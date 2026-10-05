@@ -56,7 +56,8 @@ func TestInspectCuInterposeLibraries(t *testing.T) {
 		{name: "loaded without annotation", first: [2]string{"front", "core"}, second: [2]string{"front", "core"}, wantLoaded: true},
 		{name: "delivered", requirement: CuInterposeRequired, first: [2]string{"front", "core"}, second: [2]string{"front", "core"}, wantLoaded: true},
 		{name: "partial coverage", first: [2]string{"front", "core"}, wantError: "participants [2]"},
-		{name: "missing core", first: [2]string{"front", ""}, wantError: "both cuinterpose"},
+		{name: "missing core", first: [2]string{"front", ""}, wantError: "libcuinterpose_core.so"},
+		{name: "core without frontend", first: [2]string{"", "core"}, wantError: "frontend must be mapped"},
 		{name: "different frontend", first: [2]string{"front", "core"}, second: [2]string{"other", "core"}, wantError: "hashes differ"},
 		{name: "different core", first: [2]string{"front", "core"}, second: [2]string{"front", "diff"}, wantError: "hashes differ"},
 	} {
@@ -64,7 +65,7 @@ func TestInspectCuInterposeLibraries(t *testing.T) {
 			procRoot := t.TempDir()
 			writeMappedLibraries(t, procRoot, 1, tc.first[0], tc.first[1])
 			writeMappedLibraries(t, procRoot, 2, tc.second[0], tc.second[1])
-			identity, err := InspectCuInterposeLibraries(procRoot, []int{1, 2}, tc.requirement)
+			identity, _, err := InspectCuInterposeLibraries(procRoot, []int{1, 2}, tc.requirement)
 			if tc.wantError != "" {
 				require.ErrorContains(t, err, tc.wantError)
 				return
@@ -73,7 +74,7 @@ func TestInspectCuInterposeLibraries(t *testing.T) {
 			require.Equal(t, tc.wantLoaded, identity != nil)
 		})
 	}
-	_, err := InspectCuInterposeLibraries(t.TempDir(), nil, CuInterposeRequired)
+	_, _, err := InspectCuInterposeLibraries(t.TempDir(), nil, CuInterposeRequired)
 	require.ErrorContains(t, err, "not active")
 }
 
@@ -99,7 +100,7 @@ func TestInspectCuInterposeRejectsReplacedOrDeletedMappings(t *testing.T) {
 				require.NoError(t, os.Rename(path, path+".old"))
 				require.NoError(t, os.WriteFile(path, []byte("front"), 0600))
 			}
-			_, err := InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeOptional)
+			_, _, err := InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeOptional)
 			require.ErrorContains(t, err, tc.wantError)
 		})
 	}
@@ -134,7 +135,7 @@ func TestInspectCuInterposeRepeatedMappingRegions(t *testing.T) {
 				regions = append(regions, strings.Join(fields, " "))
 			}
 			require.NoError(t, os.WriteFile(mapsPath, []byte(strings.Join(regions, "\n")+"\n"), 0600))
-			identity, err := InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeRequired)
+			identity, _, err := InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeRequired)
 			if tc.changedField != 0 {
 				require.ErrorContains(t, err, "conflicting device/inode identities")
 				return
@@ -154,14 +155,14 @@ func TestInspectCuInterposeRejectsUnsupportedPathWithoutAnnotation(t *testing.T)
 	require.NoError(t, err)
 	contents = []byte(strings.ReplaceAll(string(contents), podcontract.CuInterposeMountPath, "/some directory"))
 	require.NoError(t, os.WriteFile(maps, contents, 0600))
-	_, err = InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeOptional)
+	_, _, err = InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeOptional)
 	require.ErrorContains(t, err, "must be delivered")
 }
 
 func TestCheckCuInterposeLibraries(t *testing.T) {
 	procRoot := t.TempDir()
 	directory := writeMappedLibraries(t, procRoot, 1, "front", "core")
-	identity, err := InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeRequired)
+	identity, _, err := InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeRequired)
 	require.NoError(t, err)
 	require.NoError(t, CheckCuInterposeLibraries(directory, identity))
 	for _, name := range []string{"libcuinterpose.so", "libcuinterpose_core.so"} {
@@ -177,6 +178,58 @@ func TestCheckCuInterposeLibraries(t *testing.T) {
 			require.ErrorContains(t, err, fmt.Sprintf("expected %x", sha256.Sum256(original)))
 			require.ErrorContains(t, err, fmt.Sprintf("actual %x", sha256.Sum256(changed)))
 			require.NoError(t, os.WriteFile(path, original, 0600))
+		})
+	}
+}
+
+func TestInspectFrontendOnlyCUDAProcesses(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		workerActive bool
+		parentCore   string
+		wantError    string
+	}{
+		{name: "mixed", workerActive: true, parentCore: "core"},
+		{name: "all frontend only", parentCore: "core"},
+		{name: "missing core", workerActive: true, wantError: "libcuinterpose_core.so"},
+		{name: "different inactive core", workerActive: true, parentCore: "diff", wantError: "hashes differ"},
+		{name: "nonregular inactive core", workerActive: true, parentCore: "fifo", wantError: "regular file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			procRoot := t.TempDir()
+			parentDir := writeMappedLibraries(t, procRoot, 1001, "front", "")
+			corePath := filepath.Join(parentDir, "libcuinterpose_core.so")
+			if tc.parentCore == "fifo" {
+				require.NoError(t, unix.Mkfifo(corePath, 0600))
+			} else if tc.parentCore != "" {
+				require.NoError(t, os.WriteFile(corePath, []byte(tc.parentCore), 0600))
+			}
+			if tc.workerActive {
+				writeMappedLibraries(t, procRoot, 1623, "front", "core")
+			} else {
+				workerDir := writeMappedLibraries(t, procRoot, 1623, "front", "")
+				require.NoError(t, os.WriteFile(filepath.Join(workerDir, "libcuinterpose_core.so"), []byte("core"), 0600))
+			}
+			// No control sockets exist. A mapped core must still be selected so a
+			// missing runtime endpoint fails coordinator inspection, not coverage.
+			nativePIDs := []int{1001, 1623}
+			identity, active, err := InspectCuInterposeLibraries(procRoot, nativePIDs, CuInterposeRequired)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, []int{1001, 1623}, nativePIDs)
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("front"))), identity.FrontendSHA256)
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("core"))), identity.CoreSHA256)
+			if tc.workerActive {
+				require.Equal(t, []int{1623}, active)
+			} else {
+				require.Empty(t, active)
+			}
+			require.NoError(t, CheckCuInterposeLibraries(parentDir, identity))
+			require.NoError(t, os.WriteFile(corePath, []byte("diff"), 0600))
+			require.ErrorContains(t, CheckCuInterposeLibraries(parentDir, identity), "SHA-256 mismatch")
 		})
 	}
 }

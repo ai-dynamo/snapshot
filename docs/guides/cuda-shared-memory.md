@@ -86,7 +86,7 @@ leaves a source that has no active shim on the native CUDA checkpoint path.
 
 | Setting | Recipe behavior | Reason |
 | --- | --- | --- |
-| SGLang `NCCL_CUMEM_ENABLE`, `NCCL_NVLS_ENABLE` | Leave unset | Let the engine choose its CUDA allocation and multicast paths. SGLang 0.5.17 still defaults these off unless its corresponding options are enabled. |
+| SGLang `NCCL_CUMEM_ENABLE`, `NCCL_NVLS_ENABLE` | Leave unset | Let the engine choose its CUDA allocation and multicast paths. For these single-node recipes, SGLang 0.5.20 defaults these off unless its corresponding options are enabled. |
 | TensorRT-LLM `TLLM_NCCL_SYMMETRIC_ZERO_COPY` | Leave unset | Allow the engine's default selection. Availability and successful registration still determine whether registered windows are used. |
 | SGLang `NCCL_IB_DISABLE=1` | Keep | RDMA connections and NIC registrations are outside CUDA shared-memory reconstruction. |
 | SGLang RAS and PyTorch monitoring/timeout settings | Keep | These concern background services and checkpoint pauses. |
@@ -122,10 +122,11 @@ The GLM pairs pin [RadixArk/GLM-5.3-NVFP4](https://huggingface.co/RadixArk/GLM-5
 and the DeepSeek pairs pin
 [NVIDIA/DeepSeek-V4-Flash-NVFP4](https://huggingface.co/nvidia/DeepSeek-V4-Flash-NVFP4).
 Each source and restore pair uses the same model revision and engine image.
-DeepSeek uses the existing vLLM 0.27.1 and SGLang 0.5.17 releases. The vLLM
+DeepSeek uses the vLLM 0.27.1 and SGLang 0.5.20 releases. The vLLM
 settings follow Dynamo's [B200 aggregated profile](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-flash/vllm/agg-b200-agentic/deploy.yaml),
 with the context bounded to 128K. The SGLang settings follow the
-[tagged B200 NVFP4 recipe](https://github.com/sgl-project/sglang/blob/v0.5.17/docs/src/snippets/configs/deepseek-ai/deepseek-v4.jsx).
+[tagged B200 NVFP4 recipe](https://github.com/sgl-project/sglang/blob/v0.5.20/docs/src/snippets/configs/deepseek-ai/deepseek-v4.jsx),
+with a 128K context and 4096-token prefill chunks.
 The checkpoint combines FP8 attention with NVFP4 experts, so its recipes let
 the engine detect the quantization format. They do not force a uniform FP4
 format.

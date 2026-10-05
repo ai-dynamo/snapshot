@@ -19,17 +19,26 @@ and deployment gotchas. The public opt-in is
 
 Applications must finish all CUDA calls and GPU work, keep a fixed group of fully
 interposed peers, keep library files stable, and remain parked until restore
-completes. Capture checks the libraries and coordinator endpoint in every CUDA
-participant before preparation; removing the annotation does not disable an
-active shim. Existing native CUDA jobfiles remain supported; verified shim
-activation permits one to be absent.
+completes. Capture verifies the mapped frontend and both delivered library hashes
+in every CUDA participant. Only processes with a mapped core must expose a
+coordinator endpoint. A frontend-only process can hold native CUDA state without
+having initialized the shim runtime. Removing the annotation does not disable an
+active shim.
+
+The manifest records coordinator namespace PIDs in `cuinterpose.pids`, an explicit
+subset of `cudaRestore.pids`. Native CUDA checkpoint and restore always retain the full
+`cudaRestore.pids` list. An empty coordinator subset skips the coordinator but still
+requires matching libraries on restore. Existing native CUDA jobfiles remain
+supported. A nonempty coordinator subset permits an absent jobfile; an empty
+subset keeps the native multi-GPU jobfile requirement.
 
 The [workload contract](../reference/workload-contract.md#cuinterpose-synchronization-and-lifetime) collects the synchronization and lifetime requirements, including the shim's behavior when an application violates them.
 
 Restore requires the captured SHA-256 hashes of both libraries to match the
 restore agent's copies, even when compatibility checks are skipped. Use a
 matching shim bundle or recreate the checkpoint after a shim upgrade. Earlier
-draft checkpoints containing `cuinterpose: true` must be recreated.
+draft checkpoints containing `cuinterpose: true` or missing `cuinterpose.pids`
+must be recreated.
 
 Creators must retain a generic allocation handle or local mapping while their
 exported descriptors or imported allocations remain usable; a virtual shareable

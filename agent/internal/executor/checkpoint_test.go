@@ -154,12 +154,49 @@ func TestCuInterposeCaptureFailureBoundary(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, CheckpointNeedsSourceKill(err))
 
+	identity := testCuInterposeIdentity()
+	identity.PIDs = []int{1}
+
 	// Treat every failure after preparation starts as potentially changing CUDA state.
 	// This fixture prevents CUDA and CRIU operations from running.
 	_, err = captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
-		&types.CheckpointManifest{CuInterpose: testCuInterposeIdentity()},
+		&types.CheckpointManifest{CuInterpose: identity},
 		&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1}, CUDANSPIDs: []int{1}},
 		t.TempDir(), "", logr.Discard())
 	require.ErrorContains(t, err, "prepare cuinterpose")
 	assert.True(t, CheckpointNeedsSourceKill(err))
+}
+
+func TestConfigureCheckpointPreservesNativeAndRuntimeParticipants(t *testing.T) {
+	for _, runtimePIDs := range [][]int{{623}, {}} {
+		t.Run(fmt.Sprint(runtimePIDs), func(t *testing.T) {
+			directory := t.TempDir()
+			identity := testCuInterposeIdentity()
+			identity.PIDs = runtimePIDs
+			state := &types.CheckpointContainerSnapshot{
+				PID: 1001, RootFS: "/", NetNSInode: 7,
+				CUDAHostPIDs: []int{1001, 1623}, CUDANSPIDs: []int{1, 623}, CuInterpose: identity,
+			}
+			_, _, err := configureCheckpoint(logr.Discard(), state,
+				CheckpointRequest{ContentUID: "content", ContainerName: "main"}, &types.AgentConfig{}, directory)
+			require.NoError(t, err)
+			manifest, err := types.ReadManifest(directory)
+			require.NoError(t, err)
+			require.Equal(t, []int{1, 623}, manifest.CUDA.PIDs)
+			require.Equal(t, runtimePIDs, manifest.CuInterpose.PIDs)
+			require.Equal(t, []int{1001, 1623}, state.CUDAHostPIDs)
+		})
+	}
+}
+
+func TestFrontendOnlyCaptureSkipsCoordinator(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Reach the native CUDA boundary without starting any helper.
+	_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
+		&types.CheckpointManifest{CuInterpose: testCuInterposeIdentity()},
+		&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1001}, CUDANSPIDs: []int{1}},
+		t.TempDir(), "", logr.Discard())
+	require.ErrorContains(t, err, "CUDA checkpoint failed")
+	require.NotContains(t, err.Error(), "prepare cuinterpose")
+	require.True(t, CheckpointNeedsSourceKill(err))
 }

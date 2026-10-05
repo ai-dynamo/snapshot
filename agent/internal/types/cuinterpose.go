@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 )
@@ -14,6 +15,9 @@ import (
 type CuInterposeManifest struct {
 	FrontendSHA256 string `yaml:"frontendSHA256"`
 	CoreSHA256     string `yaml:"coreSHA256"`
+	// PIDs are the namespace PIDs whose core runtime participates in the coordinator.
+	// An explicit empty list means only the frontend was loaded in CUDA processes.
+	PIDs []int `yaml:"pids"`
 }
 
 func (m *CuInterposeManifest) Validate() error {
@@ -29,7 +33,37 @@ func (m *CuInterposeManifest) Validate() error {
 			return fmt.Errorf("cuinterpose.%s must contain a SHA-256 hash; recreate the checkpoint", field.name)
 		}
 	}
+	if m.PIDs == nil {
+		return fmt.Errorf("cuinterpose.pids must be present, including an explicit empty list; recreate the checkpoint")
+	}
+	seen := make(map[int]bool, len(m.PIDs))
+	for _, pid := range m.PIDs {
+		if pid <= 0 || seen[pid] {
+			return fmt.Errorf("cuinterpose.pids must contain positive, unique namespace PIDs")
+		}
+		seen[pid] = true
+	}
 	return nil
+}
+
+func (m *CuInterposeManifest) ValidateCUDAPIDs(cudaPIDs []int) error {
+	if err := m.Validate(); err != nil {
+		return err
+	}
+	if m != nil {
+		for _, pid := range m.PIDs {
+			if !slices.Contains(cudaPIDs, pid) {
+				return fmt.Errorf("cuinterpose PID %d is not a CUDA participant", pid)
+			}
+		}
+	}
+	return nil
+}
+
+// HasRuntime reports whether coordinator participation is required. Library identity
+// and restore delivery still apply when only the frontend was loaded.
+func (m *CuInterposeManifest) HasRuntime() bool {
+	return m != nil && len(m.PIDs) > 0
 }
 
 func (m *CuInterposeManifest) UnmarshalYAML(node *yaml.Node) error {

@@ -63,14 +63,17 @@ send a `POST` request to `/generate` with a JSON body such as
 
 `deployment.yaml` runs the tested SGLang image unmodified, and mounts `app.py`
 at `/snapshot-app` from the `sglang-app` ConfigMap created in step 2.
+The pinned SGLang 0.5.20 image includes torch-memory-saver 0.0.10, which
+preserves the cuInterpose preload when starting scheduler processes.
 
 The source and restore pods must use the same immutable image, mount the
 Snapshot control volume at `/snapshot-control`, and mount the same model cache
 at `/hf-cache`.
 
-The recipe leaves CUDA allocation and multicast choices to SGLang. SGLang
-0.5.17 defaults NCCL cuMem and NVLS off unless its corresponding engine options
-are enabled. Removing recipe overrides does not prove that those paths run.
+The recipe leaves CUDA allocation and multicast choices to SGLang. For these
+single-node recipes, SGLang 0.5.20 defaults NCCL cuMem and NVLS off unless its
+corresponding engine options are enabled. Removing recipe overrides does not
+prove that those paths run.
 The remaining IB, RAS, and PyTorch monitoring settings address network transport
 and checkpoint pauses. Shared-memory support does not replace those safeguards.
 

@@ -101,11 +101,15 @@ func TestCoordinatorArgvContract(t *testing.T) {
 
 	// Restore already runs inside the restored namespaces.
 	binary, argvFile = fakeCoordinator(t, 0)
-	if err := RestoreCuInterpose(context.Background(), "/tmp/checkpoint", []int{1}, binary); err != nil {
+	if err := RestoreCuInterpose(context.Background(), "/tmp/checkpoint", []int{623}, binary); err != nil {
 		t.Fatalf("RestoreCuInterpose() error = %v", err)
 	}
 	argv, _ = os.ReadFile(argvFile)
-	if !strings.HasPrefix(string(argv), "--restore\n--checkpoint-dir\n/tmp/checkpoint\n--control-dir\n"+podcontract.SnapshotControlMountPath+"\n") {
+	want = strings.Join([]string{
+		"--restore", "--checkpoint-dir", "/tmp/checkpoint",
+		"--control-dir", podcontract.SnapshotControlMountPath, "--process", "623", "",
+	}, "\n")
+	if string(argv) != want {
 		t.Fatalf("restore argv:\n%s", argv)
 	}
 }
