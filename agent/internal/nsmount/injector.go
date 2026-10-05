@@ -33,14 +33,18 @@ const (
 )
 
 // MountPoint represents an active bind-mount of a directory inside a foreign
-// namespace. The caller must call Unmount when done.
+// namespace. The caller must call Unmount or Release when done.
 type MountPoint interface {
 	// Unmount removes the bind-mount from the target namespace.
 	// It is idempotent and bounds the supplied context with an internal timeout.
 	Unmount(ctx context.Context) error
 
+	// Release closes the namespace fd without unmounting. The mount remains
+	// until the target namespace is destroyed. Subsequent cleanup is a no-op.
+	Release() error
+
 	// NsFd returns the pinned mount-namespace fd opened at Mount time.
-	// Valid until Unmount is called. Test mocks may return nil.
+	// Valid until Unmount or Release is called. Test mocks may return nil.
 	NsFd() *os.File
 }
 
@@ -125,6 +129,10 @@ type mountPoint struct {
 
 func (h *mountPoint) Unmount(ctx context.Context) error {
 	return h.mount.Unmount(ctx)
+}
+
+func (h *mountPoint) Release() error {
+	return h.mount.Release()
 }
 
 func (h *mountPoint) NsFd() *os.File {

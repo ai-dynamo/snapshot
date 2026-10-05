@@ -30,6 +30,7 @@ const (
 
 type mountRef interface {
 	Unmount(ctx context.Context) error
+	Release() error
 	NsFd() *os.File
 }
 
@@ -57,10 +58,17 @@ type execMountRef struct {
 	createdDst      bool
 	log             logr.Logger
 	once            sync.Once
-	unmountErr      error
+	cleanupErr      error
 }
 
 func (h *execMountRef) NsFd() *os.File { return h.nsFd }
+
+func (h *execMountRef) Release() error {
+	h.once.Do(func() {
+		h.cleanupErr = h.nsFd.Close()
+	})
+	return h.cleanupErr
+}
 
 func (h *execMountRef) Unmount(ctx context.Context) error {
 	h.once.Do(func() {
@@ -79,12 +87,12 @@ func (h *execMountRef) Unmount(ctx context.Context) error {
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			h.log.Error(err, "failed to unmount from namespace", "command", h.unmountCmd, "output", strings.TrimSpace(string(out)))
-			h.unmountErr = fmt.Errorf("ns-bind-mount %s: %w\noutput: %s", h.unmountCmd, err, strings.TrimSpace(string(out)))
+			h.cleanupErr = fmt.Errorf("ns-bind-mount %s: %w\noutput: %s", h.unmountCmd, err, strings.TrimSpace(string(out)))
 			return
 		}
 		h.log.Info("unmounted from namespace", "command", h.unmountCmd)
 	})
-	return h.unmountErr
+	return h.cleanupErr
 }
 
 func (m *execMounter) MountBundle(ctx context.Context, pid int) (mountRef, error) {
