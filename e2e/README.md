@@ -183,7 +183,7 @@ rewrite, to the restore-pod contract without a cluster.
 ### CuInterpose qualification
 
 The framework guides use native checkpointing by default. For a CuInterpose
-SnapshotJob, set `nvidia.com/cuinterpose-enabled: "true"` on the source Pod
+SnapshotJob, set `nvidia.com/snapshot-multigpu-enabled: "true"` on the source Pod
 template and supply an explicit target-container `command`; the operator adds
 the installer and launcher. Ordinary Pods need both libraries installed at
 `/tmp/snapshot-cuda` and preloaded before startup. See the
