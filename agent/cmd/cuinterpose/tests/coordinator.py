@@ -125,11 +125,37 @@ class Contracts(unittest.TestCase):
         self.reply(held, 1, completed(byte_counts[0]))
 
     def test_preflight_refusals(self):
-        for records in [[allocation(2)], [allocation(), mapping(8192)],
-                        [allocation(), multicast(16384),
-                         {"multicast_device": {"allocation": MULTICAST, "device": 0}}, binding(8192)]]:
-            with self.subTest(records=records), self.coordinator("--prepare", "AllocationReference"):
+        cases = [
+            ([allocation(2)], "missing creator"),
+            ([allocation(), allocation()], "duplicate allocation creator"),
+            ([allocation(size=0)], "invalid allocation creator"),
+            ([allocation(), mapping(8192)], "mapping out of bounds"),
+            ([allocation(), multicast(16384), multicast_device(), binding(8192)],
+             "multicast binding out of member bounds"),
+            ([allocation(), multicast(4096), multicast_device(),
+              binding(4096, member={**ALLOCATION, "creator_pid": 2})],
+             "inconsistent allocation creator"),
+            ([allocation(), multicast(4096), multicast_device(), binding(4096, member=MULTICAST)],
+             "invalid multicast member"),
+        ]
+        for records, error in cases:
+            with self.subTest(error=error), self.coordinator("--prepare", error):
                 self.inspect([records, []], begin=True)
+
+    def test_mapping_refusals_start_no_phases(self):
+        for field, value, error in (
+                ("allocation", {**ALLOCATION, "creator_pid": 2}, "inconsistent allocation creator"),
+                ("address", 0, "invalid mapping"),
+                ("size", 0, "invalid mapping"),
+                ("offset", (1 << 64) - 1, "mapping out of bounds")):
+            record = mapping()
+            record["mapping"][field] = value
+            with self.subTest(field=field), self.coordinator("--prepare", error):
+                self.inspect([[allocation(), record], []], begin=True)
+
+    def test_importer_cannot_save_creator_bytes(self):
+        with self.coordinator("--prepare", "allocation checkpoint_via_host_carrier flag on importer"):
+            self.inspect([[allocation()], [allocation(checkpoint_via_host_carrier=True)]], begin=True)
 
     def test_existing_checkpoint_is_preserved_without_contacting_participants(self):
         self.state.write_bytes(b"previous checkpoint")
@@ -142,7 +168,7 @@ class Contracts(unittest.TestCase):
             self.inspect([[allocation(), mapping()], [allocation()]])
 
     def test_read_only_inspection_validates_topology(self):
-        with self.coordinator("--inspect", "AllocationReference"):
+        with self.coordinator("--inspect", "mapping out of bounds"):
             self.inspect([[allocation(), mapping(8192)], []])
 
     def test_read_only_inspection_requires_healthy_participants(self):
@@ -328,17 +354,26 @@ class Contracts(unittest.TestCase):
             self.inspect([[creator], [allocation(), mapping(address=0x20000)]])
 
     def test_usage_errors(self):
-        for args in ["", "--prepare --checkpoint-dir /tmp",
-                     "--prepare --control-dir /tmp --process 1",
-                     "--inspect --prepare --checkpoint-dir /tmp --control-dir /tmp --process 1",
-                     "--inspect --control-dir /tmp",
-                     "--prepare --checkpoint-dir /tmp --control-dir relative --process 1",
-                     "--prepare --checkpoint-dir /tmp --control-dir /tmp --process 0",
-                     "--prepare --checkpoint-dir /tmp --control-dir /tmp --process 1 --process 1",
-                     "--prepare --checkpoint-dir /tmp --control-dir /tmp --process not-a-pid"]:
+        control = f"--control-dir {self.directory}"
+        cases = [
+            ("", ("required arguments", "--control-dir", "--process")),
+            ("--prepare --checkpoint-dir /tmp", ("required arguments", "--control-dir", "--process")),
+            (f"--prepare {control} --process 1", ("required arguments", "--checkpoint-dir")),
+            (f"--inspect --prepare {control} --process 1", ("cannot be used with", "--inspect", "--prepare")),
+            (f"--inspect {control}", ("required arguments", "--process")),
+            (f"--checkpoint-dir /tmp {control} --process 1", ("an action is required",)),
+            ("--inspect --control-dir relative --process 1", ("--control-dir must be an absolute path",)),
+            (f"--inspect {control} --process 0", ("invalid value '0'", "--process")),
+            (f"--inspect {control} --process 1 --process 1", ("duplicate namespace PID",)),
+            (f"--inspect {control} --process not-a-pid", ("invalid value 'not-a-pid'", "--process")),
+        ]
+        for args, expected in cases:
             with self.subTest(args=args):
-                result = subprocess.run([str(BINARY), *args.split()], capture_output=True, timeout=5)
+                result = subprocess.run([str(BINARY), *args.split()], capture_output=True, text=True, timeout=5)
                 self.assertNotEqual(result.returncode, 0)
+                for diagnostic in expected:
+                    self.assertIn(diagnostic, result.stderr)
+                self.assertFalse(select.select(self.listeners, [], [], 0)[0], "invalid arguments contacted a participant")
 
     def test_later_participant_overflow_starts_no_save(self):
         records = [allocation(2, size=size, checkpoint_via_host_carrier=True, identifier=bytes([i] * 16))
@@ -352,11 +387,44 @@ class Contracts(unittest.TestCase):
             with self.subTest(sizes=sizes), self.coordinator("--prepare", "inconsistent multicast properties"):
                 self.inspect([[multicast(size, 2)] for size in sizes], begin=True)
 
-    def test_nonzero_multicast_flags_start_no_phases(self):
-        record = multicast(4096)
-        record["multicast"]["properties"]["flags"] = 1
-        with self.coordinator("--prepare", "invalid multicast properties"):
-            self.inspect([[allocation(), record, multicast_device(), binding(4096)], []], begin=True)
+    def test_invalid_multicast_properties_start_no_phases(self):
+        for field, value in (("flags", 1), ("size", 0), ("devices", 0), ("handle_types", 0)):
+            record = multicast(4096)
+            record["multicast"]["properties"][field] = value
+            with self.subTest(field=field), self.coordinator("--prepare", "invalid multicast properties"):
+                self.inspect([[allocation(), record, multicast_device(), binding(4096)], []], begin=True)
+
+    def test_multicast_requires_one_creator_and_complete_groups(self):
+        cases = [
+            ([[], [multicast(4096)]], "must have exactly one creator; found 0"),
+            ([[multicast(4096), multicast(4096)], []], "must have exactly one creator; found 2"),
+            ([[multicast(4096)], []], "incomplete multicast device group"),
+            ([[multicast(4096), multicast_device()], []], "incomplete multicast binding group"),
+        ]
+        for records, error in cases:
+            with self.subTest(error=error), self.coordinator("--prepare", error):
+                self.inspect(records, begin=True)
+
+    def test_multicast_references_require_matching_objects(self):
+        records = [multicast_device(), binding(4096),
+                   {"multicast_mapping": {"allocation": MULTICAST, "address": 0x10000,
+                    "size": 4096, "offset": 0, "flags": 0, "access": []}}]
+        for record in records:
+            with self.subTest(record=record), self.coordinator("--prepare", "missing multicast object"):
+                self.inspect([[allocation(), record], []], begin=True)
+            next(iter(record.values()))["allocation"] = {**MULTICAST, "creator_pid": 2}
+            with self.subTest(record=record), self.coordinator("--prepare", "inconsistent multicast creator"):
+                self.inspect([[allocation(), multicast(4096), record], []], begin=True)
+
+    def test_multicast_member_addresses_and_offsets_are_valid(self):
+        for source, error in (
+                ({"address": {"address": 0, "tracked_member": None}}, "invalid multicast member"),
+                ({"memory": {"allocation": ALLOCATION, "offset": (1 << 64) - 1}},
+                 "multicast binding out of member bounds")):
+            record = binding(4096)
+            record["multicast_binding"]["source"] = source
+            with self.subTest(source=source), self.coordinator("--prepare", error):
+                self.inspect([[allocation(), multicast(4096), multicast_device(), record], []], begin=True)
 
     def test_multicast_device_ordinals_are_process_local(self):
         other = {"id": bytes([3] * 16), "creator_pid": 2}
