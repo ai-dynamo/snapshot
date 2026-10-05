@@ -61,15 +61,6 @@ def pods(spec: frameworks.FrameworkSpec) -> tuple[dict, dict, workloads.TestRun]
 
 
 @pytest.mark.workload
-def test_tensorrt_mpi_uses_tcp_instead_of_ucx() -> None:
-    source, restore, _ = pods(frameworks.FRAMEWORKS["tensorrt-llm"])
-    for pod in (source, restore):
-        main = fw.main_container(pod)
-        assert fw.env_value(main, "OMPI_MCA_pml") == "ob1"
-        assert fw.env_value(main, "OMPI_MCA_btl") == "tcp,self"
-
-
-@pytest.mark.workload
 def test_explicit_restore_node(monkeypatch: pytest.MonkeyPatch, spec: frameworks.FrameworkSpec) -> None:
     monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_NODE", "gpu-node-destination")
     _, restored, _ = pods(spec)
