@@ -253,7 +253,7 @@ config:
 
     # Restore-specific options (only apply during CRIU restore, not dump)
     rstSibling: true         # Restore as sibling process (required for go-criu swrk mode)
-    mntnsCompatMode: false   # Mount namespace compatibility mode
+    mntnsCompatMode: false   # Force compatibility engine; false allows automatic selection
     evasiveDevices: true     # Use any device path if original is inaccessible
     forceIrmap: true         # Force resolving inotify/fsnotify watch names
 
