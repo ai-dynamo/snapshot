@@ -18,7 +18,7 @@ container's `command` explicitly:
 ```yaml
 metadata:
   annotations:
-    nvidia.com/cuinterpose-enabled: "true"
+    nvidia.com/snapshot-multigpu-enabled: "true"
 spec:
   containers:
     - name: workload
