@@ -26,8 +26,8 @@ having initialized the shim runtime. Removing the annotation does not disable an
 active shim.
 
 The manifest records coordinator namespace PIDs in `cuinterpose.pids`, an explicit
-subset of `cuda.pids`. Native CUDA checkpoint and restore always retain the full
-`cuda.pids` list. An empty coordinator subset skips the coordinator but still
+subset of `cudaRestore.pids`. Native CUDA checkpoint and restore always retain the full
+`cudaRestore.pids` list. An empty coordinator subset skips the coordinator but still
 requires matching libraries on restore. Existing native CUDA jobfiles remain
 supported. A nonempty coordinator subset permits an absent jobfile; an empty
 subset keeps the native multi-GPU jobfile requirement.

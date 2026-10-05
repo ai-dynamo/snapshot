@@ -676,7 +676,7 @@ Missing or unhealthy endpoints fail before preparation and preserve the source.
 Inspection is read-only and does not lock the group.
 
 Capture records this subset in `cuinterpose.pids` and retains all native CUDA
-participants in `cuda.pids`. An explicit empty subset skips coordinator
+participants in `cudaRestore.pids`. An explicit empty subset skips coordinator
 inspection and preparation while retaining bundle identity checks and native
 CUDA checkpointing. It does not waive the native multi-GPU jobfile requirement.
 
@@ -742,7 +742,7 @@ sequenceDiagram
     Shims-->>Coord: All participants finished
     Coord->>Files: Write cuinterpose.state
     Coord-->>Agent: Prepare succeeded and exit
-    Agent->>CUDA: Lock every cuda.pids process, then checkpoint each
+    Agent->>CUDA: Lock every cudaRestore.pids process, then checkpoint each
     Agent->>CRIU: Dump process tree and host memory
     CRIU->>Files: Save images including host carriers
 ```
@@ -771,7 +771,7 @@ the process tree, namespace PIDs, shim records, and host carriers. Native CUDA r
 process state, then unlocks CUDA so the shims can make driver calls. The
 application remains parked until all shim reconstruction succeeds.
 Coordinator sockets use `cuinterpose.pids`, which CRIU preserves; native CUDA
-restore resolves every `cuda.pids` entry to a process PID visible to the native
+restore resolves every `cudaRestore.pids` entry to a process PID visible to the native
 helper. With an empty coordinator subset, bundle verification and delivery still
 apply, but the coordinator is skipped. The diagram shows a nonempty subset.
 
@@ -786,7 +786,7 @@ sequenceDiagram
     participant App as Parked application
     Agent->>Agent: Check format and library hashes; restore mounts and socket directory
     Agent->>CRIU: Restore process tree and host carriers
-    Agent->>CUDA: Restore every cuda.pids process, then unlock CUDA
+    Agent->>CUDA: Restore every cudaRestore.pids process, then unlock CUDA
     Agent->>Coord: Start restore in target namespaces
     Coord->>Creators: INSPECT on each namespace-PID socket
     Coord->>Importers: INSPECT on each namespace-PID socket
@@ -944,7 +944,7 @@ images, not this file.
 The corresponding section of `manifest.yaml` is ordinary YAML:
 
 ```yaml
-cuda:
+cudaRestore:
   pids: [1, 623]
 cuinterpose:
   pids: [623]
@@ -954,7 +954,7 @@ cuinterpose:
 
 The illustrative hashes above record both verified delivered libraries, not the
 annotation. Both hashes and `pids` are required when `cuinterpose` is present.
-The coordinator PIDs must be positive, unique, and a subset of `cuda.pids`.
+The coordinator PIDs must be positive, unique, and a subset of `cudaRestore.pids`.
 Here PID 1 has only the frontend loaded, while PID 623 has the core and must
 participate in the coordinator protocol.
 
