@@ -118,6 +118,7 @@ spec:
                   "max_num_seqs": 32,
                   "max_num_batched_tokens": 8192,
                   "speculative_config": {
+                    "revision": "363e8f086905afd83db356a620f9aa401c23800a",
                     "method": "mtp",
                     "num_speculative_tokens": 5
                   }
