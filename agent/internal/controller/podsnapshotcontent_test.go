@@ -42,9 +42,9 @@ func TestCuInterposeRequiredSurvivesAnnotationEdits(t *testing.T) {
 		wantError         bool
 	}{
 		{name: "native"},
-		{name: "ordinary Pod requested", annotation: "true", required: true},
+		{name: "ordinary Pod requested", annotation: "enabled", required: true},
 		{name: "annotation removed", wrapped: true, required: true},
-		{name: "annotation disabled", annotation: "false", wrapped: true, required: true},
+		{name: "annotation disabled", annotation: "disabled", wrapped: true, required: true},
 		{name: "annotation malformed", annotation: "invalid", wrapped: true, required: true},
 		{name: "ordinary Pod malformed annotation", annotation: "invalid", wantError: true},
 	} {

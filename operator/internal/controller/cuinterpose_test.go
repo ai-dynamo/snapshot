@@ -18,7 +18,7 @@ import (
 
 func cuInterposeTemplate() *corev1.PodTemplateSpec {
 	return &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"nvidia.com/snapshot-multigpu-enabled": "true"}},
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"nvidia.com/cuda-shared-memory-support": "enabled"}},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{
 			{Name: "worker", Command: []string{"python3", "-m", "worker"}, Args: []string{"--rank", "0"}},
 			{Name: "helper"},
@@ -139,8 +139,8 @@ func TestShapeCuInterposeCaptureRejectsWithoutMutation(t *testing.T) {
 			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: cuInterposeVolumeName, MountPath: "/other"}}
 		}, "conflicts"},
 		{"invalid annotation", func(p *corev1.PodTemplateSpec, _ *CuInterposeDelivery) {
-			p.Annotations[podcontract.CuInterposeAnnotation] = "enabled"
-		}, "invalid boolean"},
+			p.Annotations[podcontract.CuInterposeAnnotation] = "invalid"
+		}, "expected enabled or disabled"},
 		{"missing image", func(_ *corev1.PodTemplateSpec, d *CuInterposeDelivery) { d.AgentImage = "" }, "--agent-image"},
 		{"unsupported policy", func(_ *corev1.PodTemplateSpec, d *CuInterposeDelivery) { d.PullPolicy = "sometimes" }, "pull policy"},
 	} {
@@ -171,7 +171,7 @@ func TestShapeCuInterposeCapturePreservesParentMount(t *testing.T) {
 }
 
 func TestShapeCuInterposeCaptureDisabled(t *testing.T) {
-	for _, annotations := range []map[string]string{nil, {podcontract.CuInterposeAnnotation: "false"}} {
+	for _, annotations := range []map[string]string{nil, {podcontract.CuInterposeAnnotation: "disabled"}} {
 		template := cuInterposeTemplate()
 		template.Annotations = annotations
 		before := template.DeepCopy()

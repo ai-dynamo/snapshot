@@ -5,7 +5,6 @@ package podcontract
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -15,16 +14,19 @@ const (
 	CuInterposeLauncherPath = CuInterposeMountPath + "/cuinterpose-launch"
 )
 
-// ParseCuInterposeAnnotation accepts the same values as ParseBool. It distinguishes an
-// absent annotation from an invalid value.
+// ParseCuInterposeAnnotation accepts enabled or disabled after trimming whitespace.
+// An absent annotation leaves support disabled; other present values are invalid.
 func ParseCuInterposeAnnotation(annotations map[string]string) (bool, error) {
 	value, present := annotations[CuInterposeAnnotation]
 	if !present {
 		return false, nil
 	}
-	enabled, err := strconv.ParseBool(strings.TrimSpace(value))
-	if err != nil {
-		return false, fmt.Errorf("annotation %s: invalid boolean %q", CuInterposeAnnotation, value)
+	switch strings.TrimSpace(value) {
+	case "enabled":
+		return true, nil
+	case "disabled":
+		return false, nil
+	default:
+		return false, fmt.Errorf("annotation %s: expected enabled or disabled, got %q", CuInterposeAnnotation, value)
 	}
-	return enabled, nil
 }
