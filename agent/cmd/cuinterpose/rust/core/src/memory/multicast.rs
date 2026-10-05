@@ -33,6 +33,7 @@ pub struct MulticastObject {
     pub shared: bool,
     pub devices: Vec<i32>,
     pub bindings: Vec<Binding>,
+    // Clones share this lock so bind/unbind calls retain their order.
     binding_lock: Arc<Mutex<()>>,
 }
 
@@ -706,9 +707,7 @@ fn lock_bindings<'a>(
     binding_lock: &'a Arc<Mutex<()>>,
 ) -> Result<(MutexGuard<'static, ProcessState>, MutexGuard<'a, ()>)> {
     runtime::call_unlocked(state, || {
-        binding_lock
-            .lock()
-            .map_err(|_| Error::Startup("multicast binding mutex poisoned"))
+        binding_lock.lock().map_err(|_| Error::RuntimeFailed)
     })
 }
 
