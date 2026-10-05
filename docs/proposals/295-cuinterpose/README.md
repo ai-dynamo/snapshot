@@ -1017,7 +1017,10 @@ Helm passes the agent image and pull policy to the operator for library
 installation. Image pulls use the workload Pod's or ServiceAccount's credentials;
 no registry credentials are embedded in the shim.
 Set the existing agent image tag field to `<tag>@sha256:<digest>` to pin both
-the DaemonSet and installer. Invalid pull policies fail operator startup; a
+the DaemonSet and installer. Agent digest pins require `pageBroker.enabled=false`
+because PageBroker uses a separate image repository with the shared agent tag.
+When enabling PageBroker, use the matching release tag for both images.
+Invalid pull policies fail operator startup; a
 missing agent image produces a retryable operator-configuration error. Delivery
 settings are consulted only for new source Jobs. The installer has equal CPU
 requests/limits of `100m` and memory requests/limits of `64Mi`, preserving an
