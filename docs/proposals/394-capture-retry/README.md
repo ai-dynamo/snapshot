@@ -193,13 +193,14 @@ the agent partway through, taking every other capture and restore on that node
 with it, including other tenants'.
 
 No amount of waiting helps either case: there is no moment at which this image
-fits. The agent separates them from Story 1 by comparing its size estimate
-against total staging capacity rather than against what is free, so a shortage
-that can never clear fails immediately with a reason naming the shortfall, and
-the operator learns to resize staging or move the workload. Where the estimate
-is too optimistic, the staging `sizeLimit` still bounds the write
-([Protecting the node agent](#protecting-the-node-agent)), so the capture fails
-rather than the agent. Retries are not spent on it, the workload is not held
+fits. The agent separates them from Story 1 twice over — by comparing its size
+estimate against total staging capacity rather than against what is free, and,
+when the estimate was too optimistic, by where the failure lands: Story 1 is
+refused before any bytes are written, while an image that cannot fit overruns
+the staging `sizeLimit` mid-write
+([Protecting the node agent](#protecting-the-node-agent)). Either way the
+shortfall is reported as terminal and the capture fails rather than the agent,
+so the operator learns to resize staging or move the workload. Retries are not spent on it, the workload is not held
 while they are, and the node keeps serving everyone else.
 
 #### Story 3: the CRIU dump fails after the workload is already suspended
@@ -394,12 +395,18 @@ can catch it.
 
 The containment is a bound the kernel enforces, not a prediction. Staging is a
 memory-backed `emptyDir`, which today carries no `sizeLimit` and so may grow
-until the agent's cgroup kills it. Giving it a `sizeLimit` no larger than the
-agent's memory limit inverts that: the tmpfs fills first and the write fails
-with `ENOSPC`, which PageBroker reports as `INSUFFICIENT_STORAGE` and the agent
-handles as an ordinary capture failure. The invariant the chart must hold is
-therefore **staging `sizeLimit` ≤ agent memory limit**, and it is what makes the
-oversized case survivable at all.
+until the agent's cgroup kills it. Giving it a `sizeLimit` inverts that: the
+tmpfs fills first and the write fails with `ENOSPC`, which PageBroker reports as
+`INSUFFICIENT_STORAGE` and the agent handles as an ordinary capture failure.
+
+The limit has to leave room, not merely match. Staging pages and the agent's own
+allocations are charged to the same cgroup, so a `sizeLimit` equal to the agent's
+memory limit still lets the two together reach that limit before the volume is
+full — the agent is OOM-killed with the tmpfs under its cap. The invariant the
+chart must hold is therefore **staging `sizeLimit` ≤ agent memory limit −
+reserve**, where the reserve covers the agent's peak non-staging use. Sizing
+that reserve, and testing that a staging write returns `ENOSPC` before the agent
+reaches its memory limit, are part of the work rather than assumptions of it.
 
 A pre-staging size estimate is an optimisation on top of that, not the
 safeguard. Image size is not known in advance; it is only bounded *below* by the
@@ -410,6 +417,22 @@ already exceeds staging capacity the capture fails immediately, before spending
 a model's worth of time discovering it. When the bound fits, the capture
 proceeds and the `sizeLimit` is what holds. PageBroker-reported staging headroom
 (#237) would sharpen the estimate and is not what makes this safe.
+
+**Telling a full node from an image that will never fit.** Both reach the agent
+as `INSUFFICIENT_STORAGE`, and confusing them would spend the retry budget on an
+image that cannot succeed. The failing step separates them, which the agent
+already knows:
+
+- **Refused at `PrepareCheckpoint`**, before any bytes are written. The broker
+  declined to allocate staging because the node's staging is occupied. Nothing
+  about this image is implicated, so it is retryable.
+- **`ENOSPC` while the dump is writing.** Staging was allocated and the image
+  overran the `sizeLimit`. That the write reached the cap is proof the image
+  exceeds capacity — the upper bound the pre-staging estimate could not supply —
+  so it is terminal, with the reason naming the measured shortfall.
+
+The failed attempt therefore produces the evidence the estimate lacked, and no
+second attempt is needed to learn it.
 
 ### Storage cleanup
 
