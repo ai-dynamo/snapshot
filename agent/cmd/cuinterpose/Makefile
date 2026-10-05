@@ -17,7 +17,7 @@ build:
 
 test:
 	docker buildx build --platform linux/amd64 --target cuinterpose-test \
-		-f ../../Dockerfile ../..
+		$(if $(TEST_IMAGE),--load --tag "$(TEST_IMAGE)") -f ../../Dockerfile ../..
 
 frontend:
 	@cd rust && expected=$$(cargo tree --locked -p cbindgen --depth 0 --prefix none --format '{p}') && \
