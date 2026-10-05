@@ -13,6 +13,12 @@ after restore. The Snapshot agent injects the restore tooling at runtime.
 > `vllm/vllm-openai:v0.27.1-ubuntu2404` image) and does not work on vLLM
 > 0.28.
 
+The source manifest enables [CUDA shared-memory support](cuda-shared-memory.md)
+and installs its libraries before the engine starts. Use a Snapshot agent and
+operator build with this support. Set `SNAPSHOT_AGENT_IMAGE` to the **same immutable
+agent image used for capture and restore** before deploying, as described in the
+[shared-memory guide](cuda-shared-memory.md#ordinary-pods-and-deployments).
+
 ## 1. Download the example files
 
 Download [`app.py`](vllm/app.py), [`deployment.yaml`](vllm/deployment.yaml),
@@ -104,6 +110,10 @@ the resulting memory use. `app.py` sets `trust_remote_code=False`; Qwen3 needs
 no custom model code. Edit `TRUST_REMOTE_CODE` in `app.py` for a checkpoint
 that ships its own modeling code.
 
+`SNAPSHOT_TENSOR_PARALLEL_SIZE` defaults to `1`. To use two GPUs on one node,
+set it to `2` and set the `nvidia.com/gpu` limit to `"2"` in both source and
+restore manifests. Keep the same parallelism and compatible GPUs at restore.
+
 > [!NOTE]
 > This example runs vLLM directly through `AsyncLLM` rather than `vllm serve`, so
 > the standard `vllm serve` command-line arguments do not apply. The model is
@@ -120,9 +130,9 @@ unreliable across checkpoint/restore.
 Deploy the edited manifest:
 
 ```bash
-kubectl apply \
-  --namespace "$SNAPSHOT_NAMESPACE" \
-  --filename deployment.yaml
+: "${SNAPSHOT_AGENT_IMAGE:?Set the matching Snapshot agent image first}"
+envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment.yaml | \
+  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
 ```
 
 Wait until the vLLM replica finishes initialization and becomes safe to

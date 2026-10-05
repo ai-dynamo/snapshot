@@ -8,6 +8,12 @@ image that includes SGLang, CUDA, and `torch_memory_saver`, unmodified.
 mounted into it from a ConfigMap to prepare SGLang for checkpoint and resume
 it after restore. The Snapshot agent injects the restore tooling at runtime.
 
+The source manifest enables [CUDA shared-memory support](cuda-shared-memory.md)
+and installs its libraries before the engine starts. Use a Snapshot agent and
+operator build with this support. Set `SNAPSHOT_AGENT_IMAGE` to the **same immutable
+agent image used for capture and restore** before deploying, as described in the
+[shared-memory guide](cuda-shared-memory.md#ordinary-pods-and-deployments).
+
 ## 1. Download the example files
 
 Download [`app.py`](sglang/app.py),
@@ -62,6 +68,12 @@ The source and restore pods must use the same immutable image, mount the
 Snapshot control volume at `/snapshot-control`, and mount the same model cache
 at `/hf-cache`.
 
+The recipe leaves CUDA allocation and multicast choices to SGLang. SGLang
+0.5.17 defaults NCCL cuMem and NVLS off unless its corresponding engine options
+are enabled. Removing recipe overrides does not prove that those paths run.
+The remaining IB, RAS, and PyTorch monitoring settings address network transport
+and checkpoint pauses. Shared-memory support does not replace those safeguards.
+
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the SGLang pod will run, and create the ConfigMap
@@ -107,7 +119,9 @@ containers:
 The example configures a context length of 10240 tokens for a 24 GiB NVIDIA A10
 GPU. Reduce `SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
 validating the resulting memory use. The KV cache page size is set through
-`SGLANG_PAGE_SIZE` (default `16`); the engine runs with `tp_size=1`.
+`SGLANG_PAGE_SIZE` (default `16`). `SNAPSHOT_TENSOR_PARALLEL_SIZE` defaults to
+`1`. To use two GPUs on one node, set it to `2` and set the `nvidia.com/gpu`
+limit to `"2"` in both source and restore manifests.
 `app.py` sets `trust_remote_code=False`; Qwen3 needs no custom model code.
 Edit that line in `app.py` for a checkpoint that ships its own modeling code.
 
@@ -129,9 +143,9 @@ kubectl apply \
 Deploy the edited manifest:
 
 ```bash
-kubectl apply \
-  --namespace "$SNAPSHOT_NAMESPACE" \
-  --filename deployment.yaml
+: "${SNAPSHOT_AGENT_IMAGE:?Set the matching Snapshot agent image first}"
+envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment.yaml | \
+  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
 ```
 
 The init container downloads the model when its cache marker does not exist. The

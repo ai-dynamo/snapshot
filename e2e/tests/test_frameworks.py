@@ -166,6 +166,13 @@ def test_framework_checkpoint_restore_serves_inference(
             timeout=frameworks.SOURCE_READY_TIMEOUT_SECONDS,
         )
         source_node = source.spec.node_name
+        assert source.metadata.annotations.get(fw.SHARED_MEMORY_ANNOTATION) == "enabled"
+        source_main = next(c for c in source.spec.containers if c.name == frameworks.CONTAINER)
+        parallelism = next(e.value for e in source_main.env if e.name == "SNAPSHOT_TENSOR_PARALLEL_SIZE")
+        result.update_environment(comparisonDimensions={
+            "cudaSharedMemorySupport": "enabled",
+            "tensorParallelSize": int(parallelism),
+        })
         result.redact(source_node, "source-node")
         result.mark_event("source.ready")
         _record_framework_image_digest(result, source)

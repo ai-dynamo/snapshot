@@ -14,10 +14,12 @@ the container during pod startup.
 ## Example
 
 Each build-and-deploy guide ships a ready-to-apply `restore-deployment.yaml` next
-to its `deployment.yaml`: the same manifest with an
+to its `deployment.yaml`: the workload mounts and image with an
 `nvidia.com/restore-from` annotation added naming the `PodSnapshot` to restore
 from, and the container command replaced with an inert `sleep infinity`.
-Download the one for the framework in use:
+The restore agent supplies the CUDA shared-memory libraries, so the placeholder
+does not run the source's installer or launcher. Download the one for the
+framework in use:
 
 - [vLLM `restore-deployment.yaml`](vllm/restore-deployment.yaml)
 - [SGLang `restore-deployment.yaml`](sglang/restore-deployment.yaml)
@@ -31,7 +33,7 @@ export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
 ```
 
-In the manifest, set the container `image` to the one built for the source and set
+In the manifest, keep the same immutable engine image and GPU count as the source and set
 the `restore-from` annotation to the `PodSnapshot` name, then apply it and watch the
 rollout (the Deployment is named `<framework>-restored`):
 

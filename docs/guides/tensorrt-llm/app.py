@@ -13,7 +13,8 @@ from tensorrt_llm import LLM, SamplingParams
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 MODEL = os.environ["SNAPSHOT_MODEL"]
-# Small single-GPU sizing so the example fits alongside other GPU tenants and
+TENSOR_PARALLEL_SIZE = int(os.environ.get("SNAPSHOT_TENSOR_PARALLEL_SIZE", "1"))
+# Small default sizing so the example fits alongside other GPU tenants and
 # keeps the checkpoint artifact small. Override through the Pod template.
 MAX_NUM_TOKENS = int(os.environ.get("TRTLLM_MAX_NUM_TOKENS", "1024"))
 MAX_BATCH_SIZE = int(os.environ.get("TRTLLM_MAX_BATCH_SIZE", "1"))
@@ -85,7 +86,7 @@ def main() -> None:
         backend="pytorch",
         dtype="float16",
         trust_remote_code=TRUST_REMOTE_CODE,
-        tensor_parallel_size=1,
+        tensor_parallel_size=TENSOR_PARALLEL_SIZE,
         max_num_tokens=MAX_NUM_TOKENS,
         max_seq_len=512,
         max_batch_size=MAX_BATCH_SIZE,
