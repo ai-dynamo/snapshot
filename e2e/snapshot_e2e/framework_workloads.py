@@ -23,8 +23,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from kubernetes import client
 
 from snapshot_e2e import k8s
+from snapshot_e2e import lifecycle
+from snapshot_e2e.frameworks import CONTAINER
 from snapshot_e2e.frameworks import MODEL_CACHE_MOUNT
 from snapshot_e2e.frameworks import MODEL_CACHE_VOLUME
 from snapshot_e2e.frameworks import FrameworkSpec
@@ -45,8 +48,8 @@ GUIDE_CACHE_INIT_CONTAINER = "model-cache"
 MANIFESTS_DIR = Path(__file__).resolve().parent / "manifests"
 
 
-# Inspect the guide process's root: a kubectl exec process can inhabit the
-# placeholder's mount namespace rather than the restored workload's namespace.
+# Run from the privileged agent: ordinary exec cannot dereference a restored,
+# nondumpable process's root and can inhabit a different mount namespace.
 CUINTERPOSE_LIBRARY_PROBE = r'''
 import hashlib
 import json
@@ -56,6 +59,8 @@ from pathlib import Path
 libraries = None
 for process in Path(sys.argv[1]).glob("[0-9]*"):
     try:
+        if sys.argv[2] not in (process / "cgroup").read_text():
+            continue
         args = (process / "cmdline").read_bytes().split(b"\0")
     except FileNotFoundError:
         continue
@@ -66,7 +71,7 @@ for process in Path(sys.argv[1]).glob("[0-9]*"):
     current = {}
     for name in ("libcuinterpose.so", "libcuinterpose_core.so"):
         with (process / "root/tmp/snapshot-cuda" / name).open("rb") as library:
-            current[name] = hashlib.file_digest(library, "sha256").hexdigest()
+            current[name] = hashlib.sha256(library.read()).hexdigest()
     if libraries is not None and libraries != current:
         raise RuntimeError("guide processes have different libraries")
     libraries = current
@@ -76,15 +81,28 @@ print(json.dumps(libraries))
 '''
 
 
-def cuinterpose_library_hashes(namespace: str, pod: str) -> dict[str, str]:
+def cuinterpose_library_hashes(config: k8s.E2EConfig, pod: client.V1Pod) -> dict[str, str]:
     """Require both delivered libraries to remain readable by the guide process."""
+    container_id = next(
+        status.container_id for status in pod.status.container_statuses
+        if status.name == CONTAINER
+    )
+    runtime_id = (container_id or "").split("://", 1)[-1]
+    if len(runtime_id) != 64 or any(char not in "0123456789abcdef" for char in runtime_id):
+        raise AssertionError(f"missing or invalid guide container ID: {container_id!r}")
+    agent = lifecycle.checkpoint_agent_pod(config, pod.spec.node_name)
+    # The same host-tools seam used for crictl metadata. Host Python 3 is required.
     output = k8s.exec_payload(
-        namespace, pod, f"python3 -c {shlex.quote(CUINTERPOSE_LIBRARY_PROBE)} /proc"
+        config.namespace, agent,
+        f"timeout 30s nsenter -t 1 -m -r -w -- /usr/bin/python3 -c "
+        f"{shlex.quote(CUINTERPOSE_LIBRARY_PROBE)} /proc {shlex.quote(runtime_id)}",
     )
     try:
         return json.loads(output)
     except json.JSONDecodeError as exc:
-        raise AssertionError(f"cuinterpose library probe failed in {pod}: {output}") from exc
+        raise AssertionError(
+            f"cuinterpose library probe failed for {pod.metadata.name}: {output}"
+        ) from exc
 
 
 def load_manifest(path: Path) -> dict[str, Any]:

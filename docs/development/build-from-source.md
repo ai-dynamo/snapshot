@@ -68,6 +68,11 @@ For a digest pin, set an image's `tag` field to `<tag>@sha256:<digest>`. The
 agent field supplies the same pinned image to the DaemonSet and SnapshotJob's
 CuInterpose installer.
 
+Agent digest pins currently require `pageBroker.enabled=false`. The PageBroker
+sidecar uses a separate image repository but inherits the agent tag, so an agent
+digest cannot identify its image. When enabling PageBroker, use the matching
+release tag for both images.
+
 ## Development workflow
 
 Common `make` targets from the repo root:
