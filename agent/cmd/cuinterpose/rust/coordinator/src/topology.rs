@@ -12,12 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct AllocationSummary {
     pub reference: AllocationReference,
     pub size: u64,
-    pub checkpoint_via_host_carrier: bool,
-    /// The creator retains an application handle or a mapping of this allocation.
-    /// SaveAllocations needs that handle, or must recover it from a creator mapping,
-    /// to copy shared backing into the host carrier. An importer cannot supply the
-    /// creator's saved bytes, so importer handles and mappings do not count.
-    anchor: bool,
+    pub shared: bool,
+    pub owner_pid: NamespacePid,
+    pub holders: BTreeSet<NamespacePid>,
+    location_type: u32,
 }
 struct Multicast {
     reference: AllocationReference,
@@ -28,13 +26,13 @@ struct Multicast {
     creators: u32,
 }
 
-/// Collect definitions, creator anchors, device attachments and bindings without
+/// Collect definitions, local holder anchors, device attachments and bindings without
 /// requiring references to appear after their definitions. Then check references,
 /// bounds and group completeness against the collected state without changing it.
 pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
     let mut allocations: BTreeMap<AllocationId, AllocationSummary> = BTreeMap::new();
     let mut multicasts: BTreeMap<AllocationId, Multicast> = BTreeMap::new();
-    let mut creator_mappings = BTreeSet::new();
+    let mut anchors = BTreeSet::new();
     // CUDA device ordinals are local to each process, so each device must be attached
     // and bound in the same participant.
     let mut devices: BTreeMap<AllocationId, BTreeSet<(NamespacePid, i32)>> = BTreeMap::new();
@@ -47,7 +45,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
             match record {
                 Record::Allocation {
                     allocation,
-                    checkpoint_via_host_carrier,
+                    shared,
                     size,
                     allocation_type,
                     handle_types,
@@ -64,29 +62,45 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             .contains(&location.location_type),
                         "participant {namespace_pid}: unsupported allocation properties for {allocation:?}: allocation_type={allocation_type}, location={location:?}"
                     );
+                    ensure!(
+                        participants.contains_key(&allocation.creator_pid),
+                        "participant {namespace_pid}: missing creator participant for {allocation:?}"
+                    );
+                    ensure!(
+                        *size > 0,
+                        "participant {namespace_pid}: invalid allocation extent for {allocation:?}"
+                    );
                     if allocation.creator_pid == *namespace_pid {
-                        ensure!(
-                            *handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0
-                                && *size > 0,
-                            "participant {namespace_pid}: invalid allocation creator {allocation:?}: size={size}, handle_types={handle_types}"
-                        );
-                        let std::collections::btree_map::Entry::Vacant(entry) =
-                            allocations.entry(allocation.id)
-                        else {
-                            bail!(
-                                "participant {namespace_pid}: duplicate allocation creator {allocation:?}"
-                            );
-                        };
-                        entry.insert(AllocationSummary {
-                            reference: *allocation,
-                            size: *size,
-                            anchor: *virtual_allocation_handle_count != 0,
-                            checkpoint_via_host_carrier: *checkpoint_via_host_carrier,
-                        });
-                    } else if *checkpoint_via_host_carrier {
-                        bail!(
-                            "participant {namespace_pid}: allocation checkpoint_via_host_carrier flag on importer of {allocation:?}"
-                        );
+                        ensure!(*handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
+                            "participant {namespace_pid}: invalid allocation creator {allocation:?}: handle_types={handle_types}");
+                    } else {
+                        ensure!(*shared && (*handle_types == 0 || *handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0),
+                            "participant {namespace_pid}: invalid imported allocation {allocation:?}");
+                    }
+                    let known =
+                        allocations
+                            .entry(allocation.id)
+                            .or_insert_with(|| AllocationSummary {
+                                reference: *allocation,
+                                size: *size,
+                                shared: *shared,
+                                owner_pid: *namespace_pid,
+                                holders: BTreeSet::new(),
+                                location_type: location.location_type,
+                            });
+                    ensure!(
+                        known.reference == *allocation
+                            && known.size == *size
+                            && known.shared == *shared
+                            && known.location_type == location.location_type,
+                        "participant {namespace_pid}: inconsistent allocation metadata for {allocation:?}"
+                    );
+                    ensure!(
+                        known.holders.insert(*namespace_pid),
+                        "participant {namespace_pid}: duplicate allocation record for {allocation:?}"
+                    );
+                    if *virtual_allocation_handle_count != 0 {
+                        anchors.insert((allocation.id, *namespace_pid));
                     }
                 }
                 Record::Multicast {
@@ -142,8 +156,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         multicast.creators += 1;
                     }
                 }
-                Record::Mapping { allocation, .. } if allocation.creator_pid == *namespace_pid => {
-                    creator_mappings.insert(*allocation);
+                Record::Mapping { allocation, .. } => {
+                    anchors.insert((allocation.id, *namespace_pid));
                 }
                 Record::MulticastDevice { allocation, device } => {
                     ensure!(
@@ -164,7 +178,23 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
         }
     }
     for allocation in allocations.values_mut() {
-        allocation.anchor |= creator_mappings.contains(&allocation.reference);
+        // Prefer the original creator while it has local state. Otherwise an existing
+        // holder saves the backing without changing its identity or remote lifetime.
+        allocation.owner_pid = if allocation
+            .holders
+            .contains(&allocation.reference.creator_pid)
+        {
+            allocation.reference.creator_pid
+        } else {
+            *allocation.holders.first().unwrap()
+        };
+        for holder in &allocation.holders {
+            ensure!(
+                anchors.contains(&(allocation.reference.id, *holder)),
+                "participant {holder}: missing allocation anchor for {:?}",
+                allocation.reference
+            );
+        }
     }
     for (namespace_pid, participant) in participants {
         for record in participant {
@@ -188,7 +218,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         format!("participant {namespace_pid}: missing creator for {allocation:?}")
                     })?;
                     ensure!(
-                        known.reference == *allocation,
+                        known.reference == *allocation && known.holders.contains(namespace_pid),
                         "participant {namespace_pid}: inconsistent allocation creator for {allocation:?}"
                     );
                     if *address == 0
@@ -272,11 +302,6 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                 }
                 _ => {}
             }
-        }
-    }
-    for allocation in allocations.values() {
-        if !allocation.anchor {
-            bail!("missing creator anchor for {:?}", allocation.reference);
         }
     }
     for multicast in multicasts.values() {
@@ -370,7 +395,7 @@ mod tests {
             Record::Allocation {
                 allocation,
                 size: 4096,
-                checkpoint_via_host_carrier: true,
+                shared: true,
                 allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32,
                 handle_types: CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
                 location: MemoryLocation {

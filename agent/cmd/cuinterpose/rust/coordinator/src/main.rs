@@ -9,7 +9,8 @@ mod topology;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use cuinterpose_protocol::{
-    self as protocol, Manifest, NamespacePid, Operation, Record, Reply, Request, Response,
+    self as protocol, AllocationOwner, Manifest, NamespacePid, Operation, Record, Reply, Request,
+    Response,
 };
 use std::collections::BTreeSet;
 use std::os::unix::net::SocketAddr;
@@ -51,6 +52,7 @@ fn exchange(endpoint: &Path, request: &Request) -> Result<Response> {
         .with_context(|| format!("{display}: {request:?}: connect failed"))?;
     let timeout = Some(match request {
         Request::Execute { operation, .. } => protocol::operation_timeout(*operation),
+        Request::SaveAllocations { .. } => protocol::operation_timeout(Operation::SaveAllocations),
         _ => protocol::control_timeout(),
     });
     socket
@@ -95,11 +97,24 @@ impl Peer {
         }
     }
 
-    fn execute(&self, operation: Operation, expected_bytes: u64) -> Result<()> {
-        match self.request(&Request::Execute {
-            namespace_pid: self.namespace_pid,
-            operation,
-        })? {
+    fn execute(
+        &self,
+        operation: Operation,
+        expected_bytes: u64,
+        owners: Vec<AllocationOwner>,
+    ) -> Result<()> {
+        let request = if operation == Operation::SaveAllocations {
+            Request::SaveAllocations {
+                namespace_pid: self.namespace_pid,
+                owners,
+            }
+        } else {
+            Request::Execute {
+                namespace_pid: self.namespace_pid,
+                operation,
+            }
+        };
+        match self.request(&request)? {
             Reply::Completed {
                 operation: actual,
                 bytes,
@@ -130,9 +145,7 @@ fn command_all(
         .map(|peer| {
             allocations
                 .iter()
-                .filter(|a| {
-                    a.checkpoint_via_host_carrier && a.reference.creator_pid == peer.namespace_pid
-                })
+                .filter(|a| a.shared && a.owner_pid == peer.namespace_pid)
                 .try_fold(0u64, |sum, a| {
                     sum.checked_add(a.size).context("allocation size overflow")
                 })
@@ -149,8 +162,20 @@ fn command_all(
         let mut jobs = Vec::with_capacity(peers.len());
         let mut failures = Vec::new();
         for (peer, bytes) in peers.iter().zip(expected_bytes) {
+            let owners = if operation == Operation::SaveAllocations {
+                allocations
+                    .iter()
+                    .filter(|a| a.shared && a.holders.contains(&peer.namespace_pid))
+                    .map(|a| AllocationOwner {
+                        allocation: a.reference,
+                        owner_pid: a.owner_pid,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             match std::thread::Builder::new()
-                .spawn_scoped(scope, move || peer.execute(operation, bytes))
+                .spawn_scoped(scope, move || peer.execute(operation, bytes, owners))
             {
                 Ok(job) => jobs.push((peer, job)),
                 Err(error) => failures.push(format!(
