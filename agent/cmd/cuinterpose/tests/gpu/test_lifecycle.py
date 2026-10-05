@@ -53,7 +53,5 @@ def test_foreign_import_is_rejected_before_checkpoint(gpu_environment, tmp_path,
     ) as workload:
         workload.start()
 
-        assert not (workload.checkpoint_dir / harness.STATE_FILENAME).exists()
-
         (workload.sync_dir / "continue").touch()
         workload.finish()

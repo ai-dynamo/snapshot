@@ -21,10 +21,11 @@ from cuda_driver import cuda_call
 @pytest.mark.gpu
 @pytest.mark.parametrize("case,interposed", [
     pytest.param(case, interposed, id=f"{case}-{'shim' if interposed else 'native'}")
-    for case in ("malloc-before", "malloc-after", "malloc-runtime", "disable",
+    for case in ("malloc-before", "malloc-after", "malloc-runtime", "malloc-checkpoint", "disable",
                  "context-lifetime", "concurrent", "ipc", "ipc-reordered", "ipc-isolated")
     for interposed in (False, True)
 ] + [
+    pytest.param("ipc-checkpoint", True, id="ipc-checkpoint-shim"),
     # Device permissions intentionally allow more than native context isolation.
     # These importing-context peer grants are shim extensions, not native parity.
     pytest.param("ipc-peer-before", True, id="ipc-peer-before-shim"),
@@ -41,7 +42,7 @@ def test_peer_access(case, interposed, tools, tmp_path):
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), case, str(int(interposed)),
          str(tools.coordinator)],
-        env=env, capture_output=True, text=True, timeout=90,
+        env=env, capture_output=True, text=True, timeout=180,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     print(result.stdout, end="")
@@ -74,15 +75,14 @@ def increment(address):
     cuda_call(driver.cuModuleUnload, module)
 
 
-def checkpoint_cuda(pid):
-    # Optional standalone qualification case, with the actual NVIDIA checkpoint
-    # helper supplied by the caller. Run it outside the process being suspended.
-    binary = os.environ["CUINTERPOSE_CUDA_CHECKPOINT"]
+def checkpoint_cuda(*pids):
+    # Run outside every target process so its CUDA calls can be suspended.
     env = os.environ.copy()
     env.pop("LD_PRELOAD", None)
-    for action in ("lock", "checkpoint", "restore", "unlock"):
-        subprocess.run([binary, "--action", action, "--pid", str(pid)],
-                       env=env, check=True, timeout=30)
+    subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "checkpoint", *map(str, pids)],
+        env=env, check=True, timeout=70,
+    )
 
 
 def reconstruct(coordinator, *pids, native_checkpoint=False):
@@ -98,8 +98,7 @@ def reconstruct(coordinator, *pids, native_checkpoint=False):
             command.extend(["--process", str(pid)])
         subprocess.run(command, env=env, check=True, timeout=20)
         if phase == "--prepare" and native_checkpoint:
-            for pid in pids:
-                checkpoint_cuda(pid)
+            checkpoint_cuda(*pids)
 
 
 def malloc_peer_access(case, interposed, coordinator):
@@ -225,7 +224,7 @@ def concurrent_malloc():
 
 def ipc_import(fd, device, case):
     channel = socket.socket(fileno=int(fd))
-    channel.settimeout(30)
+    channel.settimeout(120 if case == "ipc-checkpoint" else 30)
     cuda_call(driver.cuInit, 0)
     context = cuda_call(driver.cuDevicePrimaryCtxRetain, int(device))
     peer = None
@@ -294,7 +293,8 @@ def ipc_peer_access(case, interposed, coordinator):
         parent.sendall(ctypes.string_at(handle.getPtr(), 64))
         assert parent.recv(5, socket.MSG_WAITALL) == b"ready"
         if interposed:
-            reconstruct(coordinator, os.getpid(), process.pid)
+            reconstruct(coordinator, os.getpid(), process.pid,
+                        native_checkpoint=case == "ipc-checkpoint")
         parent.sendall(b"r")
         assert process.wait(timeout=30) == 0
         count = 3 if case.startswith("ipc-peer-") else 2
@@ -309,6 +309,12 @@ def ipc_peer_access(case, interposed, coordinator):
 
 
 if __name__ == "__main__":
+    if sys.argv[1] == "checkpoint":
+        cuda_driver.native_checkpoint(
+            tuple(map(int, sys.argv[2:])), command_timeout_seconds=20,
+            checkpoint_timeout_seconds=60,
+        )
+        raise SystemExit(0)
     case, interposed, coordinator, *extra = sys.argv[1:]
     if case == "import":
         ipc_import(interposed, coordinator, *extra)

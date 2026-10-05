@@ -252,9 +252,10 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         _collective(input_tensor, group_name, output, options.multicast)
+    output.zero_()
     graph.replay()
     torch.cuda.synchronize()
-    _assert_exact_result(output, "before checkpoint")
+    _assert_exact_result(output, 3.0, "before checkpoint")
     (options.sync_dir / f"ready-{rank}").touch()
 
     _wait_for_continue(options.sync_dir)
@@ -281,9 +282,13 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
             rank,
             "virtual-shareable-handle peer mapping after restore",
         )
+    input_tensor.fill_(2 * (rank + 1))
+    output.zero_()
+    torch.cuda.synchronize()
+    dist.barrier()
     graph.replay()
     torch.cuda.synchronize()
-    _assert_exact_result(output, "after restore")
+    _assert_exact_result(output, 6.0, "after restore")
     (options.sync_dir / f"done-{rank}").touch()
 
     dist.barrier()
@@ -344,13 +349,13 @@ def _replace_local_binding_with_address(
         cuda_call(driver.cuMemRelease, multicast_handle)
 
 
-def _assert_exact_result(output: torch.Tensor, stage: str) -> None:
-    expected = torch.full((NUMEL,), 3.0, dtype=torch.float32)
+def _assert_exact_result(output: torch.Tensor, value: float, stage: str) -> None:
+    expected = torch.full((NUMEL,), value, dtype=torch.float32)
     actual = output.cpu()
     if not torch.equal(actual, expected):
         mismatch = torch.nonzero(actual != expected)[0].item()
         raise AssertionError(
-            f"{stage}: output[{mismatch}] is {actual[mismatch].item()}, expected 3.0"
+            f"{stage}: output[{mismatch}] is {actual[mismatch].item()}, expected {value}"
         )
 
 

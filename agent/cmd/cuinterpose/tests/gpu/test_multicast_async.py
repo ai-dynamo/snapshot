@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Replay multicast addresses backed by native, shareable async memory pools."""
+"""Restore multicast bindings to native async pools and tracked VMM members."""
 
 import ctypes
 import os
@@ -20,11 +20,10 @@ from test_multicast_locking import records
 
 @pytest.mark.gpu
 @pytest.mark.multicast
-@pytest.mark.parametrize("version", ["v1", "v2"])
-def test_native_async_addresses_survive_restore(version, multicast_supported, tools, tmp_path):
-    # The suite supports CUDA 13.0. The explicit-device binding API arrived in 13.1.
-    if version == "v2" and cuda_call(driver.cuDriverGetVersion) < 13010:
-        pytest.skip("cuMulticastBindAddr_v2 requires CUDA 13.1")
+@pytest.mark.parametrize("source,version", [("address", "v1"), ("address", "v2"), ("memory", "v2")])
+def test_multicast_bindings_survive_restore(source, version, multicast_supported, tools, tmp_path):
+    if version == "v2":
+        assert cuda_call(driver.cuDriverGetVersion) >= 13010, "selected v2 cases require CUDA 13.1"
     control = tmp_path / "control"
     checkpoint = tmp_path / "checkpoint"
     control.mkdir()
@@ -34,7 +33,7 @@ def test_native_async_addresses_survive_restore(version, multicast_supported, to
     }
     with (tmp_path / "worker.log").open("w+") as log:
         child = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), version], env=environment,
+            [sys.executable, str(Path(__file__).resolve()), source, version], env=environment,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True,
         )
         try:
@@ -48,8 +47,8 @@ def test_native_async_addresses_survive_restore(version, multicast_supported, to
                     "--checkpoint-dir", str(checkpoint), "--process", str(child.pid),
                 ], check=True, capture_output=True, text=True, timeout=30)
                 if phase == "--prepare":
-                    # These allocations belong to CUDA, so CUDA must restore them
-                    # before the shim can replay BindAddr at their original VAs.
+                    # CUDA restores its own allocations before the shim rebuilds
+                    # multicast bindings, including native async-pool addresses.
                     cuda_driver.native_checkpoint(
                         (child.pid,), command_timeout_seconds=20,
                         checkpoint_timeout_seconds=30,
@@ -83,6 +82,7 @@ def read_multicast(address):
     module = cuda_call(driver.cuModuleLoadData, ptx)
     function = cuda_call(driver.cuModuleGetFunction, module, b"read_multicast")
     output = int(cuda_call(driver.cuMemAlloc, 4))
+    cuda_call(driver.cuMemsetD32, output, 0, 1)
     arguments = (ctypes.c_uint64(address), ctypes.c_uint64(output))
     parameters = (ctypes.c_void_p * 2)(*(ctypes.addressof(arg) for arg in arguments))
     launch = ctypes.CDLL("libcuda.so.1").cuLaunchKernel
@@ -99,7 +99,7 @@ def read_multicast(address):
     cuda_call(driver.cuModuleUnload, module)
 
 
-def run_worker(version):
+def run_worker(source, version):
     cuda_call(driver.cuInit, 0)
     contexts = [cuda_call(driver.cuDevicePrimaryCtxRetain, device) for device in range(2)]
     cuda_call(driver.cuCtxSetCurrent, contexts[0])
@@ -117,42 +117,65 @@ def run_worker(version):
     allocations = []
     for device, value in enumerate((0x12345678, 0x11111111)):
         cuda_call(driver.cuCtxSetCurrent, contexts[device])
-        pool_properties = driver.CUmemPoolProps()
-        pool_properties.allocType = driver.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
-        pool_properties.handleTypes = cuda_driver.POSIX_FD_HANDLE_TYPE
-        pool_properties.location.type = driver.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
-        pool_properties.location.id = device
-        pool = cuda_call(driver.cuMemPoolCreate, pool_properties)
-        stream = cuda_call(driver.cuStreamCreate, 0)
-        base = int(cuda_call(driver.cuMemAllocFromPoolAsync, 2 * size, pool, stream))
-        cuda_call(driver.cuStreamSynchronize, stream)
-        address = (base + size - 1) // size * size
+        if source == "memory":
+            member = cuda_call(driver.cuMemCreate, size, cuda_driver.allocation_properties(device), 0)
+            address = cuda_driver.map_allocation(member, size, device)
+            allocations.append((member, address))
+        else:
+            pool_properties = driver.CUmemPoolProps()
+            pool_properties.allocType = driver.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+            pool_properties.handleTypes = cuda_driver.POSIX_FD_HANDLE_TYPE
+            pool_properties.location.type = driver.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+            pool_properties.location.id = device
+            pool = cuda_call(driver.cuMemPoolCreate, pool_properties)
+            stream = cuda_call(driver.cuStreamCreate, 0)
+            base = int(cuda_call(driver.cuMemAllocFromPoolAsync, 2 * size, pool, stream))
+            cuda_call(driver.cuStreamSynchronize, stream)
+            address = (base + size - 1) // size * size
+            allocations.append((pool, stream, base))
         cuda_call(driver.cuMemsetD32, address, value, size // 4)
         cuda_call(driver.cuCtxSynchronize)
-        if version == "v2":
+        if source == "memory":
+            cuda_call(driver.cuMulticastBindMem_v2, group, device, 0, member, 0, size, 0)
+        elif version == "v2":
             cuda_call(driver.cuMulticastBindAddr_v2, group, device, 0, address, size, 0)
         else:
             cuda_call(driver.cuMulticastBindAddr, group, 0, address, size, 0)
-        allocations.append((pool, stream, base))
     cuda_call(driver.cuCtxSetCurrent, contexts[0])
     multicast_address = cuda_driver.map_allocation(group, size, 0)
-    bindings = [record["multicast_binding"] for record in records()
-                if "multicast_binding" in record]
+    current = records()
+    bindings = [record["multicast_binding"] for record in current if "multicast_binding" in record]
     assert len(bindings) == 2, bindings
-    assert all(binding["source"]["address"]["tracked_member"] is None
-               for binding in bindings), bindings
+    assert {binding["device"] for binding in bindings} == {0, 1}, bindings
+    if source == "memory":
+        members = {record["allocation"]["location"]["id"]: record["allocation"]["allocation"]
+                   for record in current if "allocation" in record}
+        for binding in bindings:
+            assert binding["source"]["memory"] == {
+                "allocation": members[binding["device"]], "offset": 0,
+            }, binding
+    else:
+        assert all(binding["source"]["address"]["tracked_member"] is None
+                   for binding in bindings), bindings
     assert all(binding["version"] == version for binding in bindings), bindings
     read_multicast(multicast_address)
     print("ready", flush=True)
     assert input() == "continue"
+    assert [record["multicast_binding"] for record in records()
+            if "multicast_binding" in record] == bindings
     read_multicast(multicast_address)
-    for device, (pool, stream, base) in enumerate(allocations):
+    for device, allocation in enumerate(allocations):
         cuda_call(driver.cuCtxSetCurrent, contexts[device])
         cuda_call(driver.cuMulticastUnbind, group, device, 0, size)
-        cuda_call(driver.cuMemFreeAsync, base, stream)
-        cuda_call(driver.cuStreamSynchronize, stream)
-        cuda_call(driver.cuStreamDestroy, stream)
-        cuda_call(driver.cuMemPoolDestroy, pool)
+        if source == "memory":
+            member, address = allocation
+            cuda_driver.destroy_mapped_allocation(address, size, member)
+        else:
+            pool, stream, base = allocation
+            cuda_call(driver.cuMemFreeAsync, base, stream)
+            cuda_call(driver.cuStreamSynchronize, stream)
+            cuda_call(driver.cuStreamDestroy, stream)
+            cuda_call(driver.cuMemPoolDestroy, pool)
     cuda_call(driver.cuCtxSetCurrent, contexts[0])
     cuda_driver.destroy_mapped_allocation(multicast_address, size, group)
     for device in range(2):

@@ -37,6 +37,7 @@ def main():
     )
     functions = {fields[0] for line in exports.splitlines()
                  if len(fields := line.split()) >= 2 and fields[1] == "T"}
+    assert functions, "nm found no frontend function symbols"
     relocations = subprocess.check_output(["readelf", "-rW", str(frontend)], text=True)
     for line in relocations.splitlines():
         fields = line.split()
