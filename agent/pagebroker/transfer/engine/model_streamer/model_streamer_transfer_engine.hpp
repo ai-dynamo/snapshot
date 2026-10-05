@@ -7,7 +7,7 @@
 #include <mutex>
 
 #include "model_streamer_restore.hpp"
-#include "transfer_engine.hpp"
+#include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class ModelStreamerTransferEngine final : public TransferEngine {

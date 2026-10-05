@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#include "model_streamer_restore.hpp"
+#include "transfer/engine/model_streamer/model_streamer_restore.hpp"
 
 #include <gtest/gtest.h>
 
@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-#include "model_streamer_api.hpp"
+#include "transfer/engine/model_streamer/model_streamer_api.hpp"
 
 using namespace snapshot::pagebroker;
 using namespace std::chrono_literals;
