@@ -98,7 +98,83 @@ Removing an override does not prove a feature ran. Engines can select a fallback
 because of their version, GPU topology, or runtime probes. In particular, NCCL
 NVLS and an engine's own multicast implementation are different paths.
 
-## Multiple GPUs and gotchas
+## Multi-GPU models
+
+The single-GPU manifests remain small Qwen3 examples. The following separate
+manifest pairs target one B200 node. They use the same `app.py` and ConfigMap
+as their engine's single-GPU example:
+
+| Model | Engine | GPUs and parallelism | Context | Manifest pair |
+| --- | --- | --- | --- | --- |
+| GLM 5.3 NVFP4 | vLLM | 8, TP8/EP8 | 128K | [Source](vllm/deployment-glm-5.3.yaml), [restore](vllm/restore-deployment-glm-5.3.yaml) |
+| GLM 5.3 NVFP4 | SGLang | 8, TP8/EP8 | 128K | [Source](sglang/deployment-glm-5.3.yaml), [restore](sglang/restore-deployment-glm-5.3.yaml) |
+| GLM 5.3 NVFP4 | TensorRT-LLM | 8, TP8/EP8 | 128K | [Source](tensorrt-llm/deployment-glm-5.3.yaml), [restore](tensorrt-llm/restore-deployment-glm-5.3.yaml) |
+| DeepSeek V4 Flash NVFP4 | vLLM | 4, TP4 | 128K | [Source](vllm/deployment-deepseek-v4-flash.yaml), [restore](vllm/restore-deployment-deepseek-v4-flash.yaml) |
+| DeepSeek V4 Flash NVFP4 | SGLang | 4, TP4 | 128K | [Source](sglang/deployment-deepseek-v4-flash.yaml), [restore](sglang/restore-deployment-deepseek-v4-flash.yaml) |
+
+These configurations keep prefill and decode in the same engine and do not
+use serving-time KV offloading. The existing checkpoint pause and memory-release
+steps still apply. GLM limits concurrency to 32 and DeepSeek to 64. These are
+bounded example settings, not measured throughput optima or full-context stress
+test results.
+
+The GLM pairs pin [RadixArk/GLM-5.3-NVFP4](https://huggingface.co/RadixArk/GLM-5.3-NVFP4)
+and the DeepSeek pairs pin
+[NVIDIA/DeepSeek-V4-Flash-NVFP4](https://huggingface.co/nvidia/DeepSeek-V4-Flash-NVFP4).
+Each source and restore pair uses the same model revision and engine image.
+DeepSeek uses the existing vLLM 0.27.1 and SGLang 0.5.17 releases. The vLLM
+settings follow Dynamo's [B200 aggregated profile](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-flash/vllm/agg-b200-agentic/deploy.yaml),
+with the context bounded to 128K. The SGLang settings follow the
+[tagged B200 NVFP4 recipe](https://github.com/sgl-project/sglang/blob/v0.5.17/docs/src/snippets/configs/deepseek-ai/deepseek-v4.jsx).
+The checkpoint combines FP8 attention with NVFP4 experts, so its recipes let
+the engine detect the quantization format. They do not force a uniform FP4
+format.
+
+Model-specific settings are JSON objects in `VLLM_ENGINE_ARGS`,
+`SGLANG_ENGINE_ARGS`, or `TRTLLM_ENGINE_ARGS`. Keys are Python constructor
+arguments, not CLI flags. They override the small example's defaults. The
+GLM vLLM and SGLang profiles use speculative decoding. The TensorRT-LLM profile
+keeps it off because its pinned release does not support GLM NVFP4 with MTP.
+
+Create the [shared model-cache PVC](model-cache-pvc.yaml) in the workload
+namespace, using a ReadWriteMany storage class available in your cluster.
+The large examples request 2 TiB of cache space and mount it at `/hf-cache`.
+You can use an existing PVC containing a Hugging Face cache instead by changing
+`claimName` in both manifests. The download init container reuses cached files
+and records completion for the exact model revision. Both source and restore
+also mount a 64 GiB memory-backed `/dev/shm`.
+
+For example, from the repository root, after creating the `vllm-app` ConfigMap
+and setting `SNAPSHOT_AGENT_IMAGE`:
+
+```bash
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename docs/guides/model-cache-pvc.yaml
+
+envsubst '${SNAPSHOT_AGENT_IMAGE}' \
+  < docs/guides/vllm/deployment-deepseek-v4-flash.yaml | \
+  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+
+kubectl rollout status --namespace "$SNAPSHOT_NAMESPACE" \
+  deployment/vllm-deepseek-v4-flash-source --timeout=60m
+```
+
+[Checkpoint](checkpoint.md) the resulting source Pod. Set the restore
+manifest's `nvidia.com/restore-from` to that PodSnapshot name, then follow the
+[restore guide](restore.md) with the matching multi-GPU restore manifest.
+Restore needs the same GPU count and enough CPU memory for the captured state.
+The TensorRT-LLM GLM recipe requests 1 TiB of host memory without a hard memory
+limit. It retains GPU state during capture, so the host copy can exceed 1 TiB.
+Use a node with enough available RAM and measure peak memory before setting a
+hard limit for your workload.
+On a node with only enough GPUs for one copy, remove the source after the
+checkpoint is ready before creating the restore Pod.
+
+A populated model cache avoids repeated weight downloads. Compilation caches
+can also be mounted on persistent storage, but reuse them only with compatible
+engine, CUDA and GPU versions. Record cache use when comparing startup times.
+
+## Gotchas
 
 The examples default to one GPU. For two GPUs on one node, set
 `SNAPSHOT_TENSOR_PARALLEL_SIZE` to `"2"` and the main container's

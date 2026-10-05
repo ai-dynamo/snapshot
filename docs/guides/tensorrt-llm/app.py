@@ -81,18 +81,29 @@ def serve_api(llm: LLM, restored_text: str) -> None:
 def main() -> None:
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
-    llm = LLM(
-        model=MODEL,
-        backend="pytorch",
-        dtype="float16",
-        trust_remote_code=TRUST_REMOTE_CODE,
-        tensor_parallel_size=TENSOR_PARALLEL_SIZE,
-        max_num_tokens=MAX_NUM_TOKENS,
-        max_seq_len=512,
-        max_batch_size=MAX_BATCH_SIZE,
-        enable_chunked_prefill=False,
-        kv_cache_config={"free_gpu_memory_fraction": FREE_GPU_MEMORY_FRACTION},
-    )
+    engine_args = {
+        "model": MODEL,
+        "backend": "pytorch",
+        "dtype": "float16",
+        "trust_remote_code": TRUST_REMOTE_CODE,
+        "tensor_parallel_size": TENSOR_PARALLEL_SIZE,
+        "max_num_tokens": MAX_NUM_TOKENS,
+        "max_seq_len": 512,
+        "max_batch_size": MAX_BATCH_SIZE,
+        "enable_chunked_prefill": False,
+        "kv_cache_config": {"free_gpu_memory_fraction": FREE_GPU_MEMORY_FRACTION},
+    }
+    # JSON keys are LLM API keyword arguments, not CLI flags.
+    engine_args.update(json.loads(os.environ.get("TRTLLM_ENGINE_ARGS", "{}")))
+    revision = engine_args.pop("revision", None)
+    if revision is not None:
+        from huggingface_hub import snapshot_download
+
+        # rc24 does not forward revision to every tokenizer/config read.
+        engine_args["model"] = snapshot_download(
+            repo_id=engine_args["model"], revision=revision, local_files_only=True
+        )
+    llm = LLM(**engine_args)
 
     for text in generate_text(
         llm,

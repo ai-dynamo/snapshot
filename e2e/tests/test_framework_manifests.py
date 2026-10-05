@@ -20,6 +20,8 @@ pull request, without a cluster:
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from snapshot_e2e import framework_workloads as fw
@@ -45,6 +47,7 @@ def _workload_image(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", AGENT_IMAGE)
     monkeypatch.delenv("SNAPSHOT_E2E_RESTORE_NODE", raising=False)
     monkeypatch.delenv("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE", raising=False)
+    monkeypatch.delenv("SNAPSHOT_E2E_RECIPE", raising=False)
 
 
 @pytest.fixture(params=sorted(frameworks.FRAMEWORKS))
@@ -369,3 +372,62 @@ def test_control_file_names_match_the_guide_program(spec: frameworks.FrameworkSp
     for path in sentinels:
         name = path.rsplit("/", 1)[-1]
         assert f'"{name}"' in program, f"{spec.name}/app.py does not write {name!r}"
+
+
+@pytest.mark.workload
+@pytest.mark.parametrize("engine,recipe,size", [
+    ("vllm", "glm-5.3", 8),
+    ("sglang", "glm-5.3", 8),
+    ("tensorrt-llm", "glm-5.3", 8),
+    ("vllm", "deepseek-v4-flash", 4),
+    ("sglang", "deepseek-v4-flash", 4),
+])
+def test_multi_gpu_recipe_matches_restore_and_shared_cache(
+    monkeypatch: pytest.MonkeyPatch, engine: str, recipe: str, size: int,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RECIPE", recipe)
+    spec = frameworks.framework_spec(engine)
+    source, restore, run = pods(spec)
+    source_main, restore_main = map(fw.main_container, (source, restore))
+    argument_variable = {"vllm": "VLLM_ENGINE_ARGS", "sglang": "SGLANG_ENGINE_ARGS",
+                         "tensorrt-llm": "TRTLLM_ENGINE_ARGS"}[engine]
+    arguments = json.loads(fw.env_value(source_main, argument_variable))
+    assert arguments == json.loads(fw.env_value(restore_main, argument_variable))
+    assert len(arguments["revision"]) == 40
+    assert spec.case_name == f"{engine}-{recipe}"
+    assert spec.model == fw.env_value(source_main, "SNAPSHOT_MODEL")
+    assert source["metadata"]["annotations"][fw.SHARED_MEMORY_ANNOTATION] == "enabled"
+    assert restore["metadata"]["annotations"][fw.RESTORE_FROM_ANNOTATION] == run.snapshot_name
+    assert restore_main["command"] == ["/bin/sh", "-c", "exec sleep infinity"]
+    for pod in (source, restore):
+        main = fw.main_container(pod)
+        assert main["resources"]["limits"]["nvidia.com/gpu"] == str(size)
+        assert fw.env_value(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE") == str(size)
+        assert fw.env_value(main, "SNAPSHOT_MODEL_REVISION") == arguments["revision"]
+        volumes = {v["name"]: v for v in pod["spec"]["volumes"]}
+        assert volumes["shm"]["emptyDir"]["medium"] == "Memory"
+        pvc = fw.model_cache_pvc(config=CONFIG, spec=spec)
+        assert volumes["model-cache"]["persistentVolumeClaim"]["claimName"] == pvc["metadata"]["name"]
+        assert {"name": "shm", "mountPath": "/dev/shm"} in main["volumeMounts"]
+        downloader = next(c for c in pod["spec"]["initContainers"] if c["name"] == "model-cache")
+        assert fw.env_value(downloader, "SNAPSHOT_MODEL_REVISION") == arguments["revision"]
+        assert fw.env_value(downloader, "SNAPSHOT_MODEL") == spec.model
+        fw.use_shared_model_cache(pod["spec"], CACHE)
+        assert not any(c["name"] == "model-cache" for c in pod["spec"].get("initContainers", []))
+        assert fw.env_value(fw.main_container(pod), "HF_HUB_OFFLINE") == "1"
+    monkeypatch.setenv("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE", "2")
+    with pytest.raises(ValueError, match=f"requires TP{size}"):
+        frameworks.framework_spec(engine)
+
+
+@pytest.mark.workload
+@pytest.mark.parametrize("engine,recipe,error", [
+    ("vllm", "../vllm", "unknown SNAPSHOT_E2E_RECIPE"),
+    ("tensorrt-llm", "deepseek-v4-flash", "has no deepseek-v4-flash recipe"),
+])
+def test_recipe_selection_rejects_unknown_or_unavailable_profiles(
+    monkeypatch: pytest.MonkeyPatch, engine: str, recipe: str, error: str,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RECIPE", recipe)
+    with pytest.raises(ValueError, match=error):
+        frameworks.framework_spec(engine)
