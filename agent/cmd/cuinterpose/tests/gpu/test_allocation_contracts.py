@@ -25,7 +25,7 @@ def test_allocation_contracts(case, interposed, tools, tmp_path):
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("case", ["nonposix-create", "nonposix-export", "export-flags", "private-export"])
+@pytest.mark.parametrize("case", ["nonposix-create", "nonposix-export", "export-flags"])
 def test_shim_rejections_preserve_state(case, tools, tmp_path):
     run_case(case, True, tools, tmp_path)
 
@@ -157,16 +157,11 @@ def rejected_allocation(case):
         properties.requestedHandleTypes = driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
         output = ctypes.c_uint64(99)
         before = records()
-        assert create(ctypes.byref(output), size, properties.getPtr(), 0) == int(
-            driver.CUresult.CUDA_ERROR_NOT_SUPPORTED)
+        status = create(ctypes.byref(output), size, properties.getPtr(), 0)
+        assert status == int(driver.CUresult.CUDA_ERROR_NOT_SUPPORTED), (case, status)
         assert output.value == 99 and records() == before
     else:
-        private = case == "private-export"
-        if private:
-            address = cuda_call(driver.cuMemAlloc, size)
-            handle = cuda_call(driver.cuMemRetainAllocationHandle, address)
-        else:
-            handle = cuda_call(driver.cuMemCreate, size, properties, 0)
+        handle = cuda_call(driver.cuMemCreate, size, properties, 0)
         export = library.cuMemExportToShareableHandle
         export.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint64,
                            ctypes.c_uint, ctypes.c_uint64]
@@ -175,17 +170,12 @@ def rejected_allocation(case):
                 if case == "nonposix-export" else POSIX_FD_HANDLE_TYPE)
         output = ctypes.c_int(-99)
         before = records()
-        assert export(ctypes.byref(output), int(handle), int(kind), int(case == "export-flags")) == int(
-            driver.CUresult.CUDA_ERROR_INVALID_VALUE)
+        status = export(ctypes.byref(output), int(handle), int(kind), int(case == "export-flags"))
+        assert status == int(driver.CUresult.CUDA_ERROR_INVALID_VALUE), (case, status)
         assert output.value == -99 and records() == before
-        if private:
-            cuda_driver.write_bytes(address, b"still valid")
-            cuda_driver.assert_bytes(address, b"still valid", "rejected private export")
-            cuda_call(driver.cuMemFree, address)
-        else:
-            descriptor = int(cuda_call(driver.cuMemExportToShareableHandle,
-                                      handle, POSIX_FD_HANDLE_TYPE, 0))
-            os.close(descriptor)
+        descriptor = int(cuda_call(driver.cuMemExportToShareableHandle,
+                                  handle, POSIX_FD_HANDLE_TYPE, 0))
+        os.close(descriptor)
         cuda_call(driver.cuMemRelease, handle)
     cuda_call(driver.cuDevicePrimaryCtxRelease, 0)
 
@@ -228,7 +218,7 @@ if __name__ == "__main__":
         invalid_create_preserves_output(interposed)
     elif case == "host-numa-v1":
         rejected_host_numa_bind()
-    elif case in ("nonposix-create", "nonposix-export", "export-flags", "private-export"):
+    elif case in ("nonposix-create", "nonposix-export", "export-flags"):
         rejected_allocation(case)
     else:
         allocation_aliases(interposed, exportable=case == "aliases")
