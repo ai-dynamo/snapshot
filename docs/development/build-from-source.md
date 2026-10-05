@@ -25,31 +25,33 @@ cd snapshot
 
 ## 2. Build the images
 
-The root `Makefile` builds both images. Override `REGISTRY` and `VERSION` to tag
-them for the registry:
+The root `Makefile` builds all three images. Override `REGISTRY` and `VERSION`
+to tag them for the registry:
 
 ```bash
-make docker-build-agent docker-build-operator \
+make docker-build-agent docker-build-pagebroker docker-build-operator \
   REGISTRY=<registry> \
   VERSION=<tag>
 ```
 
-This produces `<registry>/agent:<tag>` and
-`<registry>/operator:<tag>`.
+This produces `<registry>/agent:<tag>`, `<registry>/pagebroker:<tag>`, and
+`<registry>/operator:<tag>`. The agent and PageBroker images must be built from
+the same checkout: they speak an internal protocol and the chart pulls both at
+`image.agent.tag`.
 
 ## 3. Push the images
 
-Push both images to a registry the cluster can pull from:
+Push the images to a registry the cluster can pull from:
 
 ```bash
 docker push <registry>/agent:<tag>
+docker push <registry>/pagebroker:<tag>
 docker push <registry>/operator:<tag>
 ```
 
 ## 4. Install the chart against the built images
 
-Install the chart from the checkout, pointing the operator and agent images at
-the built images:
+Install the chart from the checkout, pointing the images at the built ones:
 
 ```bash
 helm install snapshot ./charts/snapshot \
@@ -57,7 +59,8 @@ helm install snapshot ./charts/snapshot \
   --set image.operator.repository=<registry>/operator \
   --set image.operator.tag=<tag> \
   --set image.agent.repository=<registry>/agent \
-  --set image.agent.tag=<tag>
+  --set image.agent.tag=<tag> \
+  --set image.pageBroker.repository=<registry>/pagebroker
 ```
 
 See [Installation](../operations/install.md) for storage and uninstall options.

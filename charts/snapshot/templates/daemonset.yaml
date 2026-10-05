@@ -108,8 +108,8 @@ spec:
       containers:
         {{- if .Values.pageBroker.enabled }}
         - name: pagebroker
-          image: "{{ .Values.pageBroker.image.repository }}:{{ .Values.pageBroker.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.pageBroker.image.pullPolicy }}
+          image: "{{ .Values.image.pageBroker.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pageBroker.pullPolicy }}
           command:
           {{- with .Values.pageBroker.command }}
             {{- toYaml . | nindent 12 }}
