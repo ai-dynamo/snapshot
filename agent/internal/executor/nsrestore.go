@@ -77,9 +77,9 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		if err != nil {
 			return nil, err
 		}
-		// The coordinator restores shared IPC/multicast state for shim captures.
-		// Native multi-GPU captures still require launch-job state.
-		requiresCUDAJobFile := len(m.CUDA.SourceGPUUUIDs) > 1 && m.CuInterpose == nil
+		// An active coordinator restores shared IPC/multicast state. Native and
+		// frontend-only multi-GPU captures still require launch-job state.
+		requiresCUDAJobFile := len(m.CUDA.SourceGPUUUIDs) > 1 && !m.CuInterpose.HasRuntime()
 		if requiresCUDAJobFile && cudaJobFile == "" {
 			return nil, fmt.Errorf("multi-GPU checkpoint is missing CUDA launch-job state")
 		}
@@ -197,7 +197,7 @@ func executeRestore(
 		defer f.Close()
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
 	}
-	if m.CuInterpose != nil && !m.CUDA.IsEmpty() {
+	if m.CuInterpose.HasRuntime() {
 		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
 		if err != nil {
 			return nil, 0, nil, err
@@ -214,10 +214,10 @@ func executeRestore(
 	if err := snapshotruntime.RemoveControlSentinel(podcontract.SnapshotControlMountPath, podcontract.RestoreCompleteFile); err != nil {
 		return nil, 0, nil, fmt.Errorf("remove stale restore-complete sentinel: %w", err)
 	}
-	if m.CuInterpose != nil {
+	if m.CuInterpose.HasRuntime() {
 		// The control emptyDir can retain socket names from a prior incarnation.
 		// Remove this manifest's endpoints before CRIU recreates their bindings.
-		if err := cuda.RemoveStaleCuInterposeSockets(podcontract.SnapshotControlMountPath, m.CUDA.PIDs); err != nil {
+		if err := cuda.RemoveStaleCuInterposeSockets(podcontract.SnapshotControlMountPath, m.CuInterpose.PIDs); err != nil {
 			return nil, 0, nil, fmt.Errorf("remove stale cuinterpose sockets: %w", err)
 		}
 	}
@@ -288,11 +288,11 @@ func executeRestore(
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
 		}
-		if m.CuInterpose != nil {
+		if m.CuInterpose.HasRuntime() {
 			// CUDA is unlocked, but the application still waits for restore-complete. Socket
 			// names retain the checkpoint's innermost namespace PIDs, whereas the native CUDA
 			// calls above need PIDs visible to the restoring process.
-			err := cuda.RestoreCuInterpose(ctx, opts.CheckpointPath, m.CUDA.PIDs, coordinatorFdPath)
+			err := cuda.RestoreCuInterpose(ctx, opts.CheckpointPath, m.CuInterpose.PIDs, coordinatorFdPath)
 			if err != nil {
 				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)
 			}

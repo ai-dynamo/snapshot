@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -130,23 +131,30 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if req.CuInterposeRequired {
 		requirement = cuda.CuInterposeRequired
 	}
-	state.CuInterpose, err = cuda.InspectCuInterposeLibraries(snapshotruntime.HostProcPath, state.CUDAHostPIDs, requirement)
+	var runtimeHostPIDs []int
+	state.CuInterpose, runtimeHostPIDs, err = cuda.InspectCuInterposeLibraries(snapshotruntime.HostProcPath, state.CUDAHostPIDs, requirement)
 	if err != nil {
 		return err
 	}
-	if state.CuInterpose != nil {
+	for i, pid := range state.CUDAHostPIDs {
+		if slices.Contains(runtimeHostPIDs, pid) {
+			state.CuInterpose.PIDs = append(state.CuInterpose.PIDs, state.CUDANSPIDs[i])
+		}
+	}
+	if state.CuInterpose.HasRuntime() {
 		if err := cuda.InspectCuInterpose(ctx, cuda.CuInterposeTarget{
 			ProcRoot: snapshotruntime.HostProcPath, TargetPID: state.PID,
-			NamespacePIDs: state.CUDANSPIDs, Binary: cuda.DefaultCoordinatorBinaryPath,
+			NamespacePIDs: state.CuInterpose.PIDs, Binary: cuda.DefaultCoordinatorBinaryPath,
 		}); err != nil {
 			return fmt.Errorf("inspect cuinterpose: %w", err)
 		}
 	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 {
-		// The coordinator owns shared IPC/multicast state, so shim captures do not
-		// require native launch-job state. Preserve it when the workload provides it.
-		requiresCUDAJobFile := len(state.GPUs.Devices) > 1 && state.CuInterpose == nil
+		// An active coordinator owns shared IPC/multicast state, so these captures
+		// do not require native launch-job state. Frontend-only processes still do.
+		// Preserve launch-job state whenever the workload provides it.
+		requiresCUDAJobFile := len(state.GPUs.Devices) > 1 && !state.CuInterpose.HasRuntime()
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, requiresCUDAJobFile)
 		if err != nil {
 			return err
@@ -371,11 +379,11 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
-		if data.CuInterpose != nil {
+		if data.CuInterpose.HasRuntime() {
 			// Remove shared mappings before native CUDA lock and checkpoint calls.
 			err := cuda.PrepareCuInterpose(ctx, cuda.CuInterposeTarget{
 				ProcRoot: snapshotruntime.HostProcPath, TargetPID: state.PID,
-				NamespacePIDs: state.CUDANSPIDs, Binary: cuda.DefaultCoordinatorBinaryPath,
+				NamespacePIDs: data.CuInterpose.PIDs, Binary: cuda.DefaultCoordinatorBinaryPath,
 			}, checkpointDir)
 			if err != nil {
 				return nil, fmt.Errorf("prepare cuinterpose: %w", err)

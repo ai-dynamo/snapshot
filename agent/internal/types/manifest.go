@@ -217,7 +217,7 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 	if err := validateArtifactManifest(data.Artifact); err != nil {
 		return err
 	}
-	if err := data.CuInterpose.Validate(); err != nil {
+	if err := data.CuInterpose.ValidateCUDAPIDs(data.CUDA.PIDs); err != nil {
 		return err
 	}
 
@@ -248,6 +248,10 @@ func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 		return nil, fmt.Errorf("failed to unmarshal checkpoint manifest: %w", err)
 	}
 	if err := validateArtifactManifest(data.Artifact); err != nil {
+		return nil, err
+	}
+
+	if err := data.CuInterpose.ValidateCUDAPIDs(data.CUDA.PIDs); err != nil {
 		return nil, err
 	}
 

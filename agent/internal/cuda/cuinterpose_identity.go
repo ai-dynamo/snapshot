@@ -27,32 +27,36 @@ const (
 	CuInterposeRequired
 )
 
-// InspectCuInterposeLibraries uses the CUDA process list so a missing socket reply
-// cannot silently remove a participant from inspection.
-func InspectCuInterposeLibraries(procRoot string, pids []int, requirement CuInterposeRequirement) (*types.CuInterposeManifest, error) {
+// InspectCuInterposeLibraries verifies the bundle in every CUDA process and returns
+// the host PIDs with a mapped core. Socket availability never removes a participant
+// from this set. The caller records the corresponding namespace PIDs in the manifest.
+func InspectCuInterposeLibraries(procRoot string, pids []int, requirement CuInterposeRequirement) (*types.CuInterposeManifest, []int, error) {
 	var identity *types.CuInterposeManifest
-	var absent []int
+	var absent, active []int
 	for _, pid := range pids {
-		current, err := processCuInterposeLibraries(filepath.Join(procRoot, strconv.Itoa(pid)))
+		current, coreMapped, err := processCuInterposeLibraries(filepath.Join(procRoot, strconv.Itoa(pid)))
 		if err != nil {
-			return nil, fmt.Errorf("cuinterpose process %d: %w", pid, err)
+			return nil, nil, fmt.Errorf("cuinterpose process %d: %w", pid, err)
 		}
 		if current == nil {
 			absent = append(absent, pid)
 			continue
 		}
-		if identity != nil && *identity != *current {
-			return nil, fmt.Errorf("cuinterpose process %d: library hashes differ between CUDA participants", pid)
+		if identity != nil && (identity.FrontendSHA256 != current.FrontendSHA256 || identity.CoreSHA256 != current.CoreSHA256) {
+			return nil, nil, fmt.Errorf("cuinterpose process %d: library hashes differ between CUDA participants", pid)
 		}
 		identity = current
+		if coreMapped {
+			active = append(active, pid)
+		}
 	}
 	if identity != nil && len(absent) != 0 {
-		return nil, fmt.Errorf("cuinterpose is missing from CUDA participants %v", absent)
+		return nil, nil, fmt.Errorf("cuinterpose is missing from CUDA participants %v", absent)
 	}
 	if identity == nil && requirement == CuInterposeRequired {
-		return nil, fmt.Errorf("cuinterpose was requested or delivered but is not active in any CUDA participant")
+		return nil, nil, fmt.Errorf("cuinterpose was requested or delivered but is not active in any CUDA participant")
 	}
-	return identity, nil
+	return identity, active, nil
 }
 
 type mappedLibrary struct {
@@ -60,10 +64,10 @@ type mappedLibrary struct {
 	inode  string
 }
 
-func processCuInterposeLibraries(processDir string) (*types.CuInterposeManifest, error) {
+func processCuInterposeLibraries(processDir string) (*types.CuInterposeManifest, bool, error) {
 	maps, err := os.Open(filepath.Join(processDir, "maps"))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer maps.Close()
 	libraries := make(map[string]mappedLibrary)
@@ -80,27 +84,28 @@ func processCuInterposeLibraries(processDir string) (*types.CuInterposeManifest,
 			continue
 		}
 		if path != filepath.Join(podcontract.CuInterposeMountPath, filepath.Base(path)) {
-			return nil, fmt.Errorf("library %s must be delivered at %s before startup", path, podcontract.CuInterposeMountPath)
+			return nil, false, fmt.Errorf("library %s must be delivered at %s before startup", path, podcontract.CuInterposeMountPath)
 		}
 		if len(fields) > 6 {
-			return nil, fmt.Errorf("mapped library %s is deleted or has an unsupported path", path)
+			return nil, false, fmt.Errorf("mapped library %s is deleted or has an unsupported path", path)
 		}
 		mapping := mappedLibrary{device: fields[3], inode: fields[4]}
 		if previous, found := libraries[path]; found && previous != mapping {
-			return nil, fmt.Errorf("mapped library %s has conflicting device/inode identities", path)
+			return nil, false, fmt.Errorf("mapped library %s has conflicting device/inode identities", path)
 		}
 		libraries[path] = mapping
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if len(libraries) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
-	if len(libraries) != 2 {
-		return nil, fmt.Errorf("both cuinterpose frontend and core must be mapped")
+	if _, found := libraries[filepath.Join(podcontract.CuInterposeMountPath, "libcuinterpose.so")]; !found {
+		return nil, false, fmt.Errorf("cuinterpose frontend must be mapped")
 	}
-	var identity types.CuInterposeManifest
+	_, coreMapped := libraries[filepath.Join(podcontract.CuInterposeMountPath, "libcuinterpose_core.so")]
+	identity := types.CuInterposeManifest{PIDs: []int{}}
 	for _, library := range []struct {
 		name   string
 		digest *string
@@ -109,31 +114,40 @@ func processCuInterposeLibraries(processDir string) (*types.CuInterposeManifest,
 		{"libcuinterpose_core.so", &identity.CoreSHA256},
 	} {
 		path := filepath.Join(podcontract.CuInterposeMountPath, library.name)
-		hash, err := hashMappedLibrary(filepath.Join(processDir, "root", path), libraries[path])
+		var mapping *mappedLibrary
+		if mapped, found := libraries[path]; found {
+			mapping = &mapped
+		}
+		hash, err := hashDeliveredLibrary(filepath.Join(processDir, "root", path), mapping)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		*library.digest = hash
 	}
-	return &identity, nil
+	return &identity, coreMapped, nil
 }
 
-func hashMappedLibrary(path string, mapping mappedLibrary) (string, error) {
-	file, err := os.Open(path)
+func hashDeliveredLibrary(path string, mapping *mappedLibrary) (string, error) {
+	// O_NONBLOCK prevents a malformed bundle containing a FIFO from blocking inspection.
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return "", fmt.Errorf("open mapped library %s: %w", path, err)
+		return "", fmt.Errorf("open delivered library %s: %w", path, err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return "", fmt.Errorf("stat mapped library %s: %w", path, err)
+		return "", fmt.Errorf("stat delivered library %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("library %s must be a regular file", path)
 	}
 	stat := info.Sys().(*syscall.Stat_t)
 	wantDevice := fmt.Sprintf("%02x:%02x", unix.Major(stat.Dev), unix.Minor(stat.Dev))
-	if mapping.device != wantDevice || mapping.inode != strconv.FormatUint(stat.Ino, 10) {
+	if mapping != nil && (mapping.device != wantDevice || mapping.inode != strconv.FormatUint(stat.Ino, 10)) {
 		return "", fmt.Errorf("mapped library %s was replaced since it was loaded", path)
 	}
-	// All mapped regions agree on this descriptor's identity, so hash it once. Delivery
+	// A frontend-only process has not loaded the lazy core, but must still carry
+	// the same bundle so it can initialize after restore. Hash each file once. Delivery
 	// mounts are read-only, and manually delivered libraries must also remain unchanged
 	// during capture. This does not detect concurrent in-place writes to the same inode.
 	return hashLibrary(file)
