@@ -84,7 +84,7 @@ def main() -> None:
     engine_args = {
         "model": MODEL,
         "backend": "pytorch",
-        "dtype": "float16",
+        "dtype": "auto",
         "trust_remote_code": TRUST_REMOTE_CODE,
         "tensor_parallel_size": TENSOR_PARALLEL_SIZE,
         "max_num_tokens": MAX_NUM_TOKENS,
