@@ -69,10 +69,11 @@ CuInterpose installer.
 
 Common `make` targets from the repo root:
 
-- `make build` — compile the agent and operator, and build the C/Rust cuinterpose
-  libraries, static coordinator, and static launcher in a pinned Docker builder
-- `make -C agent cuinterpose-test` — containerized Rust unit, loader, endpoint,
-  static coordinator/launcher, and ELF artifact checks (no GPU required)
+- `make build` — compile the Go agent and operator binaries
+- `make -C agent cuinterpose-build` — build the C/Rust cuinterpose libraries,
+  static coordinator, and static launcher in a pinned Docker builder
+- `make -C agent cuinterpose-test` — containerized Rust unit, protocol,
+  coordinator, launcher, and ELF artifact checks (no GPU required)
 - `make test` — run unit tests across the `api`, `agent`, and `operator` modules
 - `make lint` — run linters
 - `make helm-lint` — lint the Helm chart
@@ -80,8 +81,7 @@ Common `make` targets from the repo root:
 
 CuInterpose exports `libcuinterpose.so`, `libcuinterpose_core.so`,
 `cuinterpose-coordinator`, and `cuinterpose-launch` into
-`agent/cmd/cuinterpose/build/`. Both executables use the existing musl target;
-the launcher uses only Rust's standard library. See the
+`agent/cmd/cuinterpose/build/`. Both executables use the existing musl target. See the
 [Rust build instructions](../../agent/cmd/cuinterpose/rust/README.md) for local
 toolchain requirements and `test-native`.
 
