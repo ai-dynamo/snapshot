@@ -344,3 +344,80 @@ impl Arena {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::{ProcessState, checkpoint};
+    use crate::runtime;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn load_acknowledged_releases_arena_after_runtime_failure() {
+        const CHILD: &str = "CUINTERPOSE_ARENA_CLEANUP_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "memory::host_carrier::tests::load_acknowledged_releases_arena_after_runtime_failure",
+                ])
+                .env(CHILD, "1")
+                .env("SNAPSHOT_CONTROL_DIR", "/snapshot-control")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
+
+        let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED);
+        let mut state = ProcessState::new(unsafe { libc::getpid() } as u32);
+        state.arena = Some(Arena {
+            base: base as usize,
+            size,
+            offsets: BTreeMap::new(),
+        });
+        runtime::install_for_test(state);
+
+        // Hold the inherited mutex: a fork child must reject ownership before
+        // attempting to lock it or releasing its copy of the arena.
+        let guard = runtime::get().unwrap();
+        runtime::RUNTIME_FAILED.store(true, Ordering::Release);
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            unsafe { libc::alarm(2) };
+            checkpoint::load_acknowledged();
+            let mut resident = 0;
+            let mapped = unsafe { libc::mincore(base, size, &mut resident) } == 0;
+            unsafe { libc::_exit(i32::from(!mapped)) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert_eq!(status, 0, "fork child must leave the arena and mutex alone");
+        drop(guard);
+
+        assert!(matches!(runtime::ready(), Err(Error::RuntimeFailed)));
+        assert!(matches!(runtime::get(), Err(Error::RuntimeFailed)));
+        checkpoint::load_acknowledged();
+        let mut resident = 0;
+        assert_eq!(unsafe { libc::mincore(base, size, &mut resident) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOMEM)
+        );
+        checkpoint::load_acknowledged();
+        assert!(matches!(runtime::ready(), Err(Error::RuntimeFailed)));
+        assert!(matches!(runtime::get(), Err(Error::RuntimeFailed)));
+    }
+}
