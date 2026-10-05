@@ -252,9 +252,14 @@ impl Memblock {
             allocation.context = context()?;
         }
         let reference = self.reference();
-        if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference.id)? {
+        if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference)? {
             let fd = crate::driver::export_posix(self.driver_handle()?)?;
-            export_cache()?.insert(reference.id, fd, None)?;
+            let metadata = match self {
+                Self::Unicast(allocation) => ExportMetadata::Unicast {
+                    size: allocation.size,
+                },
+            };
+            export_cache()?.insert(reference, fd, metadata)?;
         }
         match self {
             Self::Unicast(allocation) => {
@@ -280,9 +285,10 @@ pub(crate) fn import_reference(
         match memblock {
             Memblock::Unicast(allocation) => {
                 if allocation.driver.is_none() {
-                    let (raw, properties) =
-                        request_export(reference).map_err(CoreError::PeerExport)?;
-                    if properties.is_some() {
+                    let (raw, metadata) = request_export(reference, reference.creator_pid)
+                        .map_err(CoreError::PeerExport)?;
+                    if !matches!(metadata, ExportMetadata::Unicast { size } if size == allocation.size)
+                    {
                         return Err(CoreError::from(CUDA_ERROR_INVALID_HANDLE));
                     }
                     allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
@@ -302,10 +308,12 @@ pub(crate) fn import_reference(
     // The EXPORT service uses the export cache without locking ProcessState, so a
     // request within this process can complete while its caller holds the allocation
     // metadata lock.
-    let (raw, multicast_properties) = request_export(reference).map_err(CoreError::PeerExport)?;
-    if multicast_properties.is_some() {
-        return Err(CUDA_ERROR_INVALID_HANDLE.into());
-    }
+    let (raw, metadata) =
+        request_export(reference, reference.creator_pid).map_err(CoreError::PeerExport)?;
+    let size = match metadata {
+        ExportMetadata::Unicast { size } => size,
+        ExportMetadata::Multicast(_) => return Err(CUDA_ERROR_INVALID_HANDLE.into()),
+    };
     let context = context()?;
     let driver = crate::driver::import_posix(raw.as_fd())?;
     let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
@@ -327,9 +335,7 @@ pub(crate) fn import_reference(
         reference,
         refcounts: Default::default(),
         driver: Some(driver),
-        // The creator owns the full backing extent. This importer knows only its
-        // mappings.
-        size: 0,
+        size,
         properties,
         shared: true,
         context,
