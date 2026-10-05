@@ -67,9 +67,11 @@ for process in Path(sys.argv[1]).glob("[0-9]*"):
     for name in ("libcuinterpose.so", "libcuinterpose_core.so"):
         with (process / "root/tmp/snapshot-cuda" / name).open("rb") as library:
             current[name] = hashlib.file_digest(library, "sha256").hexdigest()
-    assert libraries is None or libraries == current, "guide processes have different libraries"
+    if libraries is not None and libraries != current:
+        raise RuntimeError("guide processes have different libraries")
     libraries = current
-assert libraries is not None, "no running /snapshot-app/app.py guide process"
+if libraries is None:
+    raise RuntimeError("no running /snapshot-app/app.py guide process")
 print(json.dumps(libraries))
 '''
 
