@@ -22,3 +22,6 @@ dashboard/test-results/
 # Benchmarks Python workspace
 benchmarks/.venv/
 benchmarks/results/
+
+# Pinned Model Streamer native build inputs.
+.model-streamer/

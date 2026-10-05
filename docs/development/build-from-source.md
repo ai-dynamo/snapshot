@@ -39,6 +39,38 @@ This produces `<registry>/agent:<tag>`, `<registry>/pagebroker:<tag>`, and
 the same checkout: they speak an internal protocol and the chart pulls both at
 `image.agent.tag`.
 
+Build the pinned Model Streamer inputs first:
+
+```bash
+make model-streamer-artifacts
+```
+
+This builds the x86_64 core wheel and public C headers from commit
+`ae93548e02be46f479e7689a7e10e9bb243bb653`, using the digest-pinned upstream
+toolchain in `agent/pagebroker/model-streamer.Dockerfile`. Fixed package version
+and ZIP timestamps make the wheel reproducible. The output defaults to
+`.model-streamer/`; override `MODEL_STREAMER_ARTIFACT_DIR` for another location.
+CI runs this same target before building PageBroker.
+
+`docker-build-pagebroker` verifies the wheel and public headers against the
+committed SHA-256 pins. `MODEL_STREAMER_WHEEL_DIR`, `MODEL_STREAMER_INCLUDE_DIR`
+and `MODEL_STREAMER_LEGAL_DIR` can select separately provisioned matching inputs.
+The image includes the native library, metadata and corresponding source
+materials. The agent image build does not require Model Streamer.
+
+For native builds, pass `MODEL_STREAMER_INCLUDE_DIR=/path/to/include` and
+`MODEL_STREAMER_LIB_DIR=/path/to/lib` to `make -C agent/pagebroker test daemon`.
+PageBroker submits CPU destinations and needs no CUDA driver. The filesystem
+strategy defaults to the library's `sync_buffered`; set
+`RUNAI_STREAMER_FS_STRATEGY` before starting PageBroker to select an explicit
+preference list such as `io_uring_buffered,sync_buffered`.
+
+Native sessions admit at most eight submissions and target 10 GB of submitted
+bytes; one larger file runs alone. Admission closes on the first completed
+submission. All destinations remain mapped until the session ends, then pending
+work starts a new session. Terminal failures stop native access before releasing
+any affected restore; ordinary completed storage errors fail their own restore.
+
 ## 3. Push the images
 
 Push the images to a registry the cluster can pull from:

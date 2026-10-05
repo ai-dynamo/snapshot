@@ -24,3 +24,9 @@ NVIDIA-authored code in this image is Apache-2.0 and published at
 https://github.com/ai-dynamo/snapshot.
 
 Per-component license texts are in /legal/THIRD-PARTY.txt.
+
+Model Streamer is pinned to ae93548e02be46f479e7689a7e10e9bb243bb653.
+Its native wheel metadata, source revision, and source archive are installed
+under /legal/model-streamer/. The source directory also contains the exact
+libaio 0.3.113 and liburing 2.14 source archives (including their license texts)
+used by the pinned upstream toolchain to build libstreamer.so.

@@ -24,6 +24,7 @@ message IOEngine
   oneof kind
   {
     PosixCopyIOEngine posix_copy = 1;
+    ModelStreamerIOEngine model_streamer = 2;
   }
 }
 
@@ -173,3 +174,5 @@ message Response
     GetArtifactMetadataComplete get_artifact_metadata_complete = 20;
   }
 }
+
+message ModelStreamerIOEngine {}

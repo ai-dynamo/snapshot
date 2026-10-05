@@ -11,7 +11,7 @@
 namespace snapshot::pagebroker {
 using Path = std::filesystem::path;
 
-enum class TransferEngineType { POSIX_COPY };
+enum class TransferEngineType { POSIX_COPY, MODEL_STREAMER };
 
 class TransferEngine {
  public:
