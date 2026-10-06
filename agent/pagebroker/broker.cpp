@@ -110,16 +110,17 @@ TransactionDirectory(const Path& transaction_root, const std::string& transactio
 
 }  // namespace
 
-Broker::Broker(Path staging_root, Path storage_root, std::optional<S3Config> config) : staging_root_(fs::weakly_canonical(std::move(staging_root)))
+Broker::Broker(Path staging_root, Path storage_root, std::optional<S3Config> config, ModelStreamerOptions model_streamer)
+    : staging_root_(fs::weakly_canonical(std::move(staging_root)))
 {
   if (config) {
     resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions, config->transaction_lifetime);
     staging_root_ /= "s3";
-    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config)));
+    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config), std::move(model_streamer)));
     // Preserve remote staging across restart; consumers may still mount it.
   } else {
     io_engines_.push_back(std::make_unique<PosixCopyEngine>(storage_root));
-    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(storage_root)));
+    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(storage_root), std::move(model_streamer)));
     fs::remove_all(staging_root_ / "restore");
     fs::remove_all(staging_root_ / "checkpoint");
   }

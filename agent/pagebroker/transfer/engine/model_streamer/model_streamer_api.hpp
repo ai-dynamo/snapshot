@@ -16,4 +16,5 @@ using ::runai_file_streamer_request;
 using ::runai_file_streamer_response;
 using ::runai_file_streamer_response_str;
 using ::runai_file_streamer_set_credentials;
+using ::runai_file_streamer_set_fs_strategy;
 }  // namespace snapshot::pagebroker::model_streamer_api

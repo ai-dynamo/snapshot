@@ -13,4 +13,5 @@ ExitCode RunDaemon(
     const std::filesystem::path& staging_directory,
     const std::filesystem::path& storage_root,
     size_t max_concurrent_requests,
-    const std::filesystem::path& storage_config = {});
+    const std::filesystem::path& storage_config = {},
+    const std::filesystem::path& model_streamer_config = {});

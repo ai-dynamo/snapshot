@@ -92,7 +92,7 @@ ParseTransferLimits(const Json& value, S3Config& config)
   if (value.contains("limits")) {
     const auto& limits = value.at("limits");
     const std::set<std::string> allowed{"transactionSeconds", "stagingBytes", "activeTransactions", "uploadPartBytes",
-        "uploadBufferBytes", "uploadWorkers", "uploadActiveFiles", "requestSeconds"};
+        "uploadBufferBytes", "uploadWorkers", "uploadActiveFiles", "requestSeconds", "uploadRequestRetries", "uploadConnectSeconds"};
     if (!limits.is_object())
       throw std::invalid_argument("S3 limits must be an object");
     for (const auto& [key, ignored] : limits.items()) {
@@ -110,8 +110,10 @@ ParseTransferLimits(const Json& value, S3Config& config)
     upload.workers = read_limit("uploadWorkers", upload.workers, 64);
     upload.active_files = read_limit("uploadActiveFiles", upload.active_files, 64);
     upload.request_timeout = std::chrono::seconds(read_limit("requestSeconds", 60, 60));
+    upload.request_retries = read_limit("uploadRequestRetries", upload.request_retries, 10, 0);
+    const auto request_seconds = std::chrono::duration_cast<std::chrono::seconds>(upload.request_timeout).count();
+    upload.connect_timeout = std::chrono::seconds(read_limit("uploadConnectSeconds", std::min<std::uint64_t>(5, request_seconds), request_seconds));
   }
-  upload.connect_timeout = std::min(upload.request_timeout, std::chrono::milliseconds(5000));
   upload.operation_timeout = config.transaction_lifetime;
   config.transfer.restore_timeout = config.transaction_lifetime;
   upload.Validate();

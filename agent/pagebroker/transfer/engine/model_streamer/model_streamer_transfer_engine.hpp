@@ -8,15 +8,16 @@
 #include <optional>
 
 #include "model_streamer_restore.hpp"
+#include "model_streamer_config.hpp"
 #include "transfer/s3/s3_storage_backend.hpp"
 #include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class ModelStreamerTransferEngine final : public TransferEngine {
  public:
-  explicit ModelStreamerTransferEngine(Path storage_root);
-  ModelStreamerTransferEngine(Path storage_root, S3TransferOptions options);
-  explicit ModelStreamerTransferEngine(S3Config config);
+  explicit ModelStreamerTransferEngine(Path storage_root, ModelStreamerOptions model_streamer = {});
+  ModelStreamerTransferEngine(Path storage_root, S3TransferOptions options, ModelStreamerOptions model_streamer = {});
+  explicit ModelStreamerTransferEngine(S3Config config, ModelStreamerOptions model_streamer = {});
   TransferEngineType type() const override;
   RestorePlan PrepareRestore(const StorageBackend& source, TransferControl control = {},
       const PublishedArtifact* artifact = nullptr, bool metadata_only = false) const override;
@@ -40,6 +41,7 @@ class ModelStreamerTransferEngine final : public TransferEngine {
 
   Path storage_root_;
   const std::optional<S3TransferOptions> s3_options_;
+  const ModelStreamerOptions model_streamer_;
   std::unique_ptr<S3StorageBackend> store_;
   mutable std::mutex restore_mutex_;
   mutable std::shared_ptr<ModelStreamerRestore> restore_;

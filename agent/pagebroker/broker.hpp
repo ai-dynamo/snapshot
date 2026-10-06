@@ -17,12 +17,14 @@
 #include "restore_transaction_descriptor.hpp"
 #include "transaction.hpp"
 #include "s3_config.hpp"
+#include "model_streamer_config.hpp"
 #include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class Broker {
  public:
-  Broker(Path staging_root, Path storage_root, std::optional<S3Config> config = std::nullopt);
+  Broker(Path staging_root, Path storage_root, std::optional<S3Config> config = std::nullopt,
+      ModelStreamerOptions model_streamer = {});
   Response HandleRequest(const Request& request);
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
   void CancelActiveTransactions();
