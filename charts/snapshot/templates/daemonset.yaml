@@ -31,22 +31,21 @@ spec:
         {{- with .Values.daemonset.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.openshift.enabled .Values.daemonset.podAnnotations }}
       annotations:
+        kubectl.kubernetes.io/default-container: agent
         {{- if .Values.openshift.enabled }}
         # Pin this DS to the built-in "privileged" SCC even if a higher-priority
         # custom SCC is added later. See openshift/enhancements custom-scc-preemption-prevention.
         # User-supplied podAnnotations cannot override this key.
         openshift.io/required-scc: privileged
-        {{- with omit .Values.daemonset.podAnnotations "openshift.io/required-scc" }}
+        {{- with omit .Values.daemonset.podAnnotations "openshift.io/required-scc" "kubectl.kubernetes.io/default-container" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- else }}
-        {{- with .Values.daemonset.podAnnotations }}
+        {{- with omit .Values.daemonset.podAnnotations "kubectl.kubernetes.io/default-container" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}
-      {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.serviceAccountName" . }}
       hostPID: true
@@ -109,48 +108,6 @@ spec:
               mountPath: /host-seccomp
       {{- end }}
       containers:
-        {{- if .Values.pageBroker.enabled }}
-        - name: pagebroker
-          image: "{{ .Values.image.pageBroker.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pageBroker.pullPolicy }}
-          command:
-          {{- with .Values.pageBroker.command }}
-            {{- toYaml . | nindent 12 }}
-          {{- else }}
-            - /usr/local/bin/pagebroker
-          {{- end }}
-          args:
-            {{- with .Values.pageBroker.args }}
-            {{- toYaml . | nindent 12 }}
-            {{- else }}
-            - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
-            - {{ $pageBrokerStagingPath | quote }}
-            - {{ .Values.storage.pvc.basePath | quote }}
-            - --max-concurrent-requests
-            - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
-            - --custom-storage-buffer-count
-            - {{ .Values.pageBroker.transferBufferCount | int64 | quote }}
-            - --custom-storage-chunk-bytes
-            - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
-            - --custom-storage-max-pinned-bytes
-            - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
-            {{- end }}
-          securityContext:
-            privileged: true
-            # The image defaults to a non-root user. The broker locks CUDA processes
-            # owned by other users and writes artifact directories the root agent creates.
-            runAsUser: 0
-            runAsGroup: 0
-          env:
-            {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
-          resources:
-            {{- toYaml .Values.pageBroker.resources | nindent 12 }}
-          volumeMounts:
-            - name: pagebroker
-              mountPath: /pagebroker
-            - name: checkpoints
-              mountPath: {{ .Values.storage.pvc.basePath }}
-        {{- end }}
         - name: agent
           image: {{ include "snapshot.agentImage" . | quote }}
           imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
@@ -176,10 +133,8 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
-            {{- if .Values.pageBroker.enabled }}
             - name: pagebroker
               mountPath: /pagebroker
-            {{- end }}
             {{- if eq .Values.storage.type "pvc" }}
             # Every agent owns direct access to the shared checkpoint store.
             - name: checkpoints
@@ -221,16 +176,48 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
+        - name: pagebroker
+          image: "{{ .Values.image.pageBroker.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pageBroker.pullPolicy }}
+          # CustomStorage operates on the workload's CUDA processes and device mappings.
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+            {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
+          args:
+            - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
+            - {{ $pageBrokerStagingPath | quote }}
+            - {{ .Values.storage.pvc.basePath | quote }}
+            - --max-concurrent-requests
+            - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
+            - --custom-storage-buffer-count
+            - {{ .Values.pageBroker.transferBufferCount | int64 | quote }}
+            - --custom-storage-chunk-bytes
+            - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
+            - --custom-storage-max-pinned-bytes
+            - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
+          resources:
+            {{- toYaml .Values.pageBroker.resources | nindent 12 }}
+          volumeMounts:
+            - name: pagebroker
+              mountPath: /pagebroker
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
       volumes:
         # Configuration ConfigMap
         - name: config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
-        {{- if .Values.pageBroker.enabled }}
         - name: pagebroker
           emptyDir:
             medium: Memory
-        {{- end }}
+            # Falls back even when pageBroker.staging is explicitly null (e.g.
+            # helm upgrade --reuse-values from a release predating this key):
+            # an absent sizeLimit is an unbounded memory-backed volume, not a
+            # safe default.
+            sizeLimit: {{ (.Values.pageBroker.staging | default dict).sizeLimit | default "64Gi" | quote }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles

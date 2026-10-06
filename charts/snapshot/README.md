@@ -181,7 +181,6 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `image.agent.repository` | Agent image repository | `ghcr.io/ai-dynamo/snapshot/agent` |
 | `image.agent.tag` | Agent and PageBroker image tag (empty = chart appVersion) | `""` |
 | `image.pageBroker.repository` | PageBroker sidecar image repository. Always pulled at `image.agent.tag` | `ghcr.io/ai-dynamo/snapshot/pagebroker` |
-| `pageBroker.enabled` | Deploy the storage broker and embedded GPU engine | `true` |
 | `pageBroker.transferBufferCount` | Persistent transfer slots per visible GPU | `32` |
 | `pageBroker.transferChunkBytes` | Bytes per transfer slot | `134217728` |
 | `pageBroker.maxPinnedBytes` | Total pinned memory limit, including allocation rounding. Zero sets no limit | `0` |
@@ -196,6 +195,10 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |
+| `pageBroker.staging.sizeLimit` | Cap on the memory-backed staging volume shared by the agent and PageBroker. Keep at or below both memory limits so oversized transfers are refused instead of OOM-killed | `64Gi` |
+| `pageBroker.maxConcurrentRequests` | Concurrent control-socket requests the daemon serves | `16` |
+| `pageBroker.resources` | CPU and memory requests/limits for the PageBroker sidecar. The memory limit bounds restore prefetch into staging | 8 CPU / 32Gi request, 32 CPU / 256Gi limit |
+| `daemonset.resources` | CPU and memory requests/limits for the agent. The agent's memory limit also bounds the largest checkpoint image, because CRIU writes it into memory-backed PageBroker staging | 2 CPU / 1Gi request, 4 CPU / 64Gi limit |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
@@ -208,15 +211,13 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
 
-When PageBroker is enabled, it handles every capture and restore. GPU capture
-uses CustomStorage when the driver supports it. A pod opts out with
-`nvidia.com/snapshot-pagebroker: "false"`, and its capture uses the
-driver-managed format. Restore follows the saved artifact format.
+PageBroker handles every capture and restore. GPU capture uses CustomStorage
+when the driver supports it, otherwise it uses the driver-managed format.
+Restore follows the saved artifact format.
 
 PageBroker adds an 8 CPU and 32 GiB memory request to each agent pod. A node
 must have this capacity plus the agent's own request, or the pod stays Pending.
-Set `pageBroker.resources` for the node profile or set `pageBroker.enabled=false`
-to use conventional checkpointing. The default transfer rings reserve 4 GiB per
+Set `pageBroker.resources` for the node profile. The default transfer rings reserve 4 GiB per
 GPU, or 32 GiB on an eight-GPU node, plus overhead. A lower resource request
 does not reduce this allocation. Set the memory limit to cover the rings,
 process memory, and CPU staging. See the

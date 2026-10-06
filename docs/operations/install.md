@@ -21,6 +21,12 @@ By default the chart provisions its own `ReadWriteMany` checkpoint volume, share
 by every checkpoint. See [Storage](storage.md) for the volume model and options,
 including reusing an existing claim.
 
+Each agent pod runs two containers: the agent and the PageBroker sidecar, which
+stages checkpoint data in memory and publishes it to the shared volume. The pod
+requests 3 CPU and 3Gi of memory per GPU node by default, and its memory limits
+decide the largest checkpoint it can take. See
+[PageBroker staging](storage.md#pagebroker-staging) for how to size it.
+
 ## Verify the installation
 
 ```bash
@@ -29,7 +35,8 @@ kubectl rollout status daemonset/snapshot-agent --namespace snapshot
 ```
 
 The operator and the `snapshot-agent` DaemonSet become ready once the node agent
-is running on each GPU node.
+and its PageBroker sidecar are running on each GPU node. Each agent pod reports
+`2/2` containers ready.
 
 ## Uninstall
 

@@ -37,47 +37,41 @@ import (
 
 func TestRestoreUsesSavedCUDAFormat(t *testing.T) {
 	for _, engine := range []bool{false, true} {
-		for _, requested := range []bool{false, true} {
-			for _, storage := range []string{"cpu", "driver", "custom"} {
-				t.Run(fmt.Sprintf("engine-%t/requested-%t/%s", engine, requested, storage), func(t *testing.T) {
-					base := t.TempDir()
-					directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
-					if err != nil {
+		for _, storage := range []string{"cpu", "driver", "custom"} {
+			t.Run(fmt.Sprintf("available-%t/%s", engine, storage), func(t *testing.T) {
+				base := t.TempDir()
+				directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(directory, 0700); err != nil {
+					t.Fatal(err)
+				}
+				manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+					types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+				if storage != "cpu" {
+					manifest.CUDA = types.CUDAManifest{PIDs: []int{12}, CustomStorage: storage == "custom"}
+					if err := os.WriteFile(filepath.Join(directory, podcontract.CUDAJobFileName), []byte("launch-state"), 0600); err != nil {
 						t.Fatal(err)
 					}
-					if err := os.MkdirAll(directory, 0700); err != nil {
-						t.Fatal(err)
-					}
-					manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
-						types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
-					if storage != "cpu" {
-						manifest.CUDA = types.CUDAManifest{PIDs: []int{12}, CustomStorage: storage == "custom"}
-						if err := os.WriteFile(filepath.Join(directory, podcontract.CUDAJobFileName), []byte("launch-state"), 0600); err != nil {
-							t.Fatal(err)
-						}
-					}
-					if err := types.WriteManifest(directory, manifest); err != nil {
-						t.Fatal(err)
-					}
-					log := testr.New(t)
-					_, err = Restore(context.Background(), checkpointPathRuntime{}, log, RestoreRequest{
-						BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
-						PageBrokerEnabled: engine, PageBrokerRequested: requested,
-						CustomStorageAvailable: true,
-					}, nsmount.New(log))
-					// Restore uses startup capabilities without contacting PageBroker.
-					want := "stop after path preparation"
-					if storage == "custom" && engine && !requested {
-						want = "CustomStorage restore cannot opt out of PageBroker with nvidia.com/snapshot-pagebroker=false"
-					}
-					if storage == "custom" && !engine {
-						want = "CustomStorage checkpoint requires PageBroker"
-					}
-					if err == nil || !strings.Contains(err.Error(), want) {
-						t.Fatalf("restore error=%v; want %s", err, want)
-					}
-				})
-			}
+				}
+				if err := types.WriteManifest(directory, manifest); err != nil {
+					t.Fatal(err)
+				}
+				log := testr.New(t)
+				_, err = Restore(context.Background(), checkpointPathRuntime{}, log, RestoreRequest{
+					BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+					CustomStorageAvailable: engine,
+				}, nsmount.New(log))
+				// Restore uses startup capabilities without contacting PageBroker.
+				want := "stop after path preparation"
+				if storage == "custom" && !engine {
+					want = "PageBroker does not support CustomStorage restore"
+				}
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("restore error=%v; want %s", err, want)
+				}
+			})
 		}
 	}
 }
@@ -744,7 +738,7 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 			}()
 			_, err = Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
 				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
-				SkipCompatCheck: true, PageBrokerEnabled: true, PageBrokerRequested: true,
+				SkipCompatCheck:       true,
 				PageBrokerRestoreMode: tc.mode, PageBrokerControlSocketPath: listener.Addr().String(),
 			}, mounts)
 			// The fixture has no namespace FD, so nsrestore cannot launch.
@@ -911,8 +905,8 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 			defer cancel()
 			_, err = Restore(ctx, runtime, testr.New(t), RestoreRequest{
 				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
-				PageBrokerEnabled: true, PageBrokerRequested: true, PageBrokerControlSocketPath: listener.Addr().String(),
-				PageBrokerRestoreMode: "staged", CustomStorageAvailable: true, SkipCompatCheck: true,
+				PageBrokerControlSocketPath: listener.Addr().String(),
+				PageBrokerRestoreMode:       "staged", CustomStorageAvailable: true, SkipCompatCheck: true,
 			}, mounts)
 			if err == nil {
 				t.Fatal("expected restore failure")
