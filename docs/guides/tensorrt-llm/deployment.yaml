@@ -34,7 +34,6 @@ spec:
             - {name: TRTLLM_MAX_NUM_TOKENS, value: "1024"}
             - {name: TRTLLM_MAX_BATCH_SIZE, value: "1"}
             - {name: TRTLLM_FREE_GPU_MEMORY_FRACTION, value: "0.10"}
-            - {name: SNAPSHOT_CONTROL_DIR, value: /snapshot-control}
             - {name: HF_HUB_DISABLE_XET, value: "1"}
             - {name: OMPI_MCA_pml, value: ob1}
             - {name: OMPI_MCA_btl, value: "tcp,self"}

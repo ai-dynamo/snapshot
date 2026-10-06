@@ -65,7 +65,6 @@ spec:
                   "cuda_graph_max_bs_decode": 64, "chunked_prefill_size": 4096
                 }
             - {name: SNAPSHOT_MODEL_REVISION, value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027}
-            - {name: SNAPSHOT_CONTROL_DIR, value: /snapshot-control}
             - {name: HF_HOME, value: /hf-cache}
             - {name: HF_HUB_OFFLINE, value: "1"}
             - {name: HF_HUB_DISABLE_XET, value: "1"}

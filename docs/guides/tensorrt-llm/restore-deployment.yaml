@@ -33,7 +33,6 @@ spec:
           command: [/bin/sh, -c, exec sleep infinity]
           env:
             - {name: SNAPSHOT_MODEL, value: Qwen/Qwen3-0.6B}
-            - {name: SNAPSHOT_CONTROL_DIR, value: /snapshot-control}
             - {name: HF_HUB_DISABLE_XET, value: "1"}
             - {name: OMPI_MCA_pml, value: ob1}
             - {name: OMPI_MCA_btl, value: "tcp,self"}

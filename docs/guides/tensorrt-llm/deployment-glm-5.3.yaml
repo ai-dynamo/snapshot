@@ -98,7 +98,6 @@ spec:
             - {name: SNAPSHOT_MODEL_REVISION, value: 363e8f086905afd83db356a620f9aa401c23800a}
             - {name: HF_HOME, value: /hf-cache}
             - {name: HF_HUB_OFFLINE, value: "1"}
-            - {name: SNAPSHOT_CONTROL_DIR, value: /snapshot-control}
             - {name: HF_HUB_DISABLE_XET, value: "1"}
             - {name: OMPI_MCA_pml, value: ob1}
             - {name: OMPI_MCA_btl, value: "tcp,self"}
