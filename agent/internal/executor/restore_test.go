@@ -1175,3 +1175,134 @@ func TestCustomStorageFilesReachChild(t *testing.T) {
 		t.Fatal("wrapper exit stopped cancellation of surviving child")
 	}
 }
+
+func TestRestoreBoundFetchesMetadataAndStagesPublishedArtifact(t *testing.T) {
+	publishedArtifact := &pagebroker.PublishedArtifact{
+		StoreId:               "store-v1-" + strings.Repeat("a", 64),
+		ArtifactHandle:        "artifacts/content/containers/main",
+		ArtifactFormatVersion: "snapshot.pagebroker/v1",
+	}
+	manifestDir := t.TempDir()
+	manifest := &types.CheckpointManifest{Artifact: types.ArtifactManifest{ContentUID: "content", ContainerName: "main"}}
+	if err := types.WriteManifest(manifestDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "broker.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var events []string
+	bundleDone := make(chan struct{})
+	mounts := &restoreSourceMounter{events: &events, bundleDone: bundleDone}
+
+	server := make(chan error, 1)
+	go func() {
+		var metadataTx, mainTx string
+		// Connection 0: GetArtifactMetadata (its own transaction).
+		// Connection 1: Abort of the metadata transaction — fetchArtifactMetadata's
+		// own defer fires it immediately, before the main transaction even starts.
+		// Connection 2: StagedRestore (the main transaction, artifact-addressed).
+		// Connection 3: Abort of the main transaction (cleanup after a failed nsrestore).
+		for i := 0; i < 4; i++ {
+			connection, err := listener.Accept()
+			if err != nil {
+				server <- err
+				return
+			}
+			err = func() error {
+				defer connection.Close()
+				if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					return err
+				}
+				var size uint32
+				if err := binary.Read(connection, binary.BigEndian, &size); err != nil {
+					return err
+				}
+				data := make([]byte, size)
+				if _, err := io.ReadFull(connection, data); err != nil {
+					return err
+				}
+				request := new(pagebroker.Request)
+				if err := proto.Unmarshal(data, request); err != nil {
+					return err
+				}
+				response := &pagebroker.Response{RequestId: request.RequestId, TransactionId: request.TransactionId}
+				switch i {
+				case 0:
+					metadataTx = request.GetTransactionId()
+					metadataReq := request.GetGetArtifactMetadata()
+					if metadataReq == nil || !proto.Equal(metadataReq.GetArtifact(), publishedArtifact) {
+						return fmt.Errorf("expected GetArtifactMetadata for the published artifact, got %v", request.GetCommand())
+					}
+					response.Result = &pagebroker.Response_GetArtifactMetadataComplete{
+						GetArtifactMetadataComplete: &pagebroker.GetArtifactMetadataComplete{ManifestDirectory: manifestDir},
+					}
+				case 1:
+					if request.GetAbort() == nil || request.GetTransactionId() != metadataTx {
+						return fmt.Errorf("expected abort of the metadata transaction %q, got %v", metadataTx, request)
+					}
+					response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+				case 2:
+					mainTx = request.GetTransactionId()
+					if mainTx == metadataTx {
+						return errors.New("main transaction reused the metadata transaction ID")
+					}
+					staged := request.GetStagedRestore()
+					if staged == nil || !proto.Equal(staged.GetArtifact(), publishedArtifact) {
+						return fmt.Errorf("expected StagedRestore with the published artifact, got %v", request.GetCommand())
+					}
+					if staged.GetSource() != nil {
+						return fmt.Errorf("bound restore must not set a legacy source: %v", staged.GetSource())
+					}
+					response.Result = &pagebroker.Response_StagedRestoreDirectory{
+						StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: proto.String("/pagebroker/staging/restore/test")},
+					}
+				case 3:
+					if request.GetAbort() == nil || request.GetTransactionId() != mainTx {
+						return fmt.Errorf("expected abort of the main transaction %q, got %v", mainTx, request)
+					}
+					response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+				}
+				data, err = proto.Marshal(response)
+				if err != nil {
+					return err
+				}
+				if err := binary.Write(connection, binary.BigEndian, uint32(len(data))); err != nil {
+					return err
+				}
+				_, err = connection.Write(data)
+				return err
+			}()
+			if err != nil {
+				server <- err
+				return
+			}
+		}
+		server <- nil
+	}()
+
+	_, err = Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		SkipCompatCheck: true, PageBrokerControlSocketPath: listener.Addr().String(),
+		PublishedArtifact: publishedArtifact,
+	}, mounts)
+	// The fixture has no namespace FD, so nsrestore cannot launch.
+	if err == nil {
+		t.Fatal("restore unexpectedly succeeded")
+	}
+	select {
+	case err := <-server:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("restore did not complete its PageBroker exchange")
+	}
+	if mounts.staged != "/pagebroker/staging/restore/test" || mounts.artifact != "" {
+		t.Fatalf("bound restore must mount via MountPageBroker, not MountArtifact: %+v", mounts)
+	}
+}
