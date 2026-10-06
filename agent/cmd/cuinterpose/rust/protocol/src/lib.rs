@@ -35,8 +35,8 @@ pub const VIRTUAL_SHAREABLE_HANDLE_BYTES: usize =
 
 pub type Manifest = BTreeMap<NamespacePid, Vec<Record>>;
 
-pub fn socket_path(control_dir: &Path, namespace_pid: NamespacePid) -> PathBuf {
-    control_dir.join(format!("cuinterpose-{namespace_pid}.sock"))
+pub fn socket_path(socket_dir: &Path, namespace_pid: NamespacePid) -> PathBuf {
+    socket_dir.join(format!("cuinterpose-{namespace_pid}.sock"))
 }
 
 #[derive(Debug, thiserror::Error)]
