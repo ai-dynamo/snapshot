@@ -8,17 +8,13 @@ metadata:
 spec:
   replicas: 1
   progressDeadlineSeconds: 1800
-  strategy:
-    type: Recreate
+  strategy: {type: Recreate}
   selector:
-    matchLabels:
-      app: tensorrt-llm-restored
+    matchLabels: {app: tensorrt-llm-restored}
   template:
     metadata:
-      labels:
-        app: tensorrt-llm-restored
-      annotations:
-        nvidia.com/restore-from: tensorrt-llm-snapshot
+      labels: {app: tensorrt-llm-restored}
+      annotations: {nvidia.com/restore-from: tensorrt-llm-snapshot}
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -28,67 +24,35 @@ spec:
         seccompProfile:
           type: Localhost
           localhostProfile: profiles/block-iouring.json
-      nodeSelector:
-        nvidia.com/gpu.present: "true"
+      nodeSelector: {nvidia.com/gpu.present: "true"}
       containers:
         - name: main
           image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
           imagePullPolicy: IfNotPresent
-          # Inert placeholder: the agent restores the checkpointed process into
-          # this container, so app.py must not run here.
-          command:
-            - /bin/sh
-            - -c
-            - exec sleep infinity
+          # The agent restores the saved process into this inert container.
+          command: [/bin/sh, -c, exec sleep infinity]
           env:
-            - name: SNAPSHOT_MODEL
-              value: Qwen/Qwen3-0.6B
-            - name: SNAPSHOT_CONTROL_DIR
-              value: /snapshot-control
-            - name: HF_HUB_DISABLE_XET
-              value: "1"
-            - name: OMPI_MCA_pml
-              value: ob1
-            - name: OMPI_MCA_btl
-              value: tcp,self
+            - {name: SNAPSHOT_MODEL, value: Qwen/Qwen3-0.6B}
+            - {name: SNAPSHOT_CONTROL_DIR, value: /snapshot-control}
+            - {name: HF_HUB_DISABLE_XET, value: "1"}
+            - {name: OMPI_MCA_pml, value: ob1}
+            - {name: OMPI_MCA_btl, value: "tcp,self"}
           ports:
-            - name: api
-              containerPort: 8000
+            - {name: api, containerPort: 8000}
           resources:
-            limits:
-              nvidia.com/gpu: "1"
+            limits: {nvidia.com/gpu: "1"}
           readinessProbe:
             exec:
-              command:
-                - cat
-                - /snapshot-control/trtllm-restore-ready
+              command: [cat, /snapshot-control/trtllm-restore-ready]
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:
-            - name: snapshot-control
-              mountPath: /snapshot-control
-              subPath: main
-            - name: tun
-              mountPath: /dev/net/tun
-            - name: shm
-              mountPath: /dev/shm
-            # The checkpointed process's mount namespace includes this
-            # mount (from the source Pod); restore recreates it here too,
-            # even though this placeholder's own command never reads it.
-            - name: app
-              mountPath: /snapshot-app
-              readOnly: true
+            - {name: snapshot-control, mountPath: /snapshot-control, subPath: main}
+            - {name: tun, mountPath: /dev/net/tun}
+            - {name: shm, mountPath: /dev/shm}
+            - {name: app, mountPath: /snapshot-app, readOnly: true}
       volumes:
-        - name: snapshot-control
-          emptyDir: {}
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
-        - name: shm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 1Gi
-        - name: app
-          configMap:
-            name: tensorrt-llm-app
+        - {name: snapshot-control, emptyDir: {}}
+        - {name: tun, hostPath: {path: /dev/net/tun, type: CharDevice}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 1Gi}}
+        - {name: app, configMap: {name: tensorrt-llm-app}}

@@ -8,17 +8,13 @@ metadata:
 spec:
   replicas: 1
   progressDeadlineSeconds: 3600
-  strategy:
-    type: Recreate
+  strategy: {type: Recreate}
   selector:
-    matchLabels:
-      app: tensorrt-llm-glm-5-3-restored
+    matchLabels: {app: tensorrt-llm-glm-5-3-restored}
   template:
     metadata:
-      labels:
-        app: tensorrt-llm-glm-5-3-restored
-      annotations:
-        nvidia.com/restore-from: tensorrt-llm-glm-5-3-snapshot
+      labels: {app: tensorrt-llm-glm-5-3-restored}
+      annotations: {nvidia.com/restore-from: tensorrt-llm-glm-5-3-snapshot}
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -28,15 +24,12 @@ spec:
         seccompProfile:
           type: Localhost
           localhostProfile: profiles/block-iouring.json
-      nodeSelector:
-        nvidia.com/gpu.product: NVIDIA-B200
+      nodeSelector: {nvidia.com/gpu.product: NVIDIA-B200}
       initContainers:
         - name: model-cache
           image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
           imagePullPolicy: IfNotPresent
-          command:
-            - python3
-            - -c
+          command: [python3, -c]
           args:
             - |
               import os
@@ -49,116 +42,61 @@ spec:
                   snapshot_download(repo_id=model, revision=revision)
                   marker.touch()
           env:
-            - name: SNAPSHOT_MODEL
-              value: RadixArk/GLM-5.3-NVFP4
-            - name: SNAPSHOT_MODEL_REVISION
-              value: 363e8f086905afd83db356a620f9aa401c23800a
-            - name: HF_HOME
-              value: /hf-cache
-            - name: HF_HUB_DISABLE_XET
-              value: "1"
+            - {name: SNAPSHOT_MODEL, value: RadixArk/GLM-5.3-NVFP4}
+            - {name: SNAPSHOT_MODEL_REVISION, value: 363e8f086905afd83db356a620f9aa401c23800a}
+            - {name: HF_HOME, value: /hf-cache}
+            - {name: HF_HUB_DISABLE_XET, value: "1"}
           volumeMounts:
-            - name: model-cache
-              mountPath: /hf-cache
+            - {name: model-cache, mountPath: /hf-cache}
       containers:
         - name: main
           image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
           imagePullPolicy: IfNotPresent
-          # Inert placeholder: the agent restores the checkpointed process into
-          # this container, so app.py must not run here.
-          command:
-            - /bin/sh
-            - -c
-            - exec sleep infinity
+          # The agent restores the saved process into this inert container.
+          command: [/bin/sh, -c, exec sleep infinity]
           env:
-            - name: SNAPSHOT_MODEL
-              value: RadixArk/GLM-5.3-NVFP4
-            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
-              value: "8"
+            - {name: SNAPSHOT_MODEL, value: RadixArk/GLM-5.3-NVFP4}
+            - {name: SNAPSHOT_TENSOR_PARALLEL_SIZE, value: "8"}
             - name: TRTLLM_ENGINE_ARGS
               value: |-
                 {
                   "revision": "363e8f086905afd83db356a620f9aa401c23800a",
-                  "dtype": "bfloat16",
-                  "moe_expert_parallel_size": 8,
-                  "max_seq_len": 131072,
-                  "max_num_tokens": 8192,
-                  "max_batch_size": 32,
+                  "dtype": "bfloat16", "moe_expert_parallel_size": 8,
+                  "max_seq_len": 131072, "max_num_tokens": 8192, "max_batch_size": 32,
                   "enable_chunked_prefill": true,
-                  "moe_config": {
-                    "backend": "TRTLLM"
-                  },
+                  "moe_config": {"backend": "TRTLLM"},
                   "kv_cache_config": {
-                    "free_gpu_memory_fraction": 0.75,
-                    "dtype": "fp8",
+                    "free_gpu_memory_fraction": 0.75, "dtype": "fp8",
                     "enable_block_reuse": false
                   },
-                  "cuda_graph_config": {
-                    "enable_padding": true,
-                    "max_batch_size": 32
-                  }
+                  "cuda_graph_config": {"enable_padding": true, "max_batch_size": 32}
                 }
-            - name: SNAPSHOT_MODEL_REVISION
-              value: 363e8f086905afd83db356a620f9aa401c23800a
-            - name: HF_HOME
-              value: /hf-cache
-            - name: HF_HUB_OFFLINE
-              value: "1"
-            - name: SNAPSHOT_CONTROL_DIR
-              value: /snapshot-control
-            - name: HF_HUB_DISABLE_XET
-              value: "1"
-            - name: OMPI_MCA_pml
-              value: ob1
-            - name: OMPI_MCA_btl
-              value: tcp,self
+            - {name: SNAPSHOT_MODEL_REVISION, value: 363e8f086905afd83db356a620f9aa401c23800a}
+            - {name: HF_HOME, value: /hf-cache}
+            - {name: HF_HUB_OFFLINE, value: "1"}
+            - {name: SNAPSHOT_CONTROL_DIR, value: /snapshot-control}
+            - {name: HF_HUB_DISABLE_XET, value: "1"}
+            - {name: OMPI_MCA_pml, value: ob1}
+            - {name: OMPI_MCA_btl, value: "tcp,self"}
           ports:
-            - name: api
-              containerPort: 8000
+            - {name: api, containerPort: 8000}
           resources:
-            requests:
-              cpu: "16"
-              memory: 1Ti
-            # Capture copies resident GPU state to host memory.
-            limits:
-              nvidia.com/gpu: "8"
+            requests: {cpu: "16", memory: 1Ti}
+            limits: {nvidia.com/gpu: "8"}
           readinessProbe:
             exec:
-              command:
-                - cat
-                - /snapshot-control/trtllm-restore-ready
+              command: [cat, /snapshot-control/trtllm-restore-ready]
             periodSeconds: 1
             failureThreshold: 3600
           volumeMounts:
-            - name: shm
-              mountPath: /dev/shm
-            - name: model-cache
-              mountPath: /hf-cache
-            - name: snapshot-control
-              mountPath: /snapshot-control
-              subPath: main
-            - name: tun
-              mountPath: /dev/net/tun
-            # The checkpointed process's mount namespace includes this
-            # mount (from the source Pod); restore recreates it here too,
-            # even though this placeholder's own command never reads it.
-            - name: app
-              mountPath: /snapshot-app
-              readOnly: true
+            - {name: shm, mountPath: /dev/shm}
+            - {name: model-cache, mountPath: /hf-cache}
+            - {name: snapshot-control, mountPath: /snapshot-control, subPath: main}
+            - {name: tun, mountPath: /dev/net/tun}
+            - {name: app, mountPath: /snapshot-app, readOnly: true}
       volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: snapshot-model-cache
-        - name: shm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 64Gi
-        - name: snapshot-control
-          emptyDir: {}
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
-        - name: app
-          configMap:
-            name: tensorrt-llm-app
+        - {name: model-cache, persistentVolumeClaim: {claimName: snapshot-model-cache}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 64Gi}}
+        - {name: snapshot-control, emptyDir: {}}
+        - {name: tun, hostPath: {path: /dev/net/tun, type: CharDevice}}
+        - {name: app, configMap: {name: tensorrt-llm-app}}
