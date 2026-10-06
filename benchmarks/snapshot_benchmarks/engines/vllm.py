@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The vLLM engine: loads and patches docs/guides/vllm/{deployment,
-restore-deployment}.yaml directly, so the benchmark deploys exactly the pod
+"""The vLLM engine: loads docs/guides/vllm/{capture,restore}/qwen3-0.6b.yaml
+directly, so the benchmark deploys exactly the pod
 template the manual guide documents -- only `image`, `SNAPSHOT_MODEL`, the run
 name/namespace, and (for restore) the `nvidia.com/restore-from` annotation are
 patched. This is deliberate: the guide's own YAML stays the single source of
@@ -27,8 +27,8 @@ import yaml
 from snapshot_benchmarks.engines import ModelSpec
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-SOURCE_DEPLOYMENT_PATH = _REPO_ROOT / "docs/guides/vllm/deployment.yaml"
-RESTORE_DEPLOYMENT_PATH = _REPO_ROOT / "docs/guides/vllm/restore-deployment.yaml"
+SOURCE_DEPLOYMENT_PATH = _REPO_ROOT / "docs/guides/vllm/capture/qwen3-0.6b.yaml"
+RESTORE_DEPLOYMENT_PATH = _REPO_ROOT / "docs/guides/vllm/restore/qwen3-0.6b.yaml"
 
 CONTAINER_NAME = "main"
 VERSION_PROBE_COMMAND = 'python3 -c "import vllm; print(vllm.__version__)"'

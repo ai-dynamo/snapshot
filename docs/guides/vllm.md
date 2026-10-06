@@ -4,7 +4,7 @@ This guide makes a vLLM workload snapshot-ready by mounting an entrypoint
 into a vLLM runtime image, implementing Snapshot's [workload
 contract](../reference/workload-contract.md). The example runs the official
 vLLM image that includes vLLM and its runtime dependencies, unmodified.
-`deployment.yaml` pins the exact upstream image, and one program, `app.py`, is
+`capture/qwen3-0.6b.yaml` pins the exact upstream image, and one program, `app.py`, is
 mounted into it from a ConfigMap to prepare vLLM for checkpoint and resume it
 after restore. The Snapshot agent injects the restore tooling at runtime.
 
@@ -14,28 +14,29 @@ shared-memory support and install the matching cuInterpose bundle.
 
 ## 1. Download the example files
 
-Download [`app.py`](vllm/app.py), [`deployment.yaml`](vllm/deployment.yaml),
-and [`restore-deployment.yaml`](vllm/restore-deployment.yaml) from the
+Download [`app.py`](vllm/app.py), [`capture/qwen3-0.6b.yaml`](vllm/capture/qwen3-0.6b.yaml),
+and [`restore/qwen3-0.6b.yaml`](vllm/restore/qwen3-0.6b.yaml) from the
 repository:
 
 ```bash
 mkdir -p vllm-snapshot
 cd vllm-snapshot
+mkdir -p capture restore
 
 curl --fail --location \
   --output app.py \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/vllm/app.py
 
 curl --fail --location \
-  --output deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/vllm/deployment.yaml
+  --output capture/qwen3-0.6b.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/vllm/capture/qwen3-0.6b.yaml
 
 curl --fail --location \
-  --output restore-deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/vllm/restore-deployment.yaml
+  --output restore/qwen3-0.6b.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/vllm/restore/qwen3-0.6b.yaml
 ```
 
-The program loads the model selected in `deployment.yaml`, runs one
+The program loads the model selected in `capture/qwen3-0.6b.yaml`, runs one
 generation to initialize vLLM, and then calls `pause_generation()` and
 `sleep()`. It writes
 `ready-for-snapshot` only when the process is safe to checkpoint. In a restore
@@ -46,7 +47,7 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-`deployment.yaml` runs vLLM's own Ubuntu 24.04 build of the 0.31.0 image
+`capture/qwen3-0.6b.yaml` runs vLLM's own Ubuntu 24.04 build of the 0.31.0 image
 (`v0.31.0-ubuntu2404`) unmodified, which already matches the glibc floor the
 current Snapshot restore bundle requires, and mounts `app.py` at
 `/snapshot-app` from the `vllm-app` ConfigMap created in step 2.
@@ -59,7 +60,7 @@ The source and restore pods must mount the Snapshot control volume at
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the vLLM pod will run, and create the ConfigMap
-`deployment.yaml` mounts `app.py` from:
+`capture/qwen3-0.6b.yaml` mounts `app.py` from:
 
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
@@ -82,7 +83,7 @@ kubectl create configmap vllm-app \
 
 ## 3. Deploy vLLM
 
-Select the model through `SNAPSHOT_MODEL` in [`deployment.yaml`](vllm/deployment.yaml):
+Select the model through `SNAPSHOT_MODEL` in [`capture/qwen3-0.6b.yaml`](vllm/capture/qwen3-0.6b.yaml):
 
 ```yaml
 containers:
@@ -120,7 +121,7 @@ unreliable across checkpoint/restore.
 Deploy the edited manifest:
 
 ```bash
-kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename deployment.yaml
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename capture/qwen3-0.6b.yaml
 ```
 
 Wait until the vLLM replica finishes initialization and becomes safe to

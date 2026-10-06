@@ -46,7 +46,7 @@ on Debian and Ubuntu):
 
 ```bash
 : "${SNAPSHOT_AGENT_IMAGE:?Set the matching Snapshot agent image first}"
-envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment-glm-5.3.yaml | \
+envsubst '${SNAPSHOT_AGENT_IMAGE}' < capture/glm-5.3.yaml | \
   kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
 ```
 
@@ -107,17 +107,22 @@ manifest pairs each use all eight GPUs on one B200 node. They use the same
 
 | Model | Engine | GPUs and parallelism | Context | Manifest pair |
 | --- | --- | --- | --- | --- |
-| GLM 5.3 NVFP4 | vLLM | 8, TP8/EP8 | 128K | [Source](vllm/deployment-glm-5.3.yaml), [restore](vllm/restore-deployment-glm-5.3.yaml) |
-| GLM 5.3 NVFP4 | SGLang | 8, TP8/EP8 | 128K | [Source](sglang/deployment-glm-5.3.yaml), [restore](sglang/restore-deployment-glm-5.3.yaml) |
-| GLM 5.3 NVFP4 | TensorRT-LLM | 8, TP8/EP8 | 128K | [Source](tensorrt-llm/deployment-glm-5.3.yaml), [restore](tensorrt-llm/restore-deployment-glm-5.3.yaml) |
-| DeepSeek V4.1 Flash | vLLM | 8, TP8/EP8 | 128K | [Source](vllm/deployment-deepseek-v4.1-flash.yaml), [restore](vllm/restore-deployment-deepseek-v4.1-flash.yaml) |
-| DeepSeek V4.1 Flash | SGLang | 8, TP8/EP8 | 128K | [Source](sglang/deployment-deepseek-v4.1-flash.yaml), [restore](sglang/restore-deployment-deepseek-v4.1-flash.yaml) |
+| GLM 5.3 NVFP4 | vLLM | 8, TP8/EP8 | 128K | [Source](vllm/capture/glm-5.3.yaml), [restore](vllm/restore/glm-5.3.yaml) |
+| GLM 5.3 NVFP4 | SGLang | 8, TP8/EP8 | 128K | [Source](sglang/capture/glm-5.3.yaml), [restore](sglang/restore/glm-5.3.yaml) |
+| GLM 5.3 NVFP4 | TensorRT-LLM | 8, TP8/EP8 | 128K | [Source](tensorrt-llm/capture/glm-5.3.yaml), [restore](tensorrt-llm/restore/glm-5.3.yaml) |
+| DeepSeek V4.1 Flash | vLLM | 8, TP8/EP8 | 128K | [Source](vllm/capture/deepseek-v4.1-flash.yaml), [restore](vllm/restore/deepseek-v4.1-flash.yaml) |
+| DeepSeek V4.1 Flash | SGLang | 8, TP8/EP8 | 128K | [Source](sglang/capture/deepseek-v4.1-flash.yaml), [restore](sglang/restore/deepseek-v4.1-flash.yaml) |
 
 These configurations keep prefill and decode in the same engine and do not
 use serving-time KV offloading. The existing checkpoint pause and memory-release
 steps still apply. GLM limits concurrency to 32 and DeepSeek to 64. These are
 bounded example settings, not measured throughput optima or full-context stress
 test results.
+
+Each engine keeps matching model filenames under `capture/` and `restore/`.
+Configure the engine in the capture manifest. The restore manifest starts an
+inert placeholder, and the restored process resumes with its captured engine
+configuration.
 
 The GLM pairs pin [RadixArk/GLM-5.3-NVFP4](https://huggingface.co/RadixArk/GLM-5.3-NVFP4)
 and the DeepSeek pairs pin
@@ -135,8 +140,8 @@ The author checkpoint
 combines FP8 dense weights with four-bit routed experts, so the recipes let
 the engine detect its quantization format.
 
-Model-specific settings are JSON objects in `VLLM_ENGINE_ARGS`,
-`SGLANG_ENGINE_ARGS`, or `TRTLLM_ENGINE_ARGS`. Keys are Python constructor
+Model-specific settings in the capture manifests are JSON objects in
+`VLLM_ENGINE_ARGS`, `SGLANG_ENGINE_ARGS`, or `TRTLLM_ENGINE_ARGS`. Keys are Python constructor
 arguments, not CLI flags. They override the small example's defaults. The
 GLM vLLM and SGLang profiles use the model's native MTP head to propose five tokens.
 SGLang calls this path `EAGLE`. DeepSeek V4.1 uses its bundled DSpark head with
@@ -162,7 +167,7 @@ kubectl apply --namespace "$SNAPSHOT_NAMESPACE" \
   --filename docs/guides/model-cache-pvc.yaml
 
 envsubst '${SNAPSHOT_AGENT_IMAGE}' \
-  < docs/guides/vllm/deployment-deepseek-v4.1-flash.yaml | \
+  < docs/guides/vllm/capture/deepseek-v4.1-flash.yaml | \
   kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
 
 kubectl rollout status --namespace "$SNAPSHOT_NAMESPACE" \

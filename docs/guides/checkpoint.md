@@ -35,7 +35,7 @@ API as part of its control loop.
     duplicate those controller-injected fields.
 
 The framework guides include a complete, working example of a `PodSnapshot`-ready
-pod — see the `deployment.yaml` referenced from the [vLLM](vllm.md),
+pod — see the capture manifest referenced from the [vLLM](vllm.md),
 [SGLang](sglang.md), and [TensorRT-LLM](tensorrt-llm.md) guides.
 
 Set the namespace where the replica runs — the same one used to deploy it:
@@ -87,7 +87,7 @@ no long-running replica to manage, which fits pipeline use cases.
 
 `spec.podTemplate` only needs the workload's own container spec — image,
 command, resources, and any volumes it mounts (including `/dev/net/tun`,
-which every framework guide's `deployment.yaml` mounts and which CRIU expects
+which every framework guide's capture manifest mounts and which CRIU expects
 to find again on restore). The controller injects the `/snapshot-control`
 volume and mount, `SNAPSHOT_CONTROL_DIR`, the `ready-for-snapshot` readiness
 probe, and the seccomp profile before creating the source pod.
