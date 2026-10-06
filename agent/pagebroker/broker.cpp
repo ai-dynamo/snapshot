@@ -253,6 +253,9 @@ Broker::HandleRequest(const Request& request)
   Response response;
   try {
     switch (request.command_case()) {
+      case Request::kDirectRestore:
+        response = DirectRestore(request);
+        break;
       case Request::kStagedRestore:
         response = Restore(request);
         break;
@@ -278,6 +281,24 @@ Broker::HandleRequest(const Request& request)
   }
   RetainTerminalTransaction(request.transaction_id());
   ReapTerminalTransactions();
+  return response;
+}
+
+Response
+Broker::DirectRestore(const Request& request)
+{
+  const auto& input = request.direct_restore();
+  const auto& engine = Engine(input.io_engine());
+  engine.SourceDirectory(input.source());
+  auto transaction = CreateOrGetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction->mutex());
+  if (transaction->state() != Transaction::State::NEW)
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
+  transaction->set_state(Transaction::State::PREPARING);
+  transaction->set_descriptor(RestoreTransactionDescriptor({}));
+  transaction->set_state(Transaction::State::STAGED);
+  auto response = Reply(request);
+  response.mutable_direct_restore_ready();
   return response;
 }
 
@@ -385,7 +406,8 @@ Broker::Commit(const Request& request)
 Response
 Broker::CleanupRestore(const Request& request, Transaction& transaction, const RestoreTransactionDescriptor& descriptor)
 {
-  fs::remove_all(descriptor.staging_directory());
+  if (!descriptor.staging_directory().empty())
+    fs::remove_all(descriptor.staging_directory());
   transaction.clear_descriptor();
   transaction.set_state(Transaction::State::COMMITTED);
   return CommitSucceeded(request);

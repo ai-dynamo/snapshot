@@ -54,3 +54,12 @@ survive an uninstall.
 
 `storage.type` currently supports `pvc`. Object-storage backends (`s3`, `oci`) are
 reserved in the chart for future use and are not supported today.
+
+### PageBroker restore source
+
+For pods annotated with `nvidia.com/snapshot-pagebroker: "true"`,
+`pageBroker.restoreMode` selects the restore source when PageBroker is enabled:
+
+- `direct` (default) prepares a PageBroker transaction and mounts the original
+  checkpoint directory read-only for CRIU. It does not copy CPU images into staging.
+- `staged` copies checkpoint files into PageBroker staging before CRIU runs.

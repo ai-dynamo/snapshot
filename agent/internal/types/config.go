@@ -50,6 +50,14 @@ func (c *AgentConfig) Validate() error {
 	if c.PageBroker.Enabled && strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
 		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required when PageBroker is enabled"}
 	}
+	c.PageBroker.RestoreMode = strings.ToLower(strings.TrimSpace(c.PageBroker.RestoreMode))
+	switch c.PageBroker.RestoreMode {
+	case "":
+		c.PageBroker.RestoreMode = "direct"
+	case "staged", "direct":
+	default:
+		return &ConfigError{Field: "pageBroker.restoreMode", Message: "pageBroker.restoreMode must be staged or direct"}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
@@ -77,6 +85,8 @@ type StorageSpec struct {
 }
 
 type PageBrokerSpec struct {
+	// RestoreMode selects the restore source. Empty defaults to direct.
+	RestoreMode       string `yaml:"restoreMode"`
 	Enabled           bool   `yaml:"enabled"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
 }

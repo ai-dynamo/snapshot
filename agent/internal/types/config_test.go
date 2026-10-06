@@ -62,6 +62,31 @@ func TestAgentConfigValidateRequiresPageBrokerControlSocket(t *testing.T) {
 	}
 }
 
+func TestPageBrokerRestoreMode(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{"", "direct"}, {"  ", "direct"}, {"staged", "staged"}, {"direct", "direct"}, {" DIRECT ", "direct"},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			cfg := validAgentConfig()
+			cfg.PageBroker.RestoreMode = tc.input
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.PageBroker.RestoreMode != tc.want {
+				t.Fatalf("mode = %q, want %q", cfg.PageBroker.RestoreMode, tc.want)
+			}
+		})
+	}
+	cfg := validAgentConfig()
+	cfg.PageBroker.RestoreMode = "invalid"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("accepted invalid restore mode")
+	}
+}
+
 // A config written before checkpointTimeoutSeconds existed must still load, and must come up with
 // the guard on rather than unbounded.
 func TestCheckpointSpecDefaultsWhenAbsent(t *testing.T) {

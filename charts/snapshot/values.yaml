@@ -114,6 +114,8 @@ storage:
 
 pageBroker:
   enabled: false
+  # Restore directly from the checkpoint directory, or opt into a staged copy.
+  restoreMode: direct
   command: []
   args: []
   maxConcurrentRequests: 16

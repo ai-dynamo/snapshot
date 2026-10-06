@@ -17,6 +17,7 @@ class TransferEngine {
  public:
   virtual ~TransferEngine();
   virtual TransferEngineType type() const = 0;
+  virtual Path SourceDirectory(const StorageBackend& source) const = 0;
   virtual uintmax_t RestoreSize(const StorageBackend& source) const = 0;
   virtual void StageRestore(const StorageBackend& source, const Path& destination) const = 0;
   virtual void ValidateCheckpointDestination(const StorageBackend& destination) const = 0;

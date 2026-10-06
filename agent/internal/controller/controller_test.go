@@ -1540,6 +1540,7 @@ func TestProcessCaptureQueueItemRequeuesOnError(t *testing.T) {
 func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
+	w.config.PageBroker.RestoreMode = "direct"
 	artifactPath := t.TempDir()
 	artifact := &restoreArtifact{
 		SnapshotName:        "snapshot-a",
@@ -1562,6 +1563,7 @@ func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
 	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "engine-0", "ctr-abc", time.Time{}, false)
 	require.NoError(t, err)
 	assert.Equal(t, "content-uid", request.ContentUID)
+	assert.Equal(t, "direct", request.PageBrokerRestoreMode)
 	assert.Equal(t, w.config.Storage.BasePath, request.BasePath)
 	assert.Equal(t, "main", request.ArtifactContainerName)
 	assert.Equal(t, "engine-0", request.DestinationContainerName)

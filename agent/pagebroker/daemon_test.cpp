@@ -456,4 +456,56 @@ TEST_F(BrokerTest, AbortsRestore)
   EXPECT_EQ(commit_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
 }
 
+TEST_F(BrokerTest, DirectRestoreRejectsInvalidSource)
+{
+  const auto link = root_ / "storage" / "source-link";
+  fs::create_directory_symlink(source_, link);
+  for (const auto& source : {root_ / "storage" / "missing", source_ / "image", link}) {
+    auto request = RequestFor("invalid-direct-source");
+    Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(), source);
+    const auto response = broker().HandleRequest(request);
+    ASSERT_TRUE(response.has_failure());
+    EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+  }
+}
+
+TEST_F(BrokerTest, DirectRestoreDoesNotStageOrDeleteSource)
+{
+  auto request = RequestFor("direct");
+  Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(), source_);
+  ASSERT_TRUE(broker().HandleRequest(request).has_direct_restore_ready());
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "restore" / "direct"));
+  auto abort = RequestFor("direct");
+  abort.mutable_abort();
+  EXPECT_TRUE(broker().HandleRequest(abort).has_abort_complete());
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+}
+
+TEST_F(BrokerTest, DirectRestoreCommitPreservesSource)
+{
+  auto request = RequestFor("direct-commit");
+  Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(), source_);
+  ASSERT_TRUE(broker().HandleRequest(request).has_direct_restore_ready());
+  auto commit = RequestFor("direct-commit");
+  commit.mutable_commit();
+  EXPECT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "restore" / "direct-commit"));
+}
+
+TEST_F(BrokerTest, DirectRestoreExpiresFromPreparationTime)
+{
+  auto request = RequestFor("direct-expiry");
+  Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(), source_);
+  ASSERT_TRUE(broker().HandleRequest(request).has_direct_restore_ready());
+  const auto now = std::chrono::steady_clock::now();
+  broker().ReapExpiredTransactions(now + std::chrono::hours(2));
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_CONFLICT);
+  broker().ReapExpiredTransactions(now + std::chrono::hours(3));
+  auto commit = RequestFor("direct-expiry");
+  commit.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+}
+
 }  // namespace
