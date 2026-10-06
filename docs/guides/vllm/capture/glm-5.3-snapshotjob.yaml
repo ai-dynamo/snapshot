@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: SnapshotJob
+metadata:
+  name: vllm-glm-5-3-snapshot
+spec:
+  activeDeadlineSeconds: 7200
+  podSnapshotTemplate:
+    targetContainers:
+      - main
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/cuda-shared-memory-support: enabled
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-B200
+      initContainers:
+        - name: model-cache
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import os
+              from huggingface_hub import snapshot_download
+              snapshot_download(
+                  repo_id=os.environ["SNAPSHOT_MODEL"],
+                  revision=os.environ["SNAPSHOT_MODEL_REVISION"],
+              )
+          env:
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+      containers:
+        - name: main
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /snapshot-app/app.py
+          env:
+            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
+              value: "8"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: VLLM_ENGINE_ARGS
+              value: |-
+                {
+                  "revision": "363e8f086905afd83db356a620f9aa401c23800a",
+                  "dtype": "bfloat16", "quantization": "modelopt_fp4", "enable_expert_parallel": true,
+                  "kv_cache_dtype": "fp8", "max_model_len": 131072, "gpu_memory_utilization": 0.85,
+                  "max_num_seqs": 32, "max_num_batched_tokens": 8192,
+                  "speculative_config": {
+                    "revision": "363e8f086905afd83db356a620f9aa401c23800a",
+                    "method": "mtp", "num_speculative_tokens": 5
+                  }
+                }
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "16"
+              memory: 1Ti
+            limits:
+              memory: 1Ti
+              nvidia.com/gpu: "8"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: tun
+              mountPath: /dev/net/tun
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: snapshot-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: app
+          configMap:
+            name: vllm-app

@@ -27,6 +27,8 @@ image and deploy it:
 - [SGLang](sglang.md)
 - [TensorRT-LLM](tensorrt-llm.md)
 
+For multi-GPU workloads, follow the [multi-GPU examples](cuda-shared-memory.md).
+
 ## 2. Checkpoint
 
 - [Checkpoint a replica](checkpoint.md)

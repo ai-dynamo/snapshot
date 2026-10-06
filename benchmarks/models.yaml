@@ -10,7 +10,7 @@
 # in each run's JSON output).
 #
 # `env` overrides `VLLM_MAX_MODEL_LEN` / `VLLM_GPU_MEMORY_UTILIZATION` (see
-# docs/guides/vllm/deployment.yaml, which defaults to 2048 / 0.30, sized for a
+# docs/guides/vllm/capture/qwen3-0.6b.yaml, which defaults to 2048 / 0.30, sized for a
 # small single-GPU deployment). The larger models below need larger values to
 # fit -- tune these for your own GPU's VRAM.
 #
