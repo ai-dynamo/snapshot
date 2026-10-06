@@ -63,15 +63,3 @@ For pods annotated with `nvidia.com/snapshot-pagebroker: "true"`,
 - `direct` (default) prepares a PageBroker transaction and mounts the original
   checkpoint directory read-only for CRIU. It does not copy CPU images into staging.
 - `staged` copies checkpoint files into PageBroker staging before CRIU runs.
-
-Both modes attempt to unmount the restore source before Commit or Abort.
-Mount cleanup errors are reported through the existing restore cleanup path.
-Commit, Abort, and expiry of a direct restore do not delete the checkpoint.
-An open source directory is not a lock against external deletion or changes.
-Keep checkpoint contents available for the duration of restore.
-
-Source selection is separate from CRIU's image I/O mode. Restore uses
-`imageIoMode` from the saved checkpoint manifest. `direct` (also the default
-when empty) requests `O_DIRECT`. An explicit `writeback` setting is preserved.
-The checkpoint filesystem and CRIU must support the requested I/O mode.
-`pageBroker.restoreMode: direct` does not change how checkpoints are captured.
