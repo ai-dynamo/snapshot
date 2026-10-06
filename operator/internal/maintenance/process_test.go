@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
+	"github.com/ai-dynamo/snapshot/api/storage/coordination"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
@@ -51,7 +52,8 @@ func testConfig(basePath string) operatortypes.ArtifactCleanupConfig {
 
 func newTestQueue(t *testing.T, basePath string, objects ...client.Object) (*Queue, *record.FakeRecorder) {
 	t.Helper()
-	kubeClient := ctrlfake.NewClientBuilder().WithScheme(maintenanceTestScheme(t)).WithObjects(objects...).Build()
+	kubeClient := ctrlfake.NewClientBuilder().WithScheme(maintenanceTestScheme(t)).
+		WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).WithObjects(objects...).Build()
 	recorder := record.NewFakeRecorder(10)
 	q, err := NewQueue(kubeClient, kubeClient, recorder, testConfig(basePath))
 	require.NoError(t, err)
@@ -212,7 +214,7 @@ func TestProcessSweepDeletesOnFirstAuthoritativeAbsence(t *testing.T) {
 		emptyMetadataPage(list, "10", "")
 		return nil
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC, locker: coordination.NewLocker()}
 	require.NoError(t, q.processSweep(context.Background(), log.Log))
 	_, err := os.Lstat(root)
 	require.True(t, os.IsNotExist(err))
@@ -232,7 +234,7 @@ func TestProcessSweepProtectsUIDOnFinalPage(t *testing.T) {
 		}
 		return nil
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC, locker: coordination.NewLocker()}
 	require.NoError(t, q.processSweep(context.Background(), log.Log))
 	_, err := os.Lstat(root)
 	require.NoError(t, err)
@@ -244,7 +246,7 @@ func TestProcessSweepFailsClosedAfterListAttemptsExhausted(t *testing.T) {
 	reader := &metadataReader{list: func(*metav1.PartialObjectMetadataList, *client.ListOptions) error {
 		return assert.AnError
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC, locker: coordination.NewLocker()}
 	require.Error(t, q.processSweep(context.Background(), log.Log))
 	assert.Equal(t, 3, reader.calls)
 	_, err := os.Lstat(root)
@@ -262,7 +264,7 @@ func TestProcessSweepProcessesBoundedBatch(t *testing.T) {
 		emptyMetadataPage(list, "30", "")
 		return nil
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC, locker: coordination.NewLocker()}
 	require.NoError(t, q.processSweep(context.Background(), log.Log))
 	artifactsRoot, err := artifact.ResolveRoot(base)
 	require.NoError(t, err)
@@ -372,4 +374,28 @@ func TestProcessSweepEnqueuesPendingFinalizersWhenEnumerationFails(t *testing.T)
 	require.False(t, shutdown)
 	defer q.queue.Done(key)
 	assert.Equal(t, newDeleteContentKey("pending", "pending-uid"), key)
+}
+
+func TestProcessDeleteContentSerializesOnSameArtifactKey(t *testing.T) {
+	base, _ := prepareTestArtifactRoot(t, "uid-lock")
+	now := metav1.Now()
+	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
+		Name: "content", UID: types.UID("uid-lock"), ResourceVersion: "1", DeletionTimestamp: &now,
+		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+	}}
+	q, _ := newTestQueue(t, base, content)
+
+	unlock := q.locker.Lock(storeKey(content))
+	done := make(chan error, 1)
+	go func() {
+		done <- q.processDeleteContent(context.Background(), newDeleteContentKey("content", "uid-lock"))
+	}()
+	select {
+	case <-done:
+		unlock()
+		t.Fatal("processDeleteContent proceeded while the artifact lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	require.NoError(t, <-done)
 }
