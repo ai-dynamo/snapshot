@@ -127,6 +127,12 @@ type RestoreRequest struct {
 	PageBrokerControlSocketPath string
 	PageBrokerRestoreMode       string
 
+	// PublishedArtifact, when set, switches restore to the artifact-addressed
+	// RPCs against this exact publication instead of reading a legacy
+	// filesystem-addressed artifact. The caller reads it from the content's
+	// recorded status; restore never reconstructs or guesses it.
+	PublishedArtifact *pagebroker.PublishedArtifact
+
 	// Decided by the caller, so both gates reach the same answer.
 	SkipCompatCheck bool
 	// WithoutProxy restores into a container whose PID 1 is its own command,
@@ -143,6 +149,36 @@ type RestoreResult struct {
 	// RestoredPID is the restored process, relative to the container's PID
 	// namespace.
 	RestoredPID int
+}
+
+// fetchArtifactMetadata retrieves and parses the verified manifest for a
+// published artifact into PageBroker-managed local staging. It releases that
+// metadata transaction on every exit, including a lost reply, per
+// Client.GetArtifactMetadata's contract: Abort never deletes the publication,
+// only this transaction's staging. The manifest is read and parsed before the
+// deferred Abort runs, since Abort invalidates the staging directory.
+func fetchArtifactMetadata(ctx context.Context, broker pagebroker.Client, artifact *pagebroker.PublishedArtifact) (manifest *types.CheckpointManifest, retErr error) {
+	transactionID := uuid.NewString()
+	defer func() {
+		abortCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			abortCtx, cancel = context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+			defer cancel()
+		}
+		if err := broker.Abort(abortCtx, transactionID); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker metadata transaction %q: %w", transactionID, err))
+		}
+	}()
+	dir, err := broker.GetArtifactMetadata(ctx, transactionID, artifact)
+	if err != nil {
+		return nil, fmt.Errorf("get PageBroker artifact metadata: %w", err)
+	}
+	manifest, err = types.ReadManifest(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read PageBroker artifact manifest: %w", err)
+	}
+	return manifest, nil
 }
 
 // Restore performs external restore for the given request.
@@ -217,13 +253,24 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"destination_container", req.DestinationContainerName,
 	)
 
-	artifactPath, err := nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
-	if err != nil {
-		return RestoreResult{}, fmt.Errorf("resolve checkpoint artifact: %w", err)
-	}
-	manifest, err := types.ReadManifest(artifactPath)
-	if err != nil {
-		return RestoreResult{}, fmt.Errorf("read checkpoint manifest: %w", err)
+	bound := req.PublishedArtifact != nil
+	var artifactPath string
+	var manifest *types.CheckpointManifest
+	var err error
+	if bound {
+		manifest, err = fetchArtifactMetadata(ctx, broker, req.PublishedArtifact)
+		if err != nil {
+			return RestoreResult{}, err
+		}
+	} else {
+		artifactPath, err = nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
+		if err != nil {
+			return RestoreResult{}, fmt.Errorf("resolve checkpoint artifact: %w", err)
+		}
+		manifest, err = types.ReadManifest(artifactPath)
+		if err != nil {
+			return RestoreResult{}, fmt.Errorf("read checkpoint manifest: %w", err)
+		}
 	}
 	if err := validateRestoreManifest(req, manifest); err != nil {
 		return RestoreResult{}, err
@@ -278,16 +325,24 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
 	transactionID = uuid.NewString()
 	stageStart := time.Now()
-	direct := req.PageBrokerRestoreMode != "staged"
+	// Artifact-addressed restore has no direct mode at the protocol level
+	// (StagedRestoreRequest is the only request that carries an artifact);
+	// legacy restore keeps choosing between direct and staged.
+	direct := !bound && req.PageBrokerRestoreMode != "staged"
 	var staged string
 	preparationAttempted = true
-	if usePageBrokerGPU && direct {
+	switch {
+	case bound && usePageBrokerGPU:
+		staged, gpu, err = broker.PrepareGPUStagedArtifactRestore(ctx, transactionID, req.PublishedArtifact, nil, gpuContext)
+	case bound:
+		staged, err = broker.StagedArtifactRestore(ctx, transactionID, req.PublishedArtifact, nil)
+	case usePageBrokerGPU && direct:
 		gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
-	} else if usePageBrokerGPU {
+	case usePageBrokerGPU:
 		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
-	} else if direct {
+	case direct:
 		err = broker.DirectRestore(ctx, transactionID, artifactPath)
-	} else {
+	default:
 		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
 	}
 	pageBrokerStageDuration = time.Since(stageStart)

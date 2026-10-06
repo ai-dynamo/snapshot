@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -186,7 +187,7 @@ func TestMarkCheckpointReadyPublishesWhatTheCaptureRecorded(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 	path := committedArtifact(t, w, string(content.UID))
 
-	require.NoError(t, w.markCheckpointReady(context.Background(), content, path))
+	require.NoError(t, w.markCheckpointReady(context.Background(), content, path, "", nil))
 
 	assertPublishedTheRecordedSource(t, getContent(t, w, content.Name))
 }
@@ -197,7 +198,7 @@ func TestMarkCheckpointReadyGoesReadyWhenTheManifestCannotBeRead(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 
-	require.NoError(t, w.markCheckpointReady(context.Background(), content, t.TempDir()))
+	require.NoError(t, w.markCheckpointReady(context.Background(), content, t.TempDir(), "", nil))
 
 	got := getContent(t, w, content.Name)
 	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
@@ -209,9 +210,9 @@ func TestFreshCapturePublishesTheSourceItRecorded(t *testing.T) {
 	pod := makeSourcePod()
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
-	w.checkpointFn = func(_ context.Context, params CheckpointParams) error {
+	w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		committedArtifact(t, w, params.ContentUID)
-		return nil
+		return nil, nil
 	}
 
 	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
