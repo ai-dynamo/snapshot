@@ -186,6 +186,13 @@ A populated model cache avoids repeated weight downloads. Compilation caches
 can also be mounted on persistent storage, but reuse them only with compatible
 engine, CUDA and GPU versions. Record cache use when comparing startup times.
 
+External compilation caches need extra care when reusing a checkpoint. On NFS,
+a mapped temporary JIT library can depend on a remap link that CRIU removes
+during restore. Keeping the checkpoint directory alone does not preserve that
+external file for another restore. Keep compiler caches in the captured
+container filesystem unless your external-cache setup preserves every
+referenced file for each restore.
+
 ## Gotchas
 
 Use the declared GPU count and tensor parallelism in the selected multi-GPU
