@@ -5,7 +5,7 @@
 //! context.
 
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
-use crate::driver::{self};
+use crate::driver;
 use crate::error::Result;
 use crate::runtime;
 use cudarc::driver::sys::{CUcontext, CUdevice};
