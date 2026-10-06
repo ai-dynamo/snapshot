@@ -94,9 +94,9 @@ pub fn request_export(
         runtime::socket_dir().map_err(|_| Error::Invalid("cuinterpose state is unavailable"))?;
     let socket = protocol::connect(
         &protocol::socket_path(socket_dir, serving_pid),
-        protocol::timeout(None),
+        protocol::control_timeout(),
     )?;
-    let timeout = Some(protocol::timeout(None));
+    let timeout = Some(protocol::control_timeout());
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
     protocol::send(

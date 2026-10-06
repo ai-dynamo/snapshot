@@ -163,7 +163,7 @@ pub struct ProcessState {
     pub foreign_mappings: BTreeMap<u64, usize>,
     pub phase: Phase,
     // Set once per checkpoint after every registry is frozen. Importers can outlive
-    // the creator's local references without changing the immutable allocation ID.
+    // the creator's local references, so the carrier owner is separate from identity.
     pub checkpoint_owners: BTreeMap<AllocationId, NamespacePid>,
     pub arena: Option<host_carrier::Arena>,
     pub unlocked_driver_calls: usize,
