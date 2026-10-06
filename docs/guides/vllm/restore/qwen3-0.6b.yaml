@@ -7,13 +7,17 @@ metadata:
   name: vllm-restored
 spec:
   replicas: 1
-  strategy: {type: Recreate}
+  strategy:
+    type: Recreate
   selector:
-    matchLabels: {app: vllm-restored}
+    matchLabels:
+      app: vllm-restored
   template:
     metadata:
-      labels: {app: vllm-restored}
-      annotations: {nvidia.com/restore-from: vllm-snapshot}
+      labels:
+        app: vllm-restored
+      annotations:
+        nvidia.com/restore-from: vllm-snapshot
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -21,32 +25,57 @@ spec:
         seccompProfile:
           type: Localhost
           localhostProfile: profiles/block-iouring.json
-      nodeSelector: {nvidia.com/gpu.present: "true"}
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
       containers:
         - name: main
           image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
           # The agent restores the saved process into this inert container.
-          command: [/bin/sh, -c, exec sleep infinity]
+          command:
+            - /bin/sh
+            - -c
+            - exec sleep infinity
           env:
-            - {name: SNAPSHOT_CONTROL_DIR, value: /snapshot-control}
-            - {name: SNAPSHOT_MODEL, value: Qwen/Qwen3-0.6B}
+            - name: SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
           ports:
-            - {name: api, containerPort: 8000}
+            - name: api
+              containerPort: 8000
           resources:
-            limits: {nvidia.com/gpu: "1"}
+            limits:
+              nvidia.com/gpu: "1"
           readinessProbe:
             exec:
-              command: [cat, /snapshot-control/vllm-restore-ready]
+              command:
+                - cat
+                - /snapshot-control/vllm-restore-ready
             periodSeconds: 1
             failureThreshold: 1200
           volumeMounts:
-            - {name: snapshot-control, mountPath: /snapshot-control, subPath: main}
-            - {name: tun, mountPath: /dev/net/tun}
-            - {name: shm, mountPath: /dev/shm}
-            - {name: app, mountPath: /snapshot-app, readOnly: true}
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: tun
+              mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
       volumes:
-        - {name: snapshot-control, emptyDir: {}}
-        - {name: tun, hostPath: {path: /dev/net/tun, type: CharDevice}}
-        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 1Gi}}
-        - {name: app, configMap: {name: vllm-app}}
+        - name: snapshot-control
+          emptyDir: {}
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: app
+          configMap:
+            name: vllm-app
