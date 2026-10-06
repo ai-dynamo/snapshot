@@ -254,7 +254,8 @@ ResultName(const Response& response)
       return "staged_checkpoint";
     case Response::kDirectCheckpointDirectory: return "direct_checkpoint";
     case Response::kCapabilities: return "capabilities";
-    case Response::kGpuComplete: return "gpu_complete";
+    case Response::kGpuCheckpointComplete: return "gpu_checkpoint_complete";
+    case Response::kGpuRestoreComplete: return "gpu_restore_complete";
     case Response::kCommitComplete:
       return "committed";
     case Response::kAbortComplete:
