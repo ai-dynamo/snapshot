@@ -12,11 +12,9 @@ agent injects the restore tooling at runtime.
 > [!NOTE]
 > TensorRT-LLM support is experimental.
 
-The source manifest enables [CUDA shared-memory support](cuda-shared-memory.md)
-and installs its libraries before the engine starts. Use a Snapshot agent and
-operator build with this support. Set `SNAPSHOT_AGENT_IMAGE` to the **same immutable
-agent image used for capture and restore** before deploying, as described in the
-[shared-memory guide](cuda-shared-memory.md#ordinary-pods-and-deployments).
+This single-GPU example uses native CUDA checkpoint and restore. The separate
+[multi-GPU examples](cuda-shared-memory.md#multi-gpu-models) enable CUDA
+shared-memory support and install the matching cuInterpose bundle.
 
 ## 1. Download the example files
 
@@ -63,16 +61,13 @@ deliberately: the `1.2.1` GA image fails at `import tensorrt` because
 `libnvonnxparser.so.10` is missing from it, and no 1.3.0 GA image exists yet.
 Move to the first 1.3.x GA once it is published.
 
-The source Pod starts `app.py` through cuInterpose to support CUDA memory
-sharing during checkpoint and restore. See [CUDA shared memory](cuda-shared-memory.md)
-for the matching artifacts and deployment requirements. The recipe leaves CUDA
-graphs, allreduce selection, and `TLLM_NCCL_SYMMETRIC_ZERO_COPY` at their framework
-defaults. The default one-GPU example does not exercise inter-GPU collectives.
+The recipe leaves CUDA graphs, allreduce selection, and
+`TLLM_NCCL_SYMMETRIC_ZERO_COPY` at their framework defaults. This single-GPU
+example does not exercise inter-GPU collectives.
 
 `OMPI_MCA_pml=ob1` and `OMPI_MCA_btl=tcp,self` keep MPI communication on TCP.
 These settings avoid RDMA mappings that CRIU cannot restore and UCX TCP
-keepalive timeouts during a large checkpoint. cuInterpose handles CUDA memory,
-so it does not remove these CPU transport constraints. These MPI settings do
+keepalive timeouts during a large checkpoint. These MPI settings do
 not disable NCCL or TensorRT-LLM's GPU collective algorithms.
 
 If the application requires the UCX MPI transport, use `OMPI_MCA_pml=ucx`,
@@ -121,9 +116,7 @@ containers:
 ```
 
 The example defaults to one GPU, the PyTorch backend, and a maximum sequence
-length of 512 tokens. Set `SNAPSHOT_TENSOR_PARALLEL_SIZE` and the
-`nvidia.com/gpu` limit to the same GPU count in both Deployment manifests.
-Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
+length of 512 tokens. Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
 `1024`), `TRTLLM_MAX_BATCH_SIZE` (default `1`), and
 `TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). `app.py` sets
 `trust_remote_code=False`; Qwen3 needs no custom model code. A model-specific
@@ -141,9 +134,7 @@ TensorRT-LLM image, GPU count, backend, or engine settings.
 Deploy the edited manifest:
 
 ```bash
-: "${SNAPSHOT_AGENT_IMAGE:?Set the matching Snapshot agent image first}"
-envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment.yaml | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename deployment.yaml
 ```
 
 Wait until the TensorRT-LLM replica finishes initialization and becomes safe to

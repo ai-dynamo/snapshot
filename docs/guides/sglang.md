@@ -8,11 +8,9 @@ image that includes SGLang, CUDA, and `torch_memory_saver`, unmodified.
 mounted into it from a ConfigMap to prepare SGLang for checkpoint and resume
 it after restore. The Snapshot agent injects the restore tooling at runtime.
 
-The source manifest enables [CUDA shared-memory support](cuda-shared-memory.md)
-and installs its libraries before the engine starts. Use a Snapshot agent and
-operator build with this support. Set `SNAPSHOT_AGENT_IMAGE` to the **same immutable
-agent image used for capture and restore** before deploying, as described in the
-[shared-memory guide](cuda-shared-memory.md#ordinary-pods-and-deployments).
+This single-GPU example uses native CUDA checkpoint and restore. The separate
+[multi-GPU examples](cuda-shared-memory.md#multi-gpu-models) enable CUDA
+shared-memory support and install the matching cuInterpose bundle.
 
 ## 1. Download the example files
 
@@ -122,9 +120,7 @@ containers:
 The example configures a context length of 10240 tokens for a 24 GiB NVIDIA A10
 GPU. Reduce `SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
 validating the resulting memory use. The KV cache page size is set through
-`SGLANG_PAGE_SIZE` (default `16`). `SNAPSHOT_TENSOR_PARALLEL_SIZE` defaults to
-`1`. To use two GPUs on one node, set it to `2` and set the `nvidia.com/gpu`
-limit to `"2"` in both source and restore manifests.
+`SGLANG_PAGE_SIZE` (default `16`).
 `app.py` sets `trust_remote_code=False`; Qwen3 needs no custom model code.
 A model-specific `SGLANG_ENGINE_ARGS` JSON object can override the defaults
 with `sglang.Engine` keyword arguments, including `trust_remote_code`.
@@ -147,9 +143,7 @@ kubectl apply \
 Deploy the edited manifest:
 
 ```bash
-: "${SNAPSHOT_AGENT_IMAGE:?Set the matching Snapshot agent image first}"
-envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment.yaml | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename deployment.yaml
 ```
 
 The init container downloads the model when its cache marker does not exist. The

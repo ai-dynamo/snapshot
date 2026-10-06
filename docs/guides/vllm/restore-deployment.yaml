@@ -38,8 +38,6 @@ spec:
             - -c
             - exec sleep infinity
           env:
-            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
-              value: "1"
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
             - name: SNAPSHOT_CONTROL_DIR

@@ -10,14 +10,15 @@ processes on one node, including POSIX-exported VMM, synchronous memory IPC,
 HOST_NUMA allocations, and multicast objects. Snapshot uses its internal
 cuInterpose libraries to save and reconstruct these resources.
 
-The [vLLM](vllm.md), [SGLang](sglang.md), and
-[TensorRT-LLM](tensorrt-llm.md) examples enable this support. Use matching
-Snapshot agent and operator builds that include the feature. The engine images
-remain unmodified.
+The [multi-GPU examples](#multi-gpu-models) enable this support. The small
+single-GPU [vLLM](vllm.md), [SGLang](sglang.md), and
+[TensorRT-LLM](tensorrt-llm.md) examples use native CUDA checkpoint and restore.
+Use matching Snapshot agent and operator builds for shared-memory support.
+The engine images remain unmodified.
 
 ## Ordinary Pods and Deployments
 
-The source manifests perform three steps:
+The multi-GPU source manifests perform three steps:
 
 1. Set the Pod annotation `nvidia.com/cuda-shared-memory-support: "enabled"`.
 2. Copy both libraries and `cuinterpose-launch` from the Snapshot agent image
@@ -45,7 +46,7 @@ on Debian and Ubuntu):
 
 ```bash
 : "${SNAPSHOT_AGENT_IMAGE:?Set the matching Snapshot agent image first}"
-envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment.yaml | \
+envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment-glm-5.3.yaml | \
   kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
 ```
 
@@ -182,11 +183,8 @@ engine, CUDA and GPU versions. Record cache use when comparing startup times.
 
 ## Gotchas
 
-The examples default to one GPU. For two GPUs on one node, set
-`SNAPSHOT_TENSOR_PARALLEL_SIZE` to `"2"` and the main container's
-`resources.limits.nvidia.com/gpu` to `"2"` in both source and restore manifests.
-Use a model whose attention heads and engine implementation support that
-parallelism. Allocate compatible GPUs at restore.
+Use the declared GPU count and tensor parallelism in the selected multi-GPU
+manifest pair. Allocate compatible GPUs at restore.
 
 - Finish requests and all CUDA work before announcing `ready-for-snapshot`.
   Shared-memory support does not pause the application for you. Shared HOST_NUMA

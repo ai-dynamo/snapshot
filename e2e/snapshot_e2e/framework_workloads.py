@@ -245,20 +245,6 @@ def pod_from_deployment(
         use_shared_model_cache(pod_spec, model_cache)
 
     main = main_container({"spec": pod_spec})
-    parallelism = os.environ.get("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE")
-    if parallelism is not None:
-        try:
-            size = int(parallelism)
-        except ValueError:
-            raise ValueError("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE must be a positive integer") from None
-        if size < 1:
-            raise ValueError("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE must be a positive integer")
-        set_env(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE", str(size))
-        resources = main.setdefault("resources", {})
-        resources.setdefault("limits", {})["nvidia.com/gpu"] = str(size)
-        if "nvidia.com/gpu" in resources.get("requests", {}):
-            resources["requests"]["nvidia.com/gpu"] = str(size)
-
     # Content-addressed tags are immutable, so a cached pull is correct and
     # saves minutes on multi-GB images. An override (SNAPSHOT_E2E_FRAMEWORK_IMAGE)
     # is typically a mutable dev tag, where a cached image would test stale bits.

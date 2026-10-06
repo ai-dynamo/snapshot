@@ -46,7 +46,6 @@ CACHE = frameworks.SharedModelCache(
 def _workload_image(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", AGENT_IMAGE)
     monkeypatch.delenv("SNAPSHOT_E2E_RESTORE_NODE", raising=False)
-    monkeypatch.delenv("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE", raising=False)
     monkeypatch.delenv("SNAPSHOT_E2E_RECIPE", raising=False)
 
 
@@ -72,57 +71,6 @@ def test_explicit_restore_node(monkeypatch: pytest.MonkeyPatch, spec: frameworks
 
 
 @pytest.mark.workload
-@pytest.mark.parametrize("size", [1, 2])
-def test_tensor_parallel_override_matches_source_and_restore_gpus(
-    monkeypatch: pytest.MonkeyPatch, spec: frameworks.FrameworkSpec, size: int,
-) -> None:
-    monkeypatch.setenv("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE", str(size))
-    source, restored, _ = pods(spec)
-    for pod in (source, restored):
-        main = fw.main_container(pod)
-        assert fw.env_value(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE") == str(size)
-        assert main["resources"]["limits"]["nvidia.com/gpu"] == str(size)
-        assert sum(e["name"] == "SNAPSHOT_TENSOR_PARALLEL_SIZE" for e in main["env"]) == 1
-
-
-@pytest.mark.workload
-@pytest.mark.parametrize("value", ["", "0", "-1", "2.5", "two"])
-def test_tensor_parallel_override_rejects_invalid_values(
-    monkeypatch: pytest.MonkeyPatch, value: str,
-) -> None:
-    monkeypatch.setenv("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE", value)
-    spec = frameworks.FRAMEWORKS["vllm"]
-    run = workloads.TestRun.new("invalid-parallelism")
-    with pytest.raises(ValueError, match="SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE must be a positive integer"):
-        fw.source_pod(config=CONFIG, run=run, spec=spec, image=IMAGE)
-    with pytest.raises(ValueError, match="SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE must be a positive integer"):
-        fw.restore_pod(config=CONFIG, run=run, spec=spec, source_node="n0", image=IMAGE)
-
-
-@pytest.mark.workload
-def test_unset_tensor_parallel_override_preserves_recipe() -> None:
-    deployment = fw.load_manifest(frameworks.FRAMEWORKS["vllm"].deployment_manifest)
-    main = deployment["spec"]["template"]["spec"]["containers"][0]
-    fw.set_env(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE", "2")
-    main["resources"]["limits"]["nvidia.com/gpu"] = "2"
-    pod = fw.pod_from_deployment(deployment, name="tp", namespace="test", labels={}, image=IMAGE)
-    rendered = fw.main_container(pod)
-    assert fw.env_value(rendered, "SNAPSHOT_TENSOR_PARALLEL_SIZE") == "2"
-    assert rendered["resources"]["limits"]["nvidia.com/gpu"] == "2"
-
-
-@pytest.mark.workload
-def test_tensor_parallel_override_updates_explicit_gpu_requests(monkeypatch: pytest.MonkeyPatch) -> None:
-    deployment = fw.load_manifest(frameworks.FRAMEWORKS["vllm"].deployment_manifest)
-    main = deployment["spec"]["template"]["spec"]["containers"][0]
-    main["resources"]["requests"] = {"nvidia.com/gpu": "1", "cpu": "1"}
-    monkeypatch.setenv("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE", "2")
-    pod = fw.pod_from_deployment(deployment, name="tp", namespace="test", labels={}, image=IMAGE)
-    assert fw.main_container(pod)["resources"]["requests"] == {"nvidia.com/gpu": "2", "cpu": "1"}
-    assert main["resources"]["requests"]["nvidia.com/gpu"] == "1"
-
-
-@pytest.mark.workload
 def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
     for pod in (source, restore):
@@ -137,7 +85,7 @@ def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec)
         main = fw.main_container(pod)
         assert main["image"] == IMAGE
         assert main["resources"]["limits"]["nvidia.com/gpu"] == "1"
-        assert fw.env_value(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE") == "1"
+        assert fw.env_value(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE") is None
         assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
         assert {
             "name": "snapshot-control",
@@ -148,22 +96,28 @@ def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec)
         volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
         assert volumes["snapshot-control"] == {"name": "snapshot-control", "emptyDir": {}}
         assert volumes["tun"]["hostPath"] == {"path": "/dev/net/tun", "type": "CharDevice"}
+        assert "snapshot-cuda" not in volumes
+        assert all(mount["mountPath"] != "/tmp/snapshot-cuda" for mount in main["volumeMounts"])
         for container in pod_spec.get("initContainers", []):
-            expected = AGENT_IMAGE if container["name"] == "snapshot-cuda-install" else IMAGE
-            assert container["image"] == expected
+            assert container["name"] != "snapshot-cuda-install"
+            assert container["image"] == IMAGE
 
 
 @pytest.mark.workload
-def test_source_pod_is_checkpointable_with_shared_memory_enabled(spec: frameworks.FrameworkSpec) -> None:
-    source, _, _ = pods(spec)
+def test_source_pod_is_checkpointable_without_shared_memory(
+    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = workloads.TestRun.new("native")
+    monkeypatch.delenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", raising=False)
+    monkeypatch.delenv("SNAPSHOT_E2E_SNAPSHOT_TAG", raising=False)
+    source = fw.source_pod(config=CONFIG, run=run, spec=spec, image=IMAGE)
     main = fw.main_container(source)
     # Ready == checkpointable: the test waits for pod readiness before creating
     # the PodSnapshot, which is only sound if readiness is gated on the file.
     assert main["readinessProbe"]["exec"]["command"] == ["cat", workloads.SOURCE_READY]
     assert fw.env_value(main, "SNAPSHOT_RESTORE_STANDBY") is None
-    assert source["metadata"]["annotations"] == {
-        "nvidia.com/cuda-shared-memory-support": "enabled",
-    }
+    assert source["metadata"]["annotations"] == {}
+    assert main["command"] == ["python3", *(["-u"] if spec.name == "sglang" else []), "/snapshot-app/app.py"]
 
 
 @pytest.mark.workload
@@ -175,6 +129,8 @@ def test_source_delivers_matching_shared_memory_bundle(
     model_cache: frameworks.SharedModelCache | None,
     agent_image: str,
 ) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RECIPE", "glm-5.3")
+    spec = frameworks.framework_spec(spec.name)
     monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", agent_image)
     monkeypatch.setenv("SNAPSHOT_E2E_FRAMEWORK_IMAGE", IMAGE)
     run = workloads.TestRun.new("delivery")
@@ -213,7 +169,8 @@ def test_source_preserves_workload_annotations_but_not_restore_routing(
     spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     deployment = fw.load_manifest(spec.deployment_manifest)
-    deployment["spec"]["template"]["metadata"]["annotations"].update({
+    deployment["spec"]["template"]["metadata"].setdefault("annotations", {}).update({
+        fw.SHARED_MEMORY_ANNOTATION: "enabled",
         "example.com/workload": "keep",
         fw.RESTORE_FROM_ANNOTATION: "old-snapshot",
         "nvidia.com/restore-container-map": "main=main",
@@ -415,9 +372,6 @@ def test_multi_gpu_recipe_matches_restore_and_shared_cache(
         fw.use_shared_model_cache(pod["spec"], CACHE)
         assert not any(c["name"] == "model-cache" for c in pod["spec"].get("initContainers", []))
         assert fw.env_value(fw.main_container(pod), "HF_HUB_OFFLINE") == "1"
-    monkeypatch.setenv("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE", "2")
-    with pytest.raises(ValueError, match=f"requires TP{size}"):
-        frameworks.framework_spec(engine)
 
 
 @pytest.mark.workload

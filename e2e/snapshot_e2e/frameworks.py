@@ -142,9 +142,6 @@ def framework_spec(name: str) -> FrameworkSpec:
         deployment = yaml.safe_load(handle)
     main = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == CONTAINER)
     env = {e["name"]: e["value"] for e in main["env"]}
-    parallelism = os.environ.get("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE")
-    if parallelism is not None and parallelism != env["SNAPSHOT_TENSOR_PARALLEL_SIZE"]:
-        raise ValueError(f"{name}/{recipe} requires TP{env['SNAPSHOT_TENSOR_PARALLEL_SIZE']}")
     return replace(
         spec,
         model=env["SNAPSHOT_MODEL"],
