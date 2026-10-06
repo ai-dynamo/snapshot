@@ -77,9 +77,64 @@ const (
 	LegacyRestoreStandbyModeEnv = "DYN_SNAPSHOT_RESTORE_STANDBY"
 
 	// RestoreCompleteFile is written by the Snapshot agent when restore has
-	// completed and the workload may resume.
+	// completed and the workload may resume. Its contents are key=value lines
+	// built by FormatRestoreComplete; workloads that only gate on the file's
+	// existence may ignore them.
 	RestoreCompleteFile = "restore-complete"
+
+	// RestoreFailedFile is written by the Snapshot agent before it kills a
+	// destination container whose restore failed. The failing container never
+	// acts on it; a later container in the same Pod reads it as proof that the
+	// Pod's one restore was already used.
+	RestoreFailedFile = "restore-failed"
+
+	// RestoreCompletePIDKey names the restored process's PID, relative to the
+	// destination container's PID namespace, in RestoreCompleteFile.
+	RestoreCompletePIDKey = "pid"
 )
+
+// RestoreComplete is the content of RestoreCompleteFile.
+type RestoreComplete struct {
+	// PID is the restored process, relative to the destination container's
+	// PID namespace.
+	PID int
+}
+
+// FormatRestoreComplete renders the content of RestoreCompleteFile.
+func FormatRestoreComplete(rc RestoreComplete) []byte {
+	return []byte(RestoreCompletePIDKey + "=" + strconv.Itoa(rc.PID) + "\n")
+}
+
+// ParseRestoreComplete reads the content of RestoreCompleteFile. Unknown keys
+// are ignored so the agent can add fields without breaking older readers.
+func ParseRestoreComplete(data []byte) (RestoreComplete, error) {
+	var rc RestoreComplete
+	for line := range strings.Lines(string(data)) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return RestoreComplete{}, fmt.Errorf("invalid %s line %q: expected key=value", RestoreCompleteFile, line)
+		}
+		if key != RestoreCompletePIDKey {
+			continue
+		}
+		if rc.PID != 0 {
+			return RestoreComplete{}, fmt.Errorf("duplicate %s key %q", RestoreCompleteFile, key)
+		}
+		pid, err := strconv.Atoi(value)
+		if err != nil || pid <= 0 {
+			return RestoreComplete{}, fmt.Errorf("invalid %s %s %q", RestoreCompleteFile, key, value)
+		}
+		rc.PID = pid
+	}
+	if rc.PID == 0 {
+		return RestoreComplete{}, fmt.Errorf("%s has no %s", RestoreCompleteFile, RestoreCompletePIDKey)
+	}
+	return rc, nil
+}
 
 // ContainerMapping maps the one captured source container to a restore
 // destination in the target Pod.

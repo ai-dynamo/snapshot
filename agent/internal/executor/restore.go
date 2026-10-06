@@ -112,17 +112,25 @@ type RestoreRequest struct {
 	SkipCompatCheck bool
 }
 
+// RestoreResult identifies the processes a successful restore leaves behind.
+type RestoreResult struct {
+	// PlaceholderHostPID is the placeholder container's host PID, so callers
+	// can reach into the container's mount namespace (e.g. to write sentinels
+	// under /snapshot-control) without re-resolving via the runtime.
+	PlaceholderHostPID int
+	// RestoredPID is the restored process, relative to the container's PID
+	// namespace.
+	RestoredPID int
+}
+
 // Restore performs external restore for the given request.
-// Returns the namespace-relative PID of the restored process.
 // The DaemonSet side inspects the placeholder and launches nsrestore,
 // which handles rootfs application, CRIU restore, and CUDA restore inside the namespace.
 //
-// Returns the placeholder container's host PID so callers can reach into the
-// container's mount namespace (e.g. to write sentinels under /snapshot-control)
-// without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounts RestoreMounter) (placeholderPID int, retErr error) {
+// A RestoreCleanupError still carries the result: the restore itself succeeded.
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounts RestoreMounter) (restored RestoreResult, retErr error) {
 	if mounts == nil {
-		return 0, fmt.Errorf("restore mounter is required")
+		return RestoreResult{}, fmt.Errorf("restore mounter is required")
 	}
 
 	brokered := req.PageBrokerRequested && req.PageBrokerEnabled
@@ -165,24 +173,24 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	artifactPath, err := nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
 	if err != nil {
-		return 0, fmt.Errorf("resolve checkpoint artifact: %w", err)
+		return RestoreResult{}, fmt.Errorf("resolve checkpoint artifact: %w", err)
 	}
 	manifest, err := types.ReadManifest(artifactPath)
 	if err != nil {
-		return 0, fmt.Errorf("read checkpoint manifest: %w", err)
+		return RestoreResult{}, fmt.Errorf("read checkpoint manifest: %w", err)
 	}
 	if err := validateRestoreManifest(req, manifest); err != nil {
-		return 0, err
+		return RestoreResult{}, err
 	}
 
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
-		return 0, err
+		return RestoreResult{}, err
 	}
 
 	bundleMount, err := mounts.MountBundle(ctx, snap.PlaceholderPID)
 	if err != nil {
-		return 0, fmt.Errorf("mount agent bundle into placeholder: %w", err)
+		return RestoreResult{}, fmt.Errorf("mount agent bundle into placeholder: %w", err)
 	}
 	activeMounts = append(activeMounts, restoreMount{
 		action: "unmount agent bundle from placeholder",
@@ -204,7 +212,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		}
 		pageBrokerStageDuration = time.Since(stageStart)
 		if err != nil {
-			return 0, fmt.Errorf("prepare PageBroker restore: %w", err)
+			return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
 		}
 		mountStart := time.Now()
 		var sourceMount nsmount.MountPoint
@@ -216,7 +224,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		}
 		pageBrokerMountDuration = time.Since(mountStart)
 		if err != nil {
-			return 0, fmt.Errorf("mount PageBroker restore source: %w", err)
+			return RestoreResult{}, fmt.Errorf("mount PageBroker restore source: %w", err)
 		}
 		activeMounts = append(activeMounts, restoreMount{
 			action: "unmount PageBroker restore source from placeholder",
@@ -225,7 +233,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	} else {
 		artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
 		if err != nil {
-			return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
+			return RestoreResult{}, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
 		}
 		activeMounts = append(activeMounts, restoreMount{
 			action: "unmount checkpoint artifact from placeholder",
@@ -235,7 +243,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
 	if err != nil {
-		return 0, fmt.Errorf("nsrestore failed: %w", err)
+		return RestoreResult{}, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	if brokered {
 		sourceMount := activeMounts[len(activeMounts)-1]
@@ -255,7 +263,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
 	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
-		return 0, err
+		return RestoreResult{}, err
 	}
 
 	cleanup()
@@ -293,7 +301,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"placeholder_host_pid", snap.PlaceholderPID,
 	)
 
-	return snap.PlaceholderPID, nil
+	return RestoreResult{PlaceholderHostPID: snap.PlaceholderPID, RestoredPID: result.RestoredPID}, nil
 }
 
 func remainingDuration(wall time.Duration, parts ...time.Duration) time.Duration {

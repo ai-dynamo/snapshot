@@ -12,7 +12,7 @@ import (
 func TestWriteSentinelInDir_CreatesFileAtomically(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := writeSentinelInDir(dir, "snapshot-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "snapshot-complete", []byte("pid=42\n")); err != nil {
 		t.Fatalf("writeSentinelInDir failed: %v", err)
 	}
 
@@ -20,7 +20,7 @@ func TestWriteSentinelInDir_CreatesFileAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sentinel not found: %v", err)
 	}
-	if string(data) != "done\n" {
+	if string(data) != "pid=42\n" {
 		t.Errorf("unexpected sentinel contents: %q", data)
 	}
 
@@ -37,33 +37,33 @@ func TestWriteSentinelInDir_CreatesFileAtomically(t *testing.T) {
 
 func TestWriteSentinelInDir_Overwrites(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeSentinelInDir(dir, "restore-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "restore-complete", []byte("pid=1\n")); err != nil {
 		t.Fatalf("first write failed: %v", err)
 	}
-	if err := writeSentinelInDir(dir, "restore-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "restore-complete", []byte("pid=2\n")); err != nil {
 		t.Fatalf("second write failed: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "restore-complete"))
 	if err != nil {
 		t.Fatalf("sentinel not found: %v", err)
 	}
-	if string(data) != "done\n" {
+	if string(data) != "pid=2\n" {
 		t.Errorf("unexpected sentinel contents: %q", data)
 	}
 }
 
 func TestWriteSentinelInDir_DirMissing(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	if err := writeSentinelInDir(missing, "snapshot-complete"); err == nil {
+	if err := writeSentinelInDir(missing, "snapshot-complete", nil); err == nil {
 		t.Fatal("expected error writing into missing directory")
 	}
 }
 
 func TestWriteControlSentinel_RejectsInvalidPID(t *testing.T) {
-	if err := WriteControlSentinel(0, "snapshot-complete"); err == nil {
+	if err := WriteControlSentinel(0, "snapshot-complete", nil); err == nil {
 		t.Fatal("expected error for PID 0")
 	}
-	if err := WriteControlSentinel(-1, "snapshot-complete"); err == nil {
+	if err := WriteControlSentinel(-1, "snapshot-complete", nil); err == nil {
 		t.Fatal("expected error for negative PID")
 	}
 }
@@ -78,7 +78,7 @@ func TestControlSentinelExistsInDir(t *testing.T) {
 		t.Fatal("missing sentinel reported as present")
 	}
 
-	if err := writeSentinelInDir(dir, "restore-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "restore-complete", nil); err != nil {
 		t.Fatalf("writeSentinelInDir: %v", err)
 	}
 	exists, err = controlSentinelExistsInDir(dir, "restore-complete")
@@ -106,7 +106,7 @@ func TestRemoveControlSentinel_MissingFile(t *testing.T) {
 
 func TestRemoveControlSentinel_RemovesExisting(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeSentinelInDir(dir, "restore-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "restore-complete", nil); err != nil {
 		t.Fatalf("writeSentinelInDir: %v", err)
 	}
 	if err := RemoveControlSentinel(dir, "restore-complete"); err != nil {

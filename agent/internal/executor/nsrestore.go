@@ -191,13 +191,16 @@ func executeRestore(
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
 	}
 
-	// The restore-complete sentinel lives on the pod emptyDir mounted at
-	// SnapshotControlMountPath. Clear it here, in that mount namespace, so a
-	// leftover from an earlier incarnation cannot release the restored process
-	// before this CRIU/CUDA attempt finishes. A missing file is already gone;
-	// a missing mount is a hard error.
-	if err := snapshotruntime.RemoveControlSentinel(podcontract.SnapshotControlMountPath, podcontract.RestoreCompleteFile); err != nil {
-		return nil, 0, nil, fmt.Errorf("remove stale restore-complete sentinel: %w", err)
+	// The restore-complete and restore-failed sentinels live on the pod
+	// emptyDir mounted at SnapshotControlMountPath. Clear them here, in that
+	// mount namespace, so each attempt writes them at most once: a leftover
+	// restore-complete from an earlier incarnation cannot release the restored
+	// process before this CRIU/CUDA attempt finishes. A missing file is already
+	// gone; a missing mount is a hard error.
+	for _, name := range []string{podcontract.RestoreCompleteFile, podcontract.RestoreFailedFile} {
+		if err := snapshotruntime.RemoveControlSentinel(podcontract.SnapshotControlMountPath, name); err != nil {
+			return nil, 0, nil, fmt.Errorf("remove stale %s sentinel: %w", name, err)
+		}
 	}
 
 	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, log)
