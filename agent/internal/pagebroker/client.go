@@ -52,6 +52,8 @@ func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destinatio
 	return imageDirectory(response.GetStagedCheckpointDirectory().GetImageDirectory())
 }
 
+// DirectRestore prepares a transaction against the original checkpoint directory.
+// The caller must keep its contents available until Commit or Abort.
 func (c Client) DirectRestore(ctx context.Context, transactionID, source string) error {
 	response, err := c.request(ctx, transactionID, &Request_DirectRestore{
 		DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},

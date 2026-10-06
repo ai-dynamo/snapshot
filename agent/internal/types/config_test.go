@@ -67,7 +67,7 @@ func TestPageBrokerRestoreMode(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"", "staged"}, {"staged", "staged"}, {"direct", "direct"}, {" DIRECT ", "direct"},
+		{"", "direct"}, {"  ", "direct"}, {"staged", "staged"}, {"direct", "direct"}, {" DIRECT ", "direct"},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
 			cfg := validAgentConfig()

@@ -60,9 +60,9 @@ reserved in the chart for future use and are not supported today.
 For pods annotated with `nvidia.com/snapshot-pagebroker: "true"`,
 `pageBroker.restoreMode` selects the restore source when PageBroker is enabled:
 
-- `staged` (default) copies checkpoint files into PageBroker staging before CRIU runs.
-- `direct` prepares a PageBroker transaction and mounts the original checkpoint
-  directory read-only for CRIU. It does not copy CPU images into staging.
+- `direct` (default) prepares a PageBroker transaction and mounts the original
+  checkpoint directory read-only for CRIU. It does not copy CPU images into staging.
+- `staged` copies checkpoint files into PageBroker staging before CRIU runs.
 
 Both modes attempt to unmount the restore source before Commit or Abort.
 Mount cleanup errors are reported through the existing restore cleanup path.

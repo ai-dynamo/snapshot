@@ -179,7 +179,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `pageBroker.restoreMode` | `staged` | PageBroker restore source: `staged` copies CPU images into staging, `direct` reads the original artifact. Requires PageBroker and the pod annotation. |
+| `pageBroker.restoreMode` | `direct` | PageBroker restore source: `staged` copies CPU images into staging, `direct` reads the original artifact. Requires PageBroker and the pod annotation. |
 | `storage.type` | `pvc` | Only `pvc` is implemented today. |
 | `storage.pvc.create` | `true` | Create the PVC; set `false` to use an existing one. |
 | `storage.pvc.name` | `snapshot-pvc` | Shared PVC name. |

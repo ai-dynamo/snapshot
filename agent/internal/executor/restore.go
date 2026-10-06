@@ -195,7 +195,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		transactionID = uuid.NewString()
 		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 		stageStart := time.Now()
-		direct := req.PageBrokerRestoreMode == "direct"
+		direct := req.PageBrokerRestoreMode != "staged"
 		var staged string
 		if direct {
 			err = broker.DirectRestore(ctx, transactionID, artifactPath)

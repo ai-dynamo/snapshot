@@ -458,7 +458,7 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 		mountFailure bool
 		cancel       bool
 	}{
-		{name: "default staged"},
+		{name: "default direct"},
 		{name: "explicit staged", mode: "staged"},
 		{name: "direct", mode: "direct"},
 		{name: "direct mount failure", mode: "direct", mountFailure: true},
@@ -522,7 +522,7 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 							if transaction == "" {
 								return errors.New("missing transaction")
 							}
-							if tc.mode == "direct" {
+							if tc.mode != "staged" {
 								if request.GetDirectRestore().GetSource().GetFilesystem().GetDirectory() != artifact {
 									return errors.New("wrong direct restore source")
 								}
@@ -579,7 +579,7 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 				t.Fatal("restore did not abort its transaction")
 			}
 			name := "staged"
-			if tc.mode == "direct" {
+			if tc.mode != "staged" {
 				name = "artifact"
 				if mounts.artifact != artifact || mounts.staged != "" {
 					t.Fatalf("wrong source mount: %+v", mounts)

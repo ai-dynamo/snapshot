@@ -53,7 +53,7 @@ func (c *AgentConfig) Validate() error {
 	c.PageBroker.RestoreMode = strings.ToLower(strings.TrimSpace(c.PageBroker.RestoreMode))
 	switch c.PageBroker.RestoreMode {
 	case "":
-		c.PageBroker.RestoreMode = "staged"
+		c.PageBroker.RestoreMode = "direct"
 	case "staged", "direct":
 	default:
 		return &ConfigError{Field: "pageBroker.restoreMode", Message: "pageBroker.restoreMode must be staged or direct"}
@@ -85,6 +85,7 @@ type StorageSpec struct {
 }
 
 type PageBrokerSpec struct {
+	// RestoreMode selects the restore source. Empty defaults to direct.
 	RestoreMode       string `yaml:"restoreMode"`
 	Enabled           bool   `yaml:"enabled"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
