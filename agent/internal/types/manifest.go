@@ -186,6 +186,12 @@ type CUDAManifest struct {
 type GPUManifest struct {
 	UUID        string `yaml:"uuid"`
 	ProductName string `yaml:"productName,omitempty"`
+
+	// MIGProfile is the slice shape, such as "1g.10gb". Absent means unknown
+	// rather than whole GPU, because an agent released before this field
+	// captured slices without recording their shape. UUID tells the two apart,
+	// because only a slice's carries the MIG- prefix.
+	MIGProfile string `yaml:"migProfile,omitempty"`
 }
 
 func NewCUDAManifest(pids []int, gpus compat.GPUInfo) CUDAManifest {
@@ -198,6 +204,7 @@ func NewCUDAManifest(pids []int, gpus compat.GPUInfo) CUDAManifest {
 		m.SourceGPUs = append(m.SourceGPUs, GPUManifest{
 			UUID:        device.UUID,
 			ProductName: device.ProductName,
+			MIGProfile:  device.MIGProfile,
 		})
 	}
 	return m
@@ -297,6 +304,7 @@ func (m *CheckpointManifest) gpuInfo() compat.GPUInfo {
 			env.Devices = append(env.Devices, compat.GPUDevice{
 				UUID:        gpu.UUID,
 				ProductName: gpu.ProductName,
+				MIGProfile:  gpu.MIGProfile,
 			})
 		}
 		return env

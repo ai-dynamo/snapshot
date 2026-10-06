@@ -57,6 +57,7 @@ func checkpointSourceFromManifest(manifest *types.CheckpointManifest) *snapshotv
 		for _, device := range env.GPUDevices {
 			nvidia.Instances = append(nvidia.Instances, snapshotv1alpha1.NvidiaCheckpointSourceInstance{
 				ProductName: device.ProductName,
+				MIGProfile:  device.MIGProfile,
 			})
 		}
 		source.Devices = &snapshotv1alpha1.CheckpointSourceDevices{Nvidia: nvidia}

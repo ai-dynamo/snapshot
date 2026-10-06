@@ -138,6 +138,23 @@ func TestCheckpointSourceFromManifest(t *testing.T) {
 				s.Devices.Nvidia.Instances = make([]snapshotv1alpha1.NvidiaCheckpointSourceInstance, 3)
 			}),
 		},
+		// The model name is the parent card's either way, so the profile is the
+		// only published value that says a slice was captured rather than a
+		// whole GPU.
+		"a capture on MIG slices": {
+			manifest: manifestWith(func(m *types.CheckpointManifest) {
+				m.CUDA.SourceGPUs = []types.GPUManifest{
+					{UUID: "MIG-1", ProductName: "NVIDIA H100 80GB HBM3", MIGProfile: "3g.40gb"},
+					{UUID: "MIG-2", ProductName: "NVIDIA H100 80GB HBM3", MIGProfile: "1g.10gb"},
+				}
+			}),
+			want: sourceWith(func(s *snapshotv1alpha1.CheckpointSource) {
+				s.Devices.Nvidia.Instances = []snapshotv1alpha1.NvidiaCheckpointSourceInstance{
+					{ProductName: "NVIDIA H100 80GB HBM3", MIGProfile: "3g.40gb"},
+					{ProductName: "NVIDIA H100 80GB HBM3", MIGProfile: "1g.10gb"},
+				}
+			}),
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.want, checkpointSourceFromManifest(tc.manifest))

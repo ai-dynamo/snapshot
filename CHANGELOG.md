@@ -41,6 +41,18 @@ commit-level history for each release is on its
   restore compatibility still compares the artifact's manifest. CRD change;
   populated for captures that reach `Ready` after the upgrade, so a content
   already `Ready` before it is not backfilled.
+- Restore compatibility refuses a MIG mismatch, under two new named checks.
+  `mig-partitioning` refuses a whole GPU restored onto a MIG slice or the
+  reverse, and applies to checkpoints captured by any version, because it reads
+  the GPU UUIDs already recorded. `mig-profile` refuses a slice restored onto a
+  differently shaped one — for example `3g.40gb` onto `1g.10gb` — and applies to
+  checkpoints captured after the upgrade, because the profile was not recorded
+  before it; an artifact without one is admitted on shape as before. Neither
+  case was refused previously: `nvidia-smi` reports a slice under its parent
+  card's model name, so `gpu-model` and `gpu-count` both passed and the restore
+  failed inside CRIU or the CUDA runtime instead. The profile is also published
+  on `PodSnapshotContent.status.source.devices.nvidia.instances[].migProfile`
+  (CRD change).
 
 ## [0.1.0] - 2026-09-06
 
