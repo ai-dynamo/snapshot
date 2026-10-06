@@ -175,6 +175,25 @@ custom image still has to meet these:
   unreliable copy of that context, so a worker forked before checkpoint may not
   restore correctly.
 
+### CuInterpose synchronization and lifetime
+
+Workloads using [CuInterpose](../development/cuinterpose.md) must also meet these requirements. The shim tracks CUDA resources; it does not add application-level ownership or synchronization.
+
+| Application requirement | Shim behavior and limits |
+| --- | --- |
+| Finish all CUDA calls and GPU work, stop CPU writes to shared HOST_NUMA memory, and keep every participant parked from checkpoint entry until restore completes. | Checkpoint entry refuses outstanding unlocked driver calls, and intercepted memory calls are rejected while checkpointing. The shim cannot detect every GPU operation or CPU writer; racing those writes can corrupt the captured contents. |
+| Serialize object destruction against calls using that object, including blocked multicast calls. Serialize context destruction, reset, and final primary-context release against all uses of that context. | The state mutex is released around blocking driver calls; there are no per-object lifetime pins. If a successful call returns to find its required object missing, the shim aborts the process rather than continue with inconsistent tracking. |
+| Keep all sharing peers, including the original creator process, in the fixed, fully interposed checkpoint group. Keep a creator handle or mapping while new VMM imports may be requested. | Existing VMM imports may outlive the creator's local references. Checkpoint selects an existing holder to save the full backing once. Virtual descriptors carry identity, not a backing reference, so FD-only lifetime and new imports after all creator references are released remain unsupported. |
+| Before checkpoint, release every handle and mapping of memory imported from a process without the shim, such as a GPU Memory Service server. | The shim imports foreign memory natively and tracks its handles and mappings. Inspection and checkpoint entry refuse while any remain, before preparation changes any state. |
+| Do not retry or resume after failed or ambiguous checkpoint preparation or reconstruction. | Irreversible mutations and failed cleanup are fail-stop. Unknown asynchronous-copy completion terminates the process without freeing memory that DMA may still reference. The agent terminates the source after preparation failure and does not continue native capture. |
+| After CUDA initialization, a fork child must exec or exit. | Shim memory calls reject inherited runtime state before taking its locks. Long-lived fork children during checkpoint are unsupported. |
+
+The memory-IPC adapter requires fully interposed IPC peers. It grants each converted `cuMemAlloc` mapping access from its allocating GPU and each IPC import access from its importing GPU. Successful `cuCtxEnablePeerAccess` calls also grant the current GPU access to existing and future converted allocations and IPC imports owned by the peer context. Grants are recorded with each mapping and replayed during reconstruction. Merely making another GPU visible does not add a grant or its allocation cost.
+
+The adapter assumes cooperating processes, typically one process per GPU. VMM permissions apply to devices, so CUDA context boundaries and `cuCtxDisablePeerAccess` are not access-control boundaries for converted mappings. Disabling peer access stops grants for future mappings, but existing mappings keep their device permissions. Destroying or resetting a context, or releasing its final primary-context reference, removes its relationships for future mappings. Applications remain responsible for serializing context teardown with its users.
+
+Converted allocations round backing up to the device's minimum VMM allocation granularity, so account for the larger footprint of small allocations. Explicit application-managed VMM mappings retain their own access policy.
+
 ## Packaging methods
 
 - **Custom image (reference).** Start from the framework runtime image, add a
