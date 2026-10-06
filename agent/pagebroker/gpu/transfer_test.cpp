@@ -43,10 +43,10 @@ class CudaTransfer : public testing::Test {
 
   void TearDown() override
   {
-    if (stream_) EXPECT_EQ(cuStreamSynchronize(stream_), CUDA_SUCCESS);
-    if (data_) EXPECT_EQ(cuMemFree(data_), CUDA_SUCCESS);
-    if (stream_) EXPECT_EQ(cuStreamDestroy(stream_), CUDA_SUCCESS);
-    if (context_) EXPECT_EQ(cuDevicePrimaryCtxRelease(device_), CUDA_SUCCESS);
+    if (stream_) { EXPECT_EQ(cuStreamSynchronize(stream_), CUDA_SUCCESS); }
+    if (data_) { EXPECT_EQ(cuMemFree(data_), CUDA_SUCCESS); }
+    if (stream_) { EXPECT_EQ(cuStreamDestroy(stream_), CUDA_SUCCESS); }
+    if (context_) { EXPECT_EQ(cuDevicePrimaryCtxRelease(device_), CUDA_SUCCESS); }
   }
 
   void RoundTrip(transfer::TransferBuffers& buffers)
