@@ -30,7 +30,7 @@ spec:
         nvidia.com/gpu.product: NVIDIA-B200
       initContainers:
         - name: model-cache
-          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -60,7 +60,7 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
           # Inert placeholder: the agent restores the checkpointed process into
           # this container, so app.py must not run here.

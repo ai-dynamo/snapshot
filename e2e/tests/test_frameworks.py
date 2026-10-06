@@ -151,27 +151,32 @@ def test_framework_checkpoint_restore_serves_inference(
                 snap.ensure_pvc(guide_pvc)
 
         k8s.apply_configmap(config.namespace, fw.app_configmap(config=config, spec=framework))
-        k8s.create_pod(
-            fw.source_pod(
-                config=config,
-                run=run,
-                spec=framework,
-                image=framework_image,
-                model_cache=model_cache,
-            )
+        source_manifest = fw.source_pod(
+            config=config,
+            run=run,
+            spec=framework,
+            image=framework_image,
+            model_cache=model_cache,
         )
+        shared_memory = source_manifest["metadata"]["annotations"].get(fw.SHARED_MEMORY_ANNOTATION)
+        k8s.create_pod(source_manifest)
         source = snap.wait_for_pod_ready(
             config.namespace,
             run.source_pod,
             timeout=framework.source_ready_timeout_seconds,
         )
         source_node = source.spec.node_name
-        assert source.metadata.annotations.get(fw.SHARED_MEMORY_ANNOTATION) == "enabled"
-        source_libraries = fw.cuinterpose_library_hashes(config, source)
+        assert (source.metadata.annotations or {}).get(fw.SHARED_MEMORY_ANNOTATION) == shared_memory
+        source_libraries = (
+            fw.cuinterpose_library_hashes(config, source) if shared_memory == "enabled" else None
+        )
+        prompts = inference.chat_prompts(config.namespace, run.source_pod)
         source_main = next(c for c in source.spec.containers if c.name == frameworks.CONTAINER)
-        parallelism = next(e.value for e in source_main.env if e.name == "SNAPSHOT_TENSOR_PARALLEL_SIZE")
+        parallelism = next(
+            (e.value for e in source_main.env if e.name == "SNAPSHOT_TENSOR_PARALLEL_SIZE"), "1"
+        )
         result.update_environment(comparisonDimensions={
-            "cudaSharedMemorySupport": "enabled",
+            "cudaSharedMemorySupport": shared_memory or "disabled",
             "tensorParallelSize": int(parallelism),
         })
         result.redact(source_node, "source-node")
@@ -258,12 +263,13 @@ def test_framework_checkpoint_restore_serves_inference(
         result.redact(restore_node, "restore-node")
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
-        assert fw.cuinterpose_library_hashes(config, restored_pod) == source_libraries, (
-            "restored guide libraries differ from the captured bundle"
-        )
+        if source_libraries is not None:
+            assert fw.cuinterpose_library_hashes(config, restored_pod) == source_libraries, (
+                "restored guide libraries differ from the captured bundle"
+            )
 
-        answer = inference.request_generate(config.namespace, run.restore_pod, frameworks.PROMPT)
-        print(f"[{framework.name}] /generate after restore: {answer!r}")
+        answers = inference.verify_chat_answers(config.namespace, run.restore_pod, prompts)
+        print(f"[{framework.name}] /generate after restore: {answers!r}")
 
         # The placeholder's own entrypoint must have stayed in standby. If it
         # had loaded a model, its log would show the pre-checkpoint line and

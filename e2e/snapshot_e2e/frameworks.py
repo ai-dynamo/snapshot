@@ -22,9 +22,6 @@ FRAMEWORKS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "guide
 CONTAINER = "main"
 API_PORT = 8000
 
-# One small chat-style prompt is enough to prove the restored engine serves;
-# the guide APIs cap generation length themselves.
-PROMPT = "Reply with one short sentence confirming this restored worker can serve."
 REQUEST_TIMEOUT_SECONDS = 120
 
 # Phase budgets: source covers image pull, model load, and warm-up generation
@@ -37,9 +34,10 @@ REQUEST_TIMEOUT_SECONDS = 120
 # it counts double. The inner `timeout` around pytest in e2e-frameworks.yaml
 # is the binding limit: it must exceed SOURCE_READY_TIMEOUT_SECONDS +
 # CHECKPOINT_TIMEOUT_SECONDS + POD_DELETE_TIMEOUT_SECONDS +
-# 2 * restore_timeout_seconds + REQUEST_TIMEOUT_SECONDS, or pytest is
+# 2 * restore_timeout_seconds + 3 * REQUEST_TIMEOUT_SECONDS + 60s for source
+# prompt rendering, or pytest is
 # interrupted before the failure dump runs -- e.g. sglang's 600s override
-# makes that 900+300+180+2*600+120 = 2700s (45 min), the largest of the three.
+# makes that 900+300+180+2*600+3*120+60 = 3000s (50 min), the largest of the three.
 SOURCE_READY_TIMEOUT_SECONDS = 900
 CHECKPOINT_TIMEOUT_SECONDS = 300
 RESTORE_TIMEOUT_SECONDS = 300
@@ -133,7 +131,7 @@ def framework_spec(name: str) -> FrameworkSpec:
     recipe = os.environ.get("SNAPSHOT_E2E_RECIPE", "")
     if not recipe:
         return spec
-    if recipe not in {"glm-5.3", "deepseek-v4-flash"}:
+    if recipe not in {"glm-5.3", "deepseek-v4.1-flash"}:
         raise ValueError(f"unknown SNAPSHOT_E2E_RECIPE: {recipe}")
     spec = replace(spec, recipe=recipe)
     if not spec.deployment_manifest.is_file():
@@ -142,9 +140,6 @@ def framework_spec(name: str) -> FrameworkSpec:
         deployment = yaml.safe_load(handle)
     main = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == CONTAINER)
     env = {e["name"]: e["value"] for e in main["env"]}
-    parallelism = os.environ.get("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE")
-    if parallelism is not None and parallelism != env["SNAPSHOT_TENSOR_PARALLEL_SIZE"]:
-        raise ValueError(f"{name}/{recipe} requires TP{env['SNAPSHOT_TENSOR_PARALLEL_SIZE']}")
     return replace(
         spec,
         model=env["SNAPSHOT_MODEL"],

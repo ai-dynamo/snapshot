@@ -14,8 +14,6 @@ spec:
       app: vllm-source
   template:
     metadata:
-      annotations:
-        nvidia.com/cuda-shared-memory-support: "enabled"
       labels:
         app: vllm-source
     spec:
@@ -27,47 +25,14 @@ spec:
           localhostProfile: profiles/block-iouring.json
       nodeSelector:
         nvidia.com/gpu.present: "true"
-      initContainers:
-        - name: snapshot-cuda-install
-          image: ${SNAPSHOT_AGENT_IMAGE}
-          imagePullPolicy: IfNotPresent
-          command: ["/bin/cp"]
-          args:
-            - --preserve=mode
-            - --
-            - /usr/local/lib/snapshot/libcuinterpose.so
-            - /usr/local/lib/snapshot/libcuinterpose_core.so
-            - /usr/local/bin/cuinterpose-launch
-            - /tmp/snapshot-cuda/
-          volumeMounts:
-            - name: snapshot-cuda
-              mountPath: /tmp/snapshot-cuda
-          resources:
-            requests: {cpu: 100m, memory: 64Mi}
-            limits: {cpu: 100m, memory: 64Mi}
-          securityContext:
-            runAsUser: 65532
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-            seccompProfile:
-              type: RuntimeDefault
       containers:
         - name: main
-          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
           command:
-            - /tmp/snapshot-cuda/cuinterpose-launch
-            - --library
-            - /tmp/snapshot-cuda/libcuinterpose.so
-            - --
             - python3
             - /snapshot-app/app.py
           env:
-            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
-              value: "1"
             - name: HF_HUB_DISABLE_XET
               value: "1"
             - name: SNAPSHOT_MODEL
@@ -92,9 +57,6 @@ spec:
             periodSeconds: 1
             failureThreshold: 1200
           volumeMounts:
-            - name: snapshot-cuda
-              mountPath: /tmp/snapshot-cuda
-              readOnly: true
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
@@ -106,8 +68,6 @@ spec:
               mountPath: /snapshot-app
               readOnly: true
       volumes:
-        - name: snapshot-cuda
-          emptyDir: {}
         - name: snapshot-control
           emptyDir: {}
         - name: tun
