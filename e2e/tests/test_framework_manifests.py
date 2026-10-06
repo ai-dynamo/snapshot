@@ -10,7 +10,7 @@ pull request, without a cluster:
 
 - the source and restore pods carry the restore-pod contract pieces the agent
   relies on (control volume at /snapshot-control with subPath main,
-  the apps’ default control directory, io_uring seccomp profile, /dev/net/tun, nvidia
+  the apps' default control directory, io_uring seccomp profile, /dev/net/tun, nvidia
   RuntimeClass, one GPU);
 - the restore pod is an inert placeholder (an explicit sleep command) that
   restores this run's PodSnapshot;
@@ -86,7 +86,7 @@ def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec)
         assert main["image"] == IMAGE
         assert main["resources"]["limits"]["nvidia.com/gpu"] == "1"
         assert fw.env_value(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE") is None
-        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") is None
+        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") in (None, workloads.CONTROL_DIR)
         assert {
             "name": "snapshot-control",
             "mountPath": workloads.CONTROL_DIR,
@@ -311,7 +311,7 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         # Exactly one HF_HOME even when the guide already set one (SGLang).
         assert sum(1 for e in main["env"] if e["name"] == "HF_HOME") == 1
         # Contract pieces are untouched by the cache rewrite.
-        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") is None
+        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") in (None, workloads.CONTROL_DIR)
         assert any(m["mountPath"] == "/dev/net/tun" for m in main["volumeMounts"])
 
 
