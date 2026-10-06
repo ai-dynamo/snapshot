@@ -3,8 +3,16 @@
 
 #include "posix_copy_engine.hpp"
 
+#include <algorithm>
+#include <fcntl.h>
 #include <filesystem>
+#include <linux/fs.h>
 #include <stdexcept>
+#include <sys/ioctl.h>
+#include <system_error>
+#include <unistd.h>
+
+#include "file_descriptor.hpp"
 
 namespace snapshot::pagebroker {
 namespace {
@@ -83,7 +91,8 @@ uintmax_t
 DirectorySize(const Path& path)
 {
   uintmax_t bytes = 0;
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(path)) {
+  for (auto it = std::filesystem::recursive_directory_iterator(path); it != std::filesystem::recursive_directory_iterator(); ++it) {
+    const auto& entry = *it;
     if (entry.is_symlink())
       throw std::runtime_error("checkpoint contains symlink");
     if (entry.is_regular_file())
@@ -110,7 +119,49 @@ PosixCopyEngine::RestoreSize(const StorageBackend& source) const
 void
 PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destination) const
 {
-  CopyDirectory(SourcePath(source, storage_root_), destination);
+  const Path root = SourcePath(source, storage_root_);
+  std::filesystem::create_directory(destination);
+  for (auto it = std::filesystem::recursive_directory_iterator(root); it != std::filesystem::recursive_directory_iterator(); ++it) {
+    const auto& entry = *it;
+    const Path target = destination / entry.path().lexically_relative(root);
+    if (entry.is_symlink())
+      throw std::runtime_error("checkpoint contains symlink");
+    if (entry.is_directory()) {
+      std::filesystem::create_directory(target);
+    } else if (entry.is_regular_file()) {
+      // A reflink lets the restore change its files without changing the
+      // checkpoint. Hard links would allow those changes to corrupt the source.
+      FileDescriptor input(open(entry.path().c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+      FileDescriptor output(open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
+      if (input.get() < 0 || output.get() < 0)
+        throw std::system_error(errno, std::generic_category(), "open restore clone");
+      if (ioctl(output.get(), FICLONE, input.get()) != 0) {
+        if (errno != EXDEV && errno != EOPNOTSUPP && errno != ENOTTY && errno != EINVAL)
+          throw std::system_error(errno, std::generic_category(), "clone restore file");
+        // NFSv4.2 can perform COPY server-side even when CLONE is unavailable.
+        // Unlike hard links this still creates independently writable files.
+        uintmax_t remaining = entry.file_size();
+        while (remaining) {
+          ssize_t copied = copy_file_range(input.get(), nullptr, output.get(), nullptr,
+                                          std::min<uintmax_t>(remaining, 1ULL << 30), 0);
+          if (copied > 0) {
+            remaining -= copied;
+          } else if (copied < 0 && errno == EINTR) {
+            continue;
+          } else if (copied == 0 || errno == EXDEV || errno == EOPNOTSUPP || errno == ENOSYS ||
+                     errno == EINVAL || errno == EPERM) {
+            std::filesystem::copy_file(entry.path(), target, std::filesystem::copy_options::overwrite_existing);
+            break;
+          } else {
+            throw std::system_error(errno, std::generic_category(), "copy restore file");
+          }
+        }
+      }
+      std::filesystem::permissions(target, entry.status().permissions());
+    } else {
+      throw std::runtime_error("checkpoint contains non-regular entry");
+    }
+  }
 }
 
 void
@@ -131,9 +182,21 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
   const Path published = DestinationPath(destination, storage_root_);
   const Path partial = PartialPath(published);
   const Path previous = PreviousPath(published);
+  bool moved = false;
+  bool owns_partial = false;
   try {
     std::filesystem::create_directories(published.parent_path());
-    CopyDirectory(source, partial);
+    owns_partial = std::filesystem::create_directory(partial);
+    if (!owns_partial) throw std::runtime_error("checkpoint partial destination already exists");
+    std::error_code error;
+    std::filesystem::rename(source, partial, error);
+    if (!error) {
+      moved = true;
+    } else if (error == std::errc::cross_device_link) {
+      CopyDirectory(source, partial);
+    } else {
+      throw std::filesystem::filesystem_error("stage publication", source, partial, error);
+    }
     if (std::filesystem::exists(published)) {
       std::filesystem::rename(published, previous);
       RestorePreviousOnFailure restore_previous(previous, published);
@@ -147,7 +210,12 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
   }
   catch (...) {
     std::error_code cleanup_error;
-    std::filesystem::remove_all(partial, cleanup_error);
+    if (moved) {
+      // Restore the source directory so the caller can retry or abort.
+      std::filesystem::rename(partial, source, cleanup_error);
+    } else if (owns_partial) {
+      std::filesystem::remove_all(partial, cleanup_error);
+    }
     throw;
   }
 }
