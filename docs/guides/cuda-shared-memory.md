@@ -172,6 +172,9 @@ kubectl rollout status --namespace "$SNAPSHOT_NAMESPACE" \
 manifest's `nvidia.com/restore-from` to that PodSnapshot name, then follow the
 [restore guide](restore.md) with the matching multi-GPU restore manifest.
 Restore needs the same GPU count and enough CPU memory for the captured state.
+The vLLM and SGLang large-model pairs request 1 TiB of host memory for the
+checkpoint-time weight backup and process state. This is separate from
+serving-time offloading.
 The TensorRT-LLM GLM recipe requests 1 TiB of host memory without a hard memory
 limit. It retains GPU state during capture, so the host copy can exceed 1 TiB.
 Use a node with enough available RAM and measure peak memory before setting a

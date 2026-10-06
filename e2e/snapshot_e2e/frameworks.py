@@ -22,9 +22,6 @@ FRAMEWORKS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "guide
 CONTAINER = "main"
 API_PORT = 8000
 
-# One small chat-style prompt is enough to prove the restored engine serves;
-# the guide APIs cap generation length themselves.
-PROMPT = "Reply with one short sentence confirming this restored worker can serve."
 REQUEST_TIMEOUT_SECONDS = 120
 
 # Phase budgets: source covers image pull, model load, and warm-up generation

@@ -113,9 +113,9 @@ spec:
           resources:
             requests:
               cpu: "16"
-              memory: 512Gi
+              memory: 1Ti
             limits:
-              memory: 512Gi
+              memory: 1Ti
               nvidia.com/gpu: "4"
           readinessProbe:
             exec:
