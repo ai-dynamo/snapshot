@@ -6,6 +6,7 @@ package types
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ type AgentConfig struct {
 	Storage           StorageSpec     `yaml:"storage"`
 	Overlay           OverlaySettings `yaml:"overlay"`
 	PageBroker        PageBrokerSpec  `yaml:"pageBroker"`
+	Checkpoint        CheckpointSpec  `yaml:"checkpoint"`
 	Restore           RestoreSpec     `yaml:"restore"`
 	CRIU              CRIUSettings    `yaml:"criu"`
 }
@@ -62,6 +64,9 @@ func (c *AgentConfig) Validate() error {
 			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, or empty", c.CRIU.ImageIoMode, "writeback", "direct"),
 		}
 	}
+	if err := c.Checkpoint.Validate(); err != nil {
+		return err
+	}
 	return c.Restore.Validate()
 }
 
@@ -74,6 +79,46 @@ type StorageSpec struct {
 type PageBrokerSpec struct {
 	Enabled           bool   `yaml:"enabled"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
+}
+
+// DefaultCheckpointTimeoutSeconds bounds a dump for a config written before the field existed.
+const DefaultCheckpointTimeoutSeconds = 3600
+
+// maxTimeoutSeconds is the largest value that survives conversion to a time.Duration, which counts
+// nanoseconds in an int64. Past it the multiplication wraps negative, and a negative timeout reads
+// as "no timeout" at every call site — so an absurd value would silently remove the bound it asked
+// for. Roughly 292 years; nothing legitimate comes near it.
+const maxTimeoutSeconds = int64(math.MaxInt64) / int64(time.Second)
+
+// CheckpointSpec holds settings for the CRIU dump.
+type CheckpointSpec struct {
+	// A pointer so absent and zero are distinguishable: every config predating this field omits
+	// it, and an agent upgraded ahead of its ConfigMap has to start — with the guard on.
+	CheckpointTimeoutSeconds *int `yaml:"checkpointTimeoutSeconds"`
+}
+
+// CheckpointTimeout bounds one dump, defaulting when the config omits it.
+func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
+	if c.CheckpointTimeoutSeconds == nil {
+		return DefaultCheckpointTimeoutSeconds * time.Second
+	}
+	return time.Duration(*c.CheckpointTimeoutSeconds) * time.Second
+}
+
+func (c *CheckpointSpec) Validate() error {
+	if c.CheckpointTimeoutSeconds == nil {
+		return nil
+	}
+	if *c.CheckpointTimeoutSeconds <= 0 {
+		return &ConfigError{Field: "checkpointTimeoutSeconds", Message: "checkpointTimeoutSeconds must be greater than zero"}
+	}
+	if int64(*c.CheckpointTimeoutSeconds) > maxTimeoutSeconds {
+		return &ConfigError{
+			Field:   "checkpointTimeoutSeconds",
+			Message: fmt.Sprintf("checkpointTimeoutSeconds must not exceed %d", maxTimeoutSeconds),
+		}
+	}
+	return nil
 }
 
 // RestoreSpec holds settings for the CRIU restore process.
@@ -96,6 +141,12 @@ func (c *RestoreSpec) RestoreTimeout() time.Duration {
 func (c *RestoreSpec) Validate() error {
 	if c.RestoreTimeoutSeconds <= 0 {
 		return &ConfigError{Field: "restoreTimeoutSeconds", Message: "restoreTimeoutSeconds must be greater than zero"}
+	}
+	if int64(c.RestoreTimeoutSeconds) > maxTimeoutSeconds {
+		return &ConfigError{
+			Field:   "restoreTimeoutSeconds",
+			Message: fmt.Sprintf("restoreTimeoutSeconds must not exceed %d", maxTimeoutSeconds),
+		}
 	}
 	return nil
 }

@@ -204,6 +204,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 `config.*` renders into the agent ConfigMap.
 
 - `config.overlay.exclusions` — rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`.
+- `config.checkpoint.checkpointTimeoutSeconds` — maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
 - `config.restore.restoreTimeoutSeconds` — maximum seconds for a restore before the agent marks it failed. Default `7200`.
 
 `config.criu.*` — CRIU options:

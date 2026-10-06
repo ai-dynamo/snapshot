@@ -31,6 +31,9 @@ data:
       controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}
       {{- end }}
 
+    checkpoint:
+      checkpointTimeoutSeconds: {{ .Values.config.checkpoint.checkpointTimeoutSeconds }}
+
     restore:
       restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
       skipCompatCheck: {{ .Values.config.restore.skipCompatCheck }}
