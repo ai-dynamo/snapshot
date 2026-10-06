@@ -39,6 +39,46 @@ there, runs the environment check, then runs the snapshot lifecycle tests.
 The workflow resolves the latest published Snapshot operator/agent image tag and
 passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
+### CPU Mode (k3d)
+
+`e2e-cpu.yaml` runs on pull requests that touch the images, chart, CRDs, or
+harness, where no GPU cluster is available. It builds the operator and agent
+images from the pull request, creates a k3d cluster, imports the images into it,
+installs the chart through the same `setup.py` phases the GPU workflow uses, and
+runs `pytest -m cpu`.
+
+k3d has no GPU, so `hack/k3d-cpu-e2e.sh cluster-up` fakes the three things the
+chart and test helpers inherited from the GPU environment, each safe only
+because the cluster has a single node:
+
+| Faked | Why it is needed |
+| --- | --- |
+| Node label `nvidia.com/gpu.present=true` | the agent DaemonSet and workload pods both select GPU nodes |
+| `RuntimeClass/nvidia` on the `runc` handler | the agent pod hardcodes `runtimeClassName: nvidia` |
+| hostPath `PersistentVolume` declared `ReadWriteMany` | the installer requires an RWX checkpoint claim, and k3d's local-path provisioner is RWO |
+
+The script stops there. It does not install Snapshot and does not create the
+checkpoint claim — `setup.py` does both, the same way it does for a GPU cluster.
+What the script does contribute is `hack/k3d-cpu-e2e.sh helm-set`, which prints
+the chart values this cluster needs (k3s keeps containerd outside the
+conventional paths, and a single node has to fit the workload pods) in the
+newline-separated form `SNAPSHOT_E2E_HELM_SET` accepts.
+
+`make cpu-e2e` runs the whole sequence on a linux/amd64 Docker host — build,
+cluster, install, tests — and deletes the cluster afterwards:
+
+```bash
+make cpu-e2e                                     # the whole thing
+SNAPSHOT_E2E_KEEP_CLUSTER=true make cpu-e2e      # leave the cluster up to debug
+SNAPSHOT_E2E_SKIP_BUILD=true bash hack/cpu-e2e.sh -m cpu -k restores
+```
+
+The agent is linux/amd64 only, so this does not work on an Apple Silicon Mac.
+
+Each stage stands alone. Against a cluster that already runs Snapshot, set
+`KUBECONFIG` and run `pytest -m cpu` on its own; against a clean cluster, run
+the `setup.py` phases below and then the tests.
+
 ### Local Direct Mode
 
 Use direct mode when `KUBECONFIG` already points at the cluster where Snapshot
