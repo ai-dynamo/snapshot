@@ -1,0 +1,528 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Test the packaged coordinator with real sockets and predefined replies."""
+
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
+import select
+import socket
+import struct
+import subprocess
+import tempfile
+import unittest
+
+import msgpack
+
+BINARY = Path(__file__).resolve().parents[1] / "build/cuinterpose-coordinator"
+PREPARE = ("prepare_multicast", "save_allocations", "prepare_unicast")
+RESTORE = ("load_allocations", "restore_unicast", "restore_multicast_creators",
+           "restore_multicast_importers", "restore_multicast_devices", "restore_multicast_bindings")
+ALLOCATION = {"id": bytes([1] * 16), "creator_pid": 1}
+MULTICAST = {"id": bytes([2] * 16), "creator_pid": 1}
+
+
+def encode(body):
+    return msgpack.packb({"version": 2, "body": body}, use_bin_type=True)
+
+
+def allocation(creator=1, *, size=4096, shared=False, identifier=ALLOCATION["id"]):
+    return {"allocation": {"allocation": {"id": identifier, "creator_pid": creator},
+        "shared": shared, "size": size, "allocation_type": 1, "handle_types": 1,
+        "location": {"location_type": 1, "id": 0}, "virtual_allocation_handle_count": 1}}
+
+
+def mapping(size=4096, address=0x10000):
+    return {"mapping": {"allocation": ALLOCATION, "address": address,
+        "size": size, "offset": 0, "access": []}}
+
+
+def multicast(size, devices=1):
+    return {"multicast": {"allocation": MULTICAST, "properties": {"devices": devices, "size": size,
+        "handle_types": 1, "flags": 0}, "virtual_multicast_handle_count": 1}}
+
+
+def multicast_device(device=0):
+    return {"multicast_device": {"allocation": MULTICAST, "device": device}}
+
+
+def binding(size, offset=0, *, member=ALLOCATION):
+    return {"multicast_binding": {"allocation": MULTICAST,
+        "source": {"memory": {"allocation": member, "offset": 0}},
+        "size": size, "offset": offset, "flags": 0, "version": "v1", "device": 0}}
+
+
+class Contracts(unittest.TestCase):
+    def setUp(self):
+        self.resources = ExitStack()
+        self.addCleanup(self.resources.close)
+        self.directory = Path(self.resources.enter_context(tempfile.TemporaryDirectory()))
+        self.state = self.directory / "cuinterpose.state"
+        self.listeners = []
+        for pid in (1, 2):
+            listener = self.resources.enter_context(socket.socket(socket.AF_UNIX))
+            listener.bind(str(self.directory / f"cuinterpose-{pid}.sock"))
+            listener.listen()
+            self.listeners.append(listener)
+
+    @contextmanager
+    def coordinator(self, mode, error=None, *, checkpoint_dir=None):
+        had_state = self.state.exists()
+        command = [str(BINARY), mode, "--control-dir", str(self.directory),
+                   "--process", "1", "--process", "2"]
+        if mode != "--inspect":
+            command += ["--checkpoint-dir", str(checkpoint_dir or self.directory)]
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            yield process
+            _, stderr = process.communicate(timeout=5)
+            self.assertFalse(select.select(self.listeners, [], [], 0)[0], "unexpected phase or retry")
+            if error is None:
+                self.assertEqual(process.returncode, 0, stderr)
+            else:
+                self.assertNotEqual(process.returncode, 0, stderr)
+                for expected in (error,) if isinstance(error, str) else error:
+                    self.assertIn(expected, stderr)
+                if mode == "--prepare" and not had_state:
+                    self.assertFalse(self.state.exists())
+            if mode == "--inspect":
+                self.assertFalse(self.state.exists())
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+
+    def request(self, pid, kind, **fields):
+        if kind == "execute" and fields.get("operation") == "save_allocations":
+            kind = "save_allocations"
+            fields = {"owners": self.expected_owners.get(pid, [])}
+        listener = self.listeners[pid - 1]
+        self.assertTrue(select.select([listener], [], [], 3)[0], f"no {kind} request for {pid}")
+        connection, _ = listener.accept()
+        self.resources.callback(connection.close)
+        connection.settimeout(3)
+        with connection.makefile("rb") as stream:
+            size, = struct.unpack("<I", stream.read(4))
+            message = msgpack.unpackb(stream.read(size), raw=False)
+        self.assertEqual(message, {"version": 2, "body": {"kind": kind, "namespace_pid": pid, **fields}})
+        return connection
+
+    def reply(self, connection, pid, result):
+        body = encode({"namespace_pid": pid, "result": result})
+        with connection:
+            connection.sendall(struct.pack("<I", len(body)) + body)
+
+    def inspect(self, records, begin=False, owners=None):
+        self.expected_owners = owners or {}
+        for pid, records in enumerate(records, 1):
+            self.reply(self.request(pid, "begin_checkpoint" if begin else "inspect"), pid,
+                       {"Ok": {"inspection": {"records": records}}})
+
+    def phase(self, operation, byte_counts=(0, 0)):
+        # Requiring both requests before any reply detects serial dispatch.
+        held, other = [self.request(pid, "execute", operation=operation) for pid in (1, 2)]
+        def completed(count):
+            return {"Ok": {"completed": {"operation": operation, "bytes": count}}}
+        self.reply(other, 2, completed(byte_counts[1]))
+        self.assertFalse(select.select(self.listeners, [], [], 0.1)[0], "advanced before the held reply")
+        self.reply(held, 1, completed(byte_counts[0]))
+
+    def test_preflight_refusals(self):
+        cases = [
+            ([allocation(3)], "missing creator participant"),
+            ([allocation(), allocation()], "duplicate allocation record"),
+            ([allocation(size=0)], "invalid allocation extent"),
+            ([allocation(), mapping(8192)], "mapping out of bounds"),
+            ([allocation(), multicast(16384), multicast_device(), binding(8192)],
+             "multicast binding out of member bounds"),
+            ([allocation(), multicast(4096), multicast_device(),
+              binding(4096, member={**ALLOCATION, "creator_pid": 2})],
+             "inconsistent allocation creator"),
+            ([allocation(), multicast(4096), multicast_device(), binding(4096, member=MULTICAST)],
+             "invalid multicast member"),
+        ]
+        for records, error in cases:
+            with self.subTest(error=error), self.coordinator("--prepare", error):
+                self.inspect([records, []], begin=True)
+
+    def test_mapping_refusals_start_no_phases(self):
+        for field, value, error in (
+                ("allocation", {**ALLOCATION, "creator_pid": 2}, "inconsistent allocation creator"),
+                ("address", 0, "invalid mapping"),
+                ("size", 0, "invalid mapping"),
+                ("offset", (1 << 64) - 1, "mapping out of bounds")):
+            record = mapping()
+            record["mapping"][field] = value
+            with self.subTest(field=field), self.coordinator("--prepare", error):
+                self.inspect([[allocation(), record], []], begin=True)
+
+    def test_participants_must_agree_on_sharing(self):
+        with self.coordinator("--prepare", "inconsistent allocation metadata"):
+            self.inspect([[allocation()], [allocation(shared=True)]], begin=True)
+
+    def test_existing_checkpoint_is_preserved_without_contacting_participants(self):
+        self.state.write_bytes(b"previous checkpoint")
+        with self.coordinator("--prepare", "already exists"):
+            pass
+        self.assertEqual(self.state.read_bytes(), b"previous checkpoint")
+
+    def test_read_only_inspection_contacts_every_participant(self):
+        with self.coordinator("--inspect"):
+            self.inspect([[allocation(shared=True), mapping()], [allocation(shared=True)]])
+
+    def test_read_only_inspection_validates_topology(self):
+        with self.coordinator("--inspect", "mapping out of bounds"):
+            self.inspect([[allocation(), mapping(8192)], []])
+
+    def test_read_only_inspection_requires_healthy_participants(self):
+        with self.coordinator("--inspect", "injected failure"):
+            self.reply(self.request(1, "inspect"), 1, {"Ok": {"inspection": {"records": []}}})
+            self.reply(self.request(2, "inspect"), 2, {"Err": "injected failure"})
+
+    def test_read_only_inspection_requires_every_endpoint(self):
+        self.listeners[1].close()
+        (self.directory / "cuinterpose-2.sock").unlink()
+        self.listeners.pop()
+        with self.coordinator("--inspect", "connect failed"):
+            self.reply(self.request(1, "inspect"), 1, {"Ok": {"inspection": {"records": []}}})
+
+    def test_unsupported_allocation_properties_start_no_phases(self):
+        for field, value in (("location", {"location_type": 0, "id": 0}), ("allocation_type", 0)):
+            for importer in (False, True):
+                unsupported = allocation()
+                unsupported["allocation"][field] = value
+                records = [[allocation()], [unsupported]] if importer else [[unsupported], []]
+                with self.subTest(field=field, importer=importer), \
+                        self.coordinator("--prepare", "unsupported allocation properties"):
+                    self.inspect(records, begin=True)
+                # Validate both the saved manifest and the live inspection on
+                # restore before any load or reconstruction command is sent.
+                for saved, live in ((records, [[allocation()], []]),
+                                    ([[allocation()], []], records)):
+                    self.state.write_bytes(encode({1: saved[0], 2: saved[1]}))
+                    with self.coordinator("--restore", "unsupported allocation properties"):
+                        self.inspect(live)
+                self.state.unlink()
+
+    def test_host_numa_creator_saves_once_and_importer_reconnects(self):
+        creator = allocation(shared=True)
+        importer = allocation(shared=True)
+        for record in (creator, importer):
+            record["allocation"]["location"] = {"location_type": 3, "id": 57}
+        records = [[creator, mapping()], [importer, mapping(address=0x20000)]]
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True, owners={pid: [{"allocation": ALLOCATION, "owner_pid": 1}] for pid in (1, 2)})
+            for operation in PREPARE:
+                self.phase(operation, (4096, 0) if operation == "save_allocations" else (0, 0))
+        saved = msgpack.unpackb(self.state.read_bytes(), raw=False, strict_map_key=False)
+        self.assertEqual(saved["body"], {1: records[0], 2: records[1]})
+        with self.coordinator("--restore"):
+            self.inspect(records)
+            for operation in RESTORE:
+                self.phase(operation, (4096, 0) if operation == "load_allocations" else (0, 0))
+            self.inspect(records)
+
+    def test_surviving_importer_saves_full_backing_once(self):
+        # The creator remains in the group but has released all its local references.
+        # A partial mapping must not reduce the saved size to the mapped range.
+        imported = allocation(shared=True, size=8192)
+        imported["allocation"]["handle_types"] = 0
+        imported["allocation"]["virtual_allocation_handle_count"] = 0
+        alias = mapping(4096, address=0x30000)
+        alias["mapping"]["offset"] = 4096
+        records = [[], [imported, alias]]
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True, owners={2: [{"allocation": ALLOCATION, "owner_pid": 2}]})
+            for operation in PREPARE:
+                self.phase(operation, (0, 8192) if operation == "save_allocations" else (0, 0))
+        with self.coordinator("--restore"):
+            self.inspect(records)
+            for operation in RESTORE:
+                self.phase(operation, (0, 8192) if operation == "load_allocations" else (0, 0))
+            self.inspect(records)
+
+    def test_failed_or_lost_reply_stops_without_retry(self):
+        for lost in (False, True):
+            error = "receive failed" if lost else "injected failure"
+            with self.subTest(lost=lost), self.coordinator("--prepare", error):
+                self.inspect([[], []], begin=True)
+                held, failed = [self.request(pid, "execute", operation=PREPARE[0]) for pid in (1, 2)]
+                if lost:
+                    failed.close()
+                else:
+                    self.reply(failed, 2, {"Err": "injected failure"})
+                self.reply(held, 1, {"Ok": {"completed": {"operation": PREPARE[0], "bytes": 0}}})
+
+    def test_wrong_transfer_size_stops_before_teardown(self):
+        with self.coordinator("--prepare", ("SaveAllocations", "participant 1", "transfer size",
+                                            "expected_bytes 4096", "bytes 0")):
+            self.inspect([[allocation(shared=True)], []], begin=True, owners={1: [{"allocation": ALLOCATION, "owner_pid": 1}]})
+            self.phase(PREPARE[0])
+            self.phase(PREPARE[1])  # Replies claim zero bytes instead of 4096.
+
+    def test_all_participant_failures_are_reported_after_every_reply(self):
+        errors = ("PrepareMulticast", "participant 1", "cuinterpose-1.sock", "rank one failure",
+                  "participant 2", "cuinterpose-2.sock", "rank two failure")
+        with self.coordinator("--prepare", errors) as process:
+            self.inspect([[], []], begin=True)
+            first, second = [self.request(pid, "execute", operation=PREPARE[0]) for pid in (1, 2)]
+            self.reply(first, 1, {"Err": "rank one failure"})
+            with self.assertRaises(subprocess.TimeoutExpired):
+                process.wait(timeout=0.1)
+            self.reply(second, 2, {"Err": "rank two failure"})
+
+    def test_begin_checkpoint_refusal_starts_no_lifecycle_phase(self):
+        with self.coordinator("--prepare", ("BeginCheckpoint", "participant 2",
+                                            "cuinterpose-2.sock", "cannot freeze registry")):
+            self.reply(self.request(1, "begin_checkpoint"), 1, {"Ok": {"inspection": {"records": []}}})
+            self.reply(self.request(2, "begin_checkpoint"), 2, {"Err": "cannot freeze registry"})
+
+    def test_execute_identity_and_operation_mismatches_are_diagnostic(self):
+        for identity in (False, True):
+            errors = ("namespace PID changed", "expected 1, actual 3") if identity else (
+                "expected operation PrepareMulticast", "actual LoadAllocations", "expected_bytes 0", "bytes 0")
+            with self.subTest(identity=identity), self.coordinator("--prepare", ("participant 1", *errors)):
+                self.inspect([[], []], begin=True)
+                first, second = [self.request(pid, "execute", operation=PREPARE[0]) for pid in (1, 2)]
+                self.reply(first, 3 if identity else 1, {"Ok": {"completed": {
+                    "operation": PREPARE[0] if identity else "load_allocations", "bytes": 0}}})
+                self.reply(second, 2, {"Ok": {"completed": {"operation": PREPARE[0], "bytes": 0}}})
+
+    def test_every_lifecycle_refusal_names_its_phase(self):
+        for mode, operations in (("--prepare", PREPARE), ("--restore", RESTORE)):
+            for index, operation in enumerate(operations):
+                self.state.unlink(missing_ok=True)
+                if mode == "--restore":
+                    self.state.write_bytes(encode({1: [], 2: []}))
+                phase_name = "".join(word.title() for word in operation.split("_"))
+                with self.subTest(operation=operation), \
+                        self.coordinator(mode, (phase_name, "participant 1", "cuinterpose-1.sock", "refused")):
+                    self.inspect([[], []], begin=mode == "--prepare")
+                    for preceding in operations[:index]:
+                        self.phase(preceding)
+                    first, second = [self.request(pid, "execute", operation=operation) for pid in (1, 2)]
+                    self.reply(first, 1, {"Err": "refused"})
+                    self.reply(second, 2, {"Ok": {"completed": {"operation": operation, "bytes": 0}}})
+
+    def test_publication_failure_after_preparation_sends_no_rollback(self):
+        missing = self.directory / "missing-checkpoint-directory"
+        with self.coordinator("--prepare", ("publish checkpoint state", str(missing)), checkpoint_dir=missing):
+            self.inspect([[], []], begin=True)
+            for operation in PREPARE:
+                self.phase(operation)
+        self.assertFalse(missing.exists())
+
+    def test_parallel_phases_and_canonical_state(self):
+        other = allocation(2, identifier=bytes([3] * 16))
+        records = [[mapping(), allocation()], [other]]
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True)
+            for operation in PREPARE:
+                self.phase(operation)
+        saved = msgpack.unpackb(self.state.read_bytes(), raw=False, strict_map_key=False)
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["body"], {1: [allocation(), mapping()], 2: [other]})
+        records[0].reverse()
+        with self.coordinator("--restore"):
+            self.inspect(records)
+            for operation in RESTORE:
+                self.phase(operation)
+            self.inspect(records)
+
+    def test_restore_refusals(self):
+        for case, error in [("missing", "cannot parse"), ("corrupt", "cannot parse"),
+                            ("identity", "namespace PID changed"), ("topology", "restored topology")]:
+            self.state.unlink(missing_ok=True)
+            if case == "corrupt":
+                self.state.write_bytes(b"not-cuinterpose-state\n")
+            elif case != "missing":
+                self.state.write_bytes(encode({1: [allocation(), mapping()], 2: []}))
+            with self.subTest(case=case), self.coordinator("--restore", error):
+                if case == "identity":
+                    self.reply(self.request(1, "inspect"), 3, {"Ok": {"inspection": {"records": []}}})
+                elif case == "topology":
+                    changed = [[allocation(), mapping(address=0x30000)], []]
+                    self.inspect(changed)
+                    for operation in RESTORE:
+                        self.phase(operation)
+                    self.inspect(changed)
+
+    def test_restore_difference_identifies_participant_and_record(self):
+        original = [allocation(), mapping()]
+        for changed, details in (([allocation()], ("expected 2 records, actual 1 records",)),
+                                  ([allocation(), mapping(address=0x30000)],
+                                   ("record 1", "expected Mapping", "actual Mapping", "65536", "196608"))):
+            self.state.write_bytes(encode({1: original, 2: []}))
+            with self.subTest(changed=changed), \
+                    self.coordinator("--restore", ("restored topology", "participant 1", *details)):
+                self.inspect([original, []])
+                for operation in RESTORE:
+                    self.phase(operation)
+                self.inspect([changed, []])
+
+    def test_creator_none_handle_type_is_rejected_even_with_carrier(self):
+        for carrier in (False, True):
+            record = allocation(shared=carrier)
+            record["allocation"]["handle_types"] = 0
+            with self.subTest(carrier=carrier), \
+                    self.coordinator("--inspect", ("invalid allocation creator", "handle_types=0")):
+                self.inspect([[record], []])
+
+    def test_creator_anchor_requires_local_handle_or_mapping(self):
+        creator = allocation(shared=True)
+        creator["allocation"]["virtual_allocation_handle_count"] = 0
+        with self.coordinator("--inspect"):
+            self.inspect([[creator, mapping()], []])
+        with self.coordinator("--inspect", "missing allocation anchor"):
+            self.inspect([[creator], [allocation(shared=True), mapping(address=0x20000)]])
+
+    def test_usage_errors(self):
+        control = f"--control-dir {self.directory}"
+        cases = [
+            ("", ("required arguments", "--control-dir", "--process")),
+            ("--prepare --checkpoint-dir /tmp", ("required arguments", "--control-dir", "--process")),
+            (f"--prepare {control} --process 1", ("required arguments", "--checkpoint-dir")),
+            (f"--inspect --prepare {control} --process 1", ("cannot be used with", "--inspect", "--prepare")),
+            (f"--inspect {control}", ("required arguments", "--process")),
+            (f"--checkpoint-dir /tmp {control} --process 1", ("an action is required",)),
+            ("--inspect --control-dir relative --process 1", ("--control-dir must be an absolute path",)),
+            (f"--inspect {control} --process 0", ("invalid value '0'", "--process")),
+            (f"--inspect {control} --process 1 --process 1", ("duplicate namespace PID",)),
+            (f"--inspect {control} --process not-a-pid", ("invalid value 'not-a-pid'", "--process")),
+        ]
+        for args, expected in cases:
+            with self.subTest(args=args):
+                result = subprocess.run([str(BINARY), *args.split()], capture_output=True, text=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                for diagnostic in expected:
+                    self.assertIn(diagnostic, result.stderr)
+                self.assertFalse(select.select(self.listeners, [], [], 0)[0], "invalid arguments contacted a participant")
+
+    def test_later_participant_overflow_starts_no_save(self):
+        records = [allocation(2, size=size, shared=True, identifier=bytes([i] * 16))
+                   for i, size in enumerate(((1 << 64) - 1, 1))]
+        with self.coordinator("--prepare", "allocation size overflow"):
+            self.inspect([[], records], begin=True)
+            self.phase(PREPARE[0])
+
+    def test_multicast_sizes_must_agree(self):
+        for sizes in ((4096, 8192), (8192, 4096)):
+            with self.subTest(sizes=sizes), self.coordinator("--prepare", "inconsistent multicast properties"):
+                self.inspect([[multicast(size, 2)] for size in sizes], begin=True)
+
+    def test_invalid_multicast_properties_start_no_phases(self):
+        for field, value in (("flags", 1), ("size", 0), ("devices", 0), ("handle_types", 0)):
+            record = multicast(4096)
+            record["multicast"]["properties"][field] = value
+            with self.subTest(field=field), self.coordinator("--prepare", "invalid multicast properties"):
+                self.inspect([[allocation(), record, multicast_device(), binding(4096)], []], begin=True)
+
+    def test_multicast_requires_one_creator_and_complete_groups(self):
+        cases = [
+            ([[], [multicast(4096)]], "must have exactly one creator; found 0"),
+            ([[multicast(4096), multicast(4096)], []], "must have exactly one creator; found 2"),
+            ([[multicast(4096)], []], "incomplete multicast device group"),
+            ([[multicast(4096), multicast_device()], []], "incomplete multicast binding group"),
+        ]
+        for records, error in cases:
+            with self.subTest(error=error), self.coordinator("--prepare", error):
+                self.inspect(records, begin=True)
+
+    def test_multicast_references_require_matching_objects(self):
+        records = [multicast_device(), binding(4096),
+                   {"multicast_mapping": {"allocation": MULTICAST, "address": 0x10000,
+                    "size": 4096, "offset": 0, "flags": 0, "access": []}}]
+        for record in records:
+            with self.subTest(record=record), self.coordinator("--prepare", "missing multicast object"):
+                self.inspect([[allocation(), record], []], begin=True)
+            next(iter(record.values()))["allocation"] = {**MULTICAST, "creator_pid": 2}
+            with self.subTest(record=record), self.coordinator("--prepare", "inconsistent multicast creator"):
+                self.inspect([[allocation(), multicast(4096), record], []], begin=True)
+
+    def test_multicast_member_addresses_and_offsets_are_valid(self):
+        for source, error in (
+                ({"address": {"address": 0, "tracked_member": None}}, "invalid multicast member"),
+                ({"memory": {"allocation": ALLOCATION, "offset": (1 << 64) - 1}},
+                 "multicast binding out of member bounds")):
+            record = binding(4096)
+            record["multicast_binding"]["source"] = source
+            with self.subTest(source=source), self.coordinator("--prepare", error):
+                self.inspect([[allocation(), multicast(4096), multicast_device(), record], []], begin=True)
+
+    def test_multicast_device_ordinals_are_process_local(self):
+        other = {"id": bytes([3] * 16), "creator_pid": 2}
+        records = [
+            [allocation(), multicast(4096, 2), multicast_device(), binding(4096)],
+            [allocation(2, identifier=other["id"]), multicast(4096, 2),
+             multicast_device(), binding(4096, member=other)],
+        ]
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True)
+            for operation in PREPARE:
+                self.phase(operation)
+        with self.coordinator("--restore"):
+            self.inspect(records)
+            for operation in RESTORE:
+                self.phase(operation)
+            self.inspect(records)
+
+    def test_shared_holder_metadata_and_anchors_are_consistent(self):
+        for field, value, error in (
+                ("size", 8192, "inconsistent allocation metadata"),
+                ("location", {"location_type": 3, "id": 0}, "inconsistent allocation metadata"),
+                ("virtual_allocation_handle_count", 0, "missing allocation anchor")):
+            importer = allocation(shared=True)
+            importer["allocation"][field] = value
+            with self.subTest(field=field), self.coordinator("--prepare", error):
+                self.inspect([[allocation(shared=True)], [importer]], begin=True)
+
+    def test_creator_remains_owner_when_importer_has_lower_pid(self):
+        reference = {**ALLOCATION, "creator_pid": 2}
+        records = [[allocation(2, shared=True)], [allocation(2, shared=True)]]
+        owners = {1: [{"allocation": reference, "owner_pid": 2}],
+                  2: [{"allocation": reference, "owner_pid": 2}]}
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True, owners=owners)
+            for operation in PREPARE:
+                self.phase(operation, byte_counts=(0, 4096) if operation == "save_allocations" else (0, 0))
+
+    def test_multicast_binding_requires_local_attachment(self):
+        records = [
+            [allocation(shared=True), multicast(4096), multicast_device(), binding(4096)],
+            [allocation(shared=True), multicast(4096), binding(4096)],
+        ]
+        with self.coordinator("--prepare", "participant 2: multicast binding device 0 is not attached"):
+            self.inspect(records, begin=True)
+
+    def test_multicast_duplicate_device_in_one_process_is_rejected(self):
+        records = [[allocation(), multicast(4096), multicast_device(),
+                    multicast_device(), binding(4096)], []]
+        with self.coordinator("--prepare", "participant 1: duplicate multicast device 0"):
+            self.inspect(records, begin=True)
+
+    def test_multicast_device_requires_matching_creator(self):
+        device = multicast_device()
+        device["multicast_device"]["allocation"] = {**MULTICAST, "creator_pid": 2}
+        records = [[allocation(), multicast(4096), device, binding(4096)], []]
+        with self.coordinator("--prepare", "inconsistent multicast creator"):
+            self.inspect(records, begin=True)
+
+    def test_rounded_multicast_extents_preserve_creation_size(self):
+        records = [[allocation(), multicast(4096),
+            {"multicast_device": {"allocation": MULTICAST, "device": 0}}, binding(4096, 4096),
+            {"multicast_mapping": {"allocation": MULTICAST, "address": 0x10000, "size": 8192,
+                                   "offset": 0, "flags": 0, "access": []}}], []]
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True)
+            for operation in PREPARE:
+                self.phase(operation)
+        with self.coordinator("--restore"):
+            self.inspect(records)
+            for operation in RESTORE:
+                self.phase(operation)
+            self.inspect(records)
+
+
+if __name__ == "__main__":
+    unittest.main()

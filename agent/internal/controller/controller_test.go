@@ -100,6 +100,10 @@ func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ str
 	return noopMountPoint{}, nil
 }
 
+func (noopInjector) MountCuInterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
+}
+
 func (noopInjector) MountPageBroker(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }
@@ -107,6 +111,7 @@ func (noopInjector) MountPageBroker(_ context.Context, _ nsmount.MountPoint, _ s
 type noopMountPoint struct{}
 
 func (noopMountPoint) Unmount(context.Context) error { return nil }
+func (noopMountPoint) Release() error                { return nil }
 func (noopMountPoint) NsFd() *os.File                { return nil }
 
 var _ executor.RestoreMounter = noopInjector{}

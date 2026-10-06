@@ -12,7 +12,7 @@ model it serves.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -22,9 +22,6 @@ FRAMEWORKS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "guide
 CONTAINER = "main"
 API_PORT = 8000
 
-# One small chat-style prompt is enough to prove the restored engine serves;
-# the guide APIs cap generation length themselves.
-PROMPT = "Reply with one short sentence confirming this restored worker can serve."
 REQUEST_TIMEOUT_SECONDS = 120
 
 # Phase budgets: source covers image pull, model load, and warm-up generation
@@ -37,9 +34,10 @@ REQUEST_TIMEOUT_SECONDS = 120
 # it counts double. The inner `timeout` around pytest in e2e-frameworks.yaml
 # is the binding limit: it must exceed SOURCE_READY_TIMEOUT_SECONDS +
 # CHECKPOINT_TIMEOUT_SECONDS + POD_DELETE_TIMEOUT_SECONDS +
-# 2 * restore_timeout_seconds + REQUEST_TIMEOUT_SECONDS, or pytest is
+# 2 * restore_timeout_seconds + 3 * REQUEST_TIMEOUT_SECONDS + 60s for source
+# prompt rendering, or pytest is
 # interrupted before the failure dump runs -- e.g. sglang's 600s override
-# makes that 900+300+180+2*600+120 = 2700s (45 min), the largest of the three.
+# makes that 900+300+180+2*600+3*120+60 = 3000s (50 min), the largest of the three.
 SOURCE_READY_TIMEOUT_SECONDS = 900
 CHECKPOINT_TIMEOUT_SECONDS = 300
 RESTORE_TIMEOUT_SECONDS = 300
@@ -62,6 +60,13 @@ class FrameworkSpec:
     # Overrides RESTORE_TIMEOUT_SECONDS for this framework's restore-condition
     # and restore-outcome waits.
     restore_timeout_seconds: int = RESTORE_TIMEOUT_SECONDS
+    source_ready_timeout_seconds: int = SOURCE_READY_TIMEOUT_SECONDS
+    checkpoint_timeout_seconds: int = CHECKPOINT_TIMEOUT_SECONDS
+    recipe: str | None = None
+
+    @property
+    def case_name(self) -> str:
+        return f"{self.name}-{self.recipe}" if self.recipe else self.name
 
     @property
     def manifest_dir(self) -> Path:
@@ -69,11 +74,11 @@ class FrameworkSpec:
 
     @property
     def deployment_manifest(self) -> Path:
-        return self.manifest_dir / "deployment.yaml"
+        return self.manifest_dir / "capture" / f"{self.recipe or 'qwen3-0.6b'}.yaml"
 
     @property
     def restore_deployment_manifest(self) -> Path:
-        return self.manifest_dir / "restore-deployment.yaml"
+        return self.manifest_dir / "restore" / f"{self.recipe or 'qwen3-0.6b'}.yaml"
 
     @property
     def app_py(self) -> Path:
@@ -81,8 +86,8 @@ class FrameworkSpec:
 
     @property
     def app_configmap_name(self) -> str:
-        # Matches the configMap.name this framework's own deployment.yaml
-        # references; see manifests/frameworks/<name>/deployment.yaml.
+        # Matches the configMap.name this framework's capture manifest
+        # references, including the multi-GPU variants.
         return f"{self.name}-app"
 
     @property
@@ -117,6 +122,30 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         restore_error_file="/snapshot-control/trtllm-restore-error",
     ),
 }
+
+
+def framework_spec(name: str) -> FrameworkSpec:
+    spec = FRAMEWORKS[name]
+    recipe = os.environ.get("SNAPSHOT_E2E_RECIPE", "")
+    if not recipe:
+        return spec
+    if recipe not in {"glm-5.3", "deepseek-v4.1-flash"}:
+        raise ValueError(f"unknown SNAPSHOT_E2E_RECIPE: {recipe}")
+    spec = replace(spec, recipe=recipe)
+    if not spec.deployment_manifest.is_file():
+        raise ValueError(f"{name} has no {recipe} recipe")
+    with spec.deployment_manifest.open(encoding="utf-8") as handle:
+        deployment = yaml.safe_load(handle)
+    main = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == CONTAINER)
+    env = {e["name"]: e["value"] for e in main["env"]}
+    return replace(
+        spec,
+        model=env["SNAPSHOT_MODEL"],
+        model_cache_manifest="../model-cache-pvc.yaml",
+        source_ready_timeout_seconds=3600,
+        checkpoint_timeout_seconds=1800,
+        restore_timeout_seconds=1800,
+    )
 
 
 @dataclass(frozen=True)
@@ -180,7 +209,7 @@ def framework_image(spec: FrameworkSpec) -> str:
 
     SNAPSHOT_E2E_FRAMEWORK_IMAGE wins so a different image can be tested.
     Otherwise the image is read straight from the guide's own
-    deployment.yaml -- one place to change it.
+    capture manifest -- one place to change it.
     """
     override = os.environ.get("SNAPSHOT_E2E_FRAMEWORK_IMAGE")
     if override:

@@ -10,7 +10,7 @@ pull request, without a cluster:
 
 - the source and restore pods carry the restore-pod contract pieces the agent
   relies on (control volume at /snapshot-control with subPath main,
-  SNAPSHOT_CONTROL_DIR, io_uring seccomp profile, /dev/net/tun, nvidia
+  the apps' default control directory, io_uring seccomp profile, /dev/net/tun, nvidia
   RuntimeClass, one GPU);
 - the restore pod is an inert placeholder (an explicit sleep command) that
   restores this run's PodSnapshot;
@@ -19,6 +19,8 @@ pull request, without a cluster:
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -34,6 +36,7 @@ CONFIG = k8s.E2EConfig(
     kubeconfig=None,
 )
 IMAGE = "framework-under-test:local"
+AGENT_IMAGE = "snapshot-agent:test"
 CACHE = frameworks.SharedModelCache(
     server="nfs.example.internal", path="/exports/models", pvc_name="model-cache"
 )
@@ -41,9 +44,8 @@ CACHE = frameworks.SharedModelCache(
 
 @pytest.fixture(autouse=True)
 def _workload_image(monkeypatch: pytest.MonkeyPatch) -> None:
-    # TestRun.new resolves the generic workload image eagerly; these checks
-    # never schedule anything, so any value satisfies it.
-    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", "snapshot-workload:test")
+    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", AGENT_IMAGE)
+    monkeypatch.delenv("SNAPSHOT_E2E_RECIPE", raising=False)
 
 
 @pytest.fixture(params=sorted(frameworks.FRAMEWORKS))
@@ -63,6 +65,7 @@ def pods(spec: frameworks.FrameworkSpec) -> tuple[dict, dict, workloads.TestRun]
 @pytest.mark.workload
 def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
+    assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
         assert pod_spec["runtimeClassName"] == "nvidia"
@@ -75,7 +78,8 @@ def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec)
         main = fw.main_container(pod)
         assert main["image"] == IMAGE
         assert main["resources"]["limits"]["nvidia.com/gpu"] == "1"
-        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
+        assert fw.env_value(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE") is None
+        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") in (None, workloads.CONTROL_DIR)
         assert {
             "name": "snapshot-control",
             "mountPath": workloads.CONTROL_DIR,
@@ -85,19 +89,91 @@ def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec)
         volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
         assert volumes["snapshot-control"] == {"name": "snapshot-control", "emptyDir": {}}
         assert volumes["tun"]["hostPath"] == {"path": "/dev/net/tun", "type": "CharDevice"}
+        assert "snapshot-cuda" not in volumes
+        assert all(mount["mountPath"] != "/tmp/snapshot-cuda" for mount in main["volumeMounts"])
         for container in pod_spec.get("initContainers", []):
+            assert container["name"] != "snapshot-cuda-install"
             assert container["image"] == IMAGE
 
 
 @pytest.mark.workload
-def test_source_pod_is_checkpointable_and_unannotated(spec: frameworks.FrameworkSpec) -> None:
-    source, _, _ = pods(spec)
+def test_source_pod_is_checkpointable_without_shared_memory(
+    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = workloads.TestRun.new("native")
+    monkeypatch.delenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", raising=False)
+    monkeypatch.delenv("SNAPSHOT_E2E_SNAPSHOT_TAG", raising=False)
+    source = fw.source_pod(config=CONFIG, run=run, spec=spec, image=IMAGE)
     main = fw.main_container(source)
     # Ready == checkpointable: the test waits for pod readiness before creating
     # the PodSnapshot, which is only sound if readiness is gated on the file.
     assert main["readinessProbe"]["exec"]["command"] == ["cat", workloads.SOURCE_READY]
     assert fw.env_value(main, "SNAPSHOT_RESTORE_STANDBY") is None
     assert source["metadata"]["annotations"] == {}
+    assert main["command"] == ["python3", *(["-u"] if spec.name == "sglang" else []), "/snapshot-app/app.py"]
+
+
+@pytest.mark.workload
+@pytest.mark.parametrize("model_cache", [None, CACHE], ids=["guide-cache", "shared-cache"])
+@pytest.mark.parametrize("agent_image", [AGENT_IMAGE, "snapshot-agent@sha256:" + "a" * 64])
+def test_source_delivers_matching_shared_memory_bundle(
+    spec: frameworks.FrameworkSpec,
+    monkeypatch: pytest.MonkeyPatch,
+    model_cache: frameworks.SharedModelCache | None,
+    agent_image: str,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RECIPE", "glm-5.3")
+    spec = frameworks.framework_spec(spec.name)
+    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", agent_image)
+    monkeypatch.setenv("SNAPSHOT_E2E_FRAMEWORK_IMAGE", IMAGE)
+    run = workloads.TestRun.new("delivery")
+    source = fw.source_pod(config=CONFIG, run=run, spec=spec, model_cache=model_cache)
+    main = fw.main_container(source)
+    assert main["image"] == IMAGE
+    assert main["imagePullPolicy"] == "Always"
+    assert main["command"][:4] == [
+        "/tmp/snapshot-cuda/cuinterpose-launch", "--library",
+        "/tmp/snapshot-cuda/libcuinterpose.so", "--",
+    ]
+    assert main["command"][4] == "python3"
+    assert main["command"][-1] == "/snapshot-app/app.py"
+    assert {"name": "snapshot-cuda", "mountPath": "/tmp/snapshot-cuda", "readOnly": True} in main["volumeMounts"]
+    volumes = {volume["name"]: volume for volume in source["spec"]["volumes"]}
+    assert volumes["snapshot-cuda"] == {"name": "snapshot-cuda", "emptyDir": {}}
+    installers = [c for c in source["spec"]["initContainers"] if c["name"] == "snapshot-cuda-install"]
+    assert len(installers) == 1
+    installer = installers[0]
+    assert installer["image"] == agent_image
+    assert installer["imagePullPolicy"] == ("IfNotPresent" if "@sha256:" in agent_image else "Always")
+    assert installer["command"] == ["/bin/cp"]
+    assert installer["args"] == [
+        "--preserve=mode", "--",
+        "/usr/local/lib/snapshot/libcuinterpose.so",
+        "/usr/local/lib/snapshot/libcuinterpose_core.so",
+        "/usr/local/bin/cuinterpose-launch", "/tmp/snapshot-cuda/",
+    ]
+    assert installer["volumeMounts"] == [
+        {"name": "snapshot-cuda", "mountPath": "/tmp/snapshot-cuda"},
+    ]
+
+
+@pytest.mark.workload
+def test_source_preserves_workload_annotations_but_not_restore_routing(
+    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deployment = fw.load_manifest(spec.deployment_manifest)
+    deployment["spec"]["template"]["metadata"].setdefault("annotations", {}).update({
+        fw.SHARED_MEMORY_ANNOTATION: "enabled",
+        "example.com/workload": "keep",
+        fw.RESTORE_FROM_ANNOTATION: "old-snapshot",
+        "nvidia.com/restore-container-map": "main=main",
+    })
+    monkeypatch.setattr(fw, "load_manifest", lambda _: deployment)
+    source = fw.source_pod(config=CONFIG, run=workloads.TestRun.new("annotations"), spec=spec, image=IMAGE)
+    assert source["metadata"]["annotations"] == {
+        "nvidia.com/cuda-shared-memory-support": "enabled",
+        "example.com/workload": "keep",
+    }
 
 
 @pytest.mark.workload
@@ -205,6 +281,7 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
     restore = fw.restore_pod(
         config=CONFIG, run=run, spec=spec, source_node="n0", image=IMAGE, model_cache=CACHE
     )
+    assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
         # No download init container: the export is mounted read-mostly and the
@@ -228,7 +305,7 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         # Exactly one HF_HOME even when the guide already set one (SGLang).
         assert sum(1 for e in main["env"] if e["name"] == "HF_HOME") == 1
         # Contract pieces are untouched by the cache rewrite.
-        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
+        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") in (None, workloads.CONTROL_DIR)
         assert any(m["mountPath"] == "/dev/net/tun" for m in main["volumeMounts"])
 
 
@@ -246,3 +323,65 @@ def test_control_file_names_match_the_guide_program(spec: frameworks.FrameworkSp
     for path in sentinels:
         name = path.rsplit("/", 1)[-1]
         assert f'"{name}"' in program, f"{spec.name}/app.py does not write {name!r}"
+
+
+@pytest.mark.workload
+@pytest.mark.parametrize("engine,recipe,size", [
+    ("vllm", "glm-5.3", 8),
+    ("sglang", "glm-5.3", 8),
+    ("tensorrt-llm", "glm-5.3", 8),
+    ("vllm", "deepseek-v4.1-flash", 8),
+    ("sglang", "deepseek-v4.1-flash", 8),
+])
+def test_multi_gpu_recipe_matches_restore_and_shared_cache(
+    monkeypatch: pytest.MonkeyPatch, engine: str, recipe: str, size: int,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RECIPE", recipe)
+    spec = frameworks.framework_spec(engine)
+    source, restore, run = pods(spec)
+    source_main, restore_main = map(fw.main_container, (source, restore))
+    assert fw.env_value(restore_main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
+    argument_variable = {"vllm": "VLLM_ENGINE_ARGS", "sglang": "SGLANG_ENGINE_ARGS",
+                         "tensorrt-llm": "TRTLLM_ENGINE_ARGS"}[engine]
+    arguments = json.loads(fw.env_value(source_main, argument_variable))
+    # The saved engine resumes with its captured constructor settings.
+    assert fw.env_value(restore_main, argument_variable) is None
+    if engine == "sglang":
+        assert arguments["ep_size"] == size
+    elif engine == "vllm":
+        assert arguments["enable_expert_parallel"] is True
+    assert len(arguments["revision"]) == 40
+    assert spec.case_name == f"{engine}-{recipe}"
+    assert spec.model == fw.env_value(source_main, "SNAPSHOT_MODEL")
+    assert source["metadata"]["annotations"][fw.SHARED_MEMORY_ANNOTATION] == "enabled"
+    assert restore["metadata"]["annotations"][fw.RESTORE_FROM_ANNOTATION] == run.snapshot_name
+    assert restore_main["command"] == ["/bin/sh", "-c", "exec sleep infinity"]
+    for pod in (source, restore):
+        main = fw.main_container(pod)
+        assert main["resources"]["limits"]["nvidia.com/gpu"] == str(size)
+        assert fw.env_value(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE") == str(size)
+        assert fw.env_value(main, "SNAPSHOT_MODEL_REVISION") == arguments["revision"]
+        volumes = {v["name"]: v for v in pod["spec"]["volumes"]}
+        assert volumes["shm"]["emptyDir"]["medium"] == "Memory"
+        pvc = fw.model_cache_pvc(config=CONFIG, spec=spec)
+        assert volumes["model-cache"]["persistentVolumeClaim"]["claimName"] == pvc["metadata"]["name"]
+        assert {"name": "shm", "mountPath": "/dev/shm"} in main["volumeMounts"]
+        downloader = next(c for c in pod["spec"]["initContainers"] if c["name"] == "model-cache")
+        assert fw.env_value(downloader, "SNAPSHOT_MODEL_REVISION") == arguments["revision"]
+        assert fw.env_value(downloader, "SNAPSHOT_MODEL") == spec.model
+        fw.use_shared_model_cache(pod["spec"], CACHE)
+        assert not any(c["name"] == "model-cache" for c in pod["spec"].get("initContainers", []))
+        assert fw.env_value(fw.main_container(pod), "HF_HUB_OFFLINE") == "1"
+
+
+@pytest.mark.workload
+@pytest.mark.parametrize("engine,recipe,error", [
+    ("vllm", "../vllm", "unknown SNAPSHOT_E2E_RECIPE"),
+    ("tensorrt-llm", "deepseek-v4.1-flash", "has no deepseek-v4.1-flash recipe"),
+])
+def test_recipe_selection_rejects_unknown_or_unavailable_profiles(
+    monkeypatch: pytest.MonkeyPatch, engine: str, recipe: str, error: str,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RECIPE", recipe)
+    with pytest.raises(ValueError, match=error):
+        frameworks.framework_spec(engine)

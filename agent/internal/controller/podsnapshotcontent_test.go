@@ -31,8 +31,41 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
+
+func TestCuInterposeRequiredSurvivesAnnotationEdits(t *testing.T) {
+	for _, tc := range []struct {
+		name, annotation  string
+		wrapped, required bool
+		wantError         bool
+	}{
+		{name: "native"},
+		{name: "ordinary Pod requested", annotation: "enabled", required: true},
+		{name: "annotation removed", wrapped: true, required: true},
+		{name: "annotation disabled", annotation: "disabled", wrapped: true, required: true},
+		{name: "annotation malformed", annotation: "invalid", wrapped: true, required: true},
+		{name: "ordinary Pod malformed annotation", annotation: "invalid", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Command: []string{"worker"}}}}}
+			if tc.annotation != "" {
+				pod.Annotations = map[string]string{podcontract.CuInterposeAnnotation: tc.annotation}
+			}
+			if tc.wrapped {
+				pod.Spec.Containers[0].Command = []string{podcontract.CuInterposeLauncherPath, "worker"}
+			}
+			required, err := cuInterposeRequired(pod, "main")
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.required, required)
+		})
+	}
+}
 
 // fakeCheckpointer records calls behind the checkpointFn seam and returns a configured error.
 type fakeCheckpointer struct {

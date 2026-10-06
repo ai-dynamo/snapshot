@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -25,9 +26,28 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
+	agentImage := flag.String(
+		"agent-image",
+		"",
+		"Snapshot agent image that supplies the cuinterpose libraries to opted-in source Pods",
+	)
+	agentImagePullPolicy := flag.String(
+		"agent-image-pull-policy",
+		"",
+		"Pull policy for the snapshot-cuda install init container (Always, IfNotPresent, Never); empty uses the Kubernetes default",
+	)
 	flag.Parse()
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
+		os.Exit(1)
+	}
+
+	delivery := controller.CuInterposeDelivery{
+		AgentImage: *agentImage,
+		PullPolicy: corev1.PullPolicy(*agentImagePullPolicy),
+	}
+	if err := delivery.ValidatePullPolicy(); err != nil {
+		ctrl.Log.Error(err, "invalid cuinterpose delivery configuration")
 		os.Exit(1)
 	}
 
@@ -98,6 +118,7 @@ func main() {
 		Client:             mgr.GetClient(),
 		NonCacheReadClient: mgr.GetAPIReader(),
 		Recorder:           mgr.GetEventRecorderFor("snapshotjob-controller"),
+		CuInterpose:        delivery,
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")

@@ -8,6 +8,8 @@ on:
     branches:
       - main
       - 'release/*'
+      # Approved stack PRs target feature branches before they reach main.
+      - 'pull-request/[0-9]+'
   pull_request:
     branches:
       - main
@@ -22,6 +24,27 @@ permissions:
   contents: read
 
 jobs:
+  cuinterpose:
+    name: cuinterpose CPU checks
+    runs-on: ubuntu-latest
+    env:
+      SNAPSHOT_CUINTERPOSE_TEST_IMAGE: snapshot-cuinterpose-test:ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make -C agent cuinterpose-test TEST_IMAGE="$SNAPSHOT_CUINTERPOSE_TEST_IMAGE"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache: true
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - name: Check generated installer against the image payload
+        working-directory: operator
+        run: go test ./internal/controller -run '^TestCuInterposeInstallerImage$' -count=1 -v
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -82,7 +105,9 @@ jobs:
             e2e/tests/test_benchmark_outcomes.py \
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_benchmark_preview.py \
+            e2e/tests/test_framework_libraries.py \
             e2e/tests/test_framework_manifests.py \
+            e2e/tests/test_inference.py \
             e2e/tests/test_runtime_image_id.py \
             e2e/tests/test_workload_scripts.py -vv
 

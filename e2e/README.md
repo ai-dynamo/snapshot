@@ -144,6 +144,14 @@ pre-capture generation) → `PodSnapshot` → restore pod pinned to the source n
 → `nvidia.com/Restored=RestoreSucceeded` → `<framework>-restore-ready` →
 `POST /generate` answers → the placeholder never loaded a model itself.
 
+The default single-GPU recipes use native CUDA checkpoint and restore. The
+explicit multi-GPU recipes enable CUDA shared-memory support and install the
+matching cuInterpose bundle before launching the engine. The harness resolves
+their `${SNAPSHOT_AGENT_IMAGE}` placeholder from `SNAPSHOT_E2E_WORKLOAD_IMAGE`, or
+`ghcr.io/ai-dynamo/snapshot/agent:${SNAPSHOT_E2E_SNAPSHOT_TAG}`. This must identify
+the same bundle as the installed capture and restore agents. Framework image
+overrides do not replace the installer image.
+
 ```bash
 # one framework (CI runs one per matrix job); omit the variable for all three
 SNAPSHOT_E2E_FRAMEWORK=vllm \
@@ -153,6 +161,34 @@ SNAPSHOT_E2E_FRAMEWORK=vllm \
 SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapshot:dev \
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
+
+The harness preserves each manifest's GPU count and tensor parallelism.
+Benchmark comparison dimensions record shared-memory activation and the live
+source Pod's tensor-parallel size.
+The optional `SNAPSHOT_E2E_RECIPE` selects a separate multi-GPU manifest pair:
+`glm-5.3` for all three engines, or `deepseek-v4.1-flash` for vLLM and SGLang.
+These profiles keep their declared GPU counts, pinned model revisions and
+engine settings. They have longer phase deadlines for model loading and larger
+checkpoints:
+
+```bash
+SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_RECIPE=deepseek-v4.1-flash \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+```
+
+The recipe name is part of the benchmark case name so its timings are separate
+from the small single-GPU example. These cases are explicit local or cluster
+qualification runs, not additional default CI jobs.
+
+For shared-memory recipes, retain the checkpoint's cuInterpose manifest and
+matching library hashes with the run evidence. The PodSnapshotContent API does
+not expose that metadata, so the source annotation alone does not prove shared
+allocations were reconstructed.
+
+For those recipes, the test also verifies delivered library paths and hashes
+before capture and after restore through the privileged Snapshot agent. This
+check requires `/usr/bin/python3` on the worker node and does not add privileges
+to the workload Pod. Native single-GPU tests do not run this check.
 
 Model weights come from one of two places:
 
@@ -165,15 +201,44 @@ Model weights come from one of two places:
   init container. In vCluster mode the setup enables `sync.toHost.persistentVolumes`
   so the NFS mount options reach the node. The model must already be in the cache.
 - **Guide download** (default without the variables): the guide's own plumbing
-  runs unchanged. SGLang's init container downloads into its PVC, which the test
-  creates from the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS`
-  when set) and leaves in place; vLLM and TensorRT-LLM download in-process.
-  This needs working DNS and egress from the pods. A partial or stale SGLang
-  cache (for example after a killed run) is reset by deleting that PVC; the
-  next run recreates and refills it.
+  runs unchanged. SGLang's default recipe and all multi-GPU recipes download
+  in an init container into a PVC. The test creates the guide's PVC if missing
+  (with `SNAPSHOT_E2E_STORAGE_CLASS` when set) and leaves it in place. The small
+  vLLM and TensorRT-LLM recipes download in-process. Downloads need working DNS
+  and egress. A failed download retries on the next startup. Large recipes reuse
+  cached files and download missing files for the pinned model revision.
 
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.
+
+### CuInterpose qualification
+
+The framework guides enable CUDA shared-memory support. See the
+[recipe guide](../docs/guides/cuda-shared-memory.md) for delivery and the
+[developer overview](../docs/development/cuinterpose.md) for the supported
+resource and synchronization contracts.
+
+Build and run the CPU suite before GPU qualification:
+
+```bash
+make -C agent/cmd/cuinterpose build test
+uv run --project agent/cmd/cuinterpose/tests/gpu pytest agent/cmd/cuinterpose/tests/gpu -vv -rs
+```
+
+The GPU suite uses the matching artifacts in `agent/cmd/cuinterpose/build/`
+(override with `CUINTERPOSE_BUILD_DIR`) and preloads them from its test-local
+directory. Shared-memory lifecycle tests need two GPUs and exercise read-only
+inspection, preparation, native CUDA checkpoint/restore, and reconstruction.
+Multicast additionally requires supported NVLink/NVSwitch hardware. HOST_NUMA
+tests require POSIX-shareable HOST_NUMA VMM and exercise coordinator
+reconstruction without native CUDA checkpoint or CRIU.
+
+These native tests do not qualify the Kubernetes/CRIU lifecycle. Run an opted-in
+multi-process workload through capture and restore, repeat with a distinct
+restore node, and verify a changed shim bundle fails before CRIU even when
+compatibility checking is skipped. Record the tested revision, hardware, and
+skipped cases; unit or reconstruction-only success does not establish those
+end-to-end results.
 
 ### Framework benchmark results
 
@@ -373,21 +438,19 @@ one-time GitHub Pages configuration.
 
 ## Framework Images
 
-The framework e2e workloads are the programs and manifests under
-`manifests/frameworks/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`), owned
-by the e2e suite -- these are not the `docs/guides/` examples, which still
-document a build-and-push image flow and are updated separately. Each
-framework runs the upstream image unmodified -- the exact image reference is
+The framework e2e workloads use the programs and manifests under
+`docs/guides/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`). Each
+framework runs the upstream image unmodified. The exact image reference is
 `spec.template.spec.containers[0].image` in that framework's own
-`deployment.yaml` -- with `app.py` mounted from a ConfigMap (`kubectl create
+capture manifest, with `app.py` mounted from a ConfigMap (`kubectl create
 configmap <framework>-app --from-file=app.py -n
 "${SNAPSHOT_E2E_TEST_NAMESPACE:-snapshot-e2e}"`) rather than baked into a
-Snapshot-built image. There is nothing under `manifests/frameworks/<framework>/`
-for Snapshot to build, push, or keep available; `frameworks.framework_image()`
-reads the image straight from that `deployment.yaml`, and
+Snapshot-built engine image. The separate installer uses the matching Snapshot
+agent image. `frameworks.framework_image()` reads the engine image straight
+from that capture manifest, and
 `framework_workloads.app_configmap()` builds the ConfigMap from the same
 `app.py`.
 
 Point `SNAPSHOT_E2E_FRAMEWORK_IMAGE` at a different image to test an
 unpublished change (a fork of `vllm/vllm-openai`, for example) without
-editing `deployment.yaml`.
+editing the capture manifest.

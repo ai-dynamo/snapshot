@@ -11,10 +11,10 @@ driven by the guide's own program and manifests (see framework_workloads):
    sentinel, so Ready means the engine served before capture and the process
    is checkpointable.
 2. A PodSnapshot captures it. The dump terminates the source process.
-3. A restore pod built from the guide's restore manifest is pinned to the
-   source node. Its own entrypoint stays inert (`sleep infinity`); the agent
-   restores the checkpointed process into it, which resumes the engine,
-   generates again, and serves /generate.
+3. Create a restore pod from the guide's restore manifest on the source node.
+   The entrypoint waits with `sleep infinity`. The agent
+   restores the captured process, which resumes the engine, generates again,
+   and serves /generate.
 4. The test asserts the restore condition, the restore-ready file, a live
    /generate answer, and that the placeholder never loaded a model itself —
    a restore that silently degraded to a cold start must not pass.
@@ -89,7 +89,7 @@ def framework(request: pytest.FixtureRequest) -> frameworks.FrameworkSpec:
     name = request.param
     if name not in frameworks.selected_frameworks():
         pytest.skip(f"{name} not selected by SNAPSHOT_E2E_FRAMEWORK")
-    return frameworks.FRAMEWORKS[name]
+    return frameworks.framework_spec(name)
 
 
 @pytest.mark.framework
@@ -102,7 +102,7 @@ def test_framework_checkpoint_restore_serves_inference(
 ) -> None:
     result = benchmark.start(
         suite="framework-checkpoint-restore",
-        case=framework.name,
+        case=framework.case_name,
         environment={
             "namespace": config.namespace,
             "model": framework.model,
@@ -150,21 +150,34 @@ def test_framework_checkpoint_restore_serves_inference(
                 snap.ensure_pvc(guide_pvc)
 
         k8s.apply_configmap(config.namespace, fw.app_configmap(config=config, spec=framework))
-        k8s.create_pod(
-            fw.source_pod(
-                config=config,
-                run=run,
-                spec=framework,
-                image=framework_image,
-                model_cache=model_cache,
-            )
+        source_manifest = fw.source_pod(
+            config=config,
+            run=run,
+            spec=framework,
+            image=framework_image,
+            model_cache=model_cache,
         )
+        shared_memory = source_manifest["metadata"]["annotations"].get(fw.SHARED_MEMORY_ANNOTATION)
+        k8s.create_pod(source_manifest)
         source = snap.wait_for_pod_ready(
             config.namespace,
             run.source_pod,
-            timeout=frameworks.SOURCE_READY_TIMEOUT_SECONDS,
+            timeout=framework.source_ready_timeout_seconds,
         )
         source_node = source.spec.node_name
+        assert (source.metadata.annotations or {}).get(fw.SHARED_MEMORY_ANNOTATION) == shared_memory
+        source_libraries = (
+            fw.cuinterpose_library_hashes(config, source) if shared_memory == "enabled" else None
+        )
+        prompts = inference.chat_prompts(config.namespace, run.source_pod)
+        source_main = next(c for c in source.spec.containers if c.name == frameworks.CONTAINER)
+        parallelism = next(
+            (e.value for e in source_main.env if e.name == "SNAPSHOT_TENSOR_PARALLEL_SIZE"), "1"
+        )
+        result.update_environment(comparisonDimensions={
+            "cudaSharedMemorySupport": shared_memory or "disabled",
+            "tensorParallelSize": int(parallelism),
+        })
         result.redact(source_node, "source-node")
         result.mark_event("source.ready")
         _record_framework_image_digest(result, source)
@@ -189,7 +202,7 @@ def test_framework_checkpoint_restore_serves_inference(
         pod_snapshot, content = snap.wait_for_snapshot_ready(
             config.namespace,
             run.snapshot_name,
-            timeout=frameworks.CHECKPOINT_TIMEOUT_SECONDS,
+            timeout=framework.checkpoint_timeout_seconds,
         )
         result.finish_duration(CHECKPOINT_DURATION, event="checkpoint.ready")
         assert pod_snapshot["status"]["boundSnapshotContentName"] == content["metadata"]["name"]
@@ -240,14 +253,19 @@ def test_framework_checkpoint_restore_serves_inference(
                 event="traffic.ready",
             ),
         )
+        assert restored_pod.spec.node_name == source_node
         restored_text = restored_text.strip()
         restore_node = restored_pod.spec.node_name
         result.redact(restore_node, "restore-node")
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
+        if source_libraries is not None:
+            assert fw.cuinterpose_library_hashes(config, restored_pod) == source_libraries, (
+                "restored guide libraries differ from the captured bundle"
+            )
 
-        answer = inference.request_generate(config.namespace, run.restore_pod, frameworks.PROMPT)
-        print(f"[{framework.name}] /generate after restore: {answer!r}")
+        answers = inference.verify_chat_answers(config.namespace, run.restore_pod, prompts)
+        print(f"[{framework.name}] /generate after restore: {answers!r}")
 
         # The placeholder's own entrypoint must have stayed in standby. If it
         # had loaded a model, its log would show the pre-checkpoint line and

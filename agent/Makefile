@@ -6,12 +6,21 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .DEFAULT_GOAL := build
 
-.PHONY: build cuda-checkpoint-helper test test-go test-pagebroker tidy lint fmt pagebroker-generate pagebroker-check-generated
+.PHONY: build cuda-checkpoint-helper test test-go test-pagebroker tidy lint fmt pagebroker-generate pagebroker-check-generated go-build cuinterpose-build cuinterpose-test
 
 PROTOC_GEN_GO := $(TOOLS_BIN_DIR)/protoc-gen-go
 CUDA_ROOT ?= /usr/local/cuda
 
-build:
+# Native artifacts have their own build and CI gate so Go-only work needs no Docker.
+build: go-build
+
+cuinterpose-build:
+	$(MAKE) -C cmd/cuinterpose build
+
+cuinterpose-test:
+	$(MAKE) -C cmd/cuinterpose test
+
+go-build:
 	GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent
 	GOOS=linux GOARCH=amd64 go build -o bin/nsrestore ./cmd/nsrestore
 
@@ -26,8 +35,7 @@ test: test-go
 test-go:
 	go test ./...
 
-# The image build runs this full CPU mock suite with the pinned CUDA headers.
-# No GPU or NIXL installation is needed for these tests.
+# The PageBroker image runs its CPU tests with the pinned build dependencies.
 test-pagebroker:
 	$(MAKE) -C pagebroker test CUDA_ROOT=$(CUDA_ROOT)
 

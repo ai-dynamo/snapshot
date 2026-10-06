@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -56,6 +57,7 @@ type SnapshotJobReconciler struct {
 	client.Client
 	NonCacheReadClient client.Reader
 	Recorder           record.EventRecorder
+	CuInterpose        CuInterposeDelivery
 }
 
 type snapshotJobFailure struct {
@@ -149,6 +151,17 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 		desiredJob, buildErr := buildSourceJob(sj)
 		if buildErr != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, buildErr), ctrl.Result{}, nil
+		}
+		// buildSourceJob has already validated the annotation and single target.
+		enabled, _ := podcontract.ParseCuInterposeAnnotation(desiredJob.Spec.Template.Annotations)
+		if enabled {
+			if err := r.CuInterpose.validate(); err != nil {
+				r.Recorder.Event(sj, corev1.EventTypeWarning, "OperatorConfigurationError", err.Error())
+				return snapshotJobObservation{}, ctrl.Result{}, err
+			}
+		}
+		if err := shapeCuInterposeCapture(&desiredJob.Spec.Template, sj.Spec.PodSnapshotTemplate.TargetContainers[0], r.CuInterpose); err != nil {
+			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
 		}
 		return r.createSourceJob(ctx, sj, desiredJob)
 	case err != nil:

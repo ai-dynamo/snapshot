@@ -31,6 +31,8 @@ type CheckpointManifest struct {
 	Overlay  OverlayManifest   `yaml:"overlay"`
 	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
 	Host     HostManifest      `yaml:"host,omitempty"`
+	// CuInterpose identifies the libraries verified in the source processes.
+	CuInterpose *CuInterposeManifest `yaml:"cuinterpose,omitempty"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object
@@ -217,6 +219,9 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 	if err := validateArtifactManifest(data.Artifact); err != nil {
 		return err
 	}
+	if err := data.CuInterpose.ValidateCUDAPIDs(data.CUDA.PIDs); err != nil {
+		return err
+	}
 
 	content, err := yaml.Marshal(data)
 	if err != nil {
@@ -245,6 +250,10 @@ func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 		return nil, fmt.Errorf("failed to unmarshal checkpoint manifest: %w", err)
 	}
 	if err := validateArtifactManifest(data.Artifact); err != nil {
+		return nil, err
+	}
+
+	if err := data.CuInterpose.ValidateCUDAPIDs(data.CUDA.PIDs); err != nil {
 		return nil, err
 	}
 

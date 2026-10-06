@@ -1,0 +1,494 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Handle CUDA API calls. The memory modules manage allocation state.
+
+use crate::driver::{self};
+use crate::error::{Error, Result};
+use crate::memory::multicast::{self, BindInput};
+use crate::memory::vmm::Allocation;
+use crate::memory::{self, Memblock, VirtualAllocationHandle};
+use crate::memory::{ipc, sharing, vmm};
+use crate::runtime;
+use cudarc::driver::sys::CUresult::*;
+use cudarc::driver::sys::*;
+use cuinterpose_protocol::BindingVersion;
+use runtime::active;
+use std::ffi::c_void;
+use std::os::fd::IntoRawFd;
+
+pub use crate::memory::context::{
+    cuCtxDestroy, cuCtxDestroy_v2, cuDevicePrimaryCtxRelease, cuDevicePrimaryCtxRelease_v2,
+    cuDevicePrimaryCtxReset, cuDevicePrimaryCtxReset_v2,
+};
+pub use crate::memory::ipc::{cuCtxDisablePeerAccess, cuCtxEnablePeerAccess};
+
+pub fn cuMemCreate(
+    out: *mut u64,
+    size: usize,
+    prop: *const CUmemAllocationProp,
+    flags: u64,
+) -> Result<()> {
+    if out.is_null() || prop.is_null() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let properties = unsafe { *prop };
+    let supported = properties.requestedHandleTypes
+        == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+    if !supported && properties.requestedHandleTypes.0 != 0 {
+        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+    }
+    if supported {
+        vmm::validate_properties(&properties)?;
+    }
+    let mut state = active()?;
+    let reference = if supported {
+        Some(state.new_reference()?)
+    } else {
+        None
+    };
+    let context = if supported { driver::context()? } else { 0 };
+    let mut driver = 0;
+    let create = crate::driver::symbols::cuMemCreate()?;
+    crate::driver::result(unsafe { create(&mut driver, size, &properties, flags) })?;
+    let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
+    let handle = match reference {
+        Some(reference) => runtime::must_complete(state.adopt_unicast(Allocation {
+            reference,
+            refcounts: Default::default(),
+            driver: Some(driver),
+            size,
+            properties,
+            shared: false,
+            context,
+        })),
+        None => driver,
+    };
+    unsafe { out.write(handle) };
+    Ok(())
+}
+
+pub fn cuMemRelease(handle: u64) -> Result<()> {
+    let mut state = active()?;
+    if let Some(handle) = VirtualAllocationHandle::from_raw(handle) {
+        state.release_virtual_handle(handle)?;
+    } else {
+        unsafe { crate::driver::cuMemRelease(handle) }?;
+    }
+    Ok(())
+}
+
+pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Result<()> {
+    if out.is_null() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let mut state = active()?;
+    let mapping = state
+        .mappings
+        .range(..=address as u64)
+        .next_back()
+        .filter(|(_, mapping)| address as u64 - mapping.address < mapping.size as u64)
+        .map(|(_, mapping)| (mapping.id, mapping.handle));
+    let mut driver = 0;
+    unsafe { crate::driver::cuMemRetainAllocationHandle(&mut driver, address) }?;
+    if let Some((id, handle)) = mapping {
+        unsafe {
+            out.write(runtime::must_complete(
+                state.retain_backing(id, handle, driver),
+            ))
+        };
+    } else {
+        let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
+        unsafe {
+            out.write(driver);
+        }
+    }
+    Ok(())
+}
+
+pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u64) -> Result<()> {
+    let mut state = active()?;
+    let Some(id) = state.resolve_virtual_handle(handle)? else {
+        unsafe { crate::driver::cuMemMap(address, size, offset, handle, flags) }?;
+        return Ok(());
+    };
+    if state
+        .memblocks
+        .get(&id)
+        .and_then(Memblock::multicast)
+        .is_some()
+    {
+        return multicast::map(
+            state,
+            id,
+            VirtualAllocationHandle::from_raw(handle).unwrap(),
+            address,
+            size,
+            offset,
+            flags,
+        );
+    }
+    state.map_unicast(
+        id,
+        VirtualAllocationHandle::from_raw(handle).unwrap(),
+        address,
+        size,
+        offset,
+        flags,
+    )
+}
+
+pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
+    let mut state = active()?;
+    unsafe { crate::driver::cuMemUnmap(address, size) }?;
+    // CUDA unmaps only whole mappings. A successful range can include several mappings.
+    let addresses: Vec<_> = state
+        .mappings_in_range(address, size)
+        .map(|mapping| mapping.address)
+        .collect();
+    for start in addresses {
+        let id = state.remove_mapping(start);
+        runtime::must_complete(state.release_unused_memblock(id));
+    }
+    Ok(())
+}
+
+pub fn cuMemSetAccess(
+    address: u64,
+    size: usize,
+    access: *const CUmemAccessDesc,
+    count: usize,
+) -> Result<()> {
+    let mut state = active()?;
+    if access.is_null() {
+        unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
+        return Ok(());
+    }
+    if count > isize::MAX as usize / size_of::<CUmemAccessDesc>() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let descriptors = unsafe { std::slice::from_raw_parts(access, count) };
+    // A fully mapped access range can span several allocations, so prepare all metadata
+    // updates before the CUDA call and publish them only after it succeeds.
+    let updates: Vec<_> = state
+        .mappings_in_range(address, size)
+        .map(|mapping| (mapping.address, mapping.merged_access(descriptors)))
+        .collect();
+    unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
+    for (start, access) in updates {
+        state.mappings.get_mut(&start).unwrap().access = access;
+    }
+    Ok(())
+}
+
+pub fn cuMemExportToShareableHandle(
+    out: *mut c_void,
+    handle: u64,
+    kind: CUmemAllocationHandleType,
+    flags: u64,
+) -> Result<()> {
+    let mut state = active()?;
+    let Some(id) = state.resolve_virtual_handle(handle)? else {
+        unsafe { crate::driver::cuMemExportToShareableHandle(out, handle, kind, flags) }?;
+        return Ok(());
+    };
+    if out.is_null()
+        || kind != CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+        || flags != 0
+    {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let namespace_pid = state.namespace_pid;
+    let memblock = state
+        .memblocks
+        .get_mut(&id)
+        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    if let Memblock::Unicast(allocation) = memblock
+        && allocation.properties.requestedHandleTypes.0 & kind.0 == 0
+    {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    // The ticket identifies an allocation without retaining its backing, so it cannot
+    // extend the allocation's lifetime as a CUDA export FD would.
+    let fd = sharing::create(memblock.reference()).map_err(|error| {
+        Error::io(
+            "create shareable handle ticket",
+            std::io::Error::other(error),
+        )
+    })?;
+    memblock.export(namespace_pid)?;
+    unsafe { out.cast::<i32>().write(fd.into_raw_fd()) };
+    Ok(())
+}
+
+pub fn cuMemImportFromShareableHandle(
+    out: *mut u64,
+    fd: *mut c_void,
+    kind: CUmemAllocationHandleType,
+) -> Result<()> {
+    if out.is_null() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    if kind != CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR {
+        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+    }
+    let reference = sharing::decode(fd as isize as i32)
+        .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?
+        .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
+    let state = active()?;
+    let (_state, handle) = sharing::import_reference(state, reference)?;
+    unsafe { out.write(handle) };
+    Ok(())
+}
+
+pub fn cuMemGetAllocationPropertiesFromHandle(
+    out: *mut CUmemAllocationProp,
+    handle: u64,
+) -> Result<()> {
+    let state = active()?;
+    let driver = match VirtualAllocationHandle::from_raw(handle) {
+        Some(handle) => handle.driver_handle(&state)?,
+        None => handle,
+    };
+    unsafe { crate::driver::cuMemGetAllocationPropertiesFromHandle(out, driver) }?;
+    if let Some(allocation) = state
+        .resolve_virtual_handle(handle)?
+        .and_then(|id| state.memblocks.get(&id).and_then(Memblock::unicast))
+    {
+        // For application-private allocations, hide only the internal POSIX capability
+        // while preserving the other flags returned by the driver.
+        unsafe {
+            (*out).requestedHandleTypes = allocation.properties.requestedHandleTypes;
+        }
+    }
+    Ok(())
+}
+
+pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp) -> Result<()> {
+    if out.is_null() || properties.is_null() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let properties = unsafe { *properties };
+    if properties.handleTypes
+        != u64::from(CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0)
+    {
+        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+    }
+    let state = runtime::active()?;
+    let id = memory::random()?;
+    let context = driver::context()?;
+    let (mut state, driver) = multicast::create_backing(state, &properties)?;
+    let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
+    let handle = runtime::must_complete(state.adopt_multicast(id, driver, properties, context));
+    unsafe { out.write(handle) };
+    Ok(())
+}
+
+pub fn cuMulticastAddDevice(handle: u64, device: i32) -> Result<()> {
+    let state = runtime::active()?;
+    let id = state
+        .resolve_virtual_handle(handle)?
+        .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
+    multicast::add_device(state, id, device)
+}
+
+pub fn cuMulticastBindMem(
+    handle: u64,
+    offset: usize,
+    member: u64,
+    member_offset: usize,
+    size: usize,
+    flags: u64,
+) -> Result<()> {
+    multicast::bind(
+        handle,
+        offset,
+        size,
+        flags,
+        0,
+        BindingVersion::V1,
+        BindInput::Memory {
+            handle: member,
+            offset: member_offset,
+        },
+    )
+}
+
+pub fn cuMulticastBindMem_v2(
+    handle: u64,
+    device: i32,
+    offset: usize,
+    member: u64,
+    member_offset: usize,
+    size: usize,
+    flags: u64,
+) -> Result<()> {
+    multicast::bind(
+        handle,
+        offset,
+        size,
+        flags,
+        device,
+        BindingVersion::V2,
+        BindInput::Memory {
+            handle: member,
+            offset: member_offset,
+        },
+    )
+}
+
+pub fn cuMulticastBindAddr(
+    handle: u64,
+    offset: usize,
+    address: u64,
+    size: usize,
+    flags: u64,
+) -> Result<()> {
+    multicast::bind(
+        handle,
+        offset,
+        size,
+        flags,
+        0,
+        BindingVersion::V1,
+        BindInput::Address(address),
+    )
+}
+
+pub fn cuMulticastBindAddr_v2(
+    handle: u64,
+    device: i32,
+    offset: usize,
+    address: u64,
+    size: usize,
+    flags: u64,
+) -> Result<()> {
+    multicast::bind(
+        handle,
+        offset,
+        size,
+        flags,
+        device,
+        BindingVersion::V2,
+        BindInput::Address(address),
+    )
+}
+
+pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -> Result<()> {
+    let state = runtime::active()?;
+    let id = state
+        .resolve_virtual_handle(handle)?
+        .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
+    multicast::unbind(state, id, device, offset, size)
+}
+
+pub use cuIpcOpenMemHandle as cuIpcOpenMemHandle_v2;
+
+pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
+    if out.is_null() || size == 0 {
+        return Err(CUDA_ERROR_INVALID_VALUE.into());
+    }
+    let mut state = runtime::active()?;
+    let mut device = 0;
+    unsafe { driver::cuCtxGetDevice(&mut device) }?;
+    let (properties, extent) = state.allocation_layout(device, size)?;
+    let reference = state.new_reference()?;
+    let context = driver::context()?;
+    let mut backing = 0;
+    let flags = 0;
+    unsafe { driver::cuMemCreate(&mut backing, extent, &properties, flags) }?;
+    let backing = runtime::must_complete(VirtualAllocationHandle::from_driver(backing));
+    let handle = runtime::must_complete(state.adopt_unicast(Allocation {
+        reference,
+        refcounts: Default::default(),
+        driver: Some(backing),
+        size: extent,
+        properties,
+        shared: false,
+        context,
+    }));
+    let opens = 0;
+    let address = state.map_malloc(handle, size, extent, opens, context, device)?;
+    unsafe { out.write(address) };
+    Ok(())
+}
+
+pub fn cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr) -> Result<()> {
+    if out.is_null() {
+        return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
+    }
+    let mut state = runtime::active()?;
+    let mapping = state
+        .malloc_regions
+        .get(&address)
+        .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?
+        .clone();
+    let id = mapping.virtual_allocation_handle.id(&state)?;
+    let reference = state
+        .memblocks
+        .get(&id)
+        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
+        .reference();
+    let ipc_handle = mapping.export_handle(reference)?;
+    let namespace_pid = state.namespace_pid;
+    state
+        .memblocks
+        .get_mut(&id)
+        .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?
+        .export(namespace_pid)?;
+    unsafe { out.write(ipc_handle) };
+    Ok(())
+}
+
+pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32) -> Result<()> {
+    if out.is_null() || flags != CUipcMem_flags::CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS as u32 {
+        return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
+    }
+    let (reference, requested, extent) = ipc::decode(handle)?;
+    let mut state = runtime::active()?;
+    let address = if let Some(address) = state.reopen_malloc(reference, requested, extent)? {
+        address
+    } else {
+        let context = driver::context()?;
+        let mut device = 0;
+        unsafe { driver::cuCtxGetDevice(&mut device) }?;
+        let (mut state, handle) = sharing::import_reference(state, reference)?;
+        let opens = 1;
+        state.map_malloc(handle, requested, extent, opens, context, device)?
+    };
+    unsafe { out.write(address) };
+    Ok(())
+}
+
+pub fn cuMemFree_v2(address: CUdeviceptr) -> Result<()> {
+    ipc::release(address, ipc::Ownership::Owned)
+}
+
+pub fn cuIpcCloseMemHandle(address: CUdeviceptr) -> Result<()> {
+    ipc::release(address, ipc::Ownership::Imported)
+}
+
+pub fn cuMemGetAddressRange_v2(
+    base: *mut CUdeviceptr,
+    size: *mut usize,
+    address: CUdeviceptr,
+) -> Result<()> {
+    let state = runtime::active()?;
+    if let Some((&start, mapping)) = state.malloc_regions.range(..=address).next_back()
+        && address - start < mapping.requested as u64
+    {
+        unsafe {
+            if !base.is_null() {
+                base.write(start);
+            }
+            if !size.is_null() {
+                size.write(mapping.requested);
+            }
+        }
+        return Ok(());
+    }
+    runtime::call_unlocked(state, || unsafe {
+        driver::cuMemGetAddressRange_v2(base, size, address)
+    })
+    .map(|_| ())
+}

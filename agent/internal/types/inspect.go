@@ -34,6 +34,7 @@ type CheckpointContainerSnapshot struct {
 	CUDAHostPIDs   []int    // host-visible PIDs used for checkpoint-side CUDA actions
 	CUDANSPIDs     []int    // innermost PIDs stored in the checkpoint manifest
 	GPUDevicePaths map[string]string
+	CuInterpose    *CuInterposeManifest
 
 	// GPUs holds the GPUs the checkpointed container could see, in allocation
 	// order, with the model and driver version where they could be read.

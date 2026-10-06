@@ -26,6 +26,9 @@ const (
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
 	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
 
+	// CuInterposeAnnotation enables the CUDA interposer for checkpoint targets.
+	CuInterposeAnnotation = "nvidia.com/cuda-shared-memory-support"
+
 	// DefaultSeccompLocalhostProfile is the kubelet-local profile installed by
 	// the Snapshot Helm chart to block io_uring for CRIU.
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"

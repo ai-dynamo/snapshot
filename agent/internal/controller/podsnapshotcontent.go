@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -606,6 +607,10 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 // returning the error; on success the dump itself has already terminated the source process.
 func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) error {
 	log := logr.FromContextOrDiscard(ctx)
+	required, err := cuInterposeRequired(params.Pod, params.ContainerName)
+	if err != nil {
+		return err
+	}
 
 	req := executor.CheckpointRequest{
 		ContainerID:         params.ContainerID,
@@ -619,6 +624,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		Pod:                 podEnvironment(params.Pod, params.ContainerName),
 		Clientset:           w.clientset,
 		PageBrokerRequested: params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		CuInterposeRequired: required,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
 		if executor.CheckpointNeedsSourceKill(err) {
@@ -709,4 +715,16 @@ func contentNameFromInformerObj(obj interface{}) (string, bool) {
 		return "", false
 	}
 	return accessor.GetName(), true
+}
+
+// The launcher command establishes that delivery is required even if annotations later
+// change. Without that command, the annotation decides, independently of the operator's
+// current image or settings.
+func cuInterposeRequired(pod *corev1.Pod, target string) (bool, error) {
+	for _, container := range pod.Spec.Containers {
+		if container.Name == target && len(container.Command) > 0 && container.Command[0] == podcontract.CuInterposeLauncherPath {
+			return true, nil
+		}
+	}
+	return podcontract.ParseCuInterposeAnnotation(pod.Annotations)
 }

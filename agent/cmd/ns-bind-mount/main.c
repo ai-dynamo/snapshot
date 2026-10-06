@@ -2,16 +2,18 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * ns-bind-mount installs and removes the two mounts used by restore:
+ * ns-bind-mount installs and removes the fixed mounts used by restore:
  *
  *   mount-bundle-fd <namespace-fd>
+ *   mount-snapshot-cuda-fd <namespace-fd> <directory-name>
  *   mount-checkpoint-fd <namespace-fd> <checkpoint-path>
  *   unmount-bundle-fd <namespace-fd> [created]
+ *   unmount-snapshot-cuda-fd <namespace-fd> <directory-name> [created]
  *   unmount-checkpoint-fd <namespace-fd> [created]
  *
  * The caller pins the target mount namespace and passes its descriptor through
- * ExtraFiles. Bundle and checkpoint policy is deliberately fixed here: callers
- * cannot select arbitrary host sources, container destinations, or attributes.
+ * ExtraFiles. Sources and attributes are fixed here. The cuinterpose destination
+ * name comes from the Go pod contract and can select only a directory under /tmp.
  */
 
 #define _GNU_SOURCE
@@ -58,6 +60,8 @@ struct mount_attr {
 
 #define BUNDLE_SOURCE "/snapshot-binaries"
 #define BUNDLE_DESTINATION "/tmp/snapshot-binaries"
+/* CRIU reopens library mappings at the paths recorded during capture. */
+#define SNAPSHOT_CUDA_SOURCE BUNDLE_SOURCE "/snapshot-cuda"
 #define CHECKPOINT_ROOT "/checkpoints"
 #define CHECKPOINT_DESTINATION "/tmp/checkpoint"
 #define PAGEBROKER_RESTORE_ROOT "/pagebroker/staging/restore"
@@ -235,6 +239,53 @@ mount_bundle(int argc, char* argv[])
 }
 
 static int
+snapshot_cuda_destination(const char* leaf, char* destination, size_t size)
+{
+  if (*leaf == '\0' || strcmp(leaf, ".") == 0 || strcmp(leaf, "..") == 0 ||
+      strlen(leaf) > NAME_MAX) {
+    fprintf(stderr, "invalid snapshot-cuda directory name: %s\n", leaf);
+    return -1;
+  }
+  for (const char* p = leaf; *p; p++) {
+    if (!is_portable_path_char(*p)) {
+      fprintf(stderr, "invalid snapshot-cuda directory name: %s\n", leaf);
+      return -1;
+    }
+  }
+  int length = snprintf(destination, size, "/tmp/%s", leaf);
+  return length < 0 || (size_t)length >= size ? -1 : 0;
+}
+
+enum snapshot_cuda_action { SNAPSHOT_CUDA_MOUNT, SNAPSHOT_CUDA_UNMOUNT };
+
+static int
+snapshot_cuda(int argc, char* argv[], enum snapshot_cuda_action action)
+{
+  int unmount = action == SNAPSHOT_CUDA_UNMOUNT;
+  if (argc != 4 && !(unmount && argc == 5)) {
+    fprintf(stderr, "usage: ns-bind-mount %s <namespace-fd> <directory-name>%s\n",
+        argv[1], unmount ? " [created]" : "");
+    return 1;
+  }
+  int created = unmount && argc == 5;
+  if (created && strcmp(argv[4], "created") != 0) {
+    fprintf(stderr, "expected created marker\n");
+    return 1;
+  }
+  char destination[PATH_MAX];
+  int ns_fd = parse_fd(argv[2]);
+  if (ns_fd < 0 || snapshot_cuda_destination(argv[3], destination, sizeof destination) < 0)
+    return 1;
+  if (unmount)
+    return remove_mount(ns_fd, destination, created);
+  return install_mount(
+      ns_fd,
+      SNAPSHOT_CUDA_SOURCE,
+      destination,
+      MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV);
+}
+
+static int
 mount_checkpoint(int argc, char* argv[])
 {
   if (argc != 4) {
@@ -298,6 +349,8 @@ main(int argc, char* argv[])
   }
   if (strcmp(argv[1], "mount-bundle-fd") == 0)
     return mount_bundle(argc, argv);
+  if (strcmp(argv[1], "mount-snapshot-cuda-fd") == 0)
+    return snapshot_cuda(argc, argv, SNAPSHOT_CUDA_MOUNT);
   if (strcmp(argv[1], "mount-checkpoint-fd") == 0)
     return mount_checkpoint(argc, argv);
   if (strcmp(argv[1], "mount-pagebroker-fd") == 0)
@@ -308,6 +361,8 @@ main(int argc, char* argv[])
         argv,
         BUNDLE_DESTINATION,
         "usage: ns-bind-mount unmount-bundle-fd <namespace-fd> [created]");
+  if (strcmp(argv[1], "unmount-snapshot-cuda-fd") == 0)
+    return snapshot_cuda(argc, argv, SNAPSHOT_CUDA_UNMOUNT);
   if (strcmp(argv[1], "unmount-checkpoint-fd") == 0)
     return unmount_role(
         argc,
