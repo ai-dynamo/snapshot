@@ -61,9 +61,11 @@ materials. The agent image build does not require Model Streamer.
 For native builds, pass `MODEL_STREAMER_INCLUDE_DIR=/path/to/include` and
 `MODEL_STREAMER_LIB_DIR=/path/to/lib` to `make -C agent/pagebroker test daemon`.
 PageBroker submits CPU destinations and needs no CUDA driver. The filesystem
-strategy defaults to the library's `sync_buffered`; set
-`RUNAI_STREAMER_FS_STRATEGY` before starting PageBroker to select an explicit
-preference list such as `io_uring_buffered,sync_buffered`.
+strategy defaults to the library's ordered
+`io_uring_direct,libaio_direct,sync_buffered` preference list. Use the optional
+[`--model-streamer-config` JSON file](../../agent/pagebroker/MODEL_STREAMER.md)
+or `RUNAI_STREAMER_FS_STRATEGY` before starting PageBroker to select an explicit
+list such as `io_uring_buffered,sync_buffered`.
 
 Native sessions admit at most eight submissions and target 10 GB of submitted
 bytes; one larger file runs alone. Admission closes on the first completed

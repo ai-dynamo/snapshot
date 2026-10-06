@@ -64,21 +64,23 @@ Environment(const char* name)
 
 }  // namespace
 
-ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root)
+ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root, ModelStreamerOptions model_streamer)
     : storage_root_(fs::weakly_canonical(std::move(storage_root))),
+      model_streamer_(std::move(model_streamer)),
       restore_(CreateRestore())
 {
 }
 
-ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root, S3TransferOptions options)
+ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root, S3TransferOptions options, ModelStreamerOptions model_streamer)
     : storage_root_(fs::weakly_canonical(std::move(storage_root))), s3_options_(std::move(options)),
+      model_streamer_(std::move(model_streamer)),
       restore_(CreateRestore())
 {
   ValidateS3Configuration();
 }
 
-ModelStreamerTransferEngine::ModelStreamerTransferEngine(S3Config config)
-    : ModelStreamerTransferEngine("/", config.transfer)
+ModelStreamerTransferEngine::ModelStreamerTransferEngine(S3Config config, ModelStreamerOptions model_streamer)
+    : ModelStreamerTransferEngine("/", config.transfer, std::move(model_streamer))
 {
   store_ = std::make_unique<S3StorageBackend>(std::move(config));
 }
@@ -115,13 +117,18 @@ ModelStreamerTransferEngine::ArtifactStorage() const
 std::shared_ptr<ModelStreamerRestore>
 ModelStreamerTransferEngine::CreateRestore() const
 {
+  model_streamer_.ValidateEnvironment();
+  ModelStreamerSessionOptions session;
+  session.filesystem_strategy = model_streamer_.filesystem_strategy;
   if (!s3_options_)
-    return std::make_shared<ModelStreamerRestore>();
+    return std::make_shared<ModelStreamerRestore>(std::move(session));
   const auto& connection = s3_options_->connection;
-  return std::make_shared<ModelStreamerRestore>(
-      ModelStreamerSessionOptions{connection.region, connection.endpoint, connection.access_key_id,
-                                  connection.secret_access_key, connection.session_token},
-      s3_options_->restore_timeout);
+  session.region = connection.region;
+  session.endpoint = connection.endpoint;
+  session.access_key_id = connection.access_key_id;
+  session.secret_access_key = connection.secret_access_key;
+  session.session_token = connection.session_token;
+  return std::make_shared<ModelStreamerRestore>(std::move(session), s3_options_->restore_timeout);
 }
 
 // Reuse a healthy coordinator; replace it after a terminal native failure.

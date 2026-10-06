@@ -20,6 +20,31 @@ TEST(S3ConfigTest, HasFiniteDefaultsAndNoCredentialValues)
   EXPECT_TRUE(config.transfer.connection.access_key_id.empty());
 }
 
+TEST(S3ConfigTest, ConfiguresSdkRetriesAndConnectionTimeoutIndependently)
+{
+  auto value = Json::parse(kConfig);
+  value["limits"] = {{"requestSeconds", 2}};
+  auto config = ParseS3Config(value.dump());
+  EXPECT_EQ(config.transfer.upload_limits.connect_timeout, std::chrono::seconds(2));
+  EXPECT_EQ(config.transfer.upload_limits.request_retries, 3);
+  value["limits"]["uploadRequestRetries"] = 0;
+  value["limits"]["uploadConnectSeconds"] = 1;
+  config = ParseS3Config(value.dump());
+  EXPECT_EQ(config.transfer.upload_limits.connect_timeout, std::chrono::seconds(1));
+  EXPECT_EQ(config.transfer.upload_limits.request_timeout, std::chrono::seconds(2));
+  EXPECT_EQ(config.transfer.upload_limits.request_retries, 0);
+  EXPECT_EQ(config.transfer.restore_timeout, std::chrono::hours(2));
+  for (const auto* field : {"uploadRequestRetries", "uploadConnectSeconds"}) {
+    auto invalid = value;
+    invalid["limits"][field] = -1;
+    EXPECT_THROW(ParseS3Config(invalid.dump()), std::invalid_argument);
+    invalid["limits"][field] = 11;
+    EXPECT_THROW(ParseS3Config(invalid.dump()), std::invalid_argument);
+  }
+  value["limits"]["uploadConnectSeconds"] = 0;
+  EXPECT_THROW(ParseS3Config(value.dump()), std::invalid_argument);
+}
+
 TEST(S3ConfigTest, ValidatesConnectionFieldsBeforeOptionalSettings)
 {
   for (const auto* field : {"region", "endpoint"}) {

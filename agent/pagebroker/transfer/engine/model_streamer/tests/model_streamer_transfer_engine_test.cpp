@@ -49,6 +49,8 @@ bool timeout_first_session = false;
 fs::path fake_s3_root;
 int credential_status = 0;
 unsigned credential_calls = 0;
+int strategy_status = 0;
+std::vector<std::string> configured_strategies;
 std::atomic<bool> hold_end = false;
 std::atomic<bool> end_entered = false;
 std::atomic<bool> release_end = false;
@@ -87,6 +89,8 @@ class ModelStreamerTransferEngineTest : public ::testing::Test {
     timeout_first_session = false;
     credential_status = credential_calls = 0;
     configured.clear();
+    strategy_status = 0;
+    configured_strategies.clear();
     fake_s3_root.clear();
     options_.connection.region = "test-region";
     options_.connection.endpoint = "http://s3.example.invalid";
@@ -126,6 +130,15 @@ runai_file_streamer_set_credentials(void* value, const char** keys, const char**
   for (unsigned i = 0; i < count; ++i)
     configured.emplace(keys[i], values[i]);
   return credential_status;
+}
+
+extern "C" int
+runai_file_streamer_set_fs_strategy(void* value, const char* strategy)
+{
+  auto& streamer = *static_cast<FakeStreamer*>(value);
+  EXPECT_TRUE(streamer.responses.empty());
+  configured_strategies.emplace_back(strategy);
+  return strategy_status;
 }
 
 extern "C" void
@@ -329,6 +342,56 @@ TEST_F(ModelStreamerTransferEngineTest, S3RecoveryPreservesConnectionAndTimeout)
   EXPECT_EQ(configured, original);
   EXPECT_EQ(credential_calls, 3);
   EXPECT_EQ(fs::file_size(root_.path() / "recovered/data"), 9);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, PreservesStrategyAcrossRecoveryAndSessionTurnover)
+{
+  const auto source = root_.path() / "source";
+  fs::create_directory(source);
+  std::ofstream(source / "data") << "recovered";
+  StorageBackend storage;
+  storage.mutable_filesystem()->set_directory(source.string());
+  auto tuning = ParseModelStreamerConfig(R"({"filesystem":{"strategies":["io_uring_buffered","sync_buffered"]}})");
+  ModelStreamerTransferEngine engine(root_.path(), options_, tuning);
+  tuning.filesystem_strategy = "sync_buffered";
+  EXPECT_THROW(engine.StageRestore(engine.PrepareRestore(storage), root_.path() / "failed"), std::runtime_error);
+  EXPECT_NO_THROW(engine.StageRestore(engine.PrepareRestore(storage), root_.path() / "recovered"));
+  EXPECT_NO_THROW(engine.StageRestore(engine.PrepareRestore(storage), root_.path() / "next-session"));
+  EXPECT_EQ(configured_strategies, (std::vector<std::string>(3, "io_uring_buffered,sync_buffered")));
+  EXPECT_EQ(starts, 3);
+  EXPECT_EQ(ends, 3);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, EndsSessionAndRecoversAfterStrategySetterFailure)
+{
+  fail_first_session = false;
+  strategy_status = RUNAI_FILE_STREAMER_RESPONSE_INVALID_PARAMETER_ERROR;
+  const auto source = root_.path() / "source";
+  fs::create_directory(source);
+  std::ofstream(source / "data") << "data";
+  StorageBackend storage;
+  storage.mutable_filesystem()->set_directory(source.string());
+  ModelStreamerOptions tuning;
+  tuning.filesystem_strategy = "sync_buffered";
+  ModelStreamerTransferEngine engine(root_.path(), tuning);
+  EXPECT_THROW(engine.StageRestore(engine.PrepareRestore(storage), root_.path() / "failed"), std::runtime_error);
+  EXPECT_EQ(starts, 1);
+  EXPECT_EQ(ends, 1);
+  EXPECT_EQ(next_submission_id, 0);
+  strategy_status = 0;
+  EXPECT_NO_THROW(engine.StageRestore(engine.PrepareRestore(storage), root_.path() / "recovered"));
+  EXPECT_EQ(starts, 2);
+  EXPECT_EQ(ends, 2);
+  EXPECT_EQ(configured_strategies, (std::vector<std::string>(2, "sync_buffered")));
+}
+
+TEST_F(ModelStreamerTransferEngineTest, RejectsUnappliedProcessSettingsBeforeNativeStartup)
+{
+  ScopedEnvironment concurrency("RUNAI_STREAMER_OBJ_CONCURRENCY", "2");
+  ModelStreamerOptions tuning;
+  tuning.s3_concurrency = 3;
+  EXPECT_THROW(ModelStreamerTransferEngine(root_.path(), tuning), std::invalid_argument);
+  EXPECT_EQ(starts, 0);
 }
 
 TEST_F(ModelStreamerTransferEngineTest, RejectsConflictingS3SettingsAndInvalidTimeouts)

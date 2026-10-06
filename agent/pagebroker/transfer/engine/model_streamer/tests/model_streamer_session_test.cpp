@@ -108,6 +108,11 @@ extern "C" int runai_file_streamer_set_credentials(void*, const char**, const ch
   return RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
 }
 
+extern "C" int runai_file_streamer_set_fs_strategy(void*, const char*)
+{
+  return RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
+}
+
 extern "C" void runai_file_streamer_end(void* value)
 {
   auto* session = static_cast<Session*>(value);

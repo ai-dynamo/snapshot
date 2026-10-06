@@ -125,7 +125,7 @@ RUN make test && make daemon && make s3-test-build
 # Smoke-test must run here: the runtime stage is distroless (no shell).
 RUN output=$(/src/pagebroker 2>&1); status=$?; \
     [ "$status" -eq 2 ]; \
-    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests [--storage-config path]" ]
+    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests [--storage-config path] [--model-streamer-config path]" ]
 
 # Corresponding source for the statically linked protobuf. Fetched in this
 # stage, from the same libprotobuf-dev install that provided the linked

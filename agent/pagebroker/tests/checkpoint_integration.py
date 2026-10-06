@@ -176,18 +176,32 @@ def run(args):
                           prefix=service.prefix, addressing="path", allowHttp=not args.tls,
                           caFile=environment.get("AWS_CA_BUNDLE", ""),
                           limits=dict(transactionSeconds=120, activeTransactions=8, uploadPartBytes=5*1024*1024,
-                                      uploadBufferBytes=20*1024*1024, requestSeconds=2))
+                                      uploadBufferBytes=20*1024*1024, requestSeconds=2,
+                                      uploadConnectSeconds=1, uploadRequestRetries=2))
             config_path = root / "storage.json"
             config_path.write_text(json.dumps(config))
-            missing = subprocess.run([
+            streamer_path = root / "streamer.json"
+            streamer_path.write_text(json.dumps(dict(
+                filesystem=dict(strategies=["sync_buffered"]), readChunkBytes=8*1024*1024,
+                s3Reader=dict(concurrency=2, maxConnections=2, maxInflightMiB=16,
+                              maxRetries=1, retryWindowSeconds=0, lowSpeedTimeoutMs=2000),
+                logging=dict(level="ERROR", toStderr=True))))
+            missing_command = [
                 "docker", "run", "--rm", "--network=host", "--user", f"{os.getuid()}:{os.getgid()}",
                 "--mount", f"type=bind,source={root},target={root}",
                 "--env", "AWS_SHARED_CREDENTIALS_FILE=/dev/null", "--env", "AWS_CONFIG_FILE=/dev/null",
                 "--env", "AWS_EC2_METADATA_DISABLED=true", "--entrypoint", "/usr/local/bin/pagebroker", args.image,
                 str(root / "missing.sock"), str(root / "missing-staging"), "/unused",
                 "--max-concurrent-requests", "16", "--storage-config", str(config_path),
-            ], capture_output=True, text=True, timeout=15)
+            ]
+            missing = subprocess.run(missing_command, capture_output=True, text=True, timeout=15)
             assert missing.returncode == 1 and "PageBroker startup failed" in missing.stderr, missing.stderr
+            invalid_path = root / "invalid-streamer.json"
+            invalid_path.write_text('{"s3Reader":{"concurrency":0}}')
+            invalid = subprocess.run(missing_command + ["--model-streamer-config", str(invalid_path)],
+                                     capture_output=True, text=True, timeout=15)
+            assert invalid.returncode == 2 and "s3Reader.concurrency" in invalid.stderr, invalid.stderr
+            assert not (root / "missing.sock").exists()
             containers = []
             try:
                 for number in range(3):
@@ -211,7 +225,13 @@ def run(args):
                         selected_config.write_text(json.dumps(short_config))
                     command += ["--entrypoint", "/usr/local/bin/pagebroker", args.image,
                                 str(root / f"{number}.sock"), str(root / f"staging-{number}"), "/unused",
-                                "--max-concurrent-requests", "16", "--storage-config", str(selected_config)]
+                                "--max-concurrent-requests", "16"]
+                    # Exercise both argument orders plus the existing no-tuning
+                    # invocation in independent daemon processes.
+                    storage_args = ["--storage-config", str(selected_config)]
+                    streamer_args = ["--model-streamer-config", str(streamer_path)]
+                    command += (streamer_args + storage_args if number == 0 else
+                                storage_args + streamer_args if number == 1 else storage_args)
                     subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
                     containers.append(name)
                 deadline = time.monotonic() + 15

@@ -24,6 +24,7 @@
 
 #include "file_descriptor.hpp"
 #include "model_streamer_api.hpp"
+#include "model_streamer_config.hpp"
 #include "utils/event_loop.hpp"
 #include "utils/sha256.hpp"
 
@@ -266,6 +267,8 @@ ModelStreamerRestore::ModelStreamerRestore(
     throw std::invalid_argument("Model Streamer submission timeout must be positive");
   if (!HasCompleteCredentials(options_))
     throw std::invalid_argument("Model Streamer explicit credentials require both access and secret keys");
+  if (options_.filesystem_strategy)
+    ValidateFilesystemStrategy(*options_.filesystem_strategy);
   for (const auto* value : {&options_.region, &options_.endpoint, &options_.access_key_id,
                             &options_.secret_access_key, &options_.session_token}) {
     if (value->find('\0') != std::string::npos)
@@ -300,6 +303,11 @@ ModelStreamerRestore::Start()
     throw std::runtime_error("Model Streamer started without returning a handle");
 
   try {
+    if (options_.filesystem_strategy) {
+      const int status = streamer::runai_file_streamer_set_fs_strategy(value_, options_.filesystem_strategy->c_str());
+      if (status != 0)
+        throw std::runtime_error("configure Model Streamer filesystem strategy: " + StreamerError(status));
+    }
     std::vector<const char*> keys;
     std::vector<const char*> values;
     const auto append = [&](const char* key, const std::string& value) {
