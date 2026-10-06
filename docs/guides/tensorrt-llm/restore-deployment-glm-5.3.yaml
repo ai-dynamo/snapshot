@@ -52,6 +52,7 @@ spec:
           # The agent restores the saved process into this inert container.
           command: [/bin/sh, -c, exec sleep infinity]
           env:
+            - {name: SNAPSHOT_CONTROL_DIR, value: /snapshot-control}
             - {name: SNAPSHOT_MODEL, value: RadixArk/GLM-5.3-NVFP4}
             - {name: SNAPSHOT_TENSOR_PARALLEL_SIZE, value: "8"}
             - name: TRTLLM_ENGINE_ARGS

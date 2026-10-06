@@ -73,6 +73,7 @@ def test_explicit_restore_node(monkeypatch: pytest.MonkeyPatch, spec: frameworks
 @pytest.mark.workload
 def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
+    assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
         assert pod_spec["runtimeClassName"] == "nvidia"
@@ -288,6 +289,7 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
     restore = fw.restore_pod(
         config=CONFIG, run=run, spec=spec, source_node="n0", image=IMAGE, model_cache=CACHE
     )
+    assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
         # No download init container: the export is mounted read-mostly and the
@@ -346,6 +348,7 @@ def test_multi_gpu_recipe_matches_restore_and_shared_cache(
     spec = frameworks.framework_spec(engine)
     source, restore, run = pods(spec)
     source_main, restore_main = map(fw.main_container, (source, restore))
+    assert fw.env_value(restore_main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     argument_variable = {"vllm": "VLLM_ENGINE_ARGS", "sglang": "SGLANG_ENGINE_ARGS",
                          "tensorrt-llm": "TRTLLM_ENGINE_ARGS"}[engine]
     arguments = json.loads(fw.env_value(source_main, argument_variable))
