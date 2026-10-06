@@ -4,6 +4,8 @@
 //! Allocation identity, virtual handle references, and tracked address ranges.
 
 pub(crate) mod checkpoint;
+pub(crate) mod context;
+pub(crate) mod ipc;
 pub(crate) mod sharing;
 pub(crate) mod vmm;
 
@@ -124,6 +126,12 @@ pub struct HandleEntry {
 
 pub struct ProcessState {
     pub namespace_pid: NamespacePid,
+    pub malloc_regions: BTreeMap<u64, ipc::MallocRegion>,
+    imported_mallocs: BTreeMap<AllocationId, u64>,
+    // Minimum granularity and GPUDirect RDMA flag for the fixed malloc properties.
+    malloc_layouts: BTreeMap<i32, (usize, u8)>,
+    // Owning context -> accessing contexts and their device ordinals.
+    malloc_peers: BTreeMap<usize, BTreeMap<usize, i32>>,
     pub memblocks: BTreeMap<AllocationId, Memblock>,
     pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, HandleEntry>,
     pub mappings: BTreeMap<u64, Mapping>,
@@ -143,6 +151,10 @@ impl ProcessState {
     pub(crate) fn new(namespace_pid: NamespacePid) -> Self {
         Self {
             namespace_pid,
+            malloc_regions: BTreeMap::new(),
+            imported_mallocs: BTreeMap::new(),
+            malloc_layouts: BTreeMap::new(),
+            malloc_peers: BTreeMap::new(),
             memblocks: BTreeMap::new(),
             virtual_allocation_handles: BTreeMap::new(),
             mappings: BTreeMap::new(),

@@ -227,3 +227,18 @@ pub(crate) fn must_complete<T>(result: Result<T>) -> T {
         std::process::abort();
     })
 }
+
+/// The state lock is released around a blocking driver call so other threads can make
+/// progress, then reacquired before the result is recorded. The returned guard keeps
+/// result recording atomic with checkpoint entry.
+pub(crate) fn call_unlocked<T>(
+    mut state: MutexGuard<'static, ProcessState>,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<(MutexGuard<'static, ProcessState>, T)> {
+    state.unlocked_driver_calls += 1;
+    drop(state);
+    let result = operation();
+    let mut state = must_complete(get());
+    state.unlocked_driver_calls -= 1;
+    result.map(|value| (state, value))
+}

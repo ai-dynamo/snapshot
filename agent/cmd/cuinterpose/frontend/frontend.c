@@ -39,8 +39,16 @@ enum {
     cudaDriverEntryPointSymbolNotFound = 1,
 };
 
-// The backend implements these memory entry points.
+// The backend implements these memory and context entry points.
 #define MEMORY_API(X) \
+    X(cuCtxEnablePeerAccess, (CUcontext peer, unsigned flags), (peer, flags)) \
+    X(cuCtxDisablePeerAccess, (CUcontext peer), (peer)) \
+    X(cuCtxDestroy, (CUcontext context), (context)) \
+    X(cuCtxDestroy_v2, (CUcontext context), (context)) \
+    X(cuDevicePrimaryCtxRelease, (CUdevice device), (device)) \
+    X(cuDevicePrimaryCtxRelease_v2, (CUdevice device), (device)) \
+    X(cuDevicePrimaryCtxReset, (CUdevice device), (device)) \
+    X(cuDevicePrimaryCtxReset_v2, (CUdevice device), (device)) \
     X(cuMemAlloc_v2, (CUdeviceptr *out, size_t size), (out, size)) \
     X(cuMemFree_v2, (CUdeviceptr address), (address)) \
     X(cuMemGetAddressRange_v2, (CUdeviceptr *base, size_t *size, CUdeviceptr address), (base, size, address)) \
@@ -328,11 +336,15 @@ API void *dlsym(void *handle, const char *name) {
     __attribute__((musttail)) return function(handle, name);
 }
 
-// A procedure query can return a newer entry point. Old names such as cuMemAlloc
-// have no separate wrapper, so dlsym must keep returning their original 32-bit ABI.
+// A procedure query can return a newer entry point, including a context API's _v2
+// variant. Old memory names such as cuMemAlloc have no separate wrapper, so dlsym must
+// keep returning their original 32-bit ABI.
 static const struct {
     const char *requested, *returned;
 } QUERY_ALIASES[] = {
+    {"cuCtxDestroy", "cuCtxDestroy_v2"},
+    {"cuDevicePrimaryCtxRelease", "cuDevicePrimaryCtxRelease_v2"},
+    {"cuDevicePrimaryCtxReset", "cuDevicePrimaryCtxReset_v2"},
     {"cuMemAlloc", "cuMemAlloc_v2"},
     {"cuMemFree", "cuMemFree_v2"},
     {"cuMemGetAddressRange", "cuMemGetAddressRange_v2"},
