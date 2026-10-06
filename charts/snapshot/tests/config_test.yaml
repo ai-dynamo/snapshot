@@ -45,3 +45,22 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: "skipCompatCheck: true"
+
+  - it: keeps staged restore as the default
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'restoreMode: "staged"'
+
+  - it: configures direct restore independently of CRIU I/O
+    set:
+      pageBroker.enabled: true
+      pageBroker.restoreMode: direct
+      config.criu.imageIoMode: writeback
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'restoreMode: "direct"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'imageIoMode: "writeback"'

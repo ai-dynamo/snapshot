@@ -51,6 +51,7 @@ class Broker {
   Response ExecuteGpu(const Request& request, const std::shared_ptr<Transaction::GpuOperation>& operation,
                       std::unique_lock<std::mutex> lock);
   Response Restore(const Request& request);
+  Response DirectRestore(const Request& request);
   Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine);
   Response PrepareCheckpoint(const Request& request);
   Response StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine);

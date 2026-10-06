@@ -109,6 +109,8 @@ storage:
 # CustomStorage requires the CPU staging pod annotation and driver support.
 pageBroker:
   enabled: true
+  # Restore from a staged copy or directly from the checkpoint directory.
+  restoreMode: staged
   command: []
   args: []
   maxConcurrentRequests: 16

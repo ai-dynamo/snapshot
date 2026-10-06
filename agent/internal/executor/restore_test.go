@@ -780,3 +780,210 @@ func TestRestoreManifestRequiresMatchingShimLibrariesEvenWhenCompatibilityIsSkip
 		}
 	}
 }
+
+type restoreSourceMounter struct {
+	bundleDone chan struct{}
+	artifact   string
+	staged     string
+	fail       bool
+	cancel     context.CancelFunc
+	events     *[]string
+}
+
+type restoreSourceMount struct {
+	done   chan struct{}
+	name   string
+	events *[]string
+}
+
+func (m restoreSourceMount) NsFd() *os.File { return nil }
+func (m restoreSourceMount) Unmount(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	*m.events = append(*m.events, "unmount "+m.name)
+	if m.done != nil {
+		close(m.done)
+	}
+	return nil
+}
+func (m *restoreSourceMounter) MountBundle(context.Context, int) (nsmount.MountPoint, error) {
+	return restoreSourceMount{done: m.bundleDone, name: "bundle", events: m.events}, nil
+}
+func (m *restoreSourceMounter) source(name string) (nsmount.MountPoint, error) {
+	*m.events = append(*m.events, "mount "+name)
+	if m.cancel != nil {
+		m.cancel()
+	}
+	if m.fail {
+		return nil, errors.New("mount failed")
+	}
+	return restoreSourceMount{name: name, events: m.events}, nil
+}
+func (m *restoreSourceMounter) MountArtifact(_ context.Context, _ nsmount.MountPoint, path string) (nsmount.MountPoint, error) {
+	m.artifact = path
+	return m.source("artifact")
+}
+func (m *restoreSourceMounter) MountPageBroker(_ context.Context, _ nsmount.MountPoint, path string) (nsmount.MountPoint, error) {
+	m.staged = path
+	return m.source("staged")
+}
+
+func TestRestoreSourceAndAbortCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		mode         string
+		mountFailure bool
+		cancel       bool
+	}{
+		{name: "default staged"},
+		{name: "explicit staged", mode: "staged"},
+		{name: "direct", mode: "direct"},
+		{name: "direct mount failure", mode: "direct", mountFailure: true},
+		{name: "direct cancellation", mode: "direct", mountFailure: true, cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			artifact, err := nsmount.ResolveArtifactPath(base, "content", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(artifact, 0700); err != nil {
+				t.Fatal(err)
+			}
+			manifest := &types.CheckpointManifest{Artifact: types.ArtifactManifest{ContentUID: "content", ContainerName: "main"}}
+			if err := types.WriteManifest(artifact, manifest); err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "broker.sock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var events []string
+			bundleDone := make(chan struct{})
+			mounts := &restoreSourceMounter{fail: tc.mountFailure, events: &events, bundleDone: bundleDone}
+			if tc.cancel {
+				mounts.cancel = cancel
+			}
+			server := make(chan error, 1)
+			go func() {
+				transaction := ""
+				for i := 0; i < 2; i++ {
+					connection, err := listener.Accept()
+					if err != nil {
+						server <- err
+						return
+					}
+					err = func() error {
+						defer connection.Close()
+						if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+							return err
+						}
+						var size uint32
+						if err := binary.Read(connection, binary.BigEndian, &size); err != nil {
+							return err
+						}
+						data := make([]byte, size)
+						if _, err := io.ReadFull(connection, data); err != nil {
+							return err
+						}
+						request := new(pagebroker.Request)
+						if err := proto.Unmarshal(data, request); err != nil {
+							return err
+						}
+						response := &pagebroker.Response{RequestId: request.RequestId, TransactionId: request.TransactionId}
+						if i == 0 {
+							transaction = request.GetTransactionId()
+							if transaction == "" {
+								return errors.New("missing transaction")
+							}
+							if tc.mode == "direct" {
+								if request.GetDirectRestore().GetSource().GetFilesystem().GetDirectory() != artifact {
+									return errors.New("wrong direct restore source")
+								}
+								response.Result = &pagebroker.Response_DirectRestoreReady{DirectRestoreReady: &pagebroker.DirectRestoreReady{}}
+							} else {
+								if request.GetStagedRestore().GetSource().GetFilesystem().GetDirectory() != artifact {
+									return errors.New("wrong staged restore source")
+								}
+								response.Result = &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: proto.String("/pagebroker/staging/restore/test")}}
+							}
+						} else {
+							if request.GetAbort() == nil || request.GetTransactionId() != transaction {
+								return errors.New("expected abort of prepared restore")
+							}
+							select {
+							case <-bundleDone:
+							default:
+								return errors.New("abort arrived before mount cleanup")
+							}
+							response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+						}
+						data, err = proto.Marshal(response)
+						if err != nil {
+							return err
+						}
+						if err := binary.Write(connection, binary.BigEndian, uint32(len(data))); err != nil {
+							return err
+						}
+						_, err = connection.Write(data)
+						return err
+					}()
+					if err != nil {
+						server <- err
+						return
+					}
+				}
+				server <- nil
+			}()
+			_, err = Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+				SkipCompatCheck: true, PageBrokerEnabled: true, PageBrokerRequested: true,
+				PageBrokerRestoreMode: tc.mode, PageBrokerControlSocketPath: listener.Addr().String(),
+			}, mounts)
+			// The fixture has no namespace FD, so nsrestore cannot launch.
+			if err == nil {
+				t.Fatal("restore unexpectedly succeeded")
+			}
+			select {
+			case err := <-server:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(6 * time.Second):
+				t.Fatal("restore did not abort its transaction")
+			}
+			name := "staged"
+			if tc.mode == "direct" {
+				name = "artifact"
+				if mounts.artifact != artifact || mounts.staged != "" {
+					t.Fatalf("wrong source mount: %+v", mounts)
+				}
+			} else if mounts.staged != "/pagebroker/staging/restore/test" || mounts.artifact != "" {
+				t.Fatalf("wrong staging mount: %+v", mounts)
+			}
+			want := []string{"mount " + name}
+			if !tc.mountFailure {
+				want = append(want, "unmount "+name)
+			}
+			want = append(want, "unmount bundle")
+			if !reflect.DeepEqual(events, want) {
+				t.Fatalf("cleanup = %v, want %v", events, want)
+			}
+			if _, err := types.ReadManifest(artifact); err != nil {
+				t.Fatalf("source was removed: %v", err)
+			}
+		})
+	}
+}
+
+func (m *cleanupMounter) MountCuInterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return nil, errors.New("unexpected cuinterpose mount")
+}
+
+func (m *restoreSourceMounter) MountCuInterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return nil, errors.New("unexpected cuinterpose mount")
+}
