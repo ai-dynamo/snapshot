@@ -74,13 +74,11 @@ class FrameworkSpec:
 
     @property
     def deployment_manifest(self) -> Path:
-        suffix = f"-{self.recipe}" if self.recipe else ""
-        return self.manifest_dir / f"deployment{suffix}.yaml"
+        return self.manifest_dir / "capture" / f"{self.recipe or 'qwen3-0.6b'}.yaml"
 
     @property
     def restore_deployment_manifest(self) -> Path:
-        suffix = f"-{self.recipe}" if self.recipe else ""
-        return self.manifest_dir / f"restore-deployment{suffix}.yaml"
+        return self.manifest_dir / "restore" / f"{self.recipe or 'qwen3-0.6b'}.yaml"
 
     @property
     def app_py(self) -> Path:
@@ -88,7 +86,7 @@ class FrameworkSpec:
 
     @property
     def app_configmap_name(self) -> str:
-        # Matches the configMap.name this framework's own deployment.yaml
+        # Matches the configMap.name this framework's capture manifest
         # references, including the multi-GPU variants.
         return f"{self.name}-app"
 
@@ -211,7 +209,7 @@ def framework_image(spec: FrameworkSpec) -> str:
 
     SNAPSHOT_E2E_FRAMEWORK_IMAGE wins so a different image can be tested.
     Otherwise the image is read straight from the guide's own
-    deployment.yaml -- one place to change it.
+    capture manifest -- one place to change it.
     """
     override = os.environ.get("SNAPSHOT_E2E_FRAMEWORK_IMAGE")
     if override:

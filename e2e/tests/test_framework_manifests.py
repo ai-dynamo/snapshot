@@ -45,7 +45,6 @@ CACHE = frameworks.SharedModelCache(
 @pytest.fixture(autouse=True)
 def _workload_image(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", AGENT_IMAGE)
-    monkeypatch.delenv("SNAPSHOT_E2E_RESTORE_NODE", raising=False)
     monkeypatch.delenv("SNAPSHOT_E2E_RECIPE", raising=False)
 
 
@@ -61,13 +60,6 @@ def pods(spec: frameworks.FrameworkSpec) -> tuple[dict, dict, workloads.TestRun]
         config=CONFIG, run=run, spec=spec, source_node="gpu-node-0", image=IMAGE
     )
     return source, restore, run
-
-
-@pytest.mark.workload
-def test_explicit_restore_node(monkeypatch: pytest.MonkeyPatch, spec: frameworks.FrameworkSpec) -> None:
-    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_NODE", "gpu-node-destination")
-    _, restored, _ = pods(spec)
-    assert restored["spec"]["affinity"] == workloads.same_node_affinity("gpu-node-destination")
 
 
 @pytest.mark.workload
@@ -352,7 +344,8 @@ def test_multi_gpu_recipe_matches_restore_and_shared_cache(
     argument_variable = {"vllm": "VLLM_ENGINE_ARGS", "sglang": "SGLANG_ENGINE_ARGS",
                          "tensorrt-llm": "TRTLLM_ENGINE_ARGS"}[engine]
     arguments = json.loads(fw.env_value(source_main, argument_variable))
-    assert arguments == json.loads(fw.env_value(restore_main, argument_variable))
+    # The saved engine resumes with its captured constructor settings.
+    assert fw.env_value(restore_main, argument_variable) is None
     if engine == "sglang":
         assert arguments["ep_size"] == size
     elif engine == "vllm":

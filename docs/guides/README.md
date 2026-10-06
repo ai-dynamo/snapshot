@@ -27,7 +27,8 @@ image and deploy it:
 - [SGLang](sglang.md)
 - [TensorRT-LLM](tensorrt-llm.md)
 
-These examples enable [CUDA shared-memory support](cuda-shared-memory.md).
+The separate multi-GPU examples enable
+[CUDA shared-memory support](cuda-shared-memory.md).
 That guide covers matching agent images, ordinary Pods, SnapshotJobs, and
 the settings to change for multiple GPUs on one node.
 

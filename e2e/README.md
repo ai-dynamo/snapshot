@@ -162,11 +162,6 @@ SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapsho
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
-Set `SNAPSHOT_E2E_RESTORE_NODE` to test a distinct destination node with shared
-checkpoint storage. The test requires that node to differ from the actual
-source and verifies the restored Pod's placement. Without it, restore stays
-on the source node.
-
 The harness preserves each manifest's GPU count and tensor parallelism.
 Benchmark comparison dimensions record shared-memory activation and the live
 source Pod's tensor-parallel size.
@@ -418,15 +413,15 @@ The framework e2e workloads use the programs and manifests under
 `docs/guides/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`). Each
 framework runs the upstream image unmodified. The exact image reference is
 `spec.template.spec.containers[0].image` in that framework's own
-`deployment.yaml` -- with `app.py` mounted from a ConfigMap (`kubectl create
+capture manifest, with `app.py` mounted from a ConfigMap (`kubectl create
 configmap <framework>-app --from-file=app.py -n
 "${SNAPSHOT_E2E_TEST_NAMESPACE:-snapshot-e2e}"`) rather than baked into a
 Snapshot-built engine image. The separate installer uses the matching Snapshot
 agent image. `frameworks.framework_image()` reads the engine image straight
-from that `deployment.yaml`, and
+from that capture manifest, and
 `framework_workloads.app_configmap()` builds the ConfigMap from the same
 `app.py`.
 
 Point `SNAPSHOT_E2E_FRAMEWORK_IMAGE` at a different image to test an
 unpublished change (a fork of `vllm/vllm-openai`, for example) without
-editing `deployment.yaml`.
+editing the capture manifest.

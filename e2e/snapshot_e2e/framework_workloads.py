@@ -153,13 +153,10 @@ def restore_pod(
         model_cache=model_cache,
     )
     # The guide names its own PodSnapshot, so the restore annotation must instead
-    # identify this run's snapshot. Tests normally restore on the source node because
-    # another destination requires shared checkpoint storage.
+    # identify this run's snapshot. Restore on the source node where its checkpoint
+    # is stored.
     pod["metadata"]["annotations"] = {RESTORE_FROM_ANNOTATION: run.snapshot_name}
-    destination = os.environ.get("SNAPSHOT_E2E_RESTORE_NODE", source_node)
-    if not destination:
-        raise ValueError("SNAPSHOT_E2E_RESTORE_NODE must name a node")
-    pod["spec"]["affinity"] = same_node_affinity(destination)
+    pod["spec"]["affinity"] = same_node_affinity(source_node)
     return pod
 
 
@@ -168,7 +165,7 @@ def app_configmap(
     config: k8s.E2EConfig,
     spec: FrameworkSpec,
 ) -> dict[str, Any]:
-    """The ConfigMap the guide's deployment.yaml mounts app.py from.
+    """The ConfigMap the guide's capture manifest mounts app.py from.
 
     Matches spec.app_configmap_name, the name the guide's own manifest
     references, and the same `kubectl create configmap --from-file=app.py`

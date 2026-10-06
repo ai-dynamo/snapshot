@@ -4,7 +4,7 @@ This guide makes a TensorRT-LLM workload snapshot-ready by mounting an
 entrypoint into a TensorRT-LLM runtime image, implementing Snapshot's
 [workload contract](../reference/workload-contract.md). The example runs the
 TensorRT-LLM image that includes TensorRT-LLM and its runtime dependencies,
-unmodified. `deployment.yaml` pins the exact upstream image, and one
+unmodified. `capture/qwen3-0.6b.yaml` pins the exact upstream image, and one
 program, `app.py`, is mounted into it from a ConfigMap to prepare
 TensorRT-LLM for checkpoint and validate it after restore. The Snapshot
 agent injects the restore tooling at runtime.
@@ -19,28 +19,29 @@ shared-memory support and install the matching cuInterpose bundle.
 ## 1. Download the example files
 
 Download [`app.py`](tensorrt-llm/app.py),
-[`deployment.yaml`](tensorrt-llm/deployment.yaml), and
-[`restore-deployment.yaml`](tensorrt-llm/restore-deployment.yaml) from the
+[`capture/qwen3-0.6b.yaml`](tensorrt-llm/capture/qwen3-0.6b.yaml), and
+[`restore/qwen3-0.6b.yaml`](tensorrt-llm/restore/qwen3-0.6b.yaml) from the
 repository:
 
 ```bash
 mkdir -p tensorrt-llm-snapshot
 cd tensorrt-llm-snapshot
+mkdir -p capture restore
 
 curl --fail --location \
   --output app.py \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/app.py
 
 curl --fail --location \
-  --output deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/deployment.yaml
+  --output capture/qwen3-0.6b.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/capture/qwen3-0.6b.yaml
 
 curl --fail --location \
-  --output restore-deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/restore-deployment.yaml
+  --output restore/qwen3-0.6b.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/restore/qwen3-0.6b.yaml
 ```
 
-The program loads the model selected in `deployment.yaml` and calls
+The program loads the model selected in `capture/qwen3-0.6b.yaml` and calls
 `LLM.generate()` to initialize TensorRT-LLM. The synchronous call returns only
 after generation finishes, so no request remains in flight. The program then
 runs `gc.collect()` and writes `ready-for-snapshot` when it reaches the safe
@@ -54,7 +55,7 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-`deployment.yaml` runs the TensorRT-LLM `1.3.0rc24` release image, pinned by
+`capture/qwen3-0.6b.yaml` runs the TensorRT-LLM `1.3.0rc24` release image, pinned by
 digest, unmodified, and mounts `app.py` at `/snapshot-app` from the
 `tensorrt-llm-app` ConfigMap created in step 2. A release candidate is used
 deliberately: the `1.2.1` GA image fails at `import tensorrt` because
@@ -70,18 +71,13 @@ These settings avoid RDMA mappings that CRIU cannot restore and UCX TCP
 keepalive timeouts during a large checkpoint. These MPI settings do
 not disable NCCL or TensorRT-LLM's GPU collective algorithms.
 
-If the application requires the UCX MPI transport, use `OMPI_MCA_pml=ucx`,
-`UCX_TLS=tcp,self`, and `UCX_TCP_KEEPIDLE=inf` instead, before starting the source
-Pod. Disabling UCX TCP keepalive prevents it from detecting dead peers, so
-revalidate that configuration with the application's failure handling.
-
 The source and restore pods must use the same immutable image and mount the
 Snapshot control volume at `/snapshot-control`.
 
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the TensorRT-LLM pod will run, and create the
-ConfigMap `deployment.yaml` mounts `app.py` from:
+ConfigMap `capture/qwen3-0.6b.yaml` mounts `app.py` from:
 
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
@@ -105,7 +101,7 @@ kubectl create configmap tensorrt-llm-app \
 ## 3. Deploy TensorRT-LLM
 
 Select a model supported by the chosen TensorRT-LLM image through
-`SNAPSHOT_MODEL` in [`deployment.yaml`](tensorrt-llm/deployment.yaml):
+`SNAPSHOT_MODEL` in [`capture/qwen3-0.6b.yaml`](tensorrt-llm/capture/qwen3-0.6b.yaml):
 
 ```yaml
 containers:
@@ -134,7 +130,7 @@ TensorRT-LLM image, GPU count, backend, or engine settings.
 Deploy the edited manifest:
 
 ```bash
-kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename deployment.yaml
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename capture/qwen3-0.6b.yaml
 ```
 
 Wait until the TensorRT-LLM replica finishes initialization and becomes safe to
