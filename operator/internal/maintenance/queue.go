@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/api/storage/coordination"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
@@ -35,6 +36,10 @@ type Queue struct {
 	registry          BackendRegistry
 	configuredBackend string
 
+	// locker serializes delete, sweep and metadata-recovery work on the same
+	// (store, artifact) key, per the coordination contract.
+	locker *coordination.Locker
+
 	queue workqueue.TypedRateLimitingInterface[WorkItemKey]
 }
 
@@ -55,6 +60,7 @@ func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record
 		recorder:          recorder,
 		config:            cfg,
 		configuredBackend: configuredBackend,
+		locker:            coordination.NewLocker(),
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[WorkItemKey](),
 			workqueue.TypedRateLimitingQueueConfig[WorkItemKey]{Name: "podsnapshotcontent-maintenance"},
