@@ -59,11 +59,16 @@ func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error
 
 // processSweep reschedules pending finalization and removes up to
 // config.BatchSize confirmed orphans.
-func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
+func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) (resultErr error) {
 	backend, err := q.backend()
 	if err != nil {
 		return err
 	}
+	// The namespaces are independent: a broken content list or unsafe content
+	// root must not starve failed-attempt helper cleanup (or vice versa).
+	defer func() {
+		resultErr = errors.Join(resultErr, q.processHelperSweep(ctx, backend, logger))
+	}()
 
 	// Enumerate before listing content so new artifacts aren't mistaken for orphans.
 	candidates, enumerationErr := backend.Candidates(ctx, logger)

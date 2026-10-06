@@ -35,6 +35,55 @@ func minimalSnapshotJob() *snapshotv1alpha1.SnapshotJob {
 	}
 }
 
+func TestBuildSourceJobHelperArtifactContract(t *testing.T) {
+	makeJob := func() *snapshotv1alpha1.SnapshotJob {
+		sj := minimalSnapshotJob()
+		sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.HelperArtifactContainersAnnotation: "saver"}
+		sj.Spec.PodTemplate.Spec.Containers = append(sj.Spec.PodTemplate.Spec.Containers, corev1.Container{Name: "saver"})
+		return sj
+	}
+	sj := makeJob()
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	saver := requireContainer(t, job.Spec.Template.Spec.Containers, "saver")
+	assert.Contains(t, saver.Env, corev1.EnvVar{Name: podcontract.SnapshotJobUIDEnv, Value: "sj-uid"})
+	assert.Contains(t, saver.Env, corev1.EnvVar{Name: podcontract.HelperArtifactSubdirEnv, Value: "helper-artifacts/sj-uid"})
+	assert.Empty(t, sj.Spec.PodTemplate.Spec.Containers[1].Env, "injection must not mutate the caller's template")
+	snap, err := buildPodSnapshot(sj, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "source", UID: "pod-uid"}})
+	require.NoError(t, err)
+	assert.Equal(t, "saver", snap.Annotations[podcontract.HelperArtifactContainersAnnotation])
+	assert.Equal(t, "sj-uid", snap.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel])
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*snapshotv1alpha1.SnapshotJob)
+	}{
+		{"target", func(sj *snapshotv1alpha1.SnapshotJob) {
+			sj.Spec.PodTemplate.Annotations[podcontract.HelperArtifactContainersAnnotation] = "worker"
+		}},
+		{"missing", func(sj *snapshotv1alpha1.SnapshotJob) {
+			sj.Spec.PodTemplate.Annotations[podcontract.HelperArtifactContainersAnnotation] = "missing"
+		}},
+		{"init helper", func(sj *snapshotv1alpha1.SnapshotJob) {
+			sj.Spec.PodTemplate.Spec.Containers = sj.Spec.PodTemplate.Spec.Containers[:1]
+			sj.Spec.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "saver"}}
+		}},
+		{"reserved uid", func(sj *snapshotv1alpha1.SnapshotJob) {
+			sj.Spec.PodTemplate.Spec.Containers[1].Env = []corev1.EnvVar{{Name: podcontract.SnapshotJobUIDEnv, Value: "foreign"}}
+		}},
+		{"reserved path", func(sj *snapshotv1alpha1.SnapshotJob) {
+			sj.Spec.PodTemplate.Spec.Containers[1].Env = []corev1.EnvVar{{Name: podcontract.HelperArtifactSubdirEnv, Value: "foreign"}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sj := makeJob()
+			tc.mutate(sj)
+			_, err := buildSourceJob(sj)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestBuildSourceJob(t *testing.T) {
 	t.Run("wires identity, target, and options through to NewSourceJob", func(t *testing.T) {
 		sj := minimalSnapshotJob()

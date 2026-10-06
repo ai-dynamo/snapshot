@@ -72,6 +72,17 @@ spec:
                 format: int64
                 minimum: 1
                 type: integer
+              onFailurePolicy:
+                description: |-
+                  OnFailurePolicy defaults to Retain when omitted. CleanupHelpers permits
+                  reclamation of this failed attempt's declared, UID-owned helper artifacts
+                  only after every source writer stops. It never deletes capture artifacts,
+                  source objects, or failure status. Like the rest of spec, it is immutable.
+                  No server default is inserted into existing immutable specs.
+                enum:
+                - Retain
+                - CleanupHelpers
+                type: string
               podSnapshotTemplate:
                 description: |-
                   PodSnapshotTemplate defines the properties of the PodSnapshot produced by
@@ -148,6 +159,23 @@ spec:
                     description: |-
                       Standard object's metadata.
                       More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      finalizers:
+                        items:
+                          type: string
+                        type: array
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      name:
+                        type: string
+                      namespace:
+                        type: string
                     type: object
                   spec:
                     description: |-
@@ -7453,6 +7481,23 @@ spec:
                                         May contain labels and annotations that will be copied into the PVC
                                         when creating it. No other fields are allowed and will be rejected during
                                         validation.
+                                      properties:
+                                        annotations:
+                                          additionalProperties:
+                                            type: string
+                                          type: object
+                                        finalizers:
+                                          items:
+                                            type: string
+                                          type: array
+                                        labels:
+                                          additionalProperties:
+                                            type: string
+                                          type: object
+                                        name:
+                                          type: string
+                                        namespace:
+                                          type: string
                                       type: object
                                     spec:
                                       description: |-

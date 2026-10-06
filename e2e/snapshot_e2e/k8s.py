@@ -15,7 +15,6 @@ from kubernetes.stream import stream
 
 from snapshot_e2e.infra.preflight import load_config
 
-
 SNAPSHOT_LABEL = "app.kubernetes.io/name=snapshot"
 
 
@@ -179,13 +178,18 @@ def pod_logs(
     container: str | None = None,
 ) -> str:
     try:
-        return client.CoreV1Api().read_namespaced_pod_log(
+        response = client.CoreV1Api().read_namespaced_pod_log(
             name=name,
             namespace=namespace,
             tail_lines=tail_lines,
             container=container,
-            _preload_content=True,
+            _preload_content=False,
         )
+        try:
+            # SDK string deserialization rewrites JSON or wraps bytes in repr.
+            return response.data.decode("utf-8")
+        finally:
+            response.release_conn()
     except ApiException as exc:
         return f"<logs unavailable: {api_error_detail(exc)}>"
 
@@ -213,14 +217,15 @@ def exec_command(
 PAYLOAD_MARKER = "e2e-payload-follows"
 
 
-def exec_payload(namespace: str, pod: str, command: str) -> str:
+def exec_payload(namespace: str, pod: str, command: str, *, container: str | None = None) -> str:
     """Exec output with whatever the login shell printed first dropped.
 
     exec_command merges stderr into the stream, so a container whose profile
     writes anything breaks every caller that parses the result rather than
     matching a substring in it.
     """
-    output = exec_command(namespace, pod, f"echo {PAYLOAD_MARKER}; {command}")
+    kwargs = {"container": container} if container is not None else {}
+    output = exec_command(namespace, pod, f"echo {PAYLOAD_MARKER}; {command}", **kwargs)
     _, marker, payload = output.partition(PAYLOAD_MARKER)
     if not marker:
         raise AssertionError(f"exec output carried no payload marker: {output!r}")
