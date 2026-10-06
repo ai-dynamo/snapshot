@@ -10,14 +10,15 @@ processes on one node, including POSIX-exported VMM, synchronous memory IPC,
 HOST_NUMA allocations, and multicast objects. Snapshot uses its internal
 cuInterpose libraries to save and reconstruct these resources.
 
-The [vLLM](vllm.md), [SGLang](sglang.md), and
-[TensorRT-LLM](tensorrt-llm.md) examples enable this support. Use matching
-Snapshot agent and operator builds that include the feature. The engine images
-remain unmodified.
+The [multi-GPU examples](#multi-gpu-models) enable this support. The small
+single-GPU [vLLM](vllm.md), [SGLang](sglang.md), and
+[TensorRT-LLM](tensorrt-llm.md) examples use native CUDA checkpoint and restore.
+Use matching Snapshot agent and operator builds for shared-memory support.
+The engine images remain unmodified.
 
 ## Ordinary Pods and Deployments
 
-The source manifests perform three steps:
+The multi-GPU source manifests perform three steps:
 
 1. Set the Pod annotation `nvidia.com/cuda-shared-memory-support: "enabled"`.
 2. Copy both libraries and `cuinterpose-launch` from the Snapshot agent image
@@ -45,7 +46,7 @@ on Debian and Ubuntu):
 
 ```bash
 : "${SNAPSHOT_AGENT_IMAGE:?Set the matching Snapshot agent image first}"
-envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment.yaml | \
+envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment-glm-5.3.yaml | \
   kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
 ```
 
@@ -86,7 +87,7 @@ leaves a source that has no active shim on the native CUDA checkpoint path.
 
 | Setting | Recipe behavior | Reason |
 | --- | --- | --- |
-| SGLang `NCCL_CUMEM_ENABLE`, `NCCL_NVLS_ENABLE` | Leave unset | Let the engine choose its CUDA allocation and multicast paths. For these single-node recipes, SGLang 0.5.20 defaults these off unless its corresponding options are enabled. |
+| SGLang `NCCL_CUMEM_ENABLE`, `NCCL_NVLS_ENABLE` | Leave unset | Let the engine choose its CUDA allocation and multicast paths. Engine options and runtime probes still determine which paths are selected. |
 | TensorRT-LLM `TLLM_NCCL_SYMMETRIC_ZERO_COPY` | Leave unset | Allow the engine's default selection. Availability and successful registration still determine whether registered windows are used. |
 | SGLang `NCCL_IB_DISABLE=1` | Keep | RDMA connections and NIC registrations are outside CUDA shared-memory reconstruction. |
 | SGLang RAS and PyTorch monitoring/timeout settings | Keep | These concern background services and checkpoint pauses. |
@@ -109,8 +110,8 @@ as their engine's single-GPU example:
 | GLM 5.3 NVFP4 | vLLM | 8, TP8/EP8 | 128K | [Source](vllm/deployment-glm-5.3.yaml), [restore](vllm/restore-deployment-glm-5.3.yaml) |
 | GLM 5.3 NVFP4 | SGLang | 8, TP8/EP8 | 128K | [Source](sglang/deployment-glm-5.3.yaml), [restore](sglang/restore-deployment-glm-5.3.yaml) |
 | GLM 5.3 NVFP4 | TensorRT-LLM | 8, TP8/EP8 | 128K | [Source](tensorrt-llm/deployment-glm-5.3.yaml), [restore](tensorrt-llm/restore-deployment-glm-5.3.yaml) |
-| DeepSeek V4 Flash NVFP4 | vLLM | 4, TP4 | 128K | [Source](vllm/deployment-deepseek-v4-flash.yaml), [restore](vllm/restore-deployment-deepseek-v4-flash.yaml) |
-| DeepSeek V4 Flash NVFP4 | SGLang | 4, TP4 | 128K | [Source](sglang/deployment-deepseek-v4-flash.yaml), [restore](sglang/restore-deployment-deepseek-v4-flash.yaml) |
+| DeepSeek V4.1 Flash | vLLM | 4, TP4/EP4 | 128K | [Source](vllm/deployment-deepseek-v4.1-flash.yaml), [restore](vllm/restore-deployment-deepseek-v4.1-flash.yaml) |
+| DeepSeek V4.1 Flash | SGLang | 4, TP4/EP4 | 128K | [Source](sglang/deployment-deepseek-v4.1-flash.yaml), [restore](sglang/restore-deployment-deepseek-v4.1-flash.yaml) |
 
 These configurations keep prefill and decode in the same engine and do not
 use serving-time KV offloading. The existing checkpoint pause and memory-release
@@ -120,25 +121,27 @@ test results.
 
 The GLM pairs pin [RadixArk/GLM-5.3-NVFP4](https://huggingface.co/RadixArk/GLM-5.3-NVFP4)
 and the DeepSeek pairs pin
-[NVIDIA/DeepSeek-V4-Flash-NVFP4](https://huggingface.co/nvidia/DeepSeek-V4-Flash-NVFP4).
+[deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash).
 Each source and restore pair uses the same model revision and engine image.
-The [SGLang GLM guide](https://github.com/sgl-project/sglang/blob/v0.5.20/docs/cookbook/autoregressive/GLM/GLM-5.3.mdx)
+The [SGLang GLM guide](https://github.com/sgl-project/sglang/blob/v0.5.21/docs/cookbook/autoregressive/GLM/GLM-5.3.mdx)
 labels this GLM quantized checkpoint experimental. Its
-[B200 NVFP4 profile](https://github.com/sgl-project/sglang/blob/v0.5.20/docs/src/snippets/configs/zai-org/glm-5.3.jsx)
+[B200 NVFP4 profile](https://github.com/sgl-project/sglang/blob/v0.5.21/docs/src/snippets/configs/zai-org/glm-5.3.jsx)
 is marked unverified upstream.
-DeepSeek uses the vLLM 0.27.1 and SGLang 0.5.20 releases. The vLLM
-settings follow Dynamo's [B200 aggregated profile](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-flash/vllm/agg-b200-agentic/deploy.yaml),
-with the context bounded to 128K. The SGLang settings follow the
-[tagged B200 NVFP4 recipe](https://github.com/sgl-project/sglang/blob/v0.5.20/docs/src/snippets/configs/deepseek-ai/deepseek-v4.jsx),
-with a 128K context and 4096-token prefill chunks.
-The checkpoint combines FP8 attention with NVFP4 experts, so its recipes let
-the engine detect the quantization format. They do not force a uniform FP4
-format.
+The vLLM and SGLang examples use releases 0.31.0 and 0.5.21. DeepSeek follows
+the [vLLM V4.1 recipe](https://github.com/vllm-project/recipes/blob/main/models/deepseek-ai/DeepSeek-V4.1-Flash.yaml)
+and [SGLang B200 profile](https://github.com/sgl-project/sglang/blob/v0.5.21/docs/src/snippets/configs/deepseek-ai/deepseek-v4_1.jsx),
+with context bounded to 128K. Engram stays on the GPUs. The author checkpoint
+combines FP8 dense weights with four-bit routed experts, so the recipes let
+the engine detect its quantization format.
 
 Model-specific settings are JSON objects in `VLLM_ENGINE_ARGS`,
 `SGLANG_ENGINE_ARGS`, or `TRTLLM_ENGINE_ARGS`. Keys are Python constructor
 arguments, not CLI flags. They override the small example's defaults. The
-GLM vLLM and SGLang profiles use speculative decoding. The TensorRT-LLM profile
+GLM vLLM and SGLang profiles use the model's native five-token MTP head.
+SGLang calls this path `EAGLE`. DeepSeek V4.1 uses its bundled DSpark head with
+five speculative tokens. Neither profile downloads an external draft model.
+These are baseline configurations, not claims that speculation improves every
+workload or concurrency level. The TensorRT-LLM profile
 omits MTP, following the pinned release's
 [GLM NVFP4 guide](https://github.com/NVIDIA/TensorRT-LLM/blob/v1.3.0rc24/docs/source/deployment-guide/deployment-guide-for-glm-5-on-trtllm.md#b200-nvfp4-config).
 
@@ -158,17 +161,20 @@ kubectl apply --namespace "$SNAPSHOT_NAMESPACE" \
   --filename docs/guides/model-cache-pvc.yaml
 
 envsubst '${SNAPSHOT_AGENT_IMAGE}' \
-  < docs/guides/vllm/deployment-deepseek-v4-flash.yaml | \
+  < docs/guides/vllm/deployment-deepseek-v4.1-flash.yaml | \
   kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
 
 kubectl rollout status --namespace "$SNAPSHOT_NAMESPACE" \
-  deployment/vllm-deepseek-v4-flash-source --timeout=60m
+  deployment/vllm-deepseek-v4.1-flash-source --timeout=60m
 ```
 
 [Checkpoint](checkpoint.md) the resulting source Pod. Set the restore
 manifest's `nvidia.com/restore-from` to that PodSnapshot name, then follow the
 [restore guide](restore.md) with the matching multi-GPU restore manifest.
 Restore needs the same GPU count and enough CPU memory for the captured state.
+The vLLM and SGLang large-model pairs request 1 TiB of host memory for the
+checkpoint-time weight backup and process state. This is separate from
+serving-time offloading.
 The TensorRT-LLM GLM recipe requests 1 TiB of host memory without a hard memory
 limit. It retains GPU state during capture, so the host copy can exceed 1 TiB.
 Use a node with enough available RAM and measure peak memory before setting a
@@ -182,11 +188,8 @@ engine, CUDA and GPU versions. Record cache use when comparing startup times.
 
 ## Gotchas
 
-The examples default to one GPU. For two GPUs on one node, set
-`SNAPSHOT_TENSOR_PARALLEL_SIZE` to `"2"` and the main container's
-`resources.limits.nvidia.com/gpu` to `"2"` in both source and restore manifests.
-Use a model whose attention heads and engine implementation support that
-parallelism. Allocate compatible GPUs at restore.
+Use the declared GPU count and tensor parallelism in the selected multi-GPU
+manifest pair. Allocate compatible GPUs at restore.
 
 - Finish requests and all CUDA work before announcing `ready-for-snapshot`.
   Shared-memory support does not pause the application for you. Shared HOST_NUMA

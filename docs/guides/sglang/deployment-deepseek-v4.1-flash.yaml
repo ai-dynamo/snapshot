@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# One-node DeepSeek V4.1 Flash example on 4 B200 GPUs.
+# Engine kwargs below use a 128K context and bounded concurrency.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sglang-glm-5-3-restored
+  name: sglang-deepseek-v4.1-flash-source
 spec:
   replicas: 1
   progressDeadlineSeconds: 3600
@@ -12,13 +15,13 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: sglang-glm-5-3-restored
+      app: sglang-deepseek-v4.1-flash-source
   template:
     metadata:
-      labels:
-        app: sglang-glm-5-3-restored
       annotations:
-        nvidia.com/restore-from: sglang-glm-5-3-snapshot
+        nvidia.com/cuda-shared-memory-support: "enabled"
+      labels:
+        app: sglang-deepseek-v4.1-flash-source
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -29,6 +32,32 @@ spec:
       nodeSelector:
         nvidia.com/gpu.product: NVIDIA-B200
       initContainers:
+        - name: snapshot-cuda-install
+          image: ${SNAPSHOT_AGENT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/cp"]
+          args:
+            - --preserve=mode
+            - --
+            - /usr/local/lib/snapshot/libcuinterpose.so
+            - /usr/local/lib/snapshot/libcuinterpose_core.so
+            - /usr/local/bin/cuinterpose-launch
+            - /tmp/snapshot-cuda/
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          securityContext:
+            runAsUser: 65532
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
         - name: model-cache
           image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
@@ -48,9 +77,9 @@ spec:
                   marker.touch()
           env:
             - name: SNAPSHOT_MODEL
-              value: RadixArk/GLM-5.3-NVFP4
+              value: deepseek-ai/DeepSeek-V4.1-Flash
             - name: SNAPSHOT_MODEL_REVISION
-              value: 363e8f086905afd83db356a620f9aa401c23800a
+              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
             - name: HF_HOME
               value: /hf-cache
             - name: HF_HUB_DISABLE_XET
@@ -62,40 +91,39 @@ spec:
         - name: main
           image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
-          # Inert placeholder: the agent restores the checkpointed process into
-          # this container, so app.py must not run here.
           command:
-            - /bin/sh
-            - -c
-            - exec sleep infinity
+            - /tmp/snapshot-cuda/cuinterpose-launch
+            - --library
+            - /tmp/snapshot-cuda/libcuinterpose.so
+            - --
+            - python3
+            - -u
+            - /snapshot-app/app.py
+          args:
+            - --mode
+            - snapshot
           env:
             - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
-              value: "8"
+              value: "4"
             - name: SNAPSHOT_MODEL
-              value: RadixArk/GLM-5.3-NVFP4
+              value: deepseek-ai/DeepSeek-V4.1-Flash
             - name: SGLANG_ENGINE_ARGS
               value: |-
                 {
-                  "revision": "363e8f086905afd83db356a620f9aa401c23800a",
-                  "dtype": "bfloat16",
-                  "quantization": "modelopt_fp4",
-                  "ep_size": 8,
-                  "kv_cache_dtype": "fp8_e4m3",
-                  "page_size": 64,
+                  "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+                  "trust_remote_code": true,
+                  "ep_size": 4,
+                  "page_size": 256,
                   "context_length": 131072,
-                  "mem_fraction_static": 0.85,
-                  "max_running_requests": 32,
-                  "cuda_graph_max_bs_decode": 32,
-                  "chunked_prefill_size": 8192,
-                  "moe_runner_backend": "flashinfer_trtllm",
-                  "moe_a2a_backend": "none",
-                  "speculative_algorithm": "EAGLE",
-                  "speculative_num_steps": 5,
-                  "speculative_eagle_topk": 1,
-                  "speculative_num_draft_tokens": 6
+                  "max_running_requests": 64,
+                  "mem_fraction_static": 0.8,
+                  "speculative_algorithm": "DSPARK",
+                  "speculative_dspark_block_size": 5,
+                  "cuda_graph_max_bs_decode": 64,
+                  "chunked_prefill_size": 4096
                 }
             - name: SNAPSHOT_MODEL_REVISION
-              value: 363e8f086905afd83db356a620f9aa401c23800a
+              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
             - name: HF_HOME
@@ -121,17 +149,20 @@ spec:
               memory: 1Ti
             limits:
               memory: 1Ti
-              nvidia.com/gpu: "8"
+              nvidia.com/gpu: "4"
           readinessProbe:
             exec:
               command:
                 - cat
-                - /snapshot-control/sglang-restore-ready
+                - /snapshot-control/ready-for-snapshot
             periodSeconds: 1
             failureThreshold: 3600
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+              readOnly: true
             - name: model-cache
               mountPath: /hf-cache
             - name: snapshot-control
@@ -139,9 +170,6 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
-            # The checkpointed process's mount namespace includes this
-            # mount (from the source Pod); restore recreates it here too,
-            # even though this placeholder's own command never reads it.
             - name: app
               mountPath: /snapshot-app
               readOnly: true
@@ -150,6 +178,8 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Gi
+        - name: snapshot-cuda
+          emptyDir: {}
         - name: model-cache
           persistentVolumeClaim:
             claimName: snapshot-model-cache
@@ -159,6 +189,7 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        # Created from app.py: kubectl create configmap sglang-app --from-file=app.py
         - name: app
           configMap:
             name: sglang-app

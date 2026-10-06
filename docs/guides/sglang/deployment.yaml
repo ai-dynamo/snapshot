@@ -14,8 +14,6 @@ spec:
       app: sglang-source
   template:
     metadata:
-      annotations:
-        nvidia.com/cuda-shared-memory-support: "enabled"
       labels:
         app: sglang-source
     spec:
@@ -28,34 +26,8 @@ spec:
       nodeSelector:
         nvidia.com/gpu.present: "true"
       initContainers:
-        - name: snapshot-cuda-install
-          image: ${SNAPSHOT_AGENT_IMAGE}
-          imagePullPolicy: IfNotPresent
-          command: ["/bin/cp"]
-          args:
-            - --preserve=mode
-            - --
-            - /usr/local/lib/snapshot/libcuinterpose.so
-            - /usr/local/lib/snapshot/libcuinterpose_core.so
-            - /usr/local/bin/cuinterpose-launch
-            - /tmp/snapshot-cuda/
-          volumeMounts:
-            - name: snapshot-cuda
-              mountPath: /tmp/snapshot-cuda
-          resources:
-            requests: {cpu: 100m, memory: 64Mi}
-            limits: {cpu: 100m, memory: 64Mi}
-          securityContext:
-            runAsUser: 65532
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-            seccompProfile:
-              type: RuntimeDefault
         - name: model-cache
-          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -82,13 +54,9 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
           command:
-            - /tmp/snapshot-cuda/cuinterpose-launch
-            - --library
-            - /tmp/snapshot-cuda/libcuinterpose.so
-            - --
             - python3
             - -u
             - /snapshot-app/app.py
@@ -96,8 +64,6 @@ spec:
             - --mode
             - snapshot
           env:
-            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
-              value: "1"
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
             - name: SGLANG_CONTEXT_LENGTH
@@ -134,9 +100,6 @@ spec:
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:
-            - name: snapshot-cuda
-              mountPath: /tmp/snapshot-cuda
-              readOnly: true
             - name: model-cache
               mountPath: /hf-cache
             - name: snapshot-control
@@ -150,8 +113,6 @@ spec:
               mountPath: /snapshot-app
               readOnly: true
       volumes:
-        - name: snapshot-cuda
-          emptyDir: {}
         - name: model-cache
           persistentVolumeClaim:
             claimName: sglang-model-cache

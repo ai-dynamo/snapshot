@@ -8,16 +8,9 @@ vLLM image that includes vLLM and its runtime dependencies, unmodified.
 mounted into it from a ConfigMap to prepare vLLM for checkpoint and resume it
 after restore. The Snapshot agent injects the restore tooling at runtime.
 
-> [!NOTE]
-> This example is validated on vLLM 0.27.1 (the pinned
-> `vllm/vllm-openai:v0.27.1-ubuntu2404` image) and does not work on vLLM
-> 0.28.
-
-The source manifest enables [CUDA shared-memory support](cuda-shared-memory.md)
-and installs its libraries before the engine starts. Use a Snapshot agent and
-operator build with this support. Set `SNAPSHOT_AGENT_IMAGE` to the **same immutable
-agent image used for capture and restore** before deploying, as described in the
-[shared-memory guide](cuda-shared-memory.md#ordinary-pods-and-deployments).
+This single-GPU example uses native CUDA checkpoint and restore. The separate
+[multi-GPU examples](cuda-shared-memory.md#multi-gpu-models) enable CUDA
+shared-memory support and install the matching cuInterpose bundle.
 
 ## 1. Download the example files
 
@@ -53,8 +46,8 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-`deployment.yaml` runs vLLM's own Ubuntu 24.04 build of the 0.27.1 image
-(`v0.27.1-ubuntu2404`) unmodified, which already matches the glibc floor the
+`deployment.yaml` runs vLLM's own Ubuntu 24.04 build of the 0.31.0 image
+(`v0.31.0-ubuntu2404`) unmodified, which already matches the glibc floor the
 current Snapshot restore bundle requires, and mounts `app.py` at
 `/snapshot-app` from the `vllm-app` ConfigMap created in step 2.
 `HF_HUB_DISABLE_XET=1` prevents the model downloader from leaving an open cache
@@ -111,16 +104,12 @@ no custom model code. A model-specific `VLLM_ENGINE_ARGS` JSON object can
 override the defaults with `AsyncEngineArgs` keyword arguments, including
 `trust_remote_code` when required by the selected checkpoint.
 
-`SNAPSHOT_TENSOR_PARALLEL_SIZE` defaults to `1`. To use two GPUs on one node,
-set it to `2` and set the `nvidia.com/gpu` limit to `"2"` in both source and
-restore manifests. Keep the same parallelism and compatible GPUs at restore.
-
 > [!NOTE]
 > This example runs vLLM directly through `AsyncLLM` rather than `vllm serve`, so
 > the standard `vllm serve` command-line arguments do not apply. The model is
 > selected with `SNAPSHOT_MODEL`. Supply API keyword arguments through
 > `VLLM_ENGINE_ARGS`, and process settings through vLLM's
-> [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/).
+> [environment variables](https://docs.vllm.ai/en/v0.31.0/configuration/env_vars/).
 
 `app.py` also sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` before importing vLLM.
 Calling `AsyncLLM` directly rather than vLLM's CLI wrapper skips the wrapper's
@@ -131,9 +120,7 @@ unreliable across checkpoint/restore.
 Deploy the edited manifest:
 
 ```bash
-: "${SNAPSHOT_AGENT_IMAGE:?Set the matching Snapshot agent image first}"
-envsubst '${SNAPSHOT_AGENT_IMAGE}' < deployment.yaml | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename deployment.yaml
 ```
 
 Wait until the vLLM replica finishes initialization and becomes safe to
@@ -157,7 +144,7 @@ kubectl get pods \
 Use that Pod name in the `PodSnapshot` created during the next step. The
 readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
 
-For the separate GLM 5.3 and DeepSeek V4 Flash multi-GPU manifests, see
+For the separate GLM 5.3 and DeepSeek V4.1 Flash multi-GPU manifests, see
 [Multi-GPU models](cuda-shared-memory.md#multi-gpu-models). They reuse this
 program and ConfigMap.
 

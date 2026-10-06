@@ -144,9 +144,10 @@ pre-capture generation) → `PodSnapshot` → restore pod pinned to the source n
 → `nvidia.com/Restored=RestoreSucceeded` → `<framework>-restore-ready` →
 `POST /generate` answers → the placeholder never loaded a model itself.
 
-The source recipes enable CUDA shared-memory support and install the matching
-cuInterpose bundle before launching the engine. The harness resolves their
-`${SNAPSHOT_AGENT_IMAGE}` placeholder from `SNAPSHOT_E2E_WORKLOAD_IMAGE`, or
+The default single-GPU recipes use native CUDA checkpoint and restore. The
+explicit multi-GPU recipes enable CUDA shared-memory support and install the
+matching cuInterpose bundle before launching the engine. The harness resolves
+their `${SNAPSHOT_AGENT_IMAGE}` placeholder from `SNAPSHOT_E2E_WORKLOAD_IMAGE`, or
 `ghcr.io/ai-dynamo/snapshot/agent:${SNAPSHOT_E2E_SNAPSHOT_TAG}`. This must identify
 the same bundle as the installed capture and restore agents. Framework image
 overrides do not replace the installer image.
@@ -159,10 +160,6 @@ SNAPSHOT_E2E_FRAMEWORK=vllm \
 # test a different image instead of the guide's own pinned image
 SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapshot:dev \
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
-
-# qualify the same recipe on two GPUs, without editing its manifests
-SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE=2 \
-  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
 Set `SNAPSHOT_E2E_RESTORE_NODE` to test a distinct destination node with shared
@@ -170,19 +167,17 @@ checkpoint storage. The test requires that node to differ from the actual
 source and verifies the restored Pod's placement. Without it, restore stays
 on the source node.
 
-The guide defaults use one GPU. `SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE` accepts a
-positive integer and sets the engine's `SNAPSHOT_TENSOR_PARALLEL_SIZE` and GPU
-limit in both source and restore Pods. When unset, the guide settings remain
-unchanged. Benchmark comparison dimensions record shared-memory activation and
-the live source Pod's tensor-parallel size, keeping TP1 and TP2 results separate.
+The harness preserves each manifest's GPU count and tensor parallelism.
+Benchmark comparison dimensions record shared-memory activation and the live
+source Pod's tensor-parallel size.
 The optional `SNAPSHOT_E2E_RECIPE` selects a separate multi-GPU manifest pair:
-`glm-5.3` for all three engines, or `deepseek-v4-flash` for vLLM and SGLang.
+`glm-5.3` for all three engines, or `deepseek-v4.1-flash` for vLLM and SGLang.
 These profiles keep their declared GPU counts, pinned model revisions and
-engine settings. Do not combine them with a different TP override. They have
-longer phase deadlines for model loading and larger checkpoints:
+engine settings. They have longer phase deadlines for model loading and larger
+checkpoints:
 
 ```bash
-SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_RECIPE=deepseek-v4-flash \
+SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_RECIPE=deepseek-v4.1-flash \
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
@@ -190,14 +185,15 @@ The recipe name is part of the benchmark case name so its timings are separate
 from the small single-GPU example. These cases are explicit local or cluster
 qualification runs, not additional default CI jobs.
 
-Retain the checkpoint's cuInterpose manifest and matching library
-hashes with the run evidence. The PodSnapshotContent API does not expose that
-metadata, so the source annotation and a successful TP1 run alone do not prove
-shared allocations were reconstructed.
+For shared-memory recipes, retain the checkpoint's cuInterpose manifest and
+matching library hashes with the run evidence. The PodSnapshotContent API does
+not expose that metadata, so the source annotation alone does not prove shared
+allocations were reconstructed.
 
-The test also verifies delivered library paths and hashes after restore through
-the privileged Snapshot agent. This check requires `/usr/bin/python3` on the
-worker node and does not add privileges to the workload Pod.
+For those recipes, the test also verifies delivered library paths and hashes
+before capture and after restore through the privileged Snapshot agent. This
+check requires `/usr/bin/python3` on the worker node and does not add privileges
+to the workload Pod. Native single-GPU tests do not run this check.
 
 Model weights come from one of two places:
 
