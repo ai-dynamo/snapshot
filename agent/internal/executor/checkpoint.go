@@ -60,10 +60,7 @@ type CheckpointRequest struct {
 	PodIP         string
 	Clientset     kubernetes.Interface
 
-	// StoreID binds this capture to a configured store (api/storage.PVC.StoreID
-	// and friends). Empty means legacy, unbound, filesystem-addressed capture;
-	// nonempty switches to the artifact-addressed PageBroker RPCs and makes
-	// Checkpoint return a descriptor instead of nil.
+	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
 
 	// Pod carries the image reference and limits the target container runs with, read from

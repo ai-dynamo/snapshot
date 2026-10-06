@@ -48,8 +48,7 @@ type CheckpointParams struct {
 	StartedAt time.Time
 	// CuInterposeRequested is the source Pod's explicit opt-in, already preflighted.
 	CuInterposeRequested bool
-	// StoreID binds this capture to a configured store. Empty means legacy,
-	// unbound, filesystem-addressed capture.
+	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
 }
 
@@ -399,10 +398,8 @@ func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *co
 	}
 }
 
-// setSnapshotContentSucceeded patches status with the Ready condition, the source values the
-// capture recorded, and the published artifact descriptor for bound content. Uses optimistic
-// locking so a concurrent terminal Failed write wins and this patch is rejected rather than
-// overwriting it.
+// setSnapshotContentSucceeded patches status with Ready, the recorded source,
+// and the published artifact descriptor for bound content.
 func (w *NodeController) setSnapshotContentSucceeded(
 	ctx context.Context,
 	content *snapshotv1alpha1.PodSnapshotContent,
@@ -458,8 +455,7 @@ const readyStatusConflictLimit = 8
 // The Ready write also publishes what the capture ran on, read from the artifact's manifest once
 // rather than per retry. An unreadable manifest costs those values, never the capture: Ready is
 // written regardless, because the artifact is already committed.
-// containerName and publishedArtifact are set only for a bound (artifact-addressed) checkpoint
-// just committed in this call; both are zero for the legacy and artifact-recovery paths.
+// containerName and publishedArtifact are set only for a just-committed bound checkpoint.
 func (w *NodeController) markCheckpointReady(
 	ctx context.Context,
 	content *snapshotv1alpha1.PodSnapshotContent,
@@ -524,9 +520,8 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 // artifact directory. On dump or verification failure it SIGKILLs the CUDA-locked process before
 // returning the error; on success the dump itself has already terminated the source process.
 //
-// When params.StoreID is set, the checkpoint is artifact-addressed: PageBroker's committed
-// descriptor is the proof of success, so the local filesystem verification below does not run —
-// there is no guarantee the agent can read the published artifact's final location at all.
+// When params.StoreID is set, PageBroker's descriptor is the proof of
+// success, so the filesystem verification below does not run.
 func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 	log := logr.FromContextOrDiscard(ctx)
 
