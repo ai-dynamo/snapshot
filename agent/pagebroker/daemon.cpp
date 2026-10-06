@@ -211,6 +211,8 @@ const char*
 CommandName(Request::CommandCase command)
 {
   switch (command) {
+    case Request::kDirectRestore:
+      return "direct_restore";
     case Request::kStagedRestore:
       return "staged_restore";
     case Request::kPrepareStagedCheckpoint:
@@ -228,6 +230,8 @@ const char*
 ResultName(const Response& response)
 {
   switch (response.result_case()) {
+    case Response::kDirectRestoreReady:
+      return "direct_restore";
     case Response::kStagedRestoreDirectory:
       return "staged_restore";
     case Response::kStagedCheckpointDirectory:

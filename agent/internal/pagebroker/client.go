@@ -52,6 +52,19 @@ func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destinatio
 	return imageDirectory(response.GetStagedCheckpointDirectory().GetImageDirectory())
 }
 
+func (c Client) DirectRestore(ctx context.Context, transactionID, source string) error {
+	response, err := c.request(ctx, transactionID, &Request_DirectRestore{
+		DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return err
+	}
+	if response.GetDirectRestoreReady() == nil {
+		return fmt.Errorf("unexpected PageBroker direct restore response")
+	}
+	return nil
+}
+
 func imageDirectory(directory string) (string, error) {
 	if directory == "" {
 		return "", fmt.Errorf("unexpected PageBroker staging response")
