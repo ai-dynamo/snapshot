@@ -114,8 +114,6 @@ type RestoreRequest struct {
 	ArtifactContainerName       string
 	DestinationContainerName    string
 	Clientset                   kubernetes.Interface
-	PageBrokerRequested         bool
-	PageBrokerEnabled           bool
 	CustomStorageAvailable      bool
 	PageBrokerControlSocketPath string
 	PageBrokerRestoreMode       string
@@ -146,21 +144,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return RestoreResult{}, fmt.Errorf("restore mounter is required")
 	}
 
-	brokered := req.PageBrokerRequested && req.PageBrokerEnabled
 	transactionID := ""
-	var broker pagebroker.Client
+	broker := pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 	var gpu *pagebroker.CustomStorageExecution
 	committed := false
 	gpuRestoreComplete := false
 	usePageBrokerGPU := false
 	var terminateFailedRestore func(context.Context) error
-	defer func() {
-		if !usePageBrokerGPU && transactionID != "" && !committed {
-			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
-			defer cancel()
-			_ = broker.Abort(abortCtx, transactionID)
-		}
-	}()
 
 	var cleanupErr error
 	var activeMounts []restoreMount
@@ -191,6 +181,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			}
 		}
 		cleanup()
+		if !usePageBrokerGPU && transactionID != "" && !committed {
+			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+			defer cancel()
+			if err := broker.Abort(abortCtx, transactionID); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("abort PageBroker restore %q: %w", transactionID, err))
+			}
+		}
 		if cleanupErr == nil {
 			return
 		}
@@ -269,53 +266,42 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	containerCheckpointPath := nsmount.CheckpointDst
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
-	if brokered {
-		transactionID = uuid.NewString()
-		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
-		stageStart := time.Now()
-		direct := req.PageBrokerRestoreMode != "staged"
-		var staged string
-		if direct {
-			err = broker.DirectRestore(ctx, transactionID, artifactPath)
-		} else {
-			staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
-		}
-		pageBrokerStageDuration = time.Since(stageStart)
-		if err != nil {
-			return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
-		}
-		if usePageBrokerGPU {
-			gpu, err = broker.OpenCustomStorageExecution(transactionID, gpuContext)
-			if err != nil {
-				return RestoreResult{}, err
-			}
-		}
-		mountStart := time.Now()
-		var sourceMount nsmount.MountPoint
-		if direct {
-			sourceMount, err = mounts.MountArtifact(ctx, bundleMount, artifactPath)
-		} else {
-			sourceMount, err = mounts.MountPageBroker(ctx, bundleMount, staged)
-			containerCheckpointPath = nsmount.PageBrokerDst
-		}
-		pageBrokerMountDuration = time.Since(mountStart)
-		if err != nil {
-			return RestoreResult{}, fmt.Errorf("mount PageBroker restore source: %w", err)
-		}
-		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount PageBroker restore source from placeholder",
-			point:  sourceMount,
-		})
+	transactionID = uuid.NewString()
+	broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
+	stageStart := time.Now()
+	direct := req.PageBrokerRestoreMode != "staged"
+	var staged string
+	if direct {
+		err = broker.DirectRestore(ctx, transactionID, artifactPath)
 	} else {
-		artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
-		if err != nil {
-			return RestoreResult{}, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
-		}
-		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount checkpoint artifact from placeholder",
-			point:  artifactMount,
-		})
+		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
 	}
+	pageBrokerStageDuration = time.Since(stageStart)
+	if err != nil {
+		return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
+	}
+	if usePageBrokerGPU {
+		gpu, err = broker.OpenCustomStorageExecution(transactionID, gpuContext)
+		if err != nil {
+			return RestoreResult{}, err
+		}
+	}
+	mountStart := time.Now()
+	var sourceMount nsmount.MountPoint
+	if direct {
+		sourceMount, err = mounts.MountArtifact(ctx, bundleMount, artifactPath)
+	} else {
+		sourceMount, err = mounts.MountPageBroker(ctx, bundleMount, staged)
+		containerCheckpointPath = nsmount.PageBrokerDst
+	}
+	pageBrokerMountDuration = time.Since(mountStart)
+	if err != nil {
+		return RestoreResult{}, fmt.Errorf("mount PageBroker restore source: %w", err)
+	}
+	activeMounts = append(activeMounts, restoreMount{
+		action: "unmount PageBroker restore source from placeholder",
+		point:  sourceMount,
+	})
 
 	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, gpu)
 	if err != nil {
@@ -332,20 +318,19 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return RestoreResult{}, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	gpuRestoreComplete = usePageBrokerGPU
-	if brokered {
-		sourceMount := activeMounts[len(activeMounts)-1]
-		if err := sourceMount.point.Unmount(ctx); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", sourceMount.action, err))
-		}
-		activeMounts = activeMounts[:len(activeMounts)-1]
-		commitStart := time.Now()
-		if err := broker.Commit(ctx, transactionID); err != nil {
-			log.Error(err, "failed to commit PageBroker restore")
-		} else {
-			committed = true
-		}
-		pageBrokerCommitDuration = time.Since(commitStart)
+	restoreSource := activeMounts[len(activeMounts)-1]
+	if err := restoreSource.point.Unmount(ctx); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", restoreSource.action, err))
 	}
+	activeMounts = activeMounts[:len(activeMounts)-1]
+	commitStart := time.Now()
+	if err := broker.Commit(ctx, transactionID); err != nil {
+		log.Error(err, "failed to commit PageBroker restore")
+	} else {
+		committed = true
+	}
+	pageBrokerCommitDuration = time.Since(commitStart)
+
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
@@ -436,12 +421,6 @@ func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManif
 func validateCustomStorageRestore(req RestoreRequest, manifest *types.CheckpointManifest) error {
 	if !manifest.CUDA.CustomStorage {
 		return nil
-	}
-	if !req.PageBrokerEnabled {
-		return fmt.Errorf("CustomStorage checkpoint requires PageBroker")
-	}
-	if !req.PageBrokerRequested {
-		return fmt.Errorf("CustomStorage restore cannot opt out of PageBroker with nvidia.com/snapshot-pagebroker=false")
 	}
 	if !req.CustomStorageAvailable {
 		return fmt.Errorf("PageBroker does not support CustomStorage restore")

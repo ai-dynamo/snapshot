@@ -6,9 +6,6 @@
     "pageBroker": {
       "type": "object",
       "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
         "maxConcurrentRequests": {
           "type": "integer",
           "minimum": 1,

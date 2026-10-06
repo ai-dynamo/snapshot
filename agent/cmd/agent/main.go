@@ -62,15 +62,13 @@ func main() {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if cfg.PageBroker.Enabled {
-		ctx, cancel := context.WithTimeout(rootCtx, pageBrokerStartupTimeout)
-		capabilities, err := waitForPageBroker(ctx, pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath})
-		cancel()
-		if err != nil {
-			fatal(agentLog, err, "Failed to read PageBroker capabilities")
-		}
-		cfg.CustomStorageAvailable = capabilities.CustomStorageAvailable
+	ctx, cancel := context.WithTimeout(rootCtx, pageBrokerStartupTimeout)
+	capabilities, err := waitForPageBroker(ctx, pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath})
+	cancel()
+	if err != nil {
+		fatal(agentLog, err, "Failed to read PageBroker capabilities")
 	}
+	cfg.CustomStorageAvailable = capabilities.CustomStorageAvailable
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,

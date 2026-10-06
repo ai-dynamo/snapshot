@@ -48,8 +48,8 @@ func (c *AgentConfig) Validate() error {
 		return &ConfigError{Field: "storage.basePath", Message: fmt.Sprintf("storage.basePath must be %q", CheckpointBasePath)}
 	}
 	c.Storage.BasePath = basePath
-	if c.PageBroker.Enabled && strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
-		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required when PageBroker is enabled"}
+	if strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
+		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required"}
 	}
 	c.PageBroker.RestoreMode = strings.ToLower(strings.TrimSpace(c.PageBroker.RestoreMode))
 	switch c.PageBroker.RestoreMode {
@@ -88,7 +88,6 @@ type StorageSpec struct {
 type PageBrokerSpec struct {
 	// RestoreMode selects the restore source. Empty defaults to direct.
 	RestoreMode       string `yaml:"restoreMode"`
-	Enabled           bool   `yaml:"enabled"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
 }
 
