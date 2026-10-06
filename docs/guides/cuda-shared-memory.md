@@ -102,16 +102,16 @@ NVLS and an engine's own multicast implementation are different paths.
 ## Multi-GPU models
 
 The single-GPU manifests remain small Qwen3 examples. The following separate
-manifest pairs target one B200 node. They use the same `app.py` and ConfigMap
-as their engine's single-GPU example:
+manifest pairs each use all eight GPUs on one B200 node. They use the same
+`app.py` and ConfigMap as their engine's single-GPU example:
 
 | Model | Engine | GPUs and parallelism | Context | Manifest pair |
 | --- | --- | --- | --- | --- |
 | GLM 5.3 NVFP4 | vLLM | 8, TP8/EP8 | 128K | [Source](vllm/deployment-glm-5.3.yaml), [restore](vllm/restore-deployment-glm-5.3.yaml) |
 | GLM 5.3 NVFP4 | SGLang | 8, TP8/EP8 | 128K | [Source](sglang/deployment-glm-5.3.yaml), [restore](sglang/restore-deployment-glm-5.3.yaml) |
 | GLM 5.3 NVFP4 | TensorRT-LLM | 8, TP8/EP8 | 128K | [Source](tensorrt-llm/deployment-glm-5.3.yaml), [restore](tensorrt-llm/restore-deployment-glm-5.3.yaml) |
-| DeepSeek V4.1 Flash | vLLM | 4, TP4/EP4 | 128K | [Source](vllm/deployment-deepseek-v4.1-flash.yaml), [restore](vllm/restore-deployment-deepseek-v4.1-flash.yaml) |
-| DeepSeek V4.1 Flash | SGLang | 4, TP4/EP4 | 128K | [Source](sglang/deployment-deepseek-v4.1-flash.yaml), [restore](sglang/restore-deployment-deepseek-v4.1-flash.yaml) |
+| DeepSeek V4.1 Flash | vLLM | 8, TP8/EP8 | 128K | [Source](vllm/deployment-deepseek-v4.1-flash.yaml), [restore](vllm/restore-deployment-deepseek-v4.1-flash.yaml) |
+| DeepSeek V4.1 Flash | SGLang | 8, TP8/EP8 | 128K | [Source](sglang/deployment-deepseek-v4.1-flash.yaml), [restore](sglang/restore-deployment-deepseek-v4.1-flash.yaml) |
 
 These configurations keep prefill and decode in the same engine and do not
 use serving-time KV offloading. The existing checkpoint pause and memory-release
@@ -130,7 +130,8 @@ is marked unverified upstream.
 The vLLM and SGLang examples use releases 0.31.0 and 0.5.21. DeepSeek follows
 the [vLLM V4.1 recipe](https://github.com/vllm-project/recipes/blob/main/models/deepseek-ai/DeepSeek-V4.1-Flash.yaml)
 and [SGLang B200 profile](https://github.com/sgl-project/sglang/blob/v0.5.21/docs/src/snippets/configs/deepseek-ai/deepseek-v4_1.jsx),
-with context bounded to 128K. Engram stays on the GPUs. The author checkpoint
+adapted here to TP8/EP8 with context bounded to 128K. Engram stays on the GPUs.
+The author checkpoint
 combines FP8 dense weights with four-bit routed experts, so the recipes let
 the engine detect its quantization format.
 

@@ -338,8 +338,8 @@ def test_control_file_names_match_the_guide_program(spec: frameworks.FrameworkSp
     ("vllm", "glm-5.3", 8),
     ("sglang", "glm-5.3", 8),
     ("tensorrt-llm", "glm-5.3", 8),
-    ("vllm", "deepseek-v4.1-flash", 4),
-    ("sglang", "deepseek-v4.1-flash", 4),
+    ("vllm", "deepseek-v4.1-flash", 8),
+    ("sglang", "deepseek-v4.1-flash", 8),
 ])
 def test_multi_gpu_recipe_matches_restore_and_shared_cache(
     monkeypatch: pytest.MonkeyPatch, engine: str, recipe: str, size: int,
@@ -353,6 +353,10 @@ def test_multi_gpu_recipe_matches_restore_and_shared_cache(
                          "tensorrt-llm": "TRTLLM_ENGINE_ARGS"}[engine]
     arguments = json.loads(fw.env_value(source_main, argument_variable))
     assert arguments == json.loads(fw.env_value(restore_main, argument_variable))
+    if engine == "sglang":
+        assert arguments["ep_size"] == size
+    elif engine == "vllm":
+        assert arguments["enable_expert_parallel"] is True
     assert len(arguments["revision"]) == 40
     assert spec.case_name == f"{engine}-{recipe}"
     assert spec.model == fw.env_value(source_main, "SNAPSHOT_MODEL")
