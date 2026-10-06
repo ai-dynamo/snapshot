@@ -69,11 +69,21 @@ See [Installation](../operations/install.md) for storage and uninstall options.
 
 Common `make` targets from the repo root:
 
-- `make build` — compile the agent and operator
+- `make build` — compile the Go agent and operator binaries
+- `make -C agent cuinterpose-build` — build the C/Rust cuinterpose libraries,
+  static coordinator, and static launcher in a pinned Docker builder
+- `make -C agent cuinterpose-test` — containerized Rust unit, protocol,
+  coordinator, launcher, and ELF artifact checks (no GPU required)
 - `make test` — run unit tests across the `api`, `agent`, and `operator` modules
 - `make lint` — run linters
 - `make helm-lint` — lint the Helm chart
 - `make check` — the full pre-merge gate (generate, license headers, fmt, tidy, lint, and more)
+
+CuInterpose exports `libcuinterpose.so`, `libcuinterpose_core.so`,
+`cuinterpose-coordinator`, and `cuinterpose-launch` into
+`agent/cmd/cuinterpose/build/`. Both executables use the existing musl target. See the
+[Rust build instructions](../../agent/cmd/cuinterpose/rust/README.md) for local
+toolchain requirements and `test-native`.
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
