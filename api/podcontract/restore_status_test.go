@@ -31,6 +31,11 @@ func TestClassifyRestoreOutcome(t *testing.T) {
 			want: RestoreOutcomePending,
 		},
 		{
+			name:       "replenishment refused",
+			conditions: []corev1.PodCondition{restored(corev1.ConditionFalse, RestoreReasonReplenishmentIncompatible)},
+			want:       RestoreOutcomeFailed,
+		},
+		{
 			name:       "unrecognized dependency reason",
 			conditions: []corev1.PodCondition{restored(corev1.ConditionFalse, "SnapshotPending")},
 			want:       RestoreOutcomeUnknown,
@@ -48,6 +53,11 @@ func TestClassifyRestoreOutcome(t *testing.T) {
 		{
 			name:       "restore in progress",
 			conditions: []corev1.PodCondition{restored(corev1.ConditionFalse, RestoreReasonInProgress)},
+			want:       RestoreOutcomePending,
+		},
+		{
+			name:       "restore replenishing",
+			conditions: []corev1.PodCondition{restored(corev1.ConditionFalse, RestoreReasonReplenishing)},
 			want:       RestoreOutcomePending,
 		},
 		{
