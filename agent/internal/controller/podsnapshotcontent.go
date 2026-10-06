@@ -23,6 +23,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
@@ -47,6 +48,9 @@ type CheckpointParams struct {
 	StartedAt time.Time
 	// CuInterposeRequested is the source Pod's explicit opt-in, already preflighted.
 	CuInterposeRequested bool
+	// StoreID binds this capture to a configured store. Empty means legacy,
+	// unbound, filesystem-addressed capture.
+	StoreID string
 }
 
 // singleTargetContainer returns the one capture-target container from the work order. The CRD
@@ -120,7 +124,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		// (Job cleanup, eviction): only a gone pod without a committed artifact fails the work
 		// order terminally.
 		if artifactPresent(artifactPath, contentUID, containerName) {
-			return w.markCheckpointReady(ctx, content, artifactPath)
+			return w.markCheckpointReady(ctx, content, artifactPath, "", nil)
 		}
 		return w.setSnapshotContentFailed(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", podKey.String()))
 	}
@@ -136,7 +140,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	// publishes the checkpoint for restore. The artifact dir exists only after the executor's
 	// atomic rename.
 	if artifactPresent(artifactPath, contentUID, containerName) {
-		return w.markCheckpointReady(ctx, content, artifactPath)
+		return w.markCheckpointReady(ctx, content, artifactPath, "", nil)
 	}
 
 	// Several work orders can name one pod, and everything below draws conclusions from live pod
@@ -225,6 +229,10 @@ func (w *NodeController) runCheckpoint(
 		defer cancel()
 	}
 
+	storeID := ""
+	if content.Spec.Storage != nil {
+		storeID = content.Spec.Storage.StoreID
+	}
 	params := CheckpointParams{
 		Pod:                  pod,
 		ContainerName:        containerName,
@@ -234,11 +242,13 @@ func (w *NodeController) runCheckpoint(
 		HostPath:             artifactPath,
 		StartedAt:            time.Now(),
 		CuInterposeRequested: cuInterposeRequested,
+		StoreID:              storeID,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
 	// would discard a usable checkpoint and, being terminal, block recovery from ever promoting it.
-	if err := w.checkpointFn(dumpCtx, params); err != nil {
+	artifact, err := w.checkpointFn(dumpCtx, params)
+	if err != nil {
 		logger.Error(err, "Checkpoint failed")
 		if patchErr := w.setSnapshotContentFailed(ctx, content, "CheckpointFailed", err); patchErr != nil {
 			return fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, patchErr)
@@ -246,7 +256,7 @@ func (w *NodeController) runCheckpoint(
 		return nil
 	}
 
-	return w.markCheckpointReady(ctx, content, artifactPath)
+	return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
 }
 
 // classifySourcePodIdentity reports whether the live pod is the work order's pinned source
@@ -389,13 +399,16 @@ func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *co
 	}
 }
 
-// setSnapshotContentSucceeded patches status with the Ready condition and the source values the
-// capture recorded. Uses optimistic locking so a concurrent terminal Failed write wins and this
-// patch is rejected rather than overwriting it.
+// setSnapshotContentSucceeded patches status with the Ready condition, the source values the
+// capture recorded, and the published artifact descriptor for bound content. Uses optimistic
+// locking so a concurrent terminal Failed write wins and this patch is rejected rather than
+// overwriting it.
 func (w *NodeController) setSnapshotContentSucceeded(
 	ctx context.Context,
 	content *snapshotv1alpha1.PodSnapshotContent,
 	source *snapshotv1alpha1.CheckpointSource,
+	containerName string,
+	publishedArtifact *pagebroker.PublishedArtifact,
 ) error {
 	patch := client.MergeFromWithOptions(content.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
@@ -406,6 +419,27 @@ func (w *NodeController) setSnapshotContentSucceeded(
 	})
 	if source != nil {
 		content.Status.Source = source
+	}
+	if publishedArtifact != nil {
+		if content.Status.Storage == nil {
+			content.Status.Storage = &snapshotv1alpha1.CheckpointStorageStatus{}
+		}
+		recorded := snapshotv1alpha1.PublishedContainerArtifact{
+			ContainerName:         containerName,
+			ArtifactHandle:        publishedArtifact.GetArtifactHandle(),
+			ArtifactFormatVersion: publishedArtifact.GetArtifactFormatVersion(),
+		}
+		replaced := false
+		for i, existing := range content.Status.Storage.Artifacts {
+			if existing.ContainerName == containerName {
+				content.Status.Storage.Artifacts[i] = recorded
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			content.Status.Storage.Artifacts = append(content.Status.Storage.Artifacts, recorded)
+		}
 	}
 	return w.client.Status().Patch(ctx, content, patch)
 }
@@ -424,22 +458,30 @@ const readyStatusConflictLimit = 8
 // The Ready write also publishes what the capture ran on, read from the artifact's manifest once
 // rather than per retry. An unreadable manifest costs those values, never the capture: Ready is
 // written regardless, because the artifact is already committed.
+// containerName and publishedArtifact are set only for a bound (artifact-addressed) checkpoint
+// just committed in this call; both are zero for the legacy and artifact-recovery paths.
 func (w *NodeController) markCheckpointReady(
 	ctx context.Context,
 	content *snapshotv1alpha1.PodSnapshotContent,
 	artifactPath string,
+	containerName string,
+	publishedArtifact *pagebroker.PublishedArtifact,
 ) error {
 	logger := logr.FromContextOrDiscard(ctx)
-	source, err := checkpointSourceAtPath(artifactPath)
-	if err != nil {
-		logger.Error(err, "Failed to read the captured source; marking Ready without it",
-			"content", content.Name,
-			"artifactPath", artifactPath,
-		)
+	var source *snapshotv1alpha1.CheckpointSource
+	if publishedArtifact == nil {
+		var err error
+		source, err = checkpointSourceAtPath(artifactPath)
+		if err != nil {
+			logger.Error(err, "Failed to read the captured source; marking Ready without it",
+				"content", content.Name,
+				"artifactPath", artifactPath,
+			)
+		}
 	}
 	ready := content
 	for attempt := 0; attempt < readyStatusConflictLimit; attempt++ {
-		if err := w.setSnapshotContentSucceeded(ctx, ready, source); err != nil {
+		if err := w.setSnapshotContentSucceeded(ctx, ready, source, containerName, publishedArtifact); err != nil {
 			if !apierrors.IsConflict(err) {
 				logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 				return err
@@ -481,7 +523,11 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 // container ID and host PID. It runs executor.Checkpoint to the destination and verifies the
 // artifact directory. On dump or verification failure it SIGKILLs the CUDA-locked process before
 // returning the error; on success the dump itself has already terminated the source process.
-func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) error {
+//
+// When params.StoreID is set, the checkpoint is artifact-addressed: PageBroker's committed
+// descriptor is the proof of success, so the local filesystem verification below does not run —
+// there is no guarantee the agent can read the published artifact's final location at all.
+func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 	log := logr.FromContextOrDiscard(ctx)
 
 	req := executor.CheckpointRequest{
@@ -496,14 +542,20 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		Pod:                  podEnvironment(params.Pod, params.ContainerName),
 		Clientset:            w.clientset,
 		CuInterposeRequested: params.CuInterposeRequested,
+		StoreID:              params.StoreID,
 	}
-	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
+	artifact, err := executor.Checkpoint(ctx, w.runtime, log, req, w.config)
+	if err != nil {
 		if executor.CheckpointNeedsSourceKill(err) {
 			if killErr := w.killCheckpointProcess(log, params.ContainerPID, "checkpoint failed"); killErr != nil {
 				log.Error(killErr, "Failed to kill target after checkpoint failure")
 			}
 		}
-		return fmt.Errorf("checkpoint: %w", err)
+		return nil, fmt.Errorf("checkpoint: %w", err)
+	}
+
+	if params.StoreID != "" {
+		return artifact, nil
 	}
 
 	info, statErr := os.Stat(params.HostPath)
@@ -517,10 +569,10 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		if killErr := w.killCheckpointProcess(log, params.ContainerPID, "checkpoint verification failed"); killErr != nil {
 			log.Error(killErr, "Failed to kill target after checkpoint verification failure")
 		}
-		return verifyErr
+		return nil, verifyErr
 	}
 
-	return nil
+	return nil, nil
 }
 
 // killCheckpointProcess SIGKILLs the CUDA-locked process so it does not hang after a failed dump.

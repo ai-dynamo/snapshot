@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
+	"github.com/ai-dynamo/snapshot/api/storage/coordination"
 )
 
 const pageBrokerAbortTimeout = 30 * time.Second
@@ -59,6 +60,12 @@ type CheckpointRequest struct {
 	PodIP         string
 	Clientset     kubernetes.Interface
 
+	// StoreID binds this capture to a configured store (api/storage.PVC.StoreID
+	// and friends). Empty means legacy, unbound, filesystem-addressed capture;
+	// nonempty switches to the artifact-addressed PageBroker RPCs and makes
+	// Checkpoint return a descriptor instead of nil.
+	StoreID string
+
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
@@ -76,24 +83,41 @@ type checkpointPhaseTimings struct {
 
 // Checkpoint captures a container through PageBroker and commits its artifact.
 // The broker owns storage publication and, when supported, CUDA CustomStorage.
-func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
+func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) (*pagebroker.PublishedArtifact, error) {
 	return checkpoint(ctx, rt, log, req, cfg, inspectContainer)
 }
 
 func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig,
 	inspect func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error),
-) (retErr error) {
+) (artifact *pagebroker.PublishedArtifact, retErr error) {
 	ctx = logr.NewContext(ctx, log)
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
-	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
-	if err != nil {
-		return fmt.Errorf("resolve checkpoint artifact path: %w", err)
+	bound := req.StoreID != ""
+	var target *pagebroker.ArtifactTarget
+	var finalDir string
+	if bound {
+		if _, err := coordination.ValidateBinding(req.StoreID, req.ContentUID, req.ContainerName); err != nil {
+			return nil, fmt.Errorf("validate storage binding: %w", err)
+		}
+		target = &pagebroker.ArtifactTarget{
+			StoreId: req.StoreID,
+			Artifact: &pagebroker.ArtifactIdentity{
+				ArtifactUid:   req.ContentUID,
+				ContainerName: req.ContainerName,
+			},
+		}
+	} else {
+		var err error
+		finalDir, err = nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
+		if err != nil {
+			return nil, fmt.Errorf("resolve checkpoint artifact path: %w", err)
+		}
 	}
 	state, gpuDeviceMapDuration, err := inspect(ctx, rt, log, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	usePageBrokerGPU := cfg.CustomStorageAvailable && len(state.CUDAHostPIDs) > 0
 	transactionID := uuid.NewString()
@@ -119,44 +143,57 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if usePageBrokerGPU {
 		executionContext, err = pagebroker.NewGPUContext(state.CUDANSPIDs, cuda.GPUUUIDs(state.GPUs), "")
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	preparationAttempted = true
-	tmpDir, gpu, err := prepareCheckpoint(ctx, broker, transactionID, finalDir, executionContext)
+	var tmpDir string
+	if bound {
+		tmpDir, err = broker.PrepareArtifactCheckpoint(ctx, transactionID, target, nil)
+		if err == nil && executionContext != nil {
+			gpu, err = broker.OpenCustomStorageExecution(transactionID, executionContext)
+		}
+	} else {
+		tmpDir, gpu, err = prepareCheckpoint(ctx, broker, transactionID, finalDir, executionContext)
+	}
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
-		return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+		return nil, fmt.Errorf("prepare PageBroker checkpoint: %w", err)
 	}
 
 	state.CuInterpose, err = inspectCuInterpose(ctx, state, req.CuInterposeRequested)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 && !usePageBrokerGPU {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := cuda.CheckJobFile(cudaJobFile, len(state.GPUs.Devices), state.CuInterpose.UsesCoordinator()); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, usePageBrokerGPU)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
 	if err != nil {
-		return checkpointNeedsSourceKill(err)
+		return nil, checkpointNeedsSourceKill(err)
 	}
 
 	switchStart := time.Now()
-	if err := broker.Commit(ctx, transactionID); err != nil {
-		return fmt.Errorf("commit PageBroker checkpoint: %w", err)
+	if bound {
+		artifact, err = broker.CommitCheckpoint(ctx, transactionID)
+		if err != nil {
+			return nil, fmt.Errorf("commit PageBroker checkpoint: %w", err)
+		}
+	} else if err := broker.Commit(ctx, transactionID); err != nil {
+		return nil, fmt.Errorf("commit PageBroker checkpoint: %w", err)
 	}
 	committed = true
 	switchDuration := time.Since(switchStart)
@@ -185,7 +222,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	log.Info("Checkpoint timing summary", "checkpoint", summary)
 
-	return nil
+	return artifact, nil
 }
 
 func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {

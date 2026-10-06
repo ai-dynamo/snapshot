@@ -272,7 +272,7 @@ func TestCheckpointPreparationFailure(t *testing.T) {
 					}
 					server <- nil
 				}()
-				err = checkpoint(ctx, nil, logr.Discard(), req, cfg,
+				_, err = checkpoint(ctx, nil, logr.Discard(), req, cfg,
 					func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
 						state := &types.CheckpointContainerSnapshot{PID: -1, RootFS: workingDirectory}
 						if format == "custom-storage" {
@@ -402,7 +402,7 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	start := time.Now()
-	err := checkpoint(ctx, checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+	_, err := checkpoint(ctx, checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
 		ContentUID:    "content-uid",
 		ContainerName: "main",
 	}, cfg, func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
