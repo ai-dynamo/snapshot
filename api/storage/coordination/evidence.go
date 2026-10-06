@@ -5,27 +5,22 @@ package coordination
 
 import "errors"
 
-// Evidence is one discovered publication at the storage backend. CommitID is
-// the deterministic identity from storage.CommitID, never a write timestamp;
-// recovery must never select evidence by when it was written.
+// Evidence is one discovered publication, keyed by storage.CommitID — never
+// selected by write timestamp.
 type Evidence struct {
 	CommitID       string
 	ArtifactHandle string
 	FormatVersion  string
 }
 
-// ErrNoEvidence means nothing at the backend matches the expected commitID:
-// a legitimate "not published yet" or "already deleted," not a conflict.
+// ErrNoEvidence means nothing matches the expected commitID.
 var ErrNoEvidence = errors.New("no matching publication evidence")
 
-// ErrConflictingEvidence means more than one distinct publication claims the
-// same commitID. Repair must refuse explicitly rather than guess.
+// ErrConflictingEvidence means two distinct publications claim the same commitID.
 var ErrConflictingEvidence = errors.New("conflicting publication evidence")
 
-// MatchEvidence finds the exact publication for expectedCommitID among
-// discovered evidence. Multiple entries with the same commitID are only a
-// conflict if they disagree on handle or format version; backends may
-// legitimately report the same confirmed publication more than once.
+// MatchEvidence finds the exact publication for expectedCommitID. Duplicate
+// entries for the same commitID are fine; disagreeing ones are a conflict.
 func MatchEvidence(expectedCommitID string, found []Evidence) (Evidence, error) {
 	var match *Evidence
 	for i := range found {

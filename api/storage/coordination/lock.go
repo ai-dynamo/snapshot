@@ -6,17 +6,14 @@ package coordination
 import "sync"
 
 // Key identifies one (store, artifact) pair that delete, sweep and
-// metadata-recovery work must serialize on. It is not a transaction ID: the
-// same Key is reused across retries and across independent operation kinds.
+// metadata-recovery work must serialize on.
 type Key struct {
 	StoreID     string
 	ArtifactUID string
 }
 
-// Locker hands out per-Key exclusion so unrelated artifacts never block each
-// other, while delete, sweep and recovery on the same artifact never run
-// concurrently. It holds no storage state; a backend's own I/O still decides
-// what a held lock permits.
+// Locker gives per-Key exclusion so unrelated artifacts never block each
+// other, while same-artifact operations never run concurrently.
 type Locker struct {
 	mu    sync.Mutex
 	locks map[Key]*refcountedMutex
@@ -32,9 +29,8 @@ func NewLocker() *Locker {
 	return &Locker{locks: make(map[Key]*refcountedMutex)}
 }
 
-// Lock blocks until key is free, then returns an Unlock func the caller must
-// call exactly once. Locked keys are released from the map once no caller
-// still holds or waits on them, so Locker does not grow unbounded.
+// Lock blocks until key is free, then returns an Unlock func to call exactly
+// once. Entries are released once no caller still holds or waits on them.
 func (l *Locker) Lock(key Key) (unlock func()) {
 	l.mu.Lock()
 	entry, ok := l.locks[key]

@@ -8,11 +8,8 @@ import (
 	"time"
 )
 
-// DeletionWindow encodes the SNEP Stage 1 bounded-deletion requirements: an
-// admission window during which a freshly orphaned artifact is never swept,
-// the longest a broker transaction may stay open, and an allowance for clock
-// skew between components. Any caller enforcing deletion validates the same
-// configuration, so no caller can independently shrink the safety margin.
+// DeletionWindow is the Stage 1 bounded-deletion configuration: admission
+// window, max transaction lifetime, and clock-skew allowance.
 type DeletionWindow struct {
 	AdmissionWindow    time.Duration
 	MaxTransactionLife time.Duration
@@ -36,9 +33,8 @@ func (w DeletionWindow) Validate() error {
 	return nil
 }
 
-// QuiescenceDeadline is the earliest time at which an artifact last seen at
-// lastSeen may be swept: the admission window, plus the longest a
-// transaction may still be open against it, plus clock-skew margin.
+// QuiescenceDeadline is the earliest time an artifact last seen at lastSeen
+// may be swept.
 func (w DeletionWindow) QuiescenceDeadline(lastSeen time.Time) time.Time {
 	return lastSeen.Add(w.AdmissionWindow + w.MaxTransactionLife + w.ClockSkewAllowance)
 }

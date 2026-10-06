@@ -36,8 +36,6 @@ type Queue struct {
 	registry          BackendRegistry
 	configuredBackend string
 
-	// locker serializes delete, sweep and metadata-recovery work on the same
-	// (store, artifact) key, per the coordination contract.
 	locker *coordination.Locker
 
 	queue workqueue.TypedRateLimitingInterface[WorkItemKey]
