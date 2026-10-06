@@ -30,14 +30,17 @@ _CHAT_CHECKS = {
 _CHAT_PROMPTS = """
 import json, os, sys
 from pathlib import Path
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
 model = os.environ["SNAPSHOT_MODEL"]
 revision = os.environ.get("SNAPSHOT_MODEL_REVISION")
-path = model if Path(model).is_dir() else snapshot_download(
-    repo_id=model, revision=revision, local_files_only=True,
-)
+path = model
+if not Path(path).is_dir():
+    # The lexical parent preserves the snapshot directory for cached symlinks.
+    path = str(Path(hf_hub_download(
+        repo_id=model, filename="config.json", revision=revision, local_files_only=True,
+    )).parent)
 tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
 config = json.loads((Path(path) / "config.json").read_text())
 prompts = {}

@@ -46,17 +46,23 @@ def test_semantic_answers_reject_wrong_or_corrupt_output(
 
 @pytest.mark.parametrize("model_type", ["qwen3", "deepseek_v41", "glm_moe_dsa"])
 @pytest.mark.parametrize("revision", [None, "a" * 40])
-def test_prompt_script_uses_offline_source_cache_and_template(
+@pytest.mark.parametrize("local_path", [False, True])
+def test_prompt_script_uses_partial_offline_cache_or_local_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    model_type: str, revision: str | None,
+    model_type: str, revision: str | None, local_path: bool,
 ) -> None:
-    (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}))
-    download = Mock(return_value=str(tmp_path))
+    snapshot = tmp_path / "snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    blob = tmp_path / "config-blob"
+    blob.write_text(json.dumps({"model_type": model_type}))
+    config = snapshot / "config.json"
+    config.symlink_to(blob)
+    download = Mock(return_value=str(config))
     render = Mock(return_value="model-rendered prompt")
     load = Mock(return_value=SimpleNamespace(apply_chat_template=render))
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(hf_hub_download=download))
     monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=load)))
-    monkeypatch.setenv("SNAPSHOT_MODEL", "example/model")
+    monkeypatch.setenv("SNAPSHOT_MODEL", str(snapshot) if local_path else "example/model")
     if revision:
         monkeypatch.setenv("SNAPSHOT_MODEL_REVISION", revision)
     else:
@@ -65,8 +71,13 @@ def test_prompt_script_uses_offline_source_cache_and_template(
 
     exec(compile(inference._CHAT_PROMPTS, "chat-prompts", "exec"), {})
 
-    download.assert_called_once_with(repo_id="example/model", revision=revision, local_files_only=True)
-    load.assert_called_once_with(str(tmp_path), local_files_only=True, trust_remote_code=False)
+    if local_path:
+        download.assert_not_called()
+    else:
+        download.assert_called_once_with(
+            repo_id="example/model", filename="config.json", revision=revision, local_files_only=True,
+        )
+    load.assert_called_once_with(str(snapshot), local_files_only=True, trust_remote_code=False)
     messages = [{"role": "user", "content": "What is 2 + 2?"}]
     if model_type == "glm_moe_dsa":
         messages.append({"role": "assistant", "content": "", "reasoning_content": ""})
