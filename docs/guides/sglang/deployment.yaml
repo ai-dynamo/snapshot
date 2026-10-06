@@ -29,13 +29,8 @@ spec:
           args:
             - |
               import os
-              from pathlib import Path
               from huggingface_hub import snapshot_download
-              model = os.environ["SNAPSHOT_MODEL"]
-              marker = Path("/hf-cache") / (".snapshot-model-" + model.replace("/", "--"))
-              if not marker.exists():
-                  snapshot_download(repo_id=model)
-                  marker.touch()
+              snapshot_download(repo_id=os.environ["SNAPSHOT_MODEL"])
           env:
             - {name: SNAPSHOT_MODEL, value: Qwen/Qwen3-0.6B}
             - {name: HF_HOME, value: /hf-cache}

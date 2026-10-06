@@ -150,7 +150,7 @@ namespace, using a ReadWriteMany storage class available in your cluster.
 The large examples request 2 TiB of cache space and mount it at `/hf-cache`.
 You can use an existing PVC containing a Hugging Face cache instead by changing
 `claimName` in both manifests. The download init container reuses cached files
-and records completion for the exact model revision. Both source and restore
+and downloads missing files for the exact model revision. Both source and restore
 also mount a 64 GiB memory-backed `/dev/shm`.
 
 For example, from the repository root, after creating the `vllm-app` ConfigMap

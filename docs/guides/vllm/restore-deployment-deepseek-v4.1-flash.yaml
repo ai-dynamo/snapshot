@@ -31,14 +31,11 @@ spec:
           args:
             - |
               import os
-              from pathlib import Path
               from huggingface_hub import snapshot_download
-              model = os.environ["SNAPSHOT_MODEL"]
-              revision = os.environ["SNAPSHOT_MODEL_REVISION"]
-              marker = Path("/hf-cache") / (".snapshot-model-" + model.replace("/", "--") + "-" + revision)
-              if not marker.exists():
-                  snapshot_download(repo_id=model, revision=revision)
-                  marker.touch()
+              snapshot_download(
+                  repo_id=os.environ["SNAPSHOT_MODEL"],
+                  revision=os.environ["SNAPSHOT_MODEL_REVISION"],
+              )
           env:
             - {name: SNAPSHOT_MODEL, value: deepseek-ai/DeepSeek-V4.1-Flash}
             - {name: SNAPSHOT_MODEL_REVISION, value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027}
