@@ -19,10 +19,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// storeKey returns the coordination.Key maintenance work on this content
-// must serialize under. Legacy content with no declared store still gets a
-// consistent (empty-store) key, so concurrent legacy operations on the same
-// content UID still serialize against each other.
+// storeKey returns the coordination.Key this content's maintenance work must
+// serialize under. Legacy content without a store still gets a stable key.
 func storeKey(content *snapshotv1alpha1.PodSnapshotContent) coordination.Key {
 	storeID := ""
 	if content.Spec.Storage != nil {
