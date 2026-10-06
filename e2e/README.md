@@ -272,11 +272,29 @@ Upgrade configs:
 Each phase's duration is printed at the end, and appended to
 `GITHUB_STEP_SUMMARY` in CI.
 
-In CI, run the **E2E Upgrade Tests** workflow (`.github/workflows/e2e-upgrade.yaml`)
-by hand. Its inputs choose the version to upgrade from (release tag or main
-commit hash; empty means the latest release), the version to upgrade to (empty
-means the checked-out commit), and the config, profile, or scenarios. It creates
-a vCluster, installs the old version from GHCR, and runs this test.
+### Upgrade runs in CI
+
+The **E2E Upgrade Tests** workflow (`.github/workflows/e2e-upgrade.yaml`) runs
+this test once per pair of version to upgrade from, upgrade config, and scenario
+profile. Each pair gets its own vCluster, installs the old version from GHCR,
+and upgrades to the version under test.
+
+The versions to upgrade from are the newest patch release of each of the last
+`UPGRADE_FROM_MINOR_VERSIONS` (3) minor versions, prereleases excluded. With
+fewer releases, every existing release is tested.
+
+| Trigger | Profile | Configs | Skipping |
+| --- | --- | --- | --- |
+| Nightly (`0 8 * * *`) | `basic` | `full` | A pair is skipped when nothing under `agent`, `operator`, `api`, `charts`, `e2e`, the workflow, its actions, or the gate and resolver scripts changed since its last pass on `main` |
+| Weekly (`0 13 * * 6`) | `all` | every config | None |
+| Manual | `upgrade_profile` input | `upgrade_config` input; `default` uses the profile's configs | None |
+
+The workflow-level `env` block holds these settings. `hack/upgrade-e2e-gate.py`
+decides which pairs run and lists every decision in the job summary.
+
+Manual runs accept `upgrade_from` as a comma-separated list of release tags or
+main commit hashes, and `snapshot_tag` for a version to upgrade to other than
+the checked-out commit.
 
 To add a scenario, subclass `UpgradeScenario` in
 `snapshot_e2e/upgrade/scenarios.py`. Implement `pre_upgrade` and `post_upgrade`,
