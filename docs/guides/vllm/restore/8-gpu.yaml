@@ -4,68 +4,64 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: tensorrt-llm-source
+  name: vllm-8gpu-restored
 spec:
   replicas: 1
-  progressDeadlineSeconds: 1800
+  progressDeadlineSeconds: 3600
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: tensorrt-llm-source
+      app: vllm-8gpu-restored
   template:
     metadata:
       labels:
-        app: tensorrt-llm-source
+        app: vllm-8gpu-restored
+      annotations:
+        nvidia.com/restore-from: <snapshot-name>
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
       securityContext:
-        fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: Localhost
           localhostProfile: profiles/block-iouring.json
       nodeSelector:
-        nvidia.com/gpu.present: "true"
+        nvidia.com/gpu.product: NVIDIA-B200
       containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
+          # The agent restores the saved process into this inert container.
           command:
-            - python3
-            - /snapshot-app/app.py
+            - /bin/sh
+            - -c
+            - exec sleep infinity
           env:
-            - name: SNAPSHOT_MODEL
-              value: Qwen/Qwen3-0.6B
-            - name: TRTLLM_MAX_NUM_TOKENS
-              value: "1024"
-            - name: TRTLLM_MAX_BATCH_SIZE
-              value: "1"
-            - name: TRTLLM_FREE_GPU_MEMORY_FRACTION
-              value: "0.10"
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
-            - name: HF_HUB_DISABLE_XET
-              value: "1"
-            - name: TLLM_NCCL_SYMMETRIC_ZERO_COPY
-              value: "0"
-            - name: UCX_TLS
-              value: tcp,self
           ports:
             - name: api
               containerPort: 8000
           resources:
+            requests:
+              cpu: "16"
+              memory: 1Ti
             limits:
-              nvidia.com/gpu: "1"
+              memory: 1Ti
+              nvidia.com/gpu: "8"
           readinessProbe:
             exec:
               command:
                 - cat
-                - /snapshot-control/ready-for-snapshot
+                - /snapshot-control/vllm-restore-ready
             periodSeconds: 1
-            failureThreshold: 1800
+            failureThreshold: 3600
           volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: model-cache
+              mountPath: /hf-cache
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
@@ -75,13 +71,19 @@ spec:
               mountPath: /snapshot-app
               readOnly: true
       volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: snapshot-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
         - name: snapshot-control
           emptyDir: {}
         - name: tun
           hostPath:
             path: /dev/net/tun
             type: CharDevice
-        # Created from app.py: kubectl create configmap tensorrt-llm-app --from-file=app.py
         - name: app
           configMap:
-            name: tensorrt-llm-app
+            name: vllm-app

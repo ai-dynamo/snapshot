@@ -35,7 +35,7 @@ API as part of its control loop.
     duplicate those controller-injected fields.
 
 The framework guides include a complete, working example of a `PodSnapshot`-ready
-pod — see the `deployment.yaml` referenced from the [vLLM](vllm.md),
+pod — see the capture manifest referenced from the [vLLM](vllm.md),
 [SGLang](sglang.md), and [TensorRT-LLM](tensorrt-llm.md) guides.
 
 Set the namespace where the replica runs — the same one used to deploy it:
@@ -87,7 +87,7 @@ no long-running replica to manage, which fits pipeline use cases.
 
 `spec.podTemplate` only needs the workload's own container spec — image,
 command, resources, and any volumes it mounts (including `/dev/net/tun`,
-which every framework guide's `deployment.yaml` mounts and which CRIU expects
+which every framework guide's capture manifest mounts and which CRIU expects
 to find again on restore). The controller injects the `/snapshot-control`
 volume and mount, `SNAPSHOT_CONTROL_DIR`, the `ready-for-snapshot` readiness
 probe, and the seccomp profile before creating the source pod.
@@ -108,7 +108,7 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           command:
             - python3
             - /snapshot-app/app.py

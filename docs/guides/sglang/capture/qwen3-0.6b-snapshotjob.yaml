@@ -1,33 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: nvidia.com/v1alpha1
+kind: SnapshotJob
 metadata:
-  name: sglang-source
+  name: sglang-snapshot
 spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: sglang-source
-  template:
-    metadata:
-      labels:
-        app: sglang-source
+  podSnapshotTemplate:
+    targetContainers:
+      - main
+  podTemplate:
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
-      securityContext:
-        seccompProfile:
-          type: Localhost
-          localhostProfile: profiles/block-iouring.json
       nodeSelector:
         nvidia.com/gpu.present: "true"
       initContainers:
         - name: model-cache
-          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -35,13 +25,8 @@ spec:
           args:
             - |
               import os
-              from pathlib import Path
               from huggingface_hub import snapshot_download
-              model = os.environ["SNAPSHOT_MODEL"]
-              marker = Path("/hf-cache") / (".snapshot-model-" + model.replace("/", "--"))
-              if not marker.exists():
-                  snapshot_download(repo_id=model)
-                  marker.touch()
+              snapshot_download(repo_id=os.environ["SNAPSHOT_MODEL"])
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
@@ -54,7 +39,7 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -70,18 +55,12 @@ spec:
               value: "10240"
             - name: SGLANG_PAGE_SIZE
               value: "16"
-            - name: SNAPSHOT_CONTROL_DIR
-              value: /snapshot-control
             - name: HF_HOME
               value: /hf-cache
             - name: HF_HUB_OFFLINE
               value: "1"
             - name: HF_HUB_DISABLE_XET
               value: "1"
-            - name: NCCL_CUMEM_ENABLE
-              value: "0"
-            - name: NCCL_NVLS_ENABLE
-              value: "0"
             - name: NCCL_IB_DISABLE
               value: "1"
             - name: NCCL_RAS_ENABLE
@@ -96,21 +75,13 @@ spec:
           resources:
             limits:
               nvidia.com/gpu: "1"
-          readinessProbe:
-            exec:
-              command:
-                - cat
-                - /snapshot-control/ready-for-snapshot
-            periodSeconds: 1
-            failureThreshold: 1800
           volumeMounts:
             - name: model-cache
               mountPath: /hf-cache
-            - name: snapshot-control
-              mountPath: /snapshot-control
-              subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
             - name: app
               mountPath: /snapshot-app
               readOnly: true
@@ -118,13 +89,14 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: sglang-model-cache
-        - name: snapshot-control
-          emptyDir: {}
         - name: tun
           hostPath:
             path: /dev/net/tun
             type: CharDevice
-        # Created from app.py: kubectl create configmap sglang-app --from-file=app.py
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
         - name: app
           configMap:
             name: sglang-app
