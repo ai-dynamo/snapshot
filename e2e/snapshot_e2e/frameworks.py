@@ -34,9 +34,10 @@ REQUEST_TIMEOUT_SECONDS = 120
 # it counts double. The inner `timeout` around pytest in e2e-frameworks.yaml
 # is the binding limit: it must exceed SOURCE_READY_TIMEOUT_SECONDS +
 # CHECKPOINT_TIMEOUT_SECONDS + POD_DELETE_TIMEOUT_SECONDS +
-# 2 * restore_timeout_seconds + REQUEST_TIMEOUT_SECONDS, or pytest is
+# 2 * restore_timeout_seconds + 3 * REQUEST_TIMEOUT_SECONDS + 60s for source
+# prompt rendering, or pytest is
 # interrupted before the failure dump runs -- e.g. sglang's 600s override
-# makes that 900+300+180+2*600+120 = 2700s (45 min), the largest of the three.
+# makes that 900+300+180+2*600+3*120+60 = 3000s (50 min), the largest of the three.
 SOURCE_READY_TIMEOUT_SECONDS = 900
 CHECKPOINT_TIMEOUT_SECONDS = 300
 RESTORE_TIMEOUT_SECONDS = 300
