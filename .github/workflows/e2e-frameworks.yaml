@@ -121,8 +121,8 @@ jobs:
     name: ${{ matrix.framework }}
     needs: [check, datadog-gate]
     runs-on: prod-deploy-tester-v1
-    # Above the sum of this job's own step timeout-minutes (117, dominated by
-    # the 50-min test step) plus margin: a job-level timeout kills the whole
+    # Above the sum of this job's own step timeout-minutes (123, dominated by
+    # the 56-min test step) plus margin: a job-level timeout kills the whole
     # job, including the failure() diagnostics upload and always() vCluster
     # cleanup, which is exactly the safety net a slow run needs most.
     timeout-minutes: 140
@@ -363,7 +363,8 @@ jobs:
           uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
       # The inner timeout must exceed the phase budgets in
-      # e2e/snapshot_e2e/frameworks.py plus the request timeout (45 min with
+      # e2e/snapshot_e2e/frameworks.py plus the three semantic requests and
+      # source prompt rendering (50 min with
       # sglang's 600s restore_timeout_seconds override). SIGINT reaches the
       # whole process group, so pytest raises KeyboardInterrupt, runs its
       # fixture finalizers (benchmark result, cluster cleanup), and exits
@@ -371,10 +372,10 @@ jobs:
       - name: Run ${{ matrix.framework }} checkpoint/restore test
         if: ${{ steps.selected.outputs.run == 'true' }}
         id: framework_test
-        timeout-minutes: 50
+        timeout-minutes: 56
         run: |
           set -uo pipefail
-          timeout --signal=INT --kill-after=150s 46m \
+          timeout --signal=INT --kill-after=150s 52m \
             uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
           status=$?
           if [[ "${status}" -eq 124 ]]; then
@@ -383,7 +384,7 @@ jobs:
               --case "${{ matrix.framework }}" \
               --test test_framework_checkpoint_restore_serves_inference \
               --outcome timed_out \
-              --message "pytest exceeded the 46 minute benchmark timeout"
+              --message "pytest exceeded the 52 minute benchmark timeout"
           fi
           exit "${status}"
 
