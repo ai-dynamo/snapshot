@@ -16,9 +16,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 type checkpointPathRuntime struct{}
@@ -139,4 +141,85 @@ func TestCheckpointNeedsSourceKill(t *testing.T) {
 	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
 	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
 	assert.False(t, CheckpointNeedsSourceKill(fmt.Errorf("commit PageBroker checkpoint: %w", errors.New("failed"))))
+}
+
+func TestConfigureCheckpointPreservesNativeAndCoordinatorParticipants(t *testing.T) {
+	for _, coordinatorPIDs := range [][]int{{623}, {}} {
+		t.Run(fmt.Sprint(coordinatorPIDs), func(t *testing.T) {
+			directory := t.TempDir()
+			identity := testCuInterposeIdentity()
+			identity.PIDs = coordinatorPIDs
+			state := &types.CheckpointContainerSnapshot{
+				PID: 1001, RootFS: "/", NetNSInode: 7,
+				CUDAHostPIDs: []int{1001, 1623}, CUDANSPIDs: []int{1, 623}, CuInterpose: identity,
+			}
+			_, _, err := configureCheckpoint(logr.Discard(), state,
+				CheckpointRequest{ContentUID: "content", ContainerName: "main"}, &types.AgentConfig{}, directory)
+			require.NoError(t, err)
+			manifest, err := types.ReadManifest(directory)
+			require.NoError(t, err)
+			require.Equal(t, []int{1, 623}, manifest.CUDA.PIDs)
+			require.Equal(t, identity, manifest.CuInterpose)
+		})
+	}
+}
+
+// Preparation changes shared state, so it runs only for coordinator participants and
+// inside captureCheckpoint, whose errors Checkpoint treats as requiring source termination.
+func TestCapturePreparesOnlyCoordinatorParticipants(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		coordinatorPIDs []int
+		wantError       string
+	}{
+		// PID -1 makes preparation fail before any coordinator starts.
+		{name: "coordinator", coordinatorPIDs: []int{1}, wantError: "prepare cuinterpose"},
+		// The cancelled context stops at the native CUDA boundary without a helper.
+		{name: "frontend only", coordinatorPIDs: []int{}, wantError: "CUDA checkpoint failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identity := testCuInterposeIdentity()
+			identity.PIDs = tc.coordinatorPIDs
+			ctx, cancel := context.WithCancel(context.Background())
+			if len(tc.coordinatorPIDs) == 0 {
+				cancel()
+			}
+			defer cancel()
+			_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
+				&types.CheckpointManifest{CuInterpose: identity},
+				&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1}, CUDANSPIDs: []int{1}},
+				t.TempDir(), "", logr.Discard())
+			require.ErrorContains(t, err, tc.wantError)
+		})
+	}
+}
+
+func TestConfigureCheckpointRecordsCuInterposeSocketExclusion(t *testing.T) {
+	cfg := &types.AgentConfig{Overlay: types.OverlaySettings{Exclusions: []string{"/var/cache"}}}
+	_, data, err := configureCheckpoint(logr.Discard(), &types.CheckpointContainerSnapshot{PID: 42, RootFS: "/", NetNSInode: 7},
+		CheckpointRequest{ContentUID: "content", ContainerName: "main"}, cfg, t.TempDir())
+	require.NoError(t, err)
+	require.Equal(t, []string{"/var/cache", cuda.CuInterposeSocketPattern}, data.Overlay.Exclusions.Exclusions)
+}
+
+func TestCheckCuInterposeMountReadOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mounts    []types.MountInfo
+		wantError bool
+	}{
+		{name: "read-only", mounts: []types.MountInfo{{MountPoint: podcontract.CuInterposeMountPath, ReadOnly: true}}},
+		{name: "writable", mounts: []types.MountInfo{{MountPoint: podcontract.CuInterposeMountPath}}, wantError: true},
+		{name: "writable nested", mounts: []types.MountInfo{{MountPoint: podcontract.CuInterposeMountPath + "/libcuinterpose.so"}}, wantError: true},
+		{name: "delivered in image", mounts: []types.MountInfo{{MountPoint: "/models"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkCuInterposeMountReadOnly(tc.mounts)
+			if tc.wantError {
+				require.ErrorContains(t, err, "must be read-only")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

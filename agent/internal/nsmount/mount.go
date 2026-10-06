@@ -27,11 +27,13 @@ const (
 
 type mountRef interface {
 	Unmount(ctx context.Context) error
+	Release() error
 	NsFd() *os.File
 }
 
 type mounter interface {
 	MountBundle(ctx context.Context, pid int) (mountRef, error)
+	MountCuInterpose(ctx context.Context, nsFd *os.File) (mountRef, error)
 	MountCheckpoint(ctx context.Context, nsFd *os.File, checkpointPath string) (mountRef, error)
 	MountPageBroker(ctx context.Context, nsFd *os.File, stagingPath string) (mountRef, error)
 }
@@ -52,10 +54,17 @@ type execMountRef struct {
 	createdDst bool
 	log        logr.Logger
 	once       sync.Once
-	unmountErr error
+	cleanupErr error
 }
 
 func (h *execMountRef) NsFd() *os.File { return h.nsFd }
+
+func (h *execMountRef) Release() error {
+	h.once.Do(func() {
+		h.cleanupErr = h.nsFd.Close()
+	})
+	return h.cleanupErr
+}
 
 func (h *execMountRef) Unmount(ctx context.Context) error {
 	h.once.Do(func() {
@@ -71,12 +80,12 @@ func (h *execMountRef) Unmount(ctx context.Context) error {
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			h.log.Error(err, "failed to unmount from namespace", "command", h.unmountCmd, "output", strings.TrimSpace(string(out)))
-			h.unmountErr = fmt.Errorf("ns-bind-mount %s: %w\noutput: %s", h.unmountCmd, err, strings.TrimSpace(string(out)))
+			h.cleanupErr = fmt.Errorf("ns-bind-mount %s: %w\noutput: %s", h.unmountCmd, err, strings.TrimSpace(string(out)))
 			return
 		}
 		h.log.Info("unmounted from namespace", "command", h.unmountCmd)
 	})
-	return h.unmountErr
+	return h.cleanupErr
 }
 
 func (m *execMounter) MountBundle(ctx context.Context, pid int) (mountRef, error) {
@@ -89,6 +98,14 @@ func (m *execMounter) MountBundle(ctx context.Context, pid int) (mountRef, error
 }
 
 func (m *execMounter) MountCheckpoint(ctx context.Context, nsFd *os.File, checkpointPath string) (mountRef, error) {
+	return m.mountInNamespace(ctx, nsFd, "mount-checkpoint-fd", "unmount-checkpoint-fd", checkpointPath)
+}
+
+func (m *execMounter) MountCuInterpose(ctx context.Context, nsFd *os.File) (mountRef, error) {
+	return m.mountInNamespace(ctx, nsFd, "mount-snapshot-cuda-fd", "unmount-snapshot-cuda-fd")
+}
+
+func (m *execMounter) mountInNamespace(ctx context.Context, nsFd *os.File, mountCmd, unmountCmd string, args ...string) (mountRef, error) {
 	if nsFd == nil {
 		return nil, fmt.Errorf("mount namespace fd is required")
 	}
@@ -97,7 +114,7 @@ func (m *execMounter) MountCheckpoint(ctx context.Context, nsFd *os.File, checkp
 		return nil, fmt.Errorf("duplicate mount namespace fd: %w", err)
 	}
 	unix.CloseOnExec(dupFd)
-	return m.mount(ctx, os.NewFile(uintptr(dupFd), nsFd.Name()), "mount-checkpoint-fd", "unmount-checkpoint-fd", checkpointPath)
+	return m.mount(ctx, os.NewFile(uintptr(dupFd), nsFd.Name()), mountCmd, unmountCmd, args...)
 }
 
 func (m *execMounter) MountPageBroker(ctx context.Context, nsFd *os.File, stagingPath string) (mountRef, error) {

@@ -228,7 +228,7 @@ func TestRunCheckpoint_ReadyPatchErrorLeavesNotReady(t *testing.T) {
 
 	// A Ready write that never landed is retryable: the queue redelivers and the artifact resume
 	// path picks it back up.
-	require.Error(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "x", artifactPath))
+	require.Error(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, false, "x", artifactPath))
 
 	assert.Nil(t, meta.FindStatusCondition(
 		getContent(t, w, content.Name).Status.Conditions,
@@ -313,7 +313,7 @@ func TestRunCheckpoint_FailedBeforeReadyDoesNotKill(t *testing.T) {
 	artifactPath := w.config.Storage.BasePath
 	_, target := startKillableTarget(t)
 
-	require.NoError(t, w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", target.Process.Pid, "x", artifactPath))
+	require.NoError(t, w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", target.Process.Pid, false, "x", artifactPath))
 
 	// The dump itself terminates the source; a raced Failed condition must not
 	// trigger an extra kill of an unrelated PID.

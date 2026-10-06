@@ -17,6 +17,8 @@ import (
 const (
 	// SnapshotBinSrc is the agent-side directory containing the binary bundle.
 	SnapshotBinSrc = "/snapshot-binaries"
+	// CuInterposeBundlePath holds the libraries restored at their capture-time paths.
+	CuInterposeBundlePath = SnapshotBinSrc + "/snapshot-cuda"
 	// SnapshotBinDst is the mount destination inside the placeholder namespace.
 	SnapshotBinDst = "/tmp/snapshot-binaries"
 	// CheckpointSrc is the fixed agent-side checkpoint mount.
@@ -54,19 +56,24 @@ const (
 )
 
 // MountPoint represents an active bind-mount of a directory inside a foreign
-// namespace. The caller must call Unmount when done.
+// namespace. The caller must call Unmount or Release when done.
 type MountPoint interface {
 	// Unmount removes the bind-mount from the target namespace.
 	// It is idempotent and bounds the supplied context with an internal timeout.
 	Unmount(ctx context.Context) error
 
+	// Release closes the namespace fd without unmounting. The mount remains
+	// until the target namespace is destroyed. Subsequent cleanup is a no-op.
+	Release() error
+
 	// NsFd returns the pinned mount-namespace fd opened at Mount time.
-	// Valid until Unmount is called. Test mocks may return nil.
+	// Valid until Unmount or Release is called. Test mocks may return nil.
 	NsFd() *os.File
 }
 
-// NSMounter installs the binary bundle and a selected checkpoint artifact at
-// their fixed destinations in a placeholder container's mount namespace.
+// NSMounter installs the binary bundle, the cuinterpose libraries, and a selected
+// checkpoint artifact at their fixed destinations in a placeholder container's
+// mount namespace.
 type NSMounter struct {
 	mounter mounter
 	log     logr.Logger
@@ -89,6 +96,18 @@ func newWithMounter(m mounter, log logr.Logger) *NSMounter {
 func (nsm *NSMounter) MountBundle(ctx context.Context, pid int) (MountPoint, error) {
 	nsm.log.Info("mounting bundle into placeholder namespace", "pid", pid)
 	ref, err := nsm.mounter.MountBundle(ctx, pid)
+	if err != nil {
+		return nil, err
+	}
+	return &mountPoint{mount: ref}, nil
+}
+
+// MountCuInterpose exposes the bundle's cuinterpose libraries read-only and
+// executable at podcontract.CuInterposeMountPath, their capture-time path, in the
+// namespace pinned by namespaceMount.
+func (nsm *NSMounter) MountCuInterpose(ctx context.Context, namespaceMount MountPoint) (MountPoint, error) {
+	nsm.log.Info("mounting cuinterpose libraries into placeholder namespace")
+	ref, err := nsm.mounter.MountCuInterpose(ctx, namespaceMount.NsFd())
 	if err != nil {
 		return nil, err
 	}
@@ -134,6 +153,10 @@ type mountPoint struct {
 
 func (h *mountPoint) Unmount(ctx context.Context) error {
 	return h.mount.Unmount(ctx)
+}
+
+func (h *mountPoint) Release() error {
+	return h.mount.Release()
 }
 
 func (h *mountPoint) NsFd() *os.File {

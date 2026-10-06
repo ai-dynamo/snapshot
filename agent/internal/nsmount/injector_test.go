@@ -19,6 +19,7 @@ type fakeMountRef struct {
 }
 
 func (h *fakeMountRef) NsFd() *os.File { return h.nsFd }
+func (h *fakeMountRef) Release() error { return nil }
 func (h *fakeMountRef) Unmount(context.Context) error {
 	*h.unmountLog = append(*h.unmountLog, h.dst)
 	return nil
@@ -49,6 +50,15 @@ func (m *mockMounter) mount(role string, pid int, src string) (mountRef, error) 
 
 func (m *mockMounter) MountBundle(_ context.Context, pid int) (mountRef, error) {
 	return m.mount("bundle", pid, "")
+}
+
+func (m *mockMounter) MountCuInterpose(_ context.Context, nsFd *os.File) (mountRef, error) {
+	i := len(m.calls)
+	m.calls = append(m.calls, mountCall{role: "snapshot-cuda", nsFd: nsFd})
+	if i < len(m.results) && m.results[i] != nil {
+		return nil, m.results[i]
+	}
+	return &fakeMountRef{dst: "snapshot-cuda", unmountLog: &m.unmountLog}, nil
 }
 
 func (m *mockMounter) MountCheckpoint(_ context.Context, nsFd *os.File, src string) (mountRef, error) {
@@ -96,10 +106,14 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	if _, err := nsm.MountArtifact(context.Background(), bundle, "/checkpoints/artifacts/content-uid/containers/main"); err != nil {
 		t.Fatalf("MountArtifact: %v", err)
 	}
+	if _, err := nsm.MountCuInterpose(context.Background(), bundle); err != nil {
+		t.Fatalf("MountCuInterpose: %v", err)
+	}
 
 	want := []mountCall{
 		{role: "bundle", pid: testPID},
 		{role: "checkpoint", src: "/checkpoints/artifacts/content-uid/containers/main"},
+		{role: "snapshot-cuda"},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d", len(m.calls), len(want))
@@ -111,6 +125,9 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	}
 	if m.calls[1].nsFd != bundle.NsFd() {
 		t.Fatal("checkpoint mount did not reuse the bundle's pinned namespace fd")
+	}
+	if m.calls[2].nsFd != bundle.NsFd() {
+		t.Fatal("cuinterpose libraries mount did not reuse the bundle's pinned namespace fd")
 	}
 }
 
@@ -139,6 +156,7 @@ func TestMountArtifactRejectsUnsafeSourceBeforeHelper(t *testing.T) {
 type noopNamespaceMount struct{}
 
 func (noopNamespaceMount) Unmount(context.Context) error { return nil }
+func (noopNamespaceMount) Release() error                { return nil }
 func (noopNamespaceMount) NsFd() *os.File                { return nil }
 
 func TestMountPointUnmount(t *testing.T) {

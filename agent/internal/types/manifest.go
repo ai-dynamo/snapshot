@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -31,6 +32,8 @@ type CheckpointManifest struct {
 	Overlay  OverlayManifest   `yaml:"overlay"`
 	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
 	Host     HostManifest      `yaml:"host,omitempty"`
+	// CuInterpose identifies the libraries verified in the source processes.
+	CuInterpose *CuInterposeManifest `yaml:"cuinterpose,omitempty"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object
@@ -215,6 +218,9 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 	if err := validateArtifactManifest(data.Artifact); err != nil {
 		return err
 	}
+	if err := data.validateCuInterpose(); err != nil {
+		return err
+	}
 
 	content, err := yaml.Marshal(data)
 	if err != nil {
@@ -246,7 +252,28 @@ func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 		return nil, err
 	}
 
+	if err := data.validateCuInterpose(); err != nil {
+		return nil, err
+	}
+
 	return &data, nil
+}
+
+// validateCuInterpose also requires every coordinator PID to be a native CUDA
+// participant, because native CUDA restore must recreate its driver state first.
+func (m *CheckpointManifest) validateCuInterpose() error {
+	if m.CuInterpose == nil {
+		return nil
+	}
+	if err := m.CuInterpose.Validate(); err != nil {
+		return err
+	}
+	for _, pid := range m.CuInterpose.PIDs {
+		if !slices.Contains(m.CUDA.PIDs, pid) {
+			return fmt.Errorf("cuinterpose PID %d is not a CUDA participant", pid)
+		}
+	}
+	return nil
 }
 
 func validateArtifactManifest(artifact ArtifactManifest) error {

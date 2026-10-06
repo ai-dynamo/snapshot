@@ -77,8 +77,8 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		if err != nil {
 			return nil, err
 		}
-		if len(m.CUDA.SourceGPUUUIDs) > 1 && cudaJobFile == "" {
-			return nil, fmt.Errorf("multi-GPU checkpoint is missing CUDA launch-job state")
+		if err := cuda.CheckJobFile(cudaJobFile, len(m.CUDA.SourceGPUUUIDs), m.CuInterpose.UsesCoordinator()); err != nil {
+			return nil, err
 		}
 	}
 
@@ -181,6 +181,7 @@ func executeRestore(
 	// opening the binary now and exec'ing via /proc/self/fd/N after CRIU returns,
 	// the fd remains valid even if the mount is gone.
 	var cudaHelperFdPath string
+	var coordinatorFdPath string
 	if !m.CUDA.IsEmpty() {
 		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
 		f, err := os.Open(helperPath)
@@ -189,6 +190,14 @@ func executeRestore(
 		}
 		defer f.Close()
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
+	}
+	if m.CuInterpose.UsesCoordinator() {
+		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("failed to open cuinterpose-coordinator before CRIU restore: %w", err)
+		}
+		defer coordinator.Close()
+		coordinatorFdPath = fmt.Sprintf("/proc/self/fd/%d", coordinator.Fd())
 	}
 
 	// The restore-complete and restore-failed sentinels live on the pod
@@ -273,6 +282,15 @@ func executeRestore(
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
+		}
+		if m.CuInterpose.UsesCoordinator() {
+			// CUDA is unlocked, but the application still waits for restore-complete. Socket
+			// names retain the checkpoint's innermost namespace PIDs, whereas the native CUDA
+			// calls above need PIDs visible to the restoring process.
+			err := cuda.RestoreCuInterpose(ctx, opts.CheckpointPath, m.CuInterpose.PIDs, coordinatorFdPath)
+			if err != nil {
+				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)
+			}
 		}
 	}
 
