@@ -137,7 +137,7 @@ the engine detect its quantization format.
 Model-specific settings are JSON objects in `VLLM_ENGINE_ARGS`,
 `SGLANG_ENGINE_ARGS`, or `TRTLLM_ENGINE_ARGS`. Keys are Python constructor
 arguments, not CLI flags. They override the small example's defaults. The
-GLM vLLM and SGLang profiles use the model's native five-token MTP head.
+GLM vLLM and SGLang profiles use the model's native MTP head to propose five tokens.
 SGLang calls this path `EAGLE`. DeepSeek V4.1 uses its bundled DSpark head with
 five speculative tokens. Neither profile downloads an external draft model.
 These are baseline configurations, not claims that speculation improves every
