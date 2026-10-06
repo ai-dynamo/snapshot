@@ -13,7 +13,7 @@ COMMON_SOURCES := file_descriptor.cpp
 DAEMON_SOURCES := $(BROKER_SOURCES) $(COMMON_SOURCES) daemon.cpp main.cpp
 
 .DEFAULT_GOAL := daemon
-.PHONY: daemon generate test
+.PHONY: daemon generate test test-gpu
 
 generate: v1/pagebroker.pb.cc v1/pagebroker.pb.h
 
@@ -33,3 +33,11 @@ test: generate | build
 	./build/pagebroker-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/storage_manifest.cpp gpu/storage_manifest_test.cpp -o build/gpu-storage-test
 	./build/gpu-storage-test
+
+# GPU CI runs this target with the host driver and one visible GPU.
+test-gpu: build/gpu-checkpoint-test
+	timeout 120 ./build/gpu-checkpoint-test
+
+build/gpu-checkpoint-test: gpu/checkpoint.cpp gpu/checkpoint.hpp gpu/checkpoint_test.cpp file_descriptor.cpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/checkpoint.cpp gpu/checkpoint_test.cpp file_descriptor.cpp \
+		$(GTEST_FLAGS) -L$(CUDA_LIBRARY_DIR) -lcuda -o $@
