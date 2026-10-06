@@ -106,6 +106,7 @@ type RestoreRequest struct {
 	PageBrokerRequested         bool
 	PageBrokerEnabled           bool
 	PageBrokerControlSocketPath string
+	PageBrokerRestoreMode       string
 
 	// Decided by the caller, so both gates reach the same answer.
 	SkipCompatCheck bool
@@ -194,22 +195,33 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		transactionID = uuid.NewString()
 		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 		stageStart := time.Now()
-		staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+		direct := req.PageBrokerRestoreMode == "direct"
+		var staged string
+		if direct {
+			err = broker.DirectRestore(ctx, transactionID, artifactPath)
+		} else {
+			staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
+		}
 		pageBrokerStageDuration = time.Since(stageStart)
 		if err != nil {
-			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
+			return 0, fmt.Errorf("prepare PageBroker restore: %w", err)
 		}
 		mountStart := time.Now()
-		stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
+		var sourceMount nsmount.MountPoint
+		if direct {
+			sourceMount, err = mounts.MountArtifact(ctx, bundleMount, artifactPath)
+		} else {
+			sourceMount, err = mounts.MountPageBroker(ctx, bundleMount, staged)
+			containerCheckpointPath = nsmount.PageBrokerDst
+		}
 		pageBrokerMountDuration = time.Since(mountStart)
 		if err != nil {
-			return 0, fmt.Errorf("mount PageBroker staging: %w", err)
+			return 0, fmt.Errorf("mount PageBroker restore source: %w", err)
 		}
 		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount PageBroker staging from placeholder",
-			point:  stagingMount,
+			action: "unmount PageBroker restore source from placeholder",
+			point:  sourceMount,
 		})
-		containerCheckpointPath = nsmount.PageBrokerDst
 	} else {
 		artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
 		if err != nil {
@@ -226,9 +238,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	if brokered {
-		stagingMount := activeMounts[len(activeMounts)-1]
-		if err := stagingMount.point.Unmount(ctx); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", stagingMount.action, err))
+		sourceMount := activeMounts[len(activeMounts)-1]
+		if err := sourceMount.point.Unmount(ctx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", sourceMount.action, err))
 		}
 		activeMounts = activeMounts[:len(activeMounts)-1]
 		commitStart := time.Now()

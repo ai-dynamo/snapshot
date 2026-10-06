@@ -319,3 +319,58 @@ func TestCommitDoesNotRetryInvalidFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDirectRestoreResponse(t *testing.T) {
+	for _, ready := range []bool{true, false} {
+		t.Run(map[bool]string{true: "ready", false: "wrong response"}[ready], func(t *testing.T) {
+			listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "broker.sock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			server := make(chan error, 1)
+			go func() {
+				connection, err := listener.Accept()
+				if err != nil {
+					server <- err
+					return
+				}
+				defer connection.Close()
+				message, err := readMessage(connection)
+				if err != nil {
+					server <- err
+					return
+				}
+				request := new(Request)
+				if err := proto.Unmarshal(message, request); err != nil {
+					server <- err
+					return
+				}
+				if request.GetTransactionId() != "transaction" || request.GetDirectRestore().GetSource().GetFilesystem().GetDirectory() != "/checkpoints/source" || request.GetDirectRestore().GetIoEngine().GetPosixCopy() == nil {
+					server <- errors.New("unexpected direct restore request")
+					return
+				}
+				response := &Response{RequestId: request.RequestId, TransactionId: request.TransactionId}
+				if ready {
+					response.Result = &Response_DirectRestoreReady{DirectRestoreReady: &DirectRestoreReady{}}
+				} else {
+					response.Result = &Response_CommitComplete{CommitComplete: &CommitComplete{}}
+				}
+				message, err = proto.Marshal(response)
+				if err == nil {
+					err = writeMessage(connection, message)
+				}
+				server <- err
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err = (Client{ControlSocketPath: listener.Addr().String()}).DirectRestore(ctx, "transaction", "/checkpoints/source")
+			if (err == nil) != ready {
+				t.Fatalf("ready=%v: %v", ready, err)
+			}
+			if err := <-server; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

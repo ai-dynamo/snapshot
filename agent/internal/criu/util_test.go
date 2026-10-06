@@ -357,3 +357,28 @@ func TestBuildRestoreExtMounts(t *testing.T) {
 		}
 	})
 }
+
+func TestRestorePreservesManifestImageIoMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want criurpc.CriuImageIoMode
+	}{
+		{"", criurpc.CriuImageIoMode_IMAGE_IO_DIRECT},
+		{"direct", criurpc.CriuImageIoMode_IMAGE_IO_DIRECT},
+		{"writeback", criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			manifest := &types.CheckpointManifest{CRIUDump: types.CRIUDumpManifest{
+				CRIU:   types.CRIUSettings{ImageIoMode: tc.mode},
+				ExtMnt: map[string]string{"root": "/"},
+			}}
+			opts, err := BuildRestoreOpts(manifest, t.TempDir(), "", logr.Discard())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opts.GetImageIoMode() != tc.want {
+				t.Fatalf("restore I/O mode = %v, want %v", opts.GetImageIoMode(), tc.want)
+			}
+		})
+	}
+}
