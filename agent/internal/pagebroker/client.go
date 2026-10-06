@@ -226,9 +226,11 @@ func exchange(ctx context.Context, connection *net.UnixConn, transactionID strin
 	}
 	if failure := response.GetFailure(); failure != nil {
 		// Legacy handlers return filesystem exception text, which can include long
-		// paths. Only the storage-extension codes promise the smaller wire bound;
-		// legacy and unknown codes retain the existing frame-size limit.
-		if (isStorageFailure(failure.GetCode()) && len(failure.GetMessage()) > maxFailureMessageSize) || !utf8.ValidString(failure.GetMessage()) {
+		// paths and is not guaranteed valid UTF-8. Only the storage-extension codes
+		// promise the smaller, UTF-8 wire bound; legacy and unknown codes retain the
+		// existing frame-size limit and are not UTF-8 checked.
+		if isStorageFailure(failure.GetCode()) &&
+			(len(failure.GetMessage()) > maxFailureMessageSize || !utf8.ValidString(failure.GetMessage())) {
 			return nil, fmt.Errorf("invalid PageBroker failure message")
 		}
 		return nil, &FailureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
