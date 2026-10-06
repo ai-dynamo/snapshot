@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"golang.org/x/sys/unix"
 )
 
 // ResolveHostPIDs maps PIDs in the caller's namespace to host PIDs. procRoot must
 // refer to the host proc mount, retained by nsrestore before namespace entry.
-// Only the existing host/container PID layout is supported.
+// CRIU may create a child PID namespace below the restore container.
 func ResolveHostPIDs(procRoot string, pids []int) ([]int, error) {
 	namespace, err := os.Stat("/proc/self/ns/pid")
 	if err != nil {
@@ -37,18 +39,36 @@ func ResolveHostPIDs(procRoot string, pids []int) ([]int, error) {
 		if err != nil || hostPID <= 0 {
 			continue
 		}
-		candidate, err := os.Stat(filepath.Join(procRoot, entry.Name(), "ns/pid"))
-		if err != nil || !os.SameFile(namespace, candidate) {
+		candidate, err := os.Open(filepath.Join(procRoot, entry.Name(), "ns/pid"))
+		if err != nil {
+			continue
+		}
+		identity, err := candidate.Stat()
+		depth := 2 // Host and restore container.
+		if err == nil && !os.SameFile(namespace, identity) {
+			// A restored process can belong to CRIU's child namespace. Its
+			// parent must be our container, not another pod's namespace.
+			parent, parentErr := unix.IoctlRetInt(int(candidate.Fd()), unix.NS_GET_PARENT)
+			if parentErr == nil {
+				unix.CloseOnExec(parent)
+				_ = candidate.Close()
+				candidate = os.NewFile(uintptr(parent), "parent PID namespace")
+				identity, err = candidate.Stat()
+				depth++
+			}
+		}
+		_ = candidate.Close()
+		if err != nil || !os.SameFile(namespace, identity) {
 			continue // Another namespace or a process that has exited.
 		}
 		process, err := ReadProcessDetails(procRoot, hostPID)
 		if err != nil {
 			continue
 		}
-		if len(process.NamespacePIDs) != 2 || process.NamespacePIDs[0] != hostPID {
+		if len(process.NamespacePIDs) != depth || process.NamespacePIDs[0] != hostPID {
 			return nil, fmt.Errorf("process %d requires the host/container PID layout", hostPID)
 		}
-		pid := process.InnermostPID
+		pid := process.NamespacePIDs[1]
 		previous, match := wanted[pid]
 		if !match {
 			continue

@@ -4,7 +4,13 @@
 package runtime
 
 import (
+	"errors"
 	"os"
+	"os/exec"
+	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 	"strconv"
 	"testing"
 )
@@ -80,5 +86,38 @@ func TestResolveHostPIDsRejectsUnsupportedIdentity(t *testing.T) {
 				t.Fatal("accepted unsupported or ambiguous process identity")
 			}
 		})
+	}
+}
+
+func TestResolveHostPIDsInCRIUNamespace(t *testing.T) {
+	if os.Getenv("SNAPSHOT_PID_NAMESPACE_TEST_CHILD") == "1" {
+		time.Sleep(time.Minute)
+		return
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestResolveHostPIDsInCRIUNamespace$")
+	child.Env = append(os.Environ(), "SNAPSHOT_PID_NAMESPACE_TEST_CHILD=1")
+	child.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWPID}
+	if err := child.Start(); err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skip("PID namespace creation requires CAP_SYS_ADMIN")
+		}
+		t.Fatal(err)
+	}
+	defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
+	root := t.TempDir()
+	process := root + "/901"
+	if err := os.MkdirAll(process+"/ns", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/proc/"+strconv.Itoa(child.Process.Pid)+"/ns/pid", process+"/ns/pid"); err != nil {
+		t.Fatal(err)
+	}
+	status := "PPid: 1\nNSpid: 901 " + strconv.Itoa(child.Process.Pid) + " 1\n"
+	if err := os.WriteFile(process+"/status", []byte(status), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveHostPIDs(root, []int{child.Process.Pid})
+	if err != nil || len(got) != 1 || got[0] != 901 {
+		t.Fatalf("host PIDs = %v, %v, want [901]", got, err)
 	}
 }
