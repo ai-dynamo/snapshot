@@ -1,20 +1,35 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+CXXFLAGS := -O2 -std=c++20 -Wall -Wextra -Werror -pthread
+CUDA_ROOT ?= /usr/local/cuda
+CUDA_INCLUDE_DIR ?= $(CUDA_ROOT)/include
+CUDA_LIBRARY_DIR ?= $(CUDA_ROOT)/lib64
+CPPFLAGS := -I. -Igpu -I$(CUDA_INCLUDE_DIR)
 PROTO := v1/pagebroker.proto
-GTEST_FLAGS := $(shell pkg-config --cflags --libs gtest_main)
+GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
 BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp
-DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp file_descriptor.cpp
+COMMON_SOURCES := file_descriptor.cpp
+DAEMON_SOURCES := $(BROKER_SOURCES) $(COMMON_SOURCES) daemon.cpp main.cpp
 
+.DEFAULT_GOAL := daemon
 .PHONY: daemon generate test
 
-generate:
+generate: v1/pagebroker.pb.cc v1/pagebroker.pb.h
+
+v1/pagebroker.pb.cc v1/pagebroker.pb.h &: $(PROTO)
 	protoc --proto_path=. --cpp_out=. $(PROTO)
 
-daemon: generate
-	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic -o pagebroker
-
-test: generate $(BROKER_SOURCES) daemon_test.cpp
+build:
 	mkdir -p build
-	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
+
+daemon: generate
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DAEMON_SOURCES) v1/pagebroker.pb.cc \
+		-Wl,-Bstatic -lprotobuf -Wl,-Bdynamic -o pagebroker
+
+test: generate | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(BROKER_SOURCES) $(COMMON_SOURCES) \
+		daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
 	./build/pagebroker-test
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/storage_manifest.cpp gpu/storage_manifest_test.cpp -o build/gpu-storage-test
+	./build/gpu-storage-test

@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+bin/
+cmd/cuda-checkpoint-helper/bin/
+pagebroker/build/
+pagebroker/pagebroker
+pagebroker/v1/*.pb.cc
+pagebroker/v1/*.pb.h

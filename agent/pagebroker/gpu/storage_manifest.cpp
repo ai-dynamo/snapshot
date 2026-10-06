@@ -5,13 +5,10 @@
 
 #include "storage_manifest.hpp"
 
-#include "content_digest.hpp"
-
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <cstdio>
@@ -23,12 +20,11 @@
 #include <unordered_set>
 #include <utility>
 
-namespace cuda_checkpoint_storage {
+namespace snapshot::pagebroker::gpu::storage {
 namespace {
 
 constexpr size_t kMaximumDeviceCount = 1024;
 constexpr size_t kMaximumManifestSize = 256 * 1024;
-std::atomic<uint64_t> kTemporaryManifestSequence{0};
 
 class FileDescriptor {
 public:
@@ -72,82 +68,45 @@ bool ParseUnsigned(std::string_view value, T *parsed) {
   return true;
 }
 
-bool NormalizeExtent(const ManifestExtent &extent, size_t index,
-                     ManifestExtent *normalized, std::string *error) {
+bool NormalizeExtent(const GpuDataFile &extent, size_t index,
+                     GpuDataFile *normalized, std::string *error) {
   if (!CanonicalizeGPUUUID(extent.source_uuid, &normalized->source_uuid)) {
-    *error = "invalid source GPU UUID in helper manifest";
+    *error = "invalid source GPU UUID in GPU manifest";
     return false;
   }
   if (extent.size == 0) {
-    *error = "zero-sized extent in helper manifest";
+    *error = "zero-sized extent in GPU manifest";
     return false;
   }
   normalized->size = extent.size;
   normalized->filename = extent.filename;
   if (normalized->filename != DeviceFilename(index)) {
-    *error = "invalid deterministic extent filename in helper manifest";
-    return false;
-  }
-  normalized->sha256 = extent.sha256;
-  if (!normalized->sha256.empty() && !IsSHA256Hex(normalized->sha256)) {
-    *error = "invalid SHA-256 digest in helper manifest";
+    *error = "invalid deterministic extent filename in GPU manifest";
     return false;
   }
   return true;
 }
 
-bool NormalizeManifest(const std::vector<ManifestExtent> &extents,
-                       std::vector<ManifestExtent> *normalized,
+bool NormalizeManifest(const std::vector<GpuDataFile> &extents,
+                       std::vector<GpuDataFile> *normalized,
                        std::string *error) {
   if (extents.size() > kMaximumDeviceCount) {
-    *error = "helper manifest has too many device extents";
+    *error = "GPU manifest has too many device extents";
     return false;
   }
   normalized->clear();
   normalized->reserve(extents.size());
   std::unordered_set<std::string> source_uuids;
   for (size_t index = 0; index < extents.size(); ++index) {
-    ManifestExtent extent;
+    GpuDataFile extent;
     if (!NormalizeExtent(extents[index], index, &extent, error)) {
       return false;
     }
     if (!source_uuids.insert(extent.source_uuid).second) {
-      *error = "duplicate source GPU UUID in helper manifest";
+      *error = "duplicate source GPU UUID in GPU manifest";
       return false;
     }
     normalized->push_back(std::move(extent));
-  }
-  return true;
-}
-
-void RemoveTemporaryManifest(const std::filesystem::path &temporary) {
-  std::error_code ignored;
-  std::filesystem::remove(temporary, ignored);
-}
-
-bool RemoveTemporaryManifests(const std::filesystem::path &directory,
-                              bool *removed, std::string *error) {
-  std::error_code iterator_error;
-  const std::filesystem::directory_iterator end;
-  for (std::filesystem::directory_iterator iterator(directory, iterator_error);
-       !iterator_error && iterator != end; iterator.increment(iterator_error)) {
-    const auto entry = *iterator;
-    const std::string name = entry.path().filename().string();
-    if (name != kLegacyTemporaryManifestName &&
-        !name.starts_with(kTemporaryManifestPrefix)) {
-      continue;
-    }
-    if (unlink(entry.path().c_str()) != 0 && errno != ENOENT) {
-      *error = "remove temporary helper manifest: " +
-               std::string(std::strerror(errno));
-      return false;
-    }
-    *removed = true;
-  }
-  if (iterator_error) {
-    *error = "scan helper directory for temporary manifests: " +
-             iterator_error.message();
-    return false;
   }
   return true;
 }
@@ -173,7 +132,7 @@ bool ReadManifestContents(const std::filesystem::path &manifest_path,
   FileDescriptor fd(
       open(manifest_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
   if (fd.get() < 0) {
-    *error = "open helper manifest: " + std::string(std::strerror(errno));
+    *error = "open GPU manifest: " + std::string(std::strerror(errno));
     return false;
   }
 
@@ -181,7 +140,7 @@ bool ReadManifestContents(const std::filesystem::path &manifest_path,
   if (fstat(fd.get(), &manifest_stat) != 0 ||
       !S_ISREG(manifest_stat.st_mode) || manifest_stat.st_size < 0 ||
       static_cast<uintmax_t>(manifest_stat.st_size) > kMaximumManifestSize) {
-    *error = "helper manifest is not a bounded regular file";
+    *error = "GPU manifest is not a bounded regular file";
     return false;
   }
 
@@ -194,7 +153,7 @@ bool ReadManifestContents(const std::filesystem::path &manifest_path,
       continue;
     }
     if (bytes <= 0) {
-      *error = "read helper manifest: " +
+      *error = "read GPU manifest: " +
                std::string(bytes == 0 ? "unexpected end of file"
                                       : std::strerror(errno));
       return false;
@@ -208,9 +167,9 @@ bool ReadManifestContents(const std::filesystem::path &manifest_path,
     bytes = read(fd.get(), &trailing, sizeof(trailing));
   } while (bytes < 0 && errno == EINTR);
   if (bytes != 0) {
-    *error = bytes < 0 ? "read helper manifest: " +
+    *error = bytes < 0 ? "read GPU manifest: " +
                              std::string(std::strerror(errno))
-                       : "helper manifest changed while being read";
+                       : "GPU manifest changed while being read";
     return false;
   }
   return true;
@@ -222,42 +181,34 @@ bool ParseVersionHeader(std::istringstream &input, std::string *error) {
   unsigned int version = 0;
   if (!(input >> key >> version_text) || key != "version" ||
       !ParseUnsigned(version_text, &version)) {
-    *error = "invalid helper manifest version header";
+    *error = "invalid GPU manifest version header";
     return false;
   }
-  if (version < 3) {
-    *error = "unsafe helper manifest without extent digests is not supported";
-    return false;
-  }
-  if (version != 3) {
-    *error = "unsupported helper manifest version";
+  if (version != 4) {
+    *error = "unsupported GPU manifest version";
     return false;
   }
   return true;
 }
 
 bool ParseDeviceEntry(std::istringstream &input, size_t expected_index,
-                      ManifestExtent *extent, std::string *error) {
+                      GpuDataFile *extent, std::string *error) {
   std::string key;
   std::string index_text;
   std::string size_text;
   size_t index = 0;
   if (!(input >> key >> index_text >> extent->source_uuid >> size_text >>
-        extent->filename >> extent->sha256) ||
+        extent->filename) ||
       key != "device" || !ParseUnsigned(index_text, &index) ||
       index != expected_index || !ParseUnsigned(size_text, &extent->size)) {
-    *error = "invalid helper manifest device entry";
+    *error = "invalid GPU manifest device entry";
     return false;
   }
 
   std::string canonical;
   if (!CanonicalizeGPUUUID(extent->source_uuid, &canonical) ||
       canonical != extent->source_uuid) {
-    *error = "helper manifest source GPU UUID is not canonical";
-    return false;
-  }
-  if (!IsSHA256Hex(extent->sha256)) {
-    *error = "helper manifest extent SHA-256 digest is invalid";
+    *error = "GPU manifest source GPU UUID is not canonical";
     return false;
   }
   return true;
@@ -332,8 +283,8 @@ std::string DeviceFilename(size_t index) {
   return filename;
 }
 
-bool BuildCheckpointManifest(const std::vector<DeviceExtent> &devices,
-                             std::vector<ManifestExtent> *extents,
+bool BuildCheckpointManifest(const std::vector<GpuDataRegion> &devices,
+                             std::vector<GpuDataFile> *extents,
                              std::string *error) {
   if (extents == nullptr || error == nullptr) {
     return false;
@@ -361,20 +312,20 @@ bool BuildCheckpointManifest(const std::vector<DeviceExtent> &devices,
       return false;
     }
     extents->push_back({std::move(source_uuid), devices[index].size,
-                        DeviceFilename(index), ""});
+                        DeviceFilename(index)});
   }
   return true;
 }
 
-bool BuildTransferJobs(const std::vector<ManifestExtent> &extents,
-                       const std::vector<DeviceExtent> &devices,
+bool BuildTransferJobs(const std::vector<GpuDataFile> &extents,
+                       const std::vector<GpuDataRegion> &devices,
                        const std::vector<DevicePair> &device_pairs,
                        std::vector<TransferJob> *jobs, std::string *error) {
   if (jobs == nullptr || error == nullptr) {
     return false;
   }
 
-  std::vector<ManifestExtent> normalized_extents;
+  std::vector<GpuDataFile> normalized_extents;
   if (!NormalizeManifest(extents, &normalized_extents, error)) {
     return false;
   }
@@ -457,124 +408,62 @@ bool BuildTransferJobs(const std::vector<ManifestExtent> &extents,
   return true;
 }
 
-bool ApplyOrVerifyExtentDigests(bool checkpoint,
-                                const std::vector<TransferJob> &jobs,
-                                const std::vector<std::string> &digests,
-                                std::vector<ManifestExtent> *extents,
-                                std::string *error) {
-  if (extents == nullptr || error == nullptr) {
-    return false;
-  }
-  if (jobs.size() != digests.size()) {
-    *error = "custom storage digest coverage mismatch";
-    return false;
-  }
-  std::vector<unsigned char> covered(extents->size(), 0);
-  for (size_t job_index = 0; job_index < jobs.size(); ++job_index) {
-    const size_t extent_index = jobs[job_index].extent_index;
-    if (extent_index >= extents->size() || covered[extent_index] != 0 ||
-        !IsSHA256Hex(digests[job_index])) {
-      *error = "custom storage digest metadata is invalid";
-      return false;
-    }
-    covered[extent_index] = 1;
-    auto &extent = (*extents)[extent_index];
-    if (checkpoint) {
-      extent.sha256 = digests[job_index];
-      continue;
-    }
-    if (extent.sha256 != digests[job_index]) {
-      *error = "custom storage extent SHA-256 mismatch for " + extent.filename;
-      return false;
-    }
-  }
-  for (const unsigned char value : covered) {
-    if (value == 0) {
-      *error = "one or more custom storage extents lack digest coverage";
-      return false;
-    }
-  }
-  return true;
-}
-
 bool WriteManifest(const std::filesystem::path &directory,
-                   const std::vector<ManifestExtent> &extents,
+                   const std::vector<GpuDataFile> &extents,
                    std::string *error) {
   if (error == nullptr) {
     return false;
   }
-  std::vector<ManifestExtent> normalized;
+  std::vector<GpuDataFile> normalized;
   if (!NormalizeManifest(extents, &normalized, error)) {
     return false;
   }
-  for (const auto &extent : normalized) {
-    if (!IsSHA256Hex(extent.sha256)) {
-      *error = "helper manifest extent is missing a valid SHA-256 digest";
-      return false;
-    }
-  }
 
-  bool removed_temporary = false;
-  if (!RemoveTemporaryManifests(directory, &removed_temporary, error)) {
-    return false;
-  }
-  const std::string temporary_name =
-      std::string(kTemporaryManifestPrefix) + std::to_string(getpid()) + "." +
-      std::to_string(kTemporaryManifestSequence.fetch_add(1));
-  const auto temporary = directory / temporary_name;
   const auto manifest_path = directory / kManifestName;
   std::ostringstream serialized;
-  serialized << "version 3\n";
+  serialized << "version 4\n";
   serialized << "device_count " << normalized.size() << "\n";
   for (size_t index = 0; index < normalized.size(); ++index) {
     serialized << "device " << index << " " << normalized[index].source_uuid
                << " " << normalized[index].size << " "
-               << normalized[index].filename << " "
-               << normalized[index].sha256 << "\n";
+               << normalized[index].filename << "\n";
   }
 
-  FileDescriptor fd(open(temporary.c_str(),
+  // The participant directory is new and private. The caller publishes the
+  // enclosing checkpoint only after every participant has completed.
+  FileDescriptor fd(open(manifest_path.c_str(),
                          O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
   if (fd.get() < 0) {
-    *error = "open temporary helper manifest: " +
+    *error = "create GPU storage manifest: " +
              std::string(std::strerror(errno));
     return false;
   }
   if (!WriteAll(fd.get(), serialized.str()) || fsync(fd.get()) != 0 ||
       !fd.Close()) {
     const int write_error = errno == 0 ? EIO : errno;
-    RemoveTemporaryManifest(temporary);
-    *error = "write temporary helper manifest: " +
+    *error = "write GPU storage manifest: " +
              std::string(std::strerror(write_error));
     return false;
   }
-  if (rename(temporary.c_str(), manifest_path.c_str()) != 0) {
-    const int rename_error = errno;
-    RemoveTemporaryManifest(temporary);
-    *error = "commit helper manifest: " +
-             std::string(std::strerror(rename_error));
-    return false;
-  }
-
   FileDescriptor directory_fd(
       open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
   if (directory_fd.get() < 0) {
     const int open_error = errno == 0 ? EIO : errno;
-    *error = "open helper directory for fsync: " +
+    *error = "open GPU directory for fsync: " +
              std::string(std::strerror(open_error));
     return false;
   }
   if (fsync(directory_fd.get()) != 0 || !directory_fd.Close()) {
     const int sync_error = errno == 0 ? EIO : errno;
     *error =
-        "fsync helper directory: " + std::string(std::strerror(sync_error));
+        "fsync GPU directory: " + std::string(std::strerror(sync_error));
     return false;
   }
   return true;
 }
 
 bool ReadManifest(const std::filesystem::path &directory,
-                  std::vector<ManifestExtent> *extents, std::string *error) {
+                  std::vector<GpuDataFile> *extents, std::string *error) {
   if (extents == nullptr || error == nullptr) {
     return false;
   }
@@ -595,15 +484,15 @@ bool ReadManifest(const std::filesystem::path &directory,
   if (!(input >> key >> device_count_text) || key != "device_count" ||
       !ParseUnsigned(device_count_text, &device_count) ||
       device_count > kMaximumDeviceCount) {
-    *error = "invalid helper manifest device count";
+    *error = "invalid GPU manifest device count";
     return false;
   }
 
-  std::vector<ManifestExtent> parsed;
+  std::vector<GpuDataFile> parsed;
   parsed.reserve(device_count);
   for (size_t expected_index = 0; expected_index < device_count;
        ++expected_index) {
-    ManifestExtent extent;
+    GpuDataFile extent;
     if (!ParseDeviceEntry(input, expected_index, &extent, error)) {
       return false;
     }
@@ -611,11 +500,11 @@ bool ReadManifest(const std::filesystem::path &directory,
   }
   std::string trailing;
   if (input >> trailing) {
-    *error = "unexpected helper manifest data";
+    *error = "unexpected GPU manifest data";
     return false;
   }
 
-  std::vector<ManifestExtent> normalized;
+  std::vector<GpuDataFile> normalized;
   if (!NormalizeManifest(parsed, &normalized, error)) {
     return false;
   }
@@ -624,12 +513,12 @@ bool ReadManifest(const std::filesystem::path &directory,
 }
 
 bool ValidateExtentFiles(const std::filesystem::path &directory,
-                         const std::vector<ManifestExtent> &extents,
+                         const std::vector<GpuDataFile> &extents,
                          std::string *error) {
   if (error == nullptr) {
     return false;
   }
-  std::vector<ManifestExtent> normalized;
+  std::vector<GpuDataFile> normalized;
   if (!NormalizeManifest(extents, &normalized, error)) {
     return false;
   }
@@ -646,32 +535,4 @@ bool ValidateExtentFiles(const std::filesystem::path &directory,
   return true;
 }
 
-bool RemoveManifest(const std::filesystem::path &directory,
-                    std::string *error) {
-  if (error == nullptr) {
-    return false;
-  }
-  bool removed = false;
-  if (unlink((directory / kManifestName).c_str()) == 0) {
-    removed = true;
-  } else if (errno != ENOENT) {
-    *error =
-        "remove stale helper manifest: " + std::string(std::strerror(errno));
-    return false;
-  }
-  if (!RemoveTemporaryManifests(directory, &removed, error)) {
-    return false;
-  }
-  if (removed) {
-    FileDescriptor directory_fd(
-        open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
-    if (directory_fd.get() < 0 || fsync(directory_fd.get()) != 0 ||
-        !directory_fd.Close()) {
-      *error = "fsync helper directory after removing manifest";
-      return false;
-    }
-  }
-  return true;
-}
-
-} // namespace cuda_checkpoint_storage
+} // namespace snapshot::pagebroker::gpu::storage

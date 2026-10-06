@@ -15,7 +15,6 @@
 # Optional targets for CI:
 #   docker build --target linter --build-context api=../api .   # Run linting
 #   docker build --target tester --build-context api=../api .   # Run tests
-#   docker build --target cuda-transfer-contracts-builder .      # Validate CUDA transfer contracts
 
 # =============================================================================
 # Build Arguments
@@ -38,76 +37,12 @@ ARG GOLANGCI_LINT_VERSION=v2.13.2
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
+ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
-ARG CUDA_HELPER_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
 
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
-
-# =============================================================================
-# Stage: CUDA 13.4 header provider
-# =============================================================================
-FROM ${CUDA_HELPER_HEADERS_IMAGE} AS cuda-helper-headers
-
-# =============================================================================
-# Stage: CUDA transfer contract builder (no transfer adapter)
-# =============================================================================
-FROM ${AGENT_BASE_IMAGE} AS cuda-transfer-contracts-builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /workspace
-
-COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/cuda.h /opt/cuda-13.4/include/cuda.h
-COPY cmd/cuda-checkpoint-helper/content_digest.cpp ./cmd/cuda-checkpoint-helper/content_digest.cpp
-COPY cmd/cuda-checkpoint-helper/content_digest.hpp ./cmd/cuda-checkpoint-helper/content_digest.hpp
-COPY cmd/cuda-checkpoint-helper/content_digest_test.cpp ./cmd/cuda-checkpoint-helper/content_digest_test.cpp
-COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
-COPY cmd/cuda-checkpoint-helper/storage_manifest.hpp ./cmd/cuda-checkpoint-helper/storage_manifest.hpp
-COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper/transfer_config.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_config.hpp ./cmd/cuda-checkpoint-helper/transfer_config.hpp
-COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_cancellation.hpp ./cmd/cuda-checkpoint-helper/transfer_cancellation.hpp
-COPY cmd/cuda-checkpoint-helper/transfer_engine.hpp ./cmd/cuda-checkpoint-helper/transfer_engine.hpp
-COPY cmd/cuda-checkpoint-helper/transfer_engine_test.cpp ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
-      -I/opt/cuda-13.4/include \
-      -c ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp \
-      -o /transfer-backend-unavailable.o
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-      -o /cuda-checkpoint-helper-storage-test \
-      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
-      ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
-      ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
-      -lcrypto \
-    && /cuda-checkpoint-helper-storage-test
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-      -o /cuda-checkpoint-helper-content-digest-test \
-      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
-      ./cmd/cuda-checkpoint-helper/content_digest_test.cpp \
-      -lcrypto \
-    && /cuda-checkpoint-helper-content-digest-test
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-      -o /cuda-checkpoint-helper-transfer-config-test \
-      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
-      ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp \
-    && /cuda-checkpoint-helper-transfer-config-test
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-      -I/opt/cuda-13.4/include \
-      -o /cuda-checkpoint-helper-transfer-cancellation-test \
-      ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp \
-    && /cuda-checkpoint-helper-transfer-cancellation-test
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -166,7 +101,7 @@ RUN golangci-lint run --timeout=5m
 # =============================================================================
 FROM go-base AS tester
 
-RUN go test ./... -v
+RUN CGO_ENABLED=0 go test ./... -v
 
 # =============================================================================
 # Stage: Builder - Build Go binaries
@@ -183,28 +118,23 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 
 # =============================================================================
-# Stage: CUDA checkpoint helper builder
+# Stage: Conventional CUDA checkpoint helper builder
 # =============================================================================
+FROM ${CUDA_HEADERS_IMAGE} AS cuda-headers
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
-
+COPY --from=cuda-headers /usr/local/cuda/include/ /opt/cuda/include/
+COPY --from=cuda-headers /usr/local/cuda/lib64/stubs/ /opt/cuda/lib64/stubs/
 WORKDIR /workspace
+COPY cmd/cuda-checkpoint-helper/ cmd/cuda-checkpoint-helper/
+COPY cmd/ns-bind-mount/main.c cmd/ns-bind-mount/main.c
+RUN make -C cmd/cuda-checkpoint-helper helper CUDA_ROOT=/opt/cuda \
+    && cp cmd/cuda-checkpoint-helper/bin/cuda-checkpoint-helper /cuda-checkpoint-helper
 
-COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
-COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
-
-RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
-    ./cmd/cuda-checkpoint-helper/main.c \
-    -I/usr/local/cuda/include \
-    -L/usr/local/cuda/lib64/stubs \
-    -lcuda
-
-# ns-bind-mount bind-mounts the snapshot binaries into a target container's mount
-# namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).
-RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
+# The mount helper needs no CUDA headers, only mount_setattr (Linux 5.12+).
+RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount cmd/ns-bind-mount/main.c
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -213,6 +143,7 @@ FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca0
 
 ARG CRIU_REPO
 ARG CRIU_REF
+ARG BUILD_JOBS=4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -240,7 +171,7 @@ RUN git init /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
-    && make -j$(nproc) \
+    && make -j${BUILD_JOBS} \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
