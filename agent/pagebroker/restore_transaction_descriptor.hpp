@@ -12,7 +12,6 @@ class RestoreTransactionDescriptor {
   explicit RestoreTransactionDescriptor(Path staging_directory, FileDescriptor source = FileDescriptor(-1));
 
   const Path& staging_directory() const;
-  int source_fd() const { return source_.get(); }
 
  private:
   Path staging_directory_;
