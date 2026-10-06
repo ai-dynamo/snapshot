@@ -243,6 +243,35 @@ Multi-GPU recipes use PVC-backed download init containers for every engine.
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.
 
+### CuInterpose qualification
+
+The multi-GPU recipes enable CUDA shared-memory support. See the
+[recipe guide](../docs/guides/cuda-shared-memory.md) for delivery and the
+[developer overview](../docs/development/cuinterpose.md) for the supported
+resource and synchronization contracts.
+
+Build and run the CPU suite before GPU qualification:
+
+```bash
+make -C agent/cmd/cuinterpose build test
+uv run --project agent/cmd/cuinterpose/tests/gpu pytest agent/cmd/cuinterpose/tests/gpu -vv -rs
+```
+
+The GPU suite uses the matching artifacts in `agent/cmd/cuinterpose/build/`
+(override with `CUINTERPOSE_BUILD_DIR`) and preloads them from its test-local
+directory. Shared-memory lifecycle tests need two GPUs and exercise read-only
+inspection, preparation, native CUDA checkpoint/restore, and reconstruction.
+Multicast additionally requires supported NVLink/NVSwitch hardware. HOST_NUMA
+tests require POSIX-shareable HOST_NUMA VMM and exercise coordinator
+reconstruction without native CUDA checkpoint or CRIU.
+
+These native tests do not qualify the Kubernetes/CRIU lifecycle. Run an opted-in
+multi-process workload through capture and restore, repeat with a distinct
+restore node, and verify a changed shim bundle fails before CRIU even when
+compatibility checking is skipped. Record the tested revision, hardware, and
+skipped cases; unit or reconstruction-only success does not establish those
+end-to-end results.
+
 ### Framework benchmark results
 
 Every selected framework test prints a benchmark summary and writes one
