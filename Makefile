@@ -28,7 +28,7 @@ AGENT_PLATFORM ?= linux/amd64
 .PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
         capture-base-packages verify-base-packages \
-        linux-build linux-test pagebroker-check-generated
+        linux-build linux-test pagebroker-check-generated cpu-e2e
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
@@ -138,6 +138,11 @@ linux-test:
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
 	  make -C agent test
+
+# Build, spin up a k3d cluster, install Snapshot, and run the CPU e2e suite.
+# Needs a linux/amd64 Docker daemon; CI runs the same sequence in e2e-cpu.yaml.
+cpu-e2e:
+	@bash hack/cpu-e2e.sh
 
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
 # changes; verify-base-packages fails the agent build if you forget.

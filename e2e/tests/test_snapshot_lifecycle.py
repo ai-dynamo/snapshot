@@ -233,6 +233,7 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_one_cpu_snapshot_restores_into_two_containers(
     config: k8s.E2EConfig,

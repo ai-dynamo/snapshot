@@ -1,0 +1,227 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Checkpoint/restore e2e on every pull request, without a GPU.
+#
+# The cluster is k3d, so the Kubernetes node is a Docker container and CRIU
+# dumps a workload nested inside it. That works: see the proof run linked from
+# issue 241. Images are built in this job and imported into the cluster, because
+# a pull request has no published images to pull.
+#
+# The GPU suite stays on its own schedule in e2e.yaml; this job shares the
+# chart installer with it and differs only in the cluster it installs into.
+
+name: E2E CPU (k3d)
+
+on:
+  pull_request:
+    # Scoped to what can change the result: the two images this job builds, the
+    # chart it installs, the CRDs they serve, and the harness that drives them.
+    paths:
+      - "agent/**"
+      - "api/**"
+      - "charts/snapshot/**"
+      - "e2e/**"
+      - "operator/**"
+      - "go.work"
+      - "go.work.sum"
+      - "**/go.mod"
+      - "**/go.sum"
+      - "Makefile"
+      - "hack/tools.mk"
+      # A named build context of the agent image, so it changes that image.
+      - "hack/compliance/**"
+      - "hack/k3d-cpu-e2e.sh"
+      - ".github/workflows/e2e-cpu.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: snapshot-e2e-cpu-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  UV_LINK_MODE: copy
+  K3D_VERSION: v5.8.3
+  KUBECTL_VERSION: v1.32.13
+  IMAGE_REGISTRY: snapshot.local
+  IMAGE_TAG: cpu-e2e
+  SNAPSHOT_E2E_MODE: direct
+  SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+  SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+  SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
+  SNAPSHOT_E2E_PVC_SIZE: 2Gi
+  SNAPSHOT_E2E_STORAGE_CLASS: snapshot-e2e-hostpath
+  SNAPSHOT_E2E_K3D_CLUSTER: snapshot-cpu-e2e
+  SNAPSHOT_E2E_HELM_TIMEOUT: 6m
+  SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
+
+jobs:
+  cpu-e2e:
+    name: CPU checkpoint/restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # setup.py and kubectl both read KUBECONFIG; in direct mode the target
+      # cluster is the one it points at.
+      KUBECONFIG: ${{ github.workspace }}/.kubeconfig-cpu-e2e
+      SNAPSHOT_E2E_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-cpu-e2e
+      SNAPSHOT_E2E_SNAPSHOT_TAG: cpu-e2e
+      SNAPSHOT_E2E_WORKLOAD_IMAGE: snapshot.local/agent:cpu-e2e
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          # The agent image carries a CUDA base, and a full runner disk shows up
+          # as an obscure build failure rather than as "out of space".
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      # The container driver is what makes --cache-to=type=gha work; --load then
+      # moves the result into the docker daemon so k3d can import it.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Cache scopes match push-artifacts.yaml on purpose: a pull request can
+      # read the layers the last main build wrote, and writes land in the pull
+      # request's own cache rather than overwriting them.
+      - name: Build operator image
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          make docker-build-operator \
+            REGISTRY="${IMAGE_REGISTRY}" \
+            TAGS="${IMAGE_TAG}" \
+            DOCKER_BUILD_ARGS="--load \
+              --cache-from=type=gha,scope=operator \
+              --cache-to=type=gha,scope=operator,mode=max"
+
+      - name: Build agent image
+        timeout-minutes: 50
+        run: |
+          set -euo pipefail
+          make docker-build-agent \
+            REGISTRY="${IMAGE_REGISTRY}" \
+            TAGS="${IMAGE_TAG}" \
+            DOCKER_BUILD_ARGS="--load \
+              --cache-from=type=gha,scope=agent \
+              --cache-to=type=gha,scope=agent,mode=max"
+
+      - name: Install kubectl
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Install k3d
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/k3d \
+            "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d version
+
+      - name: Install Python tooling
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Create k3d cluster
+        timeout-minutes: 10
+        run: hack/k3d-cpu-e2e.sh cluster-up
+
+      - name: Import images into k3d
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          k3d image import \
+            "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}" \
+            "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}" \
+            --cluster "${SNAPSHOT_E2E_K3D_CLUSTER}"
+
+      - name: Install Snapshot
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # The cluster contributes the values that describe itself; this job
+          # adds only the images it just built, which must be used from the
+          # node rather than pulled.
+          #
+          # The helper is alone in its substitution, and assigned rather than
+          # exported, so that `set -e` sees it fail. A substitution reports the
+          # status of its *last* command, so appending the image lines inside it
+          # would hide a failure here, and `export` would hide it again.
+          cluster_values="$(hack/k3d-cpu-e2e.sh helm-set)"
+          export SNAPSHOT_E2E_HELM_SET="${cluster_values}
+          image.operator.repository=${IMAGE_REGISTRY}/operator
+          image.agent.repository=${IMAGE_REGISTRY}/agent
+          image.operator.pullPolicy=IfNotPresent
+          image.agent.pullPolicy=IfNotPresent"
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-install \
+            --skip-host-preflight
+
+      - name: Wait for Snapshot components
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-ready
+
+      - name: Check the environment is usable
+        timeout-minutes: 5
+        run: uv run --locked --project e2e pytest e2e/tests -m environment -vv
+
+      - name: Run CPU checkpoint/restore tests
+        timeout-minutes: 25
+        run: uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
+
+      - name: Collect diagnostics
+        if: ${{ failure() }}
+        run: |
+          set +e
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          kubectl get pods -A -o wide >"${out}/pods.txt"
+          kubectl describe pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" >"${out}/pods-describe.txt"
+          kubectl get events -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            --sort-by=.lastTimestamp >"${out}/events.txt"
+          kubectl get pvc,pv -o yaml >"${out}/storage.yaml"
+          kubectl get podsnapshots,podsnapshotcontents -A -o yaml >"${out}/snapshots.yaml"
+          kubectl logs -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            -l app.kubernetes.io/component=snapshot-agent \
+            --all-containers --tail=-1 --prefix >"${out}/agent.log"
+          kubectl logs -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            -l app.kubernetes.io/component=operator \
+            --all-containers --tail=-1 --prefix >"${out}/operator.log"
+          echo "DIAGNOSTICS_DIR=${out}" >>"${GITHUB_ENV}"
+
+      - name: Upload diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DIAGNOSTICS_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Delete k3d cluster
+        if: ${{ always() }}
+        run: hack/k3d-cpu-e2e.sh cluster-down
