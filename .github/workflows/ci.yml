@@ -88,6 +88,7 @@ jobs:
             e2e/tests/test_runtime_image_id.py \
             e2e/tests/test_setup_chart_command.py \
             e2e/tests/test_setup_helm_overrides.py \
+            e2e/tests/test_upgrade_e2e_gate.py \
             e2e/tests/test_upgrade_harness.py \
             e2e/tests/test_workload_node_targeting.py \
             e2e/tests/test_workload_scripts.py -vv
