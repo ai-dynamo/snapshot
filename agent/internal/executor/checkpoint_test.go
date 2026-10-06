@@ -457,8 +457,6 @@ func TestCheckpointBoundRejectsMalformedStoreIDBeforeDialing(t *testing.T) {
 		StoreID:       "not-a-valid-store-id",
 	}, cfg)
 	require.ErrorContains(t, err, "validate storage binding")
-	// A bad StoreID must be caught before ever constructing a request to send,
-	// not surfaced as a PrepareArtifactCheckpoint/dial failure.
 	assert.NotContains(t, err.Error(), "prepare PageBroker checkpoint")
 }
 

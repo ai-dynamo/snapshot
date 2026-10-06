@@ -90,9 +90,7 @@ type restoreArtifact struct {
 	ContentUID          string
 	SourceContainerName string
 	Path                string
-	// PublishedArtifact is set only for bound content; it switches restore to
-	// the artifact-addressed RPCs against this exact publication, read from
-	// the content's recorded status rather than reconstructed here.
+	// PublishedArtifact is set only for bound content, read from status.
 	PublishedArtifact *pagebroker.PublishedArtifact
 }
 
@@ -638,11 +636,8 @@ func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapsh
 
 // resolveRestoreArtifact resolves the validated restore target to its physical
 // checkpoint directory. A nil error always returns a complete artifact.
-// resolveRestoreArtifact reports readiness differently depending on whether content is bound.
-// Legacy (unbound) content is ready when the artifact exists on the shared filesystem. Bound
-// content has no agent-readable filesystem path at all; readiness instead means the content's
-// own status already records a confirmed publication for the source container — the same fact
-// markCheckpointReady persisted when the checkpoint committed.
+// resolveRestoreArtifact: legacy content is ready when the filesystem artifact
+// exists; bound content is ready once status records a published container.
 func (w *NodeController) resolveRestoreArtifact(
 	podKey string,
 	target *restoreTarget,

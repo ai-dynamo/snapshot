@@ -119,9 +119,7 @@ type RestoreRequest struct {
 	PageBrokerRestoreMode       string
 
 	// PublishedArtifact, when set, switches restore to the artifact-addressed
-	// RPCs against this exact publication instead of reading a legacy
-	// filesystem-addressed artifact. The caller reads it from the content's
-	// recorded status; restore never reconstructs or guesses it.
+	// RPCs; read from the content's recorded status, never reconstructed here.
 	PublishedArtifact *pagebroker.PublishedArtifact
 
 	// Decided by the caller, so both gates reach the same answer.
@@ -139,12 +137,9 @@ type RestoreResult struct {
 	RestoredPID int
 }
 
-// fetchArtifactMetadata retrieves and parses the verified manifest for a
-// published artifact into PageBroker-managed local staging. It releases that
-// metadata transaction on every exit, including a lost reply, per
-// Client.GetArtifactMetadata's contract: Abort never deletes the publication,
-// only this transaction's staging. The manifest is read and parsed before the
-// deferred Abort runs, since Abort invalidates the staging directory.
+// fetchArtifactMetadata retrieves and parses the manifest, then releases the
+// metadata transaction on every exit. Parses before the deferred Abort runs,
+// since Abort invalidates the staging directory.
 func fetchArtifactMetadata(ctx context.Context, broker pagebroker.Client, artifact *pagebroker.PublishedArtifact) (manifest *types.CheckpointManifest, retErr error) {
 	transactionID := uuid.NewString()
 	defer func() {
@@ -316,9 +311,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	transactionID = uuid.NewString()
 	broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 	stageStart := time.Now()
-	// Artifact-addressed restore has no direct mode at the protocol level
-	// (StagedRestoreRequest is the only request that carries an artifact);
-	// legacy restore keeps choosing between direct and staged.
+	// Bound restore has no direct mode at the protocol level.
 	direct := !bound && req.PageBrokerRestoreMode != "staged"
 	var staged string
 	switch {

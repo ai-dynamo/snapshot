@@ -1202,11 +1202,8 @@ func TestRestoreBoundFetchesMetadataAndStagesPublishedArtifact(t *testing.T) {
 	server := make(chan error, 1)
 	go func() {
 		var metadataTx, mainTx string
-		// Connection 0: GetArtifactMetadata (its own transaction).
-		// Connection 1: Abort of the metadata transaction — fetchArtifactMetadata's
-		// own defer fires it immediately, before the main transaction even starts.
-		// Connection 2: StagedRestore (the main transaction, artifact-addressed).
-		// Connection 3: Abort of the main transaction (cleanup after a failed nsrestore).
+		// 0: GetArtifactMetadata. 1: its Abort (fires before the main
+		// transaction starts). 2: StagedRestore. 3: Abort of the main transaction.
 		for i := 0; i < 4; i++ {
 			connection, err := listener.Accept()
 			if err != nil {
