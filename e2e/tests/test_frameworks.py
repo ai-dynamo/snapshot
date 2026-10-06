@@ -170,6 +170,7 @@ def test_framework_checkpoint_restore_serves_inference(
         source_libraries = (
             fw.cuinterpose_library_hashes(config, source) if shared_memory == "enabled" else None
         )
+        prompts = inference.chat_prompts(config.namespace, run.source_pod)
         source_main = next(c for c in source.spec.containers if c.name == frameworks.CONTAINER)
         parallelism = next(
             (e.value for e in source_main.env if e.name == "SNAPSHOT_TENSOR_PARALLEL_SIZE"), "1"
@@ -267,8 +268,8 @@ def test_framework_checkpoint_restore_serves_inference(
                 "restored guide libraries differ from the captured bundle"
             )
 
-        answer = inference.request_generate(config.namespace, run.restore_pod, frameworks.PROMPT)
-        print(f"[{framework.name}] /generate after restore: {answer!r}")
+        answers = inference.verify_chat_answers(config.namespace, run.restore_pod, prompts)
+        print(f"[{framework.name}] /generate after restore: {answers!r}")
 
         # The placeholder's own entrypoint must have stayed in standby. If it
         # had loaded a model, its log would show the pre-checkpoint line and
