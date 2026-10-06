@@ -168,7 +168,11 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
   const Path previous = PreviousPath(published);
   try {
     std::filesystem::create_directories(published.parent_path());
-    CopyDirectory(source, partial);
+    // Direct checkpoints are already on the destination filesystem.
+    if (source.parent_path() == published.parent_path())
+      std::filesystem::rename(source, partial);
+    else
+      CopyDirectory(source, partial);
     if (std::filesystem::exists(published)) {
       std::filesystem::rename(published, previous);
       RestorePreviousOnFailure restore_previous(previous, published);
