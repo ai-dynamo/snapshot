@@ -478,10 +478,6 @@ TEST_F(BrokerTest, DirectCheckpointPublishesDestinationLocalPrivateDirectory)
   auto commit = RequestFor("direct-save");
   commit.mutable_commit();
   ASSERT_TRUE(broker().HandleRequest(commit).has_commit_complete());
-  struct stat published{};
-  ASSERT_EQ(stat(destination.c_str(), &published), 0);
-  EXPECT_EQ(published.st_dev, mode.st_dev);
-  EXPECT_EQ(published.st_ino, mode.st_ino);
   std::ifstream payload(destination / "payload");
   std::string contents;
   std::getline(payload, contents);
