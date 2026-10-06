@@ -4,12 +4,16 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+
 #include <fstream>
 #include <optional>
 #include <string>
 #include <thread>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "broker.hpp"
+#include "posix_copy_engine.hpp"
 
 namespace fs = std::filesystem;
 using namespace snapshot::pagebroker;
@@ -454,6 +458,46 @@ TEST_F(BrokerTest, AbortsRestore)
   const auto commit_response = broker().HandleRequest(commit);
   ASSERT_TRUE(commit_response.has_failure());
   EXPECT_EQ(commit_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}
+
+TEST_F(BrokerTest, DirectCheckpointPublishesDestinationLocalPrivateDirectory)
+{
+  const auto destination = root_ / "storage" / "nested" / "checkpoint";
+  auto request = RequestFor("direct-save");
+  Configure(request.mutable_prepare_direct_checkpoint()->mutable_destination(),
+            request.mutable_prepare_direct_checkpoint()->mutable_io_engine(), destination);
+  const auto reply = broker().HandleRequest(request);
+  ASSERT_TRUE(reply.has_direct_checkpoint_directory());
+  const fs::path directory(reply.direct_checkpoint_directory().image_directory());
+  EXPECT_EQ(directory.parent_path(), destination.parent_path());
+  EXPECT_FALSE(fs::exists(destination));
+  std::ofstream(directory / "payload") << "GPU and CPU output";
+  struct stat mode{};
+  ASSERT_EQ(stat(directory.c_str(), &mode), 0);
+  EXPECT_EQ(mode.st_mode & 0777, 0700);
+  auto commit = RequestFor("direct-save");
+  commit.mutable_commit();
+  ASSERT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+  std::ifstream payload(destination / "payload");
+  std::string contents;
+  std::getline(payload, contents);
+  EXPECT_EQ(contents, "GPU and CPU output");
+  EXPECT_FALSE(fs::exists(directory));
+}
+
+TEST_F(BrokerTest, CpuStagingOmitsGpuPayloadsWithoutChangingTheSource)
+{
+  fs::create_directories(source_ / "native" / "1");
+  std::ofstream(source_ / "native" / "1" / "extent") << "GPU payload";
+  PosixCopyEngine engine(root_ / "storage");
+  StorageBackend source;
+  source.mutable_filesystem()->set_directory(source_.string());
+  const auto cpu = root_ / "cpu";
+  engine.StageRestore(source, cpu);
+  EXPECT_TRUE(fs::exists(cpu / "image"));
+  EXPECT_FALSE(fs::exists(cpu / "native"));
+  EXPECT_TRUE(fs::exists(source_ / "native" / "1" / "extent"));
+  EXPECT_EQ(engine.RestoreSize(source), fs::file_size(source_ / "image"));
 }
 
 }  // namespace

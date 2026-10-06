@@ -20,7 +20,10 @@
 namespace snapshot::pagebroker {
 class Broker {
  public:
-  Broker(Path staging_root, Path storage_root);
+  Broker(Path staging_root, Path storage_root, std::shared_ptr<gpu::GpuEngine> gpu_engine = nullptr);
+  ~Broker();
+  Response HandleGpuRequest(const Request& request, std::shared_ptr<Cancellation> cancellation);
+  void StopGpuWork();
   Response HandleRequest(const Request& request);
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
 
@@ -44,6 +47,9 @@ class Broker {
   void ReleaseStaging(uintmax_t bytes);
   Response AbortStaging(
       const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error);
+  Response PrepareDirectCheckpoint(const Request& request);
+  Response ExecuteGpu(const Request& request, const std::shared_ptr<Transaction::GpuOperation>& operation,
+                      std::unique_lock<std::mutex> lock);
   Response Restore(const Request& request);
   Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine);
   Response PrepareCheckpoint(const Request& request);
@@ -57,6 +63,7 @@ class Broker {
   Response Abort(const Request& request);
   Path staging_root_;
   Engines io_engines_;
+  std::shared_ptr<gpu::GpuEngine> gpu_engine_;
   std::mutex transactions_mutex_;
   Transactions transactions_;
   std::mutex terminal_transactions_mutex_;

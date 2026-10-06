@@ -10,9 +10,12 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -196,6 +199,15 @@ WriteAll(int fd, const void* buffer, size_t size)
   return true;
 }
 
+void
+SendResponse(int connection, const Response& response)
+{
+  const std::string message = response.SerializeAsString();
+  const uint32_t size = htonl(message.size());
+  WriteAll(connection, &size, sizeof(size));
+  WriteAll(connection, message.data(), message.size());
+}
+
 Response
 InvalidRequest()
 {
@@ -215,6 +227,10 @@ CommandName(Request::CommandCase command)
       return "staged_restore";
     case Request::kPrepareStagedCheckpoint:
       return "prepare_staged_checkpoint";
+    case Request::kPrepareDirectCheckpoint: return "prepare_direct_checkpoint";
+    case Request::kCapabilities: return "capabilities";
+    case Request::kCheckpointGpu: return "checkpoint_gpu";
+    case Request::kRestoreGpu: return "restore_gpu";
     case Request::kCommit:
       return "commit";
     case Request::kAbort:
@@ -232,6 +248,9 @@ ResultName(const Response& response)
       return "staged_restore";
     case Response::kStagedCheckpointDirectory:
       return "staged_checkpoint";
+    case Response::kDirectCheckpointDirectory: return "direct_checkpoint";
+    case Response::kCapabilities: return "capabilities";
+    case Response::kGpuComplete: return "gpu_complete";
     case Response::kCommitComplete:
       return "committed";
     case Response::kAbortComplete:
@@ -243,9 +262,73 @@ ResultName(const Response& response)
   }
 }
 
+void ReapHandlers(std::vector<std::future<void>>& handlers);
+void WaitForHandlers(std::vector<std::future<void>>& handlers);
+
+// Long GPU requests have their own handlers so control requests can still run.
+class GpuConnections {
+ public:
+  explicit GpuConnections(Broker& broker) : broker_(broker) { handlers_.reserve(128); }
+  ~GpuConnections()
+  {
+    stopping_.store(true);
+    WaitForHandlers(handlers_);
+  }
+  void Start(int connection, const Request& request)
+  {
+    FileDescriptor socket(fcntl(connection, F_DUPFD_CLOEXEC, 0));
+    if (socket.get() < 0)
+      throw std::system_error(errno, std::generic_category(), "retain GPU connection");
+    std::lock_guard lock(mutex_);
+    ReapHandlers(handlers_);
+    if (handlers_.size() >= 128) throw std::runtime_error("GPU connection limit reached");
+    handlers_.emplace_back(std::async(std::launch::async,
+        [this, request, retained_socket = std::move(socket)]() mutable {
+      // Close the socket when the handler returns, even if its future is retained.
+      FileDescriptor socket(std::move(retained_socket));
+      auto cancellation = std::make_shared<snapshot::pagebroker::Cancellation>();
+      std::jthread watcher([&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+          pollfd event{socket.get(), POLLRDHUP, 0};
+          const int ready = poll(&event, 1, 100);
+          if (ready < 0 && errno == EINTR) continue;
+          if (ready < 0 || event.revents || shutting_down || stopping_.load()) {
+            cancellation->Cancel();
+            return;
+          }
+        }
+      });
+      try {
+        const auto response = broker_.HandleGpuRequest(request, cancellation);
+        std::osyncstream(std::cerr) << "transaction=" << request.transaction_id()
+                                    << " command=" << CommandName(request.command_case())
+                                    << " result=" << ResultName(response)
+                                    << (response.has_failure() ? " error=" + response.failure().message() : "") << '\n';
+        SendResponse(socket.get(), response);
+      } catch (const snapshot::pagebroker::gpu::FatalError& error) {
+        std::osyncstream(std::cerr) << "transaction=" << request.transaction_id()
+                                    << " command=" << CommandName(request.command_case())
+                                    << " result=fatal error=" << error.what() << '\n';
+        std::_Exit(1);
+      }
+    }));
+  }
+
+ private:
+  Broker& broker_;
+  std::atomic<bool> stopping_{false};
+  std::mutex mutex_;
+  std::vector<std::future<void>> handlers_;
+};
+
 void
-HandleConnection(int connection, Broker& broker)
+HandleConnection(int connection, Broker& broker, GpuConnections& gpu_connections)
 {
+  ucred peer{};
+  socklen_t peer_size = sizeof(peer);
+  if (getsockopt(connection, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) ||
+      peer_size != sizeof(peer) || (peer.uid != 0 && peer.uid != geteuid()))
+    return;
   uint32_t size = 0;
   if (!ReadAll(connection, &size, sizeof(size)))
     return;
@@ -260,6 +343,10 @@ HandleConnection(int connection, Broker& broker)
     if (!ReadAll(connection, message.data(), size) || !request.ParseFromString(message) || !request.IsInitialized()) {
       response = InvalidRequest();
     } else {
+      if (request.has_checkpoint_gpu() || request.has_restore_gpu()) {
+        gpu_connections.Start(connection, request);
+        return;
+      }
       const auto request_start = std::chrono::steady_clock::now();
       response = broker.HandleRequest(request);
       const auto duration =
@@ -271,21 +358,18 @@ HandleConnection(int connection, Broker& broker)
     }
   }
 
-  std::string message = response.SerializeAsString();
-  size = htonl(message.size());
-  WriteAll(connection, &size, sizeof(size));
-  WriteAll(connection, message.data(), message.size());
+  SendResponse(connection, response);
 }
 
 void
-ServeConnection(int connection, Broker& broker)
+ServeConnection(int connection, Broker& broker, GpuConnections& gpu_connections)
 {
   FileDescriptor descriptor(connection);
   if (const auto error = ConfigureConnection(descriptor.get()); error) {
     LogError("set connection timeout", error);
     return;
   }
-  HandleConnection(descriptor.get(), broker);
+  HandleConnection(descriptor.get(), broker, gpu_connections);
 }
 
 void
@@ -324,7 +408,10 @@ WaitForHandlers(std::vector<std::future<void>>& handlers)
 void
 Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
 {
+  // Control handlers must finish before the GPU connection owner is destroyed.
+  GpuConnections gpu_connections(broker);
   std::vector<std::future<void>> handlers;
+  handlers.reserve(max_concurrent_requests);
   auto next_transaction_reap = std::chrono::steady_clock::now();
   auto accept_retry_delay = kAcceptRetryInitialDelay;
   while (!shutting_down) {
@@ -363,13 +450,14 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
     }
     try {
       handlers.emplace_back(
-          std::async(std::launch::async, [connection, &broker] { ServeConnection(connection, broker); }));
+          std::async(std::launch::async, [connection, &broker, &gpu_connections] { ServeConnection(connection, broker, gpu_connections); }));
     }
     catch (const std::exception& error) {
       FileDescriptor descriptor(connection);
       std::cerr << "start connection: " << error.what() << '\n';
     }
   }
+  broker.StopGpuWork();
   WaitForHandlers(handlers);
 }
 }  // namespace
@@ -379,7 +467,9 @@ RunDaemon(
     const fs::path& socket_path,
     const fs::path& staging_directory,
     const fs::path& storage_root,
-    size_t max_concurrent_requests)
+    size_t max_concurrent_requests,
+    snapshot::pagebroker::gpu::EngineOptions gpu_options,
+    bool enable_gpu)
 {
   shutting_down = 0;
   if (!RaiseFileDescriptorLimit())
@@ -392,11 +482,24 @@ RunDaemon(
     std::cerr << "socket path is too long\n";
     return ExitCode::INVALID_ARGUMENTS;
   }
+  std::shared_ptr<snapshot::pagebroker::gpu::GpuEngine> gpu_engine;
+  try {
+    if (enable_gpu) gpu_engine = std::make_shared<snapshot::pagebroker::gpu::GpuEngine>(gpu_options);
+  } catch (const std::exception& error) {
+    std::cerr << "initialize GPU engine: " << error.what() << '\n';
+    return ExitCode::FAILURE;
+  }
   auto [listener, error] = CreateListener(socket_path);
   if (error)
     return Fail("create listener", error);
 
-  Broker broker(staging_directory, storage_root);
-  Serve(listener, broker, max_concurrent_requests);
+  if (chmod(socket_path.c_str(), 0600)) return Fail("protect control socket", {errno, std::generic_category()});
+  try {
+    Broker broker(staging_directory, storage_root, std::move(gpu_engine));
+    Serve(listener, broker, max_concurrent_requests);
+  } catch (const std::exception& failure) {
+    std::cerr << "PageBroker: " << failure.what() << '\n';
+    return ExitCode::FAILURE;
+  }
   return ExitCode::SUCCESS;
 }

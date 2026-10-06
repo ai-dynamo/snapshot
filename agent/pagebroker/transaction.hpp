@@ -4,17 +4,33 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <variant>
 
 #include "checkpoint_transaction_descriptor.hpp"
 #include "restore_transaction_descriptor.hpp"
+#include "gpu/engine.hpp"
 
 namespace snapshot::pagebroker {
 class Transaction {
  public:
-  enum class State { NEW, PREPARING, STAGED, COMMITTED, ABORTED };
+  enum class State { NEW, PREPARING, STAGED, ABORTING, COMMITTED, ABORTED };
   using Descriptor = std::variant<std::monostate, RestoreTransactionDescriptor, CheckpointTransactionDescriptor>;
+
+  struct GpuOperation {
+    std::unique_ptr<gpu::Artifact> artifact;
+    gpu::Direction direction;
+    std::shared_ptr<Cancellation> cancellation;
+    bool running = false;
+    bool finished = false;
+    Response result;
+    std::string request_payload;
+    std::condition_variable completed;
+  };
+  // Protected by mutex(), except the atomic cancellation token.
+  std::shared_ptr<GpuOperation> gpu_operation;
 
   // Callers hold mutex() while accessing transaction state.
   std::mutex& mutex();

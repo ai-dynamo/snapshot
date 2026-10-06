@@ -5,10 +5,15 @@
 // the real driver. The child owns the allocation being checkpointed.
 #include "checkpoint.hpp"
 #include "../file_descriptor.hpp"
+#include "../broker.hpp"
+#include "storage_manifest.hpp"
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <cerrno>
+#include <filesystem>
+#include <fstream>
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
@@ -134,7 +139,9 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
 {
   // Fork before the parent initializes CUDA.
   Target target;
+  Target next_target;
   target.Ready();
+  next_target.Ready();
   CheckpointAPI api;
   api.RequireCustomStorage();
   CUdevice device;
@@ -177,6 +184,91 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
     restore.Complete();
     restore.Unlock();
   }
+  // Use the same workloads to exercise the broker with real CUDA and NIXL.
+  namespace fs = std::filesystem;
+  using namespace snapshot::pagebroker;
+  const auto root = fs::temp_directory_path() / ("pagebroker-gpu-" + std::to_string(getpid()));
+  fs::remove_all(root);
+  fs::create_directories(root / "storage");
+  CUuuid uuid;
+  Check(cuDeviceGetUuid(&uuid, device), "get workload GPU UUID");
+  std::array<unsigned char, 16> uuid_bytes;
+  std::copy(std::begin(uuid.bytes), std::end(uuid.bytes), uuid_bytes.begin());
+  const auto visible_device = gpu::storage::FormatGPUUUID(uuid_bytes);
+  // Small rings keep this correctness test within a modest memory budget.
+  auto engine = std::make_shared<gpu::GpuEngine>(gpu::EngineOptions{2, 1024 * 1024, 0});
+  ASSERT_TRUE(engine->Available());
+  {
+    Broker broker(root / "staging", root / "storage", engine);
+    unsigned request_number = 0;
+    auto request_for = [&](const std::string& id) {
+      Request request;
+      request.set_request_id(std::to_string(++request_number));
+      request.set_transaction_id(id);
+      return request;
+    };
+    for (Target* workload : {&target, &next_target}) {
+      const auto id = std::to_string(workload->pid);
+      const auto destination = root / "storage" / id;
+      auto prepare = request_for("save-" + id);
+      auto* storage = prepare.mutable_prepare_direct_checkpoint();
+      storage->mutable_destination()->mutable_filesystem()->set_directory(destination.string());
+      storage->mutable_io_engine()->mutable_posix_copy();
+      const auto prepared = broker.HandleRequest(prepare);
+      ASSERT_TRUE(prepared.has_direct_checkpoint_directory());
+      std::ofstream(fs::path(prepared.direct_checkpoint_directory().image_directory()) / "image") << "CPU image";
+      auto save = request_for("save-" + id);
+      auto* checkpoint = save.mutable_checkpoint_gpu();
+      checkpoint->mutable_context()->add_captured_pids(workload->pid);
+      checkpoint->mutable_context()->add_visible_devices(visible_device);
+      auto* participant = checkpoint->add_targets();
+      participant->set_captured_pid(workload->pid);
+      participant->set_target_pid(workload->pid);
+      ASSERT_TRUE(broker.HandleGpuRequest(save, std::make_shared<Cancellation>()).has_gpu_checkpoint_complete());
+      // Executing CUDA checkpoint twice would fail while the target is checkpointed.
+      save.set_request_id(std::to_string(++request_number));
+      EXPECT_TRUE(broker.HandleGpuRequest(save, std::make_shared<Cancellation>()).has_gpu_checkpoint_complete());
+      auto commit = request_for("save-" + id);
+      commit.mutable_commit();
+      ASSERT_TRUE(broker.HandleRequest(commit).has_commit_complete());
+
+      for (bool cancelled : {true, false}) {
+        const auto restore_id = (cancelled ? "cancel-" : "restore-") + id;
+        auto stage = request_for(restore_id);
+        auto* restore_storage = stage.mutable_staged_restore();
+        restore_storage->mutable_source()->mutable_filesystem()->set_directory(destination.string());
+        restore_storage->mutable_io_engine()->mutable_posix_copy();
+        const auto staged = broker.HandleRequest(stage);
+        ASSERT_TRUE(staged.has_staged_restore_directory());
+        const fs::path directory(staged.staged_restore_directory().image_directory());
+        EXPECT_TRUE(fs::exists(directory / "image"));
+        EXPECT_FALSE(fs::exists(directory / "native"));
+        auto restore = request_for(restore_id);
+        *restore.mutable_restore_gpu()->mutable_context() = checkpoint->context();
+        *restore.mutable_restore_gpu()->add_targets() = *participant;
+        auto cancellation = std::make_shared<Cancellation>();
+        if (cancelled) cancellation->Cancel();
+        const auto result = broker.HandleGpuRequest(restore, cancellation);
+        auto finish = request_for(restore_id);
+        finish.mutable_commit();
+        if (cancelled) {
+          ASSERT_TRUE(result.has_failure());
+          EXPECT_EQ(result.failure().code(), Failure::INTERNAL_ERROR);
+          EXPECT_TRUE(broker.HandleRequest(finish).has_failure());
+          finish.mutable_abort();
+          EXPECT_TRUE(broker.HandleRequest(finish).has_abort_complete());
+        } else {
+          ASSERT_TRUE(result.has_gpu_restore_complete());
+          EXPECT_TRUE(broker.HandleRequest(finish).has_commit_complete());
+        }
+        EXPECT_FALSE(fs::exists(directory));
+        EXPECT_TRUE(fs::exists(destination / "native"));
+      }
+    }
+  }
+  engine.reset();
+  EXPECT_EQ(next_target.Verify(), 0);
+  fs::remove_all(root);
   EXPECT_EQ(target.Verify(), 0);
   Check(cuDevicePrimaryCtxRelease(device), "release checkpoint context");
 }

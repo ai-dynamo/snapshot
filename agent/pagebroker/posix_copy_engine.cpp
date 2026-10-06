@@ -83,9 +83,14 @@ uintmax_t
 DirectorySize(const Path& path)
 {
   uintmax_t bytes = 0;
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(path)) {
+  for (auto it = std::filesystem::recursive_directory_iterator(path); it != std::filesystem::recursive_directory_iterator(); ++it) {
+    const auto& entry = *it;
     if (entry.is_symlink())
       throw std::runtime_error("checkpoint contains symlink");
+    if (entry.path() == path / "native") {
+      it.disable_recursion_pending();
+      continue;
+    }
     if (entry.is_regular_file())
       bytes += entry.file_size();
   }
@@ -110,7 +115,37 @@ PosixCopyEngine::RestoreSize(const StorageBackend& source) const
 void
 PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destination) const
 {
-  CopyDirectory(SourcePath(source, storage_root_), destination);
+  const Path root = SourcePath(source, storage_root_);
+  std::filesystem::create_directory(destination);
+  for (auto it = std::filesystem::recursive_directory_iterator(root); it != std::filesystem::recursive_directory_iterator(); ++it) {
+    const auto& entry = *it;
+    const Path target = destination / entry.path().lexically_relative(root);
+    if (entry.is_symlink())
+      throw std::runtime_error("checkpoint contains symlink");
+    if (entry.path() == root / "native") {
+      it.disable_recursion_pending();
+      continue;
+    }
+    if (entry.is_directory()) {
+      std::filesystem::create_directory(target);
+    } else if (entry.is_regular_file()) {
+      std::filesystem::copy_file(entry.path(), target);
+    } else {
+      throw std::runtime_error("checkpoint contains non-regular entry");
+    }
+  }
+}
+
+Path
+PosixCopyEngine::SourceDirectory(const StorageBackend& source) const
+{
+  return SourcePath(source, storage_root_);
+}
+
+Path
+PosixCopyEngine::DestinationDirectory(const StorageBackend& destination) const
+{
+  return DestinationPath(destination, storage_root_);
 }
 
 void
