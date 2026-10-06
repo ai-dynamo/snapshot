@@ -987,3 +987,6 @@ func (m *cleanupMounter) MountCuInterpose(context.Context, nsmount.MountPoint) (
 func (m *restoreSourceMounter) MountCuInterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
 	return nil, errors.New("unexpected cuinterpose mount")
 }
+
+func (m cleanupMount) Release() error       { return nil }
+func (m restoreSourceMount) Release() error { return nil }
