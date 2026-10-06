@@ -50,6 +50,7 @@ spec:
           # The agent restores the saved process into this inert container.
           command: [/bin/sh, -c, exec sleep infinity]
           env:
+            - {name: SNAPSHOT_CONTROL_DIR, value: /snapshot-control}
             - {name: SNAPSHOT_TENSOR_PARALLEL_SIZE, value: "4"}
             - {name: SNAPSHOT_MODEL, value: deepseek-ai/DeepSeek-V4.1-Flash}
             - name: VLLM_ENGINE_ARGS
