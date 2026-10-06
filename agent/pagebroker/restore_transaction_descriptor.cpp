@@ -6,8 +6,8 @@
 #include <utility>
 
 namespace snapshot::pagebroker {
-RestoreTransactionDescriptor::RestoreTransactionDescriptor(Path staging_directory, FileDescriptor source)
-    : staging_directory_(std::move(staging_directory)), source_(std::move(source))
+RestoreTransactionDescriptor::RestoreTransactionDescriptor(Path staging_directory)
+    : staging_directory_(std::move(staging_directory))
 {
 }
 

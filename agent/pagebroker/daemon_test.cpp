@@ -456,7 +456,20 @@ TEST_F(BrokerTest, AbortsRestore)
   EXPECT_EQ(commit_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
 }
 
-TEST_F(BrokerTest, DirectRestoreRetainsSourceWithoutStagingOrDeletingIt)
+TEST_F(BrokerTest, DirectRestoreRejectsInvalidSource)
+{
+  const auto link = root_ / "storage" / "source-link";
+  fs::create_directory_symlink(source_, link);
+  for (const auto& source : {root_ / "storage" / "missing", source_ / "image", link}) {
+    auto request = RequestFor("invalid-direct-source");
+    Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(), source);
+    const auto response = broker().HandleRequest(request);
+    ASSERT_TRUE(response.has_failure());
+    EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+  }
+}
+
+TEST_F(BrokerTest, DirectRestoreDoesNotStageOrDeleteSource)
 {
   auto request = RequestFor("direct");
   Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(), source_);

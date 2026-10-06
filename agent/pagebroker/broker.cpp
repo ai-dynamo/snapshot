@@ -4,7 +4,6 @@
 #include "broker.hpp"
 
 #include <sys/statvfs.h>
-#include <fcntl.h>
 
 #include <filesystem>
 #include <memory>
@@ -77,15 +76,6 @@ ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
   if (!request.has_destination() || request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
     throw std::invalid_argument("checkpoint destination is required");
   return request.destination();
-}
-
-FileDescriptor
-OpenDirectory(const Path& path)
-{
-  FileDescriptor directory(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-  if (directory.get() < 0)
-    throw std::system_error(errno, std::generic_category(), "open artifact directory");
-  return directory;
 }
 
 void
@@ -299,13 +289,13 @@ Broker::DirectRestore(const Request& request)
 {
   const auto& input = request.direct_restore();
   const auto& engine = Engine(input.io_engine());
-  auto source = OpenDirectory(engine.SourceDirectory(input.source()));
+  engine.SourceDirectory(input.source());
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());
   if (transaction->state() != Transaction::State::NEW)
     return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
   transaction->set_state(Transaction::State::PREPARING);
-  transaction->set_descriptor(RestoreTransactionDescriptor({}, std::move(source)));
+  transaction->set_descriptor(RestoreTransactionDescriptor({}));
   transaction->set_state(Transaction::State::STAGED);
   auto response = Reply(request);
   response.mutable_direct_restore_ready();

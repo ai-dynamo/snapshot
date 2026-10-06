@@ -4,17 +4,15 @@
 #pragma once
 
 #include "transfer_engine.hpp"
-#include "file_descriptor.hpp"
 
 namespace snapshot::pagebroker {
 class RestoreTransactionDescriptor {
  public:
-  explicit RestoreTransactionDescriptor(Path staging_directory, FileDescriptor source = FileDescriptor(-1));
+  explicit RestoreTransactionDescriptor(Path staging_directory);
 
   const Path& staging_directory() const;
 
  private:
   Path staging_directory_;
-  FileDescriptor source_;
 };
 }  // namespace snapshot::pagebroker
