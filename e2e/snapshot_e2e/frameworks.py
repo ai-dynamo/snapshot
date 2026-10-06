@@ -133,7 +133,7 @@ def framework_spec(name: str) -> FrameworkSpec:
     recipe = os.environ.get("SNAPSHOT_E2E_RECIPE", "")
     if not recipe:
         return spec
-    if recipe not in {"glm-5.3", "deepseek-v4-flash"}:
+    if recipe not in {"glm-5.3", "deepseek-v4.1-flash"}:
         raise ValueError(f"unknown SNAPSHOT_E2E_RECIPE: {recipe}")
     spec = replace(spec, recipe=recipe)
     if not spec.deployment_manifest.is_file():

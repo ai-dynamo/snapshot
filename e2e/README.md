@@ -171,13 +171,13 @@ The harness preserves each manifest's GPU count and tensor parallelism.
 Benchmark comparison dimensions record shared-memory activation and the live
 source Pod's tensor-parallel size.
 The optional `SNAPSHOT_E2E_RECIPE` selects a separate multi-GPU manifest pair:
-`glm-5.3` for all three engines, or `deepseek-v4-flash` for vLLM and SGLang.
+`glm-5.3` for all three engines, or `deepseek-v4.1-flash` for vLLM and SGLang.
 These profiles keep their declared GPU counts, pinned model revisions and
 engine settings. They have longer phase deadlines for model loading and larger
 checkpoints:
 
 ```bash
-SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_RECIPE=deepseek-v4-flash \
+SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_RECIPE=deepseek-v4.1-flash \
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 

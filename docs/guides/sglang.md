@@ -59,19 +59,16 @@ generation succeeds and the API is listening. To validate the restored replica,
 send a `POST` request to `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-`deployment.yaml` runs the tested SGLang image unmodified, and mounts `app.py`
+`deployment.yaml` runs the pinned SGLang 0.5.21 image unmodified, and mounts `app.py`
 at `/snapshot-app` from the `sglang-app` ConfigMap created in step 2.
-The pinned SGLang 0.5.20 image includes torch-memory-saver 0.0.10, which
-preserves the cuInterpose preload when starting scheduler processes.
 
 The source and restore pods must use the same immutable image, mount the
 Snapshot control volume at `/snapshot-control`, and mount the same model cache
 at `/hf-cache`.
 
-The recipe leaves CUDA allocation and multicast choices to SGLang. For these
-single-node recipes, SGLang 0.5.20 defaults NCCL cuMem and NVLS off unless its
-corresponding engine options are enabled. Removing recipe overrides does not
-prove that those paths run.
+The recipe leaves CUDA allocation and multicast choices to SGLang. Removing
+recipe overrides does not prove that those paths run. Engine options and runtime
+probes still determine which paths are selected.
 The remaining IB, RAS, and PyTorch monitoring settings address network transport
 and checkpoint pauses. Shared-memory support does not replace those safeguards.
 
@@ -170,7 +167,7 @@ kubectl get pods \
 Use that Pod name in the `PodSnapshot` created during the next step. The
 readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
 
-For the separate GLM 5.3 and DeepSeek V4 Flash multi-GPU manifests, see
+For the separate GLM 5.3 and DeepSeek V4.1 Flash multi-GPU manifests, see
 [Multi-GPU models](cuda-shared-memory.md#multi-gpu-models). They reuse this
 program and ConfigMap.
 

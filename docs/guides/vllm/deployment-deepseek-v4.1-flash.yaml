@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# One-node DeepSeek V4 Flash NVFP4 example on 4 B200 GPUs.
+# One-node DeepSeek V4.1 Flash example on 4 B200 GPUs.
 # Engine kwargs below use a 128K context and bounded concurrency.
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sglang-deepseek-v4-flash-source
+  name: vllm-deepseek-v4.1-flash-source
 spec:
   replicas: 1
   progressDeadlineSeconds: 3600
@@ -15,13 +15,13 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: sglang-deepseek-v4-flash-source
+      app: vllm-deepseek-v4.1-flash-source
   template:
     metadata:
       annotations:
         nvidia.com/cuda-shared-memory-support: "enabled"
       labels:
-        app: sglang-deepseek-v4-flash-source
+        app: vllm-deepseek-v4.1-flash-source
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -59,7 +59,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
         - name: model-cache
-          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -77,9 +77,9 @@ spec:
                   marker.touch()
           env:
             - name: SNAPSHOT_MODEL
-              value: nvidia/DeepSeek-V4-Flash-NVFP4
+              value: deepseek-ai/DeepSeek-V4.1-Flash
             - name: SNAPSHOT_MODEL_REVISION
-              value: e3cd60e7de98e9867116860d522499a728de1cf9
+              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
             - name: HF_HOME
               value: /hf-cache
             - name: HF_HUB_DISABLE_XET
@@ -89,7 +89,7 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
           command:
             - /tmp/snapshot-cuda/cuinterpose-launch
@@ -97,51 +97,48 @@ spec:
             - /tmp/snapshot-cuda/libcuinterpose.so
             - --
             - python3
-            - -u
             - /snapshot-app/app.py
-          args:
-            - --mode
-            - snapshot
           env:
             - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
               value: "4"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
             - name: SNAPSHOT_MODEL
-              value: nvidia/DeepSeek-V4-Flash-NVFP4
-            - name: SGLANG_ENGINE_ARGS
+              value: deepseek-ai/DeepSeek-V4.1-Flash
+            - name: VLLM_ENGINE_ARGS
               value: |-
                 {
-                  "revision": "e3cd60e7de98e9867116860d522499a728de1cf9",
-                  "trust_remote_code": true,
-                  "page_size": 256,
-                  "context_length": 131072,
-                  "max_running_requests": 64,
-                  "moe_runner_backend": "flashinfer_trtllm_routed",
-                  "speculative_algorithm": "EAGLE",
-                  "speculative_num_steps": 3,
-                  "speculative_eagle_topk": 1,
-                  "speculative_num_draft_tokens": 4,
-                  "chunked_prefill_size": 4096,
-                  "disable_flashinfer_autotune": true,
-                  "swa_full_tokens_ratio": 0.1
+                  "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+                  "tokenizer_revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+                  "tokenizer_mode": "deepseek_v41",
+                  "dtype": "auto",
+                  "enable_expert_parallel": true,
+                  "language_model_only": true,
+                  "engram_config": {
+                    "cpu_offload": false
+                  },
+                  "max_model_len": 131072,
+                  "gpu_memory_utilization": 0.9,
+                  "max_num_seqs": 64,
+                  "max_num_batched_tokens": 16384,
+                  "max_cudagraph_capture_size": 384,
+                  "scheduler_reserve_full_isl": false,
+                  "speculative_config": {
+                    "method": "dspark",
+                    "num_speculative_tokens": 5,
+                    "draft_sample_method": "probabilistic",
+                    "rejection_sample_method": "block",
+                    "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027"
+                  }
                 }
             - name: SNAPSHOT_MODEL_REVISION
-              value: e3cd60e7de98e9867116860d522499a728de1cf9
-            - name: SNAPSHOT_CONTROL_DIR
-              value: /snapshot-control
+              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
             - name: HF_HOME
               value: /hf-cache
             - name: HF_HUB_OFFLINE
               value: "1"
-            - name: HF_HUB_DISABLE_XET
-              value: "1"
-            - name: NCCL_IB_DISABLE
-              value: "1"
-            - name: NCCL_RAS_ENABLE
-              value: "0"
-            - name: TORCH_NCCL_ENABLE_MONITORING
-              value: "0"
-            - name: TORCH_NCCL_DUMP_ON_TIMEOUT
-              value: "0"
+            - name: SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
           ports:
             - name: api
               containerPort: 8000
@@ -162,11 +159,11 @@ spec:
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
+            - name: model-cache
+              mountPath: /hf-cache
             - name: snapshot-cuda
               mountPath: /tmp/snapshot-cuda
               readOnly: true
-            - name: model-cache
-              mountPath: /hf-cache
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
@@ -176,22 +173,22 @@ spec:
               mountPath: /snapshot-app
               readOnly: true
       volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: snapshot-model-cache
         - name: shm
           emptyDir:
             medium: Memory
             sizeLimit: 64Gi
         - name: snapshot-cuda
           emptyDir: {}
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: snapshot-model-cache
         - name: snapshot-control
           emptyDir: {}
         - name: tun
           hostPath:
             path: /dev/net/tun
             type: CharDevice
-        # Created from app.py: kubectl create configmap sglang-app --from-file=app.py
+        # Created from app.py: kubectl create configmap vllm-app --from-file=app.py
         - name: app
           configMap:
-            name: sglang-app
+            name: vllm-app

@@ -8,11 +8,6 @@ vLLM image that includes vLLM and its runtime dependencies, unmodified.
 mounted into it from a ConfigMap to prepare vLLM for checkpoint and resume it
 after restore. The Snapshot agent injects the restore tooling at runtime.
 
-> [!NOTE]
-> This example is validated on vLLM 0.27.1 (the pinned
-> `vllm/vllm-openai:v0.27.1-ubuntu2404` image) and does not work on vLLM
-> 0.28.
-
 This single-GPU example uses native CUDA checkpoint and restore. The separate
 [multi-GPU examples](cuda-shared-memory.md#multi-gpu-models) enable CUDA
 shared-memory support and install the matching cuInterpose bundle.
@@ -51,8 +46,8 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-`deployment.yaml` runs vLLM's own Ubuntu 24.04 build of the 0.27.1 image
-(`v0.27.1-ubuntu2404`) unmodified, which already matches the glibc floor the
+`deployment.yaml` runs vLLM's own Ubuntu 24.04 build of the 0.31.0 image
+(`v0.31.0-ubuntu2404`) unmodified, which already matches the glibc floor the
 current Snapshot restore bundle requires, and mounts `app.py` at
 `/snapshot-app` from the `vllm-app` ConfigMap created in step 2.
 `HF_HUB_DISABLE_XET=1` prevents the model downloader from leaving an open cache
@@ -114,7 +109,7 @@ override the defaults with `AsyncEngineArgs` keyword arguments, including
 > the standard `vllm serve` command-line arguments do not apply. The model is
 > selected with `SNAPSHOT_MODEL`. Supply API keyword arguments through
 > `VLLM_ENGINE_ARGS`, and process settings through vLLM's
-> [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/).
+> [environment variables](https://docs.vllm.ai/en/v0.31.0/configuration/env_vars/).
 
 `app.py` also sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` before importing vLLM.
 Calling `AsyncLLM` directly rather than vLLM's CLI wrapper skips the wrapper's
@@ -149,7 +144,7 @@ kubectl get pods \
 Use that Pod name in the `PodSnapshot` created during the next step. The
 readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
 
-For the separate GLM 5.3 and DeepSeek V4 Flash multi-GPU manifests, see
+For the separate GLM 5.3 and DeepSeek V4.1 Flash multi-GPU manifests, see
 [Multi-GPU models](cuda-shared-memory.md#multi-gpu-models). They reuse this
 program and ConfigMap.
 

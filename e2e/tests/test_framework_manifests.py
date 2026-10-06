@@ -336,8 +336,8 @@ def test_control_file_names_match_the_guide_program(spec: frameworks.FrameworkSp
     ("vllm", "glm-5.3", 8),
     ("sglang", "glm-5.3", 8),
     ("tensorrt-llm", "glm-5.3", 8),
-    ("vllm", "deepseek-v4-flash", 4),
-    ("sglang", "deepseek-v4-flash", 4),
+    ("vllm", "deepseek-v4.1-flash", 4),
+    ("sglang", "deepseek-v4.1-flash", 4),
 ])
 def test_multi_gpu_recipe_matches_restore_and_shared_cache(
     monkeypatch: pytest.MonkeyPatch, engine: str, recipe: str, size: int,
@@ -377,7 +377,7 @@ def test_multi_gpu_recipe_matches_restore_and_shared_cache(
 @pytest.mark.workload
 @pytest.mark.parametrize("engine,recipe,error", [
     ("vllm", "../vllm", "unknown SNAPSHOT_E2E_RECIPE"),
-    ("tensorrt-llm", "deepseek-v4-flash", "has no deepseek-v4-flash recipe"),
+    ("tensorrt-llm", "deepseek-v4.1-flash", "has no deepseek-v4.1-flash recipe"),
 ])
 def test_recipe_selection_rejects_unknown_or_unavailable_profiles(
     monkeypatch: pytest.MonkeyPatch, engine: str, recipe: str, error: str,

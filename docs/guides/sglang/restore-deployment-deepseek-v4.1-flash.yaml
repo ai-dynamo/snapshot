@@ -4,7 +4,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sglang-deepseek-v4-flash-restored
+  name: sglang-deepseek-v4.1-flash-restored
 spec:
   replicas: 1
   progressDeadlineSeconds: 3600
@@ -12,13 +12,13 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: sglang-deepseek-v4-flash-restored
+      app: sglang-deepseek-v4.1-flash-restored
   template:
     metadata:
       labels:
-        app: sglang-deepseek-v4-flash-restored
+        app: sglang-deepseek-v4.1-flash-restored
       annotations:
-        nvidia.com/restore-from: sglang-deepseek-v4-flash-snapshot
+        nvidia.com/restore-from: sglang-deepseek-v4.1-flash-snapshot
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -30,7 +30,7 @@ spec:
         nvidia.com/gpu.product: NVIDIA-B200
       initContainers:
         - name: model-cache
-          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -48,9 +48,9 @@ spec:
                   marker.touch()
           env:
             - name: SNAPSHOT_MODEL
-              value: nvidia/DeepSeek-V4-Flash-NVFP4
+              value: deepseek-ai/DeepSeek-V4.1-Flash
             - name: SNAPSHOT_MODEL_REVISION
-              value: e3cd60e7de98e9867116860d522499a728de1cf9
+              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
             - name: HF_HOME
               value: /hf-cache
             - name: HF_HUB_DISABLE_XET
@@ -60,7 +60,7 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
           # Inert placeholder: the agent restores the checkpointed process into
           # this container, so app.py must not run here.
@@ -72,26 +72,24 @@ spec:
             - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
               value: "4"
             - name: SNAPSHOT_MODEL
-              value: nvidia/DeepSeek-V4-Flash-NVFP4
+              value: deepseek-ai/DeepSeek-V4.1-Flash
             - name: SGLANG_ENGINE_ARGS
               value: |-
                 {
-                  "revision": "e3cd60e7de98e9867116860d522499a728de1cf9",
+                  "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
                   "trust_remote_code": true,
+                  "ep_size": 4,
                   "page_size": 256,
                   "context_length": 131072,
                   "max_running_requests": 64,
-                  "moe_runner_backend": "flashinfer_trtllm_routed",
-                  "speculative_algorithm": "EAGLE",
-                  "speculative_num_steps": 3,
-                  "speculative_eagle_topk": 1,
-                  "speculative_num_draft_tokens": 4,
-                  "chunked_prefill_size": 4096,
-                  "disable_flashinfer_autotune": true,
-                  "swa_full_tokens_ratio": 0.1
+                  "mem_fraction_static": 0.8,
+                  "speculative_algorithm": "DSPARK",
+                  "speculative_dspark_block_size": 5,
+                  "cuda_graph_max_bs_decode": 64,
+                  "chunked_prefill_size": 4096
                 }
             - name: SNAPSHOT_MODEL_REVISION
-              value: e3cd60e7de98e9867116860d522499a728de1cf9
+              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
             - name: HF_HOME
