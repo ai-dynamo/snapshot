@@ -14,11 +14,17 @@ func TestDeletionWindowValidate(t *testing.T) {
 		window  DeletionWindow
 		wantErr bool
 	}{
-		{"valid", DeletionWindow{AdmissionWindow: time.Hour, MaxTransactionLife: time.Minute, ClockSkewAllowance: time.Second}, false},
+		{"valid", DeletionWindow{
+			AdmissionWindow: time.Hour, MaxTransactionLife: time.Minute, ClockSkewAllowance: time.Second,
+		}, false},
 		{"zero admission window", DeletionWindow{AdmissionWindow: 0, MaxTransactionLife: time.Minute}, true},
 		{"zero transaction life", DeletionWindow{AdmissionWindow: time.Hour, MaxTransactionLife: 0}, true},
-		{"negative skew", DeletionWindow{AdmissionWindow: time.Hour, MaxTransactionLife: time.Minute, ClockSkewAllowance: -time.Second}, true},
-		{"skew exceeds admission window", DeletionWindow{AdmissionWindow: time.Second, MaxTransactionLife: time.Minute, ClockSkewAllowance: time.Hour}, true},
+		{"negative skew", DeletionWindow{
+			AdmissionWindow: time.Hour, MaxTransactionLife: time.Minute, ClockSkewAllowance: -time.Second,
+		}, true},
+		{"skew exceeds admission window", DeletionWindow{
+			AdmissionWindow: time.Second, MaxTransactionLife: time.Minute, ClockSkewAllowance: time.Hour,
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.window.Validate()
