@@ -81,7 +81,6 @@ func TestResolveRestoreArtifactRoutesBoundContentToStatusLookup(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 	target := &restoreTarget{SnapshotName: "snap", ContentUID: "content-uid", SourceContainerName: "main"}
 
-	// A bound content must never fall through to the filesystem-presence path.
 	artifact, err := w.resolveRestoreArtifact("pod-key", target, content)
 	require.NoError(t, err)
 	require.NotNil(t, artifact.PublishedArtifact)
@@ -140,9 +139,7 @@ func TestMarkCheckpointReadySkipsFilesystemSourceReadWhenBound(t *testing.T) {
 		ArtifactHandle:        "artifacts/content/containers/main",
 		ArtifactFormatVersion: "snapshot.pagebroker/v1",
 	}
-	// artifactPath points at a directory with no manifest at all; if
-	// markCheckpointReady tried to read a source from it for bound content,
-	// this would error, which this test's require.NoError would catch.
+	// t.TempDir() has no manifest; bound content must not try to read one.
 	err := w.markCheckpointReady(context.Background(), content, t.TempDir(), "main", published)
 	require.NoError(t, err)
 
