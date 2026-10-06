@@ -181,7 +181,7 @@ func TestSetSnapshotContentSucceeded_StatusPatchErrorReturnsError(t *testing.T) 
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	err := w.setSnapshotContentSucceeded(context.Background(), content, nil)
+	err := w.setSnapshotContentSucceeded(context.Background(), content, nil, "", nil)
 
 	require.Error(t, err)
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
@@ -196,7 +196,7 @@ func TestSetSnapshotContentSucceeded_ConflictReturnsError(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	err := w.setSnapshotContentSucceeded(context.Background(), content, nil)
+	err := w.setSnapshotContentSucceeded(context.Background(), content, nil, "", nil)
 
 	require.Error(t, err)
 	assert.True(t, apierrors.IsConflict(err))
@@ -210,7 +210,7 @@ func TestSetSnapshotContentSucceeded_NoSourceLeavesAPublishedOneAlone(t *testing
 	content.Status.Source = recordedSource()
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, interceptor.Funcs{}, content)
 
-	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, nil))
+	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, nil, "", nil))
 
 	assert.Equal(t, recordedSource(), getContent(t, w, content.Name).Status.Source)
 }
@@ -263,7 +263,7 @@ func TestMarkCheckpointReady_FailedBeforeReadyIsSticky(t *testing.T) {
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 
-	err := w.markCheckpointReady(context.Background(), stale, "")
+	err := w.markCheckpointReady(context.Background(), stale, "", "", nil)
 
 	require.NoError(t, err, "a sticky Failed condition is an accepted outcome, not a retryable error")
 	got := getContent(t, w, stored.Name)
@@ -291,7 +291,7 @@ func TestMarkCheckpointReady_PublishesAfterAReadyConflict(t *testing.T) {
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
 	path := committedArtifact(t, w, string(stored.UID))
 
-	require.NoError(t, w.markCheckpointReady(context.Background(), stored, path))
+	require.NoError(t, w.markCheckpointReady(context.Background(), stored, path, "", nil))
 
 	assert.Equal(t, 1, conflicts, "the first Ready write has to be the rejected one")
 	got := getContent(t, w, stored.Name)
@@ -336,7 +336,7 @@ func TestMarkCheckpointReady_AlreadyReadyNoOp(t *testing.T) {
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 
-	err := w.markCheckpointReady(context.Background(), stale, "")
+	err := w.markCheckpointReady(context.Background(), stale, "", "", nil)
 
 	require.NoError(t, err, "another holder's Ready write is success, not a conflict to escalate")
 }
@@ -372,7 +372,7 @@ func TestMarkCheckpointReady_SecondConflictObservesFailed(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
 
-	err := w.markCheckpointReady(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), "")
+	err := w.markCheckpointReady(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), "", "", nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, readyPatches, "Failed must be observed on the second Ready conflict")

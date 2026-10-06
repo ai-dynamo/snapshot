@@ -31,6 +31,7 @@ import (
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -105,19 +106,20 @@ func TestReconcileCapture_CuInterposeOptInReachesCapture(t *testing.T) {
 
 // fakeCheckpointer records calls behind the checkpointFn seam and returns a configured error.
 type fakeCheckpointer struct {
-	mu     sync.Mutex
-	called bool
-	params CheckpointParams
-	err    error
+	mu       sync.Mutex
+	called   bool
+	params   CheckpointParams
+	err      error
+	artifact *pagebroker.PublishedArtifact
 }
 
 // fn is the checkpointFn seam the NodeController invokes for the dump.
-func (fc *fakeCheckpointer) fn(_ context.Context, params CheckpointParams) error {
+func (fc *fakeCheckpointer) fn(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	fc.called = true
 	fc.params = params
-	return fc.err
+	return fc.artifact, fc.err
 }
 
 // wasCalled reports whether the seam was invoked.
@@ -388,7 +390,7 @@ func TestReconcileCapture_ConcurrentTriggerCannotFailARunningCapture(t *testing.
 
 	dumping := make(chan struct{})
 	finish := make(chan struct{})
-	w.checkpointFn = func(ctx context.Context, params CheckpointParams) error {
+	w.checkpointFn = func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		close(dumping)
 		<-finish
 		// The dump kills the source: by the time it returns, the pod is terminal.
@@ -835,7 +837,7 @@ func TestExecutorCheckpointInspectionFailureDoesNotKill(t *testing.T) {
 
 	checkpointCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	err := w.executorCheckpoint(checkpointCtx, CheckpointParams{
+	_, err := w.executorCheckpoint(checkpointCtx, CheckpointParams{
 		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:      "worker-0",
 			Namespace: "inference",
@@ -1078,9 +1080,9 @@ func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content)
 	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}
-	w.checkpointFn = func(ctx context.Context, _ CheckpointParams) error {
+	w.checkpointFn = func(ctx context.Context, _ CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		<-ctx.Done() // a dump that honours cancellation, e.g. cuda-checkpoint
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 
@@ -1098,9 +1100,9 @@ func TestRunCheckpoint_OverrunButSuccessfulDumpIsStillReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}
-	w.checkpointFn = func(context.Context, CheckpointParams) error {
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		time.Sleep(1200 * time.Millisecond)
-		return nil // overran the deadline but reports success
+		return nil, nil // overran the deadline but reports success
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 
