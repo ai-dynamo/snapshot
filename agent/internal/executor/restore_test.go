@@ -94,46 +94,6 @@ func TestCustomStorageRestoreRequiresExecutionSocket(t *testing.T) {
 	}
 }
 
-func TestCUDAHelperLibraryDirectorySurvivesBundleRemoval(t *testing.T) {
-	bundle := t.TempDir()
-	libraryDir := filepath.Join(bundle, "lib")
-	if err := os.Mkdir(libraryDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(libraryDir, "libfixture.so"), []byte("library"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("LD_LIBRARY_PATH", "/old-libraries")
-	libraries, err := os.Open(libraryDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer libraries.Close()
-	if err := os.Rename(libraryDir, filepath.Join(bundle, "detached")); err != nil {
-		t.Fatal(err)
-	}
-	restoreLibraryPath, err := useCUDAHelperLibraries(libraries)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restoreLibraryPath()
-	path, _, _ := strings.Cut(os.Getenv("LD_LIBRARY_PATH"), ":")
-	data, err := os.ReadFile(filepath.Join(path, "libfixture.so"))
-	if err != nil || string(data) != "library" {
-		t.Fatalf("pinned library lookup failed after original path disappeared: %q, %v", data, err)
-	}
-	restoreLibraryPath()
-	if err := libraries.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if os.Getenv("LD_LIBRARY_PATH") != "/old-libraries" {
-		t.Fatal("library environment was not restored")
-	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("library descriptor remains after cleanup: %v", err)
-	}
-}
-
 func TestInspectCompatibilityChecksMappedGPUMountAndOrdinaryMounts(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "dev"), 0755); err != nil {

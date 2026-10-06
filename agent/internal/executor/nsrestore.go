@@ -196,7 +196,6 @@ func executeRestore(
 	// the fd remains valid even if the mount is gone.
 	var cudaHelperFdPath string
 	var coordinatorFdPath string
-	var cudaHelperLibraries *os.File
 	if !m.CUDA.IsEmpty() && !m.CUDA.CustomStorage {
 		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
 		f, err := os.Open(helperPath)
@@ -205,11 +204,6 @@ func executeRestore(
 		}
 		defer f.Close()
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
-		cudaHelperLibraries, err = os.Open(filepath.Join(opts.BundleDir, "lib"))
-		if err != nil {
-			return nil, 0, nil, fmt.Errorf("open CUDA helper libraries before CRIU restore: %w", err)
-		}
-		defer cudaHelperLibraries.Close()
 	}
 	if m.CuInterpose.HasRuntime() {
 		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
@@ -314,11 +308,6 @@ func executeRestore(
 				logGPUResult(log, result)
 			}
 		} else {
-			restoreLibraryPath, libraryErr := useCUDAHelperLibraries(cudaHelperLibraries)
-			if libraryErr != nil {
-				return nil, 0, nil, libraryErr
-			}
-			defer restoreLibraryPath()
 			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
 		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
@@ -339,29 +328,4 @@ func executeRestore(
 	// Retain aliases only once CUDA restore and unlock have also succeeded.
 	gpuMountsCommitted = true
 	return timings, restoredPID, nil, nil
-}
-
-// Keep the conventional helper's shared libraries reachable after CRIU
-// removes the bundle mount, just as we pin the executable.
-func useCUDAHelperLibraries(libraries *os.File) (func(), error) {
-	// Derive the PID from the procfs now visible after CRIU restored mounts.
-	pid, err := os.Readlink("/proc/self")
-	if err != nil {
-		return nil, fmt.Errorf("resolve nsrestore PID for CUDA helper libraries: %w", err)
-	}
-	previous, present := os.LookupEnv("LD_LIBRARY_PATH")
-	path := fmt.Sprintf("/proc/%s/fd/%d", pid, libraries.Fd())
-	if previous != "" {
-		path += ":" + previous
-	}
-	if err := os.Setenv("LD_LIBRARY_PATH", path); err != nil {
-		return nil, err
-	}
-	return func() {
-		if present {
-			_ = os.Setenv("LD_LIBRARY_PATH", previous)
-		} else {
-			_ = os.Unsetenv("LD_LIBRARY_PATH")
-		}
-	}, nil
 }

@@ -5,20 +5,26 @@ package executor
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
@@ -192,4 +198,72 @@ func TestFrontendOnlyCaptureSkipsCoordinator(t *testing.T) {
 	require.ErrorContains(t, err, "CUDA checkpoint failed")
 	require.NotContains(t, err.Error(), "prepare cuinterpose")
 	require.True(t, CheckpointNeedsSourceKill(err))
+}
+func TestCheckpointPreparationFailureDoesNotMutate(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		t.Run(fmt.Sprintf("CustomStorage=%t", custom), func(t *testing.T) {
+			root := t.TempDir()
+			destination := filepath.Join(root, "checkpoint")
+			listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "broker.sock"))
+			require.NoError(t, err)
+			defer listener.Close()
+			server := make(chan error, 1)
+			go func() {
+				connection, err := listener.Accept()
+				if err != nil {
+					server <- err
+					return
+				}
+				defer connection.Close()
+				var size uint32
+				if err := binary.Read(connection, binary.BigEndian, &size); err != nil {
+					server <- err
+					return
+				}
+				message := make([]byte, size)
+				if _, err := io.ReadFull(connection, message); err != nil {
+					server <- err
+					return
+				}
+				request := new(pagebroker.Request)
+				if err := proto.Unmarshal(message, request); err != nil {
+					server <- err
+					return
+				}
+				var received string
+				if custom {
+					received = request.GetPrepareDirectCheckpoint().GetDestination().GetFilesystem().GetDirectory()
+				} else {
+					received = request.GetPrepareStagedCheckpoint().GetDestination().GetFilesystem().GetDirectory()
+				}
+				if received != destination {
+					server <- fmt.Errorf("unexpected checkpoint preparation: %v", request)
+					return
+				}
+				code := pagebroker.Failure_STORAGE_ERROR
+				message, err = proto.Marshal(&pagebroker.Response{RequestId: request.RequestId, TransactionId: request.TransactionId,
+					Result: &pagebroker.Response_Failure{Failure: &pagebroker.Failure{Code: &code, Message: proto.String("storage unavailable")}}})
+				if err == nil {
+					err = binary.Write(connection, binary.BigEndian, uint32(len(message)))
+				}
+				if err == nil {
+					_, err = connection.Write(message)
+				}
+				server <- err
+			}()
+			var executionContext *pagebroker.GpuContext
+			if custom {
+				executionContext = &pagebroker.GpuContext{CapturedPids: []uint32{12}, VisibleDevices: []string{"GPU-source"}}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			directory, gpu, err := prepareCheckpoint(ctx, pagebroker.Client{ControlSocketPath: listener.Addr().String()}, "capture", destination, executionContext)
+			require.ErrorContains(t, err, "storage unavailable")
+			assert.False(t, CheckpointNeedsSourceKill(err))
+			assert.Empty(t, directory)
+			assert.Nil(t, gpu)
+			assert.NoDirExists(t, destination)
+			require.NoError(t, <-server)
+		})
+	}
 }

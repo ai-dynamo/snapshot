@@ -86,7 +86,7 @@ pod annotation controls CPU staging.
 | Transfer rings need substantial pinned memory | Use 32 slots of 128 MiB per visible GPU. Provide a total memory limit and check allocation before reporting readiness. |
 | Artifacts can be malformed or incomplete | Check manifests, device mappings, file types, and exact extent lengths before CUDA work. Compare returned CUDA mappings with the prepared metadata. |
 | Cancellation can occur during DMA | Wait for storage and CUDA work to stop before reusing buffers. Retain files until the caller confirms CRIU no longer uses them. |
-| Nested namespaces can have ambiguous PIDs | Use explicit captured-to-namespace PID mappings. The current manifest and resolver do not support arbitrary nested trees or duplicate innermost captured PIDs. |
+| PIDs can repeat in different namespaces | Resolve host PIDs only in the exact restore PID namespace. Capture and restore require the host/container PID pair. Nested PID namespaces and hostPID pods are outside this scope. |
 | Protocol or manifest versions can differ | Run the agent and PageBroker at the same version. Removed helper daemon sessions and payload digest files are not supported. |
 | Restored workloads may depend on PageBroker's CUDA contexts | B200 tests with driver 615.71.09 passed 30 kernel and copy checks after the engine exited. Test each supported driver and fatal-error recovery separately. |
 
@@ -153,6 +153,9 @@ automatically.
 
 `Commit` publishes or releases storage after GPU work finishes. `Abort` cancels
 work, waits for storage and CUDA transfers to stop, and then removes owned output.
+The agent waits up to five seconds for Abort. If GPU cleanup is not confirmed,
+it retains resources and skips target termination. This client timeout does not
+change the broker's transfer drain deadline.
 Expiry cancels active GPU work and waits for its transfers to stop before deleting
 transaction files. CPU staging, publication, expiry, and startup cleanup retain
 the existing PageBroker behavior. This proposal adds no storage leases, durable

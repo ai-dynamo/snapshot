@@ -90,7 +90,7 @@ func TestCPUAndDisabledPageBrokerDoNotProbeCUDA(t *testing.T) {
 }
 
 func TestFailedRestoreWaitsForAbortBeforeTermination(t *testing.T) {
-	for _, outcome := range []string{"drained", "lost-abort-reply", "termination-error"} {
+	for _, outcome := range []string{"drained", "lost-abort-reply", "abort-timeout", "termination-error"} {
 		t.Run(outcome, func(t *testing.T) {
 			listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "broker.sock"))
 			if err != nil {
@@ -127,6 +127,11 @@ func TestFailedRestoreWaitsForAbortBeforeTermination(t *testing.T) {
 				}
 				close(abortReceived)
 				<-replyAllowed
+				if outcome == "abort-timeout" {
+					_, err := io.Copy(io.Discard, connection)
+					server <- err
+					return
+				}
 				if outcome == "lost-abort-reply" {
 					server <- nil
 					return
@@ -173,16 +178,17 @@ func TestFailedRestoreWaitsForAbortBeforeTermination(t *testing.T) {
 			var got result
 			select {
 			case got = <-finished:
-			case <-time.After(5 * time.Second):
+			case <-time.After(10 * time.Second):
 				t.Fatal("cleanup did not finish")
 			}
-			if got.drained != (outcome != "lost-abort-reply") || (got.err != nil) != (outcome != "drained") {
+			confirmed := outcome == "drained" || outcome == "termination-error"
+			if got.drained != confirmed || (got.err != nil) != (outcome != "drained") {
 				t.Fatalf("cleanup = %+v", got)
 			}
-			if len(terminated) != 0 && outcome == "lost-abort-reply" {
+			if len(terminated) != 0 && !confirmed {
 				t.Fatal("terminated without confirmed drain")
 			}
-			if len(terminated) != 1 && outcome != "lost-abort-reply" {
+			if len(terminated) != 1 && confirmed {
 				t.Fatal("did not terminate after drain")
 			}
 			if err := <-server; err != nil {

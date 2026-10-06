@@ -28,7 +28,7 @@ import (
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
-const pageBrokerAbortTimeout = 5 * time.Minute
+const pageBrokerAbortTimeout = 5 * time.Second
 
 // checkpointNeedsSourceKillError reports a failure after CUDA or CRIU may have left the source unsafe.
 type checkpointNeedsSourceKillError struct{ cause error }
@@ -120,23 +120,17 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 				}
 			}
 		}()
-		var err error
+		var executionContext *pagebroker.GpuContext
 		if useGPU {
-			context, prepareErr := gpuContext(state.CUDANSPIDs, gpuUUIDs(state.GPUs), "")
-			if prepareErr != nil {
-				return prepareErr
+			executionContext, err = gpuContext(state.CUDANSPIDs, gpuUUIDs(state.GPUs), "")
+			if err != nil {
+				return err
 			}
-			preparationSent = true
-			tmpDir, err = broker.PrepareDirectCheckpoint(ctx, transactionID, finalDir)
-			if err == nil {
-				gpu, err = broker.OpenGPUExecution(transactionID, context)
-			}
-			if gpu != nil {
-				defer gpu.Close()
-			}
-		} else {
-			preparationSent = true
-			tmpDir, err = broker.PrepareCheckpoint(ctx, transactionID, finalDir)
+		}
+		preparationSent = true
+		tmpDir, gpu, err = prepareCheckpoint(ctx, broker, transactionID, finalDir, executionContext)
+		if gpu != nil {
+			defer gpu.Close()
 		}
 		if err != nil {
 			return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
@@ -465,4 +459,17 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 
 	return timings, nil
+}
+
+func prepareCheckpoint(ctx context.Context, broker pagebroker.Client, transactionID, destination string, gpuContext *pagebroker.GpuContext) (string, *pagebroker.GPUExecution, error) {
+	if gpuContext == nil {
+		directory, err := broker.PrepareCheckpoint(ctx, transactionID, destination)
+		return directory, nil, err
+	}
+	directory, err := broker.PrepareDirectCheckpoint(ctx, transactionID, destination)
+	if err != nil {
+		return "", nil, err
+	}
+	gpu, err := broker.OpenGPUExecution(transactionID, gpuContext)
+	return directory, gpu, err
 }

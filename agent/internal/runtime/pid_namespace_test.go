@@ -4,91 +4,10 @@
 package runtime
 
 import (
-	"errors"
 	"os"
-	"os/exec"
 	"strconv"
-	"syscall"
 	"testing"
-	"time"
-
-	"golang.org/x/sys/unix"
 )
-
-func TestPIDAtNamespaceDepth(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		pids        []int
-		depth, want int
-	}{
-		{"container", []int{901, 12}, 0, 12},
-		{"nested source", []int{901, 112, 12}, 1, 112},
-		{"host", []int{901, 112, 12}, 2, 901},
-		{"ancestry mismatch", []int{901, 12}, 2, 0},
-		{"invalid PID", []int{901, 0}, 0, 0},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := pidAtNamespaceDepth(test.pids, test.depth)
-			if got != test.want || (err != nil) != (test.want == 0) {
-				t.Fatalf("PID = %d, %v, want %d", got, err, test.want)
-			}
-		})
-	}
-}
-
-func TestReadProcessPIDInNamespace(t *testing.T) {
-	namespace, err := os.Open("/proc/self/ns/pid")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer namespace.Close()
-	got, err := ReadProcessPIDInNamespace("/proc", os.Getpid(), namespace)
-	if err != nil || got != os.Getpid() {
-		t.Fatalf("PID = %d, %v, want %d", got, err, os.Getpid())
-	}
-	wrong, err := os.Open("/proc/self/ns/mnt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer wrong.Close()
-	if _, err := ReadProcessPIDInNamespace("/proc", os.Getpid(), wrong); err == nil {
-		t.Fatal("accepted a mount namespace as a PID namespace")
-	}
-}
-
-func TestReadProcessPIDInNamespaceNested(t *testing.T) {
-	if os.Getenv("SNAPSHOT_PID_NAMESPACE_TEST_CHILD") == "1" {
-		time.Sleep(time.Minute)
-		return
-	}
-	child := exec.Command(os.Args[0], "-test.run=^TestReadProcessPIDInNamespaceNested$")
-	child.Env = append(os.Environ(), "SNAPSHOT_PID_NAMESPACE_TEST_CHILD=1")
-	child.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWPID}
-	if err := child.Start(); err != nil {
-		if errors.Is(err, syscall.EPERM) {
-			t.Skip("PID namespace creation requires CAP_SYS_ADMIN")
-		}
-		t.Fatal(err)
-	}
-	defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
-	parentNamespace, err := os.Open("/proc/self/ns/pid")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer parentNamespace.Close()
-	got, err := ReadProcessPIDInNamespace("/proc", child.Process.Pid, parentNamespace)
-	if err != nil || got != child.Process.Pid {
-		t.Fatalf("nested PID = %d, %v, want parent-visible %d", got, err, child.Process.Pid)
-	}
-	childNamespace, err := os.Open("/proc/" + strconv.Itoa(child.Process.Pid) + "/ns/pid")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer childNamespace.Close()
-	if _, err := ReadProcessPIDInNamespace("/proc", os.Getpid(), childNamespace); err == nil {
-		t.Fatal("accepted process outside pinned descendant namespace")
-	}
-}
 
 func TestResolveHostPIDsUsesRetainedProcDirectory(t *testing.T) {
 	root := t.TempDir() + "/proc"
@@ -122,5 +41,44 @@ func TestResolveHostPIDsUsesRetainedProcDirectory(t *testing.T) {
 		if _, err := ResolveHostPIDs(retained, pids); err == nil {
 			t.Fatalf("accepted invalid targets %v", pids)
 		}
+	}
+}
+
+func TestResolveHostPIDsRejectsUnsupportedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		pids      string
+		namespace string
+		duplicate bool
+	}{
+		{"host namespace", "901", "/proc/self/ns/pid", false},
+		{"nested namespace", "901 100 12", "/proc/self/ns/pid", false},
+		{"wrong host PID", "999 12", "/proc/self/ns/pid", false},
+		{"other namespace", "901 12", "/proc/self/ns/mnt", false},
+		{"ambiguous PID", "901 12", "/proc/self/ns/pid", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeProcess := func(pid, pids string) {
+				t.Helper()
+				path := root + "/" + pid
+				if err := os.MkdirAll(path+"/ns", 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(tc.namespace, path+"/ns/pid"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path+"/status", []byte("PPid:\t1\nNSpid:\t"+pids+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeProcess("901", tc.pids)
+			if tc.duplicate {
+				writeProcess("902", "902 12")
+			}
+			if _, err := ResolveHostPIDs(root, []int{12}); err == nil {
+				t.Fatal("accepted unsupported or ambiguous process identity")
+			}
+		})
 	}
 }
