@@ -81,7 +81,7 @@ spec:
                 {
                   "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
                   "trust_remote_code": true, "ep_size": 4, "page_size": 256,
-                  "context_length": 131072, "max_running_requests": 64, "mem_fraction_static": 0.8,
+                  "context_length": 131072, "max_running_requests": 64, "mem_fraction_static": 0.85,
                   "speculative_algorithm": "DSPARK", "speculative_dspark_block_size": 5,
                   "cuda_graph_max_bs_decode": 64, "chunked_prefill_size": 4096
                 }
