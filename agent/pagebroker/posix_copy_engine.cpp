@@ -106,12 +106,6 @@ PosixCopyEngine::type() const
   return TransferEngineType::POSIX_COPY;
 }
 
-Path
-PosixCopyEngine::SourceDirectory(const StorageBackend& source) const
-{
-  return SourcePath(source, storage_root_);
-}
-
 uintmax_t
 PosixCopyEngine::RestoreSize(const StorageBackend& source) const
 {
