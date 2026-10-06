@@ -7,12 +7,15 @@ metadata:
   name: sglang-source
 spec:
   replicas: 1
-  strategy: {type: Recreate}
+  strategy:
+    type: Recreate
   selector:
-    matchLabels: {app: sglang-source}
+    matchLabels:
+      app: sglang-source
   template:
     metadata:
-      labels: {app: sglang-source}
+      labels:
+        app: sglang-source
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -20,58 +23,102 @@ spec:
         seccompProfile:
           type: Localhost
           localhostProfile: profiles/block-iouring.json
-      nodeSelector: {nvidia.com/gpu.present: "true"}
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
       initContainers:
         - name: model-cache
           image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
-          command: [python3, -c]
+          command:
+            - python3
+            - -c
           args:
             - |
               import os
               from huggingface_hub import snapshot_download
               snapshot_download(repo_id=os.environ["SNAPSHOT_MODEL"])
           env:
-            - {name: SNAPSHOT_MODEL, value: Qwen/Qwen3-0.6B}
-            - {name: HF_HOME, value: /hf-cache}
-            - {name: HF_HUB_DISABLE_XET, value: "1"}
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
           volumeMounts:
-            - {name: model-cache, mountPath: /hf-cache}
+            - name: model-cache
+              mountPath: /hf-cache
       containers:
         - name: main
           image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
-          command: [python3, -u, /snapshot-app/app.py]
-          args: [--mode, snapshot]
+          command:
+            - python3
+            - -u
+            - /snapshot-app/app.py
+          args:
+            - --mode
+            - snapshot
           env:
-            - {name: SNAPSHOT_MODEL, value: Qwen/Qwen3-0.6B}
-            - {name: SGLANG_CONTEXT_LENGTH, value: "10240"}
-            - {name: SGLANG_PAGE_SIZE, value: "16"}
-            - {name: HF_HOME, value: /hf-cache}
-            - {name: HF_HUB_OFFLINE, value: "1"}
-            - {name: HF_HUB_DISABLE_XET, value: "1"}
-            - {name: NCCL_IB_DISABLE, value: "1"}
-            - {name: NCCL_RAS_ENABLE, value: "0"}
-            - {name: TORCH_NCCL_ENABLE_MONITORING, value: "0"}
-            - {name: TORCH_NCCL_DUMP_ON_TIMEOUT, value: "0"}
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
+            - name: SGLANG_CONTEXT_LENGTH
+              value: "10240"
+            - name: SGLANG_PAGE_SIZE
+              value: "16"
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: NCCL_RAS_ENABLE
+              value: "0"
+            - name: TORCH_NCCL_ENABLE_MONITORING
+              value: "0"
+            - name: TORCH_NCCL_DUMP_ON_TIMEOUT
+              value: "0"
           ports:
-            - {name: api, containerPort: 8000}
+            - name: api
+              containerPort: 8000
           resources:
-            limits: {nvidia.com/gpu: "1"}
+            limits:
+              nvidia.com/gpu: "1"
           readinessProbe:
             exec:
-              command: [cat, /snapshot-control/ready-for-snapshot]
+              command:
+                - cat
+                - /snapshot-control/ready-for-snapshot
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:
-            - {name: model-cache, mountPath: /hf-cache}
-            - {name: snapshot-control, mountPath: /snapshot-control, subPath: main}
-            - {name: tun, mountPath: /dev/net/tun}
-            - {name: shm, mountPath: /dev/shm}
-            - {name: app, mountPath: /snapshot-app, readOnly: true}
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: tun
+              mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
       volumes:
-        - {name: model-cache, persistentVolumeClaim: {claimName: sglang-model-cache}}
-        - {name: snapshot-control, emptyDir: {}}
-        - {name: tun, hostPath: {path: /dev/net/tun, type: CharDevice}}
-        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 1Gi}}
-        - {name: app, configMap: {name: sglang-app}}
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: sglang-model-cache
+        - name: snapshot-control
+          emptyDir: {}
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: app
+          configMap:
+            name: sglang-app
