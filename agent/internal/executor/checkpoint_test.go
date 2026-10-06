@@ -155,7 +155,7 @@ func TestCuInterposeCaptureFailureBoundary(t *testing.T) {
 	_, err = captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
 		&types.CheckpointManifest{CuInterpose: identity},
 		&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1}, CUDANSPIDs: []int{1}},
-		t.TempDir(), "", logr.Discard())
+		t.TempDir(), "", logr.Discard(), nil)
 	require.ErrorContains(t, err, "prepare cuinterpose")
 	assert.True(t, CheckpointNeedsSourceKill(err))
 }
@@ -188,7 +188,7 @@ func TestFrontendOnlyCaptureSkipsCoordinator(t *testing.T) {
 	_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
 		&types.CheckpointManifest{CuInterpose: testCuInterposeIdentity()},
 		&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1001}, CUDANSPIDs: []int{1}},
-		t.TempDir(), "", logr.Discard())
+		t.TempDir(), "", logr.Discard(), nil)
 	require.ErrorContains(t, err, "CUDA checkpoint failed")
 	require.NotContains(t, err.Error(), "prepare cuinterpose")
 	require.True(t, CheckpointNeedsSourceKill(err))
