@@ -4,7 +4,7 @@ This guide makes an SGLang workload snapshot-ready by mounting an entrypoint
 into an SGLang runtime image, implementing Snapshot's [workload
 contract](../reference/workload-contract.md). The example runs an SGLang
 image that includes SGLang, CUDA, and `torch_memory_saver`, unmodified.
-`deployment.yaml` pins the exact upstream image, and one program, `app.py`, is
+`capture/qwen3-0.6b.yaml` pins the exact upstream image, and one program, `app.py`, is
 mounted into it from a ConfigMap to prepare SGLang for checkpoint and resume
 it after restore. The Snapshot agent injects the restore tooling at runtime.
 
@@ -16,13 +16,14 @@ shared-memory support and install the matching cuInterpose bundle.
 
 Download [`app.py`](sglang/app.py),
 [`model-cache-pvc.yaml`](sglang/model-cache-pvc.yaml),
-[`deployment.yaml`](sglang/deployment.yaml), and
-[`restore-deployment.yaml`](sglang/restore-deployment.yaml) from the
+[`capture/qwen3-0.6b.yaml`](sglang/capture/qwen3-0.6b.yaml), and
+[`restore/qwen3-0.6b.yaml`](sglang/restore/qwen3-0.6b.yaml) from the
 repository:
 
 ```bash
 mkdir -p sglang-snapshot
 cd sglang-snapshot
+mkdir -p capture restore
 
 curl --fail --location \
   --output app.py \
@@ -33,12 +34,12 @@ curl --fail --location \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/model-cache-pvc.yaml
 
 curl --fail --location \
-  --output deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/deployment.yaml
+  --output capture/qwen3-0.6b.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/capture/qwen3-0.6b.yaml
 
 curl --fail --location \
-  --output restore-deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/restore-deployment.yaml
+  --output restore/qwen3-0.6b.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/restore/qwen3-0.6b.yaml
 ```
 
 The program creates a direct `sglang.Engine`, runs one generation, and calls
@@ -59,7 +60,7 @@ generation succeeds and the API is listening. To validate the restored replica,
 send a `POST` request to `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-`deployment.yaml` runs the pinned SGLang 0.5.21 image unmodified, and mounts `app.py`
+`capture/qwen3-0.6b.yaml` runs the pinned SGLang 0.5.21 image unmodified, and mounts `app.py`
 at `/snapshot-app` from the `sglang-app` ConfigMap created in step 2.
 
 The source and restore pods must use the same immutable image, mount the
@@ -75,7 +76,7 @@ and checkpoint pauses. Shared-memory support does not replace those safeguards.
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the SGLang pod will run, and create the ConfigMap
-`deployment.yaml` mounts `app.py` from:
+`capture/qwen3-0.6b.yaml` mounts `app.py` from:
 
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
@@ -98,7 +99,7 @@ kubectl create configmap sglang-app \
 
 ## 3. Deploy SGLang
 
-Select the model through `SNAPSHOT_MODEL` in [`deployment.yaml`](sglang/deployment.yaml).
+Select the model through `SNAPSHOT_MODEL` in [`capture/qwen3-0.6b.yaml`](sglang/capture/qwen3-0.6b.yaml).
 Both the init container and the main container carry the value:
 
 ```yaml
@@ -140,7 +141,7 @@ kubectl apply \
 Deploy the edited manifest:
 
 ```bash
-kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename deployment.yaml
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename capture/qwen3-0.6b.yaml
 ```
 
 The init container reuses cached model files and downloads missing files. The
