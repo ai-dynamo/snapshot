@@ -70,7 +70,7 @@ jobs:
       UV_LINK_MODE: copy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.10.11"
           checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
@@ -84,6 +84,8 @@ jobs:
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_runtime_image_id.py \
+            e2e/tests/test_setup_helm_overrides.py \
+            e2e/tests/test_workload_node_targeting.py \
             e2e/tests/test_workload_scripts.py -vv
 
   # Runs on every pull request so cross-cutting changes (shared workflows, the
@@ -126,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - run: |
           make docker-build-pagebroker \
             DOCKER_BUILD_ARGS="--cache-from=type=gha,scope=pagebroker \

@@ -183,6 +183,9 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `image.pageBroker.repository` | PageBroker sidecar image repository. Always pulled at `image.agent.tag` | `ghcr.io/ai-dynamo/snapshot/pagebroker` |
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
 | `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 128Mi limit |
+| `operator.nodeSelector` | Node selector for the operator pod | `{}` |
+| `operator.affinity` | Affinity rules for the operator pod | `{}` |
+| `operator.tolerations` | Tolerations for the operator pod | `[]` |
 | `storage.type` | Snapshot-owned storage backend | `pvc` |
 | `storage.pvc.create` | Create `snapshot-pvc` instead of using an existing shared PVC | `true` |
 | `storage.pvc.name` | Shared RWX checkpoint PVC mounted by every agent | `snapshot-pvc` |

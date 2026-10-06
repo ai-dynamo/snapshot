@@ -151,6 +151,7 @@ jobs:
       SNAPSHOT_E2E_PVC_SIZE: 64Gi
       SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
       SNAPSHOT_E2E_MODE: vcluster
+      SNAPSHOT_E2E_AVOID_MIG: "true"
       SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
       SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
       SNAPSHOT_E2E_HELM_TIMEOUT: 6m
@@ -231,7 +232,7 @@ jobs:
       - name: Install Python tooling (ARM64)
         if: ${{ steps.selected.outputs.run == 'true' && runner.arch == 'ARM64' }}
         timeout-minutes: 3
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.10.11"
           checksum: "23003df007937dd607409c8ddf010baa82bad2673e60e254632ca5b04edcce13"
@@ -241,7 +242,7 @@ jobs:
       - name: Install Python tooling (X64)
         if: ${{ steps.selected.outputs.run == 'true' && runner.arch == 'X64' }}
         timeout-minutes: 3
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.10.11"
           checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"

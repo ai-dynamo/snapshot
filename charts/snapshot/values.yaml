@@ -30,6 +30,15 @@ operator:
       cpu: 50m
       memory: 64Mi
 
+  # Node selector for the operator pod
+  nodeSelector: {}
+
+  # Affinity rules for the operator pod
+  affinity: {}
+
+  # Tolerations for the operator pod
+  tolerations: []
+
   artifactCleanup:
     # Frequency of pending finalizer recovery and authoritative orphan artifact scans.
     scanInterval: 10m
@@ -216,6 +225,10 @@ config:
       - "*/.cache/huggingface"
       - "*/__pycache__"
       - "*.pyc"
+
+  checkpoint:
+    # Maximum seconds before the agent marks a checkpoint failed.
+    checkpointTimeoutSeconds: 3600
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed
