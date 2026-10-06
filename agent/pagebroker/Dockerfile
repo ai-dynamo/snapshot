@@ -40,7 +40,19 @@ RUN git init /tmp/nixl && cd /tmp/nixl \
     && cp /nixl-install/usr/local/lib/libserdes.so /nixl-install/usr/local/lib/libstream.so \
       /nixl-install/usr/local/lib/libfile_utils.so /nixl-runtime/lib/ \
     && cp -a /nixl-install/usr/local/lib/liburing.so* /nixl-runtime/lib/ \
-    && cp /nixl-install/usr/local/lib/plugins/libplugin_POSIX.so /nixl-runtime/lib/plugins/
+    && cp /nixl-install/usr/local/lib/plugins/libplugin_POSIX.so /nixl-runtime/lib/plugins/ \
+    && cp subprojects/liburing-liburing-2.14/LICENSE /nixl-runtime/liburing-LICENSE \
+    && printf '%s\n' "${NIXL_REF}" > /nixl-runtime/NIXL_COMMIT \
+    && tar -czf /nixl-src.tar.gz -C /tmp --exclude-vcs --exclude=nixl/build nixl
+# NIXL also links bundled dependencies such as Abseil. Ship their notices
+# from the exact source tree used above, alongside the complete source archive.
+RUN find /tmp/nixl/subprojects -type f \( -iname 'license*' -o -iname 'copying*' \) \
+      ! -path '*/build/*' > /tmp/nixl-notices \
+    && sort -o /tmp/nixl-notices /tmp/nixl-notices \
+    && while IFS= read -r notice; do \
+        printf '\nCOMPONENT NOTICE: %s\n' "${notice#/tmp/nixl/}" && cat "$notice" || exit 1; \
+      done < /tmp/nixl-notices > /nixl-runtime/THIRD-PARTY-NOTICES.txt
+RUN git -C /tmp/nvtx rev-parse HEAD > /NVTX_COMMIT
 
 FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build
 
@@ -80,28 +92,28 @@ RUN mv /usr/local/lib /usr/local/lib-build \
        done \
     && mv /usr/local/lib-build /usr/local/lib
 
-# Corresponding source for the statically linked protobuf. Fetched in this
-# stage, from the same libprotobuf-dev install that provided the linked
-# libprotobuf.a, and pinned to its source version (see compliance/).
-RUN sh /src/compliance/collect-sources.sh /legal/source/protobuf \
+# Keep source and attribution aligned with the exact libraries being shipped.
+RUN sh compliance/collect-sources.sh /legal/source/protobuf libprotobuf-dev \
+    && sh compliance/collect-sources.sh /legal/source/libaio libaio1t64 \
     && rm -rf /var/lib/apt/lists/*
 
-# Assemble the legal materials so the runtime stage (distroless, no shell) can
-# receive them in a single COPY.
 FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS sources
-
-COPY --from=build /legal/source/protobuf /legal/source/protobuf
+COPY --from=build /legal/source /legal/source
 COPY --from=build /src /legal/source/pagebroker
+COPY --from=nixl /tmp/nvtx/c /legal/source/nvtx/c
+COPY --from=nixl /tmp/nvtx/LICENSE.txt /legal/source/nvtx/copyright
+COPY --from=nixl /NVTX_COMMIT /legal/source/nvtx/VERSION
+COPY --from=nixl /nixl-src.tar.gz /legal/source/nixl/nixl-src.tar.gz
+COPY --from=nixl /nixl-runtime/NIXL_COMMIT /legal/source/nixl/VERSION
+COPY --from=nixl /tmp/nixl/LICENSE /legal/source/nixl/copyright
+COPY --from=nixl /nixl-runtime/liburing-LICENSE /legal/source/nixl/liburing-LICENSE
+COPY --from=nixl /nixl-runtime/THIRD-PARTY-NOTICES.txt /legal/source/nixl/THIRD-PARTY-NOTICES.txt
 COPY compliance/README.source.txt /legal/source/README.txt
-
-RUN rm -rf /legal/source/pagebroker/build \
-           /legal/source/pagebroker/pagebroker \
+RUN rm -rf /legal/source/pagebroker/build /legal/source/pagebroker/pagebroker \
            /legal/source/pagebroker/v1/pagebroker.pb.*
-
-# Attribution generated from the collected source, so it cannot drift from the
-# version actually shipped.
 COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
-RUN sh /tmp/gen-attribution.sh /legal/source/protobuf /legal/THIRD-PARTY.txt
+RUN sh /tmp/gen-attribution.sh /legal/source/protobuf /legal/THIRD-PARTY.txt \
+    /legal/source/libaio /legal/source/nixl /legal/source/nvtx
 
 FROM ${PAGEBROKER_BASE_IMAGE}
 
