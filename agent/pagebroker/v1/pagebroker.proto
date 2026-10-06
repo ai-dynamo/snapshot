@@ -27,12 +27,38 @@ message IOEngine
   }
 }
 
+message GpuDeviceMapping
+{
+  string source_uuid = 1;
+  string target_uuid = 2;
+}
+// GPU execution supplies host PIDs resolved by the agent and the full context.
+// Artifact validation occurs when CheckpointGpu or RestoreGpu runs.
+message GpuContext
+{
+  repeated uint32 captured_pids = 1;
+  repeated string visible_devices = 2;
+  repeated GpuDeviceMapping device_map = 3;
+}
+message GpuTarget
+{
+  uint32 captured_pid = 1;
+  // PID in the host PID namespace.
+  uint32 target_pid = 2;
+}
+// Targets must be nonempty, have unique captured and target PIDs, and match
+// GpuContext.captured_pids. Invalid sets return INVALID_REQUEST without execution.
+message CheckpointGpuRequest { repeated GpuTarget targets = 1; GpuContext context = 2; }
+// Uses the same target validation as CheckpointGpuRequest.
+message RestoreGpuRequest { repeated GpuTarget targets = 1; GpuContext context = 2; }
+message CapabilitiesRequest {}
+
 message StagedRestoreRequest
 {
   StorageBackend source = 1;
   IOEngine io_engine = 2;
 }
-// Allows a future GPU engine to read source data without a staging directory.
+// Keeps the source open for direct reads. Does not create CPU staging files.
 message DirectRestoreRequest
 {
   StorageBackend source = 1;
@@ -43,13 +69,18 @@ message PrepareStagedCheckpointRequest
   StorageBackend destination = 1;
   IOEngine io_engine = 2;
 }
+message PrepareDirectCheckpointRequest
+{
+  StorageBackend destination = 1;
+  IOEngine io_engine = 2;
+}
 // Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
-// Repeating Commit for a retained committed transaction returns CommitComplete; Commit for an aborted, expired, or
-// unknown transaction returns TRANSACTION_NOT_FOUND.
+// Repeating Commit for a retained committed transaction returns CommitComplete.
+// Aborted, expired, or unknown transactions return TRANSACTION_NOT_FOUND.
 message CommitRequest {}
 // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
-// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete; Abort for a committed, expired,
-// or unknown transaction returns TRANSACTION_NOT_FOUND.
+// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete. Abort for a committed or
+// expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
 message AbortRequest {}
 
 message Request
@@ -57,7 +88,8 @@ message Request
   // Snapshot assigns an ID to each request.
   optional string request_id = 1;
   // Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
-  // An uncommitted transaction expires one hour after staging begins.
+  // After two hours and five minutes, the transaction expires. This cancels GPU
+  // work. Expiry cleanup waits for active GPU transfers to stop.
   optional string transaction_id = 2;
   oneof command
   {
@@ -66,6 +98,10 @@ message Request
     CommitRequest commit = 5;
     AbortRequest abort = 6;
     DirectRestoreRequest direct_restore = 7;
+    PrepareDirectCheckpointRequest prepare_direct_checkpoint = 8;
+    CheckpointGpuRequest checkpoint_gpu = 9;
+    RestoreGpuRequest restore_gpu = 10;
+    CapabilitiesRequest capabilities = 11;
   }
 }
 
@@ -74,20 +110,28 @@ message StagedRestoreDirectory
   optional string image_directory = 1;
 }
 message DirectRestoreReady {}
+message DirectCheckpointDirectory { optional string image_directory = 1; }
+message Capabilities { bool custom_storage_available = 1; }
+message GpuParticipantResult
+{
+  uint32 captured_pid = 1;
+  uint64 bytes = 2;
+}
+message GpuComplete { repeated GpuParticipantResult participants = 1; }
 message StagedCheckpointDirectory
 {
   optional string image_directory = 1;
 }
 message CommitComplete {}
-// Confirms only that PageBroker transaction state/content was released; it says nothing about the target
-// process or CUDA state.
+// GPU work and cleanup have finished before transaction files are released.
+// This does not stop a workload that has already restored successfully.
 message AbortComplete {}
 message Failure
 {
   enum Code {
     // No failure code was supplied.
     UNSPECIFIED = 0;
-    // The request is malformed or unsupported. PageBroker did not mutate transaction state.
+    // The request is invalid or unsupported. PageBroker did not change transaction state.
     INVALID_REQUEST = 1;
     // The transaction is unknown or has reached the opposite terminal state.
     TRANSACTION_NOT_FOUND = 2;
@@ -97,7 +141,7 @@ message Failure
     INSUFFICIENT_STORAGE = 4;
     // Storage I/O failed. The caller may Abort the transaction before retrying with a new transaction ID.
     STORAGE_ERROR = 5;
-    // An unexpected broker failure occurred. The caller may Abort the transaction before retrying.
+    // The operation failed or was cancelled. Abort the transaction before retrying.
     INTERNAL_ERROR = 6;
   }
   optional Code code = 1;
@@ -115,5 +159,9 @@ message Response
     AbortComplete abort_complete = 6;
     Failure failure = 7;
     DirectRestoreReady direct_restore_ready = 8;
+    DirectCheckpointDirectory direct_checkpoint_directory = 9;
+    GpuComplete gpu_checkpoint_complete = 10;
+    GpuComplete gpu_restore_complete = 11;
+    Capabilities capabilities = 12;
   }
 }
