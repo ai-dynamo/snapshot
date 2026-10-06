@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# One-node DeepSeek V4.1 Flash example on 4 B200 GPUs.
+# One-node DeepSeek V4.1 Flash example on 8 B200 GPUs.
 # Engine kwargs below use a 128K context and bounded concurrency.
 
 apiVersion: apps/v1
@@ -73,7 +73,7 @@ spec:
           command: [/tmp/snapshot-cuda/cuinterpose-launch, --library, /tmp/snapshot-cuda/libcuinterpose.so, --, python3,
             /snapshot-app/app.py]
           env:
-            - {name: SNAPSHOT_TENSOR_PARALLEL_SIZE, value: "4"}
+            - {name: SNAPSHOT_TENSOR_PARALLEL_SIZE, value: "8"}
             - {name: HF_HUB_DISABLE_XET, value: "1"}
             - {name: SNAPSHOT_MODEL, value: deepseek-ai/DeepSeek-V4.1-Flash}
             - name: VLLM_ENGINE_ARGS
@@ -100,7 +100,7 @@ spec:
             - {name: api, containerPort: 8000}
           resources:
             requests: {cpu: "16", memory: 1Ti}
-            limits: {memory: 1Ti, nvidia.com/gpu: "4"}
+            limits: {memory: 1Ti, nvidia.com/gpu: "8"}
           readinessProbe:
             exec:
               command: [cat, /snapshot-control/ready-for-snapshot]
