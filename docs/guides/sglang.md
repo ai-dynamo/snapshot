@@ -143,7 +143,7 @@ Deploy the edited manifest:
 kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename deployment.yaml
 ```
 
-The init container downloads the model when its cache marker does not exist. The
+The init container reuses cached model files and downloads missing files. The
 main container then starts SGLang from the offline cache.
 
 Wait until the SGLang replica finishes initialization and becomes safe to

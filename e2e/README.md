@@ -210,8 +210,8 @@ Model weights come from one of two places:
   in an init container into a PVC. The test creates the guide's PVC if missing
   (with `SNAPSHOT_E2E_STORAGE_CLASS` when set) and leaves it in place. The small
   vLLM and TensorRT-LLM recipes download in-process. Downloads need working DNS
-  and egress. A failed download retries on the next startup. A large recipe's
-  completion marker includes the pinned model revision.
+  and egress. A failed download retries on the next startup. Large recipes reuse
+  cached files and download missing files for the pinned model revision.
 
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.
