@@ -80,7 +80,6 @@ spec:
           {{- end }}
           args:
             - {{ printf "--snapshot-storage-base-path=%v" .Values.storage.pvc.basePath | quote }}
-            - --snapshot-storage-config=/etc/snapshot/storage.yaml
             - {{ printf "--artifact-cleanup-scan-interval=%v" .Values.operator.artifactCleanup.scanInterval | quote }}
             - {{ printf "--artifact-cleanup-batch-size=%v" .Values.operator.artifactCleanup.batchSize | quote }}
             - {{ printf "--artifact-cleanup-list-attempts=%v" .Values.operator.artifactCleanup.listAttempts | quote }}
@@ -89,6 +88,7 @@ spec:
             # CuInterpose libraries for opted-in workloads.
             - {{ printf "--cuinterpose-image=%s" (include "snapshot.agentImage" .) | quote }}
             - {{ printf "--cuinterpose-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
+            - --snapshot-storage-config=/etc/snapshot/storage.yaml
           volumeMounts:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}
