@@ -5,6 +5,69 @@ suite: PageBroker sidecar image
 templates:
   - templates/daemonset.yaml
 tests:
+  - it: embeds GPU execution in the default PageBroker sidecar
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 2
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: pagebroker
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.privileged
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NVIDIA_VISIBLE_DEVICES
+            value: all
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NVIDIA_DRIVER_CAPABILITIES
+            value: compute,utility
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - /pagebroker/control/pagebroker.sock
+            - /pagebroker/staging
+            - /checkpoints
+            - --max-concurrent-requests
+            - "16"
+            - --gpu-buffer-count
+            - "32"
+            - --gpu-chunk-bytes
+            - "134217728"
+            - --gpu-max-pinned-bytes
+            - "0"
+
+  - it: applies the configured pinned-memory budget to the owning process
+    set:
+      pageBroker.transferBufferCount: 4
+      pageBroker.transferChunkBytes: 1048576
+      pageBroker.maxPinnedBytes: 8388608
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args[6]
+          value: "4"
+      - equal:
+          path: spec.template.spec.containers[0].args[8]
+          value: "1048576"
+      - equal:
+          path: spec.template.spec.containers[0].args[10]
+          value: "8388608"
+
+  - it: supports conventional checkpointing with PageBroker disabled
+    set:
+      pageBroker.enabled: false
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: agent
+
   - it: pulls the sidecar from its own repository at the agent's tag
     set:
       pageBroker.enabled: true
@@ -21,15 +84,17 @@ tests:
           value: Always
 
   - it: defaults the sidecar tag to the chart appVersion like the agent
+    chart:
+      appVersion: v9.8.7
     set:
       pageBroker.enabled: true
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/ai-dynamo/snapshot/pagebroker:v0.1.0
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:v9.8.7
       - equal:
           path: spec.template.spec.containers[1].image
-          value: ghcr.io/ai-dynamo/snapshot/agent:v0.1.0
+          value: ghcr.io/ai-dynamo/snapshot/agent:v9.8.7
 
   - it: follows image.pageBroker overrides
     set:

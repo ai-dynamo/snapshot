@@ -103,11 +103,22 @@ storage:
   oci:
     uri: ""
 
+# PageBroker owns CustomStorage CUDA calls and transfers in one process.
+# CustomStorage requires the CPU staging pod annotation and driver support.
 pageBroker:
-  enabled: false
+  enabled: true
   command: []
   args: []
   maxConcurrentRequests: 16
+  # Allocate and register the full ring before accepting GPU work.
+  # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
+  transferBufferCount: 32
+  transferChunkBytes: 134217728
+  # Zero is uncapped. This limit includes CUDA allocation-granularity rounding.
+  maxPinnedBytes: 0
+  # Requires 32 GiB of free allocatable memory, plus the agent request.
+  # Override for each node profile. Budget 4 GiB per GPU plus process and staging
+  # overhead. A lower request does not reduce the pinned ring allocation.
   resources:
     requests:
       cpu: 8

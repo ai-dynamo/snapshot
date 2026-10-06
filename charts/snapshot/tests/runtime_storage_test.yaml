@@ -8,7 +8,7 @@ tests:
   - it: defaults the runtime-storage volume to the containerd path on host and in container
     asserts:
       - contains:
-          path: spec.template.spec.containers[0].volumeMounts
+          path: spec.template.spec.containers[1].volumeMounts
           content:
             name: runtime-storage
             mountPath: /var/lib/containerd
@@ -28,7 +28,7 @@ tests:
       runtime.storageDir: /var/lib/rancher/rke2/agent/containerd
     asserts:
       - contains:
-          path: spec.template.spec.containers[0].volumeMounts
+          path: spec.template.spec.containers[1].volumeMounts
           content:
             name: runtime-storage
             mountPath: /var/lib/rancher/rke2/agent/containerd

@@ -186,6 +186,30 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `storage.pvc.storageClass` | `""` | Storage class; empty uses the cluster default. Must support `ReadWriteMany`. |
 | `storage.pvc.basePath` | `/checkpoints` | Fixed agent mount path; cannot be changed. |
 
+### PageBroker GPU engine
+
+PageBroker runs in a persistent container in the agent DaemonSet. Its GPU engine
+uses CustomStorage when the pod has `nvidia.com/snapshot-pagebroker: "true"`
+and the driver supports it.
+The agent runs CRIU. Without the CPU staging annotation, capture uses the
+driver-managed format. Restoring a CustomStorage artifact requires CPU staging
+and reads GPU payloads directly from the original checkpoint. Restore uses the
+format recorded in the artifact. Direct restore support is deferred.
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `pageBroker.enabled` | `true` | Deploy and use PageBroker. |
+| `pageBroker.maxConcurrentRequests` | `16` | Concurrent control request limit. |
+| `pageBroker.transferBufferCount` | `32` | Persistent ring slots per visible GPU. |
+| `pageBroker.transferChunkBytes` | `134217728` | Bytes per slot before allocation rounding. |
+| `pageBroker.maxPinnedBytes` | `0` | Total pinned memory limit. Zero sets no limit. |
+| `pageBroker.resources` | 8 CPU / 32Gi request, 32 CPU / 256Gi limit | Resources for the broker and embedded GPU engine. |
+
+The default rings reserve 4 GiB per GPU, or 32 GiB for eight GPUs, plus overhead.
+PageBroker checks the memory budget before it reports GPU readiness. It checks
+manifest structure and exact extent lengths. It does not generate or verify GPU
+payload checksums.
+
 ### Agent DaemonSet and access
 
 | Value | Default | Description |

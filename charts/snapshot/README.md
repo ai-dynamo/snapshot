@@ -181,6 +181,10 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `image.agent.repository` | Agent image repository | `ghcr.io/ai-dynamo/snapshot/agent` |
 | `image.agent.tag` | Agent and PageBroker image tag (empty = chart appVersion) | `""` |
 | `image.pageBroker.repository` | PageBroker sidecar image repository. Always pulled at `image.agent.tag` | `ghcr.io/ai-dynamo/snapshot/pagebroker` |
+| `pageBroker.enabled` | Deploy the storage broker and embedded GPU engine | `true` |
+| `pageBroker.transferBufferCount` | Persistent transfer slots per visible GPU | `32` |
+| `pageBroker.transferChunkBytes` | Bytes per transfer slot | `134217728` |
+| `pageBroker.maxPinnedBytes` | Total pinned memory limit, including allocation rounding. Zero sets no limit | `0` |
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
 | `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 128Mi limit |
 | `storage.type` | Snapshot-owned storage backend | `pvc` |
@@ -200,6 +204,12 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
+
+PageBroker uses CustomStorage when the driver supports it. Restore follows the
+saved artifact format. The default transfer rings reserve 4 GiB per GPU, or
+32 GiB on an eight-GPU node, plus overhead. Set PageBroker's container resources
+to cover this memory and process overhead. The existing pod annotation controls
+CPU staging. See the [engine design](../../docs/proposals/238-pagebroker-gpu-engine/README.md).
 
 See [values.yaml](./values.yaml) for the full configuration surface.
 

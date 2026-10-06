@@ -125,7 +125,20 @@ spec:
             - {{ .Values.storage.pvc.basePath | quote }}
             - --max-concurrent-requests
             - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
+            - --gpu-buffer-count
+            - {{ .Values.pageBroker.transferBufferCount | int64 | quote }}
+            - --gpu-chunk-bytes
+            - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
+            - --gpu-max-pinned-bytes
+            - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
             {{- end }}
+          securityContext:
+            privileged: true
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
@@ -152,6 +165,11 @@ spec:
                   fieldPath: spec.nodeName
             - name: SNAPSHOT_LOG_LEVEL
               value: {{ .Values.daemonset.snapshotLogLevel | quote }}
+            # Conventional CUDA queries need the host driver libraries.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
           volumeMounts:
             # Mount configuration ConfigMap
             - name: config

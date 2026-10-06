@@ -42,6 +42,13 @@ commit-level history for each release is on its
   populated for captures that reach `Ready` after the upgrade, so a content
   already `Ready` before it is not backfilled.
 
+### Changed
+
+- The chart enables PageBroker by default. Upgrades that apply the new defaults
+  add a privileged container with GPU access to each agent pod. It requests
+  8 CPU and 32 GiB of memory per pod. Check node capacity before upgrading, or
+  set `pageBroker.enabled=false` to opt out.
+
 ## [0.1.0] - 2026-09-06
 
 First release. Snapshot checkpoints a fully initialized GPU pod — running
