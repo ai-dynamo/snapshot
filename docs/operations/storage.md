@@ -113,8 +113,7 @@ reserved in the chart for future use and are not supported today.
 
 ### PageBroker restore source
 
-When PageBroker is enabled, `pageBroker.restoreMode` selects the restore source
-for pods that do not set `nvidia.com/snapshot-pagebroker: "false"`:
+`pageBroker.restoreMode` selects the restore source for every restore:
 
 - `direct` (default) prepares a PageBroker transaction and mounts the original
   checkpoint directory read-only for CRIU. It does not copy CPU images into staging.
