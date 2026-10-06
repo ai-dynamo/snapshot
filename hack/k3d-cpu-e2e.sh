@@ -35,7 +35,10 @@ K3S_IMAGE="${SNAPSHOT_E2E_K3S_IMAGE:-docker.io/rancher/k3s:v1.32.13-k3s1}"
 HOST_CHECKPOINTS="${SNAPSHOT_E2E_CHECKPOINT_HOST:-${RUNNER_TEMP:-/tmp}/snapshot-checkpoints}"
 NODE_CHECKPOINTS="${SNAPSHOT_E2E_CHECKPOINT_NODE:-/checkpoints-data}"
 
-KUBECONFIG_OUT="${SNAPSHOT_E2E_KUBECONFIG:-${KUBECONFIG:-}}"
+# Deliberately not falling back to KUBECONFIG: this file is overwritten with the
+# new cluster's credentials, and a developer whose KUBECONFIG points at a real
+# cluster would lose it.
+KUBECONFIG_OUT="${SNAPSHOT_E2E_KUBECONFIG:-}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -48,7 +51,9 @@ commands:
                  line, for the installer's SNAPSHOT_E2E_HELM_SET
 
 environment:
-  SNAPSHOT_E2E_KUBECONFIG   where to write the kubeconfig (required)
+  SNAPSHOT_E2E_KUBECONFIG   where to write the kubeconfig (required; the file
+                            is overwritten, so do not point it at a kubeconfig
+                            you want to keep)
   SNAPSHOT_E2E_K3D_CLUSTER  cluster name (default: snapshot-k3d-cpu)
   SNAPSHOT_E2E_K3S_IMAGE    k3s node image (default: v1.32.13-k3s1)
   SNAPSHOT_E2E_PVC_SIZE, SNAPSHOT_E2E_STORAGE_CLASS,
@@ -172,7 +177,7 @@ EOF
 cluster_up() {
   require_tools
   if [[ -z "${KUBECONFIG_OUT}" ]]; then
-    echo "SNAPSHOT_E2E_KUBECONFIG or KUBECONFIG is required" >&2
+    echo "SNAPSHOT_E2E_KUBECONFIG is required: it names the file to write" >&2
     exit 1
   fi
 

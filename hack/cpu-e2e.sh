@@ -72,8 +72,11 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
     DOCKER_BUILD_ARGS="--load"
 fi
 
-hack/k3d-cpu-e2e.sh cluster-up
+# Registered before the cluster exists: cluster-up can create the node and then
+# fail while configuring it, and cluster-down tolerates there being nothing to
+# delete.
 trap cleanup EXIT
+hack/k3d-cpu-e2e.sh cluster-up
 
 log "importing images into ${SNAPSHOT_E2E_K3D_CLUSTER}"
 k3d image import \
@@ -82,13 +85,16 @@ k3d image import \
   --cluster "${SNAPSHOT_E2E_K3D_CLUSTER}"
 
 log "installing Snapshot"
-export SNAPSHOT_E2E_HELM_SET="$(
-  hack/k3d-cpu-e2e.sh helm-set
-  echo "image.operator.repository=${IMAGE_REGISTRY}/operator"
-  echo "image.agent.repository=${IMAGE_REGISTRY}/agent"
-  echo "image.operator.pullPolicy=IfNotPresent"
-  echo "image.agent.pullPolicy=IfNotPresent"
-)"
+# The helper is alone in its substitution, and assigned rather than exported, so
+# that `set -e` sees it fail. A substitution reports the status of its *last*
+# command, so appending the image lines inside it would hide a failure here, and
+# `export` would hide it again.
+cluster_values="$(hack/k3d-cpu-e2e.sh helm-set)"
+export SNAPSHOT_E2E_HELM_SET="${cluster_values}
+image.operator.repository=${IMAGE_REGISTRY}/operator
+image.agent.repository=${IMAGE_REGISTRY}/agent
+image.operator.pullPolicy=IfNotPresent
+image.agent.pullPolicy=IfNotPresent"
 uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
   --phase snapshot-install --skip-host-preflight
 uv run --locked --project e2e python -m snapshot_e2e.infra.setup \

@@ -29,6 +29,8 @@ on:
       - "**/go.sum"
       - "Makefile"
       - "hack/tools.mk"
+      # A named build context of the agent image, so it changes that image.
+      - "hack/compliance/**"
       - "hack/k3d-cpu-e2e.sh"
       - ".github/workflows/e2e-cpu.yaml"
   workflow_dispatch:
@@ -161,13 +163,17 @@ jobs:
           # The cluster contributes the values that describe itself; this job
           # adds only the images it just built, which must be used from the
           # node rather than pulled.
-          export SNAPSHOT_E2E_HELM_SET="$(
-            hack/k3d-cpu-e2e.sh helm-set
-            echo "image.operator.repository=${IMAGE_REGISTRY}/operator"
-            echo "image.agent.repository=${IMAGE_REGISTRY}/agent"
-            echo "image.operator.pullPolicy=IfNotPresent"
-            echo "image.agent.pullPolicy=IfNotPresent"
-          )"
+          #
+          # The helper is alone in its substitution, and assigned rather than
+          # exported, so that `set -e` sees it fail. A substitution reports the
+          # status of its *last* command, so appending the image lines inside it
+          # would hide a failure here, and `export` would hide it again.
+          cluster_values="$(hack/k3d-cpu-e2e.sh helm-set)"
+          export SNAPSHOT_E2E_HELM_SET="${cluster_values}
+          image.operator.repository=${IMAGE_REGISTRY}/operator
+          image.agent.repository=${IMAGE_REGISTRY}/agent
+          image.operator.pullPolicy=IfNotPresent
+          image.agent.pullPolicy=IfNotPresent"
           uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-install \
             --skip-host-preflight
