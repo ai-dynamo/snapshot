@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable
 
 import yaml
@@ -223,6 +224,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Optional JSON file to write setup outputs.",
     )
     parser.add_argument(
+        "--helm-set",
+        action="append",
+        metavar="KEY=VALUE",
+        help=(
+            "Extra Helm --set assignment for the Snapshot chart, repeatable. "
+            "Applied after the defaults, so it can override them. Falls back to "
+            "SNAPSHOT_E2E_HELM_SET, one assignment per line."
+        ),
+    )
+    parser.add_argument(
         "--skip-host-preflight",
         action="store_true",
         help="Skip GPU Operator and GPU node preflight checks.",
@@ -350,6 +361,9 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
         image_tag=args.snapshot_tag,
         pvc_name=args.pvc_name,
         timeout=args.helm_timeout,
+        helm_overrides=parse_helm_overrides(
+            args.helm_set, os.environ.get("SNAPSHOT_E2E_HELM_SET")
+        ),
     )
 
 
@@ -860,6 +874,28 @@ def ensure_checkpoint_pvc(
         log(f"PVC {namespace}/{name} already exists: {detail}")
 
 
+def parse_helm_overrides(
+    values: Sequence[str] | None, env_value: str | None = None
+) -> list[str]:
+    """Validate extra Helm --set assignments.
+
+    CLI flags win over the newline-separated environment fallback. Assignments
+    reach helm verbatim, so they follow helm's own --set syntax: a comma starts
+    the next assignment unless it is escaped as `\\,`.
+    """
+    raw = list(values) if values else (env_value or "").splitlines()
+    overrides = []
+    for item in raw:
+        entry = item.strip()
+        if not entry:
+            continue
+        key, separator, _ = entry.partition("=")
+        if not separator or not key:
+            raise SetupError(f"--helm-set expects KEY=VALUE, got {entry!r}")
+        overrides.append(entry)
+    return overrides
+
+
 def install_snapshot_chart(
     *,
     kubeconfig: str | None,
@@ -868,6 +904,7 @@ def install_snapshot_chart(
     image_tag: str,
     pvc_name: str,
     timeout: str,
+    helm_overrides: Sequence[str] = (),
 ) -> None:
     log(f"Installing Snapshot chart release {namespace}/{release}")
     command = [
@@ -894,6 +931,11 @@ def install_snapshot_chart(
         "--set-json",
         "daemonset.imagePullSecrets=[]",
     ]
+    # Appended last so a caller can override any of the defaults above. Clusters
+    # without published images need this for image repositories, pull policy,
+    # and the container runtime paths.
+    for override in helm_overrides:
+        command.extend(["--set", override])
     env = os.environ.copy()
     if kubeconfig:
         env["KUBECONFIG"] = kubeconfig

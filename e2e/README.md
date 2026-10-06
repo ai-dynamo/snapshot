@@ -16,6 +16,19 @@ Set `SNAPSHOT_E2E_STORAGE_CLASS` when the cluster default cannot provision RWX
 claims. The AKS workflow uses `azurefile-csi`; local runs default to the
 cluster's default storage class.
 
+Set `SNAPSHOT_E2E_AVOID_MIG=true` on clusters that serve both MIG-capable
+and non-MIG GPU pools, so workload pods pin the non-MIG pool the way host
+preflight does. Clusters with one GPU pool do not expose
+`nvidia.com/mig.config` at all, and selecting on a label the nodes lack leaves
+every workload pod unschedulable — so this stays off by default.
+
+Pass `--helm-set KEY=VALUE` to `setup.py` (repeatable, or
+`SNAPSHOT_E2E_HELM_SET` with one assignment per line) to override chart values
+the installer does not set itself, such as image repositories for images that
+were built locally rather than published. Assignments reach `helm --set`
+unchanged and follow its syntax, so a literal comma in a value has to be
+escaped as `\,`.
+
 ## Modes
 
 ### CI Mode
