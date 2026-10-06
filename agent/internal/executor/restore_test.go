@@ -5,8 +5,11 @@ package executor
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,11 +19,117 @@ import (
 
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
+
+func TestRestoreUsesSavedCUDAFormat(t *testing.T) {
+	for _, engine := range []bool{false, true} {
+		for _, requested := range []bool{false, true} {
+			for _, storage := range []string{"cpu", "driver", "custom"} {
+				t.Run(fmt.Sprintf("engine-%t/requested-%t/%s", engine, requested, storage), func(t *testing.T) {
+					base := t.TempDir()
+					directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.MkdirAll(directory, 0700); err != nil {
+						t.Fatal(err)
+					}
+					manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+						types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+					if storage != "cpu" {
+						manifest.CUDA = types.CUDAManifest{PIDs: []int{12}, CustomStorage: storage == "custom"}
+						if err := os.WriteFile(filepath.Join(directory, podcontract.CUDAJobFileName), []byte("launch-state"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := types.WriteManifest(directory, manifest); err != nil {
+						t.Fatal(err)
+					}
+					log := testr.New(t)
+					_, err = Restore(context.Background(), checkpointPathRuntime{}, log, RestoreRequest{
+						BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+						PageBrokerEnabled: engine, PageBrokerRequested: requested,
+					}, nsmount.New(log))
+					// CustomStorage checks broker support before runtime inspection.
+					want := "stop after path preparation"
+					if storage == "custom" && engine {
+						want = "check PageBroker CustomStorage support"
+					}
+					if storage == "custom" && engine && !requested {
+						want = "CustomStorage restore requires nvidia.com/snapshot-pagebroker=true"
+					}
+					if storage == "custom" && !engine {
+						want = "CustomStorage checkpoint requires PageBroker"
+					}
+					if err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("restore error=%v; want %s", err, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCustomStorageRestoreRequiresExecutionSocket(t *testing.T) {
+	directory := t.TempDir()
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	manifest.CUDA = types.CUDAManifest{PIDs: []int{12}, CustomStorage: true}
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+	_, err := RestoreInNamespace(context.Background(), RestoreOptions{CheckpointPath: directory}, testr.New(t))
+	if err == nil || !strings.Contains(err.Error(), "CustomStorage restore requires PageBroker GPU execution") {
+		t.Fatalf("unexpected missing-session result: %v", err)
+	}
+}
+
+func TestCUDAHelperLibraryDirectorySurvivesBundleRemoval(t *testing.T) {
+	bundle := t.TempDir()
+	libraryDir := filepath.Join(bundle, "lib")
+	if err := os.Mkdir(libraryDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libraryDir, "libfixture.so"), []byte("library"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LD_LIBRARY_PATH", "/old-libraries")
+	libraries, err := os.Open(libraryDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer libraries.Close()
+	if err := os.Rename(libraryDir, filepath.Join(bundle, "detached")); err != nil {
+		t.Fatal(err)
+	}
+	restoreLibraryPath, err := useCUDAHelperLibraries(libraries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restoreLibraryPath()
+	path, _, _ := strings.Cut(os.Getenv("LD_LIBRARY_PATH"), ":")
+	data, err := os.ReadFile(filepath.Join(path, "libfixture.so"))
+	if err != nil || string(data) != "library" {
+		t.Fatalf("pinned library lookup failed after original path disappeared: %q, %v", data, err)
+	}
+	restoreLibraryPath()
+	if err := libraries.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("LD_LIBRARY_PATH") != "/old-libraries" {
+		t.Fatal("library environment was not restored")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("library descriptor remains after cleanup: %v", err)
+	}
+}
 
 func TestInspectCompatibilityChecksMappedGPUMountAndOrdinaryMounts(t *testing.T) {
 	root := t.TempDir()
@@ -395,5 +504,110 @@ func TestExistingMountPaths(t *testing.T) {
 
 	if got := existingMountPaths(targetRoot, nil, nil); len(got) != 0 {
 		t.Errorf("existingMountPaths of nothing = %#v, want empty", got)
+	}
+}
+
+type cleanupMount struct{ count *int }
+
+func (m cleanupMount) Unmount(context.Context) error { *m.count++; return nil }
+func (m cleanupMount) NsFd() *os.File                { return nil }
+
+type cleanupMounter struct{ bundle, staging int }
+
+func (m *cleanupMounter) MountBundle(context.Context, int) (nsmount.MountPoint, error) {
+	return cleanupMount{&m.bundle}, nil
+}
+func (m *cleanupMounter) MountPageBroker(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return cleanupMount{&m.staging}, nil
+}
+func (m *cleanupMounter) MountArtifact(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return nil, errors.New("unexpected artifact mount")
+}
+
+func TestCPUStagedRestoreCleansMountsWhenAbortReplyIsLost(t *testing.T) {
+	base := t.TempDir()
+	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "broker.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := make(chan error, 1)
+	go func() {
+		for stage := 0; stage < 2; stage++ {
+			conn, err := listener.Accept()
+			if err != nil {
+				server <- err
+				return
+			}
+			request := new(pagebroker.Request)
+			var size uint32
+			err = binary.Read(conn, binary.BigEndian, &size)
+			if err == nil {
+				data := make([]byte, size)
+				_, err = io.ReadFull(conn, data)
+				if err == nil {
+					err = proto.Unmarshal(data, request)
+				}
+			}
+			if err != nil {
+				conn.Close()
+				server <- err
+				return
+			}
+			if stage == 1 {
+				conn.Close()
+				if request.GetAbort() == nil {
+					server <- errors.New("expected Abort")
+					return
+				}
+				server <- nil
+				return
+			}
+			response := &pagebroker.Response{RequestId: request.RequestId, TransactionId: request.TransactionId,
+				Result: &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}}}
+			data, err := proto.Marshal(response)
+			if err == nil {
+				err = binary.Write(conn, binary.BigEndian, uint32(len(data)))
+			}
+			if err == nil {
+				_, err = conn.Write(data)
+			}
+			conn.Close()
+			if err != nil {
+				server <- err
+				return
+			}
+		}
+	}()
+	mounts := &cleanupMounter{}
+	_, err = Restore(context.Background(), &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		PageBrokerEnabled: true, PageBrokerRequested: true, PageBrokerControlSocketPath: listener.Addr().String(),
+	}, mounts)
+	if err == nil {
+		t.Fatal("expected restore failure")
+	}
+	if mounts.bundle != 1 || mounts.staging != 1 {
+		t.Fatalf("mount cleanup: %+v; restore: %v", mounts, err)
+	}
+	select {
+	case err := <-server:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Abort was not sent")
 	}
 }

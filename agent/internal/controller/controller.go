@@ -928,6 +928,12 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 			return incompatible
 		}
 
+		var drainErr *executor.GPUDrainError
+		if errors.As(err, &drainErr) {
+			// Keep targets alive until PageBroker finishes cleanup or exits.
+			return err
+		}
+
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
 			return op.failRestore(ctx, err)

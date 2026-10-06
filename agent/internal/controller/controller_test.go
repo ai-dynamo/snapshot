@@ -1601,3 +1601,23 @@ func TestCheckpointLeaseNameUsesContentAndContainer(t *testing.T) {
 	assert.NotEqual(t, a, b)
 	assert.True(t, strings.HasPrefix(a, "snapshot-capture-"))
 }
+
+func TestRunRestorePreservesTargetsUntilGPUDrainConfirmed(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+	failure := &executor.GPUDrainError{Err: errors.New("PageBroker Abort reply lost")}
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		return 0, failure
+	}
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		t.Fatal("controller killed target before confirmed GPU drain")
+		return nil
+	}
+	w.writeControlSentinelFn = func(int, string) error {
+		t.Fatal("controller released workload after unconfirmed GPU drain")
+		return nil
+	}
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
+	require.ErrorIs(t, err, failure)
+}

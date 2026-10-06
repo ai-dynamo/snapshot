@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
@@ -22,6 +24,11 @@ func main() {
 	log := logging.ConfigureLogger("stderr").WithName("nsrestore")
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
+	gpuFD := flag.Int("gpu-directory-fd", -1, "Inherited PageBroker socket directory")
+	hostProcFD := flag.Int("host-proc-fd", -1, "Inherited host proc directory for PID resolution")
+	gpuSocketName := flag.String("gpu-socket-name", "", "PageBroker control socket name")
+	gpuContext := flag.String("gpu-context", "", "GPU execution context JSON")
+	gpuTransaction := flag.String("gpu-transaction", "", "PageBroker storage transaction")
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	gpuMountAliases := flag.String("gpu-mount-aliases", "{}", "Checkpoint path to destination GPU path JSON")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
@@ -43,6 +50,24 @@ func main() {
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
 		BundleDir:      *bundleDir,
+	}
+
+	if *gpuFD != -1 || *gpuTransaction != "" {
+		if *gpuFD < 3 || *hostProcFD < 3 || *gpuTransaction == "" || *gpuSocketName == "" {
+			fatal(log, nil, "GPU execution requires socket and host proc directories and a transaction ID")
+		}
+		unix.CloseOnExec(*gpuFD)
+		unix.CloseOnExec(*hostProcFD)
+		executionContext := new(pagebroker.GpuContext)
+		if err := json.Unmarshal([]byte(*gpuContext), executionContext); err != nil {
+			fatal(log, err, "invalid GPU execution context")
+		}
+		opts.GPUExecution = &pagebroker.GPUExecution{Directory: os.NewFile(uintptr(*gpuFD), "pagebroker-directory"),
+			SocketName: *gpuSocketName,
+			Context:    executionContext, TransactionID: *gpuTransaction}
+		defer opts.GPUExecution.Close()
+		opts.HostProc = os.NewFile(uintptr(*hostProcFD), "host-proc")
+		defer opts.HostProc.Close()
 	}
 
 	if err := json.Unmarshal([]byte(*gpuMountAliases), &opts.GPUMountAliases); err != nil {

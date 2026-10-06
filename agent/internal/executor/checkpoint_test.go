@@ -57,7 +57,7 @@ func (checkpointImageRuntime) ResolveContainerImageID(context.Context, string) (
 	return "", errors.New("runtime image unavailable")
 }
 
-func TestCheckpointPreparesContentArtifactParents(t *testing.T) {
+func TestCheckpointDoesNotCreateArtifactsBeforeInspection(t *testing.T) {
 	cfg := &types.AgentConfig{Storage: types.StorageSpec{BasePath: t.TempDir()}}
 	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, "content-uid", "main")
 	require.NoError(t, err)
@@ -67,8 +67,8 @@ func TestCheckpointPreparesContentArtifactParents(t *testing.T) {
 		ContainerName: "main",
 	}, cfg)
 	require.ErrorContains(t, err, "stop after path preparation")
-	assert.DirExists(t, filepath.Dir(finalDir))
-	assert.DirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts", "content-uid", ".tmp"))
+	assert.NoDirExists(t, filepath.Dir(finalDir))
+	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts", "content-uid", ".tmp"))
 }
 
 func TestInspectContainerToleratesUnreadableRuntimeImageID(t *testing.T) {
@@ -120,23 +120,16 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 	assert.Equal(t, "sha256:runtime-content", manifest.K8s.ImageID)
 }
 
-func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
-	cfg := &types.AgentConfig{
-		Storage:    types.StorageSpec{BasePath: t.TempDir()},
-		PageBroker: types.PageBrokerSpec{Enabled: true, ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
-	}
-
-	err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
-		ContentUID:          "content-uid",
-		ContainerName:       "main",
-		PageBrokerRequested: true,
-	}, cfg)
-	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
-	assert.False(t, CheckpointNeedsSourceKill(err))
+func TestGPUCheckpointCannotFallBackWhenExecutionIsMissing(t *testing.T) {
+	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{}, &types.CheckpointManifest{CUDA: types.CUDAManifest{CustomStorage: true}},
+		&types.CheckpointContainerSnapshot{CUDAHostPIDs: []int{12}, CUDANSPIDs: []int{12}},
+		t.TempDir(), "", logr.Discard(), nil)
+	require.ErrorContains(t, err, "missing PageBroker GPU execution context")
 }
 
 func TestCheckpointNeedsSourceKill(t *testing.T) {
 	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
 	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
+	assert.False(t, CheckpointNeedsSourceKill(&GPUDrainError{Err: checkpointNeedsSourceKill(errors.New("abort unconfirmed"))}))
 	assert.False(t, CheckpointNeedsSourceKill(fmt.Errorf("commit PageBroker checkpoint: %w", errors.New("failed"))))
 }

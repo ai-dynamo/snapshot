@@ -52,6 +52,16 @@ func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destinatio
 	return imageDirectory(response.GetStagedCheckpointDirectory().GetImageDirectory())
 }
 
+func (c Client) PrepareDirectCheckpoint(ctx context.Context, transactionID, destination string) (string, error) {
+	response, err := c.request(ctx, transactionID, &Request_PrepareDirectCheckpoint{
+		PrepareDirectCheckpoint: &PrepareDirectCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return "", err
+	}
+	return imageDirectory(response.GetDirectCheckpointDirectory().GetImageDirectory())
+}
+
 func imageDirectory(directory string) (string, error) {
 	if directory == "" {
 		return "", fmt.Errorf("unexpected PageBroker staging response")
@@ -115,11 +125,21 @@ func (c Client) request(ctx context.Context, transactionID string, command isReq
 		return nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
 	}
 	defer connection.Close()
-	stopCancel := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	return exchange(ctx, connection.(*net.UnixConn), transactionID, command)
+}
+
+func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command) (*Response, error) {
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = connection.CloseWrite()
+		_ = connection.Close()
+	})
 	defer stopCancel()
 
 	requestID := uuid.NewString()
-	request := &Request{RequestId: &requestID, TransactionId: &transactionID, Command: command}
+	request := &Request{RequestId: &requestID, Command: command}
+	if transactionID != "" {
+		request.TransactionId = &transactionID
+	}
 	message, err := proto.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("marshal PageBroker request: %w", err)
