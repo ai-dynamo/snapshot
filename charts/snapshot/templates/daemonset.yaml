@@ -198,11 +198,13 @@ spec:
             - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
             - --custom-storage-max-pinned-bytes
             - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
+            # The same resolved store identity the operator reads, so the
+            # broker refuses artifact requests bound to any other store.
+            - --storage-config
+            - /etc/snapshot/storage.yaml
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
-            # Expose the same PVC identity to the external artifact-contract
-            # build. The current filesystem-only broker keeps its existing args.
             - name: storage-config
               mountPath: /etc/snapshot
               readOnly: true

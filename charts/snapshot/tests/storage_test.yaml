@@ -61,6 +61,12 @@ tests:
     template: templates/daemonset.yaml
     asserts:
       - contains:
+          path: spec.template.spec.containers[1].args
+          content: --storage-config
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: /etc/snapshot/storage.yaml
+      - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: config
