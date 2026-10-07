@@ -61,7 +61,8 @@ future stores be added with minimal changes to workload APIs.
 ### Non-Goals
 
 - Storage classes, simultaneous stores, automatic fallback or artifact migration.
-- Direct streaming, new feature-discovery APIs or workload-identity implementation.
+- Direct (unstaged) restore from S3, new feature-discovery APIs or
+  workload-identity implementation.
 - Moving CRIU/process orchestration into PageBroker or redesigning CUDA execution.
 - Cross-component operation leases and generation fencing in Stage 1; those are
   deferred to Stage 2 after the conservative deletion contract is qualified.
@@ -98,8 +99,10 @@ PVC or S3 through their own backend adapters.
   clock-skew allowance has elapsed from the deletion timestamp. PageBroker expires
   every admitted transaction within that bound and checks expiry immediately before
   publishing an index or issuing another storage read. Failed, partial, unknown or
-  premature cleanup retains the finalizer. Stage 2 replaces the conservative wait
-  with explicit active-operation tracking and generation fencing.
+  premature cleanup retains the finalizer. Because the transaction lifetime is a
+  2h05m constant, Stage 1 artifact reclamation lags a content deletion by at least
+  that long. Stage 2 replaces the conservative wait with explicit active-operation
+  tracking and generation fencing.
 - **Metadata loss:** back up Kubernetes content metadata separately. During ownership
   recovery, pause capture, restore and orphan deletion across restarts until
   administrator resume.
@@ -174,9 +177,11 @@ listed at the end of this section.
   and backend implementations for PVC, then S3 and future stores, called in-process
   by workers. They access storage directly; maintenance does not call PageBroker.
 - **Work item keys:** a typed key carries mode (`delete-content`, `sweep` or
-  `recover-metadata`), the expected store ID and configuration; deletion also
-  names the content and its artifact UID. These identify authorized scope, not
-  an arbitrary path.
+  `recover-metadata`) and the expected store ID; deletion also names the content
+  and its artifact UID. The key stays comparable so duplicate enqueues coalesce;
+  the worker resolves store configuration by ID at processing time, and a store-ID
+  mismatch is a terminal refusal. These identify authorized scope, not an
+  arbitrary path.
   Each deletion covers every container and unfinished attempt for that content.
 - **Enqueue sources:** the content reconciler enqueues `delete-content` on a
   deletion timestamp, a periodic ticker enqueues `sweep`, and the reconciler
@@ -251,6 +256,10 @@ the cross-component active-operation and generation-fencing contract.
 - Read `manifest_directory` through the volume shared with node PageBroker.
   Close each inspection transaction with `Abort` on every exit, including requeues.
 - Restore from verified staging; finish CRIU/CUDA consumers and unmount before cleanup.
+- Derive the restore mode from the backend of the content's bound store, not from
+  the Helm `restoreMode` value. Direct restore mounts a local checkpoint directory
+  and stays PVC-only; S3 always takes the staged path. Log once when the configured
+  mode is overridden.
 
 Extend the concrete Go `pagebroker.Client` used by the agent. Snapshot retains
 Kubernetes authorization, CRIU, canonical manifest creation and process orchestration.
@@ -419,10 +428,11 @@ storage:
   PVC mode, the operator manager mounts the shared claim directly.
 - Configure the maintenance worker pool size, per-task timeout and retry backoff on
   the operator manager itself.
-- Configure a maximum agent admission window, PageBroker transaction lifetime and
-  clock-skew allowance in every participating component. Helm rejects zero or
-  unbounded values and validates that the operator's Stage 1 deletion delay is at
-  least their sum.
+- Configure a maximum agent admission window and clock-skew allowance in every
+  participating component; Helm rejects zero or unbounded values. The PageBroker
+  transaction lifetime stays a PageBroker constant (2h05m) and is not configurable.
+  The operator derives its Stage 1 deletion delay as admission window plus that
+  constant plus clock-skew allowance rather than taking it as a value.
 - Match Snapshot/PageBroker image versions. PageBroker reads mounted configuration
   and has no Kubernetes client.
 
@@ -526,7 +536,10 @@ confirmed-but-unrecorded publication → a worker locates the exact expected
 store/artifact/container/`commitID` → repairs missing descriptors without deleting
 data. Conflicts fail closed rather than choosing the newest object.
 
-After all restore consumers finish, unmount staging before Commit cleanup.
+After all restore consumers finish, unmount staging before Commit cleanup. If
+unmount fails, the agent reports the restore result unchanged, skips `Commit`, and
+leaves the transaction to expire; expiry reclaims staging, and the deferral is
+counted in the cleanup-deferrals metric under Monitoring.
 Once fully staged, restore needs no further S3 reads. Keep cleanup failures
 separate from process success; never rerun a restore to retry cleanup.
 
@@ -556,8 +569,8 @@ and preserve historical success.
 - Shared store-ID, artifact-format and publication/read/delete contracts.
 
 Before coding, finalize the credentials-file format and SDKs, canonical store-ID
-encoding, protobuf tags, Stage 1 maximum transaction lifetime and deletion delay,
-admission window, recovery-mode control and numeric resource/time limits. Build PVC
+encoding, protobuf tags, admission window, recovery-mode control and numeric
+resource/time limits. Build PVC
 maintenance before adding S3. Finalize the active-operation and generation-fencing
 protocol before enabling Stage 2 concurrent deletion.
 
@@ -569,6 +582,8 @@ backend integration with a disposable S3-compatible service, and GPU end-to-end 
 - **API/configuration:** immutable store bindings, unique container descriptors,
   identical Go/C++ `commitID` derivation, exact recovery matching, identical Go/C++
   store-ID results for endpoint/region/addressing variants, and legacy PVC.
+- **Restore mode:** S3 restore with `restoreMode: direct` configured still takes
+  the staged path; PVC restore keeps the configured mode.
 - **Helm/security:** S3 installation without checkpoint PVC; credentials only in
   PageBroker/operator manager; matching images and an operator service account
   without GPU/host mounts. Rotate and revoke credentials while already-running Go
