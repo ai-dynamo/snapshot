@@ -80,7 +80,7 @@ func fatal(log logr.Logger, err error, msg string) {
 // directly — they arrive via the inherited env from the agent (execNSRestore sets
 // cmd.Env = os.Environ()), so no flags are needed to pass them through argv.
 func useInjectedBundle(bundleDir string) error {
-	libDir := filepath.Join(bundleDir, "lib")
+	libDir := filepath.Join(bundleDir, nsmount.BundleLibDir)
 	if inherited := os.Getenv("LD_LIBRARY_PATH"); inherited != "" {
 		libDir += ":" + inherited
 	}

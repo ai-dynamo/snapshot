@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
@@ -80,16 +81,7 @@ func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlayS
 		}
 	}()
 
-	tarArgs := []string{"--xattrs"}
-	for _, excl := range buildExclusions(exclusions) {
-		tarArgs = append(tarArgs, "--exclude="+excl)
-	}
-	for _, dest := range bindMountDests {
-		tarArgs = append(tarArgs, "--exclude=."+dest)
-	}
-	tarArgs = append(tarArgs, "-C", upperDir, "-cf", tmpPath, ".")
-
-	cmd := exec.Command("tar", tarArgs...)
+	cmd := exec.Command("tar", captureTarArgs(upperDir, tmpPath, exclusions, bindMountDests)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("tar failed: %w (output: %s)", err, string(output))
@@ -109,6 +101,22 @@ func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlayS
 	tmpPath = ""
 
 	return rootfsDiffPath, nil
+}
+
+// captureTarArgs builds the archive-creation arguments for a rootfs diff.
+//
+// trusted.* is excluded because the archive is cut from the overlay upperdir:
+// it carries trusted.overlay.opaque markers, and re-applying one to the
+// restored container hides the base-image content under it.
+func captureTarArgs(upperDir, outPath string, exclusions types.OverlaySettings, bindMountDests []string) []string {
+	args := []string{"--xattrs", "--xattrs-exclude=trusted.*"}
+	for _, excl := range buildExclusions(exclusions) {
+		args = append(args, "--exclude="+excl)
+	}
+	for _, dest := range bindMountDests {
+		args = append(args, "--exclude=."+dest)
+	}
+	return append(args, "-C", upperDir, "-cf", outPath, ".")
 }
 
 // buildExclusions merges exclusion lists and normalizes paths for tar --exclude patterns.
@@ -153,12 +161,34 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 	return true, nil
 }
 
+// restoreTarCmd builds the extraction command for a rootfs diff.
+//
+// The bundled tar runs under the bundled loader, named explicitly so the
+// kernel never consults its PT_INTERP and resolves libc from the placeholder.
+// See the bundle layout comment in internal/nsmount for why that is necessary
+// and why the loader's glibc is kept out of lib/.
+//
+// bundleDir must be absolute. There is deliberately no PATH fallback: resolving
+// "tar" inside the placeholder would find the placeholder's own tar, which is
+// the failure this function exists to prevent.
+func restoreTarCmd(bundleDir string, args ...string) (*exec.Cmd, error) {
+	if !filepath.IsAbs(bundleDir) {
+		return nil, fmt.Errorf("bundle dir must be an absolute path, got %q", bundleDir)
+	}
+	libcDir := filepath.Join(bundleDir, nsmount.BundleLibcDir)
+	argv := append([]string{
+		"--library-path", libcDir + ":" + filepath.Join(bundleDir, nsmount.BundleLibDir),
+		filepath.Join(bundleDir, nsmount.BundleTar),
+	}, args...)
+	return exec.Command(filepath.Join(libcDir, nsmount.BundleLoader), argv...), nil
+}
+
 // ApplyRootfsDiff extracts rootfs-diff.tar into the target root.
 //
 // The archive is copied to local disk first. tar walks members with many small
 // reads; doing that directly from NFS is much slower than one sequential copy
 // plus a local extract.
-func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
+func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logger) error {
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
 	info, err := os.Stat(rootfsDiffPath)
 	if os.IsNotExist(err) {
@@ -182,8 +212,22 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 	// --skip-old-files: silently skip files that already exist in the restore target.
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
 	// like triton caches, tmp files) — base image files should not be overwritten.
+	// --numeric-owner: the restored processes hold the checkpoint's numeric ids;
+	// re-resolving the archived names through the placeholder's passwd database
+	// would remap them.
+	// --xattrs-include: tar's extract mask defaults to user.*, so file
+	// capabilities would be archived and then dropped. The list is enumerated
+	// rather than widened to '*': that would also reapply security.selinux,
+	// which can fail the restore on an SELinux node, and the trusted.overlay.*
+	// markers carried by archives captured before they were excluded.
 	log.Info("Applying rootfs diff", "target", targetRoot, "bytes", info.Size())
-	cmd := exec.Command("tar", "--skip-old-files", "--blocking-factor=2048", "-C", targetRoot, "-xf", localPath)
+	cmd, err := restoreTarCmd(bundleDir,
+		"--xattrs", "--xattrs-include=user.*", "--xattrs-include=security.capability",
+		"--numeric-owner", "--skip-old-files", "--blocking-factor=2048",
+		"-C", targetRoot, "-xf", localPath)
+	if err != nil {
+		return err
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

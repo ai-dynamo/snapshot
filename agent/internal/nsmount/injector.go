@@ -30,6 +30,29 @@ const (
 	PageBrokerDst = "/tmp/pagebroker"
 )
 
+// Bundle layout. Three places have to agree on it: agent/Dockerfile builds it,
+// useInjectedBundle points LD_LIBRARY_PATH and PATH at it, and
+// runtime.restoreTarCmd invokes the tar inside it.
+//
+// lib/ and libc/ are separate deliberately. The kernel reads a binary's
+// PT_INTERP before LD_LIBRARY_PATH applies, so criu and ip — exec'd directly —
+// always run under the placeholder's loader; putting a glibc on
+// LD_LIBRARY_PATH would pair that loader with a libc it cannot drive, which
+// fails at exec with "undefined symbol: __tunable_is_initialized". tar escapes
+// PT_INTERP by naming the loader explicitly, and that needs the loader and its
+// glibc as a matched pair, so they live in libc/ — off LD_LIBRARY_PATH.
+const (
+	// BundleLibDir holds the non-glibc shared-library closure.
+	BundleLibDir = "lib"
+	// BundleLibcDir holds the matched loader and glibc, used only by BundleTar.
+	BundleLibcDir = "libc"
+	// BundleLoader is the ELF interpreter in BundleLibcDir. The agent is
+	// linux/amd64 only, so the name is fixed.
+	BundleLoader = "ld-linux-x86-64.so.2"
+	// BundleTar extracts rootfs diffs during restore.
+	BundleTar = "tar"
+)
+
 // MountPoint represents an active bind-mount of a directory inside a foreign
 // namespace. The caller must call Unmount when done.
 type MountPoint interface {
