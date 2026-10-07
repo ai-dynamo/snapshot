@@ -10,7 +10,7 @@ pull request, without a cluster:
 
 - the source and restore pods carry the restore-pod contract pieces the agent
   relies on (control volume at /snapshot-control with subPath main,
-  the apps' default control directory, io_uring seccomp profile, /dev/net/tun, nvidia
+  the apps' default control directory, io_uring seccomp profile, nvidia
   RuntimeClass, one GPU);
 - the restore pod is an inert placeholder (an explicit sleep command) that
   restores this run's PodSnapshot;
@@ -83,10 +83,10 @@ def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec)
             "mountPath": workloads.CONTROL_DIR,
             "subPath": workloads.CONTAINER,
         } in main["volumeMounts"]
-        assert any(mount["mountPath"] == "/dev/net/tun" for mount in main["volumeMounts"])
+        assert all(mount["mountPath"] != "/dev/net/tun" for mount in main["volumeMounts"])
         volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
         assert volumes["snapshot-control"] == {"name": "snapshot-control", "emptyDir": {}}
-        assert volumes["tun"]["hostPath"] == {"path": "/dev/net/tun", "type": "CharDevice"}
+        assert not any(v.get("hostPath", {}).get("path") == "/dev/net/tun" for v in volumes.values())
         for container in pod_spec.get("initContainers", []):
             assert container["image"] == IMAGE
 
@@ -232,7 +232,7 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         assert sum(1 for e in main["env"] if e["name"] == "HF_HOME") == 1
         # Contract pieces are untouched by the cache rewrite.
         assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") in (None, workloads.CONTROL_DIR)
-        assert any(m["mountPath"] == "/dev/net/tun" for m in main["volumeMounts"])
+        assert all(m["mountPath"] != "/dev/net/tun" for m in main["volumeMounts"])
 
 
 @pytest.mark.workload

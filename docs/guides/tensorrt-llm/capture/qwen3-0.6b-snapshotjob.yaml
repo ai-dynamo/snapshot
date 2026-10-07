@@ -44,18 +44,12 @@ spec:
             limits:
               nvidia.com/gpu: "1"
           volumeMounts:
-            - name: tun
-              mountPath: /dev/net/tun
             - name: shm
               mountPath: /dev/shm
             - name: app
               mountPath: /snapshot-app
               readOnly: true
       volumes:
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
         - name: shm
           emptyDir:
             medium: Memory

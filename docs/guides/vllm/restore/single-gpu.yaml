@@ -56,8 +56,6 @@ spec:
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
-            - name: tun
-              mountPath: /dev/net/tun
             - name: shm
               mountPath: /dev/shm
             - name: app
@@ -66,10 +64,6 @@ spec:
       volumes:
         - name: snapshot-control
           emptyDir: {}
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
         - name: shm
           emptyDir:
             medium: Memory

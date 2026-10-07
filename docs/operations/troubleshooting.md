@@ -33,3 +33,24 @@ kubectl get pvc -n <ns>
 The `snapshot-agent` runs privileged with `hostPID`, `hostIPC`, and `hostNetwork`.
 If the namespace enforces a restrictive Pod Security level, the agent — or a
 restore pod — can be rejected. See [Security](security.md).
+
+## CRIU reports `Unable to create tun`
+
+`Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory`
+can appear on successful restores. It comes from a TUN capability probe and
+is a red herring for workloads that do not use TUN devices. The framework
+recipes do not require a `/dev/net/tun` hostPath mount to silence this message.
+Fresh vLLM 0.31 / Qwen3-0.6B capture, restore, and inference have been verified
+without the device at TP1 and TP2, with CUDA shared-memory support enabled for
+TP2 on two B200 GPUs.
+
+For a failed restore, inspect the final CRIU error lines and the agent's
+`CRIU restore tail` diagnostics. CRIU's RPC error can contain its first logged
+error, including this nonfatal probe, rather than the failure that terminated
+restore. A later worker-exit error is relevant failure context, though its
+underlying cause may require inspecting the preceding messages.
+
+Workloads that actually use TUN still need their devices configured. When
+restoring an existing checkpoint, preserve its required mount layout. Removing
+a mount from an already captured workload is a separate change from capturing
+and restoring the recipes without it.

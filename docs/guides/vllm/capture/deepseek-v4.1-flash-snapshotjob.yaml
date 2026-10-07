@@ -98,8 +98,6 @@ spec:
               mountPath: /dev/shm
             - name: model-cache
               mountPath: /hf-cache
-            - name: tun
-              mountPath: /dev/net/tun
             - name: app
               mountPath: /snapshot-app
               readOnly: true
@@ -111,10 +109,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Gi
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
         - name: app
           configMap:
             name: vllm-app

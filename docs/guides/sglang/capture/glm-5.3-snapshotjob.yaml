@@ -108,8 +108,6 @@ spec:
               mountPath: /dev/shm
             - name: model-cache
               mountPath: /hf-cache
-            - name: tun
-              mountPath: /dev/net/tun
             - name: app
               mountPath: /snapshot-app
               readOnly: true
@@ -121,10 +119,6 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: snapshot-model-cache
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
         - name: app
           configMap:
             name: sglang-app

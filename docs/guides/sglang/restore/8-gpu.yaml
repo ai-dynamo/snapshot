@@ -65,8 +65,6 @@ spec:
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
-            - name: tun
-              mountPath: /dev/net/tun
             - name: app
               mountPath: /snapshot-app
               readOnly: true
@@ -80,10 +78,6 @@ spec:
             claimName: snapshot-model-cache
         - name: snapshot-control
           emptyDir: {}
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
         - name: app
           configMap:
             name: sglang-app

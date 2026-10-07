@@ -78,8 +78,6 @@ spec:
           volumeMounts:
             - name: model-cache
               mountPath: /hf-cache
-            - name: tun
-              mountPath: /dev/net/tun
             - name: shm
               mountPath: /dev/shm
             - name: app
@@ -89,10 +87,6 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: sglang-model-cache
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
         - name: shm
           emptyDir:
             medium: Memory

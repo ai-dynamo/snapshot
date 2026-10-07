@@ -86,9 +86,10 @@ completes from the resulting `PodSnapshot` — removing the source replica. Ther
 no long-running replica to manage, which fits pipeline use cases.
 
 `spec.podTemplate` only needs the workload's own container spec — image,
-command, resources, and any volumes it mounts (including `/dev/net/tun`,
-which every framework guide's capture manifest mounts and which CRIU expects
-to find again on restore). The controller injects the `/snapshot-control`
+command, resources, and any volumes it mounts. The framework recipes do not
+need `/dev/net/tun`. CRIU can log a nonfatal TUN capability-probe error when
+the device is absent. See [TUN probe errors](../operations/troubleshooting.md#criu-reports-unable-to-create-tun).
+The controller injects the `/snapshot-control`
 volume and mount, `SNAPSHOT_CONTROL_DIR`, the `ready-for-snapshot` readiness
 probe, and the seccomp profile before creating the source pod.
 
@@ -122,16 +123,10 @@ spec:
             - name: app
               mountPath: /snapshot-app
               readOnly: true
-            - name: tun
-              mountPath: /dev/net/tun
       volumes:
         - name: app
           configMap:
             name: vllm-app
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
 ```
 
 ```bash

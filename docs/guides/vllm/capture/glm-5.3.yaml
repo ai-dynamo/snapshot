@@ -154,8 +154,6 @@ spec:
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
-            - name: tun
-              mountPath: /dev/net/tun
             - name: app
               mountPath: /snapshot-app
               readOnly: true
@@ -171,10 +169,6 @@ spec:
           emptyDir: {}
         - name: snapshot-control
           emptyDir: {}
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
         - name: app
           configMap:
             name: vllm-app
