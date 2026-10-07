@@ -7,6 +7,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod context;
 mod host_carrier;
 pub(crate) mod ipc;
+pub(crate) mod multicast;
 pub(crate) mod sharing;
 pub(crate) mod vmm;
 
@@ -77,24 +78,28 @@ pub struct Refcounts {
 #[derive(Clone)]
 pub enum Memblock {
     Unicast(Allocation),
+    Multicast(multicast::MulticastObject),
 }
 
 impl Memblock {
     pub(crate) fn refcounts(&self) -> &Refcounts {
         match self {
             Self::Unicast(allocation) => &allocation.refcounts,
+            Self::Multicast(object) => &object.refcounts,
         }
     }
 
     pub(crate) fn refcounts_mut(&mut self) -> &mut Refcounts {
         match self {
             Self::Unicast(allocation) => &mut allocation.refcounts,
+            Self::Multicast(object) => &mut object.refcounts,
         }
     }
 
     pub fn unicast(&self) -> Option<&Allocation> {
         match self {
             Self::Unicast(allocation) => Some(allocation),
+            _ => None,
         }
     }
 
@@ -105,9 +110,24 @@ impl Memblock {
         }
     }
 
+    pub fn multicast(&self) -> Option<&multicast::MulticastObject> {
+        match self {
+            Self::Multicast(object) => Some(object),
+            _ => None,
+        }
+    }
+
+    pub fn multicast_mut(&mut self) -> Option<&mut multicast::MulticastObject> {
+        match self {
+            Self::Multicast(object) => Some(object),
+            _ => None,
+        }
+    }
+
     pub(crate) fn reference(&self) -> AllocationReference {
         match self {
             Self::Unicast(allocation) => allocation.reference,
+            Self::Multicast(object) => object.reference,
         }
     }
 
@@ -115,6 +135,7 @@ impl Memblock {
     pub(crate) fn driver_handle(&self) -> Result<u64> {
         match self {
             Self::Unicast(allocation) => allocation.driver,
+            Self::Multicast(object) => object.driver,
         }
         .ok_or(CUDA_ERROR_INVALID_HANDLE.into())
     }
@@ -266,6 +287,15 @@ impl ProcessState {
                     return Ok(());
                 }
                 export_cache()?.remove(&id)?;
+            }
+            Memblock::Multicast(object) => {
+                if handle_live || mapped {
+                    return Ok(());
+                }
+                export_cache()?.remove(&id)?;
+                if let Some(driver) = object.driver {
+                    unsafe { crate::driver::cuMemRelease(driver) }?;
+                }
             }
         }
         self.memblocks.remove(&id);

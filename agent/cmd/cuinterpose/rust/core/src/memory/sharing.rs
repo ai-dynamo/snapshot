@@ -268,6 +268,7 @@ impl Memblock {
                     size: allocation.size,
                     location: location_metadata(allocation.properties.location),
                 },
+                Self::Multicast(object) => ExportMetadata::Multicast(object.properties),
             };
             export_cache()?.insert(reference, fd, metadata)?;
         }
@@ -275,6 +276,7 @@ impl Memblock {
             Self::Unicast(allocation) => {
                 allocation.shared = true;
             }
+            Self::Multicast(object) => object.shared = true,
         }
         Ok(reference)
     }
@@ -305,6 +307,7 @@ pub(crate) fn import_reference(
                 }
                 allocation.shared = true;
             }
+            Memblock::Multicast(object) => object.shared = true,
         }
         let handle = state.mint_virtual_allocation_handle(id)?;
         state
@@ -322,7 +325,9 @@ pub(crate) fn import_reference(
         request_export(reference, reference.creator_pid).map_err(CoreError::PeerExport)?;
     let (size, location) = match metadata {
         ExportMetadata::Unicast { size, location } => (size, location),
-        ExportMetadata::Multicast(_) => return Err(CUDA_ERROR_INVALID_HANDLE.into()),
+        ExportMetadata::Multicast(properties) => {
+            return super::multicast::import(state, reference, raw, properties);
+        }
     };
     let context = context()?;
     let driver = crate::driver::import_posix(raw.as_fd())?;
