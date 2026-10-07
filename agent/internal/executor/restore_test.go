@@ -67,7 +67,7 @@ func TestRestoreUsesSavedCUDAFormat(t *testing.T) {
 					// Restore uses startup capabilities without contacting PageBroker.
 					want := "stop after path preparation"
 					if storage == "custom" && engine && !requested {
-						want = "CustomStorage restore requires nvidia.com/snapshot-pagebroker=true"
+						want = "CustomStorage restore cannot opt out of PageBroker with nvidia.com/snapshot-pagebroker=false"
 					}
 					if storage == "custom" && !engine {
 						want = "CustomStorage checkpoint requires PageBroker"

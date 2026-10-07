@@ -8,7 +8,7 @@ tests:
   - it: defaults the runtime-storage volume to the containerd path on host and in container
     asserts:
       - contains:
-          path: spec.template.spec.containers[0].volumeMounts
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
           content:
             name: runtime-storage
             mountPath: /var/lib/containerd
@@ -28,7 +28,7 @@ tests:
       runtime.storageDir: /var/lib/rancher/rke2/agent/containerd
     asserts:
       - contains:
-          path: spec.template.spec.containers[0].volumeMounts
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
           content:
             name: runtime-storage
             mountPath: /var/lib/rancher/rke2/agent/containerd
@@ -50,3 +50,14 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "runtime.storageDir must be an absolute path"
+
+  - it: mounts runtime storage when PageBroker is disabled
+    set:
+      pageBroker.enabled: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: runtime-storage
+            mountPath: /var/lib/containerd
+            readOnly: true

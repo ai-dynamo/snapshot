@@ -9,9 +9,11 @@ const (
 	// CaptureEligibleLabel is the gate-applied promotion label: the node agent's pre-bind gate
 	// adds it only after the source pod passes validation. The agent's source-pod capture
 	// informer keys on it so only gate-validated pods drive the capture path.
-	CaptureEligibleLabel        = "nvidia.com/snapshot-capture-eligible"
-	PageBrokerAnnotation        = "nvidia.com/snapshot-pagebroker"
-	PageBrokerAnnotationEnabled = "true"
+	CaptureEligibleLabel = "nvidia.com/snapshot-capture-eligible"
+	// PageBroker handles every capture and restore when the agent enables it.
+	// A Pod opts out by setting this annotation to "false".
+	PageBrokerAnnotation         = "nvidia.com/snapshot-pagebroker"
+	PageBrokerAnnotationDisabled = "false"
 
 	// SnapshotNodeLabel mirrors PodSnapshotContent.spec.source.nodeName onto the
 	// object so the per-node agent's cache can label-select work for its node.

@@ -407,7 +407,7 @@ func validateCustomStorageRestore(req RestoreRequest, manifest *types.Checkpoint
 		return fmt.Errorf("CustomStorage checkpoint requires PageBroker")
 	}
 	if !req.PageBrokerRequested {
-		return fmt.Errorf("CustomStorage restore requires nvidia.com/snapshot-pagebroker=true")
+		return fmt.Errorf("CustomStorage restore cannot opt out of PageBroker with nvidia.com/snapshot-pagebroker=false")
 	}
 	if !req.CustomStorageAvailable {
 		return fmt.Errorf("PageBroker does not support CustomStorage restore")

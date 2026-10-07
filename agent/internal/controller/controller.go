@@ -992,7 +992,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		DestinationContainerName:    op.destination,
 		SkipCompatCheck:             op.skipCompatCheck,
 		Clientset:                   w.clientset,
-		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] != snapshotv1alpha1.PageBrokerAnnotationDisabled,
 		PageBrokerEnabled:           w.config.PageBroker.Enabled,
 		CustomStorageAvailable:      w.config.CustomStorageAvailable,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,

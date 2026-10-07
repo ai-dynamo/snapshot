@@ -125,7 +125,21 @@ spec:
             - {{ .Values.storage.pvc.basePath | quote }}
             - --max-concurrent-requests
             - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
+            - --custom-storage-buffer-count
+            - {{ .Values.pageBroker.transferBufferCount | int64 | quote }}
+            - --custom-storage-chunk-bytes
+            - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
+            - --custom-storage-max-pinned-bytes
+            - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
             {{- end }}
+          securityContext:
+            privileged: true
+            # The image defaults to a non-root user. The broker locks CUDA processes
+            # owned by other users and writes artifact directories the root agent creates.
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+            {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
@@ -152,6 +166,8 @@ spec:
                   fieldPath: spec.nodeName
             - name: SNAPSHOT_LOG_LEVEL
               value: {{ .Values.daemonset.snapshotLogLevel | quote }}
+            # Conventional CUDA queries need the host driver libraries.
+            {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
           volumeMounts:
             # Mount configuration ConfigMap
             - name: config
