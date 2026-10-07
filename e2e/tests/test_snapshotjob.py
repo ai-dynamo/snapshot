@@ -189,9 +189,6 @@ def test_snapshotjob_cpu_captures_and_restore_recovers_state(
             workloads.snapshotjob_pod_template(config=config, run=run, gpu=False),
         )
 
-        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
-        source_pod_name = source_pod.metadata.name
-
         sj = snap.wait_for_condition(
             config.namespace,
             snapshotjob_name,
@@ -207,7 +204,15 @@ def test_snapshotjob_cpu_captures_and_restore_recovers_state(
             pod_snapshot_name,
             timeout=60,
         )
-        source_node = content["spec"]["source"]["nodeName"]
+        # The source pod is named by the content rather than observed live: a
+        # CPU capture finishes in a few seconds and the controller deletes the
+        # source Job along with it, so the pod can be gone before a poll sees
+        # it. The GPU test can watch for the pod because its workload takes
+        # long enough to be caught; here the recorded name is the only one that
+        # is guaranteed to still be readable.
+        source = content["spec"]["source"]
+        source_node = source["nodeName"]
+        source_pod_name = source["podRef"]["name"]
         manifest = snap.checkpoint_artifact_manifest(
             config, source_node, content["metadata"]["uid"]
         )

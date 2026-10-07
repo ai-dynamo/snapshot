@@ -817,7 +817,14 @@ def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str
         checkpoint_agent_pod(config, node),
         f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
     )
-    status = json.loads(output).get("status")
+    # exec merges stderr into the stream, and a node without /etc/crictl.yaml
+    # (k3s) makes crictl warn that it is guessing the runtime endpoint. Decode
+    # from the first brace rather than the first byte so that warning, which
+    # says nothing about the container, does not read as a missing status.
+    start = output.find("{")
+    if start < 0:
+        raise AssertionError(f"crictl printed no JSON for {container_id!r}: {output!r}")
+    status = json.loads(output[start:]).get("status")
     if not isinstance(status, dict) or not status:
         raise AssertionError(f"runtime reported no container status for {container_id!r}")
     return (status.get("imageId") or "").strip()
