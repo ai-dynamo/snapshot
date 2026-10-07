@@ -25,15 +25,15 @@ import (
 // CuInterposeInspection is what capture found in the CUDA processes. It becomes the
 // manifest once host PIDs are translated to namespace PIDs.
 type CuInterposeInspection struct {
-	// sha256 maps each shim library file name to its hash.
-	sha256 map[string]string
+	// libraries maps each shim library file name to its identity.
+	libraries map[string]types.CuInterposeLibraryIdentity
 	// coordinatorHostPIDs are the host PIDs with a mapped core.
 	coordinatorHostPIDs []int
 }
 
 // Manifest translates coordinator host PIDs through the parallel CUDA PID lists.
 func (i *CuInterposeInspection) Manifest(cudaHostPIDs, cudaNamespacePIDs []int) *types.CuInterposeManifest {
-	manifest := &types.CuInterposeManifest{SHA256: i.sha256, PIDs: []int{}}
+	manifest := &types.CuInterposeManifest{Libraries: i.libraries, PIDs: []int{}}
 	for index, pid := range cudaHostPIDs {
 		if slices.Contains(i.coordinatorHostPIDs, pid) {
 			manifest.PIDs = append(manifest.PIDs, cudaNamespacePIDs[index])
@@ -58,8 +58,8 @@ func InspectCuInterposeLibraries(procRoot string, hostPIDs []int, requested bool
 			continue
 		}
 		if inspection == nil {
-			inspection = &CuInterposeInspection{sha256: shim.sha256}
-		} else if !maps.Equal(inspection.sha256, shim.sha256) {
+			inspection = &CuInterposeInspection{libraries: shim.libraries}
+		} else if !maps.Equal(inspection.libraries, shim.libraries) {
 			return nil, fmt.Errorf("cuinterpose process %d: library hashes differ between CUDA participants", pid)
 		}
 		if shim.coreMapped {
@@ -76,7 +76,7 @@ func InspectCuInterposeLibraries(procRoot string, hostPIDs []int, requested bool
 }
 
 type processShim struct {
-	sha256     map[string]string
+	libraries  map[string]types.CuInterposeLibraryIdentity
 	coreMapped bool
 }
 
@@ -90,7 +90,7 @@ func inspectProcessShim(processDir string) (*processShim, error) {
 		return nil, fmt.Errorf("cuinterpose frontend must be mapped")
 	}
 	_, coreMapped := mapped[types.CuInterposeCore]
-	shim := &processShim{sha256: make(map[string]string, len(types.CuInterposeLibraries)), coreMapped: coreMapped}
+	shim := &processShim{libraries: make(map[string]types.CuInterposeLibraryIdentity, len(types.CuInterposeLibraries)), coreMapped: coreMapped}
 	// A frontend-only process has not loaded the lazy core, but must still carry
 	// the same bundle so it can initialize after restore.
 	for _, library := range types.CuInterposeLibraries {
@@ -98,9 +98,11 @@ func inspectProcessShim(processDir string) (*processShim, error) {
 		if mappedLibrary, found := mapped[library]; found {
 			mapping = &mappedLibrary
 		}
-		if shim.sha256[library], err = hashDeliveredLibrary(processDir, library, mapping); err != nil {
+		hash, err := hashDeliveredLibrary(processDir, library, mapping)
+		if err != nil {
 			return nil, err
 		}
+		shim.libraries[library] = types.CuInterposeLibraryIdentity{SHA256: hash}
 	}
 	return shim, nil
 }
@@ -181,9 +183,9 @@ func hashLibrary(file *os.File) (string, error) {
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
-// CheckCuInterposeLibraries verifies executable identity. Compatibility policy and its
-// debugging override do not affect this check.
-func CheckCuInterposeLibraries(directory string, identity *types.CuInterposeManifest) error {
+// VerifyCuInterposeLibraryIdentity checks that the restore bundle matches the
+// libraries recorded at capture. Compatibility overrides do not bypass this check.
+func VerifyCuInterposeLibraryIdentity(directory string, identity *types.CuInterposeManifest) error {
 	for _, library := range types.CuInterposeLibraries {
 		file, err := os.Open(filepath.Join(directory, library))
 		if err != nil {
@@ -194,7 +196,7 @@ func CheckCuInterposeLibraries(directory string, identity *types.CuInterposeMani
 		if err != nil {
 			return err
 		}
-		if expected := identity.SHA256[library]; !strings.EqualFold(expected, actual) {
+		if expected := identity.Libraries[library].SHA256; !strings.EqualFold(expected, actual) {
 			return fmt.Errorf("cuinterpose %s SHA-256 mismatch: expected %s, actual %s; use matching shim libraries or recreate the checkpoint", library, expected, actual)
 		}
 	}

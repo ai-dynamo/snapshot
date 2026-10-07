@@ -17,11 +17,16 @@ const (
 // CuInterposeLibraries lists every shim library whose hash the manifest records.
 var CuInterposeLibraries = []string{CuInterposeFrontend, CuInterposeCore}
 
+// CuInterposeLibraryIdentity identifies a delivered shim library.
+type CuInterposeLibraryIdentity struct {
+	SHA256 string `yaml:"sha256"`
+}
+
 // CuInterposeManifest records the shim libraries a checkpoint was captured with
 // and the processes whose core serves a coordinator endpoint.
 type CuInterposeManifest struct {
-	// SHA256 maps each delivered shim library file name to its hash.
-	SHA256 map[string]string `yaml:"sha256"`
+	// Libraries maps each delivered shim library file name to its identity.
+	Libraries map[string]CuInterposeLibraryIdentity `yaml:"libraries"`
 	// PIDs are the innermost namespace PIDs whose core serves a coordinator endpoint.
 	// An explicit empty list means CUDA processes loaded only the frontend.
 	PIDs []int `yaml:"pids"`
@@ -29,13 +34,13 @@ type CuInterposeManifest struct {
 
 // Validate checks the library hashes and the PID list.
 func (m *CuInterposeManifest) Validate() error {
-	if len(m.SHA256) != len(CuInterposeLibraries) {
-		return fmt.Errorf("cuinterpose.sha256 must hash exactly %v; recreate the checkpoint", CuInterposeLibraries)
+	if len(m.Libraries) != len(CuInterposeLibraries) {
+		return fmt.Errorf("cuinterpose.libraries must contain exactly %v; recreate the checkpoint", CuInterposeLibraries)
 	}
 	for _, library := range CuInterposeLibraries {
-		digest, err := hex.DecodeString(m.SHA256[library])
+		digest, err := hex.DecodeString(m.Libraries[library].SHA256)
 		if err != nil || len(digest) != sha256.Size {
-			return fmt.Errorf("cuinterpose.sha256[%s] must contain a SHA-256 hash; recreate the checkpoint", library)
+			return fmt.Errorf("cuinterpose.libraries[%s].sha256 must contain a SHA-256 hash; recreate the checkpoint", library)
 		}
 	}
 	if m.PIDs == nil {
