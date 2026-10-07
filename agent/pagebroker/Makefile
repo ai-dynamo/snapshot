@@ -13,7 +13,7 @@ COMMON_SOURCES := file_descriptor.cpp
 DAEMON_SOURCES := $(BROKER_SOURCES) $(COMMON_SOURCES) daemon.cpp main.cpp
 
 .DEFAULT_GOAL := daemon
-.PHONY: daemon generate test
+.PHONY: daemon generate test test-gpu
 
 generate: v1/pagebroker.pb.cc v1/pagebroker.pb.h
 
@@ -27,9 +27,22 @@ daemon: generate
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DAEMON_SOURCES) v1/pagebroker.pb.cc \
 		-Wl,-Bstatic -lprotobuf -Wl,-Bdynamic -o pagebroker
 
-test: generate | build
+test: generate build/gpu-cuda-driver.o | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(BROKER_SOURCES) $(COMMON_SOURCES) \
 		daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
 	./build/pagebroker-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/storage_manifest.cpp gpu/storage_manifest_test.cpp -o build/gpu-storage-test
 	./build/gpu-storage-test
+
+# Compile the optional driver loader without requiring a CUDA library.
+build/gpu-cuda-driver.o: gpu/cuda_driver.cpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+# Run manually with the host driver and one visible GPU.
+# No checked-in GPU CI job invokes this target.
+test-gpu: build/gpu-checkpoint-test
+	timeout 120 ./build/gpu-checkpoint-test
+
+build/gpu-checkpoint-test: gpu/checkpoint.cpp gpu/checkpoint.hpp gpu/checkpoint_test.cpp file_descriptor.cpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/checkpoint.cpp gpu/checkpoint_test.cpp file_descriptor.cpp \
+		$(GTEST_FLAGS) -L$(CUDA_LIBRARY_DIR) -lcuda -o $@

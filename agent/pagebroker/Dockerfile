@@ -7,6 +7,10 @@ ARG PAGEBROKER_BUILD_IMAGE=ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba798
 # to the matching version.
 ARG PAGEBROKER_BASE_IMAGE=nvcr.io/nvidia/distroless/cc:v4.0.8@sha256:8003f23a7122e630e3a78875dda6e68403c7ccc0adb393470a8c7739fafa4a02
 
+ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
+
+FROM ${CUDA_HEADERS_IMAGE} AS cuda-headers
+
 FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,9 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=cuda-headers /usr/local/cuda/include/ /opt/cuda/include/
+COPY --from=cuda-headers /usr/local/cuda/lib64/stubs/ /opt/cuda/lib64/stubs/
+
 WORKDIR /src
 COPY . .
-RUN make test && make daemon
+RUN make test CUDA_ROOT=/opt/cuda && make build/gpu-checkpoint-test CUDA_ROOT=/opt/cuda CUDA_LIBRARY_DIR=/opt/cuda/lib64/stubs && make daemon CUDA_ROOT=/opt/cuda
 
 # Smoke-test must run here: the runtime stage is distroless (no shell).
 RUN output=$(/src/pagebroker 2>&1); status=$?; \

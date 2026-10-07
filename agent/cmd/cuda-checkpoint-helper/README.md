@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 This command supports driver-managed GPU checkpoint and restore. It also queries
 process state and the restore thread. It is built from `main.c` and does not call
-`cuInit`. The [PageBroker GPU engine](../../../docs/proposals/238-pagebroker-gpu-engine/README.md) handles
+`cuInit`. The PageBroker GPU engine handles
 CustomStorage operations and GPU data transfers.
 
 ```sh
