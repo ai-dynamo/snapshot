@@ -16,7 +16,8 @@ See the [CUDA shared-memory guide](../guides/cuda-shared-memory.md) for
 ordinary Pod and SnapshotJob activation, engine recipes, matching agent images,
 and deployment gotchas. The public opt-in is
 `nvidia.com/cuda-shared-memory-support: "enabled"` on the source Pod, and the
-agent reads only this annotation. SnapshotJob adds the libraries and launcher. An
+agent reads only this annotation. SnapshotJob admission rejects invalid annotation
+values, and the operator adds the libraries and launcher for enabled sources. An
 ordinary Pod adds them itself in a read-only mount at `/tmp/snapshot-cuda` and
 starts its target `command` with
 `/tmp/snapshot-cuda/cuinterpose-launch --library /tmp/snapshot-cuda/libcuinterpose.so --`.
@@ -32,7 +33,8 @@ writable. A frontend-only
 process can hold native CUDA state without having initialized the shim runtime.
 Removing the annotation does not disable an active shim.
 
-The manifest records coordinator namespace PIDs in `cuinterpose.pids`, an explicit
+The manifest records library identities in `cuinterpose.libraries`, keyed by file
+name with a `sha256` field, and coordinator namespace PIDs in `cuinterpose.pids`, an explicit
 subset of `cudaRestore.pids`. Native CUDA checkpoint and restore always retain the full
 `cudaRestore.pids` list. An empty coordinator subset skips the coordinator but still
 requires matching libraries on restore. Existing native CUDA jobfiles remain
