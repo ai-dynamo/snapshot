@@ -444,6 +444,7 @@ def test_skip_annotation_lets_a_refused_restore_through(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_direct_content_deletion_removes_complete_artifact_root(
     config: k8s.E2EConfig,
@@ -484,6 +485,7 @@ def test_direct_content_deletion_removes_complete_artifact_root(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_snapshot_deletion_cascades_content_and_artifact_cleanup(
     config: k8s.E2EConfig,
@@ -511,6 +513,7 @@ def test_snapshot_deletion_cascades_content_and_artifact_cleanup(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_orphan_sweep_reclaims_uid_root(
     config: k8s.E2EConfig,

@@ -172,6 +172,7 @@ def test_snapshotjob_captures_and_restore_recovers_state(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_snapshotjob_cpu_only_captures(
     config: k8s.E2EConfig,
@@ -217,6 +218,7 @@ def test_snapshotjob_cpu_only_captures(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_snapshotjob_waits_for_helper_then_completes(
     config: k8s.E2EConfig,
@@ -251,6 +253,7 @@ def test_snapshotjob_waits_for_helper_then_completes(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_when_helper_fails_after_capture(
     config: k8s.E2EConfig,
@@ -297,6 +300,7 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_deadline_exceeded_when_helper_overruns(
     config: k8s.E2EConfig,
@@ -337,6 +341,7 @@ def test_snapshotjob_deadline_exceeded_when_helper_overruns(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_deadline_exceeded_when_never_ready(
     config: k8s.E2EConfig,
@@ -371,6 +376,7 @@ def test_snapshotjob_deadline_exceeded_when_never_ready(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_deadline_exceeded_when_pod_unschedulable(
     config: k8s.E2EConfig,
@@ -408,6 +414,7 @@ def test_snapshotjob_deadline_exceeded_when_pod_unschedulable(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_on_job_name_conflict(
     config: k8s.E2EConfig,
@@ -468,6 +475,7 @@ def test_snapshotjob_fails_on_job_name_conflict(
         k8s.delete_job(config.namespace, snapshotjob_name)
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_on_podsnapshot_name_conflict(
     config: k8s.E2EConfig,
@@ -504,6 +512,7 @@ def test_snapshotjob_fails_on_podsnapshot_name_conflict(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_when_job_deleted(
     config: k8s.E2EConfig,
@@ -544,6 +553,7 @@ def test_snapshotjob_fails_when_job_deleted(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_when_workload_exits_nonzero_before_capture(
     config: k8s.E2EConfig,
@@ -576,6 +586,7 @@ def test_snapshotjob_fails_when_workload_exits_nonzero_before_capture(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_when_workload_exits_zero_before_capture(
     config: k8s.E2EConfig,
@@ -608,6 +619,7 @@ def test_snapshotjob_fails_when_workload_exits_zero_before_capture(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_spec_admission(
     config: k8s.E2EConfig,
