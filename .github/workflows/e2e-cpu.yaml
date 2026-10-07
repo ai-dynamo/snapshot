@@ -32,6 +32,7 @@ on:
       # A named build context of the agent image, so it changes that image.
       - "hack/compliance/**"
       - "hack/k3d-cpu-e2e.sh"
+      - "hack/verify-bundle-glibc.sh"
       - ".github/workflows/e2e-cpu.yaml"
   workflow_dispatch:
 
@@ -115,6 +116,15 @@ jobs:
             DOCKER_BUILD_ARGS="--load \
               --cache-from=type=gha,scope=agent \
               --cache-to=type=gha,scope=agent,mode=max"
+
+      # The restore path extracts the rootfs diff with the bundled tar, run
+      # under the bundled loader so the placeholder's glibc never has to
+      # satisfy it. This cluster's placeholder is the agent image itself, so
+      # the suite below would not notice that breaking; check it against an
+      # older userspace while the image is already built and loaded.
+      - name: Verify the bundled tar on an older placeholder
+        timeout-minutes: 5
+        run: hack/verify-bundle-glibc.sh "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}"
 
       - name: Install kubectl
         run: |
