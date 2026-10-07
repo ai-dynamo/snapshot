@@ -1,4 +1,7 @@
 {{- include "snapshot.validateRuntime" . -}}
+{{- if hasKey .Values.image.pageBroker "tag" -}}
+{{- fail "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images" -}}
+{{- end -}}
 {{- $socket := include "snapshot.runtimeSocket" . -}}
 {{- $socketDir := $socket | dir -}}
 {{- $storageDir := include "snapshot.runtimeStorageDir" . -}}
