@@ -26,7 +26,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 func snapshotJobReconcilerScheme() *runtime.Scheme {
@@ -785,4 +787,104 @@ func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
 		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: "gone"}})
 		require.NoError(t, err)
 	})
+}
+
+func TestSnapshotJobReconcileCuInterpose(t *testing.T) {
+	for _, value := range []string{"disabled", "enabled"} {
+		t.Run(value, func(t *testing.T) {
+			enabled := value == "enabled"
+			sj := minimalSnapshotJob()
+			sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: value}
+			worker := &sj.Spec.PodTemplate.Spec.Containers[0]
+			worker.Command = []string{"python3", "-m", "worker"}
+			r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+			r.CuInterposeContainer = testCuInterposeInstaller()
+			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+			require.NoError(t, err)
+			job := getSourceJob(t, r.Client, sj)
+			container := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+			if enabled {
+				installer := requireContainer(t, job.Spec.Template.Spec.InitContainers, "snapshot-cuda-install")
+				assert.Equal(t, r.CuInterposeContainer.Image, installer.Image)
+				assert.Equal(t, append(podcontract.CuInterposeLauncherPrefix(), worker.Command...), container.Command)
+				// The agent's capture preflight must accept what the operator shaped.
+				require.NoError(t, podcontract.ValidateCuInterposeLauncher(container))
+			} else {
+				assert.Equal(t, worker.Command, container.Command)
+				assert.Empty(t, job.Spec.Template.Spec.InitContainers)
+				for _, mount := range container.VolumeMounts {
+					assert.NotEqual(t, podcontract.CuInterposeMountPath, mount.MountPath)
+				}
+			}
+			for _, env := range container.Env {
+				assert.NotEqual(t, "LD_PRELOAD", env.Name)
+			}
+		})
+	}
+}
+
+func testCuInterposeInstaller() operatortypes.CuInterposeContainerConfiguration {
+	return operatortypes.CuInterposeContainerConfiguration{Image: "registry.example/agent:dev", PullPolicy: corev1.PullNever}
+}
+
+// TestSnapshotJobCuInterposeAdoptsShapedJob proves adoption accepts a source Job that
+// already carries the cuinterpose installer and launcher, without reshaping it.
+func TestSnapshotJobCuInterposeAdoptsShapedJob(t *testing.T) {
+	ctx := context.Background()
+	sj := minimalSnapshotJob()
+	sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "enabled"}
+	sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"worker"}
+	r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+	r.CuInterposeContainer = testCuInterposeInstaller()
+
+	_, err := r.Reconcile(ctx, reconcileRequest(sj))
+	require.NoError(t, err)
+	job := getSourceJob(t, r.Client, sj)
+	require.Len(t, job.Spec.Template.Spec.InitContainers, 1)
+	job.UID = "source-job-uid"
+	require.NoError(t, r.Update(ctx, job))
+
+	// The fake API does not assign a UID on create. The next reconcile therefore tests
+	// adoption before status records the existing Job's identity.
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	for range 2 {
+		_, err = r.Reconcile(ctx, reconcileRequest(sj))
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sj), updated))
+		assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+		assert.Equal(t, job.UID, updated.Status.SourceJobUID)
+		assert.Equal(t, job.Spec, getSourceJob(t, r.Client, sj).Spec)
+	}
+}
+
+func TestSnapshotJobCuInterposeInvalidSource(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		annotation string
+		command    []string
+		want       string
+	}{
+		{name: "missing command", annotation: "enabled", want: "requires container.command"},
+		{name: "empty command", annotation: "enabled", command: []string{""}, want: "requires container.command"},
+		{name: "invalid annotation", annotation: "invalid", command: []string{"worker"}, want: "expected enabled or disabled"},
+		{name: "empty annotation", annotation: "", command: []string{"worker"}, want: "expected enabled or disabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sj := minimalSnapshotJob()
+			sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: tc.annotation}
+			sj.Spec.PodTemplate.Spec.Containers[0].Command = tc.command
+			r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+			r.CuInterposeContainer = testCuInterposeInstaller()
+			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+			require.NoError(t, err)
+			updated := &snapshotv1alpha1.SnapshotJob{}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sj), updated))
+			condition := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+			require.NotNil(t, condition)
+			assert.Equal(t, metav1.ConditionTrue, condition.Status)
+			assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, condition.Reason)
+			assert.Contains(t, condition.Message, tc.want)
+			assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), client.ObjectKeyFromObject(sj), &batchv1.Job{})))
+		})
+	}
 }

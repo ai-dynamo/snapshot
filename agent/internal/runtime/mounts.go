@@ -5,8 +5,10 @@ package runtime
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -24,8 +26,11 @@ func ReadMountInfo(pid int) ([]types.MountInfo, error) {
 		return nil, fmt.Errorf("failed to open mountinfo: %w", err)
 	}
 	defer f.Close()
+	return parseMountInfo(f)
+}
 
-	infos, err := mountinfo.GetMountsFromReader(f, nil)
+func parseMountInfo(r io.Reader) ([]types.MountInfo, error) {
+	infos, err := mountinfo.GetMountsFromReader(r, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse mountinfo: %w", err)
 	}
@@ -36,6 +41,7 @@ func ReadMountInfo(pid int) ([]types.MountInfo, error) {
 			MountPoint: info.Mountpoint,
 			FSType:     info.FSType,
 			VFSOptions: info.VFSOptions,
+			ReadOnly:   slices.Contains(strings.Split(info.Options, ","), "ro"),
 		})
 	}
 	return mounts, nil

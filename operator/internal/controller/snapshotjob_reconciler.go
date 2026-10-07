@@ -24,7 +24,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/operator/internal/protocol"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch
@@ -54,8 +57,9 @@ import (
 // would kill them mid-work. Failures preserve the Job for debugging.
 type SnapshotJobReconciler struct {
 	client.Client
-	NonCacheReadClient client.Reader
-	Recorder           record.EventRecorder
+	NonCacheReadClient   client.Reader
+	Recorder             record.EventRecorder
+	CuInterposeContainer operatortypes.CuInterposeContainerConfiguration
 }
 
 type snapshotJobFailure struct {
@@ -146,9 +150,20 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 			}
 			return r.reconcileAcceptedSourceJob(ctx, sj, authoritativeJob)
 		}
+		cuInterposeEnabled, err := podcontract.ParseCuInterposeAnnotation(sj.Spec.PodTemplate.Annotations)
+		if err != nil {
+			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
+		}
 		desiredJob, buildErr := buildSourceJob(sj)
 		if buildErr != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, buildErr), ctrl.Result{}, nil
+		}
+		if cuInterposeEnabled {
+			// buildSourceJob has already validated the single target.
+			target := sj.Spec.PodSnapshotTemplate.TargetContainers[0]
+			if err := protocol.ShapeCuInterposeCapture(&desiredJob.Spec.Template, target, r.CuInterposeContainer); err != nil {
+				return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
+			}
 		}
 		return r.createSourceJob(ctx, sj, desiredJob)
 	case err != nil:

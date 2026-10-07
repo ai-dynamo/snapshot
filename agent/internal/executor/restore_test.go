@@ -20,10 +20,12 @@ import (
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -92,13 +94,87 @@ func TestGPUMappingLeavesCountPolicyToInspectGate(t *testing.T) {
 	}
 }
 
-// testMountPoint satisfies nsmount.MountPoint for executor unit tests.
-type testMountPoint struct{}
+func TestInspectCompatibilityManagedCuInterposeMount(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		delivered bool
+		mount     string
+		wantError bool
+	}{
+		{"delivered tools installed later", true, podcontract.CuInterposeMountPath, false},
+		{"unmanaged tools still required", false, podcontract.CuInterposeMountPath, true},
+		{"workload mount still required", true, "/models", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := &types.CheckpointManifest{}
+			if tc.delivered {
+				manifest.CuInterpose = testCuInterposeIdentity()
+			}
+			manifest.CRIUDump.ExtMnt = map[string]string{tc.mount: tc.mount}
+			err := inspectCompatibility(testr.New(t), manifest, compat.GPUInfo{}, nil, t.TempDir(), "", false)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("inspectCompatibility() = %v, wantError %v", err, tc.wantError)
+			}
+		})
+	}
+}
 
-func (m testMountPoint) Unmount(context.Context) error { return nil }
-func (m testMountPoint) NsFd() *os.File                { return nil }
+// testMountPoint satisfies nsmount.MountPoint for executor unit tests.
+type testMountPoint struct {
+	t          *testing.T
+	name       string
+	calls      *[]string
+	releaseErr error
+}
+
+func (m testMountPoint) Unmount(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		m.t.Errorf("cleanup context canceled: %v", err)
+	}
+	*m.calls = append(*m.calls, "unmount "+m.name)
+	return nil
+}
+
+func (m testMountPoint) Release() error {
+	*m.calls = append(*m.calls, "release "+m.name)
+	return m.releaseErr
+}
+
+func (m testMountPoint) NsFd() *os.File { return nil }
 
 var _ nsmount.MountPoint = testMountPoint{}
+
+func TestCleanupRestoreMountsRetainsLibrariesOnlyAfterSuccess(t *testing.T) {
+	closeErr := errors.New("close namespace fd")
+	for _, tc := range []struct {
+		name       string
+		restored   bool
+		releaseErr error
+		want       []string
+	}{
+		{"restore failed", false, nil, []string{"unmount artifact", "unmount shim", "unmount bundle"}},
+		{"restored", true, nil, []string{"unmount artifact", "release shim", "unmount bundle"}},
+		{"release failed", true, closeErr, []string{"unmount artifact", "release shim", "unmount bundle"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			mounts := []restoreMount{
+				{point: testMountPoint{t: t, name: "bundle", calls: &calls}},
+				{point: testMountPoint{t: t, name: "shim", calls: &calls, releaseErr: tc.releaseErr}, keepOnSuccess: true},
+				{point: testMountPoint{t: t, name: "artifact", calls: &calls}},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := cleanupRestoreMounts(ctx, mounts, tc.restored)
+			if !errors.Is(err, tc.releaseErr) {
+				t.Fatalf("cleanup error = %v, want %v", err, tc.releaseErr)
+			}
+			if !reflect.DeepEqual(calls, tc.want) {
+				t.Fatalf("cleanup calls = %v, want %v", calls, tc.want)
+			}
+		})
+	}
+}
 
 type restoreFakeRuntime struct {
 	resolvedID             string
@@ -350,26 +426,43 @@ func TestValidateRestoreManifest(t *testing.T) {
 	}
 }
 
-func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {
-	checkpointDir := t.TempDir()
-	manifest := types.NewCheckpointManifest(
-		"content-uid-123",
-		"main",
-		types.CRIUDumpManifest{},
-		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
-		types.OverlayManifest{},
-		types.HostManifest{},
-	)
-	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, compat.GPUInfo{
-		Devices: []compat.GPUDevice{{UUID: "GPU-aaa"}, {UUID: "GPU-bbb"}},
-	})
-	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
-		t.Fatalf("WriteManifest: %v", err)
-	}
-
-	_, err := RestoreInNamespace(context.Background(), RestoreOptions{CheckpointPath: checkpointDir}, testr.New(t))
-	if err == nil || !strings.Contains(err.Error(), "missing CUDA launch-job state") {
-		t.Fatalf("expected missing multi-GPU launch-job error, got %v", err)
+func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		cuInterposePIDs []int // nil means native CUDA, empty means frontend only
+		wantStopsAt     string
+	}{
+		{name: "native multi-GPU missing", wantStopsAt: "multi-GPU CUDA checkpoint is missing"},
+		{name: "frontend-only multi-GPU missing", cuInterposePIDs: []int{}, wantStopsAt: "multi-GPU CUDA checkpoint is missing"},
+		{name: "coordinator multi-GPU missing", cuInterposePIDs: []int{43}, wantStopsAt: "invalid target pod IP"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkpointDir := t.TempDir()
+			manifest := types.NewCheckpointManifest(
+				"content-uid-123", "main", types.CRIUDumpManifest{},
+				types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+				types.OverlayManifest{}, types.HostManifest{},
+			)
+			manifest.CUDA.PIDs = []int{42, 43}
+			manifest.CUDA.SourceGPUUUIDs = []string{"GPU-aaa", "GPU-bbb"}
+			if tc.cuInterposePIDs != nil {
+				manifest.CuInterpose = testCuInterposeIdentity()
+				manifest.CuInterpose.PIDs = tc.cuInterposePIDs
+			}
+			// Stopping at IP validation exercises jobfile selection in the real restore
+			// preflight without reaching namespace or CUDA operations.
+			manifest.CRIUDump.CRIU.TcpEstablished = true
+			t.Setenv(criu.InetRemapEnvVar, "")
+			if err := types.WriteManifest(checkpointDir, manifest); err != nil {
+				t.Fatal(err)
+			}
+			_, err := RestoreInNamespace(context.Background(), RestoreOptions{
+				CheckpointPath: checkpointDir, TargetPodIP: "invalid",
+			}, testr.New(t))
+			if err == nil || !strings.Contains(err.Error(), tc.wantStopsAt) {
+				t.Fatalf("RestoreInNamespace() = %v, want preflight to stop at %q", err, tc.wantStopsAt)
+			}
+		})
 	}
 }
 
@@ -419,6 +512,7 @@ type restoreSourceMount struct {
 }
 
 func (m restoreSourceMount) NsFd() *os.File { return nil }
+func (m restoreSourceMount) Release() error { return nil }
 func (m restoreSourceMount) Unmount(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -431,6 +525,9 @@ func (m restoreSourceMount) Unmount(ctx context.Context) error {
 }
 func (m *restoreSourceMounter) MountBundle(context.Context, int) (nsmount.MountPoint, error) {
 	return restoreSourceMount{done: m.bundleDone, name: "bundle", events: m.events}, nil
+}
+func (m *restoreSourceMounter) MountCuInterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return restoreSourceMount{name: "snapshot-cuda", events: m.events}, nil
 }
 func (m *restoreSourceMounter) source(name string) (nsmount.MountPoint, error) {
 	*m.events = append(*m.events, "mount "+name)
@@ -599,5 +696,15 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 				t.Fatalf("source was removed: %v", err)
 			}
 		})
+	}
+}
+
+func testCuInterposeIdentity() *types.CuInterposeManifest {
+	return &types.CuInterposeManifest{
+		Libraries: map[string]types.CuInterposeLibraryIdentity{
+			types.CuInterposeFrontend: {SHA256: strings.Repeat("a", 64)},
+			types.CuInterposeCore:     {SHA256: strings.Repeat("b", 64)},
+		},
+		PIDs: []int{},
 	}
 }

@@ -17,25 +17,31 @@ import (
 // JobFileEnv is the CUDA launch-job environment variable consumed by the driver.
 const JobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
 
-// StageJobFile copies a launch-job file into the checkpoint artifact and
-// returns the host-visible path to the source pod's live job file. Capture
-// helpers must use that live file so they join the same CUDA job as the target
-// processes; the artifact copy is only a seed for later restore pods. The
-// launch wrapper persists the driver-created file at a fixed path before
-// starting the workload.
-func StageJobFile(sourceRootPath, checkpointDir string, sourceGPUCount int) (string, error) {
+// StageJobFile copies a launch-job file into the checkpoint artifact and returns the
+// host-visible path to the source Pod's live file, or "" when the source has none.
+// Capture helpers must use the live file to join the targets' CUDA job, while the
+// artifact copy is only for later restore Pods. The launch wrapper saves the
+// driver-created file at a fixed path before starting the workload.
+func StageJobFile(sourceRootPath, checkpointDir string) (string, error) {
 	sourcePath := filepath.Join(sourceRootPath, strings.TrimPrefix(podcontract.CUDAJobFilePath, string(os.PathSeparator)))
 	destinationPath := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
 	if err := copyJobFile(sourcePath, destinationPath); err != nil {
 		if os.IsNotExist(err) {
-			if sourceGPUCount > 1 {
-				return "", fmt.Errorf("multi-GPU CUDA source is missing %s; source must be launched under cuda-checkpoint --launch-job", podcontract.CUDAJobFilePath)
-			}
 			return "", nil
 		}
 		return "", fmt.Errorf("stage CUDA checkpoint job file: %w", err)
 	}
 	return sourcePath, nil
+}
+
+// CheckJobFile applies the same launch-job rule at capture and restore. Native
+// multi-GPU restore needs the file, while a cuinterpose coordinator restores shared
+// IPC and multicast state itself.
+func CheckJobFile(jobFile string, gpuCount int, usesCoordinator bool) error {
+	if jobFile == "" && gpuCount > 1 && !usesCoordinator {
+		return fmt.Errorf("multi-GPU CUDA checkpoint is missing %s; launch the source under cuda-checkpoint --launch-job", podcontract.CUDAJobFilePath)
+	}
+	return nil
 }
 
 // refreshJobFileArtifact captures the job state after every CUDA process has

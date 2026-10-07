@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -25,6 +27,7 @@ import (
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 const pageBrokerAbortTimeout = 5 * time.Second
@@ -61,6 +64,9 @@ type CheckpointRequest struct {
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
 	Pod compat.Environment
+	// CuInterposeRequested is the workload's explicit opt-in. Capture then fails unless
+	// every CUDA process loaded the shim. Without it, a loaded shim is still captured.
+	CuInterposeRequested bool
 }
 
 type checkpointPhaseTimings struct {
@@ -125,10 +131,17 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return err
 	}
+	state.CuInterpose, err = inspectCuInterpose(ctx, state, req.CuInterposeRequested)
+	if err != nil {
+		return err
+	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices))
+		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir)
 		if err != nil {
+			return err
+		}
+		if err := cuda.CheckJobFile(cudaJobFile, len(state.GPUs.Devices), state.CuInterpose.UsesCoordinator()); err != nil {
 			return err
 		}
 	}
@@ -300,6 +313,52 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	}, gpuDeviceMapDuration, nil
 }
 
+// inspectCuInterpose verifies the shim libraries in every CUDA process and their
+// delivery mount. When a coordinator is in use, it also checks every participant
+// before capture becomes destructive.
+func inspectCuInterpose(ctx context.Context, state *types.CheckpointContainerSnapshot, requested bool) (*types.CuInterposeManifest, error) {
+	inspection, err := cuda.InspectCuInterposeLibraries(snapshotruntime.HostProcPath, state.CUDAHostPIDs, requested)
+	if err != nil {
+		return nil, err
+	}
+	if inspection == nil {
+		return nil, nil
+	}
+	manifest := inspection.Manifest(state.CUDAHostPIDs, state.CUDANSPIDs)
+	if err := checkCuInterposeMountReadOnly(state.Mounts); err != nil {
+		return nil, err
+	}
+	if manifest.UsesCoordinator() {
+		if err := cuda.InspectCuInterpose(ctx, coordinatorTarget(state.PID, manifest.PIDs)); err != nil {
+			return nil, fmt.Errorf("inspect cuinterpose: %w", err)
+		}
+	}
+	return manifest, nil
+}
+
+// checkCuInterposeMountReadOnly rejects a writable mount at or under the delivery
+// path. Restore binds the agent's shared library directory at that path, and CRIU
+// reapplies the source mount's flags to the bind.
+func checkCuInterposeMountReadOnly(mounts []types.MountInfo) error {
+	for _, m := range mounts {
+		delivery := m.MountPoint == podcontract.CuInterposeMountPath ||
+			strings.HasPrefix(m.MountPoint, podcontract.CuInterposeMountPath+"/")
+		if delivery && !m.ReadOnly {
+			return fmt.Errorf("cuinterpose delivery mount %s must be read-only", m.MountPoint)
+		}
+	}
+	return nil
+}
+
+func coordinatorTarget(hostPID int, namespacePIDs []int) cuda.CuInterposeTarget {
+	return cuda.CuInterposeTarget{
+		ProcRoot:      snapshotruntime.HostProcPath,
+		HostPID:       hostPID,
+		NamespacePIDs: namespacePIDs,
+		Binary:        cuda.DefaultCoordinatorBinaryPath,
+	}
+}
+
 func configureCheckpoint(
 	log logr.Logger,
 	state *types.CheckpointContainerSnapshot,
@@ -313,6 +372,10 @@ func configureCheckpoint(
 	}
 	podEnvironment := req.Pod
 	podEnvironment.ImageID = state.ImageID
+	overlay := cfg.Overlay
+	// GNU tar already skips sockets. The pattern keeps coordinator endpoints out of
+	// the rootfs diff regardless.
+	overlay.Exclusions = append(slices.Clone(overlay.Exclusions), cuda.CuInterposeSocketPattern)
 
 	m := types.NewCheckpointManifest(
 		req.ContentUID,
@@ -320,7 +383,7 @@ func configureCheckpoint(
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
 		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs).
 			WithPodEnvironment(podEnvironment),
-		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
+		types.NewOverlayManifest(overlay, state.UpperDir, state.OCISpec),
 		types.NewHostManifest(cfg.HostKernelVersion),
 	)
 	if len(state.CUDANSPIDs) > 0 {
@@ -330,6 +393,7 @@ func configureCheckpoint(
 			m.CUDA.NVIDIAVisibleDevices = cuda.VisibleDevicesValue(state.OCISpec.Process.Env)
 		}
 	}
+	m.CuInterpose = state.CuInterpose
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
 		return nil, nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
@@ -343,6 +407,12 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
+		if data.CuInterpose.UsesCoordinator() {
+			// Remove shared mappings before native CUDA lock and checkpoint calls.
+			if err := cuda.PrepareCuInterpose(ctx, coordinatorTarget(state.PID, data.CuInterpose.PIDs), checkpointDir); err != nil {
+				return nil, fmt.Errorf("prepare cuinterpose: %w", err)
+			}
+		}
 		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)

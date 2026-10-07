@@ -6,12 +6,32 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
+
+func TestParseMountInfoReadOnly(t *testing.T) {
+	// ReadOnly follows the per-mount options, not the superblock options.
+	mounts, err := parseMountInfo(strings.NewReader(
+		"100 90 0:50 / /tmp/snapshot-cuda ro,nosuid,nodev,relatime - overlay overlay rw,lowerdir=/l\n" +
+			"101 90 8:1 / /models rw,relatime - ext4 /dev/sda1 ro\n"))
+	if err != nil {
+		t.Fatalf("parseMountInfo() error = %v", err)
+	}
+	want := map[string]bool{"/tmp/snapshot-cuda": true, "/models": false}
+	if len(mounts) != len(want) {
+		t.Fatalf("parseMountInfo() = %+v, want %d mounts", mounts, len(want))
+	}
+	for _, m := range mounts {
+		if m.ReadOnly != want[m.MountPoint] {
+			t.Errorf("%s ReadOnly = %t, want %t", m.MountPoint, m.ReadOnly, want[m.MountPoint])
+		}
+	}
+}
 
 func TestClassifyMounts(t *testing.T) {
 	tests := []struct {
