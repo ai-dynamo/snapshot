@@ -13,19 +13,19 @@ import (
 )
 
 func TestCuInterposeManifest(t *testing.T) {
-	identity := "cuinterpose:\n  sha256:\n    libcuinterpose.so: " + strings.Repeat("a", 64) +
-		"\n    libcuinterpose_core.so: " + strings.Repeat("b", 64)
+	identity := "cuinterpose:\n  libraries:\n    libcuinterpose.so:\n      sha256: " + strings.Repeat("a", 64) +
+		"\n    libcuinterpose_core.so:\n      sha256: " + strings.Repeat("b", 64)
 	for _, tc := range []struct{ name, yaml, wantError string }{
 		{name: "native"},
 		{name: "identity", yaml: identity + "\n  pids: []"},
 		{name: "missing pids", yaml: identity, wantError: "pids must be present"},
 		{name: "null pids", yaml: identity + "\n  pids: null", wantError: "pids must be present"},
 		{name: "not native", yaml: identity + "\n  pids: [7]", wantError: "not a CUDA participant"},
-		{name: "missing hashes", yaml: "cuinterpose: {}", wantError: "must hash exactly"},
-		{name: "missing core", yaml: "cuinterpose:\n  sha256:\n    libcuinterpose.so: " + strings.Repeat("a", 64), wantError: "must hash exactly"},
-		{name: "unknown library", yaml: "cuinterpose:\n  sha256:\n    libcuinterpose.so: " + strings.Repeat("a", 64) +
-			"\n    libother.so: " + strings.Repeat("b", 64), wantError: "sha256[libcuinterpose_core.so]"},
-		{name: "malformed hash", yaml: strings.Replace(identity, strings.Repeat("a", 64), "not-a-hash", 1), wantError: "sha256[libcuinterpose.so]"},
+		{name: "missing hashes", yaml: "cuinterpose: {}", wantError: "must contain exactly"},
+		{name: "missing core", yaml: "cuinterpose:\n  libraries:\n    libcuinterpose.so:\n      sha256: " + strings.Repeat("a", 64), wantError: "must contain exactly"},
+		{name: "unknown library", yaml: "cuinterpose:\n  libraries:\n    libcuinterpose.so:\n      sha256: " + strings.Repeat("a", 64) +
+			"\n    libother.so:\n      sha256: " + strings.Repeat("b", 64), wantError: "libraries[libcuinterpose_core.so].sha256"},
+		{name: "malformed hash", yaml: strings.Replace(identity, strings.Repeat("a", 64), "not-a-hash", 1), wantError: "libraries[libcuinterpose.so].sha256"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			directory := t.TempDir()
@@ -65,7 +65,11 @@ func TestCuInterposeParticipantManifest(t *testing.T) {
 				Artifact: ArtifactManifest{ContentUID: "content", ContainerName: "main"},
 				CUDA:     CUDAManifest{PIDs: []int{1, 623}},
 				CuInterpose: &CuInterposeManifest{
-					SHA256: map[string]string{CuInterposeFrontend: strings.Repeat("a", 64), CuInterposeCore: strings.Repeat("b", 64)}, PIDs: tc.pids,
+					Libraries: map[string]CuInterposeLibraryIdentity{
+						CuInterposeFrontend: {SHA256: strings.Repeat("a", 64)},
+						CuInterposeCore:     {SHA256: strings.Repeat("b", 64)},
+					},
+					PIDs: tc.pids,
 				},
 			}
 			directory := t.TempDir()

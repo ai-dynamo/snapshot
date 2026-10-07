@@ -190,8 +190,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return RestoreResult{}, err
 	}
 	if manifest.CuInterpose != nil {
-		// Executable identity is required even when compatibility policy is skipped.
-		if err := cuda.CheckCuInterposeLibraries(nsmount.CuInterposeBundlePath, manifest.CuInterpose); err != nil {
+		// These libraries belong to the checkpointed process. The agent supplies their
+		// files, but an upgraded bundle may differ from the bytes loaded at capture.
+		if err := cuda.VerifyCuInterposeLibraryIdentity(nsmount.CuInterposeBundlePath, manifest.CuInterpose); err != nil {
 			return 0, err
 		}
 	}
