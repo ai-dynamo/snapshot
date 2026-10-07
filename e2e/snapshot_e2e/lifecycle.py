@@ -876,6 +876,28 @@ def checkpoint_rootfs_file(
     )
 
 
+def corrupt_checkpoint_image(
+    config: k8s.E2EConfig,
+    node: str,
+    content_uid: str,
+    image: str = "inventory.img",
+) -> None:
+    """Overwrite one CRIU image in a captured artifact with junk.
+
+    The default is the inventory, which CRIU reads first to find every other
+    image, so a restore fails on it rather than part way through replaying a
+    process. The file is replaced rather than removed because a missing image
+    and an unreadable one are different failures, and the unreadable one is the
+    one a half-written or bit-rotted artifact produces.
+    """
+    k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"printf 'not-a-criu-image' > "
+        f"{checkpoint_artifact_path(content_uid)}/{shlex.quote(image)}",
+    )
+
+
 def checkpoint_artifact_path(content_uid: str) -> str:
     return shlex.quote(
         f"{AGENT_CHECKPOINT_DIR}/artifacts/{content_uid}/containers/{CONTAINER}"

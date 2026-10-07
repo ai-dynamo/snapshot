@@ -508,6 +508,70 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
         raise
 
 
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    """A hard failure, which is not the same thing as a refusal.
+
+    This is deliberately not a port of the GPU test above. That one fails
+    because GPU discovery cannot read a device that is not there, and every
+    path that produces RestoreFailed in the restore executor sits behind a
+    CUDA manifest a CPU capture never writes — so no arrangement of pods or
+    annotations reaches it without a GPU.
+
+    Damaging the artifact reaches the same verdict by the only route a CPU
+    cluster has: the restore is attempted and loses, rather than being turned
+    away before any work happens. The property worth holding either way is
+    that the failure sticks to the pod and does not spread to the snapshot,
+    which is still a correct record of a capture that did succeed.
+    """
+    try:
+        _, source_node, _ = create_valid_checkpoint(config, run, gpu=False)
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        snap.corrupt_checkpoint_image(config, source_node, content["metadata"]["uid"])
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            snap.restore_pod(
+                config=config,
+                run=run,
+                gpu=False,
+                source_node=source_node,
+            )
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreFailed"
+        )
+
+        pod_snapshot, content = snap.wait_for_snapshot_ready(
+            config.namespace,
+            run.snapshot_name,
+            timeout=60,
+        )
+        assert snap.condition(pod_snapshot, "Ready")["status"] == "True"
+        assert snap.condition(content, "Ready")["status"] == "True"
+        assert_restore_events(
+            config.namespace,
+            run.restore_pod,
+            {"RestoreFailed"},
+        )
+        # A refusal is reported without the agent having touched CRIU, so the
+        # two verdicts would be indistinguishable here if the gate had also
+        # had something to complain about. It did not: the artifact is the
+        # only thing wrong, and the gate does not read artifacts.
+        assert "RestoreIncompatible" not in restore_event_reasons(
+            config.namespace, run.restore_pod
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 # A checkpoint captured with more memory than the target offers is the cheapest
 # real mismatch to build: nothing about the node has to change for it.
 CAPTURE_MEMORY_LIMIT = "4Gi"
