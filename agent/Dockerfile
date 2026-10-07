@@ -281,7 +281,8 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 # criu never forks iptables-restore/ip6tables-restore on this path and neither
 # binary needs to be in the bundle. See BuildRestoreOpts for why SKIP is safe
 # for restore specifically.
-# All resolve through PATH inside the namespace.
+# ip resolves through PATH inside the namespace; tar is invoked by absolute
+# path under the bundled loader (see the libc/ stage below).
 RUN set -eu; \
     cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
@@ -291,9 +292,9 @@ RUN set -eu; \
 # Shared-library closure of the bundled binaries and plugins.
 #
 # glibc (libc, libm, libpthread, libdl, librt, libresolv) and the loader are
-# deliberately excluded: the kernel reads PT_INTERP before LD_LIBRARY_PATH
-# applies, so the loader always comes from the placeholder, and glibc's loader
-# and libc are version-locked — pairing them across builds breaks at exec.
+# deliberately excluded from lib/, which is on LD_LIBRARY_PATH for the directly
+# exec'd binaries; tar gets its own matched pair in libc/ below. The bundle
+# layout comment in agent/internal/nsmount/injector.go has the reasoning.
 # Also excluded: libmvec, libutil, libanl, libnsl, libthread_db — same glibc
 # version-lock; libm matches only when followed by '.' or '-', not libmvec.
 # libcuda/libnvidia are excluded because they are injected by the NVIDIA
@@ -320,6 +321,35 @@ RUN set -eu; \
         exit 1; \
       fi; \
     done
+
+# Matched loader + glibc for the bundled tar, which runtime.restoreTarCmd
+# invokes as `ld-linux-x86-64.so.2 --library-path ... tar`. This is what lets
+# tar run on placeholders older than AGENT_BASE_IMAGE. Keep it out of lib/ —
+# see the bundle layout comment in agent/internal/nsmount/injector.go.
+RUN set -eu; \
+    mkdir -p /snapshot-binaries/libc; \
+    cp -L /lib64/ld-linux-x86-64.so.2 /snapshot-binaries/libc/; \
+    ldd /snapshot-binaries/tar | awk '/=> \//{print $3}' \
+    | grep -E '/(libc|libm|libmvec|libdl|libpthread|librt|libresolv)[.-]' \
+    | xargs -r -I{} cp -Ln {} /snapshot-binaries/libc/
+
+# Post-condition: every library the loader-invoked tar resolves must come from
+# the bundle. Asserting "not found" is not enough — this stage's own glibc
+# satisfies the loader just as well, so an omitted libc/ would build green here
+# and only fail on a placeholder older than AGENT_BASE_IMAGE, which is the bug
+# this arrangement exists to prevent.
+RUN set -eu; \
+    LOADER=/snapshot-binaries/libc/ld-linux-x86-64.so.2; \
+    LIBPATH=/snapshot-binaries/libc:/snapshot-binaries/lib; \
+    escaped=$("$LOADER" --library-path "$LIBPATH" --list /snapshot-binaries/tar \
+              | awk '/=>/{print $3}' | grep -v '^/snapshot-binaries/' || true); \
+    if [ -n "$escaped" ]; then \
+      echo "ERROR: bundled tar resolves outside the bundle:" >&2; \
+      echo "$escaped" >&2; \
+      "$LOADER" --library-path "$LIBPATH" --list /snapshot-binaries/tar >&2; \
+      exit 1; \
+    fi; \
+    "$LOADER" --library-path "$LIBPATH" /snapshot-binaries/tar --version >/dev/null
 
 COPY --from=sources /sources /legal/source
 
@@ -348,12 +378,22 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # The mount destination is created by the ns-bind-mount helper inside this
 # namespace, so nothing needs pre-provisioning here.
 #
-# Three constraints follow from that and must hold for every BASE_IMAGE:
-#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE, because the
-#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
-#     glibc 2.39) and loaded ahead of the placeholder's own libraries via
-#     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
-#     restore with "version 'GLIBC_2.38' not found".
+# Four constraints follow from that and must hold for every BASE_IMAGE:
+#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE for criu, ip
+#     and the CUDA tools: they are exec'd directly, so they take the loader
+#     from the placeholder but their libraries from the bundle, which is built
+#     from AGENT_BASE_IMAGE (ubuntu 24.04, glibc 2.39). A 22.04-based
+#     BASE_IMAGE builds green but fails at restore with "version 'GLIBC_2.38'
+#     not found". The rootfs-diff tar is exempt — see the bundle layout comment
+#     in agent/internal/nsmount/injector.go.
+#   - BASE_IMAGE must not ship /etc/ld.so.preload listing a library newer than
+#     AGENT_BASE_IMAGE's glibc. The bundled loader still reads that file from
+#     the placeholder, and the library it names is loaded into a process whose
+#     libc is the bundle's, so the rootfs-diff tar fails to start with
+#     "version 'GLIBC_2.41' not found (required by <preloaded library>)" —
+#     note this one bites when the placeholder is *newer*, unlike the
+#     constraint above. Known limitation, left undefended: preload files are
+#     rare, and the alternative is a static tar.
 #   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
 #   - The placeholder pod must NOT set readOnlyRootFilesystem: true unless a
 #     writable volume is mounted at /tmp. The agent bind-mounts the binary
