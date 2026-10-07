@@ -128,7 +128,12 @@ def rollout_state(ctx: UpgradeContext, upgrade: UpgradeConfig) -> list[str]:
         for pod in snapshot_pods(ctx, component):
             pod_tag = image_tag(container_image(pod.spec.containers, container))
             if pod.metadata.deletion_timestamp or pod_tag != tag or not k8s.pod_containers_ready(pod):
-                pending.append(f"{k8s.pod_readiness_detail(pod)} tag={pod_tag}")
+                terminating = (
+                    f" terminating-since={pod.metadata.deletion_timestamp} finalizers={pod.metadata.finalizers or []}"
+                    if pod.metadata.deletion_timestamp
+                    else ""
+                )
+                pending.append(f"{k8s.pod_readiness_detail(pod)} tag={pod_tag}{terminating}")
     return pending
 
 
@@ -309,12 +314,85 @@ def assert_global_invariants(ctx: UpgradeContext) -> None:
     assert not problems, "; ".join(problems)
 
 
+def dump_pod_writers(pod: client.V1Pod) -> None:
+    conditions = {c.type: f"{c.status}({c.reason or ''})" for c in pod.status.conditions or []}
+    print(f"  status writers of {pod.metadata.name} (current conditions {conditions}):")
+    for writer in k8s.pod_status_writers(pod) or ["<no managedFields touching status>"]:
+        print(f"    {writer}")
+
+
+def dump_scenario_pod_writers(namespace: str, label_selector: str) -> None:
+    try:
+        pods = client.CoreV1Api().list_namespaced_pod(namespace, label_selector=label_selector).items
+    except ApiException as exc:
+        print(f"scenario pods unavailable: {k8s.api_error_detail(exc)}")
+        return
+    for pod in pods:
+        dump_pod_writers(pod)
+
+
+def dump_operator_rollout(ctx: UpgradeContext) -> None:
+    namespace = ctx.config.namespace
+    apps = client.AppsV1Api()
+    try:
+        deployment = operator_deployment(ctx)
+    except AssertionError as exc:
+        print(f"operator Deployment unavailable: {exc}")
+        return
+    status = deployment.status
+    print(
+        f"deployment {deployment.metadata.name} generation={deployment.metadata.generation} "
+        f"observed={status.observed_generation} paused={deployment.spec.paused} "
+        f"strategy={deployment.spec.strategy.type if deployment.spec.strategy else None} "
+        f"replicas={status.replicas} updated={status.updated_replicas} ready={status.ready_replicas} "
+        f"available={status.available_replicas} unavailable={status.unavailable_replicas} "
+        f"terminating={getattr(status, 'terminating_replicas', None)}"
+    )
+    for condition in status.conditions or []:
+        print(f"  condition {condition.type}={condition.status} {condition.reason}: {condition.message}")
+    selector = ",".join(f"{k}={v}" for k, v in (deployment.spec.selector.match_labels or {}).items())
+    for replicaset in apps.list_namespaced_replica_set(namespace, label_selector=selector).items:
+        rs_status = replicaset.status
+        image = container_image(replicaset.spec.template.spec.containers, OPERATOR_CONTAINER)
+        print(
+            f"replicaset {replicaset.metadata.name} revision="
+            f"{(replicaset.metadata.annotations or {}).get('deployment.kubernetes.io/revision')} "
+            f"spec={replicaset.spec.replicas} status={rs_status.replicas} ready={rs_status.ready_replicas} "
+            f"available={rs_status.available_replicas} image={image}"
+        )
+    for pod in snapshot_pods(ctx, OPERATOR):
+        owners = [f"{o.kind}/{o.name}" for o in pod.metadata.owner_references or []]
+        conditions = {c.type: f"{c.status}({c.reason or ''})" for c in pod.status.conditions or []}
+        print(
+            f"operator pod {pod.metadata.name} deletion={pod.metadata.deletion_timestamp} "
+            f"finalizers={pod.metadata.finalizers or []} owners={owners} conditions={conditions}"
+        )
+        dump_pod_writers(pod)
+    try:
+        for lease in client.CoordinationV1Api().list_namespaced_lease(namespace).items:
+            spec = lease.spec
+            print(f"lease {lease.metadata.name} holder={spec.holder_identity} renewed={spec.renew_time}")
+    except ApiException as exc:
+        print(f"leases unavailable: {k8s.api_error_detail(exc)}")
+    events = sorted(k8s.list_events(namespace), key=lifecycle.event_time)[-50:]
+    for event in events:
+        involved = event.involved_object
+        print(
+            f"event {lifecycle.event_time(event)} {event.type} {involved.kind}/{involved.name} "
+            f"{event.reason}: {event.message}"
+        )
+
+
 def dump_diagnostics(ctx: UpgradeContext) -> None:
     print("\n--- snapshot upgrade e2e debug ---")
     try:
         print(helm(ctx, "history", ctx.config.release))
     except AssertionError as exc:
         print(exc)
+    try:
+        dump_operator_rollout(ctx)
+    except Exception as exc:
+        print(f"operator rollout dump failed: {type(exc).__name__}: {exc}")
     core = client.CoreV1Api()
     for component in (OPERATOR, AGENT):
         for pod in snapshot_pods(ctx, component):
