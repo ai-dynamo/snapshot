@@ -40,7 +40,8 @@ HEADER
 
     printf '================================================================================\n'
     printf 'COMPONENT: protobuf\n'
-    printf 'VERSION:   %s (Debian source version)\n' "$(cat "$SOURCE/VERSION")"
+    version=$(cat "$SOURCE/VERSION")
+    printf 'VERSION:   %s (Debian source version)\n' "$version"
     printf 'SOURCE:    /legal/source/protobuf/\n'
     printf '================================================================================\n\n'
     cat "$SOURCE/copyright"
@@ -49,7 +50,8 @@ HEADER
         for component in "$@"; do
             printf '\n================================================================================\n'
             printf 'COMPONENT: %s\n' "$(basename "$component")"
-            printf 'VERSION: %s\nSOURCE: %s/\n\n' "$(cat "$component/VERSION")" "$component"
+            version=$(cat "$component/VERSION")
+            printf 'VERSION: %s\nSOURCE: %s/\n\n' "$version" "$component"
             cat "$component/copyright"
             if [ -f "$component/THIRD-PARTY-NOTICES.txt" ]; then
                 cat "$component/THIRD-PARTY-NOTICES.txt"
