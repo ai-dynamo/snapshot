@@ -19,6 +19,8 @@ const (
 
 // ArtifactCleanupConfig configures content finalizer cleanup and orphan scans.
 type ArtifactCleanupConfig struct {
+	// StoreID identifies the configured backend; empty permits legacy content only.
+	StoreID      string
 	BasePath     string
 	ScanInterval time.Duration
 	BatchSize    int
