@@ -18,13 +18,19 @@ inline bool FatalCleanupPending()
   return detail::fatal_cleanup.load(std::memory_order_acquire);
 }
 
+// Start the watchdog before attempting cleanup that may itself block.
+inline void SignalFatalCleanup()
+{
+  detail::fatal_cleanup.store(true, std::memory_order_release);
+}
+
 // Keep this thread's entire ownership stack alive. In particular, a failed
 // unmap must not unwind into allocation release, and pending I/O still owns
 // its buffers and file. The daemon's shutdown owner terminates the process.
 [[noreturn]] inline void ReportFatalCleanup(const char* message)
 {
   // Signal before logging so a blocked stderr cannot prevent shutdown.
-  detail::fatal_cleanup.store(true, std::memory_order_release);
+  SignalFatalCleanup();
   std::fprintf(stderr, "PageBroker fatal cleanup: %s\n", message);
   std::fflush(stderr);
   for (;;) {
