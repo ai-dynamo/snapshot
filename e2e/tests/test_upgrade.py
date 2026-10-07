@@ -99,4 +99,7 @@ def test_post_upgrade(upgraded: UpgradeContext, name: str) -> None:
             scenarios.by_name(name).post_upgrade(upgraded, state)
     except Exception:
         lifecycle.debug_dump(upgraded.config, state.run)
+        checks.dump_scenario_pod_writers(
+            upgraded.config.namespace, ",".join(f"{k}={v}" for k, v in state.run.labels.items())
+        )
         raise
