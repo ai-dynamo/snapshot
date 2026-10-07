@@ -16,6 +16,17 @@
 #include <thread>
 
 namespace snapshot::pagebroker {
+namespace {
+struct FatalCleanupOwner {
+  ~FatalCleanupOwner() { std::_Exit(42); }
+};
+
+struct FatalCleanupCase {
+  NixlTransferEngine::Fault failure;
+  const char* diagnostic;
+};
+}  // namespace
+
 TEST(NixlTransfer, ReusesRegisteredBufferThroughTransferEngine)
 {
   char path[] = "/tmp/pagebroker-nixl-XXXXXX";
@@ -111,9 +122,7 @@ void RunFatalNixlCase(NixlTransferEngine::Fault failure, int observed)
   }
   alignas(4096) std::array<unsigned char, 4096> buffer{};
   std::array<void*, 1> addresses{buffer.data()};
-  struct Owner {
-    ~Owner() { std::_Exit(42); }
-  } owner;
+  FatalCleanupOwner owner;
   std::jthread other([&] {
     while (!stopping.load() || !cancellation.IsCancelled()) {
       std::this_thread::yield();
@@ -139,10 +148,7 @@ void RunFatalNixlCase(NixlTransferEngine::Fault failure, int observed)
 
 TEST(NixlTransfer, FatalCleanupRetainsOwnersAndCancelsOtherWorkBeforeExit)
 {
-  const struct {
-    NixlTransferEngine::Fault failure;
-    const char* diagnostic;
-  } cases[] = {
+  const FatalCleanupCase cases[] = {
     {NixlTransferEngine::Fault::DrainTimeout, "NIXL transfer did not drain before its deadline"},
     {NixlTransferEngine::Fault::RequestRelease, "release completed NIXL request failed"},
     {NixlTransferEngine::Fault::FileRelease, "NIXL file deregistration failed"},

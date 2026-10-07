@@ -12,8 +12,8 @@ ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24
 FROM ${CUDA_HEADERS_IMAGE} AS cuda-headers
 
 FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS nixl
-# POSIX-only NIXL at the qualified transfer implementation revision.
-ARG NIXL_REF=71ca3cb249a481ae892fcc042a456e1a9b87463d
+# POSIX-only NIXL v1.5.0, including upstream Linux AIO failure recovery.
+ARG NIXL_REF=1683cf3b7f3d11674c03c5e861cea22339876c96
 ARG BUILD_JOBS=4
 ARG NVTX_REF=3ebbc93ded7285963bff932c678fa367eb393ba6
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,13 +26,11 @@ RUN git init /tmp/nvtx && cd /tmp/nvtx \
     && git checkout --detach ${NVTX_REF} \
     && mkdir -p /nixl-install/usr/local/include \
     && cp -a c/include/nvtx3 /nixl-install/usr/local/include/
-COPY patches/nixl-linux-aio-submission.patch /tmp/nixl-linux-aio-submission.patch
 RUN git init /tmp/nixl && cd /tmp/nixl \
     && git remote add origin https://github.com/ai-dynamo/nixl.git \
     && git fetch --depth 1 origin ${NIXL_REF} \
     && test "$(git rev-parse FETCH_HEAD)" = "${NIXL_REF}" \
     && git checkout --detach ${NIXL_REF} \
-    && git apply /tmp/nixl-linux-aio-submission.patch \
     && meson setup build --prefix=/usr/local --libdir=lib --buildtype=release \
       -Dbuild_tests=false -Dbuild_examples=false -Denable_plugins=POSIX \
     && meson compile -C build -j ${BUILD_JOBS} \
