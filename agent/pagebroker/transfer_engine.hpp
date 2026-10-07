@@ -28,12 +28,15 @@ class TransferEngine {
   virtual void Submit(size_t slot, io::Operation operation, size_t offset, size_t size);
   virtual void Wait(size_t slot);
   virtual void Close();
+  virtual Path DestinationDirectory(const StorageBackend& destination) const;
   virtual Path SourceDirectory(const StorageBackend& source) const;
+  // CPU restore staging excludes the separate GPU payload directory.
   virtual uintmax_t RestoreSize(const StorageBackend& source) const;
   virtual void StageRestore(const StorageBackend& source, const Path& destination) const;
   virtual void ValidateCheckpointDestination(const StorageBackend& destination) const;
   virtual bool CheckpointDestinationConflicts(const StorageBackend& destination) const;
   virtual void PublishCheckpoint(const Path& source, const StorageBackend& destination) const;
+  virtual void PromoteCheckpoint(const Path& output, const StorageBackend& destination) const = 0;
   virtual void CopyDirectory(const Path& source, const Path& destination) const;
 };
 }  // namespace snapshot::pagebroker

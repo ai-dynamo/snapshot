@@ -27,6 +27,7 @@ class NixlTransferEngine final : public TransferEngine {
   void Submit(size_t slot, io::Operation operation, size_t offset, size_t size) override;
   void Wait(size_t slot) override;
   void Close() override;
+  void PromoteCheckpoint(const Path& output, const StorageBackend& destination) const override;
 
  private:
   struct Impl;

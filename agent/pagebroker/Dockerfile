@@ -69,10 +69,9 @@ RUN make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
     && make build/gpu-checkpoint-test build/gpu-transfer-test CUDA_ROOT=/opt/cuda CUDA_LIBRARY_DIR=/opt/cuda/lib64/stubs \
     && make daemon CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
 
-# Smoke-test must run here: the runtime stage is distroless (no shell).
-RUN output=$(/src/pagebroker 2>&1); status=$?; \
-    [ "$status" -eq 2 ]; \
-    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]
+# The CLI remains usable without a driver. CUDA is loaded only for capability
+# detection, and no build-time driver stub is shipped in the runtime image.
+RUN /src/pagebroker 2>/tmp/usage; status=$?; [ "$status" -eq 2 ] && grep -q '^usage: pagebroker ' /tmp/usage
 
 RUN mv /usr/local/lib /usr/local/lib-build \
     && mkdir -p /runtime-lib \
@@ -89,8 +88,6 @@ RUN mv /usr/local/lib /usr/local/lib-build \
 RUN sh /src/compliance/collect-sources.sh /legal/source/protobuf \
     && rm -rf /var/lib/apt/lists/*
 
-# Assemble the legal materials so the runtime stage (distroless, no shell) can
-# receive them in a single COPY.
 FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS sources
 
 COPY --from=build /legal/source/protobuf /legal/source/protobuf

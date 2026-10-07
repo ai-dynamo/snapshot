@@ -18,6 +18,7 @@ void TransferEngine::Open(int, size_t) { UnsupportedOperation(); }
 void TransferEngine::Submit(size_t, io::Operation, size_t, size_t) { UnsupportedOperation(); }
 void TransferEngine::Wait(size_t) { UnsupportedOperation(); }
 void TransferEngine::Close() { UnsupportedOperation(); }
+Path TransferEngine::DestinationDirectory(const StorageBackend&) const { UnsupportedOperation(); }
 Path TransferEngine::SourceDirectory(const StorageBackend&) const { UnsupportedOperation(); }
 uintmax_t TransferEngine::RestoreSize(const StorageBackend&) const { UnsupportedOperation(); }
 void TransferEngine::StageRestore(const StorageBackend&, const Path&) const { UnsupportedOperation(); }

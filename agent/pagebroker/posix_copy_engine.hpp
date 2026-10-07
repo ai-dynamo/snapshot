@@ -10,12 +10,14 @@ class PosixCopyEngine final : public TransferEngine {
  public:
   explicit PosixCopyEngine(Path storage_root);
   IoEngine type() const override;
-  Path SourceDirectory(const StorageBackend& source) const override;
   uintmax_t RestoreSize(const StorageBackend& source) const override;
   void StageRestore(const StorageBackend& source, const Path& destination) const override;
+  Path SourceDirectory(const StorageBackend& source) const override;
+  Path DestinationDirectory(const StorageBackend& destination) const override;
   void ValidateCheckpointDestination(const StorageBackend& destination) const override;
   bool CheckpointDestinationConflicts(const StorageBackend& destination) const override;
   void PublishCheckpoint(const Path& source, const StorageBackend& destination) const override;
+  void PromoteCheckpoint(const Path& output, const StorageBackend& destination) const override;
   void CopyDirectory(const Path& source, const Path& destination) const override;
 
  private:

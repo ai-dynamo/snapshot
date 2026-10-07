@@ -98,6 +98,11 @@ NixlTransferEngine::~NixlTransferEngine()
   }
 }
 
+void NixlTransferEngine::PromoteCheckpoint(const Path&, const StorageBackend&) const
+{
+  throw std::logic_error("NIXL does not support directory promotion");
+}
+
 void NixlTransferEngine::Open(int descriptor, size_t size)
 {
   auto& impl = *impl_;
