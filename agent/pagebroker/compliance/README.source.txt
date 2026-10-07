@@ -1,26 +1,31 @@
 Corresponding source
-================================================================================
+====================
 
-Upstream source for the third-party components redistributed in this image.
+Source for PageBroker and the third-party components distributed in this image:
 
-  protobuf/    Debian source package (.dsc, upstream tarball, Debian diff) for
-               protobuf, statically linked into /usr/local/bin/pagebroker, at
-               the source version the linked libprotobuf.a was built from.
-               VERSION records that source version.
+  protobuf/    Debian source package for the statically linked protobuf library.
+               Its version matches the installed development package.
+  libaio/      Debian source package for the bundled libaio runtime library.
+               Its version matches the installed binary package.
+  nixl/        NIXL and its dependencies at the revision built for POSIX I/O.
+               VERSION records the base NIXL commit. The supplied source includes
+               patches/nixl-linux-aio-submission.patch from pagebroker/, which
+               fixes failed-submission callback completion and pool reuse.
+  nvtx/        NVTX headers and notices at the profiling revision.
+               VERSION records the NVTX commit.
+  pagebroker/  NVIDIA daemon source, including the GPU engine. Build output and
+               generated protobuf files are excluded. Run `make generate` to
+               generate protobuf files from the supplied .proto file.
 
-  pagebroker/  NVIDIA-authored source for the daemon itself, as built. Build
-               artifacts and protoc-generated files are excluded; `make
-               generate` reproduces the latter from the shipped .proto.
-
-This image is distroless and installs no system packages, so statically linked
-protobuf is the only third-party content this image adds. The base image
-contains third-party components of its own -- glibc, libstdc++ and libgcc,
-which this binary links dynamically. Source for the base image's own contents
-is published by NVIDIA and is not duplicated here:
+NVIDIA publishes source for the distroless base image at:
 
   https://developer.download.nvidia.com/distroless-oss/cc/v4.0.8/
 
-NVIDIA-authored code in this image is Apache-2.0 and published at
-https://github.com/ai-dynamo/snapshot.
+The NVIDIA container runtime supplies the host CUDA driver library. This image
+excludes the CUDA driver stub used at build time.
 
-Per-component license texts are in /legal/THIRD-PARTY.txt.
+NVIDIA-authored code uses the Apache-2.0 license and is published at:
+
+  https://github.com/ai-dynamo/snapshot
+
+Component license texts are in /legal/THIRD-PARTY.txt.
