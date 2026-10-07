@@ -143,6 +143,11 @@ sidecars. An empty value leaves seccomp unmanaged for environments that provide
 the restriction elsewhere. A destination container must not override a
 requested profile with a conflicting profile.
 
+At restore, the node agent mounts its restore tooling under `/tmp` in each
+destination container. A destination container that sets
+`readOnlyRootFilesystem: true` must mount a writable volume, such as an
+`emptyDir`, at `/tmp`; otherwise the mount fails with `EROFS`.
+
 Snapshot does not modify container commands and does not inject
 `SNAPSHOT_RESTORE_STANDBY`, its deprecated `DYN_SNAPSHOT_RESTORE_STANDBY`
 alias, or any other workload-specific standby setting. The canonical name is

@@ -18,7 +18,7 @@ namespaces. Workload pods never mount checkpoint storage.
 
 ## Prerequisites
 
-- Kubernetes cluster with x86_64 GPU nodes
+- Kubernetes cluster with x86_64 GPU nodes running Linux kernel 5.12 or newer
 - NVIDIA GPU Operator 26.3 or newer, with NVIDIA driver 580.xx or newer
 - **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable

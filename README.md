@@ -83,7 +83,7 @@ infrastructure:
 
 Before installing Snapshot, make sure the following are in place:
 
-- A Kubernetes cluster with NVIDIA GPU nodes
+- A Kubernetes cluster with NVIDIA GPU nodes running Linux kernel 5.12 or newer
 - containerd or CRI-O as the container runtime
 - [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with CUDA driver 580 or newer and MIG disabled
 - A `ReadWriteMany` (RWX) storage class

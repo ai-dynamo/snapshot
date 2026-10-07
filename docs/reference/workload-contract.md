@@ -163,20 +163,19 @@ custom image still has to meet these:
 
 - **glibc floor and `x86_64`.** At restore, the agent mounts its CRIU and CUDA
   tooling into the restore container. These tools run with the image's loader
-  but with libraries built on the agent image (Ubuntu 24.04, glibc 2.39), so the
-  image must be glibc-compatible with it. An Ubuntu 22.04 image fails at restore
+  but with libraries built on the agent image (Ubuntu 24.04, glibc 2.39 today),
+  so the image must be glibc-compatible with it. An Ubuntu 22.04 image fails at restore
   with `version 'GLIBC_2.38' not found`. The reference runtime images already
   clear this floor. Snapshot is x86_64-only today.
 - **No newer preloaded library.** If the image ships `/etc/ld.so.preload`, each
-  library it lists must not need a glibc newer than 2.39. Otherwise the
-  restore tooling fails to start with `version 'GLIBC_2.41' not found`.
-- **Writable `/tmp` in the restore container.** The agent mounts its tooling
-  under `/tmp`. With `readOnlyRootFilesystem: true`, mount an `emptyDir` at
-  `/tmp`.
-- **`cuda-checkpoint` at the same path.** With `--cuda-checkpoint-wrap`, the
-  restore image must have `cuda-checkpoint` at the same path as the source
-  image, because CRIU restores file-backed mappings by path.
-- **Node kernel 5.12 or newer.** The tooling mount uses `mount_setattr`.
+  library it lists must not need a glibc newer than the agent image's. The
+  agent's bundled `tar`, which applies the captured filesystem changes, runs
+  with the agent's glibc but still loads those libraries, so it fails to start
+  with an error such as `version 'GLIBC_2.41' not found`.
+- **`cuda-checkpoint` at the same path.** With
+  [`snapshotctl`](cli.md)'s `--cuda-checkpoint-wrap`, the restore image must have
+  `cuda-checkpoint` at the same path as the source image, because CRIU restores
+  file-backed mappings by path.
 - **All file handles must be reopenable.** Disable caches that leave handles CRIU
   cannot reopen after restore — for example `HF_HUB_DISABLE_XET=1`, and loading
   models from a local cache with `HF_HUB_OFFLINE=1`.
