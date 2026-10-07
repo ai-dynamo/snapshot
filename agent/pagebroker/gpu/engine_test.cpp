@@ -4,6 +4,7 @@
 #include "engine.hpp"
 #include "storage_manifest.hpp"
 #include "file_descriptor.hpp"
+#include "fatal_cleanup.hpp"
 
 #include <gtest/gtest.h>
 #include <fcntl.h>
@@ -22,6 +23,29 @@
 
 namespace snapshot::pagebroker::gpu {
 namespace {
+void BlockDuringFatalCleanup()
+{
+  alarm(5);
+  std::atomic<bool> stopping{false};
+  FatalCleanupShutdown shutdown(stopping, std::chrono::milliseconds{100});
+  SignalFatalCleanup();
+  // Cleanup has not returned or called ReportFatalCleanup. The watchdog must
+  // still cancel admission and terminate this process within its deadline.
+  while (!stopping.load()) {
+    std::this_thread::yield();
+  }
+  std::fprintf(stderr, "fatal cleanup watchdog started\n");
+  for (;;) {
+    pause();
+  }
+}
+
+TEST(FatalCleanup, WatchdogBoundsBlockedCleanupAfterSignal)
+{
+  ASSERT_EXIT(BlockDuringFatalCleanup(), ::testing::ExitedWithCode(EXIT_FAILURE),
+              "fatal cleanup watchdog started");
+}
+
 namespace fs = std::filesystem;
 constexpr char kDevice[] = "GPU-00112233-4455-6677-8899-aabbccddeeff";
 

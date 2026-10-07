@@ -655,6 +655,7 @@ private:
     try {
       std::rethrow_exception(exception);
     } catch (const FatalError&) {
+      SignalFatalCleanup();
       fatal = true;
     } catch (...) {
     }
@@ -701,6 +702,7 @@ private:
       try {
         operation->Complete();
       } catch (...) {
+        SignalFatalCleanup();
         LogException("GPU completion cleanup failed", std::current_exception());
         complete = false;
       }
@@ -713,6 +715,7 @@ private:
       try {
         operation->Abort();
       } catch (...) {
+        SignalFatalCleanup();
         LogException("GPU target cleanup failed", std::current_exception());
         stopped = false;
       }
