@@ -137,6 +137,36 @@ RUN make -C cmd/cuda-checkpoint-helper helper CUDA_ROOT=/opt/cuda \
 RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount cmd/ns-bind-mount/main.c
 
 # =============================================================================
+# Stage: cuInterpose shim, coordinator, and launcher
+# =============================================================================
+# C CUDA interposition frontend. Pinned GNU builder.
+# GCC 15 builds the C frontend, which requires musttail. The Bookworm image supplies
+# glibc 2.36.
+FROM gcc:15.2.0-bookworm@sha256:9ca91b05c7b07d2979f16413e8b2cd6ec8a7c80ffca4121ccab0aeba33f90460 AS gcc-15
+
+FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS cuinterpose-builder
+COPY --from=cuda-headers /usr/local/cuda/include/cuda.h /opt/cuda/include/cuda.h
+COPY --from=gcc-15 /usr/local/bin/ /opt/gcc-15/bin/
+COPY --from=gcc-15 /usr/local/lib/gcc/ /opt/gcc-15/lib/gcc/
+COPY --from=gcc-15 /usr/local/libexec/gcc/ /opt/gcc-15/libexec/gcc/
+COPY --from=gcc-15 /usr/local/lib64/ /opt/gcc-15/lib64/
+RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       make gcc binutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && cargo install cbindgen --version 0.29.4 --locked \
+    && rustup component add rustfmt clippy
+WORKDIR /cuinterpose
+COPY cmd/cuinterpose/ ./
+RUN make frontend
+
+FROM cuinterpose-builder AS cuinterpose-test
+RUN make test-native
+
+FROM scratch AS cuinterpose-export
+COPY --from=cuinterpose-builder /cuinterpose/build/ /
+
+# =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
 FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS criu-builder
