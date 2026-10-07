@@ -10,10 +10,14 @@ use cudarc::driver::sys::*;
 use cuinterpose_protocol::{AllocationId, AllocationReference};
 use std::collections::btree_map::Entry;
 
-/// The device memory carrier must be able to reconstruct tracked unicast memory.
+/// The host carrier must be able to reconstruct tracked unicast memory.
 pub(crate) fn validate_properties(properties: &CUmemAllocationProp) -> Result<()> {
     if properties.type_ != CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED
-        || properties.location.type_ != CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+        || !matches!(
+            properties.location.type_,
+            CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+                | CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA
+        )
     {
         return Err(CUDA_ERROR_NOT_SUPPORTED.into());
     }
@@ -29,6 +33,16 @@ pub struct Allocation {
     pub properties: CUmemAllocationProp,
     pub shared: bool,
     pub context: usize,
+}
+
+/// A host NUMA node ID describes memory placement and cannot serve as a CUDA device
+/// ordinal. Context::run uses this fallback only when no recorded context remains.
+pub(crate) fn context_device(properties: &CUmemAllocationProp) -> i32 {
+    if properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE {
+        properties.location.id
+    } else {
+        0
+    }
 }
 
 // This code never dereferences the opaque Win32 pointer on Linux, and driver access and

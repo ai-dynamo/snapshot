@@ -5,6 +5,7 @@
 
 pub(crate) mod checkpoint;
 pub(crate) mod context;
+mod host_carrier;
 pub(crate) mod ipc;
 pub(crate) mod sharing;
 pub(crate) mod vmm;
@@ -143,6 +144,7 @@ pub struct ProcessState {
     // Set once per checkpoint after every registry is frozen. Importers can outlive
     // the creator's local references without changing the immutable allocation ID.
     pub checkpoint_owners: BTreeMap<AllocationId, NamespacePid>,
+    pub arena: Option<host_carrier::Arena>,
     pub unlocked_driver_calls: usize,
     next_virtual_allocation_handle: u64,
 }
@@ -163,6 +165,7 @@ impl ProcessState {
             next_virtual_allocation_handle: 1,
             phase: Phase::Active,
             checkpoint_owners: BTreeMap::new(),
+            arena: None,
             unlocked_driver_calls: 0,
         }
     }

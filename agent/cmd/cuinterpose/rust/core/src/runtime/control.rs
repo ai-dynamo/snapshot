@@ -301,20 +301,32 @@ fn serve(
     request: ControlRequest,
     namespace_pid: NamespacePid,
 ) -> protocol::Result<()> {
+    let load = matches!(request, ControlRequest::Execute(Operation::LoadAllocations));
     let result = match request {
         ControlRequest::BeginCheckpoint => checkpoint::begin(),
         ControlRequest::Inspect => checkpoint::inspect(),
         ControlRequest::Execute(operation) => checkpoint::execute(operation),
         ControlRequest::SaveAllocations(owners) => checkpoint::save_allocations(&owners),
     };
-    protocol::send(
+    let loaded = load && result.is_ok();
+    if let Err(error) = protocol::send(
         &socket,
         &Response {
             namespace_pid,
             result,
         },
         None,
-    )?;
+    ) {
+        if loaded {
+            // Loading has advanced the phase, so a retry cannot acknowledge the carrier.
+            eprintln!("cuinterpose: cannot send successful LoadAllocations reply: {error}");
+            std::process::abort();
+        }
+        return Err(error);
+    }
+    if loaded {
+        checkpoint::load_acknowledged();
+    }
     Ok(())
 }
 
