@@ -244,6 +244,16 @@ jobs:
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests/test_upgrade.py -m upgrade -vv -s --durations=0
 
+      - name: Dump vCluster syncer logs (trial only)
+        if: ${{ always() }}
+        env:
+          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
+        run: |
+          set +e
+          kubectl get pods -n "${HOST_NAMESPACE}" -o wide
+          kubectl get pods -n "${HOST_NAMESPACE}" -l app=vcluster -o jsonpath='{range .items[*].spec.containers[*]}{.image}{"\n"}{end}'
+          kubectl logs -n "${HOST_NAMESPACE}" -l app=vcluster --all-containers --prefix --tail=400
+
       - name: Cleanup e2e vCluster
         if: ${{ always() }}
         uses: ./.github/actions/e2e-vcluster-down
