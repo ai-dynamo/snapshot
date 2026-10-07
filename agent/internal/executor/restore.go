@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -26,7 +28,10 @@ import (
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
+
+const failedRestoreTerminationTimeout = 30 * time.Second
 
 // RestoreMounter installs the fixed binary bundle, the cuinterpose libraries and one
 // validated checkpoint artifact inside a placeholder container's mount namespace.
@@ -111,6 +116,7 @@ type RestoreRequest struct {
 	Clientset                   kubernetes.Interface
 	PageBrokerRequested         bool
 	PageBrokerEnabled           bool
+	CustomStorageAvailable      bool
 	PageBrokerControlSocketPath string
 	PageBrokerRestoreMode       string
 
@@ -135,6 +141,7 @@ type RestoreResult struct {
 //
 // A RestoreCleanupError still carries the result: the restore itself succeeded.
 func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounts RestoreMounter) (restored RestoreResult, retErr error) {
+	ctx = logr.NewContext(ctx, log)
 	if mounts == nil {
 		return RestoreResult{}, fmt.Errorf("restore mounter is required")
 	}
@@ -142,9 +149,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	brokered := req.PageBrokerRequested && req.PageBrokerEnabled
 	transactionID := ""
 	var broker pagebroker.Client
+	var gpu *pagebroker.CustomStorageExecution
 	committed := false
+	gpuRestoreComplete := false
+	usePageBrokerGPU := false
+	var terminateFailedRestore func(context.Context) error
 	defer func() {
-		if transactionID != "" && !committed {
+		if !usePageBrokerGPU && transactionID != "" && !committed {
 			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
 			defer cancel()
 			_ = broker.Abort(abortCtx, transactionID)
@@ -159,6 +170,26 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		activeMounts = nil
 	}
 	defer func() {
+		if gpu != nil {
+			defer gpu.Close()
+		}
+		if usePageBrokerGPU && transactionID != "" && !committed {
+			var err error
+			if gpu != nil && !gpuRestoreComplete {
+				err = abortRestoreTransaction(ctx, gpu, terminateFailedRestore)
+			} else {
+				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+				err = broker.Abort(abortCtx, transactionID)
+				cancel()
+			}
+			if err != nil {
+				if retErr != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker restore: %w", err))
+				} else {
+					retErr = NewRestoreCleanupError(errors.Join(cleanupErr, fmt.Errorf("release PageBroker restore: %w", err)))
+				}
+			}
+		}
 		cleanup()
 		if cleanupErr == nil {
 			return
@@ -197,9 +228,22 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		}
 	}
 
+	usePageBrokerGPU = manifest.CUDA.CustomStorage
+	if err := validateCustomStorageRestore(req, manifest); err != nil {
+		return RestoreResult{}, err
+	}
+
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
 		return RestoreResult{}, err
+	}
+
+	var gpuContext *pagebroker.GpuContext
+	if usePageBrokerGPU {
+		gpuContext, err = pagebroker.NewGPUContext(manifest.CUDA.PIDs, snap.TargetGPUUUIDs, snap.CUDADeviceMap)
+		if err != nil {
+			return RestoreResult{}, err
+		}
 	}
 
 	bundleMount, err := mounts.MountBundle(ctx, snap.PlaceholderPID)
@@ -240,6 +284,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		if err != nil {
 			return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
 		}
+		if usePageBrokerGPU {
+			gpu, err = broker.OpenCustomStorageExecution(transactionID, gpuContext)
+			if err != nil {
+				return RestoreResult{}, err
+			}
+		}
 		mountStart := time.Now()
 		var sourceMount nsmount.MountPoint
 		if direct {
@@ -267,10 +317,21 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		})
 	}
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, gpu)
 	if err != nil {
+		if usePageBrokerGPU {
+			// Abort may stop the placeholder before the controller can write its
+			// failure marker. Preserve the one-restore-per-pod contract first.
+			if markerErr := snapshotruntime.WriteControlSentinel(snap.PlaceholderPID, podcontract.RestoreFailedFile, []byte("restore failed\n")); markerErr != nil {
+				log.Error(markerErr, "Failed to write restore-failed sentinel")
+			}
+			terminateFailedRestore = func(stopCtx context.Context) error {
+				return rt.TerminateContainer(stopCtx, req.ContainerID)
+			}
+		}
 		return RestoreResult{}, fmt.Errorf("nsrestore failed: %w", err)
 	}
+	gpuRestoreComplete = usePageBrokerGPU
 	if brokered {
 		sourceMount := activeMounts[len(activeMounts)-1]
 		if err := sourceMount.point.Unmount(ctx); err != nil {
@@ -297,7 +358,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	// Release closes the agent's fd. The retained bind belongs to the workload
 	// mount namespace and disappears when that namespace is destroyed.
 	restoreComplete = true
-	cleanup()
+	// CustomStorage restores clean up in the deferred PageBroker release path.
+	if !usePageBrokerGPU {
+		cleanup()
+	}
 	wall := time.Since(restoreStart)
 	unaccounted := remainingDuration(wall,
 		pageBrokerStageDuration,
@@ -369,6 +433,22 @@ func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManif
 	return nil
 }
 
+func validateCustomStorageRestore(req RestoreRequest, manifest *types.CheckpointManifest) error {
+	if !manifest.CUDA.CustomStorage {
+		return nil
+	}
+	if !req.PageBrokerEnabled {
+		return fmt.Errorf("CustomStorage checkpoint requires PageBroker")
+	}
+	if !req.PageBrokerRequested {
+		return fmt.Errorf("CustomStorage restore cannot opt out of PageBroker with nvidia.com/snapshot-pagebroker=false")
+	}
+	if !req.CustomStorageAvailable {
+		return fmt.Errorf("PageBroker does not support CustomStorage restore")
+	}
+	return nil
+}
+
 func inspectRestore(
 	ctx context.Context,
 	rt snapshotruntime.Runtime,
@@ -436,9 +516,7 @@ func inspectRestore(
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
-		for _, device := range targetGPUs.Devices {
-			targetGPUUUIDs = append(targetGPUUUIDs, device.UUID)
-		}
+		targetGPUUUIDs = cuda.GPUUUIDs(targetGPUs)
 	}
 
 	deviceMapStart := time.Now()
@@ -462,6 +540,7 @@ func inspectRestore(
 	}
 
 	return &types.RestoreContainerSnapshot{
+		TargetGPUUUIDs:  targetGPUUUIDs,
 		PlaceholderPID:  placeholderPID,
 		TargetRoot:      targetRoot,
 		CgroupRoot:      cgroupRoot,
@@ -491,7 +570,7 @@ func existingMountPaths(targetRoot string, destinations []string, aliases map[st
 	return existing
 }
 
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string) (*RestoreInNamespaceResult, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string, gpu *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
 
 	cmd, closeFiles, err := snapshotruntime.CommandInNamespaces(ctx, snap.PlaceholderPID, mp.NsFd(),
 		snap.TargetRoot, filepath.Join(nsmount.SnapshotBinSrc, "nsrestore"))
@@ -519,6 +598,22 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	cmd.Args = append(cmd.Args, args...)
+	if gpu != nil {
+		hostProc, err := os.Open(snapshotruntime.HostProcPath)
+		if err != nil {
+			return nil, fmt.Errorf("open host proc for GPU PID resolution: %w", err)
+		}
+		defer hostProc.Close()
+		closeGPUFiles, err := addCustomStorageFiles(ctx, cmd, gpu, hostProc)
+		if err != nil {
+			return nil, err
+		}
+		defer closeGPUFiles()
+		// addCustomStorageFiles replaces process-group SIGKILL with cooperative
+		// cancellation. Wait for nsrestore to drain GPU work instead of abandoning
+		// it after the default wait delay.
+		cmd.WaitDelay = 0
+	}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer
@@ -538,4 +633,57 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	return &result, nil
+}
+
+const firstExtraFileDescriptor = 3
+
+func addCustomStorageFiles(ctx context.Context, cmd *exec.Cmd, execution *pagebroker.CustomStorageExecution, hostProc *os.File) (func(), error) {
+	gpuContext, err := json.Marshal(execution.GPUContext)
+	if err != nil {
+		return nil, fmt.Errorf("encode GPU context: %w", err)
+	}
+	cancelRead, cancelWrite, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("create nsrestore cancellation pipe: %w", err)
+	}
+	// nsenter forks for PID namespace entry. Keep cancellation active even if
+	// its wrapper exits while nsrestore still holds the stdout pipe open.
+	stopCancel := context.AfterFunc(ctx, func() { _ = cancelWrite.Close() })
+	cmd.Cancel = func() error {
+		_ = cancelWrite.Close()
+		return nil
+	}
+	socketDirectoryFD := firstExtraFileDescriptor + len(cmd.ExtraFiles)
+	hostProcFD := socketDirectoryFD + 1
+	socketFD := socketDirectoryFD + 2
+	cancelFD := socketDirectoryFD + 3
+	cmd.Args = append(cmd.Args,
+		"--pagebroker-transaction", execution.TransactionID,
+		"--pagebroker-socket-directory-fd", strconv.Itoa(socketDirectoryFD),
+		"--host-proc-fd", strconv.Itoa(hostProcFD),
+		"--pagebroker-execution-fd", strconv.Itoa(socketFD),
+		"--cancel-fd", strconv.Itoa(cancelFD),
+		"--pagebroker-socket-name", execution.SocketName,
+		"--gpu-context", string(gpuContext),
+	)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, execution.SocketDirectory, hostProc, execution.Socket, cancelRead)
+	return func() {
+		stopCancel()
+		cancelRead.Close()
+		cancelWrite.Close()
+	}, nil
+}
+
+// abortRestoreTransaction keeps failed targets alive until the broker confirms
+// that all imported CUDA mappings and storage transfers have been drained.
+func abortRestoreTransaction(ctx context.Context, gpu *pagebroker.CustomStorageExecution, terminate func(context.Context) error) error {
+	abortErr := gpu.Abort(ctx)
+	if terminate != nil {
+		stopCtx, stop := context.WithTimeout(context.Background(), failedRestoreTerminationTimeout)
+		defer stop()
+		if err := terminate(stopCtx); err != nil {
+			return errors.Join(abortErr, fmt.Errorf("terminate failed restore after GPU drain: %w", err))
+		}
+	}
+	return abortErr
 }
