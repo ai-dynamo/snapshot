@@ -72,13 +72,6 @@ IsSafePathComponent(const std::string& value)
 const StorageBackend&
 ValidateStagedRestore(const StagedRestoreRequest& request)
 {
-  // Do not silently fall back to a filesystem path when a caller asks for a
-  // store-bound artifact. Backend support lands separately from this contract.
-  if (request.has_artifact()) {
-    if (request.has_source())
-      throw std::invalid_argument("artifact cannot be combined with legacy source");
-    throw std::invalid_argument("artifact-addressed restore is not implemented");
-  }
   if (!request.has_source() || request.source().kind_case() == StorageBackend::KIND_NOT_SET)
     throw std::invalid_argument("restore source is required");
   return request.source();
@@ -87,11 +80,6 @@ ValidateStagedRestore(const StagedRestoreRequest& request)
 const StorageBackend&
 ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
 {
-  if (request.has_target()) {
-    if (request.has_destination())
-      throw std::invalid_argument("target cannot be combined with legacy destination");
-    throw std::invalid_argument("artifact-addressed checkpoint is not implemented");
-  }
   if (!request.has_destination() || request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
     throw std::invalid_argument("checkpoint destination is required");
   return request.destination();
@@ -104,6 +92,24 @@ OpenDirectory(const Path& path)
   if (directory.get() < 0)
     throw std::system_error(errno, std::generic_category(), "open artifact directory");
   return directory;
+}
+
+uintmax_t
+DirectorySize(const Path& path)
+{
+  uintmax_t bytes = 0;
+  for (auto it = fs::recursive_directory_iterator(path); it != fs::recursive_directory_iterator(); ++it) {
+    const auto& entry = *it;
+    if (entry.is_symlink())
+      throw ArtifactError(Failure::ARTIFACT_CORRUPT, "published artifact contains a symlink");
+    if (entry.path() == path / gpu::kDataDirectory) {
+      it.disable_recursion_pending();
+      continue;
+    }
+    if (entry.is_regular_file())
+      bytes += entry.file_size();
+  }
+  return bytes;
 }
 
 void
@@ -276,9 +282,11 @@ class GpuCompletion {
 
 }  // namespace
 
-Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine)
+Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine, std::string store_id)
     : staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
+  if (!store_id.empty())
+    artifact_store_.emplace(std::move(store_id), storage_root);  // copies storage_root; still needed below
   io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
   fs::remove_all(staging_root_ / "restore");
   fs::remove_all(staging_root_ / "checkpoint");
@@ -296,6 +304,14 @@ Broker::TransactionSnapshot()
 {
   std::lock_guard lock(transactions_mutex_);
   return {transactions_.begin(), transactions_.end()};
+}
+
+const PVCArtifactStore&
+Broker::RequireArtifactStore() const
+{
+  if (!artifact_store_)
+    throw ArtifactError(Failure::INVALID_REQUEST, "no artifact store is configured for this installation");
+  return *artifact_store_;
 }
 
 void
@@ -491,12 +507,15 @@ Broker::HandleRequest(const Request& request)
         response = Abort(request);
         break;
       case Request::kGetArtifactMetadata:
-        response = Fail(request, Failure::INVALID_REQUEST, "artifact metadata retrieval is not implemented");
+        response = GetArtifactMetadata(request);
         break;
       default:
         response = Fail(request, Failure::INVALID_REQUEST, "unsupported operation");
         break;
     }
+  }
+  catch (const ArtifactError& error) {
+    response = Fail(request, error.code(), error.what());
   }
   catch (const std::invalid_argument& error) {
     response = Fail(request, Failure::INVALID_REQUEST, error.what());
@@ -532,9 +551,84 @@ Response
 Broker::Restore(const Request& request)
 {
   const auto& operation = request.staged_restore();
+  if (operation.has_artifact()) {
+    if (operation.has_source())
+      throw std::invalid_argument("artifact cannot be combined with legacy source");
+    const auto& store = RequireArtifactStore();
+    const auto plan = store.ResolveRestorePlan(operation.artifact());
+    return StageArtifactRestore(request, plan);
+  }
   const auto& source = ValidateStagedRestore(operation);
   const auto& engine = Engine(operation.io_engine());
   return StageRestore(request, source, engine);
+}
+
+Response
+Broker::StageArtifactRestore(const Request& request, const RestorePlan& plan)
+{
+  const Path restore_root = staging_root_ / "restore";
+  const Path staging_directory = TransactionDirectory(restore_root, request.transaction_id());
+  const uintmax_t bytes = DirectorySize(plan.container_directory);
+  auto transaction = CreateOrGetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction->mutex());
+  if (transaction->state() != Transaction::State::NEW || fs::exists(staging_directory))
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
+  if (!ReserveStaging(bytes)) {
+    std::lock_guard transactions_lock(transactions_mutex_);
+    const auto current = transactions_.find(request.transaction_id());
+    if (current != transactions_.end() && current->second == transaction)
+      transactions_.erase(current);
+    return Fail(request, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
+  }
+  bool staging_reserved = true;
+  try {
+    transaction->set_state(Transaction::State::PREPARING);
+    artifact_store_->StageRestore(plan, staging_directory);
+    ReleaseStaging(bytes);
+    staging_reserved = false;
+    transaction->set_descriptor(RestoreTransactionDescriptor(staging_directory, OpenDirectory(plan.container_directory)));
+    transaction->set_state(Transaction::State::STAGED);
+  }
+  catch (const std::exception& error) {
+    if (staging_reserved)
+      ReleaseStaging(bytes);
+    return AbortStaging(request, *transaction, staging_directory, error);
+  }
+  auto response = Reply(request);
+  response.mutable_staged_restore_directory()->set_image_directory(staging_directory.string());
+  return response;
+}
+
+Response
+Broker::GetArtifactMetadata(const Request& request)
+{
+  const auto& operation = request.get_artifact_metadata();
+  const auto& store = RequireArtifactStore();
+  const auto plan = store.ResolveRestorePlan(operation.artifact());
+
+  // Shares the "restore" staging subroot: a metadata fetch is, structurally,
+  // just another RestoreTransactionDescriptor-backed transaction over a
+  // smaller payload (manifest.yaml only). Its transaction_id is a fresh UUID
+  // per Client.GetArtifactMetadata call, so it cannot collide with a
+  // concurrent restore's staging directory.
+  const Path restore_root = staging_root_ / "restore";
+  const Path staging_directory = TransactionDirectory(restore_root, request.transaction_id());
+  auto transaction = CreateOrGetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction->mutex());
+  if (transaction->state() != Transaction::State::NEW || fs::exists(staging_directory))
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "metadata transaction conflicts");
+  try {
+    transaction->set_state(Transaction::State::PREPARING);
+    store.StageMetadata(plan, staging_directory);
+    transaction->set_descriptor(RestoreTransactionDescriptor(staging_directory));
+    transaction->set_state(Transaction::State::STAGED);
+  }
+  catch (const std::exception& error) {
+    return AbortStaging(request, *transaction, staging_directory, error);
+  }
+  auto response = Reply(request);
+  response.mutable_get_artifact_metadata_complete()->set_manifest_directory(staging_directory.string());
+  return response;
 }
 
 Response
@@ -577,9 +671,39 @@ Response
 Broker::PrepareCheckpoint(const Request& request)
 {
   const auto& operation = request.prepare_staged_checkpoint();
+  if (operation.has_target()) {
+    if (operation.has_destination())
+      throw std::invalid_argument("target cannot be combined with legacy destination");
+    return StageArtifactCheckpoint(request, operation.target());
+  }
   const auto& destination = ValidateStagedCheckpoint(operation);
   const auto& engine = Engine(operation.io_engine());
   return StageCheckpoint(request, destination, engine);
+}
+
+Response
+Broker::StageArtifactCheckpoint(const Request& request, const ArtifactTarget& target)
+{
+  const auto& store = RequireArtifactStore();
+  store.ValidateTarget(target);
+  const Path checkpoint_root = staging_root_ / "checkpoint";
+  const Path staging_directory = TransactionDirectory(checkpoint_root, request.transaction_id());
+  auto transaction = CreateOrGetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction->mutex());
+  if (transaction->state() != Transaction::State::NEW || fs::exists(staging_directory))
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
+  try {
+    transaction->set_state(Transaction::State::PREPARING);
+    fs::create_directory(staging_directory);
+    transaction->set_descriptor(CheckpointTransactionDescriptor(staging_directory, target));
+    transaction->set_state(Transaction::State::STAGED);
+  }
+  catch (const std::exception& error) {
+    return AbortStaging(request, *transaction, staging_directory, error);
+  }
+  auto response = Reply(request);
+  response.mutable_staged_checkpoint_directory()->set_image_directory(staging_directory.string());
+  return response;
 }
 
 Response
@@ -641,6 +765,8 @@ Broker::Commit(const Request& request)
   if (checkpoint == nullptr) {
     return Fail(request, Failure::INTERNAL_ERROR, "live transaction has no descriptor");
   }
+  if (checkpoint->is_artifact_addressed())
+    return PublishArtifactCheckpoint(request, *transaction, *checkpoint);
   return PublishCheckpoint(request, *transaction, *checkpoint);
 }
 
@@ -680,6 +806,33 @@ Broker::PublishCheckpoint(
     return Fail(request, Failure::STORAGE_ERROR, error.what());
   }
   return CommitSucceeded(request);
+}
+
+Response
+Broker::PublishArtifactCheckpoint(
+    const Request& request, Transaction& transaction, const CheckpointTransactionDescriptor& descriptor)
+{
+  const Path staging_directory = descriptor.staging_directory();
+  if (!fs::is_directory(staging_directory))
+    return Fail(request, Failure::TRANSACTION_NOT_FOUND, "checkpoint staging directory not found");
+  RejectSymlinks(staging_directory);
+  PublishedArtifact published;
+  try {
+    artifact_store_->PublishCheckpoint(staging_directory, descriptor.target(), &published);
+    transaction.clear_descriptor();
+    transaction.set_state(Transaction::State::COMMITTED);
+    std::error_code cleanup_error;
+    fs::remove_all(staging_directory, cleanup_error);
+  }
+  catch (const ArtifactError& error) {
+    return Fail(request, error.code(), error.what());
+  }
+  catch (const std::exception& error) {
+    return Fail(request, Failure::STORAGE_ERROR, error.what());
+  }
+  auto response = CommitSucceeded(request);
+  *response.mutable_commit_complete()->mutable_published_artifact() = std::move(published);
+  return response;
 }
 
 Response
