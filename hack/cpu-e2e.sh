@@ -97,7 +97,6 @@ export SNAPSHOT_E2E_HELM_SET="${cluster_values}
 image.operator.repository=${IMAGE_REGISTRY}/operator
 image.agent.repository=${IMAGE_REGISTRY}/agent
 image.pageBroker.repository=${IMAGE_REGISTRY}/pagebroker
-image.agent.tag=${IMAGE_TAG}
 image.operator.pullPolicy=IfNotPresent
 image.agent.pullPolicy=IfNotPresent
 image.pageBroker.pullPolicy=IfNotPresent"
