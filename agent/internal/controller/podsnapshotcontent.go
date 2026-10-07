@@ -122,8 +122,8 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		// race. The dump kills the source, so deletion can also trail a successful capture
 		// (Job cleanup, eviction): only a gone pod without a committed artifact fails the work
 		// order terminally.
-		if artifactPresent(artifactPath, contentUID, containerName) {
-			return w.markCheckpointReady(ctx, content, artifactPath, "", nil)
+		if recovered, err := w.recoverCommittedArtifact(ctx, content, contentUID, containerName, artifactPath); recovered || err != nil {
+			return err
 		}
 		return w.setSnapshotContentFailed(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", podKey.String()))
 	}
@@ -138,8 +138,8 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	// dead pod with a committed artifact is a success awaiting its Ready write — the write that
 	// publishes the checkpoint for restore. The artifact dir exists only after the executor's
 	// atomic rename.
-	if artifactPresent(artifactPath, contentUID, containerName) {
-		return w.markCheckpointReady(ctx, content, artifactPath, "", nil)
+	if recovered, err := w.recoverCommittedArtifact(ctx, content, contentUID, containerName, artifactPath); recovered || err != nil {
+		return err
 	}
 
 	// Several work orders can name one pod, and everything below draws conclusions from live pod
@@ -192,6 +192,34 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
 	return w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, cuInterposeRequested, contentUID, artifactPath)
+}
+
+// recoverCommittedArtifact promotes a capture that committed before this reconcile — the
+// agent died, or the Ready write was lost — to Ready. Legacy content is committed when its
+// directory exists on the shared filesystem; bound content when PageBroker reports the
+// deterministic publication. The bool says Ready was written (or is being written).
+func (w *NodeController) recoverCommittedArtifact(
+	ctx context.Context,
+	content *snapshotv1alpha1.PodSnapshotContent,
+	contentUID, containerName, artifactPath string,
+) (bool, error) {
+	if content.Spec.Storage == nil {
+		if !artifactPresent(artifactPath, contentUID, containerName) {
+			return false, nil
+		}
+		return true, w.markCheckpointReady(ctx, content, artifactPath, "", nil)
+	}
+	published, manifest, err := w.committedPublication(ctx, content, containerName)
+	if err != nil {
+		return false, err
+	}
+	if published == nil {
+		if checkpointCommitPending(content) {
+			return true, fmt.Errorf("checkpoint commit outcome is still unknown for content %s", content.Name)
+		}
+		return false, nil
+	}
+	return true, w.markCheckpointReadyWithSource(ctx, content, checkpointSourceFromManifest(manifest), containerName, published)
 }
 
 func (w *NodeController) captureOwnerForPod(pod *corev1.Pod) (string, error) {
@@ -248,6 +276,13 @@ func (w *NodeController) runCheckpoint(
 	// would discard a usable checkpoint and, being terminal, block recovery from ever promoting it.
 	artifact, err := w.checkpointFn(dumpCtx, params)
 	if err != nil {
+		var commitErr *executor.CheckpointCommitError
+		if content.Spec.Storage != nil && errors.As(err, &commitErr) {
+			if patchErr := w.markCheckpointCommitPending(ctx, content, err); patchErr != nil {
+				return fmt.Errorf("record uncertain checkpoint commit: %w", errors.Join(err, patchErr))
+			}
+			return err
+		}
 		logger.Error(err, "Checkpoint failed")
 		if patchErr := w.setSnapshotContentFailed(ctx, content, "CheckpointFailed", err); patchErr != nil {
 			return fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, patchErr)
@@ -474,7 +509,28 @@ func (w *NodeController) markCheckpointReady(
 				"artifactPath", artifactPath,
 			)
 		}
+	} else if w.fetchManifestFn != nil {
+		manifest, err := w.fetchManifestFn(ctx, publishedArtifact)
+		if err != nil {
+			logger.Error(err, "Failed to read the published manifest; marking Ready without the source",
+				"content", content.Name,
+				"artifactHandle", publishedArtifact.GetArtifactHandle(),
+			)
+		} else {
+			source = checkpointSourceFromManifest(manifest)
+		}
 	}
+	return w.markCheckpointReadyWithSource(ctx, content, source, containerName, publishedArtifact)
+}
+
+func (w *NodeController) markCheckpointReadyWithSource(
+	ctx context.Context,
+	content *snapshotv1alpha1.PodSnapshotContent,
+	source *snapshotv1alpha1.CheckpointSource,
+	containerName string,
+	publishedArtifact *pagebroker.PublishedArtifact,
+) error {
+	logger := logr.FromContextOrDiscard(ctx)
 	ready := content
 	for attempt := 0; attempt < readyStatusConflictLimit; attempt++ {
 		if err := w.setSnapshotContentSucceeded(ctx, ready, source, containerName, publishedArtifact); err != nil {
