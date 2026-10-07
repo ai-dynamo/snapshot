@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from kubernetes.client import ApiException
 
@@ -84,3 +86,37 @@ def test_snapshot_e2e_environment_is_ready() -> None:
         if not k8s.pod_containers_ready(pod)
     ]
     assert not not_ready, "Snapshot agent pod is not ready: " + "; ".join(not_ready)
+
+
+POD_CONDITION_TIMEOUT_SECONDS = 60
+
+
+@pytest.mark.environment
+def test_snapshot_pods_report_the_ready_condition() -> None:
+    config = k8s.E2EConfig.from_env()
+    k8s.configure(config)
+    deadline = time.monotonic() + POD_CONDITION_TIMEOUT_SECONDS
+    while True:
+        pods = [
+            pod
+            for component in ("operator", "snapshot-agent")
+            for pod in k8s.list_snapshot_pods(config.namespace, config.release, component)
+        ]
+        missing = [
+            f"{pod.metadata.name} conditions="
+            f"{ {c.type: c.status for c in pod.status.conditions or []} }"
+            for pod in pods
+            if not any(c.type == "Ready" and c.status == "True" for c in pod.status.conditions or [])
+        ]
+        if pods and not missing:
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(5)
+    assert pods, "no Snapshot operator or agent pods were found"
+    pytest.fail(
+        "Snapshot pods run but do not report Ready=True; the target cluster is not syncing pod "
+        "conditions (for example a virtual cluster's status sync), which stalls Deployment "
+        "rollouts and restore conditions: " + "; ".join(missing)
+    )
+
