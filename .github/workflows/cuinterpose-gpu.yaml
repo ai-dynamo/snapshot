@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+name: CuInterpose GPU tests
+
+# GPU infrastructure accepts trusted mirror pushes, not pull_request events.
+on:
+  push:
+    branches: ['pull-request/[0-9]+']
+    paths:
+      - 'agent/cmd/cuinterpose/**'
+      - 'agent/Dockerfile'
+      - '.github/workflows/cuinterpose-gpu.yaml'
+  schedule:
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: cuinterpose-gpu
+  cancel-in-progress: false
+
+jobs:
+  artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: '0.10.11'
+          checksum: '5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583'
+          enable-cache: 'false'
+          download-from-astral-mirror: 'false'
+      - name: Build and stage matching artifacts
+        shell: bash
+        run: |
+          make -C agent/cmd/cuinterpose build
+          uv lock --project agent/cmd/cuinterpose/tests/gpu --python 3.12
+          mkdir payload
+          cp -a agent/cmd/cuinterpose/{frontend,tests,Makefile,build} payload/
+          cp "$(command -v uv)" payload/uv
+          printf '%s\n' "$GITHUB_SHA" > payload/revision
+          sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfile > payload/image
+          test "$(wc -l < payload/image)" -eq 1
+          # Keep the exact per-run lock and executable modes with the artifacts.
+          (cd payload && find . -type f -print0 | sort -z | xargs -0 sha256sum) > SHA256SUMS
+          mv SHA256SUMS payload/
+          tar -czf cuinterpose-gpu.tar.gz -C payload .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cuinterpose-gpu-inputs
+          path: cuinterpose-gpu.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  gpu:
+    needs: artifacts
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 60
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-nebius-2
+      TEST_NAMESPACE: dynamo-deploy-test
+      TEST_POD: snapshot-cuinterpose-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cuinterpose-gpu-inputs
+      - name: Start isolated two-GPU test pod
+        shell: bash
+        run: |
+          mkdir -p payload results
+          tar -xzf cuinterpose-gpu.tar.gz -C payload
+          (cd payload && sha256sum --check SHA256SUMS)
+          test "$(cat payload/revision)" = "$GITHUB_SHA"
+          cp payload/{revision,image,SHA256SUMS} results/
+          image=$(cat payload/image)
+          # The deployment runner already has access to this shared test namespace.
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" get namespace "$TEST_NAMESPACE" >/dev/null
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" create -f - <<YAML
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: ${TEST_POD}
+          spec:
+            restartPolicy: Never
+            activeDeadlineSeconds: 3300
+            terminationGracePeriodSeconds: 1
+            automountServiceAccountToken: false
+            runtimeClassName: nvidia
+            nodeSelector:
+              kubernetes.io/arch: amd64
+              nvidia.com/gpu.present: "true"
+              nvidia.com/gpu.product: NVIDIA-H200
+            tolerations:
+            - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+            - {key: dedicated, operator: Exists, effect: NoSchedule}
+            - {key: CriticalAddonsOnly, operator: Exists, effect: NoSchedule}
+            containers:
+            - name: tests
+              image: ${image}
+              command: [/bin/bash, -c, "sleep 3300"]
+              workingDir: /work
+              securityContext:
+                capabilities: {add: [SYS_PTRACE]}
+                seccompProfile: {type: Unconfined}
+              resources:
+                requests: {cpu: "2", memory: 8Gi, ephemeral-storage: 16Gi, nvidia.com/gpu: "2"}
+                limits: {cpu: "8", memory: 24Gi, ephemeral-storage: 40Gi, nvidia.com/gpu: "2"}
+              volumeMounts:
+              - {name: work, mountPath: /work}
+              - {name: shm, mountPath: /dev/shm}
+            volumes:
+            - {name: work, emptyDir: {}}
+            - {name: shm, emptyDir: {medium: Memory, sizeLimit: 2Gi}}
+          YAML
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" wait "pod/$TEST_POD" --for=condition=Ready --timeout=600s
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" exec -i "$TEST_POD" -- tar -xz -C /work < cuinterpose-gpu.tar.gz
+      - name: Run frontend and GPU tests
+        shell: bash
+        run: |
+          timeout 40m kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" exec -i "$TEST_POD" -- bash -seuo pipefail <<'SH' 2>&1 | tee results/run.log
+          sha256sum --check SHA256SUMS
+          mkdir results
+          export UV_CACHE_DIR=/work/cache UV_PYTHON_INSTALL_DIR=/work/python UV_FROZEN=1
+          # The pinned CUDA base supplies the compiler/toolkit but no Python.
+          ./uv sync --frozen --project tests/gpu --python 3.12
+          export PATH="/work/tests/gpu/.venv/bin:/work:$PATH"
+          python --version > results/python-version.txt
+          nvidia-smi -q > results/nvidia-smi.txt
+          nvidia-smi topo -m > results/topology.txt
+          ./uv pip list --python tests/gpu/.venv/bin/python > results/packages.txt
+          PYTHONPATH=tests/gpu python - <<'PY'
+          import torch
+          from cuda.bindings import driver
+          from cuda_driver import cuda_call
+          cuda_call(driver.cuInit, 0)
+          version = cuda_call(driver.cuDriverGetVersion)
+          print(f"CUDA driver API: {version}, Torch: {torch.__version__}, Torch CUDA: {torch.version.cuda}")
+          assert version >= 13010, "requires a CUDA 13.1+ driver"
+          assert cuda_call(driver.cuDeviceGetCount) == 2, "requires two allocated GPUs"
+          assert cuda_call(driver.cuDeviceCanAccessPeer, 0, 1), "GPU 0 needs peer access to GPU 1"
+          assert cuda_call(driver.cuDeviceCanAccessPeer, 1, 0), "GPU 1 needs peer access to GPU 0"
+          PY
+          export PYTEST_ADDOPTS="-m gpu --junitxml=/work/results/pytest.xml"
+          make test-gpu UV=/work/uv CUDA_INCLUDE=/usr/local/cuda/include
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          result = ET.parse('results/pytest.xml')
+          assert result.findall('.//testcase'), "no GPU cases executed"
+          assert not result.findall('.//skipped'), "selected GPU cases must not skip"
+          PY
+          SH
+      - name: Collect diagnostics and remove test pod
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p results
+          status=0
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" get pod "$TEST_POD" -o yaml > results/pod.yaml || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" describe pod "$TEST_POD" > results/pod-description.txt || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" logs "$TEST_POD" > results/pod.log || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" cp "$TEST_POD:/work/results" results/pod-results || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" delete pod "$TEST_POD" --ignore-not-found --timeout=120s || status=1
+          exit "$status"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: cuinterpose-gpu-results
+          path: results/
+          if-no-files-found: error
+          retention-days: 14

@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -44,6 +45,8 @@ type CheckpointParams struct {
 	HostPath string
 	// StartedAt marks when the controller observed the work order, for timing.
 	StartedAt time.Time
+	// CuInterposeRequested is the source Pod's explicit opt-in, already preflighted.
+	CuInterposeRequested bool
 }
 
 // singleTargetContainer returns the one capture-target container from the work order. The CRD
@@ -158,6 +161,13 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return err
 	}
 
+	// Check the opt-in before labeling the source and waiting for readiness, so a misconfigured
+	// Pod fails without waiting for its workload to become ready.
+	cuInterposeRequested, err := preflightCuInterpose(pod, containerName)
+	if err != nil {
+		return w.setSnapshotContentFailed(ctx, content, "CuInterposeMisconfigured", err)
+	}
+
 	// The source-pod informer keys on this label, so the patch is what makes pod status changes
 	// reach the queue instead of waiting for the resync. Failing it strands the work order.
 	if err := w.labelCaptureEligible(ctx, pod); err != nil {
@@ -178,7 +188,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
-	return w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, contentUID, artifactPath)
+	return w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, cuInterposeRequested, contentUID, artifactPath)
 }
 
 func (w *NodeController) captureOwnerForPod(pod *corev1.Pod) (string, error) {
@@ -201,6 +211,7 @@ func (w *NodeController) runCheckpoint(
 	pod *corev1.Pod,
 	containerName, containerID string,
 	containerPID int,
+	cuInterposeRequested bool,
 	contentUID string,
 	artifactPath string,
 ) error {
@@ -215,13 +226,14 @@ func (w *NodeController) runCheckpoint(
 	}
 
 	params := CheckpointParams{
-		Pod:           pod,
-		ContainerName: containerName,
-		ContainerID:   containerID,
-		ContainerPID:  containerPID,
-		ContentUID:    contentUID,
-		HostPath:      artifactPath,
-		StartedAt:     time.Now(),
+		Pod:                  pod,
+		ContainerName:        containerName,
+		ContainerID:          containerID,
+		ContainerPID:         containerPID,
+		ContentUID:           contentUID,
+		HostPath:             artifactPath,
+		StartedAt:            time.Now(),
+		CuInterposeRequested: cuInterposeRequested,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
@@ -298,6 +310,21 @@ func failedCheckpointContainer(pod *corev1.Pod) *corev1.ContainerStatus {
 		}
 	}
 	return nil
+}
+
+// preflightCuInterpose reads the explicit opt-in. An opted-in target must also start
+// under the launcher, which SnapshotJob adds and ordinary Pods must add themselves.
+func preflightCuInterpose(pod *corev1.Pod, target string) (bool, error) {
+	requested, err := podcontract.ParseCuInterposeAnnotation(pod.Annotations)
+	if err != nil || !requested {
+		return false, err
+	}
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == target {
+			return true, podcontract.ValidateCuInterposeLauncher(&pod.Spec.Containers[i])
+		}
+	}
+	return false, fmt.Errorf("cuinterpose target container %q not found", target)
 }
 
 // killRunningContainers SIGKILLs every still-running container in the pod, resolving each
@@ -458,17 +485,18 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	log := logr.FromContextOrDiscard(ctx)
 
 	req := executor.CheckpointRequest{
-		ContainerID:         params.ContainerID,
-		ContainerName:       params.ContainerName,
-		ContentUID:          params.ContentUID,
-		StartedAt:           params.StartedAt,
-		NodeName:            w.config.NodeName,
-		PodName:             params.Pod.Name,
-		PodNamespace:        params.Pod.Namespace,
-		PodIP:               params.Pod.Status.PodIP,
-		Pod:                 podEnvironment(params.Pod, params.ContainerName),
-		Clientset:           w.clientset,
-		PageBrokerRequested: params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] != snapshotv1alpha1.PageBrokerAnnotationDisabled,
+		ContainerID:          params.ContainerID,
+		ContainerName:        params.ContainerName,
+		ContentUID:           params.ContentUID,
+		StartedAt:            params.StartedAt,
+		NodeName:             w.config.NodeName,
+		PodName:              params.Pod.Name,
+		PodNamespace:         params.Pod.Namespace,
+		PodIP:                params.Pod.Status.PodIP,
+		Pod:                  podEnvironment(params.Pod, params.ContainerName),
+		Clientset:            w.clientset,
+		PageBrokerRequested:  params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] != snapshotv1alpha1.PageBrokerAnnotationDisabled,
+		CuInterposeRequested: params.CuInterposeRequested,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
 		if executor.CheckpointNeedsSourceKill(err) {

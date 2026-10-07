@@ -14,6 +14,7 @@ type MountInfo struct {
 	MountPoint string
 	FSType     string
 	VFSOptions string // superblock options (e.g. "upperdir=...")
+	ReadOnly   bool   // per-mount "ro" option, which CRIU reapplies on restore
 
 	// IsOCIManaged is true when the mount destination matches an OCI spec entry
 	// (including /run/ ↔ /var/run/ aliasing). Set by ClassifyMounts.
@@ -34,6 +35,7 @@ type CheckpointContainerSnapshot struct {
 	CUDAHostPIDs   []int    // host-visible PIDs used for checkpoint-side CUDA actions
 	CUDANSPIDs     []int    // namespace-relative PIDs stored in the checkpoint manifest
 	GPUDevicePaths map[string]string
+	CuInterpose    *CuInterposeManifest
 
 	// GPUs holds the GPUs the checkpointed container could see, in allocation
 	// order, with the model and driver version where they could be read.

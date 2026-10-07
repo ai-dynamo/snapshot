@@ -9,19 +9,24 @@ the container during pod startup.
 
 - A ready `PodSnapshot` exists (see [Checkpoint a replica](checkpoint.md)).
 - The restored replica reuses the source's snapshot-ready pod spec, provided as a
-  ready-to-apply `restore-deployment.yaml` for [each framework](#example).
+  manifest under `restore/` for [each framework](#example).
 
 ## Example
 
-Each build-and-deploy guide ships a ready-to-apply `restore-deployment.yaml` next
-to its `deployment.yaml`: the same manifest with an
-`nvidia.com/restore-from` annotation added naming the `PodSnapshot` to restore
-from, and the container command replaced with an inert `sleep infinity`.
+Each framework guide ships model-specific manifests under `capture/` and
+Pod profiles under `restore/`: `single-gpu.yaml` and `8-gpu.yaml`. Choose the
+profile matching the source GPU count, image, and mounts. Model configuration
+comes from the checkpoint.
+The restore manifest adds the `nvidia.com/restore-from` annotation naming the
+`PodSnapshot` to restore from and replaces the container command with an inert
+`sleep infinity`.
+The same restore manifest works for captures made with or without SnapshotJob.
 Download the one for the framework in use:
 
-- [vLLM `restore-deployment.yaml`](vllm/restore-deployment.yaml)
-- [SGLang `restore-deployment.yaml`](sglang/restore-deployment.yaml)
-- [TensorRT-LLM `restore-deployment.yaml`](tensorrt-llm/restore-deployment.yaml)
+- vLLM: [single GPU](vllm/restore/single-gpu.yaml), [eight GPUs](vllm/restore/8-gpu.yaml)
+- SGLang: [single GPU](sglang/restore/single-gpu.yaml), [eight GPUs](sglang/restore/8-gpu.yaml)
+- TensorRT-LLM: [single GPU](tensorrt-llm/restore/single-gpu.yaml), [eight GPUs](tensorrt-llm/restore/8-gpu.yaml)
+- [Multi-GPU examples](cuda-shared-memory.md#multi-gpu-models)
 
 Set the namespace where the restored replica will run — the same one holding the
 `PodSnapshot`:
@@ -31,14 +36,15 @@ export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
 ```
 
-In the manifest, set the container `image` to the one built for the source and set
+In the manifest, use the same container `image` as the source and set
 the `restore-from` annotation to the `PodSnapshot` name, then apply it and watch the
-rollout (the Deployment is named `<framework>-restored`):
+rollout (the Deployment is named `<framework>-restored`). For eight GPUs, use
+`restore/8-gpu.yaml` and Deployment `<framework>-8gpu-restored`:
 
 ```bash
 kubectl apply \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --filename restore-deployment.yaml
+  --filename restore/single-gpu.yaml
 
 kubectl rollout status \
   --namespace "$SNAPSHOT_NAMESPACE" \
