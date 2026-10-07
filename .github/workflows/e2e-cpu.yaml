@@ -126,6 +126,17 @@ jobs:
         timeout-minutes: 5
         run: hack/verify-bundle-glibc.sh "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}"
 
+      - name: Build PageBroker image
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          make docker-build-pagebroker \
+            REGISTRY="${IMAGE_REGISTRY}" \
+            TAGS="${IMAGE_TAG}" \
+            DOCKER_BUILD_ARGS="--load \
+              --cache-from=type=gha,scope=pagebroker \
+              --cache-to=type=gha,scope=pagebroker,mode=max"
+
       - name: Install kubectl
         run: |
           set -euo pipefail
@@ -164,6 +175,7 @@ jobs:
           k3d image import \
             "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}" \
             "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}" \
+            "${IMAGE_REGISTRY}/pagebroker:${IMAGE_TAG}" \
             --cluster "${SNAPSHOT_E2E_K3D_CLUSTER}"
 
       - name: Install Snapshot
@@ -182,8 +194,10 @@ jobs:
           export SNAPSHOT_E2E_HELM_SET="${cluster_values}
           image.operator.repository=${IMAGE_REGISTRY}/operator
           image.agent.repository=${IMAGE_REGISTRY}/agent
+          image.pageBroker.repository=${IMAGE_REGISTRY}/pagebroker
           image.operator.pullPolicy=IfNotPresent
-          image.agent.pullPolicy=IfNotPresent"
+          image.agent.pullPolicy=IfNotPresent
+          image.pageBroker.pullPolicy=IfNotPresent"
           uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-install \
             --skip-host-preflight

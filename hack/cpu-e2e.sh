@@ -70,6 +70,8 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
     DOCKER_BUILD_ARGS="--load"
   make docker-build-agent REGISTRY="${IMAGE_REGISTRY}" TAGS="${IMAGE_TAG}" \
     DOCKER_BUILD_ARGS="--load"
+  make docker-build-pagebroker REGISTRY="${IMAGE_REGISTRY}" TAGS="${IMAGE_TAG}" \
+    DOCKER_BUILD_ARGS="--load"
 fi
 
 # Registered before the cluster exists: cluster-up can create the node and then
@@ -82,6 +84,7 @@ log "importing images into ${SNAPSHOT_E2E_K3D_CLUSTER}"
 k3d image import \
   "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}" \
   "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}" \
+  "${IMAGE_REGISTRY}/pagebroker:${IMAGE_TAG}" \
   --cluster "${SNAPSHOT_E2E_K3D_CLUSTER}"
 
 log "installing Snapshot"
@@ -93,8 +96,10 @@ cluster_values="$(hack/k3d-cpu-e2e.sh helm-set)"
 export SNAPSHOT_E2E_HELM_SET="${cluster_values}
 image.operator.repository=${IMAGE_REGISTRY}/operator
 image.agent.repository=${IMAGE_REGISTRY}/agent
+image.pageBroker.repository=${IMAGE_REGISTRY}/pagebroker
 image.operator.pullPolicy=IfNotPresent
-image.agent.pullPolicy=IfNotPresent"
+image.agent.pullPolicy=IfNotPresent
+image.pageBroker.pullPolicy=IfNotPresent"
 uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
   --phase snapshot-install --skip-host-preflight
 uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
