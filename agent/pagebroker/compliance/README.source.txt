@@ -8,9 +8,7 @@ Source for PageBroker and the third-party components distributed in this image:
   libaio/      Debian source package for the bundled libaio runtime library.
                Its version matches the installed binary package.
   nixl/        NIXL and its dependencies at the revision built for POSIX I/O.
-               VERSION records the base NIXL commit. The supplied source includes
-               patches/nixl-linux-aio-submission.patch from pagebroker/, which
-               fixes failed-submission callback completion and pool reuse.
+               VERSION records the upstream NIXL commit.
   nvtx/        NVTX headers and notices at the profiling revision.
                VERSION records the NVTX commit.
   pagebroker/  NVIDIA daemon source, including the GPU engine. Build output and
