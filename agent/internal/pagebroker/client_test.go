@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"testing"
@@ -216,74 +217,87 @@ func TestAbortRequiresAbortComplete(t *testing.T) {
 	}
 }
 
-func TestStagingRequestsRejectEmptyDirectory(t *testing.T) {
+func TestImageDirectoryResponses(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		call  func(Client, context.Context) error
-		reply func(*Request) *Response
+		call  func(Client, context.Context) (string, error)
+		reply func(string) isResponse_Result
 	}{
-		{
-			name: "restore",
-			call: func(client Client, ctx context.Context) error {
-				_, err := client.StagedRestore(ctx, "transaction", "/checkpoints/source")
-				return err
-			},
-			reply: func(request *Request) *Response {
-				return &Response{RequestId: request.RequestId, TransactionId: request.TransactionId,
-					Result: &Response_StagedRestoreDirectory{StagedRestoreDirectory: &StagedRestoreDirectory{}}}
-			},
-		},
-		{
-			name: "checkpoint",
-			call: func(client Client, ctx context.Context) error {
-				_, err := client.PrepareCheckpoint(ctx, "transaction", "/checkpoints/destination")
-				return err
-			},
-			reply: func(request *Request) *Response {
-				return &Response{RequestId: request.RequestId, TransactionId: request.TransactionId,
-					Result: &Response_StagedCheckpointDirectory{StagedCheckpointDirectory: &StagedCheckpointDirectory{}}}
-			},
-		},
+		{"restore", func(c Client, ctx context.Context) (string, error) {
+			return c.StagedRestore(ctx, "transaction", "/checkpoints/source")
+		}, func(directory string) isResponse_Result {
+			return &Response_StagedRestoreDirectory{StagedRestoreDirectory: &StagedRestoreDirectory{ImageDirectory: &directory}}
+		}},
+		{"checkpoint", func(c Client, ctx context.Context) (string, error) {
+			return c.PrepareCheckpoint(ctx, "transaction", "/checkpoints/destination")
+		}, func(directory string) isResponse_Result {
+			return &Response_StagedCheckpointDirectory{StagedCheckpointDirectory: &StagedCheckpointDirectory{ImageDirectory: &directory}}
+		}},
+		{"direct-checkpoint", func(c Client, ctx context.Context) (string, error) {
+			return c.PrepareDirectCheckpoint(ctx, "transaction", "/checkpoints/destination")
+		}, func(directory string) isResponse_Result {
+			return &Response_DirectCheckpointDirectory{DirectCheckpointDirectory: &DirectCheckpointDirectory{ImageDirectory: &directory}}
+		}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer listener.Close()
-
-			server := make(chan error, 1)
-			go func() {
-				connection, err := listener.Accept()
+		for _, outcome := range []string{"valid", "empty", "wrong-response"} {
+			t.Run(tc.name+"/"+outcome, func(t *testing.T) {
+				listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 				if err != nil {
+					t.Fatal(err)
+				}
+				defer listener.Close()
+				server := make(chan error, 1)
+				go func() {
+					connection, err := listener.Accept()
+					if err != nil {
+						server <- err
+						return
+					}
+					defer connection.Close()
+					message, err := readMessage(connection)
+					if err != nil {
+						server <- err
+						return
+					}
+					request := new(Request)
+					if err := proto.Unmarshal(message, request); err != nil {
+						server <- err
+						return
+					}
+					if tc.name == "direct-checkpoint" {
+						prepare := request.GetPrepareDirectCheckpoint()
+						if prepare == nil || prepare.GetDestination().GetFilesystem().GetDirectory() != "/checkpoints/destination" || prepare.GetIoEngine().GetPosixCopy() == nil {
+							server <- fmt.Errorf("unexpected direct checkpoint request: %v", request)
+							return
+						}
+					}
+					directory := "/checkpoints/prepared"
+					if outcome == "empty" {
+						directory = ""
+					}
+					response := &Response{RequestId: request.RequestId, TransactionId: request.TransactionId, Result: tc.reply(directory)}
+					if outcome == "wrong-response" {
+						response.Result = &Response_CommitComplete{CommitComplete: &CommitComplete{}}
+					}
+					message, err = proto.Marshal(response)
+					if err == nil {
+						err = writeMessage(connection, message)
+					}
 					server <- err
-					return
+				}()
+				directory, err := tc.call(Client{ControlSocketPath: listener.Addr().String()}, context.Background())
+				if outcome == "valid" {
+					if err != nil || directory != "/checkpoints/prepared" {
+						t.Fatalf("directory=%q, err=%v", directory, err)
+					}
+				} else if err == nil {
+					t.Fatal("accepted invalid image directory response")
 				}
-				defer connection.Close()
-				message, err := readMessage(connection)
-				if err != nil {
-					server <- err
-					return
+				if err := <-server; err != nil {
+					t.Fatal(err)
 				}
-				request := new(Request)
-				if err := proto.Unmarshal(message, request); err != nil {
-					server <- err
-					return
-				}
-				message, err = proto.Marshal(tc.reply(request))
-				if err == nil {
-					err = writeMessage(connection, message)
-				}
-				server <- err
-			}()
-
-			if err := tc.call(Client{ControlSocketPath: listener.Addr().String()}, context.Background()); err == nil {
-				t.Fatal("staging request accepted an empty directory")
-			}
-			if err := <-server; err != nil {
-				t.Fatal(err)
-			}
-		})
+			})
+		}
 	}
 }
 

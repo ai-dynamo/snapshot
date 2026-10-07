@@ -756,7 +756,7 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	assert.Equal(t, "CheckpointFailed", cond.Reason)
 }
 
-func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
+func TestExecutorCheckpointInspectionFailureDoesNotKill(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{})
 	w.config.PageBroker = snapshottypes.PageBrokerSpec{
 		Enabled:           true,
@@ -781,8 +781,11 @@ func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
 		ContainerPID:  target.Process.Pid,
 		ContentUID:    "content-uid",
 	})
-	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
-	require.NoError(t, target.Process.Signal(syscall.Signal(0)), "PageBroker preflight failure must not kill the source")
+	require.ErrorContains(t, err, "failed to resolve container")
+	var status syscall.WaitStatus
+	waitedPID, waitErr := syscall.Wait4(target.Process.Pid, &status, syscall.WNOHANG, nil)
+	require.NoError(t, waitErr)
+	require.Zero(t, waitedPID, "preflight failure must not kill the source")
 	require.NoError(t, ctx.Err())
 }
 

@@ -171,7 +171,7 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 	if err != nil {
 		return nil, err
 	}
-	return gpuUUIDsOf(env), nil
+	return GPUUUIDs(env), nil
 }
 
 // DiscoverGPUs resolves the same GPUs as DiscoverGPUUUIDs, in the same
@@ -241,7 +241,7 @@ func discoverGPUs(
 				err,
 			)
 		}
-		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, gpuUUIDsOf(visible))
+		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, GPUUUIDs(visible))
 		if err != nil {
 			return compat.GPUInfo{}, err
 		}
@@ -275,7 +275,7 @@ func discoverGPUs(
 	if err != nil {
 		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 	}
-	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDsOf(visible))
+	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", GPUUUIDs(visible))
 	return visible, nil
 }
 
@@ -301,7 +301,8 @@ func describeGPUs(uuids []string, visible compat.GPUInfo) compat.GPUInfo {
 	return env
 }
 
-func gpuUUIDsOf(env compat.GPUInfo) []string {
+// GPUUUIDs returns device UUIDs in discovery order.
+func GPUUUIDs(env compat.GPUInfo) []string {
 	var uuids []string
 	for _, device := range env.Devices {
 		if device.UUID != "" {

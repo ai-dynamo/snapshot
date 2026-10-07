@@ -18,14 +18,15 @@ const CheckpointBasePath = "/checkpoints"
 
 // AgentConfig holds static checkpoint settings plus runtime fields populated at startup.
 type AgentConfig struct {
-	NodeName          string          `yaml:"-"`
-	HostKernelVersion string          `yaml:"-"`
-	Storage           StorageSpec     `yaml:"storage"`
-	Overlay           OverlaySettings `yaml:"overlay"`
-	PageBroker        PageBrokerSpec  `yaml:"pageBroker"`
-	Checkpoint        CheckpointSpec  `yaml:"checkpoint"`
-	Restore           RestoreSpec     `yaml:"restore"`
-	CRIU              CRIUSettings    `yaml:"criu"`
+	NodeName               string          `yaml:"-"`
+	HostKernelVersion      string          `yaml:"-"`
+	CustomStorageAvailable bool            `yaml:"-"`
+	Storage                StorageSpec     `yaml:"storage"`
+	Overlay                OverlaySettings `yaml:"overlay"`
+	PageBroker             PageBrokerSpec  `yaml:"pageBroker"`
+	Checkpoint             CheckpointSpec  `yaml:"checkpoint"`
+	Restore                RestoreSpec     `yaml:"restore"`
+	CRIU                   CRIUSettings    `yaml:"criu"`
 }
 
 func (c *AgentConfig) LoadEnvOverrides() {
