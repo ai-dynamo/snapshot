@@ -24,6 +24,27 @@ pvc:
   basePath: /
 `
 
+func TestNewContentBindingIsAnExplicitRolloutStep(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "storage.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(pvcStorageYAML), 0o600))
+	storeID, err := configuredStoreID(configPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, storeID)
+
+	// An operator-first upgrade can read store identity for cleanup without issuing bound captures to old agents.
+	captureStoreID, err := newContentStoreID(storeID, false)
+	require.NoError(t, err)
+	assert.Empty(t, captureStoreID)
+
+	// Activate only after the compatible agent/PageBroker rollout has completed.
+	captureStoreID, err = newContentStoreID(storeID, true)
+	require.NoError(t, err)
+	assert.Equal(t, storeID, captureStoreID)
+
+	_, err = newContentStoreID("", true)
+	require.ErrorContains(t, err, "requires snapshot-storage-config")
+}
+
 func TestConfiguredStoreIDPreservesLegacyStartup(t *testing.T) {
 	id, err := configuredStoreID("")
 	require.NoError(t, err)

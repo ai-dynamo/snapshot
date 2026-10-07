@@ -30,6 +30,17 @@ func mustConfigureStoreID() string {
 	return storeID
 }
 
+// Store identity remains available to maintenance while new captures stay legacy during rollout.
+func newContentStoreID(storeID string, enabled bool) (string, error) {
+	if !enabled {
+		return "", nil
+	}
+	if storeID == "" {
+		return "", fmt.Errorf("bind-new-contents requires snapshot-storage-config")
+	}
+	return storeID, nil
+}
+
 // configuredStoreID validates the deployment's resolved backend configuration.
 // Helm supplies it today; a future storage-class resolver can supply the same
 // inputs without exposing backend-specific settings in the agent's API.
