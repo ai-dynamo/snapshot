@@ -360,19 +360,28 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return RestoreResult{}, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	gpuRestoreComplete = usePageBrokerGPU
-	restoreSource := activeMounts[len(activeMounts)-1]
-	if err := restoreSource.point.Unmount(ctx); err != nil {
-		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", restoreSource.action, err))
+	lastMount := activeMounts[len(activeMounts)-1]
+	unmountFailed := false
+	if err := lastMount.point.Unmount(ctx); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", lastMount.action, err))
+		unmountFailed = true
 	}
 	activeMounts = activeMounts[:len(activeMounts)-1]
-	commitStart := time.Now()
-	if err := broker.Commit(ctx, transactionID); err != nil {
-		log.Error(err, "failed to commit PageBroker restore")
+	if unmountFailed {
+		// Staging may still be in use; don't Commit or Abort. Leave the
+		// transaction for expiry to reclaim.
+		log.Info("skipping PageBroker commit after a failed staging unmount; the transaction will expire", "transaction", transactionID)
+		transactionID = ""
 	} else {
-		committed = true
+		commitStart := time.Now()
+		if err := broker.Commit(ctx, transactionID); err != nil {
+			log.Error(err, "failed to commit PageBroker restore")
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("commit PageBroker restore %q: %w", transactionID, err))
+		} else {
+			committed = true
+		}
+		pageBrokerCommitDuration = time.Since(commitStart)
 	}
-	pageBrokerCommitDuration = time.Since(commitStart)
-
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
