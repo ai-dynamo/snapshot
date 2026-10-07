@@ -14,6 +14,7 @@ class FileDescriptor {
   FileDescriptor& operator=(FileDescriptor&& other) noexcept;
 
   int get() const;
+  static FileDescriptor Duplicate(int value);
 
  private:
   int value_;
