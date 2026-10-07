@@ -79,3 +79,18 @@ func TestRepairPublicationRefusesUnboundContent(t *testing.T) {
 	err := q.RepairPublication(context.Background(), content, "main", nil)
 	require.Error(t, err)
 }
+
+func TestMetadataRepairRefusesAnotherConfiguredStore(t *testing.T) {
+	content := boundTestContent(t, "content", "uid-other-store")
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	q.config.StoreID = ""
+	key := newRecoverMetadataKey(content.Name, content.UID, content.Spec.Storage.StoreID, "main")
+
+	err := q.processRecoverMetadata(context.Background(), key)
+	require.ErrorIs(t, err, coordination.ErrStoreMismatch)
+	err = q.RepairPublication(context.Background(), content, "main", nil)
+	require.ErrorIs(t, err, coordination.ErrStoreMismatch)
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, q.client.Get(context.Background(), client.ObjectKeyFromObject(content), current))
+	require.Nil(t, current.Status.Storage)
+}

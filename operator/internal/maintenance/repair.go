@@ -20,6 +20,9 @@ func (q *Queue) RepairPublication(ctx context.Context, content *snapshotv1alpha1
 	if content.Spec.Storage == nil {
 		return fmt.Errorf("content %s has no storage binding to repair against", content.Name)
 	}
+	if _, err := q.backendForContent(content); err != nil {
+		return err
+	}
 	storeID := content.Spec.Storage.StoreID
 	commitID, err := coordination.ValidateBinding(storeID, string(content.UID), containerName)
 	if err != nil {
