@@ -14,6 +14,11 @@ on:
           published for all three images in GHCR, otherwise the run fails.
         required: false
         type: string
+      pagebroker_gpu_only:
+        description: Run only the standalone PageBroker GPU tests
+        required: false
+        type: boolean
+        default: false
   schedule:
     # 23:00 Pacific Standard Time.
     - cron: "0 7 * * *"
@@ -27,8 +32,98 @@ permissions:
   packages: read
 
 jobs:
+  pagebroker-gpu:
+    name: Run PageBroker GPU tests
+    if: ${{ github.event_name == 'schedule' || inputs.pagebroker_gpu_only }}
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      SNAPSHOT_E2E_TEST_NAMESPACE: pagebroker-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_AVOID_MIG: "true"
+      UV_LINK_MODE: copy
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: ${{ runner.arch == 'ARM64' && '23003df007937dd607409c8ddf010baa82bad2673e60e254632ca5b04edcce13' || '5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583' }}
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Capture GPU cluster context
+        id: gpu-cluster
+        run: |
+          umask 077
+          cluster_context="$(kubectl config current-context)"
+          kubeconfig="${RUNNER_TEMP}/pagebroker-gpu-kubeconfig"
+          kubectl --context "${cluster_context}" -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            config view --minify --flatten --raw > "${kubeconfig}"
+          echo "KUBECONFIG=${kubeconfig}" >> "$GITHUB_ENV"
+          echo "PAGEBROKER_KUBE_CONTEXT=${cluster_context}" >> "$GITHUB_ENV"
+
+      - name: Create GPU test namespace
+        run: |
+          kubectl --context "${PAGEBROKER_KUBE_CONTEXT}" -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            create namespace "${SNAPSHOT_E2E_TEST_NAMESPACE}"
+
+      - name: Set up cluster builder
+        id: builder
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver: kubernetes
+          platforms: linux/amd64
+          cleanup: false
+          driver-opts: |
+            namespace=${{ env.SNAPSHOT_E2E_TEST_NAMESPACE }}
+            nodeselector=kubernetes.io/arch=amd64
+            requests.cpu=4
+            requests.memory=8Gi
+            limits.memory=16Gi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build GPU test image on the cluster
+        timeout-minutes: 30
+        env:
+          BUILDER: ${{ steps.builder.outputs.name }}
+        run: |
+          revision="$(git rev-parse HEAD)"
+          make docker-build-pagebroker \
+            TAGS="gpu-tests-${revision}" \
+            DOCKER_BUILD_ARGS="--builder ${BUILDER} --push --target gpu-test \
+              --build-arg PAGEBROKER_REVISION=${revision}"
+
+      - name: Run GPU test Job
+        timeout-minutes: 12
+        run: |
+          uv run --locked --project e2e pytest e2e/tests/test_pagebroker_gpu.py -vv -s
+
+      - name: Delete GPU test namespace
+        if: ${{ always() && steps.gpu-cluster.outcome == 'success' }}
+        env:
+          BUILDER: ${{ steps.builder.outputs.name }}
+        run: |
+          if [ -n "${BUILDER}" ]; then
+            docker buildx rm --force "${BUILDER}" || true
+          fi
+          kubectl --context "${PAGEBROKER_KUBE_CONTEXT}" -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            delete namespace "${SNAPSHOT_E2E_TEST_NAMESPACE}" --ignore-not-found --wait=false
+          rm -f "${KUBECONFIG}"
+
   e2e:
     name: Run Snapshot e2e tests in vCluster
+    if: ${{ !inputs.pagebroker_gpu_only }}
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 60
     env:
