@@ -199,6 +199,8 @@ tests:
             - "134217728"
             - --custom-storage-max-pinned-bytes
             - "0"
+            - --storage-config
+            - /etc/snapshot/storage.yaml
 
 
   - it: applies the configured pinned-memory budget to the owning process
