@@ -160,8 +160,9 @@ metadata:
 ```
 
 The value is trimmed and case-sensitive: `enabled` opts in and `disabled` opts
-out. Absence disables the request. Other present values are source validation
-errors. The agent reads only this annotation. It does not infer the opt-in from
+out. Absence disables the request. SnapshotJob admission rejects other present
+values through CEL validation. The agent also validates the annotation for ordinary
+Pods and reads only this annotation for opt-in. It does not infer the opt-in from
 the command or from loaded libraries.
 
 Automatic delivery applies to SnapshotJob sources and their single target
@@ -980,14 +981,16 @@ cudaRestore:
   pids: [1, 623]
 cuinterpose:
   pids: [623]
-  sha256:
-    libcuinterpose.so: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    libcuinterpose_core.so: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  libraries:
+    libcuinterpose.so:
+      sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    libcuinterpose_core.so:
+      sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 ```
 
-The illustrative hashes above record both verified delivered libraries, keyed by
-file name, not the annotation. Exactly these two hashes and `pids` are required
-when `cuinterpose` is present.
+The library identity records are keyed by file name and currently contain only
+SHA-256. Exactly these two library records and `pids` are required when
+`cuinterpose` is present.
 The coordinator PIDs must be positive, unique, and a subset of `cudaRestore.pids`.
 Here PID 1 has only the frontend loaded, while PID 623 has the core and must
 participate in the coordinator protocol.
@@ -1011,7 +1014,9 @@ linker build ID, but SHA-256 is the identity check.
 Upgrades that change shim bytes require matching agents or recreated checkpoints;
 unrelated agent changes do not invalidate them. Launcher and coordinator bytes
 are excluded: those executables are absent from the checkpointed workload.
-Archiving libraries with checkpoints remains separate work.
+The intended follow-up is to archive the captured libraries with each checkpoint,
+so restore no longer depends on the agent shipping the same bundle. Until then,
+the agent-provided libraries must match the recorded hashes.
 
 ### Security
 
