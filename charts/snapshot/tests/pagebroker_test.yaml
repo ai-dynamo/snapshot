@@ -5,6 +5,13 @@ suite: PageBroker sidecar image
 templates:
   - templates/daemonset.yaml
 tests:
+  - it: rejects a separate PageBroker tag instead of silently ignoring it
+    set:
+      image.pageBroker.tag: candidate
+    asserts:
+      - failedTemplate:
+          errorMessage: "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images"
+
   - it: embeds GPU execution in the default PageBroker sidecar
     asserts:
       - lengthEqual:
