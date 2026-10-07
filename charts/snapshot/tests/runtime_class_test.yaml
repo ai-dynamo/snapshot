@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: snapshot agent runtime class
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: uses the nvidia RuntimeClass by default
+    asserts:
+      - equal:
+          path: spec.template.spec.runtimeClassName
+          value: nvidia
+
+  - it: renders a configured RuntimeClass
+    set:
+      daemonset.runtimeClassName: nvidia-cdi
+    asserts:
+      - equal:
+          path: spec.template.spec.runtimeClassName
+          value: nvidia-cdi
+
+  - it: omits runtimeClassName when set to empty
+    set:
+      daemonset.runtimeClassName: ""
+    asserts:
+      - notExists:
+          path: spec.template.spec.runtimeClassName

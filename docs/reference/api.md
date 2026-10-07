@@ -195,6 +195,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `daemonset.resources` | 4 CPU / 4Gi limit | Agent resource requests and limits. |
 | `daemonset.nodeSelector` | `nvidia.com/gpu.present: "true"` | Targets GPU nodes. |
 | `daemonset.tolerations` | GPU + `dedicated` | Node tolerations. |
+| `daemonset.runtimeClassName` | `nvidia` | RuntimeClass for the agent pod; `""` omits it, for nodes where the NVIDIA runtime is containerd's default. |
 | `daemonset.imagePullSecrets` | `ngc-secret` | Pull secrets for the agent image. |
 | `seccomp.deploy` | `true` | Install the block-iouring seccomp profile (required for CRIU; set `false` on RHCOS 9.6+). |
 | `rbac.create` | `true` | Create agent and operator RBAC. |

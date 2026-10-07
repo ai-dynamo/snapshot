@@ -75,8 +75,11 @@ spec:
         {{- with .Values.daemonset.affinity }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      # CUDA checkpoint/restore requires the nvidia container runtime
-      runtimeClassName: nvidia
+      {{- with .Values.daemonset.runtimeClassName }}
+      # CUDA checkpoint/restore requires the nvidia container runtime. Left out
+      # when empty, for nodes where that runtime is containerd's default.
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
       {{- if .Values.seccomp.deploy }}
       initContainers:
         # Deploy seccomp profile to host before starting the agent
