@@ -12,6 +12,10 @@
 #include <string_view>
 #include <vector>
 
+namespace snapshot::pagebroker::gpu {
+inline constexpr char kDataDirectory[] = "gpu";
+}
+
 namespace snapshot::pagebroker::gpu::storage {
 
 constexpr const char *kManifestName = "manifest.txt";

@@ -33,7 +33,8 @@ daemon: generate
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DAEMON_SOURCES) v1/pagebroker.pb.cc \
 		-Wl,-Bstatic -lprotobuf -Wl,-Bdynamic -o pagebroker
 
-test: generate build/gpu-cuda-driver.o | build
+test: generate build/gpu-cuda-driver.o build/gpu-engine-test | build
+	./build/gpu-engine-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(BROKER_SOURCES) $(COMMON_SOURCES) \
 		daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
 	./build/pagebroker-test
@@ -46,6 +47,12 @@ test: generate build/gpu-cuda-driver.o | build
 # Compile the optional driver loader without requiring a CUDA library.
 build/gpu-cuda-driver.o: gpu/cuda_driver.cpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+# These tests use real files and validate the engine without initializing CUDA.
+build/gpu-engine-test: generate transfer_engine.cpp gpu/engine_test.cpp gpu/engine.cpp gpu/engine.hpp gpu/checkpoint.cpp gpu/checkpoint.hpp gpu/transfer.cpp gpu/transfer.hpp gpu/storage_manifest.cpp gpu/storage_manifest.hpp gpu/cuda_driver.cpp gpu/errors.hpp $(COMMON_SOURCES) $(IO_SOURCES) io_engine.hpp file_descriptor.hpp cancellation.hpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/engine_test.cpp gpu/engine.cpp gpu/checkpoint.cpp \
+		gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer_engine.cpp v1/pagebroker.pb.cc \
+		$(GTEST_FLAGS) -lprotobuf $(NIXL_FLAGS) -ldl -o $@
 
 # Run manually with the host driver and one visible GPU.
 # No checked-in GPU CI job invokes this target.
