@@ -8,11 +8,17 @@ import (
 	"time"
 )
 
+// PageBrokerTransactionLifetime is PageBroker's fixed transaction lifetime.
+// It is a PageBroker constant, not configuration: every participating
+// component must agree on it without a value to drift out of sync on.
+const PageBrokerTransactionLifetime = 2*time.Hour + 5*time.Minute
+
 // DeletionWindow is the Stage 1 bounded-deletion configuration: admission
-// window, max transaction lifetime, and clock-skew allowance.
+// window and clock-skew allowance. The deletion delay these two combine
+// into also waits out PageBrokerTransactionLifetime, which is fixed, not
+// part of this configuration.
 type DeletionWindow struct {
 	AdmissionWindow    time.Duration
-	MaxTransactionLife time.Duration
 	ClockSkewAllowance time.Duration
 }
 
@@ -20,9 +26,6 @@ type DeletionWindow struct {
 func (w DeletionWindow) Validate() error {
 	if w.AdmissionWindow <= 0 {
 		return fmt.Errorf("admission window must be positive")
-	}
-	if w.MaxTransactionLife <= 0 {
-		return fmt.Errorf("max transaction lifetime must be positive")
 	}
 	if w.ClockSkewAllowance < 0 {
 		return fmt.Errorf("clock skew allowance must not be negative")
@@ -36,5 +39,5 @@ func (w DeletionWindow) Validate() error {
 // QuiescenceDeadline is the earliest time an artifact last seen at lastSeen
 // may be swept.
 func (w DeletionWindow) QuiescenceDeadline(lastSeen time.Time) time.Time {
-	return lastSeen.Add(w.AdmissionWindow + w.MaxTransactionLife + w.ClockSkewAllowance)
+	return lastSeen.Add(w.AdmissionWindow + PageBrokerTransactionLifetime + w.ClockSkewAllowance)
 }

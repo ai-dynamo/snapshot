@@ -70,6 +70,38 @@ func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error
 	return q.client.Patch(ctx, content, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
+// processRecoverMetadata is idempotent the same way processDeleteContent is:
+// a content that's already gone or recreated under the same name with a
+// different UID is a completed no-op. A store-ID mismatch against the key
+// is a terminal refusal, not a retry: the content rebound since enqueue, so
+// retrying the same evidence would repair the wrong store.
+func (q *Queue) processRecoverMetadata(ctx context.Context, key WorkItemKey) error {
+	content := &snapshotv1alpha1.PodSnapshotContent{}
+	err := q.client.Get(ctx, apitypes.NamespacedName{Name: key.Name}, content)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get PodSnapshotContent %s: %w", key.Name, err)
+	}
+	if content.UID != key.UID {
+		return nil
+	}
+	if content.Spec.Storage == nil || content.Spec.Storage.StoreID != key.StoreID {
+		return fmt.Errorf("content %s no longer bound to store %q: refusing stale recover-metadata", key.Name, key.StoreID)
+	}
+
+	backend, err := q.backend()
+	if err != nil {
+		return err
+	}
+	found, err := backend.Evidence(ctx, string(content.UID))
+	if err != nil {
+		return fmt.Errorf("discover publication evidence for %s: %w", key.Name, err)
+	}
+	return q.RepairPublication(ctx, content, key.ContainerName, found)
+}
+
 // processSweep reschedules pending finalization and removes up to
 // config.BatchSize confirmed orphans.
 func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
