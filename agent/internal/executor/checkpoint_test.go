@@ -31,36 +31,6 @@ import (
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-// readFakeRequest reads one length-prefixed PageBroker request frame.
-func readFakeRequest(connection net.Conn) (*pagebroker.Request, error) {
-	var size uint32
-	if err := binary.Read(connection, binary.BigEndian, &size); err != nil {
-		return nil, err
-	}
-	data := make([]byte, size)
-	if _, err := io.ReadFull(connection, data); err != nil {
-		return nil, err
-	}
-	request := new(pagebroker.Request)
-	if err := proto.Unmarshal(data, request); err != nil {
-		return nil, err
-	}
-	return request, nil
-}
-
-// writeFakeResponse writes one length-prefixed PageBroker response frame.
-func writeFakeResponse(connection net.Conn, response *pagebroker.Response) error {
-	data, err := proto.Marshal(response)
-	if err != nil {
-		return err
-	}
-	if err := binary.Write(connection, binary.BigEndian, uint32(len(data))); err != nil {
-		return err
-	}
-	_, err = connection.Write(data)
-	return err
-}
-
 type checkpointPathRuntime struct{}
 
 func (checkpointPathRuntime) ResolveContainer(context.Context, string) (int, *specs.Spec, error) {
@@ -102,7 +72,7 @@ func TestCheckpointDoesNotCreateArtifactsBeforeInspection(t *testing.T) {
 	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, "content-uid", "main")
 	require.NoError(t, err)
 
-	err = Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+	_, err = Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
 		ContentUID:    "content-uid",
 		ContainerName: "main",
 	}, cfg)

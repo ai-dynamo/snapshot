@@ -143,12 +143,8 @@ type RestoreResult struct {
 func fetchArtifactMetadata(ctx context.Context, broker pagebroker.Client, artifact *pagebroker.PublishedArtifact) (manifest *types.CheckpointManifest, retErr error) {
 	transactionID := uuid.NewString()
 	defer func() {
-		abortCtx := ctx
-		if ctx.Err() != nil {
-			var cancel context.CancelFunc
-			abortCtx, cancel = context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
-			defer cancel()
-		}
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pageBrokerAbortTimeout)
+		defer cancel()
 		if err := broker.Abort(abortCtx, transactionID); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker metadata transaction %q: %w", transactionID, err))
 		}
