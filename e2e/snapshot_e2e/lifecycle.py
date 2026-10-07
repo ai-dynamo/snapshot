@@ -1010,6 +1010,8 @@ def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:
         print(k8s.pod_logs(config.namespace, pod.metadata.name, tail_lines=80))
     print_custom_objects(config, run)
     print_snapshot_controller_logs(config)
+    _dump_section("pod status writers", lambda: print_pod_status_writers(pods))
+    _dump_section("status sync errors", lambda: print_status_sync_errors(config.namespace))
     events = core.list_namespaced_event(config.namespace).items
     for event in events[-30:]:
         involved = event.involved_object
@@ -1197,6 +1199,8 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
             print(f"SnapshotJob debug unavailable: {k8s.api_error_detail(exc)}")
     print_custom_objects_named(config, run.snapshotjob_name)
     print_snapshot_controller_logs(config)
+    _dump_section("pod status writers", lambda: print_pod_status_writers(list(pods.values())))
+    _dump_section("status sync errors", lambda: print_status_sync_errors(config.namespace))
     events = core.list_namespaced_event(config.namespace).items
     # Job-generated pods are named <snapshotjob_name>-<suffix>, so an exact-name
     # filter silently drops every pod-level event (container termination in
@@ -1286,7 +1290,36 @@ def debug_dump_framework(
             "agent diagnostics", lambda: _dump_agent_diagnostics(config, run, source_node)
         )
     _dump_section("events", lambda: _dump_run_events(config, run))
+    _dump_section(
+        "pod status writers",
+        lambda: print_pod_status_writers(
+            client.CoreV1Api()
+            .list_namespaced_pod(config.namespace, label_selector=f"snapshot-e2e-test={run.suffix}")
+            .items
+        ),
+    )
+    _dump_section("status sync errors", lambda: print_status_sync_errors(config.namespace))
     print("--- end debug ---\n")
+
+
+def print_pod_status_writers(pods: list[client.V1Pod]) -> None:
+    for pod in pods:
+        conditions = {c.type: c.status for c in pod.status.conditions or []}
+        print(f"status writers of pod {pod.metadata.name} (conditions {conditions}):")
+        for writer in k8s.pod_status_writers(pod) or ["<no managedFields touching status>"]:
+            print(f"  {writer}")
+
+
+def print_status_sync_errors(namespace: str, limit: int = 20) -> None:
+    errors = sorted(k8s.status_sync_errors(namespace), key=event_time)[-limit:]
+    if not errors:
+        print("no SyncError events")
+    for event in errors:
+        involved = event.involved_object
+        print(
+            f"SyncError x{event.count or 1} {involved.kind}/{involved.name} "
+            f"last={event_time(event)}: {event.message}"
+        )
 
 
 def _dump_section(title: str, dump: Callable[[], None]) -> None:
