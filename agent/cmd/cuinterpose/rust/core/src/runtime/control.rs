@@ -51,7 +51,7 @@ impl PreparedWorkers {
                 }
             })
             .map_err(|error| Error::io("start control worker", error))?;
-        if state::initialized() {
+        if state::published() {
             return Ok(None);
         }
         let started = std::thread::Builder::new()

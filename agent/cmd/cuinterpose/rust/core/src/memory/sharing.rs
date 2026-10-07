@@ -84,10 +84,10 @@ pub fn request_export(
     if serving_pid == 0 {
         return Err(Error::Invalid("invalid export namespace PID"));
     }
-    let control_dir =
-        runtime::control_dir().map_err(|_| Error::Invalid("cuinterpose state is unavailable"))?;
+    let socket_dir =
+        runtime::socket_dir().map_err(|_| Error::Invalid("cuinterpose state is unavailable"))?;
     let socket = protocol::connect(
-        &protocol::socket_path(control_dir, serving_pid),
+        &protocol::socket_path(socket_dir, serving_pid),
         protocol::timeout(None),
     )?;
     let timeout = Some(protocol::timeout(None));
