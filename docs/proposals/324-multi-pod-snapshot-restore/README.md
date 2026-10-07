@@ -3,7 +3,11 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# SNEP-324: Coordinated Multi-Pod Snapshot and Restore
+# SNEP-324: Coordinated Multi-Pod Checkpoint and Restore
+
+Tracking issue: [snapshot#324](https://github.com/ai-dynamo/snapshot/issues/324)
+
+Status: Draft
 
 <!-- toc -->
 - [Summary](#summary)
@@ -12,1001 +16,1540 @@ SPDX-License-Identifier: Apache-2.0
   - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
   - [User Stories](#user-stories)
-    - [Checkpoint a Multi-Node Replica](#checkpoint-a-multi-node-replica)
-    - [Restore a Multi-Node Replica](#restore-a-multi-node-replica)
+    - [Restore an Aggregated Inference Replica](#restore-an-aggregated-inference-replica)
+    - [Restore a Prefill or Decode Replica](#restore-a-prefill-or-decode-replica)
+    - [Recover from a Partial Restore](#recover-from-a-partial-restore)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
+  - [Architecture](#architecture)
+    - [Components and Communication](#components-and-communication)
+    - [Data and Storage](#data-and-storage)
+    - [Runtime Session](#runtime-session)
+    - [Coordination Rules](#coordination-rules)
   - [API](#api)
-    - [<code>PodSetSnapshot</code>](#podsetsnapshot)
-    - [<code>PodSetSnapshotContent</code>](#podsetsnapshotcontent)
-    - [<code>PodSetRestore</code>](#podsetrestore)
-    - [<code>PodRestore</code>](#podrestore)
-  - [Group Identity and Leaf Reuse](#group-identity-and-leaf-reuse)
-  - [Security](#security)
+    - [Resource Definitions](#resource-definitions)
+    - [Validation and Binding](#validation-and-binding)
+    - [Conditions and Outcomes](#conditions-and-outcomes)
+    - [Examples](#examples)
+    - [Per-Pod API Reuse](#per-pod-api-reuse)
+    - [Checkpoint Availability](#checkpoint-availability)
   - [Checkpoint Flow](#checkpoint-flow)
   - [Restore Flow](#restore-flow)
-  - [Network Identity and Socket Restore](#network-identity-and-socket-restore)
-  - [Failure and Recovery](#failure-and-recovery)
-  - [Ownership and Scheduling](#ownership-and-scheduling)
-  - [Initial Qualification Target](#initial-qualification-target)
-  - [Open Design Decisions](#open-design-decisions)
-  - [Normative Requirements](#normative-requirements)
+  - [Startup Gate and Deadline](#startup-gate-and-deadline)
+  - [Network Identity and Release](#network-identity-and-release)
+  - [Journal and Restart Recovery](#journal-and-restart-recovery)
+  - [Failure, Cancellation, and Cleanup](#failure-cancellation-and-cleanup)
+  - [Workload Ownership and Source Lifetime](#workload-ownership-and-source-lifetime)
+  - [Security](#security)
   - [Configuration](#configuration)
   - [Performance and Scalability](#performance-and-scalability)
   - [Monitoring](#monitoring)
   - [Dependencies](#dependencies)
   - [Test Plan](#test-plan)
+    - [Unit and Controller Tests](#unit-and-controller-tests)
+    - [Agent and Failure Tests](#agent-and-failure-tests)
+    - [End-to-End Qualification](#end-to-end-qualification)
   - [Graduation Criteria](#graduation-criteria)
-- [Implementation History](#implementation-history)
-- [Alternatives](#alternatives)
-  - [Restore Every Pod Independently](#restore-every-pod-independently)
-  - [Preserve the Original Pod IP Addresses](#preserve-the-original-pod-ip-addresses)
-  - [Put the Protocol in a Workload Scheduler](#put-the-protocol-in-a-workload-scheduler)
-  - [Let Each Inference Backend Coordinate Kubernetes Restore](#let-each-inference-backend-coordinate-kubernetes-restore)
-  - [Coordinate the Group Only in Dynamo](#coordinate-the-group-only-in-dynamo)
-  - [Extend <code>SnapshotJob</code> to Multiple Pods](#extend-snapshotjob-to-multiple-pods)
-- [Appendix](#appendix)
-  - [References](#references)
 <!-- /toc -->
 
 ## Summary
 
-This SNEP defines a Kubernetes protocol for checkpointing and restoring a fixed
-set of mutually dependent Pods as one Snapshot operation. The protocol freezes
-membership, assigns stable logical member identities, admits every leaf before
-any leaf crosses its declared destructive boundary, coordinates bounded
-execution of the existing per-Pod checkpoint and restore paths, supplies every
-member with the network identity data required by its qualified profile, and
-reports one aggregate result. It does not make distributed checkpoint or
-restore atomic.
+Add a Kubernetes API to checkpoint and restore a fixed set of cooperating Pods,
+including Pods on different nodes. A set checkpoint is reusable, and each restore
+is a separate attempt with an explicit target Pod for every member. Snapshot
+checks the complete set before starting destructive work, coordinates the members
+through a shared runtime session, and reports both the overall result and each
+member's result. Capture and restore are not atomic, and neither supports rollback.
 
 ## Motivation
 
-Snapshot currently treats each Pod as an independent checkpoint and restore
-target. That is insufficient for multi-node workloads whose restored process
-state contains connections and identities belonging to other members of the
-group, including MPI sockets, NCCL bootstrap connections, peer address tables,
-and engine rank metadata.
+A distributed inference replica can span several Pods. Restoring it requires more
+than restoring each process separately:
 
-A controlled two-node TensorRT-LLM TP=2 experiment exposed the first concrete
-failure:
+- Every member needs all peers' replacement IPs, not just its own.
+- No member can send application traffic to its peers until every peer has rebuilt
+  its sockets. Sending too early can reset a connection that is still being restored.
+- Shared GPU resources need ordered reconstruction and handle exchange between
+  processes, including processes on different nodes.
 
-1. Both ranks completed NCCL checkpoint preparation and capture.
-2. Restore failed during CRIU socket reconstruction, before CUDA or NCCL
-   restore.
-3. Each restore received only its local old-to-new Pod IP mapping, while the
-   restored process state also referenced its peer's old IP.
-
-The existing CRIU remap plugin accepts multiple address mappings, but the
-current Snapshot restore path constructs only the local Pod mapping. The
-observed preserved-session path therefore needs the complete group-level
-mapping at every member. Whether a communicator-reconstruction profile also
-needs peer mappings depends on whether its disconnect path clears stale peer
-addresses before reconstruction; that remains an explicit qualification
-question.
-
-That mapping is necessary but not sufficient. The standalone restore path
-currently converts an established TCP socket whose reciprocal endpoint is
-outside the local checkpoint image into an unconnected socket. A group restore
-that preserves member-to-member TCP sessions must identify in-group peers,
-retain those sockets, apply the complete map, and coordinate reconstruction of
-both endpoints. A backend that instead rebuilds its communicator must declare
-and validate that lifecycle explicitly.
-
-Independent per-Pod execution also provides no group identity or aggregate
-result. A partial capture may appear usable, and callers cannot tell whether
-every member of one logical checkpoint or restore attempt succeeded. Snapshot
-needs a durable group coordinator above its existing per-Pod execution paths,
-while preserving the failure semantics of those paths.
-
-The group protocol does not by itself make every communication stack
-checkpoint-safe. Inference engines and communication libraries remain
-responsible for the lifecycle of persistent communication resources they own.
+The workload owner needs one operation to coordinate these steps and observe their
+result. It must be able to tell whether the checkpoint is complete and which
+members were released if a restore fails partway through.
 
 ### Goals
 
-- Represent one immutable group checkpoint separately from any particular
-  restore attempt.
-- Reuse the existing per-Pod capture and restore machinery as subordinate leaf
-  operations.
-- Validate and admit every member before any member crosses its declared
-  destructive boundary.
-- Execute member work with capability-aware, bounded concurrency and explicit
-  synchronization points.
-- Publish group success only when every member operation succeeds.
-- Deliver the validated source-to-target network identity data required by each
-  qualified restore profile.
-- Preserve existing per-Pod checkpoint, restore, and failure semantics.
-- Make group publication, failure aggregation, retry, cancellation, and cleanup
-  durable and idempotent.
-- Compose with Grove or another scheduler without moving gang or topology-aware
-  scheduling into Snapshot.
-- Qualify an initial two-node TensorRT-LLM TP=2 workload using NCCL Socket.
+- Checkpoint a fixed set of Pods and publish a reusable checkpoint only when
+  every member succeeds.
+- Restore that checkpoint into explicitly named target Pods, including on
+  different nodes and with different Pod IPs.
+- Complete all required admission checks before destructive work starts.
+- Preserve established TCP connections between members and coordinate the GPU
+  reconstruction steps required by the workload.
+- Report partial failure accurately, bound every operation by a deadline, and
+  recover safely from controller and agent restarts.
+- Reuse the per-Pod capture and restore paths without changing standalone APIs.
+- Work with any workload controller. Pod creation and placement remain outside
+  Snapshot.
 
 ### Non-Goals
 
-- Automatic workload or group-member discovery.
-- A mandatory dependency on Grove or any other workload manager.
-- Cross-namespace or cross-cluster restore.
-- Elastic membership or topology changes during restore.
-- In-flight request migration.
-- Atomic all-or-nothing checkpoint or restore, rollback to the pre-operation
-  workload state, or a guarantee that the source workload remains operational
-  after capture starts.
-- Automatic termination or fencing of members that completed normally solely
-  because another member failed.
-- Determining whether a restored workload is healthy or ready to serve.
-- RDMA reconstruction.
-- NVSHMEM, MNNVL, NVLS, FlashInfer multi-node collectives, MoE, or
-  expert-parallel qualification.
-- Transparent support for an unqualified inference backend, transport, or
-  communication-resource lifecycle.
+- Discovering members, creating target Pods, or choosing their placement.
+- Changing membership, process ranks, or the workload's logical topology during
+  restore.
+- Atomic checkpoint or restore, rollback, or keeping the source workload running
+  after destructive capture begins.
+- Automatically restarting the whole workload after a failed attempt.
+- Declaring application health, serving readiness, or in-flight request safety.
+- Cross-namespace or cross-cluster restore, artifact retention after set deletion,
+  or a hierarchy of sets.
+- Supporting an engine, transport, or GPU topology without qualification.
 
 ## Proposal
 
-Snapshot adds a set-level API above the current `PodSnapshot`,
-`PodSnapshotContent`, and restore-Pod contracts. A set checkpoint has one
-immutable member list and becomes Ready only when every member artifact is
-durable. Each restore attempt maps every logical member to exactly one existing
-target Pod and destination container. A new `PodRestore` leaf makes target
-identity, container mapping, set ownership, profile-required identity data, and
-per-member outcome durable. The set becomes Ready only when every leaf reports
-successful restoration.
+Snapshot adds two namespaced resources:
 
-The API is additive. Existing standalone APIs preserve their current
-cardinality and behavior, including standalone one-to-many restore. V1 set
-operations support exactly one source container and one destination container
-per logical member. Set-created leaf objects are owned by the set operation and
-cannot be activated independently because they do not contain enough context to
-restore a rank safely.
+- `PodSetSnapshot` identifies the source Pods and containers. It creates one
+  `PodSnapshot` per member and becomes Ready only when all member artifacts are
+  ready. Its member list and completed artifact references are immutable.
+- `PodSetRestore` identifies a ready set checkpoint and one target Pod and
+  container per member. Each object is one restore attempt. The same checkpoint
+  can be used for multiple attempts.
 
-The workload owner remains responsible for creating source and target Pods and
-for their scheduling constraints. Grove may continue to create the Pods and
-provide gang scheduling, topology-aware placement, and workload membership.
-Snapshot pins those Pods by UID, provides group checkpoint and restore
-coordination, and aggregates the existing per-Pod outcomes.
+The workload owner creates the target Pods with Snapshot's inert placeholder
+contract. A placeholder keeps the destination container running but does not
+start the application. All placeholders must be able to start without waiting
+for another member's application readiness.
 
-![Component and API ownership](diagrams/component-ownership.svg)
+Snapshot divides the work between two layers. The Kubernetes controller records
+identities, provides the restore context, admits the target set, and aggregates
+results. Node agents execute the per-Pod work and start cuInterpose coordinators
+to run the cross-Pod runtime phases. The Architecture section below defines the
+components, their placement, and their communication paths.
+
+Capture is destructive. A successful member capture ends its source process.
+If another member fails, Snapshot does not undo the completed capture. During
+restore, members stay behind their placeholders until the runtime session
+authorizes release. Release is asynchronous: a failure can leave some members
+released and others not. A group failure does not overwrite the results of
+individual members.
+
+`Restored` means that reconstruction completed and Snapshot released the member.
+It does not mean that the application is healthy or that the Pod is Ready. The
+workload owner handles those checks and any workload-level recovery.
 
 ### User Stories
 
-#### Checkpoint a Multi-Node Replica
+#### Restore an Aggregated Inference Replica
 
-As a workload controller, I can identify the complete set of Pods and target
-containers for one distributed replica and create one `PodSetSnapshot`.
-Snapshot admits the complete set before starting destructive per-Pod capture
-and publishes one reusable set checkpoint only if every member succeeds.
+A workload controller checkpoints the Pods that jointly run one inference
+replica. Later, it places replacement Pods, supplies the member-to-target mapping,
+and requests a restore. It registers the replica for traffic only after Snapshot
+reports success and the application's own readiness checks pass.
 
-#### Restore a Multi-Node Replica
+#### Restore a Prefill or Decode Replica
 
-As a workload controller, I can gang-schedule one replacement Pod per logical
-member and create a `PodSetRestore` that maps the checkpoint's members to
-those existing Pods by name and UID. Snapshot creates one durable `PodRestore`
-per member, admits the complete target set and the profile-required identity
-data before starting process reconstruction, then reports success only if every
-target reports successful restoration.
+A disaggregated deployment checkpoints a distributed prefill replica or decode
+replica as its own set. The workload controller restores that replica without
+including unrelated replicas in the operation. Connections outside the set follow
+the standalone restore behavior; this proposal does not preserve the entire
+deployment's communication state automatically.
+
+#### Recover from a Partial Restore
+
+A restore fails after one member has been released. The controller reports a
+failed attempt without rewriting that member's `Restored` outcome. The workload
+owner can inspect the results, retire the attempt's Pods, and retry with fresh
+targets and the same set checkpoint.
 
 ### Limitations, Risks, and Mitigations
 
-| Risk or limitation | Mitigation |
+| Risk | Handling |
 | --- | --- |
-| Capture is destructive and one member may fail after another was captured. | Admit every member before releasing any member across its declared destructive boundary, never publish a partial set checkpoint as Ready, expose every member outcome, and leave workload recovery to its owner. Atomicity and rollback are explicitly not guaranteed. |
-| A complete IP map does not by itself preserve established cross-Pod sockets. | Each supported profile declares whether its backend reconstructs the communicator or Snapshot preserves sessions. Preservation additionally requires coordinated network/session handling and a restore release barrier. |
-| One target may restore while another fails. | Fail the aggregate set attempt, expose every member outcome, and apply the failure disposition declared by the selected profile. The disposition for an already-prepared sibling remains an open V1 decision. |
-| A controller or node agent can restart during fan-out. | Persist operation identity, member identity, observed generation, leaf references, and per-member outcomes. Make reconciliation idempotent. |
-| Grove `startsAfter` currently waits for Kubernetes Pod Ready and can prevent all restore placeholders from existing. | Omit or rewrite inter-member `startsAfter` dependencies for restore-shaped Pods, or add a Grove milestone that distinguishes placeholder availability from workload readiness. |
-| Successful process restore does not imply serving readiness. | Complete `PodSetRestore` from the existing `nvidia.com/Restored` conditions. The workload owner separately observes Pod readiness and controls serving registration. |
-| Backend or transport state may not survive checkpoint and restore. | Publish an explicit capability profile and qualify backend/transport combinations separately. |
-| A pinned target may disappear or remain unschedulable indefinitely. | Fail immediately if the pinned UID disappears. Otherwise report a recoverable waiting condition and fail with a stable reason when the operation deadline expires. |
-| Source Pods may restart or be replaced while a destructive set capture is in progress. | Require the workload owner to hold the exact source UIDs until the operation terminates. The enforcement mechanism must be selected before alpha qualification. |
+| Capture fails after a member has crossed its destructive boundary. | Do not publish the set as Ready. Keep the member results and leave workload recovery to the owner. There is no rollback. |
+| Release reaches only some members. | Keep released members `Restored`. Stop and tear down unreleased members when failure is observed. Fail the attempt. |
+| An agent crashes after releasing a member but before removing its network lock. | Recovery treats release evidence as authoritative and finishes cleanup without killing or replaying the workload. Peer traffic can remain blocked until the agent recovers. |
+| A target disappears after admission and its result cannot be established. | Report `Unknown` with reason `TargetGone`, fail the attempt, and accept later agent evidence without reopening the attempt. |
+| A target cannot be scheduled or an agent cannot join. | Expose the waiting reason and enforce the operation deadline. |
+| A placeholder has too little startup-gate time left. | Refuse the attempt during preflight, before any member starts CRIU. |
+| A recorded Pod IP changes before execution. | Refuse before the member's destructive boundary. Never rebuild the attempt's map with a replacement IP. |
+| A member artifact is deleted after publication. | Mark the checkpoint unavailable, retain its original references, and refuse further restores. |
+| A source finishes capture before its peers and then restarts or loses its network identity. | Qualify this case before claiming support for normal source lifecycle behavior. Source identity protection remains an open question. |
+| A backend or transport cannot restore its communication state. | Qualify each supported combination. The API does not make an unsupported runtime checkpoint-safe. |
 
 ## Design Details
 
+### Architecture
+
+#### Components and Communication
+
+A **member** is one Pod and its selected workload container. Its member ID is
+stable; its **rank** is its position in the checkpoint's member list. A member
+can contain several application processes. A **participant** is an application
+process with the cuInterpose shim loaded.
+
+Each node agent starts one temporary cuInterpose coordinator process per member.
+Rank 0's coordinator is the **brain**; every other member's coordinator is a
+**relay**. They are separate from the application processes and their shims,
+not additional Kubernetes containers or a controller-hosted service.
+
+Coordinators run inside the selected member container's namespaces, including
+the Pod's network namespace. During capture they run in the source member;
+during restore they run in the target member, after local process and native
+CUDA reconstruction. The agent owns their lifecycle.
+
+| Component | Where it runs | Responsibility |
+| --- | --- | --- |
+| Workload owner | Outside Snapshot; usually a workload controller | Create and place source or placeholder Pods, request set operations, and handle application readiness and recovery. |
+| Snapshot set controller | Snapshot's Kubernetes controller | Validate and bind the set, publish context and credentials, admit restores, and aggregate member results. It does not run CUDA coordination rounds. |
+| Snapshot node agent | One agent per node | Watch assigned work, perform preflight, run CRIU and native CUDA checkpoint/restore, start and observe coordinators, and manage local journals, network locks, and release markers. One agent can handle several members. |
+| Brain | Rank 0's coordinator, inside the selected member container's namespaces | Collect the group, validate runtime compatibility, coordinate phases and handle exchange, and authorize completion. It drives its own local participants directly. |
+| Relay | Each other member's coordinator, inside the selected member container's namespaces | Drive that member's local participants and report their results to the brain. It carries coordination messages, not application traffic. |
+| Application shim | A cuInterpose library inside each participating application process | Intercept CUDA calls, track that process's resources, and perform the local preparation and reconstruction requested by its coordinator. |
+
+The diagram shows two members on different nodes. Each application process
+contains its shim; the coordinator is a separate process. Additional members use
+the same relay pattern, and several members can share one node. Controller-agent
+communication goes through the Kubernetes API, not a direct controller-to-agent
+RPC.
+
+```mermaid
+flowchart TB
+    C["Snapshot set controller"] <-->|"Context and results"| K["Kubernetes API<br/>Set resources and session Secret"]
+    K <-.->|"Watches, reports and Secret reads"| A0
+    K <-.->|"Watches, reports and Secret reads"| A1
+    subgraph N0["Node A"]
+        A0["Snapshot node agent"]
+        subgraph P0["Member rank 0: selected container namespaces"]
+            B["cuInterpose coordinator<br/>Brain role"]
+            subgraph APP0["Application process"]
+                S0["cuInterpose shim"]
+            end
+            B <-->|"Local coordination"| S0
+        end
+        A0 -->|"Starts and observes"| B
+    end
+    subgraph N1["Node B"]
+        A1["Snapshot node agent"]
+        subgraph P1["Member rank 1: selected container namespaces"]
+            R["cuInterpose coordinator<br/>Relay role"]
+            subgraph APP1["Application process"]
+                S1["cuInterpose shim"]
+            end
+            R <-->|"Local coordination"| S1
+        end
+        A1 -->|"Starts and observes"| R
+    end
+    B <-->|"Cross-Pod coordination"| R
+```
+
+The next diagram shows one runtime round. The brain sends a command to remote
+relays and executes it locally. Each relay drives its own shims and returns
+their results. The brain proceeds only after all members succeed.
+Rank 0 does not connect to itself through a relay.
+
+```mermaid
+sequenceDiagram
+    participant S0 as Rank 0 application shims
+    participant B as Rank 0 coordinator (brain)
+    participant R as Rank 1 coordinator (relay)
+    participant S1 as Rank 1 application shims
+    B->>R: Perform runtime phase
+    par Rank 0 local work
+        B->>S0: Perform local work
+        S0-->>B: Local results
+    and Rank 1 local work
+        R->>S1: Perform local work
+        S1-->>R: Local results
+    end
+    R-->>B: Member results
+    B->>B: Advance only when every member succeeded
+```
+
+#### Data and Storage
+
+The table identifies who produces each kind of data, where it belongs, and who
+uses it. Agents read the operation's recorded inputs before execution;
+coordinators do not discover a different group or choose replacement Pods.
+
+| Data | Produced by | Stored in | Used by |
+| --- | --- | --- | --- |
+| Members, ranks, and target Pod names | Caller supplies membership and targets; controller validates them | `PodSetSnapshot.spec.members` and `PodSetRestore.spec.targets`, matched by member ID | Controller and agents; agents pass rank and group size to coordinators |
+| Session endpoint and Secret reference | Controller | The operation's `status.session`, immutable once published | Agents starting the brain and relays |
+| Session credential | Controller | A per-operation Secret in Snapshot's namespace | Brain and relays, supplied by their agents |
+| Source Pod IPs | Controller records the source Pods' assigned IPs before capture | `PodSetSnapshot.status.members[].sourcePodIP` | Capture identity checks and the controller building each restore's IP pairs |
+| Source-to-target IP pairs | Controller matches saved source IPs with bound target Pod IPs by member ID | `PodSetRestore.status.members[].sourcePodIP` and `.targetPodIP` | Every agent supplies the full map to CRIU and uses peer target IPs for its network lock |
+| Member checkpoint artifact | Node agent, through the existing per-Pod capture path | Artifact storage and its `PodSnapshotContent`, whose exact name and UID are recorded in `PodSetSnapshot.status.members[].content` | Restoring agents |
+| Checkpointed CUDA metadata (cuInterpose members) | Each coordinator collects its local shims' records | That member's checkpoint artifact: rank, group size, and participant/resource records | Restore coordinators; relays send their saved records to the brain |
+| Old-to-new GPU-handle map and current round state | Brain collects member results and newly exported GPU handles | Coordinator memory for this session; no shared database | Brain, relays, and local shims during reconstruction |
+| Release marker | Node agent | `restore-complete` in the placeholder's control volume, containing the attempt UID and admitted container ID | Placeholder startup gate and agent recovery |
+| Restore member report | Node agent | `PodSetRestore.status.members[].report` | Controller validating preflight and execution results |
+| Restore member outcome | Controller, from validated reports and observations | `PodSetRestore.status.members[].outcome` | Workload owner and controller aggregating the attempt's result |
+| Peer network lock | Node agent | Target Pod's network namespace; cleanup ownership recorded in the journal | Agent holding peer traffic until release and cleaning up after restart |
+| Execution and cleanup records | Node agent | Durable, agent-owned node journal, outside the workload's control volume | Agent recovery after restart |
+
+The **IP map** and **GPU-handle map** are separate. The IP map repairs application
+TCP sockets; the GPU-handle map reconnects shared CUDA resources.
+
+The controller copies each saved source IP into the restore member entry and
+records that member's bound target IP beside it. These entries are the durable
+IP map; no additional shared store is needed. Each agent uses the same complete
+map for CRIU socket remapping and the peer target IPs for its network lock.
+The brain hosts the session endpoint; it does not use the socket-remapping map.
+
+For CUDA reconstruction, each coordinator loads its member's saved metadata.
+The brain combines those records with freshly exported handles and builds the
+GPU-handle map in memory. It sends the required updates through relays or its
+own local participant path. This map is rebuilt for each restore, not stored in
+Kubernetes or carried over from the capture session.
+
+The diagram follows these two data paths. Arrows show data movement, not the
+order of runtime commands; the runtime-round sequence above shows that order.
+
+```mermaid
+flowchart TB
+    subgraph TCP["TCP socket restoration"]
+        direction TB
+        OLD["Saved source IPs<br/>Snapshot member status"] --> PAIRS["Controller records IP pairs<br/>Restore member status"]
+        TARGET["Assigned target Pod IPs"] --> PAIRS
+        PAIRS --> AGENT["Each node agent reads the full map"]
+        AGENT --> CRIU["CRIU socket-remapping plugin"]
+        AGENT --> LOCK["Peer network lock<br/>Uses target IPs"]
+    end
+    subgraph CUDA["CUDA resource reconstruction"]
+        direction TB
+        SAVED["Saved CUDA metadata<br/>Member checkpoint artifacts"] -->|"Through local coordinators"| BRAIN["Brain collects records and new handles"]
+        EXPORTS["Fresh GPU handles<br/>Restored application shims"] -->|"Through local coordinators"| BRAIN
+        BRAIN --> HANDLES["Old-to-new GPU-handle map<br/>Brain memory for this restore"]
+        HANDLES --> SHIMS["Local shims apply updates<br/>Through brain or relay"]
+    end
+```
+
+#### Runtime Session
+
+A **runtime session** is the temporary coordination group formed by these
+coordinator processes for one capture or restore operation. It is not another
+CRD or a reusable part of the checkpoint. Each restore attempt starts a new
+session, even when it uses the same checkpoint.
+
+The session identity is the operation object's UID: `PodSetSnapshot` for capture
+or `PodSetRestore` for restore. Member ranks and group size come from the
+checkpoint's member list. Rank 0 hosts the TCP endpoint in its source Pod's
+network namespace during capture, or its target Pod's network namespace during
+restore.
+
+The controller publishes the immutable `status.session` descriptor and creates
+the referenced Secret. Agents supply this context to their coordinators. The
+credential authenticates membership in this attempt and excludes unrelated or
+stale relays; it does not encrypt session traffic or checkpoint data. Empty or
+mismatched credentials are refused. Credentials must not appear in status, Pod
+annotations, command arguments, or logs. The controller cleans up the Secret
+after session work stops or the cleanup grace period ends.
+
+Agents start their coordinators independently; rank 0 need not start first.
+Relays wait and retry joining until the brain is available, bounded by the
+operation deadline. The endpoint exists only for this session, not as a
+long-lived service. Unexpected loss of an established session fails the
+operation; this design does not promise session replay or rejoining after failure.
+
+Live session state stays in coordinator memory, as listed in Data and Storage.
+The agent journal supports execution and cleanup recovery; it does not allow the
+brain to resume a lost round. Saved CUDA metadata remains in the member artifacts
+for future restores, but session connections and credentials are not reused.
+
+At capture, coordinators connect before group inspection and disconnect before
+the CRIU dump. At restore, they connect after local CRIU and native CUDA restore.
+The session connection is therefore not part of the application's checkpointed
+connections. All join and round waits obey the operation's absolute deadline:
+`metadata.creationTimestamp + spec.deadlineSeconds`.
+
+Restore coordination traffic must remain possible while application peer traffic
+is held. [Network Identity and Release](#network-identity-and-release) defines
+that separation and the reserved session port.
+
+A standalone cuInterpose-enabled Pod uses the same coordinator locally, as a
+group of one, without a cross-Pod TCP session. Standalone capture without
+cuInterpose uses the native CUDA/CRIU path and needs no cuInterpose coordinator.
+A set member without cuInterpose still joins the session as a barrier member,
+but has no local shims to drive.
+
+#### Coordination Rules
+
+The controller owns restore admission; the runtime session owns capture
+admission and the runtime rounds. The controller does not add another brain.
+The session must:
+
+- Collect every capture member, inspect local capabilities, and validate the
+  group before any member starts destructive preparation.
+- Recheck each cuInterpose member's recorded source identity and sandbox IP
+  immediately before its first destructive preparation step. The relay performs
+  this check for remote members; the brain's local path does it for rank 0. A
+  mismatch refuses local preparation rather than changing the context.
+- Support safe capture refusal before destructive work. A coordinator reports a
+  refused result only when nothing destructive ran locally and the source can
+  continue running.
+- Include members with no cuInterpose participants in the group barriers.
+- Coordinate cuInterpose preparation and reconstruction rounds across Pods.
+- Authorize restore release only after every member completes its required
+  reconstruction and verification. Each agent validates its local
+  reconstructed process before joining the restore session.
+- Fail on a lost participant or failed round. Completion and release authorization
+  reach members asynchronously, not as an atomic broadcast.
+
+All members, including those sharing a node, must be able to execute concurrently.
+The capture and restore flows below describe when agents start coordinators and
+how runtime results become Kubernetes status.
+
 ### API
 
-The API adds four resources in `nvidia.com/v1alpha1`. The field names below
-are the proposed contract; implementation review may refine individual names
-without collapsing the separation between checkpoint artifact and restore
-attempt.
+The two resources use `nvidia.com/v1alpha1` and are namespaced. All source Pods,
+target Pods, child `PodSnapshot`s, and the referenced `PodSetSnapshot` belong to
+the operation's namespace. A `PodSnapshotContent` remains a cluster-scoped artifact
+for **one member**; it does not represent the whole set.
 
-#### `PodSetSnapshot`
+V1 supports one source container and one destination container per member, and
+IPv4. Each member must refer to a distinct Pod. Member IDs are unique and stable.
+Their order in `PodSetSnapshot.spec.members` defines ranks and does not change
+across restores. The order of `PodSetRestore.spec.targets` does not define ranks.
 
-`PodSetSnapshot` is a namespaced capture request and binding. Its immutable
-specification contains the complete source set and one operation deadline:
+V1 caps a set at 256 members because the
+[TCP-remapping plugin](https://github.com/ai-dynamo/snapshot/blob/fc349012c44e6e6a3afa82685112d746cd6c28a9/agent/plugins/inet-remap/snapshot_inet_remap.c#L16)
+currently accepts at most 256 address mappings. A restore where every member's
+IP changes needs one mapping per member. This is an implementation limit, not a
+Kubernetes or GPU-topology limit. Supporting larger fully relocated sets requires
+increasing the plugin capacity and revalidating the bounded CRD schemas.
+
+The structs below define every new public type. `PodSnapshotSource`, reused from
+the [per-Pod API](https://github.com/ai-dynamo/snapshot/blob/main/api/v1alpha1/podsnapshot_types.go),
+contains `podRef.name`, optional `podRef.uid`, and a one-element
+`podRef.containers` list. Standalone `PodSnapshot` keeps that optional UID. Set
+capture requires a source UID so the request identifies an exact source Pod.
+
+#### Resource Definitions
+
+```go
+package v1alpha1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+)
+
+const (
+	PodSetConditionContextReady = "ContextReady"
+	PodSetConditionAdmitted     = "Admitted"
+	PodSetConditionReady        = "Ready"
+	PodSetConditionFailed       = "Failed"
+)
+
+// ObjectIdentity identifies an exact object. Its namespace is implicit.
+type ObjectIdentity struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	UID types.UID `json:"uid"`
+}
+
+// TargetPodReference allows a target to be named before it is created.
+type TargetPodReference struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	UID types.UID `json:"uid,omitempty"`
+}
+
+// RuntimeSession identifies the brain and its per-attempt credential.
+type RuntimeSession struct {
+	// Endpoint is the address relays dial. In V1 it is rank 0's Pod IP and port.
+	// Workload callers treat it as opaque.
+	Endpoint string `json:"endpoint"`
+	// SecretRef points into Snapshot's namespace, not the workload namespace.
+	SecretRef corev1.SecretReference `json:"secretRef"`
+}
+
+// +kubebuilder:validation:Enum=Pending;Capturing;Captured;Failed
+type CapturePhase string
+
+const (
+	CapturePending   CapturePhase = "Pending"
+	CaptureCapturing CapturePhase = "Capturing"
+	CaptureCaptured  CapturePhase = "Captured"
+	CaptureFailed    CapturePhase = "Failed"
+)
+
+type PodSetSnapshotMember struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ID string `json:"id"`
+	// Reuses the source shape of PodSnapshot. A set source must have a UID.
+	// +kubebuilder:validation:XValidation:rule="has(self.podRef.uid) && size(self.podRef.uid) > 0",message="set sources require a Pod UID"
+	Source PodSnapshotSource `json:"source"`
+}
+
+// +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.filter(n, n.id == m.id).size() == 1)",message="member IDs must be unique"
+type PodSetSnapshotSpec struct {
+	// Seconds from this object's creation. Required; there is no infinite wait.
+	// +kubebuilder:validation:Minimum=1
+	DeadlineSeconds int64 `json:"deadlineSeconds"`
+	// Order is rank. Do not treat this list as an unordered map.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=256
+	// +listType=atomic
+	Members []PodSetSnapshotMember `json:"members"`
+}
+
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.podSnapshot) || (has(self.podSnapshot) && self.podSnapshot == oldSelf.podSnapshot)",message="child snapshot identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName == oldSelf.nodeName)",message="source node is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.sourcePodIP) || (has(self.sourcePodIP) && self.sourcePodIP == oldSelf.sourcePodIP)",message="source Pod IP is immutable"
+type PodSetSnapshotMemberStatus struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	ID string `json:"id"`
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	NodeName string `json:"nodeName,omitempty"`
+	// SourcePodIP is recorded before capture and retained for every restore.
+	// +optional
+	// +kubebuilder:validation:Format=ipv4
+	// +kubebuilder:validation:MaxLength=15
+	SourcePodIP string `json:"sourcePodIP,omitempty"`
+	// +optional
+	PodSnapshot *ObjectIdentity `json:"podSnapshot,omitempty"`
+	// Content is immutable once the completed set is published.
+	// +optional
+	Content *ObjectIdentity `json:"content,omitempty"`
+	// Derived from the child PodSnapshot's conditions.
+	// +kubebuilder:default=Pending
+	Phase CapturePhase `json:"phase"`
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.session) || (has(self.session) && self.session == oldSelf.session)",message="runtime session is immutable"
+type PodSetSnapshotStatus struct {
+	// +optional
+	Session *RuntimeSession `json:"session,omitempty"`
+	// Controller-owned; child PodSnapshot status is the agent's capture report.
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:XValidation:rule="oldSelf.all(o, self.exists(n, n.id == o.id))",message="member status entries cannot be removed"
+	// +listType=map
+	// +listMapKey=id
+	Members []PodSetSnapshotMemberStatus `json:"members,omitempty"`
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +genclient
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.members) || (has(self.status) && has(self.status.members))",message="member status cannot be cleared"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.session) || (has(self.status) && has(self.status.session))",message="runtime session cannot be cleared"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, self.spec.members.exists(s, s.id == m.id))",message="status must refer to declared members"
+type PodSetSnapshot struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
+	Spec PodSetSnapshotSpec `json:"spec"`
+	// +optional
+	Status PodSetSnapshotStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type PodSetSnapshotList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []PodSetSnapshot `json:"items"`
+}
+
+type ContainerMapping struct {
+	// Name of the container captured for this member.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Source string `json:"source"`
+	// Name of the placeholder container to receive the restored processes.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Destination string `json:"destination"`
+}
+
+type PodSetRestoreTarget struct {
+	// Must match exactly one member ID in the referenced checkpoint.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ID               string             `json:"id"`
+	PodRef           TargetPodReference `json:"podRef"`
+	ContainerMapping ContainerMapping   `json:"containerMapping"`
+}
+
+// +kubebuilder:validation:XValidation:rule="self.targets.all(t, self.targets.filter(n, n.podRef.name == t.podRef.name).size() == 1)",message="target Pods must be distinct"
+type PodSetRestoreSpec struct {
+	SnapshotRef ObjectIdentity `json:"snapshotRef"`
+	// +kubebuilder:validation:Minimum=1
+	DeadlineSeconds int64 `json:"deadlineSeconds"`
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=256
+	// +listType=map
+	// +listMapKey=id
+	Targets []PodSetRestoreTarget `json:"targets"`
+}
+
+// +kubebuilder:validation:Enum=Pending;Restored;Failed;Cancelled;Unknown
+type RestoreOutcome string
+
+const (
+	RestorePending   RestoreOutcome = "Pending"
+	RestoreRestored  RestoreOutcome = "Restored"
+	RestoreFailed    RestoreOutcome = "Failed"
+	RestoreCancelled RestoreOutcome = "Cancelled"
+	RestoreUnknown   RestoreOutcome = "Unknown"
+)
+
+// +kubebuilder:validation:Enum=Passed;Refused
+type PreflightResult string
+
+const (
+	PreflightPassed  PreflightResult = "Passed"
+	PreflightRefused PreflightResult = "Refused"
+)
+
+// +kubebuilder:validation:Enum=Restoring;Restored;Failed;Cancelled;Unknown
+type RestoreReportPhase string
+
+const (
+	RestoreReportRestoring RestoreReportPhase = "Restoring"
+	RestoreReportRestored  RestoreReportPhase = "Restored"
+	RestoreReportFailed    RestoreReportPhase = "Failed"
+	RestoreReportCancelled RestoreReportPhase = "Cancelled"
+	RestoreReportUnknown   RestoreReportPhase = "Unknown"
+)
+
+// RestoreMemberReport is the node agent's report for this member.
+type RestoreMemberReport struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	ContainerID string `json:"containerID"`
+	// +optional
+	Preflight PreflightResult `json:"preflight,omitempty"`
+	// +optional
+	Phase RestoreReportPhase `json:"phase,omitempty"`
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// +optional
+	Message    string      `json:"message,omitempty"`
+	ObservedAt metav1.Time `json:"observedAt"`
+}
+
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.pod) || (has(self.pod) && self.pod == oldSelf.pod)",message="target Pod identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.admittedContainerID) || (has(self.admittedContainerID) && self.admittedContainerID == oldSelf.admittedContainerID)",message="admitted container ID is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName == oldSelf.nodeName)",message="target node is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.sourcePodIP) || (has(self.sourcePodIP) && self.sourcePodIP == oldSelf.sourcePodIP)",message="source Pod IP is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.targetPodIP) || (has(self.targetPodIP) && self.targetPodIP == oldSelf.targetPodIP)",message="target Pod IP is immutable"
+// +kubebuilder:validation:XValidation:rule="!(oldSelf.outcome in ['Restored', 'Failed', 'Cancelled']) || self.outcome == oldSelf.outcome",message="final member outcomes are immutable"
+// +kubebuilder:validation:XValidation:rule="oldSelf.outcome != 'Unknown' || self.outcome in ['Unknown', 'Restored', 'Failed', 'Cancelled']",message="Unknown can only remain Unknown or become final"
+type PodSetRestoreMemberStatus struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	ID string `json:"id"`
+	// Everything except Report is controller-owned.
+	// +optional
+	Pod *ObjectIdentity `json:"pod,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	NodeName string `json:"nodeName,omitempty"`
+	// +optional
+	Content *ObjectIdentity `json:"content,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Format=ipv4
+	// +kubebuilder:validation:MaxLength=15
+	SourcePodIP string `json:"sourcePodIP,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Format=ipv4
+	// +kubebuilder:validation:MaxLength=15
+	TargetPodIP string `json:"targetPodIP,omitempty"`
+	// Pinned when Admitted=True, and never replaced with a later container ID.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	AdmittedContainerID string `json:"admittedContainerID,omitempty"`
+	// +kubebuilder:default=Pending
+	Outcome RestoreOutcome `json:"outcome"`
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// +optional
+	Message string `json:"message,omitempty"`
+	// +optional
+	Report *RestoreMemberReport `json:"report,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.session) || (has(self.session) && self.session == oldSelf.session)",message="runtime session is immutable"
+type PodSetRestoreStatus struct {
+	// +optional
+	Session *RuntimeSession `json:"session,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:XValidation:rule="oldSelf.all(o, self.exists(n, n.id == o.id))",message="member status entries cannot be removed"
+	// +listType=map
+	// +listMapKey=id
+	Members []PodSetRestoreMemberStatus `json:"members,omitempty"`
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +genclient
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.members) || (has(self.status) && has(self.status.members))",message="member status cannot be cleared"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.session) || (has(self.status) && has(self.status.session))",message="runtime session cannot be cleared"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, self.spec.targets.exists(t, t.id == m.id))",message="status must refer to declared members"
+type PodSetRestore struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
+	Spec PodSetRestoreSpec `json:"spec"`
+	// +optional
+	Status PodSetRestoreStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type PodSetRestoreList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []PodSetRestore `json:"items"`
+}
+```
+
+#### Validation and Binding
+
+Validation runs when the API request is accepted and again before execution.
+
+- **The API server** validates nonempty names, cardinality, unique member IDs and
+  distinct target Pod names. CEL rules keep specs immutable, make recorded
+  identities write-once, preserve status member entries, and prevent final
+  outcomes from changing. A schema-invalid request is rejected immediately.
+- **The controller** rejects repeated source Pod names and checks facts that
+  require other objects: source UIDs and running containers, checkpoint and
+  artifact identities, exact target membership, and source-to-destination
+  container mappings. It checks these before creating capture work or publishing
+  restore context. An invalid operation is recorded as Failed with a specific
+  reason; an unresolved target can wait until its deadline.
+- **The agents** check live containers, sandboxes, artifacts, and runtime
+  compatibility on their nodes. They repeat identity checks at the execution
+  boundaries described in the flows below.
+
+No admission webhook is introduced. CRD schema and CEL enforce the request's
+structural rules without a separate webhook service. Pod, container, and artifact
+state can change after a request is accepted, and target Pods may be created
+later, so execution checks still belong in the controller and agents. Accepting
+the resource is not permission to start destructive work; the operation must
+pass its capture or restore admission barrier first.
+
+For a target with a supplied UID, the controller verifies that UID. Otherwise it
+records the named Pod's UID when it first binds. A missing target that has never
+been bound is a waiting state. A missing bound UID is never replaced by a
+same-named Pod. Callers that reuse names should provide UIDs.
+
+The controller also checks for a target already bound by another unfinished
+restore and refuses it with `TargetInUse`. This check improves early feedback;
+the agent's exclusive reservation for the Pod UID prevents races between attempts.
+
+Recorded nodes, IPs, child references, contents, admitted container IDs, and the
+runtime session cannot be substituted. Status entries cannot be removed and
+re-added to evade these rules; neither the member list nor a published session
+can be reset by clearing status. The controller initializes one entry per declared
+member before agents report.
+
+Restore status has separate write ownership. The controller owns member bindings,
+outcomes, and overall conditions; each agent owns only its member's `report`.
+Updates must preserve other members' reports and fields owned by another writer,
+including when one agent handles several members. An agent's member update
+contains exactly `id` and `report`, never controller-owned fields or their zero
+values. Controller updates do not include or remove reports.
+
+Before Admitted, the controller accepts Passed only for the live destination
+container ID and the bound Pod, node, and IP. It pins every accepted container ID
+as `admittedContainerID` in the same status update that sets Admitted. A concurrent
+change requires revalidation before admission is published.
+Execution reports are checked against the pinned ID. A later application restart
+does not undo a completed restore.
+
+#### Conditions and Outcomes
+
+| Resource | Condition | Meaning when True |
+| --- | --- | --- |
+| `PodSetSnapshot` | `Ready` | Capture completed for every member and the exact child and content objects are available for restore. |
+| `PodSetSnapshot` | `Failed` | Capture failed, or a published checkpoint lost a required child or artifact. |
+| `PodSetRestore` | `ContextReady` | All target UIDs, nodes and IPs are bound; artifacts, the complete IP map, and the runtime descriptor are available. |
+| `PodSetRestore` | `Admitted` | Every member passed preflight for that context and its pinned container incarnation. |
+| `PodSetRestore` | `Ready` | Every member is `Restored` and the attempt has not already failed. |
+| `PodSetRestore` | `Failed` | The attempt cannot complete successfully. Member reports and cleanup can still arrive. |
+
+Waiting or executing is not failure. Failed is permanent for both resources:
+retry requires a new operation. A successful `PodSetRestore` remains Ready.
+`PodSetSnapshot` Ready describes checkpoint availability and can become False if
+a required child or artifact is lost. That also sets Failed=True with reason
+`ArtifactUnavailable`; the checkpoint is not recaptured, rebound, or reopened.
+
+ContextReady and Admitted record completed restore milestones. Neither authorizes
+work after failure, deletion, or deadline. Conditions use `observedGeneration`,
+stable reasons, and a useful message.
+
+Restore member outcomes are:
+
+| Outcome | Meaning |
+| --- | --- |
+| `Pending` | No final result is known; the member can be waiting or executing. |
+| `Restored` | The release marker was published. This result is final. |
+| `Failed` | The member failed without being released. This result is final. |
+| `Cancelled` | The member stopped without being released because the operation was deleted. This result is final while the operation exists. |
+| `Unknown` | The target disappeared after admission and release cannot be proved or disproved. Later evidence can settle the result. |
+
+Disappearance before admission produces `Failed` with reason `TargetGone`.
+Disappearance after admission without a final result produces `Unknown` with
+reason `TargetGone`. Disappearance after a final result changes nothing. An
+`Unknown` member fails the attempt, but later evidence can still update the member
+without changing the attempt back to Ready.
+
+CEL permits Pending to progress and Unknown to resolve to a final result when
+evidence arrives. Restored, Failed, and Cancelled cannot change. An agent must
+check release evidence before reporting a negative final result.
+
+#### Examples
+
+The source shape is the same as a `PodSnapshot` source:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: PodSetSnapshot
 metadata:
-  name: trtllm-replica-a
+  name: replica-checkpoint
+  namespace: inference
 spec:
   deadlineSeconds: 1800
   members:
     - id: rank-0
       source:
         podRef:
-          name: trtllm-rank-0
-          uid: "<source-pod-uid>"
+          name: replica-0
+          uid: "11111111-1111-4111-8111-111111111111"
           containers: [engine]
     - id: rank-1
       source:
         podRef:
-          name: trtllm-rank-1
-          uid: "<source-pod-uid>"
+          name: replica-1
+          uid: "22222222-2222-4222-8222-222222222222"
           containers: [engine]
 ```
 
-Its status contains:
-
-- one subordinate `PodSnapshot` reference and local phase per logical member;
-- member-scoped errors with stable reason codes;
-- the bound `PodSetSnapshotContent` name; and
-- group-level `Ready` and `Failed` conditions.
-
-The source Pod UID is frozen before preparation so a same-named replacement
-cannot be captured accidentally. V1 requires `containers` to contain exactly
-one entry for every member. Supporting multi-container capture is separate
-work and does not change existing standalone behavior.
-
-#### `PodSetSnapshotContent`
-
-`PodSetSnapshotContent` is the cluster-scoped, immutable artifact of record.
-It contains:
-
-- a namespace, name, and UID back-reference to its `PodSetSnapshot`;
-- the immutable logical member list;
-- each member's source network identity data required by the declared profile;
-- one subordinate `PodSnapshotContent` reference per member; and
-- artifact, protocol, and capability versions required for restore.
-
-The content becomes Ready through one root publication point only after every
-leaf artifact is durable. Atomic publication does not require all
-artifacts to be stored in one file or storage transaction.
-
-#### `PodSetRestore`
-
-`PodSetRestore` is a namespaced restore attempt. It references one immutable
-set checkpoint and maps every logical member to exactly one target Pod and
-destination container:
+Once the checkpoint is Ready, the owner prepares two target Pods and creates an
+attempt. This example omits the first target UID so it can be bound by name:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: PodSetRestore
 metadata:
-  name: trtllm-replica-a-restore-1
+  name: replica-restore-1
+  namespace: inference
 spec:
-  deadlineSeconds: 1800
   snapshotRef:
-    name: trtllm-replica-a
-    uid: "<group-snapshot-uid>"
+    name: replica-checkpoint
+    uid: "33333333-3333-4333-8333-333333333333"
+  deadlineSeconds: 1500
   targets:
     - id: rank-0
       podRef:
-        name: trtllm-rank-0-restored
-        uid: "<target-pod-uid>"
+        name: replacement-0
       containerMapping:
         source: engine
         destination: engine
     - id: rank-1
       podRef:
-        name: trtllm-rank-1-restored
-        uid: "<target-pod-uid>"
+        name: replacement-1
+        uid: "44444444-4444-4444-8444-444444444444"
       containerMapping:
         source: engine
         destination: engine
 ```
 
-The workload owner creates and schedules every target Pod before creating the
-`PodSetRestore`. The caller supplies each existing target Pod's name and UID.
-The controller validates and pins those identities, then derives their network
-identities; the caller does not author an unvalidated CRIU remap table.
+Target Pods carry `nvidia.com/restore-set: replica-restore-1` and Snapshot's
+canonical placeholder contract in set-restore mode. They do not carry
+the standalone `nvidia.com/restore-from` or `restore-container-map` annotations.
+The annotation tells the agent to wait for the set operation; it does not start
+restore by itself. Authority comes from the operation's target list, pinned Pod
+UID, and admitted container ID. The Pods and attempt may be created in either
+order. Set-restore mode installs the fixed canonical startup gate; agents refuse
+conflicting standalone annotations and check the remaining gate budget before
+admission.
 
-Every source member and every target appears exactly once. V1 has no optional
-members. The controller copies each validated container mapping into the
-member's `PodRestore`; it does not rely on a same-name-container default.
+#### Per-Pod API Reuse
 
-Status contains the canonical profile-required target identity data, or a
-durable reference to it; one `PodRestore` reference and durable phase per
-member; and set-level `Ready` and `Failed` conditions. Deadline expiry is
-reported as `Failed=True` with reason `DeadlineExceeded`. `Ready` means every
-member reports `nvidia.com/Restored=True`; it does not mean every Pod is
-Kubernetes Ready or that the workload is ready to serve. Checkpoint artifacts
-and restore attempts have separate identities so one checkpoint can be
-restored repeatedly.
+Capture keeps the per-Pod activation path: a `PodSnapshot` reconciler creates a
+`PodSnapshotContent`, and the node agent's content watch queues capture work.
+For set capture, the set controller creates one child `PodSnapshot` per member,
+owned by `PodSetSnapshot`, using the same source shape.
 
-#### `PodRestore`
+The agent then chooses the capture path:
 
-`PodRestore` is the namespaced, durable per-member restore work object. The set
-controller creates and owns it; callers continue to use the existing
-annotation-driven contract for standalone restore. A set-owned `PodSnapshot`
-cannot be named by that standalone annotation. The controller also rejects
-standalone activation when the referenced `PodSnapshot` resolves to a set-owned
-`PodSnapshotContent`.
+- **Standalone:** run the per-Pod validation and checkpoint executor without a
+  set session.
+- **Set-owned:** resolve the child from the content's snapshot reference, verify
+  its owner and member identity, and require its UID to match the parent's
+  recorded child UID. Resolve the parent's session and join group admission
+  before destructive capture.
 
-Each `PodRestore` contains:
+If a binding or session has not yet been published, set-owned work waits; it
+never falls back to standalone capture. A failed or deleting parent stops new
+work. Creating all children is therefore a trigger to begin validation and group
+admission, not authorization for independent destructive captures.
 
-- the owning `PodSetRestore` name and exact UID;
-- the logical member ID;
-- the exact subordinate `PodSnapshotContent` name and UID;
-- the target Pod name and UID;
-- the explicit source-to-destination container mapping;
-- the validated profile-required network identity data or a durable reference
-  to it;
-- the selected backend/session capability profile; and
-- any durable hold and release input required by that profile.
+Child `PodSnapshot` conditions are the capture reporting channel. The set
+controller mirrors Pending, Capturing, Captured, or Failed in member status and
+records the bound content's exact name and UID. A set-owned `PodSnapshot` cannot
+be restored through the standalone annotation: restoring a rank without the set
+context is refused.
 
-Its status contains stable per-member reasons and enough phase information to
-distinguish waiting for a placeholder, admitted, restoring, prepared and held,
-released, restored, failed, and deadline exceeded. Profiles that reconstruct
-their communicator may move from local restore directly to Restored. A profile
-that preserves established sessions must expose a prepared-and-held state and
-must not become Restored until the set controller authorizes release.
+Restore calls the per-Pod executor directly after set admission. It needs no
+per-member restore CRD. The member report in `PodSetRestore.status` and the
+agent's journal record its progress and result. The agent also writes the existing
+Pod condition `nvidia.com/Restored`, preserving its meaning.
 
-The controller and admission layer validate the exact owning set UID and reject
-activation outside that context. A reference field alone is not treated as an
-authorization boundary.
+#### Checkpoint Availability
 
-The set capture path also needs additive ownership plus held-admission and
-activation state on a set-owned `PodSnapshot` or an equivalent durable leaf
-work record. The exact encoding is part of the open leaf coordination contract;
-standalone `PodSnapshot` behavior remains unchanged.
+A published checkpoint depends on its recorded child `PodSnapshot`s and exact
+`PodSnapshotContent`s. The set controller watches both. A missing, deleting,
+replaced, or failed child or content makes the set unavailable: Ready becomes
+False and Failed becomes True with reason `ArtifactUnavailable`.
 
-### Group Identity and Leaf Reuse
+Original artifact references and Captured member results remain intact. Snapshot
+does not recreate a deleted child, adopt a same-named content, or recapture the
+source to repair a published checkpoint. The owner must create a new checkpoint
+if it needs another usable artifact set.
 
-Every member has a stable logical ID independent of Pod name, UID, IP address,
-node, or creation order. A workload controller may use an opaque ID or a stable
-component, replica, role, and rank tuple. The complete member list is resolved
-before the operation starts; Snapshot V1 does not discover members by
-understanding every possible workload-controller API.
+No additional child-protection finalizer is introduced. Direct child or content
+deletion is allowed to invalidate the checkpoint. Before every restore, the
+controller revalidates the exact objects and their readiness, independently of
+the set's cached Ready condition. Agent preflight also checks the artifact data.
+Thus Ready is the latest observation of availability, not a promise that an
+artifact cannot be deleted or storage cannot fail.
 
-Existing `PodSnapshot` and `PodSnapshotContent` mechanisms remain the per-Pod
-capture path. `PodRestore` makes the existing restore-Pod execution path durable
-for a set-owned member. Their artifacts are subordinate to the set checkpoint
-and are not independently advertised as usable workload checkpoints.
-
-Set-created leaf objects carry the set UID and logical member ID. Standalone
-restore of a set-owned leaf artifact is rejected unless an authorized
-`PodSetRestore` supplies the complete set context.
-
-`SnapshotJob` remains a single-Pod, capture-only convenience API that creates
-and owns a Kubernetes Job. It does not become the group coordinator because
-the workload owner, including Dynamo or Grove, owns creation of multi-node
-source and target Pods.
-
-### Security
-
-This proposal does not reduce the privileges required by Snapshot. Node agents
-still perform privileged CRIU, container-runtime, mount, and CUDA operations,
-and checkpoint artifacts can contain process memory, credentials, and other
-workload secrets. Deployment policies and existing mechanisms for artifact
-encryption, access control, retention, and node isolation continue to apply to
-every subordinate artifact and to the group manifest.
-
-The set APIs add several authorization and isolation requirements:
-
-- V1 accepts source and target Pods only from the namespaced set object's
-  namespace. A caller cannot use a set operation to capture or restore a Pod
-  in another namespace.
-- Every Pod, group checkpoint, restore attempt, and subordinate artifact
-  reference includes a UID where applicable. Reconcilers reject a same-named
-  object recreated with a different UID.
-- Creating a `PodSetRestore` does not grant access to its referenced
-  `PodSetSnapshotContent` or leaf artifacts. The controller and node agents
-  enforce the same RBAC and storage authorization as standalone restore.
-- Set-owned leaf artifacts reject standalone restore so a caller cannot bypass
-  the set mapping or compatibility checks.
-- The controller validates membership cardinality, uniqueness, and supported
-  size before dispatching node work to limit resource-exhaustion and oversized
-  API-object attacks.
-
-Group status exposes member identity, Pod references, failure reasons, and any
-profile-required network identity data or a reference to it. RBAC must treat
-these fields as workload metadata and restrict them consistently with existing
-Snapshot resources. Logs and metrics must not expose checkpoint contents,
-credentials, or unbounded identity values.
+If required objects disappear during an unfinished restore, the controller fails
+that attempt. Normal failed-attempt handling stops unreleased work and preserves
+released results. Deleting the parent set follows the ordered cleanup below.
 
 ### Checkpoint Flow
 
-A set checkpoint proceeds as follows:
+The diagram below describes **set capture**, including the child resources that
+trigger agent work. The `Agent` lane covers each member's local work, including
+its coordinator's local path; the `Brain` lane shows group-wide coordination.
+The architecture diagrams above show the separate processes. Individual members
+can finish at different times.
 
-1. The caller supplies the complete source member list. Every member is
-   required in V1.
-2. Snapshot freezes membership and validates every controller-observable,
-   non-destructive condition for the complete set, including Pod identity,
-   readiness, node-agent availability, artifact storage, and declared
-   capabilities.
-3. Snapshot creates set-owned per-Pod snapshot leaves in a held admission mode.
-   Each leaf performs its node-local preflight and reports Admitted or Refused
-   without crossing its declared destructive boundary.
-4. Snapshot waits for every leaf to report Admitted. If any leaf refuses or the
-   deadline expires, Snapshot abandons work that has not crossed a destructive
-   boundary, marks the set Failed, and does not start capture.
-5. After every leaf is admitted, Snapshot releases capture work with
-   capability-aware bounded concurrency and any synchronization required by
-   the selected profile. Each leaf declares the point after which it cannot be
-   abandoned without changing the source workload. This point may precede CRIU
-   dump-and-kill when a CUDA interposition shim is involved.
-6. Snapshot waits for every leaf artifact. If every leaf succeeds, Snapshot
-   publishes `PodSetSnapshotContent` as Ready. If any leaf fails, Snapshot marks
-   the set Failed and does not publish a usable set checkpoint.
+```mermaid
+sequenceDiagram
+    participant O as Workload owner
+    participant C as Snapshot controller
+    participant P as PodSnapshot reconciler
+    participant A as Agent (each member)
+    participant B as Runtime brain
+    O->>C: Create PodSetSnapshot
+    C->>C: Validate and record source identities and session
+    C->>P: Create child PodSnapshots
+    P->>A: Create PodSnapshotContents, triggering agent work
+    A->>A: Check recorded context and complete local preflight
+    A->>B: Start coordinator and join capture session
+    B->>B: Inspect all members and admit the group
+    alt Admission refused or deadline reached
+        B-->>A: Refuse before destructive work
+        A->>P: Record refusal, leave source running
+        P->>C: Child Failed
+    else Group admitted
+        B->>A: Coordinate preparation across members
+        A->>A: Recheck source identity before destructive work
+        A-->>B: Preparation result
+        B-->>A: Preparation complete, delivered per member
+        A->>A: Save required metadata and perform per-Pod capture
+        A->>P: Member artifact Ready or Failed
+        P->>C: Child result
+        C->>C: Publish Ready only when all artifacts are available
+    end
+```
 
-The held admission mode is additive to the set-owned capture path. Creating a
-standalone `PodSnapshotContent` retains its existing self-starting behavior.
-The leaf contract must make the Admitted state durable and restart-safe before
-the group controller relies on it.
+The controller validates the complete source list before creating children. It
+stores each source IP and node in `PodSetSnapshot.status.members`, creates the
+session Secret, and writes the endpoint and Secret reference to `status.session`.
+It then creates the children.
 
-The workload must complete any collective application quiescence or
-communicator preparation before its Pods become snapshot-ready. Snapshot's
-group validation reduces predictable partial failure but cannot prove that
-every CRIU or CUDA capture will succeed.
+Each child is reconciled into a `PodSnapshotContent`. Creation of that content
+triggers the node agent through its existing watch. The agent verifies the set
+ownership and published member binding, then reads the parent's recorded inputs
+and session descriptor. It waits if required inputs have not yet been published.
 
-Checkpoint capture is destructive: Snapshot terminates the captured source
-process. Current standalone capture does not define a `snapshot-complete`
-sentinel. Set publication controls artifact visibility, not source-process
-lifetime. Once a released leaf crosses its declared destructive boundary, some
-source processes may be terminated even when the set fails; Snapshot does not
-roll them back.
+Each agent checks the live source Pod UID, node, sandbox IP, and container against
+the recorded source, completes node-local preflight, and secures the required
+local capacity. Reservations and execution intent must be durable before their
+corresponding work proceeds. The agent starts its member's coordinator only while
+the operation is active. The brain waits for every member and validates the group.
+No member crosses its destructive boundary before this barrier succeeds.
 
-From the start of admission until the set operation terminates, the workload
-owner must keep the exact source Pod UIDs from restarting, being replaced, or
-resuming normal workload execution. A finalizer preserves an API record, not a
-process, and scheduling does not prevent kubelet restart. The enforcement
-mechanism is therefore an explicit open decision between a workload-owner or
-Grove hold contract and a snapshot-aware container wrapper. A workload-owner or
-Grove hold can observe set-level status. A wrapper running inside the Pod cannot
-and therefore requires a local terminal signal that distinguishes successful
-capture from failure. Choosing the wrapper also chooses that additional local
-protocol requirement.
+For a cuInterpose member, the first destructive step is GPU preparation. Its
+relay, or rank 0's local participant path, rechecks the recorded source identity
+and sandbox IP immediately before that step, and prepares only the inspected
+participants. For a member without cuInterpose, the agent performs the same
+check immediately before native CUDA checkpoint, or before the CRIU dump for a
+CPU-only member. An IP change fails the member with `PodIPChanged`; the controller
+never substitutes a new IP into the capture context. These local checks are not
+a guarantee against a concurrent Pod lifetime change.
 
-![Group checkpoint sequence](diagrams/checkpoint-sequence.svg)
+Refusal before the destructive boundary leaves the source running. Failure or
+cancellation after that boundary follows the existing unsafe-source handling,
+including `CheckpointNeedsSourceKill` where applicable. Snapshot does not promise
+that a failed capture leaves a working deployment.
+
+For a cuInterpose member, the coordinator writes its saved metadata into that
+member's checkpoint artifact before the agent proceeds with the native CUDA and
+CRIU checkpoint. Each child records its own result. The set controller publishes
+Ready only after all children are Ready and it has recorded each exact content
+name and UID. A failed set can contain successfully captured members, but it is
+not a usable set checkpoint. Source disappearance before its child completes
+fails that member; disappearance after a completed capture does not invalidate
+its artifact.
 
 ### Restore Flow
 
-A set restore proceeds as follows:
+The diagram below describes **one restore attempt**. Its admission gate is in
+Kubernetes; the later reconstruction rounds and release authorization belong to
+the runtime session. As in the capture sequence, the `Agent` lane covers local
+work and the `Brain` lane shows group-wide coordination.
 
-1. Snapshot loads the complete set checkpoint record.
-2. The workload owner asks Grove or another workload manager to create and
-   schedule one restore-shaped target Pod for every logical member.
-3. After every target Pod exists, the caller creates `PodSetRestore` with the
-   exact Pod names, UIDs, and container mappings.
-4. Snapshot validates the pinned target identities and creates one `PodRestore`
-   per member with exact set ownership, target identity, container mapping, and
-   capability profile. Each leaf enters WaitingForPlaceholder until its target
-   is scheduled and its placeholder is available. An unscheduled or temporarily
-   unavailable target remains visible through its leaf while it may recover and
-   becomes terminal when the operation deadline expires. If the pinned target
-   UID disappears, that leaf fails immediately with a stable terminal reason
-   because the same identity cannot return.
-5. After every placeholder is available, Snapshot determines and validates the
-   identity data required by the selected profile and stores it in the leaves.
-   Every leaf then performs compatibility and node-local preflight and reports
-   Admitted or Refused before any leaf starts process reconstruction.
-6. After every leaf is admitted, Snapshot activates restore work with
-   capability-aware bounded concurrency and the selected profile's required
-   synchronization.
-7. A communicator-reconstruction profile completes each member through the
-   existing local restore path. A preserved-session profile instead holds each
-   member in Prepared after local reconstruction; only after every member is
-   Prepared may the set controller authorize release.
-8. If every target reports `nvidia.com/Restored=True`, Snapshot marks
-   `PodSetRestore` Ready. If any target reports a terminal restore failure or
-   the deadline expires, Snapshot marks the set Failed and retains every member
-   outcome.
-9. The workload owner separately observes Kubernetes Pod readiness and decides
-   when the restored group may receive serving traffic.
-
-![Group restore sequence](diagrams/restore-sequence.svg)
-
-The durable `PodRestore` member phases are profile-dependent:
-
-```text
-Pending -> WaitingForPlaceholder -> Admitting -> Admitted -> Restoring
-  communicator reconstruction: -> Restored
-  preserved sessions:           -> Prepared -> Released -> Restored
+```mermaid
+sequenceDiagram
+    participant O as Workload owner
+    participant C as Snapshot controller
+    participant A as Agent (each member)
+    participant B as Runtime brain
+    O->>C: Create placeholder Pods and PodSetRestore, in either order
+    C->>C: Bind targets and publish artifacts, IP pairs and session
+    C-->>A: ContextReady
+    A->>A: Complete local preflight and reserve capacity
+    A->>C: Passed or Refused for the current container
+    alt Any member refused
+        C-->>A: Failed, no member starts reconstruction
+        A->>A: Free reservations, leave placeholders running
+    else Every member passed
+        C-->>A: Admitted, container identities pinned
+        A->>A: Recheck context and hold peer application traffic
+        A->>A: Restore local processes and sockets using the full IP map
+        A->>A: Validate local reconstructed process
+        A->>B: Start coordinator and join restore session
+        B->>A: Coordinate shared GPU reconstruction
+        A-->>B: Runtime result
+        B-->>A: Authorize release, delivered per member
+        A->>A: Final checks and durable release marker
+        A->>A: Unblock peer traffic and finish local cleanup
+        A->>C: Report Restored
+        C->>C: Ready when all Restored, Failed on failure or unknown outcome
+    end
 ```
 
-![PodRestore member and PodSetRestore group state](diagrams/restore-state.svg)
+1. **Resolve the context.** The controller requires the referenced checkpoint
+   to be Ready and not being deleted, with the exact referenced UID. It verifies
+   every recorded child and content, binds every target, checks for conflicting
+   attempts, and writes target identities, nodes, and artifact references into
+   `PodSetRestore.status.members`. In each entry it copies the checkpoint's
+   `sourcePodIP` and records the target Pod's assigned `targetPodIP`. It validates
+   the complete map, writes `status.session`, and sets `ContextReady`.
+2. **Preflight every member.** Each agent reads those member entries, derives
+   the full IP map, and resolves its own artifact and session credential. It
+   waits for a running placeholder and checks the live Pod UID, node, sandbox IP,
+   and container. It verifies the placeholder contract and remaining startup-gate
+   time, refuses standalone restore annotations, and checks artifact compatibility,
+   IP-map support, session port, and target reuse rules. It reserves the Pod UID
+   and all required local slots together. The reservation must be durable before
+   Passed is reported. Concurrent attempts cannot reserve the same target.
+3. **Admit the set.** The controller accepts only reports for live container IDs.
+   Any refusal fails the attempt before CRIU, leaving placeholders running.
+   Once all members pass, it revalidates their bound nodes and IPs, pins every
+   `admittedContainerID`, and sets Admitted in one status update. The restore
+   context is fixed for the attempt.
+4. **Reconstruct.** Each agent rechecks Admitted, failure, deletion, deadline,
+   and the bound Pod, node, sandbox IP, and container ID. It records execution
+   intent durably and holds application traffic to peers before reconstructing
+   processes, established sockets, and native CUDA state. Every member uses the
+   same complete IP map from restore status. The agent validates its local
+   reconstructed process before entering the runtime session.
+5. **Coordinate the runtime.** Agents start coordinators after local process
+   and native CUDA restore: rank 0 starts the brain, and the other ranks connect
+   as relays. For cuInterpose members, coordinators load the saved CUDA metadata;
+   relays send their records to the brain. The brain builds the temporary
+   GPU-handle map and coordinates shared GPU resource reconstruction. It authorizes
+   release only when every member completes its required work. Until then, the
+   placeholder gate and peer network lock prevent normal member traffic.
+6. **Release and report.** After runtime authorization, the agent checks the
+   operation and bound execution identity once more, atomically publishes the
+   release marker, records release durably, removes its lock, and frees its slots.
+   It reports Restored and writes the Pod Restored condition. Recovery must
+   distinguish release from completed cleanup.
 
-Set restore retains the standalone meaning of completion: the restored process
-has completed the selected local restore contract. For communicator
-reconstruction, the node agent writes `restore-complete` and reports
-`nvidia.com/Restored=True` when that local contract succeeds. For a
-preserved-session profile, local reconstruction ends in Prepared, not Restored;
-no agent may write `restore-complete` or report `nvidia.com/Restored=True` until
-every member is Prepared and release is authorized. Agents observe release
-asynchronously, so simultaneous Pod readiness is neither promised nor required.
-`PodSetRestore` does not wait for Kubernetes Pod Ready or serving readiness.
+A container change before release fails the member. After release, release
+evidence takes precedence over container changes and cancellation. A later
+application restart is not a failed restore.
 
-### Network Identity and Socket Restore
+After Admitted, CRIU, CUDA, or the session can still fail. Agents that observe
+failure stop work and tear down their unreleased members. Already released members
+are not killed by Snapshot. Checking failure before release is a local safety
+check; it cannot make release atomic across nodes.
 
-Identity-map scope is profile-dependent. A session-preservation profile receives
-the complete map of every changed source Pod IPv4 address to its corresponding
-target Pod IPv4 address so both local and peer endpoints can be rewritten.
+A target with a durable restore execution-intent record is never reused for
+restore. Retry uses a new attempt and fresh target Pod UIDs and network namespaces.
+A target that was only reserved or refused at preflight remains reusable after
+its reservation is freed.
 
-For a communicator-reconstruction profile, the required scope is not yet
-confirmed. Qualification must determine whether the disconnect path clears all
-stale peer-address state before reconstruction. Until that is demonstrated, a
-reconstruction profile cannot assume that local-only mapping is sufficient.
+### Startup Gate and Deadline
 
-Every qualified backend profile declares exactly one session policy:
+Set-restore mode uses the existing canonical placeholder startup gate. The gate
+waits for `restore-complete` and has a fixed allowance of about 30 minutes.
+This proposal adds no configurable gate duration and does not change standalone
+restore behavior.
 
-- **Communicator reconstruction:** established communication sessions need not
-  survive, and the backend reconstructs and validates its communicator before
-  local restore completes.
-- **Session preservation:** the restore path does not apply the standalone
-  external-peer disconnection behavior to a qualified in-set connection. It
-  retains and remaps both endpoints, performs coordinated network/session
-  handling, and holds every member at a release barrier.
+An already-running placeholder has spent some of that allowance. Preflight must
+not assume it has another 30 minutes from the attempt's creation. The attempt's
+absolute deadline must fit inside every running target container's remaining
+gate allowance, with a conservative margin for probe timing. Otherwise the
+agent refuses with `GateBudgetTooShort` before reporting Passed.
 
-Session preservation fails closed when a peer cannot be resolved uniquely to a
-member. Successful qualification of one policy does not imply qualification of
-the other.
+The check uses the container incarnation that admission pins. A restart before
+release fails the attempt; it does not extend the deadline or renew the gate budget.
+This prevents admitting an attempt that is already expected to outlive its gate.
+It does not make kubelet timing or execution success guaranteed.
 
-The immutable set checkpoint records each source identity. The profile-required
-target identity data is a restore work order and belongs to `PodSetRestore` and
-its `PodRestore` leaves. Pod annotations are not the source of truth for the
-mapping, ownership, activation, or aggregate member state.
+### Network Identity and Release
 
-Missing, duplicate, ambiguous, or unsupported mappings required by the selected
-profile fail restore before process reconstruction begins.
+The IPv4 map defined in Data and Storage must contain exactly one pair per
+member, with unique source IPs and unique target IPs, and fit the plugin's
+256-entry limit. `criu.tcpEstablished` must be true. CRIU remaps both ends of
+established connections between members; connections outside the set follow
+standalone behavior. Set restore takes its map from recorded member status, not
+workload annotations.
 
-### Failure and Recovery
+The map is immutable, but Pod UID alone does not guarantee that an IP stays the
+same. Agents compare the recorded IP with the live sandbox IP during preflight,
+before CRIU, and before release. A mismatch fails with `PodIPChanged`; it never
+causes map regeneration or rebinding. Cleanup uses the journaled sandbox and
+container, not whatever replaced them. These checks reduce stale-identity races;
+they cannot make Pod lifetime changes atomic with process reconstruction.
 
-A failure in any member fails the set operation; V1 has no optional members.
+Before process reconstruction, the agent installs an attempt-owned network lock
+in the target Pod's network namespace. It blocks application traffic to peer
+target IPs until release. Session traffic must remain possible in both
+directions, including relay requests and brain replies, without bypassing
+unrelated network filtering.
 
-If any checkpoint leaf refuses admission, no member may cross its destructive
-boundary. After the controller releases admitted leaves, the operation is
-non-atomic. A failed set may contain both a member whose source process was
-terminated and a member whose source remains running. Snapshot publishes no
-Ready set checkpoint, exposes every leaf outcome, and does not promise rollback
-or group-wide fencing. The workload owner decides how to recover or recreate
-the source workload.
+The session port is reserved for coordination. Preflight refuses a port already
+in use; capture refuses checkpointed application sockets using that port. The
+coordination exemption must never allow preserved application traffic to escape
+the lock early.
 
-For restore, an incompatible target leaves its placeholder running and reports
-`RestoreIncompatible`. An execution failure follows the node agent's fail-closed
-behavior and reports `RestoreFailed`. Under communicator reconstruction, a
-successfully restored sibling retains the standalone outcome. Under session
-preservation, a sibling already in Prepared must not be released after another
-member fails; whether it remains parked or is terminated is an open V1 decision
-that the chosen profile must make explicit. `PodSetRestore` reports Failed with
-every member outcome, and the workload owner decides how to repair or recreate
-the distributed replica.
+The agent records enough local ownership and sandbox information to remove only
+this attempt's lock, safely and repeatedly, without the Kubernetes object or
+peer IP map. Cleanup never changes another attempt's rules or a replacement
+sandbox. A container restart does not remove the sandbox's network namespace
+or its lock.
 
-Group operation state survives controller restart. Reconciliation does not
-duplicate leaf creation or already completed per-Pod work. Operation identity,
-member identity, observed generation, leaf references, and durable per-member
-outcomes fence repeated work. Every wait is bounded by the object's operation
-deadline. A target that remains unscheduled or cannot reach its placeholder
-before that deadline produces a terminal `DeadlineExceeded` result. A pinned
-target UID that disappears fails immediately because that identity cannot
-return.
+The **release point** is publication of `restore-complete` in the placeholder's
+control directory. The file contains the attempt UID and admitted container ID.
+Publication is atomic: the gate and recovery must never observe a partial marker.
+The placeholder checks that the file exists; recovery verifies its contents.
 
-Deletion and cancellation have distinct semantics. Deleting a
-`PodSetSnapshot` or `PodSetRestore` stops creation or activation of new leaf
-work, but cannot undo work past a destructive boundary. A controller-managed
-finalizer orders cleanup; Kubernetes finalizer ordering is not relied upon.
-Deletion of a set snapshot rejects new restore attempts and waits for existing
-referencing restores to terminate. It then removes its set-owned namespaced
-leaves, the cluster-scoped content record, subordinate content, and managed
-artifacts before the finalizer is removed. V1 does not provide a `Retain`
-policy. Deletion of a set restore removes its `PodRestore` leaves but never
-deletes caller-owned target Pods. While cleanup is incomplete the object remains
-Terminating and exposes the remaining cleanup through conditions and Events;
-after deletion, absence of the object is the caller-visible outcome.
+The marker is published before removing the lock. An application can begin to
+run during that gap, but its peer traffic remains blocked. If the agent crashes,
+traffic stays blocked until recovery removes the lock. Snapshot never removes
+an unreleased member's lock on failure or timeout. It kills the restored tree
+with the lock in place; the lock then remains until the target sandbox is removed.
 
-A durable user-requested cancellation API is still open. It may be terminal
-cancellation recorded on a surviving object or reversible suspension, but it
-must not be described as a durable outcome on an object whose deletion removes
-that status.
+### Journal and Restart Recovery
 
-### Ownership and Scheduling
+Each agent keeps a durable node-local journal that survives agent container
+restarts, separate from the workload-writable control volume. Entries are keyed by
+Pod UID and attempt UID. This is recovery from an **agent restart on the same
+node**, not a promise to recover after losing the node or its journal storage.
 
-The workload owner or caller owns:
+Each entry records the operation kind, member ID, Pod UID, execution container ID,
+sandbox identity, network-lock ownership, reserved slots, and execution and cleanup
+evidence. This is enough to kill unreleased work or finish released cleanup
+without API access.
 
-- source and target Pod creation;
-- group membership and logical role or rank assignment;
-- placement and scheduling requirements;
-- holding exact source Pod UIDs against restart, replacement, and normal
-  workload execution while a set capture is active; and
-- observing Pod readiness, recovering failed workloads, and deciding when a
-  restored group may receive serving traffic.
+The journal must distinguish:
 
-Snapshot owns:
+- A capacity reservation, made durable before Passed is reported. Reservation
+  alone does not mean execution started or make the target non-reusable.
+- Execution intent, made durable before capture's coordinator or local restore
+  starts. An interrupted execution is never replayed.
+- Local restore completion without release. That member is still unreleased.
+- Proven release, retained independently of cleanup and reporting completion.
+- Completed capture and its artifact result.
 
-- frozen operation membership and identity;
-- the group checkpoint and restore-attempt identities;
-- profile-required network identity handling;
-- leaf admission, activation, bounded execution, aggregate publication,
-  failure reporting, and artifact cleanup; and
-- the final group result.
+These are recovery facts, not additional Kubernetes phases or a prescribed
+journal format.
 
-Node agents and leaf execution paths own node-local runtime interaction, CRIU
-and CUDA execution, and per-member status and artifacts. Inference engines and
-communication libraries own application quiescence, persistent
-communication-resource lifecycle, local checkpoint and restore ordering, and
-post-restore communicator validation.
+A matching release marker **or** a durable journal release record proves release.
+The marker covers a crash before release is journaled; the journal keeps that
+knowledge if the marker later becomes unavailable. Neither proof is overridden
+by failure, deletion, deadline, or loss of the Pod.
 
-Grove or another workload manager creates the source and target Pods and owns
-their gang scheduling and topology-aware placement. The caller creates
-`PodSetRestore` only after every target Pod exists, including its UID.
-Snapshot does not duplicate those responsibilities. Restore adds one
-constraint: every target container must reach placeholder-available
-state before Snapshot admits or activates set-owned per-Pod restore work. The
-`PodRestore` leaf may already exist in WaitingForPlaceholder.
+Recovery checks release evidence first, then uses the following rules:
 
-Grove `startsAfter` currently waits for the prerequisite clique's Pods to
-become Kubernetes Ready. This can create a cycle when a dependent rank is not
-created until another clique becomes Ready, while that clique cannot restore
-through the group path until every target placeholder exists. For V1, the
-workload owner may omit or rewrite inter-member
-`startsAfter` dependencies for restore-shaped Pods while preserving gang and
-topology constraints. Alternatively, Grove may add a restore-aware milestone
-that distinguishes placeholder availability from workload readiness.
+| Record or observation | Recovery action |
+| --- | --- |
+| Matching release marker or durable release record | Never kill or replay the workload. Preserve release evidence, remove the attempt's lock if the original sandbox still exists, free slots, and report Restored if the object exists. Record cleanup completion separately. |
+| Reservation only; live attempt | Rebuild the reservation and resume preflight/admission waiting. Recheck the live container; do not rely on a stale Passed report. |
+| Reservation only; failed, deleted, or expired attempt | Free slots. The target remains reusable. |
+| Restore execution recorded; no release evidence; target still exists | Never rerun CRIU. Stop any remaining helper and tear down the recorded, unreleased execution with the lock in place. Do not act on a replacement container. Fail the member and free slots. |
+| Restore execution recorded; target gone; no release evidence | Free slots and report Unknown with reason TargetGone if the attempt still exists. Do not guess Failed. |
+| Orphaned restore record; no release evidence | Tear down unreleased execution if it exists and free slots. It cannot override release evidence. |
+| Capture execution recorded; no completed artifact | Never rerun preparation or dump. Fail the child snapshot and apply the existing unsafe-source handling. Free slots. |
 
-![Grove startup dependency considerations](diagrams/grove-scheduling.svg)
+Before handling an interrupted attempt, the agent must establish that its old
+helpers and coordinator have stopped, and stop them if necessary. A remaining
+helper does not justify replaying the operation. If the original sandbox is gone,
+its network lock is gone too; cleanup must not touch a replacement sandbox.
 
-No Grove API change is required for membership, gang scheduling, or topology
-placement. A Grove enhancement is required only if its existing API cannot
-express the placeholder-availability behavior needed before group restore
-activation.
+Cleanup completion means local cleanup finished and the result was reported,
+unless the operation no longer exists. Release evidence is retained independently
+of that completion record. If the API is unavailable, the agent still removes a
+released member's lock and frees its slots, then retries reporting without
+touching the workload.
 
-### Initial Qualification Target
+The controller recovers from API state. It does not generate new bindings,
+credentials, admission, or child work simply because it restarted. It resumes
+reconciliation using recorded identities and idempotent resource creation.
 
-The first qualification target is:
+### Failure, Cancellation, and Cleanup
 
-- one TensorRT-LLM replica;
-- dense TP=2;
-- two Pods on two nodes;
-- one GPU per Pod;
-- one Kubernetes namespace and cluster;
-- no in-flight requests;
-- checkpoint after engine initialization and before serving registration;
-- NCCL Socket transport;
-- a readiness probe that validates TensorRT-LLM and communicator health;
-- artifact storage accessible from all source and target nodes; and
-- restore may relocate either member and assign new Pod IPs.
+Agents watch the operation and check failure, deletion, and deadline before each
+destructive entry point and before release. Observing any of them stops new work
+and cancels an in-progress helper. The runtime's own failures and timeouts remain
+necessary when the API is unavailable.
 
-This target is not a supported profile until the experiment demonstrates either
-communicator reconstruction or session preservation and the SNEP records that
-choice. If it requires session preservation, the `PodRestore` prepared state,
-release input, restart recovery, and failed-sibling disposition are V1
-requirements. If TensorRT-LLM reconstructs and validates its communicator, that
-profile does not require a set release barrier. The same qualification must
-determine whether its disconnect and reconstruction path requires complete peer
-identity mappings or only local remapping.
+Deletion is the V1 cancellation request. Both set resources have a controller
+finalizer. There is no separate cancel command or durable API cancellation record
+after deletion; member status explains the result while the object remains, and
+node journals support cleanup after it is gone.
 
-CUDA graphs are disabled unless the backend demonstrates that every
-graph-visible communicator and allocation remains valid across the selected
-checkpoint and restore lifecycle. Enabling CUDA graphs is a separate
-qualification dimension, not an implied property of NCCL Socket support.
+| Restore stage at cancellation | Action |
+| --- | --- |
+| Before CRIU | Stop, free reservations, and report Cancelled. Leave the placeholder running. |
+| During CRIU or the session | Stop helpers and coordinator, kill the restored tree with its lock in place, free slots, and report Cancelled. |
+| After release authorization, before marker publication | Do not publish the marker. Tear down the unreleased member, free slots, and report Cancelled. |
+| After marker publication or durable release evidence | Never kill or replay. Finish released cleanup and retain Restored. |
 
-Passing this profile does not imply support for other NCCL transports or
-communication-resource paths.
+| Capture stage at cancellation | Action |
+| --- | --- |
+| Before the coordinator starts | Stop and free reservations. Mark the child Failed with reason Cancelled; the source is untouched. |
+| In the session, before any destructive round ran locally | Abort the coordinator through the refused path. The brain aborts the group and the source keeps running. Mark the child Failed with reason Cancelled. |
+| After destructive preparation, native CUDA checkpoint, or dump begins | Use existing unsafe-source handling. Mark the child Failed with reason Cancelled. There is no rollback. |
 
-### Open Design Decisions
+A forced crash without proof that capture stayed pre-destructive is not classified
+as a safe refusal. Interrupted capture uses the conservative unsafe-source path.
 
-The following decisions remain open and keep this SNEP in draft:
+For `PodSetRestore`, the controller removes the finalizer after every member has
+stopped or completed, or after a bounded cleanup grace period. If grace expires,
+it emits a `CleanupIncomplete` Event naming the members still requiring cleanup.
+The journal remains responsible for node-local cleanup. Finalizer removal is not
+proof that an unreachable node stopped its work.
 
-1. **Initial session policy.** The TensorRT-LLM TP=2 experiment must determine
-   whether the initial NCCL Socket profile reconstructs its communicator or
-   requires preservation of established cross-Pod sessions.
-2. **Leaf coordination contract.** The Snapshot leaf must expose side-effect-safe
-   refusal, a declared destructive boundary, durable admission or preparation,
-   and restart-safe activation. A preserved-session profile additionally needs
-   a durable external release input. This contract is being aligned with
-   SNEP-295 rather than inferred from its current implementation.
-3. **Prepared-sibling failure.** For session preservation, the proposal must
-   choose whether a prepared sibling remains parked or is terminated when
-   another member fails before release.
-4. **Source hold enforcement.** The proposal must choose a workload-owner or
-   Grove hold contract, or a snapshot-aware container wrapper. Finalizers and
-   scheduling alone do not keep a source process alive or prevent restart. A
-   wrapper also requires a local terminal capture signal because it cannot
-   observe set-level status directly.
-5. **Cancellation model.** The proposal must choose terminal cancellation or
-   reversible suspension and define its durable outcome independently of
-   deletion.
-6. **Identity-map scope.** The proposal must determine whether communicator
-   reconstruction still requires complete peer mappings or whether its
-   disconnect path clears stale peer-address state before reconstruction. Each
-   qualified profile must declare its required mapping scope.
+For `PodSetSnapshot`, deletion first prevents new restore attempts. The controller
+waits for referencing non-terminal restore attempts and stops capture work. It
+then deletes the child `PodSnapshot`s through their existing content and artifact
+cleanup path. It does not add an invalid namespaced owner reference to a
+cluster-scoped content. The set finalizer tracks this cleanup, with the same
+bounded-grace and Event behavior.
+There is no Retain policy: callers cannot restore a deleted set by supplying
+surviving content names.
 
-### Normative Requirements
+The operation deadline is absolute and applies to target waiting, preflight,
+runtime join, and execution. A missing bound source fails with `SourceGone`.
+An unbound or unschedulable target remains visibly waiting until bound or until
+the deadline expires. An expired attempt fails with `DeadlineExceeded`. Cleanup
+can continue after that deadline; the deadline stops further execution and release,
+not necessary recovery work. A successful capture ends its execution deadline;
+`deadlineSeconds` is not a checkpoint expiry time. Availability can still change
+later if a required artifact is lost.
 
-The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
-are interpreted as described in [RFC 2119].
+### Workload Ownership and Source Lifetime
 
-1. A multi-Pod checkpoint **MUST** have one set operation identity and one
-   durable set checkpoint identity.
-2. The complete member list **MUST** be resolved and frozen before admission.
-   Every member is required in V1.
-3. Every member **MUST** have a stable logical identity independent of Pod name,
-   UID, IP address, node, and creation order.
-4. Source and target Pods **MUST** map one-to-one through logical member
-   identity. V1 **MUST** map exactly one source container to exactly one
-   destination container per member.
-5. Set checkpoint publication **MUST** require every member and artifact.
-   Per-member success **MUST NOT** be exposed as set success.
-6. Every leaf **MUST** complete its admission checks before any leaf crosses its
-   declared destructive boundary.
-7. A leaf **MUST** declare the point after which it cannot be abandoned without
-   changing the source or target workload. The group controller **MUST NOT**
-   assume that this boundary is CRIU dump-and-kill.
-8. Snapshot **MUST** use capability-aware bounded concurrency and honor the
-   synchronization points declared by the selected profile.
-9. Snapshot **MUST NOT** claim atomic checkpoint, atomic restore, or rollback
-   of work that has crossed a leaf's destructive boundary.
-10. Every restore **MUST** receive the validated source-to-target identity data
-    required by its qualified profile. A session-preservation profile **MUST**
-    receive the complete set mapping. Missing, duplicate, ambiguous, or
-    unsupported required mappings **MUST** fail before process reconstruction.
-11. A member failure **MUST** fail the set operation. A profile **MUST** define
-    the disposition of a sibling that has already reached a non-resumable or
-    prepared state.
-12. Set and leaf state **MUST** survive controller and agent restart, remain
-    idempotent, and **MUST NOT** duplicate completed per-Pod work.
-13. Every set operation **MUST** have a deadline. A target that cannot reach
-    placeholder-available state before that deadline **MUST** terminate with a
-    stable reason. A pinned target UID that disappears **MUST** fail immediately
-    with a distinct terminal reason.
-14. Deletion **MUST** stop work that has not been activated, order cleanup
-    through controller logic, preserve caller-owned Pods, and **MUST NOT** claim
-    to roll back completed leaf work.
-15. Any cancellation API **MUST** expose a durable outcome independently of
-    deletion and **MUST** state whether cancellation is terminal or reversible.
-16. The protocol **MUST NOT** depend on a particular workload controller or
-    scheduler. Gang and topology-aware scheduling **MUST NOT** be reimplemented
-    by Snapshot.
-17. V1 **MUST** remain within one Kubernetes namespace and cluster.
-18. Backend, transport, topology, and session policy combinations **MUST** be
-    qualified separately before being advertised.
-19. Checkpoint artifacts and restore attempts **MUST** have separate identities
-    so one checkpoint can be restored repeatedly.
-20. A set-owned leaf artifact **MUST NOT** be restored outside the exact
-    authorized `PodSetRestore` UID and member context.
-21. Snapshot **MUST** expose additive durable APIs for the set checkpoint,
-    immutable set content, set restore attempt, and per-member `PodRestore`.
-22. The set restore API **MUST** reference one immutable set checkpoint and map
-    every logical member to exactly one pinned target Pod UID and container.
-23. Existing standalone `PodSnapshot`, `SnapshotJob`, and annotation-driven
-    restore cardinality and behavior **MUST NOT** be changed by a set operation.
-24. Every target placeholder **MUST** be available, and all identity data
-    required by the selected profile **MUST** be valid, before Snapshot
-    activates any set-owned restore leaf.
-25. A communicator-reconstruction profile **MUST** reconstruct and validate the
-    communicator before reporting the member Restored.
-26. A preserved-session profile **MUST** distinguish in-set peers from external
-    peers, **MUST NOT** apply the standalone external-peer disconnection policy
-    to a qualified in-set connection, and **MUST** hold every member until all
-    members are Prepared and release is authorized.
-27. For a preserved-session profile, an agent **MUST NOT** write
-    `restore-complete` or report `nvidia.com/Restored=True` before release.
-28. `PodSetRestore` **MUST** become Ready only from successful `PodRestore`
-    outcomes and **MUST NOT** depend on Kubernetes Pod Ready or serving
-    readiness.
-29. The workload owner **MUST** keep exact source Pod UIDs from restarting,
-    being replaced, or resuming normal execution from admission until the set
-    capture terminates. The selected integration **MUST** enforce this contract.
+The workload owner creates source and target Pods, supplies membership and
+container mappings, and sets resource and topology constraints. Snapshot neither
+creates nor schedules those Pods. The owner must make all target placeholders
+startable before application readiness and keep standalone restore activation
+off set targets.
+
+As with per-Pod capture, the owner must not deliberately delete, replace, or evict
+a member while that member's capture is running. This period ends when its child
+`PodSnapshot` is terminal, as reflected in set member status. Snapshot does not
+claim to suppress kubelet restarts or actions by other authorized controllers.
+
+**Open qualification question:** must a member that finished capture preserve its
+old network identity until its peers also finish? Qualification must test container
+restart, Pod deletion and sandbox replacement during capture skew. Retaining a Pod
+object alone does not preserve its original network namespace. If these actions
+damage a peer's captured state, supported deployments will need source isolation
+or an owner-enforced lifecycle contract before normal restart behavior is claimed
+as supported. This SNEP does not choose a fencing mechanism without that evidence.
+
+### Security
+
+Set capture grants destructive access to the selected workloads. RBAC should
+grant set creation only to callers authorized to checkpoint and restore workloads
+in that namespace. Same-namespace references prevent a set from selecting another
+namespace's Pods or checkpoints. Exact UIDs prevent name reuse from changing the
+target after binding.
+
+The controller requires access to the two CRDs, per-Pod snapshot resources, Pods,
+Events, and its per-attempt Secrets. Agents require get/list/watch access to set
+resources, patch access to `podsetrestores/status`, their existing per-Pod status
+permissions, and get access to Secrets in Snapshot's namespace. They do not need
+cluster-wide Secret read access. Because namespaced Secrets cannot use a workload
+namespace owner reference, the controller explicitly cleans up its Secrets,
+including orphaned attempt Secrets after a restart.
+
+The controller validates each report against the bound Pod, node, attempt, and
+expected container incarnation. This is data validation, not proof of which node
+wrote the report. Agents share a trusted service account in V1; there is no
+per-node write authorization. Status write ownership does not enforce
+authorization. A compromised privileged agent is outside this proposal's trust
+boundary.
+
+Session authentication must reject another attempt's credential. Network policy
+must permit the session traffic, and Snapshot must not bypass unrelated filtering.
+Only the attempt's own network lock is removed during cleanup. The session port
+is reserved from checkpointed application traffic.
+
+Checkpoint images, credentials, and process memory can contain secrets. They
+remain subject to the existing artifact storage and node-agent security model.
+The journal is not mounted into workload containers. The release marker remains
+part of the workload-visible placeholder contract; this proposal does not claim
+safe checkpoint coordination against a malicious participating application that
+tampers with its control files.
 
 ### Configuration
 
-This proposal introduces no feature-gate framework. The four additive CRDs are
-installed and upgraded through Snapshot's existing CRD installation path.
-Creating no set resource leaves standalone `PodSnapshot`, `SnapshotJob`, and
-annotation-driven restore behavior unchanged. Operation deadlines and
-capability profiles are fields of the set API rather than out-of-band feature
-flags.
+The feature is installed through its CRDs and controller/agent chart configuration.
+It does not introduce a feature-gate framework or a new CLI command. The Helm
+chart must install both CRDs and the additional status and Secret permissions.
 
-The initial qualification target uses the existing Snapshot artifact-storage,
-CRIU, CUDA checkpoint, and restore compatibility configuration. Backend and
-transport and session-policy capability are recorded in the checkpoint rather
-than selected by an out-of-band annotation. The initial qualification covers
-exactly two members; a general maximum set size remains an implementation
-decision informed by the scalability tests below.
+Each operation requires `deadlineSeconds`. Set-restore placeholders use the fixed
+canonical startup gate. Owners must create attempts with deadlines that fit the
+targets' remaining gate allowance; agent preflight enforces that rule. There is
+no per-workload gate-duration setting.
+
+The runtime session port and cleanup grace period are implementation configuration,
+not per-workload synchronization policy. Their defaults must be documented with
+the implementation. Existing node concurrency limits remain optional; when used,
+an agent reserves all of an attempt's local slots together or refuses with
+`NodeBusy`. It never waits for capacity while holding some slots. Reservations
+are journaled before Passed, rebuilt after restart, and freed on all terminal
+paths.
 
 ### Performance and Scalability
 
-Set validation, admission, capture, and restore use bounded concurrency. A
-profile may require all members to run a phase concurrently or may permit a
-smaller controller-selected bound; the protocol does not impose unconditional
-fan-out. Completion time is dominated by the slowest member and by explicit
-barriers, while artifact bytes remain the sum of the existing per-Pod artifacts
-plus a small set manifest.
+The API creates two operation objects, one child `PodSnapshot` per capture member,
+and one existing content per artifact. Restore creates no per-member API resource.
+The controller aggregates a bounded member list; the runtime handles fine-grained
+rounds without writing each round to Kubernetes.
 
-API object size and controller work grow linearly with member count. When a
-profile requires a complete network identity map, that map has linear size and
-is delivered to every member, producing quadratic aggregate distribution work.
-The initial two-member profile does not establish a general scale limit. Tests
-must measure reconciliation latency, API-object size, controller memory,
-identity-data distribution, and cleanup time at increasing set sizes before
-beta limits are selected.
+All local members must be able to execute concurrently once admitted. Serializing
+members can deadlock the runtime session. Qualification must include
+several members on one node and competing attempts on several nodes.
 
-The implementation must avoid unbounded fan-out that can starve unrelated
-standalone or set operations. The selected concurrency bound must not violate a
-profile's collective timing requirements. Metrics and logs avoid member
-identity labels whose cardinality grows with set size.
+Measure admission latency, capture and restore duration, API update volume, and
+node journal/lock cleanup cost as member count grows. The IPv4 map limit is an
+API bound, not a claim that every workload is qualified at that scale.
 
 ### Monitoring
 
-The set resources and `PodRestore` leaves expose Kubernetes conditions and
-member status sufficient to answer which phase is active, which leaf is still
-pending or held, whether every leaf is admitted or prepared, whether release is
-authorized, whether a failure is terminal, when the deadline expires, and what
-cleanup remains. Conditions use stable reason codes and include observed
-generation and transition time.
+Set conditions and member entries are the primary user-facing progress interface.
+While waiting, member reasons distinguish missing targets, scheduling, placeholder
+startup, and preflight. Stable terminal reasons include `SourceGone`, `TargetGone`,
+`PodIPChanged`, `ArtifactUnavailable`, `RestoreIncompatible`, `TargetInUse`,
+`TargetReused`, `GateBudgetTooShort`, `NodeBusy`, `GroupRefused`, `MemberFailed`,
+`DeadlineExceeded`, and `Cancelled`.
 
-The operator emits Kubernetes Events for set acceptance, validation failure,
-leaf admission or refusal, activation, checkpoint publication, restore
-preparation and release, completion, deadline expiry, set failure, deletion or
-cancellation, and cleanup failure.
+Emit Events for admission refusal, set failure, deadline expiry, and incomplete
+cleanup. Logs include operation kind, attempt UID, member ID, Pod UID, and stage;
+they exclude session secrets. During partial failure, status retains completed
+member outcomes while other reports and cleanup arrive.
 
-Metrics cover operation count, duration, and failure count by operation type,
-phase, result, and stable reason. Member IDs, Pod names, UIDs, IP addresses, and
-artifact paths are excluded from metric labels to avoid unbounded cardinality.
-Logs carry the set UID, restore-attempt UID, member ID, and leaf operation UID
-as structured correlation fields.
+Expose low-cardinality counters and timings for set success/failure, preflight
+refusal, admission wait, runtime duration, and recovery/cleanup failures. Individual
+attempt UIDs belong in logs and status, not metric labels.
 
 ### Dependencies
 
-- Existing Snapshot `PodSnapshot`, `PodSnapshotContent`, restore-Pod, CRIU,
-  CUDA checkpoint, compatibility-preflight, and artifact-storage paths, extended
-  with the durable leaf admission contract required by this SNEP.
-- The local admission, prepared/held, release, and restart contract being
-  aligned with SNEP-295.
-- A backend and communicator lifecycle qualified for checkpoint and restore,
-  including an explicit communicator-reconstruction or session-preservation
-  policy.
-- A workload owner capable of creating the complete source and target Pod set.
-- A workload-owner integration capable of enforcing the source hold contract.
-- A scheduler or workload manager capable of placing the target set. Grove is
-  optional.
-- A placeholder-startup policy that does not wait for restored workload
-  readiness before all required targets exist.
+The agents require CRIU TCP repair and remapping, the placeholder and artifact
+contracts, and cuInterpose's cross-Pod coordinator.
+
+[SNEP-295](https://github.com/ai-dynamo/snapshot/issues/295) defines the per-node
+cuInterpose foundation for shared CUDA memory, not cross-Pod coordination. This
+design reuses the cross-Pod coordinator's group validation, phase barriers, handle
+exchange, and release authorization. It does not require another brain in the
+Kubernetes controller.
+
+Integration must provide the full Coordination Rules above. Safe capture
+abort requires protocol and shim support to return a pre-destructive participant
+to its active state. Participant-free relays, local source-identity checks
+(including rank 0), and the shared absolute deadline are also required. These
+checks and transitions belong to the relevant coordinator, relay, and shim paths,
+not all to the brain.
+
+The set controller supplies membership, bindings, credentials, and durable API
+status. Agents supply local preflight, journal recovery, network locks, and release
+markers. Adding the set CRDs alone does not implement those runtime and agent
+contracts; they must be integrated and tested before the feature is supported.
+
+Supported GPU restores must validate topology rather than accept an arbitrary
+placement. For MNNVL, every member restores into the required ComputeDomain and
+clique, and in-place restore requires release of the source channel claims. The
+runtime validates these identities during join. Supporting other transports or
+topologies requires their own compatibility checks and qualification.
 
 ### Test Plan
 
-Unit tests cover API validation, immutable required membership, the
-one-container-per-member limit, explicit source-to-destination container
-mapping, exact UID ownership, deadlines, phase transitions, idempotent leaf
-creation, ordered cleanup, and profile-dependent identity-data construction.
+Implementation and qualification are tracked by
+[snapshot#324](https://github.com/ai-dynamo/snapshot/issues/324). Tests exercise the
+set API, not only direct executor calls.
 
-Controller integration tests cover:
+#### Unit and Controller Tests
 
-- admission refusal before any leaf crosses its destructive boundary;
-- failure after one admitted leaf crosses its destructive boundary;
-- one incompatible target while every sibling remains admitted but inactive;
-- communicator-reconstruction and session-preservation state paths;
-- one prepared member followed by sibling failure, using the selected
-  disposition;
-- controller restart during admission, activation, prepared hold, release, and
-  result aggregation;
-- node-agent retry without duplicate capture or restore;
-- rejection of standalone restore from a set-owned leaf and of a mismatched set
-  UID;
-- missing, deleted, and unschedulable targets before and at the operation
-  deadline;
-- mapping-scope validation for communicator reconstruction and session
-  preservation;
-- cancellation and deletion during each nonterminal phase; and
-- source restart and replacement attempts while the source hold is active.
+- Validate immutable specs, unique members and Pod names, one-container mappings,
+  exact source UIDs, optional target UIDs, and the 256-member bound. Generate the
+  CRD schemas and exercise CEL updates against an API server, not just Go parsing.
+- Verify reuse of the per-Pod source shape, set-owned child activation, and
+  refusal of standalone restore from a set child. Exercise the content watch
+  trigger, and prove that a set-owned member with missing parent context waits
+  rather than falling back to standalone destructive capture.
+- Check ContextReady and Admitted ordering, live-ID preflight validation,
+  write-once nodes, IPs and references, stale reports, and container restart before
+  execution. Reject removal and re-addition of a member entry or the whole member
+  list, and reject changes to final outcomes.
+- Reject changing or removing a published session in either resource, including
+  clearing the entire status object when a session exists without member entries.
+  Controller restart must retain the endpoint and Secret reference.
+- Update reports for two members on one node and prove neither report disappears.
+  Assert that each agent's member payload contains only `id` and `report`, without
+  `outcome` or other controller-owned fields. Verify that controller updates
+  preserve agent-owned reports.
+- Refuse a target bound by another unfinished attempt. Race two controllers'
+  binding checks and prove the agent's exclusive Pod UID reservation prevents
+  execution by both attempts.
+- Check that waiting is not failure, missing targets obey deadlines, and
+  TargetGone produces Failed before admission and Unknown after admission.
+- Preserve final outcomes after application restart or Pod deletion; accept late
+  evidence for Unknown without reopening a failed attempt.
+- Delete a child or content under a Ready checkpoint. Withdraw Ready, preserve
+  exact references and Captured outcomes, fail unfinished restores, and refuse
+  new restores even if cached conditions are stale. Do not adopt same-named
+  replacements or recapture.
+- Verify parent/child deletion ordering, waiting for active restores, bounded
+  finalizer grace, orphan Secret cleanup, and controller restart idempotence.
+  A completed checkpoint must not expire when its capture deadline passes.
 
-End-to-end qualification uses the initial qualification target and verifies:
+#### Agent and Failure Tests
 
-1. cold initialization and inference;
-2. checkpoint of both members;
-3. restore onto newly scheduled Pods;
-4. both-changed, one-changed, and unchanged Pod-IP cases;
-5. delivery of the mapping scope declared by the selected profile, including
-   complete peer mappings for session preservation;
-6. the selected communicator-reconstruction or session-preservation policy;
-7. for session preservation, no completion sentinel before every member is
-   Prepared and release is authorized;
-8. successful process, CUDA, and communicator restoration;
-9. correct post-restore inference;
-10. repeated restore from the same checkpoint;
-11. injected single-member failure, exact per-member status, and workload-owner
-    recovery; and
-12. a Grove-managed restore with placeholder-safe `startsAfter` handling.
+- Refuse one capture member before preparation and prove all sources remain
+  running; cancel capture before and after each destructive boundary.
+- Refuse one restore member and prove no CRIU restore starts and placeholders
+  remain running.
+- Test a new placeholder and one that has already spent part of its gate budget.
+  Check both sides of the remaining-budget boundary and refuse noncanonical
+  gates or conflicting standalone restore annotations before admission.
+- Change a source or target sandbox IP without changing its Pod UID, before
+  preflight and before execution. Refuse the stale identity without rebuilding
+  the map. Repeat before release and ensure cleanup touches only the recorded
+  sandbox and container.
+- Change a cuInterpose source's identity or IP after session inspection but before
+  its first preparation step. Both a remote relay and rank 0's local participant
+  path must refuse before local destructive work.
+- Crash the agent before CRIU, during CRIU, while held, after release
+  authorization, after marker publication, and after release is journaled
+  but before cleanup completes.
+- Repeat released recovery with the marker unreadable, the API unavailable,
+  the set failed or deleted, and the original Pod gone. Never kill or replay a
+  released workload; remove only the original attempt's lock.
+- Crash after Passed but before Admitted; rebuild reserved slots, revalidate,
+  and free them if the attempt cannot continue.
+- Crash the brain during partial release authorization and a relay mid-round.
+  Preserve truthful released outcomes and tear down only unreleased work.
+- Observe Failed while another member is in CRIU or has release authorization
+  but no marker. Confirm that member stops and does not release.
+- Delete or expire attempts at every capture and restore stage. Assert helper
+  termination, journal state, retained locks, and bounded API cleanup.
+- Reject a previously executed target; allow a reservation-only or preflight-
+  refused target after cleanup. Test Pod name and namespace recreation.
+- Reserve several same-node members together; contend across two nodes and
+  attempts. Verify NodeBusy refusal, no hold-and-wait, no slot leaks, and recovery.
+- Start relays before the brain. Verify that they can join once it starts and
+  that a missing brain cannot extend the absolute deadline.
+- Verify that coordination requests and replies pass while peer application
+  traffic stays blocked, and that unrelated network filtering still applies.
+  Refuse session-port use by checkpointed application sockets.
+
+#### End-to-End Qualification
+
+1. **CPU TCP workload:** restore on the same nodes and swapped nodes, force an
+   IP permutation, assert that every IP changed, and verify preserved cross-Pod
+   connections. Include a negative control with peer remapping disabled. Run
+   each case at least three times.
+2. **MPI workload:** run ping-pong after in-place and relocated restore.
+3. **GPU plus application TCP:** reconstruct cuInterpose GPU resources in the
+   same workload that holds checkpointed cross-Pod TCP connections. Verify both
+   the GPU result and those connections after release. This must exercise the
+   runtime port exemption while application sockets remain locked.
+4. **Inference engines:** qualify a real distributed TensorRT-LLM workload, then
+   vLLM and SGLang combinations before claiming support for them. Record the
+   engine version, GPU topology, transport, and workload for each supported case.
+5. **Source lifetime:** delay member B's dump; after A finishes, separately
+   restart A's container, delete A's Pod, and recreate its sandbox. Inspect B's
+   saved sockets and the restored workload. Determine whether source isolation
+   or a lifecycle contract is required.
 
 ### Graduation Criteria
 
-Alpha requires the four resources in `v1alpha1`; resolution of every open design
-decision in this SNEP; the initial qualified profile; controller and node-agent
-restart coverage; deadline, deletion, and failure-injection coverage; and
-end-to-end evidence for repeated restore and Pod-IP relocation. Documentation
-must state the exact qualified backend, transport, session policy, CUDA-graph,
-namespace, and cluster boundaries.
+**Alpha:** the two CRDs and controller/agent path are implemented; admission,
+partial failure, journal recovery, deletion, and deadlines pass the CPU and fault
+tests. GPU reconstruction and preserved TCP pass together, and at least one real
+inference workload is qualified. Source lifetime results define the supported
+operating constraints. Documentation states those constraints without claiming
+generic transport or backend support.
 
-Beta requires operational evidence for the declared supported profiles,
-upgrade and downgrade behavior, published metrics and runbooks, and no known
-path that exposes a partial group as Ready.
+**Beta readiness:** the API and status ownership have remained stable through
+operational use; repeated multi-node tests cover controller and agent restart,
+partial release, scheduling delay, concurrent attempts, and cleanup. Qualified
+backend/topology combinations and upgrade behavior are documented. Any remaining
+source-lifetime restriction is enforced or explicitly required of the owner.
 
-GA requires a stable API version, documented compatibility and storage
-policies, scale and longevity testing, conformance coverage for supported
-profiles, and a migration plan from the alpha and beta APIs.
-
-## Implementation History
-
-- 2026-09: Initial SNEP drafted from the multi-node Snapshot investigation.
-
-## Alternatives
-
-### Restore Every Pod Independently
-
-Independent restore cannot construct profile-required peer identity mappings
-when they are needed or provide one durable group result. A partial group may
-appear successful even though a required member failed.
-
-### Preserve the Original Pod IP Addresses
-
-Preserving IPs constrains scheduling and relies on networking behavior that
-Kubernetes does not generally guarantee. It also does not address group
-publication, cleanup, or non-network peer identities.
-
-### Put the Protocol in a Workload Scheduler
-
-A scheduler such as Grove can provide membership and placement, but it should
-not own CRIU and CUDA ordering, backend lifecycle, artifact publication, or
-Snapshot cleanup policy.
-
-### Let Each Inference Backend Coordinate Kubernetes Restore
-
-This duplicates Kubernetes orchestration, identity, failure semantics, and
-cleanup across TensorRT-LLM, vLLM, and SGLang. Backends should own their
-communication-resource lifecycle while Snapshot owns the outer Kubernetes
-operation.
-
-### Coordinate the Group Only in Dynamo
-
-Dynamo could aggregate multiple leaf snapshots for an integration-specific
-prototype. That leaves Snapshot unable to represent the real artifact
-boundary, requires callers to reproduce result aggregation and cleanup
-semantics, and makes complete remap delivery an out-of-band contract. The
-generic group mechanics belong in Snapshot while Dynamo remains a
-workload-specific caller.
-
-### Extend `SnapshotJob` to Multiple Pods
-
-`SnapshotJob` owns creation of one capture Job and is intentionally
-capture-only. Extending it to own a multi-Pod workload conflicts with Dynamo or
-Grove ownership of membership, rank assignment, gang scheduling, and topology
-placement. The group API instead composes caller-owned Pods and existing
-per-Pod artifacts.
-
-## Appendix
-
-### References
-
-- [RFC 2119]
-- [Dynamo DEP #13220: Composable container checkpoint/restore and CUDA data
-  plane](https://github.com/ai-dynamo/dynamo/issues/13220)
-- [Dynamo PR #12961: Stable CUDA launch-job
-  identity](https://github.com/ai-dynamo/dynamo/pull/12961)
-- [Dynamo PR #2269: Grove multi-node
-  support](https://github.com/ai-dynamo/dynamo/pull/2269)
-- [Dynamo PR #2405: Grove deployment type
-  integration](https://github.com/ai-dynamo/dynamo/pull/2405)
-- [Snapshot API types](https://github.com/ai-dynamo/snapshot/tree/main/api/v1alpha1)
-- [Snapshot workload
-  contract](https://github.com/ai-dynamo/snapshot/blob/main/docs/reference/workload-contract.md)
-- [Snapshot restore-Pod
-  contract](https://github.com/ai-dynamo/snapshot/blob/main/docs/reference/restore-pod-contract.md)
-- [Snapshot per-Pod INET
-  remap](https://github.com/ai-dynamo/snapshot/blob/main/agent/internal/criu/inet_remap.go)
-- [Snapshot CRIU INET remap
-  plugin](https://github.com/ai-dynamo/snapshot/blob/main/agent/plugins/inet-remap/snapshot_inet_remap.c)
-- [Snapshot socket restore
-  handling](https://github.com/ai-dynamo/snapshot/blob/main/agent/internal/criu/restore_images.go)
-- [Snapshot PR #140: Restore compatibility
-  checks](https://github.com/ai-dynamo/snapshot/pull/140)
-- [Snapshot issue #295: Checkpointing same-node CUDA peer
-  mappings](https://github.com/ai-dynamo/snapshot/issues/295)
-- [Snapshot issue #294: Cross-node relocation coverage for one multi-GPU
-  Pod](https://github.com/ai-dynamo/snapshot/issues/294)
-- [Grove `startsAfter`
-  API](https://github.com/ai-dynamo/grove/blob/main/operator/api/core/v1alpha1/podclique.go)
-- [Grove `startsAfter` readiness
-  implementation](https://github.com/ai-dynamo/grove/blob/main/operator/initc/internal/wait.go)
-- [Grove](https://github.com/ai-dynamo/grove)
-
-[RFC 2119]: https://www.rfc-editor.org/rfc/rfc2119
+No release date or automatic expansion to other engines and transports is implied.
