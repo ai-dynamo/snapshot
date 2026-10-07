@@ -142,8 +142,8 @@ func TestInspectCuInterposeRepeatedMappingRegions(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("front"))), inspection.sha256[types.CuInterposeFrontend])
-			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("core"))), inspection.sha256[types.CuInterposeCore])
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("front"))), inspection.libraries[types.CuInterposeFrontend].SHA256)
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("core"))), inspection.libraries[types.CuInterposeCore].SHA256)
 		})
 	}
 }
@@ -160,13 +160,13 @@ func TestInspectCuInterposeRejectsUnsupportedPathWhenNotRequested(t *testing.T) 
 	require.ErrorContains(t, err, "must be delivered")
 }
 
-func TestCheckCuInterposeLibraries(t *testing.T) {
+func TestVerifyCuInterposeLibraryIdentity(t *testing.T) {
 	procRoot := t.TempDir()
 	directory := writeMappedLibraries(t, procRoot, 1, "front", "core")
 	inspection, err := InspectCuInterposeLibraries(procRoot, []int{1}, true)
 	require.NoError(t, err)
 	identity := inspection.Manifest([]int{1}, []int{1})
-	require.NoError(t, CheckCuInterposeLibraries(directory, identity))
+	require.NoError(t, VerifyCuInterposeLibraryIdentity(directory, identity))
 	for _, name := range []string{"libcuinterpose.so", "libcuinterpose_core.so"} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(directory, name)
@@ -175,12 +175,12 @@ func TestCheckCuInterposeLibraries(t *testing.T) {
 			changed := append([]byte(nil), original...)
 			changed[0] ^= 1 // Same file size must not imply compatibility.
 			require.NoError(t, os.WriteFile(path, changed, 0600))
-			err = CheckCuInterposeLibraries(directory, identity)
+			err = VerifyCuInterposeLibraryIdentity(directory, identity)
 			require.ErrorContains(t, err, name+" SHA-256 mismatch")
 			require.ErrorContains(t, err, fmt.Sprintf("expected %x", sha256.Sum256(original)))
 			require.ErrorContains(t, err, fmt.Sprintf("actual %x", sha256.Sum256(changed)))
 			require.NoError(t, os.Remove(path))
-			err = CheckCuInterposeLibraries(directory, identity)
+			err = VerifyCuInterposeLibraryIdentity(directory, identity)
 			require.ErrorIs(t, err, os.ErrNotExist)
 			require.ErrorContains(t, err, "open restore library "+name)
 			require.NoError(t, os.WriteFile(path, original, 0600))
@@ -225,8 +225,8 @@ func TestInspectFrontendOnlyCUDAProcesses(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("front"))), inspection.sha256[types.CuInterposeFrontend])
-			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("core"))), inspection.sha256[types.CuInterposeCore])
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("front"))), inspection.libraries[types.CuInterposeFrontend].SHA256)
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("core"))), inspection.libraries[types.CuInterposeCore].SHA256)
 			identity := inspection.Manifest(hostPIDs, []int{1, 623})
 			if tc.workerActive {
 				require.Equal(t, []int{1623}, inspection.coordinatorHostPIDs)
@@ -235,9 +235,9 @@ func TestInspectFrontendOnlyCUDAProcesses(t *testing.T) {
 				require.Empty(t, inspection.coordinatorHostPIDs)
 				require.Equal(t, []int{}, identity.PIDs)
 			}
-			require.NoError(t, CheckCuInterposeLibraries(parentDir, identity))
+			require.NoError(t, VerifyCuInterposeLibraryIdentity(parentDir, identity))
 			require.NoError(t, os.WriteFile(corePath, []byte("diff"), 0600))
-			require.ErrorContains(t, CheckCuInterposeLibraries(parentDir, identity), "SHA-256 mismatch")
+			require.ErrorContains(t, VerifyCuInterposeLibraryIdentity(parentDir, identity), "SHA-256 mismatch")
 		})
 	}
 }

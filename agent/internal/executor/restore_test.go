@@ -701,7 +701,10 @@ func TestRestoreSourceAndAbortCleanup(t *testing.T) {
 
 func testCuInterposeIdentity() *types.CuInterposeManifest {
 	return &types.CuInterposeManifest{
-		SHA256: map[string]string{types.CuInterposeFrontend: strings.Repeat("a", 64), types.CuInterposeCore: strings.Repeat("b", 64)},
-		PIDs:   []int{},
+		Libraries: map[string]types.CuInterposeLibraryIdentity{
+			types.CuInterposeFrontend: {SHA256: strings.Repeat("a", 64)},
+			types.CuInterposeCore:     {SHA256: strings.Repeat("b", 64)},
+		},
+		PIDs: []int{},
 	}
 }
