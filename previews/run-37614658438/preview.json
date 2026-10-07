@@ -1,0 +1,18 @@
+{
+  "combinedRecordCount": 63,
+  "expiresAt": "2026-10-21T11:46:51.016Z",
+  "formatVersion": 1,
+  "generatedAt": "2026-10-07T11:46:51.016Z",
+  "historyRecordCount": 60,
+  "key": "run-37614658438",
+  "previewRecordCount": 3,
+  "source": {
+    "branch": "ci/e2e-vcluster-0.37",
+    "commit": "30e14d363d4b031455ac37beaf55a8c27d4df364",
+    "event": "workflow_dispatch",
+    "pullRequest": null,
+    "runAttempt": 1,
+    "runId": "37614658438",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/37614658438"
+  }
+}
