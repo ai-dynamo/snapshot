@@ -161,8 +161,22 @@ reference images this is why the build starts from the framework's tested runtim
 image and sets a few environment variables. A packaging method that skips the
 custom image still has to meet these:
 
-- **glibc floor and `x86_64`.** The restore bundle requires a recent glibc, which
-  the reference runtime images already clear. Snapshot is x86_64-only today.
+- **glibc floor and `x86_64`.** At restore, the agent mounts its CRIU and CUDA
+  tooling into the restore container. These tools run with the image's loader
+  but with libraries built on the agent image (Ubuntu 24.04, glibc 2.39), so the
+  image must be glibc-compatible with it. An Ubuntu 22.04 image fails at restore
+  with `version 'GLIBC_2.38' not found`. The reference runtime images already
+  clear this floor. Snapshot is x86_64-only today.
+- **No newer preloaded library.** If the image ships `/etc/ld.so.preload`, each
+  library it lists must not need a glibc newer than 2.39. Otherwise the
+  restore tooling fails to start with `version 'GLIBC_2.41' not found`.
+- **Writable `/tmp` in the restore container.** The agent mounts its tooling
+  under `/tmp`. With `readOnlyRootFilesystem: true`, mount an `emptyDir` at
+  `/tmp`.
+- **`cuda-checkpoint` at the same path.** With `--cuda-checkpoint-wrap`, the
+  restore image must have `cuda-checkpoint` at the same path as the source
+  image, because CRIU restores file-backed mappings by path.
+- **Node kernel 5.12 or newer.** The tooling mount uses `mount_setattr`.
 - **All file handles must be reopenable.** Disable caches that leave handles CRIU
   cannot reopen after restore — for example `HF_HUB_DISABLE_XET=1`, and loading
   models from a local cache with `HF_HUB_OFFLINE=1`.
