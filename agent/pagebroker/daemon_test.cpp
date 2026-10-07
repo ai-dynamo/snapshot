@@ -659,11 +659,12 @@ TEST(DaemonOptionsTest, ParsesCustomStorageOptions)
   const std::vector<std::string_view> arguments{
       "socket", "staging", "storage", "--custom-storage-engine", "off",
       "--max-concurrent-requests", "8", "--custom-storage-buffer-count", "2",
-      "--custom-storage-chunk-bytes", "1048576", "--custom-storage-max-pinned-bytes", "0"};
+      "--custom-storage-chunk-bytes", "1048576", "--custom-storage-max-pinned-bytes", "0", "--storage-config", "storage.yaml"};
   const auto options = ParseDaemonOptions(arguments);
   EXPECT_EQ(options.socket_path, "socket");
   EXPECT_EQ(options.staging_directory, "staging");
   EXPECT_EQ(options.storage_root, "storage");
+  EXPECT_EQ(options.storage_config_path, "storage.yaml");
   EXPECT_EQ(options.max_concurrent_requests, 8);
   EXPECT_EQ(options.gpu.buffer_count, 2);
   EXPECT_EQ(options.gpu.chunk_bytes, 1048576);
@@ -1042,7 +1043,7 @@ TEST_F(BrokerTest, RejectsUnsupportedArtifactSelectorsWithOrWithoutEngine)
   EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
 }
 
-TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
+TEST_F(BrokerTest, MetadataFailsInvalidRequestWithoutCreatingTransactionWhenNoStoreIsConfigured)
 {
   auto request = RequestFor("metadata");
   auto* artifact = request.mutable_get_artifact_metadata()->mutable_artifact();
@@ -1052,7 +1053,7 @@ TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
   const auto rejected = broker().HandleRequest(request);
   ASSERT_TRUE(rejected.has_failure());
   EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
-  EXPECT_EQ(rejected.failure().message(), "artifact metadata retrieval is not implemented");
+  EXPECT_EQ(rejected.failure().message(), "no artifact store is configured for this installation");
   EXPECT_EQ(rejected.request_id(), request.request_id());
   EXPECT_EQ(rejected.transaction_id(), request.transaction_id());
 
@@ -1060,3 +1061,160 @@ TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
   EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
   EXPECT_TRUE(fs::exists(source_ / "image"));
 }
+
+namespace {
+
+constexpr char kConfiguredStoreID[] = "store-v1-57e06c9609c92e973d048143531baadb9271a9571f1d1dbc21af2c6cd13d24c2";
+
+// ArtifactBrokerTest covers the end-to-end artifact-addressed flow through
+// HandleRequest, with a store configured. BrokerTest above deliberately
+// leaves the store unconfigured to cover the "no store" rejection path
+// without a real backend; this fixture is the one real backend it rejects to.
+class ArtifactBrokerTest : public ::testing::Test {
+ protected:
+  void SetUp() override
+  {
+    root_ = fs::temp_directory_path() / "pagebroker-artifact-daemon-tests" /
+            ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    fs::remove_all(root_);
+    broker_.emplace(root_ / "tmpfs", root_ / "storage", nullptr, kConfiguredStoreID);
+  }
+
+  void TearDown() override { fs::remove_all(root_); }
+
+  Request RequestFor(const std::string& id)
+  {
+    Request request;
+    request.set_request_id("request-" + id + "-" + std::to_string(++request_number_));
+    request.set_transaction_id(id);
+    return request;
+  }
+
+  ArtifactTarget Target(const std::string& uid, const std::string& container)
+  {
+    ArtifactTarget target;
+    target.set_store_id(kConfiguredStoreID);
+    target.mutable_artifact()->set_artifact_uid(uid);
+    target.mutable_artifact()->set_container_name(container);
+    return target;
+  }
+
+  // Runs a full checkpoint through staging and Commit; returns the published
+  // descriptor. Writes manifest.yaml plus one payload file into staging
+  // before Commit, as the agent would. Each call is a distinct transaction
+  // (a fresh transaction_id, as Snapshot always assigns) even when uid and
+  // container repeat, e.g. to simulate republishing the same target.
+  PublishedArtifact PublishCheckpoint(const std::string& uid, const std::string& container)
+  {
+    const std::string transaction_id = "checkpoint-" + uid + "-" + std::to_string(++request_number_);
+    auto prepare = RequestFor(transaction_id);
+    *prepare.mutable_prepare_staged_checkpoint()->mutable_target() = Target(uid, container);
+    const auto staged = broker().HandleRequest(prepare);
+    EXPECT_TRUE(staged.has_staged_checkpoint_directory());
+    const fs::path staging_directory(staged.staged_checkpoint_directory().image_directory());
+    std::ofstream(staging_directory / "manifest.yaml") << "artifact:\n  contentUID: " << uid << "\n";
+    std::ofstream(staging_directory / "pages-1.img") << "criu image bytes";
+
+    auto commit = RequestFor(transaction_id);
+    commit.mutable_commit();
+    const auto committed = broker().HandleRequest(commit);
+    EXPECT_TRUE(committed.has_commit_complete());
+    EXPECT_TRUE(committed.commit_complete().has_published_artifact());
+    return committed.commit_complete().published_artifact();
+  }
+
+  Broker& broker() { return *broker_; }
+
+  fs::path root_;
+  std::optional<Broker> broker_;
+  unsigned request_number_ = 0;
+};
+
+TEST_F(ArtifactBrokerTest, CheckpointsAndCommitsAnArtifactAddressedTarget)
+{
+  const auto published = PublishCheckpoint("uid-1", "main");
+  EXPECT_EQ(published.store_id(), kConfiguredStoreID);
+  EXPECT_EQ(published.artifact_handle(), "artifacts/uid-1/containers/main");
+  EXPECT_TRUE(fs::exists(root_ / "storage/artifacts/uid-1/containers/main/manifest.yaml"));
+  EXPECT_TRUE(fs::exists(root_ / "storage/artifacts/uid-1/containers/main/publication.json"));
+}
+
+TEST_F(ArtifactBrokerTest, RestoresFromAPublishedDescriptor)
+{
+  const auto published = PublishCheckpoint("uid-2", "main");
+  const auto gpu_directory = root_ / "storage/artifacts/uid-2/containers/main" / gpu::kDataDirectory;
+  fs::create_directory(gpu_directory);
+  std::ofstream(gpu_directory / "payload") << "GPU memory";
+
+  auto restore = RequestFor("restore-uid-2");
+  *restore.mutable_staged_restore()->mutable_artifact() = published;
+  const auto staged = broker().HandleRequest(restore);
+  ASSERT_TRUE(staged.has_staged_restore_directory());
+  const fs::path staging_directory(staged.staged_restore_directory().image_directory());
+  EXPECT_TRUE(fs::exists(staging_directory / "manifest.yaml"));
+  EXPECT_TRUE(fs::exists(staging_directory / "pages-1.img"));
+  EXPECT_FALSE(fs::exists(staging_directory / gpu::kDataDirectory));
+  EXPECT_TRUE(fs::exists(gpu_directory / "payload"));
+
+  auto commit = RequestFor("restore-uid-2");
+  commit.mutable_commit();
+  EXPECT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+  EXPECT_FALSE(fs::exists(staging_directory));
+  // Restoring does not consume the publication: it is still there to restore again.
+  EXPECT_TRUE(fs::exists(root_ / "storage/artifacts/uid-2/containers/main/manifest.yaml"));
+}
+
+TEST_F(ArtifactBrokerTest, FetchesMetadataWithoutStagingThePayload)
+{
+  const auto published = PublishCheckpoint("uid-3", "main");
+
+  auto metadata = RequestFor("metadata-uid-3");
+  *metadata.mutable_get_artifact_metadata()->mutable_artifact() = published;
+  const auto staged = broker().HandleRequest(metadata);
+  ASSERT_TRUE(staged.has_get_artifact_metadata_complete());
+  const fs::path manifest_directory(staged.get_artifact_metadata_complete().manifest_directory());
+  EXPECT_TRUE(fs::exists(manifest_directory / "manifest.yaml"));
+  EXPECT_FALSE(fs::exists(manifest_directory / "pages-1.img"));
+
+  // Per contract, a metadata fetch closes with Abort, not Commit, and Abort
+  // never deletes the publication itself.
+  auto abort = RequestFor("metadata-uid-3");
+  abort.mutable_abort();
+  EXPECT_TRUE(broker().HandleRequest(abort).has_abort_complete());
+  EXPECT_FALSE(fs::exists(manifest_directory));
+  EXPECT_TRUE(fs::exists(root_ / "storage/artifacts/uid-3/containers/main/manifest.yaml"));
+}
+
+TEST_F(ArtifactBrokerTest, RefusesADescriptorFromAnotherStore)
+{
+  auto restore = RequestFor("restore-mismatch");
+  auto* artifact = restore.mutable_staged_restore()->mutable_artifact();
+  artifact->set_store_id("store-v1-" + std::string(64, 'a'));
+  artifact->set_artifact_handle("artifacts/uid-4/containers/main");
+  artifact->set_artifact_format_version("snapshot.pagebroker/v1");
+  const auto rejected = broker().HandleRequest(restore);
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().code(), Failure::STORE_MISMATCH);
+}
+
+TEST_F(ArtifactBrokerTest, RefusesRestoringAnUnpublishedArtifact)
+{
+  auto restore = RequestFor("restore-missing");
+  auto* artifact = restore.mutable_staged_restore()->mutable_artifact();
+  artifact->set_store_id(kConfiguredStoreID);
+  artifact->set_artifact_handle("artifacts/never-published/containers/main");
+  artifact->set_artifact_format_version("snapshot.pagebroker/v1");
+  const auto rejected = broker().HandleRequest(restore);
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().code(), Failure::ARTIFACT_NOT_FOUND);
+}
+
+TEST_F(ArtifactBrokerTest, RepublishingReplacesThePreviousArtifactAtomically)
+{
+  const auto first = PublishCheckpoint("uid-5", "main");
+  const auto second = PublishCheckpoint("uid-5", "main");
+  EXPECT_EQ(first.artifact_handle(), second.artifact_handle());
+  EXPECT_FALSE(fs::exists(root_ / "storage/artifacts/uid-5/containers/main.pagebroker-previous"));
+}
+
+}  // namespace
