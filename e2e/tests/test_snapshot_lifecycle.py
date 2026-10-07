@@ -75,6 +75,72 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
         raise
 
 
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_successful_snapshot_captures_cpu_and_fs(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        source, source_node = create_ready_source(config, run, gpu=False)
+        assert snapshot_annotations(source) == {}
+        snap.wait_for_state_observations(
+            config.namespace,
+            run.source_pod,
+            run.source_token,
+            gpu=False,
+            minimum=2,
+        )
+        snap.create_podsnapshot(
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
+            source.metadata.uid,
+        )
+
+        pod_snapshot, content = snap.wait_for_snapshot_ready(
+            config.namespace,
+            run.snapshot_name,
+        )
+        assert_podsnapshot_ready(pod_snapshot, content, source, source_node)
+        content_uid = content["metadata"]["uid"]
+        manifest = snap.checkpoint_artifact_manifest(
+            config,
+            source_node,
+            content_uid,
+        )
+        assert f"contentUID: {content_uid}" in manifest
+        assert "containerName: main" in manifest
+        assert "criuDump:" in manifest
+        assert f"podName: {run.source_pod}" in manifest
+        # The agent records cudaRestore only when the dump found CUDA processes,
+        # so a capture that advertised one here would be claiming device state
+        # it never took.
+        assert "cudaRestore:" not in manifest
+
+        artifact_listing = snap.checkpoint_artifact_listing(
+            config,
+            source_node,
+            content_uid,
+        )
+        assert "./inventory.img" in artifact_listing
+        assert "./manifest.yaml" in artifact_listing
+        assert "./rootfs-diff.tar" in artifact_listing
+        assert "./tmp/e2e-state/file-token" in artifact_listing
+        assert "./tmp/e2e-state/observations.log" in artifact_listing
+
+        file_token = snap.checkpoint_rootfs_file(
+            config,
+            source_node,
+            content_uid,
+            "./tmp/e2e-state/file-token",
+        )
+        assert file_token.strip() == run.source_token
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 # The value does not matter, only that one is set: a limit neither side records
 # compares equal to itself and proves nothing.
 RECORDED_MEMORY_LIMIT = "4Gi"
@@ -185,6 +251,96 @@ def test_snapshot_records_the_environment_a_restore_is_checked_against(
         raise
 
 
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_snapshot_records_the_cpu_environment_a_restore_is_checked_against(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    """The device-free half of the same contract, against the same ground truth.
+
+    The GPU test covers the device facts; these are the ones a cluster without
+    a GPU can still prove, and they are the facts most of the compatibility
+    gates actually decide on: the kernel and architecture the node reports, and
+    the image, image ID and memory limit the pod was admitted with. All of them
+    are read at capture and can never be recovered afterwards.
+    """
+    try:
+        source, source_node = create_ready_source(
+            config, run, gpu=False, memory_limit=RECORDED_MEMORY_LIMIT
+        )
+        snap.wait_for_state_observations(
+            config.namespace,
+            run.source_pod,
+            run.source_token,
+            gpu=False,
+            minimum=2,
+        )
+        # Read before the capture, while the source container is still running.
+        source_status = next(
+            status
+            for status in source.status.container_statuses
+            if status.name == snap.CONTAINER
+        )
+        source_image_id = snap.runtime_image_id(
+            config, source_node, source_status.container_id
+        )
+
+        snap.create_podsnapshot(
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
+            source.metadata.uid,
+        )
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        manifest = snap.checkpoint_manifest(
+            config, source_node, content["metadata"]["uid"]
+        )
+
+        node_info = k8s.read_node(source_node).status.node_info
+        host = manifest["host"]
+        assert host["kernelVersion"] == node_info.kernel_version
+        assert host["cpuArch"] == node_info.architecture
+
+        pod = k8s.read_pod(config.namespace, run.source_pod)
+        container = next(c for c in pod.spec.containers if c.name == snap.CONTAINER)
+        limits = (container.resources.limits or {}) if container.resources else {}
+        recorded_pod = manifest["k8s"]
+        assert recorded_pod["image"] == container.image
+        if source_image_id:
+            assert recorded_pod["imageId"] == source_image_id
+        else:
+            # Missing CRI image_id is a supported unknown, not a failed capture.
+            # Verify omission rather than skipping this environment test.
+            assert "imageId" not in recorded_pod
+        assert recorded_pod["memoryLimit"] == limits["memory"]
+        # This pod sets no CPU limit, and an absent value is recorded as absent
+        # rather than invented, which is what makes it refuse nothing later.
+        assert "cpu" not in limits
+        assert "cpuLimit" not in recorded_pod
+
+        published = content["status"]["source"]
+        assert published["node"] == {
+            "name": source_node,
+            "architecture": node_info.architecture,
+            "kernelVersion": node_info.kernel_version,
+        }
+        # Exact equality, because the CPU limit this pod never set must stay
+        # absent here as well as in the manifest.
+        expected_pod = {
+            "image": container.image,
+            "memory": limits["memory"],
+        }
+        if source_image_id:
+            expected_pod["imageDigest"] = (
+                source_image_id.split("://")[-1].rsplit("@", 1)[-1]
+            )
+        assert published["pod"] == expected_pod
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 @pytest.mark.snapshot_success
 @pytest.mark.gpu
 def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
@@ -192,7 +348,7 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
     run: snap.TestRun,
 ) -> None:
     try:
-        _, source_node, checkpoint_observations = create_valid_gpu_checkpoint(config, run)
+        _, source_node, checkpoint_observations = create_valid_checkpoint(config, run, gpu=True)
 
         k8s.delete_pod(config.namespace, run.source_pod)
         snap.wait_for_pod_deleted(config.namespace, run.source_pod)
@@ -313,7 +469,7 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
     run: snap.TestRun,
 ) -> None:
     try:
-        _, source_node, _ = create_valid_gpu_checkpoint(config, run)
+        _, source_node, _ = create_valid_checkpoint(config, run, gpu=True)
         k8s.delete_pod(config.namespace, run.source_pod)
         snap.wait_for_pod_deleted(config.namespace, run.source_pod)
 
@@ -369,8 +525,8 @@ def test_refused_restore_says_why_and_does_no_criu_work(
     run: snap.TestRun,
 ) -> None:
     try:
-        _, source_node, _ = create_valid_gpu_checkpoint(
-            config, run, memory_limit=CAPTURE_MEMORY_LIMIT
+        _, source_node, _ = create_valid_checkpoint(
+            config, run, gpu=True, memory_limit=CAPTURE_MEMORY_LIMIT
         )
         k8s.delete_pod(config.namespace, run.source_pod)
         snap.wait_for_pod_deleted(config.namespace, run.source_pod)
@@ -380,6 +536,53 @@ def test_refused_restore_says_why_and_does_no_criu_work(
                 config=config,
                 run=run,
                 gpu=True,
+                source_node=source_node,
+                memory_limit=SMALLER_MEMORY_LIMIT,
+            )
+        )
+        pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreIncompatible"
+        )
+
+        refusal = snap.pod_condition(pod, snap.RESTORED_CONDITION)
+        assert "memory-limit" in refusal.message
+        assert CAPTURE_MEMORY_LIMIT in refusal.message
+        assert SMALLER_MEMORY_LIMIT in refusal.message
+
+        assert_restore_events(config.namespace, run.restore_pod, {"RestoreIncompatible"})
+        time.sleep(2 * RESTORE_RESYNC_SECONDS + 5)
+        assert restore_event_count(config.namespace, run.restore_pod, "RestoreIncompatible") == 1
+        assert "RestoreFailed" not in restore_event_reasons(config.namespace, run.restore_pod)
+
+        # The placeholder is still the placeholder: a refusal costs no CRIU work,
+        # so the workload never sees restore-complete.
+        assert not snap.file_present(config.namespace, run.restore_pod, snap.RESTORE_DONE)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_refused_cpu_restore_says_why_and_does_no_criu_work(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # The mismatch is the memory limit, so none of this needs a GPU: the gate
+    # compares what the capture recorded against what the target offers, and
+    # that comparison is the same code on either kind of cluster.
+    try:
+        _, source_node, _ = create_valid_checkpoint(
+            config, run, gpu=False, memory_limit=CAPTURE_MEMORY_LIMIT
+        )
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            snap.restore_pod(
+                config=config,
+                run=run,
+                gpu=False,
                 source_node=source_node,
                 memory_limit=SMALLER_MEMORY_LIMIT,
             )
@@ -418,8 +621,8 @@ def test_skip_annotation_lets_a_refused_restore_through(
     run: snap.TestRun,
 ) -> None:
     try:
-        _, source_node, _ = create_valid_gpu_checkpoint(
-            config, run, memory_limit=CAPTURE_MEMORY_LIMIT
+        _, source_node, _ = create_valid_checkpoint(
+            config, run, gpu=True, memory_limit=CAPTURE_MEMORY_LIMIT
         )
         k8s.delete_pod(config.namespace, run.source_pod)
         snap.wait_for_pod_deleted(config.namespace, run.source_pod)
@@ -428,6 +631,39 @@ def test_skip_annotation_lets_a_refused_restore_through(
             config=config,
             run=run,
             gpu=True,
+            source_node=source_node,
+            memory_limit=SKIPPABLE_MEMORY_LIMIT,
+        )
+        body["metadata"]["annotations"]["nvidia.com/snapshot-skip-compat-check"] = "true"
+        k8s.create_pod(body)
+
+        pod = snap.wait_for_restore_past_the_gate(config.namespace, run.restore_pod)
+        assert snap.pod_condition(pod, snap.RESTORED_CONDITION).reason != "RestoreIncompatible"
+        assert "RestoreIncompatible" not in restore_event_reasons(
+            config.namespace, run.restore_pod
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_skip_annotation_lets_a_refused_cpu_restore_through(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node, _ = create_valid_checkpoint(
+            config, run, gpu=False, memory_limit=CAPTURE_MEMORY_LIMIT
+        )
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        body = snap.restore_pod(
+            config=config,
+            run=run,
+            gpu=False,
             source_node=source_node,
             memory_limit=SKIPPABLE_MEMORY_LIMIT,
         )
@@ -532,18 +768,19 @@ def test_orphan_sweep_reclaims_uid_root(
         raise
 
 
-def create_valid_gpu_checkpoint(
+def create_valid_checkpoint(
     config: k8s.E2EConfig,
     run: snap.TestRun,
     *,
+    gpu: bool,
     memory_limit: str | None = None,
 ) -> tuple[object, str, int]:
-    source, source_node = create_ready_source(config, run, gpu=True, memory_limit=memory_limit)
+    source, source_node = create_ready_source(config, run, gpu=gpu, memory_limit=memory_limit)
     checkpoint_observations = snap.wait_for_state_observations(
         config.namespace,
         run.source_pod,
         run.source_token,
-        gpu=True,
+        gpu=gpu,
         minimum=2,
     )
     snap.create_podsnapshot(

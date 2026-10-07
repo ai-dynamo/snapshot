@@ -174,12 +174,13 @@ def test_snapshotjob_captures_and_restore_recovers_state(
 
 @pytest.mark.cpu
 @pytest.mark.snapshot_success
-def test_snapshotjob_cpu_only_captures(
+def test_snapshotjob_cpu_captures_and_restore_recovers_state(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    # First non-GPU SnapshotJob coverage: capture and artifact only, no
-    # restore round trip (that is the GPU test's job).
+    # The same round trip as the GPU test, minus the device state: nothing in
+    # the two-stage completion gate, the artifact, or the restore path depends
+    # on a GPU being present.
     try:
         snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
@@ -200,9 +201,10 @@ def test_snapshotjob_cpu_only_captures(
         )
         assert_snapshotjob_completed(sj)
 
+        pod_snapshot_name = sj["status"]["podSnapshotName"]
         _, content = snap.wait_for_snapshot_ready(
             config.namespace,
-            sj["status"]["podSnapshotName"],
+            pod_snapshot_name,
             timeout=60,
         )
         source_node = content["spec"]["source"]["nodeName"]
@@ -213,6 +215,34 @@ def test_snapshotjob_cpu_only_captures(
 
         snap.wait_for_pod_deleted(config.namespace, source_pod_name, timeout=120)
         assert k8s.read_job(config.namespace, snapshotjob_name) is None
+
+        k8s.create_pod(
+            workloads.restore_pod(
+                config=config,
+                run=run,
+                gpu=False,
+                source_node=source_node,
+                snapshot_name=pod_snapshot_name,
+            )
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+
+        # checkpoint_observations=1: the workload writes observation seq=0
+        # before signalling ready, so at least one observation is guaranteed
+        # in the captured state without any pre-capture polling.
+        output = snap.assert_restored_state(
+            config.namespace,
+            run.restore_pod,
+            source_token=run.source_token,
+            restore_token=run.restore_token,
+            checkpoint_observations=1,
+            gpu=False,
+        )
+        assert f"source_token={run.source_token}" in output
+        assert f"restore_token={run.restore_token}" in output
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
         raise
