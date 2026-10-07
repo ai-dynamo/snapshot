@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/snapshot/api/storage/coordination"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
@@ -78,6 +79,16 @@ func (q *Queue) backend() (Backend, error) {
 		return nil, fmt.Errorf("no maintenance backend implementation registered for configured store %q", q.configuredBackend)
 	}
 	return backend, nil
+}
+
+// backendForContent prevents a missing artifact on another PVC from counting as completed cleanup.
+func (q *Queue) backendForContent(content *snapshotv1alpha1.PodSnapshotContent) (Backend, error) {
+	if content.Spec.Storage != nil {
+		if err := coordination.RequireStoreMatch(content.Spec.Storage.StoreID, q.config.StoreID); err != nil {
+			return nil, fmt.Errorf("maintenance for content %s: %w", content.Name, err)
+		}
+	}
+	return q.backend()
 }
 
 // EnqueueDeleteContent schedules cleanup for one content. Repeated calls for

@@ -46,8 +46,61 @@ func prepareTestArtifactRoot(t *testing.T, uid string) (string, string) {
 
 func testConfig(basePath string) operatortypes.ArtifactCleanupConfig {
 	return operatortypes.ArtifactCleanupConfig{
+		StoreID:  "store-v1-" + fixedHex(),
 		BasePath: basePath, ScanInterval: time.Hour, BatchSize: 10, ListAttempts: 3, Workers: 1, BackendType: backends.NamePVC,
 	}
+}
+
+func TestProcessDeleteContentRequiresConfiguredStore(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		configured string
+		wantMatch  bool
+	}{
+		{name: "matching", configured: "store-v1-" + fixedHex(), wantMatch: true},
+		{name: "different", configured: "store-v1-" + fixedHex()[1:] + "0"},
+		{name: "unconfigured"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base, root := prepareTestArtifactRoot(t, "uid-bound")
+			content := boundTestContent(t, "content", "uid-bound")
+			now := metav1.Now()
+			content.DeletionTimestamp = &now
+			content.Finalizers = []string{"example.com/keep", PodSnapshotContentArtifactCleanupFinalizer}
+			q, _ := newTestQueue(t, base, content)
+			q.config.StoreID = tt.configured
+
+			err := q.processDeleteContent(context.Background(), newDeleteContentKey(content.Name, content.UID))
+			current := &snapshotv1alpha1.PodSnapshotContent{}
+			require.NoError(t, q.client.Get(context.Background(), client.ObjectKeyFromObject(content), current))
+			if tt.wantMatch {
+				require.NoError(t, err)
+				assert.NoDirExists(t, root)
+				assert.Equal(t, []string{"example.com/keep"}, current.Finalizers)
+			} else {
+				require.ErrorIs(t, err, coordination.ErrStoreMismatch)
+				assert.DirExists(t, root)
+				assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+			}
+		})
+	}
+}
+
+func TestProcessDeleteContentDoesNotFinalizeAgainstAnEmptyReplacementStore(t *testing.T) {
+	_, originalRoot := prepareTestArtifactRoot(t, "uid-original")
+	content := boundTestContent(t, "content", "uid-original")
+	now := metav1.Now()
+	content.DeletionTimestamp = &now
+	content.Finalizers = []string{"example.com/keep", PodSnapshotContentArtifactCleanupFinalizer}
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	q.config.StoreID = "store-v1-" + fixedHex()[1:] + "0"
+
+	err := q.processDeleteContent(context.Background(), newDeleteContentKey(content.Name, content.UID))
+	require.ErrorIs(t, err, coordination.ErrStoreMismatch)
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, q.client.Get(context.Background(), client.ObjectKeyFromObject(content), current))
+	assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+	assert.DirExists(t, originalRoot)
 }
 
 func newTestQueue(t *testing.T, basePath string, objects ...client.Object) (*Queue, *record.FakeRecorder) {

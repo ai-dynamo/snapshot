@@ -51,7 +51,7 @@ func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error
 		return nil
 	}
 
-	backend, err := q.backend()
+	backend, err := q.backendForContent(content)
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func (q *Queue) processRecoverMetadata(ctx context.Context, key WorkItemKey) err
 		return fmt.Errorf("content %s no longer bound to store %q: refusing stale recover-metadata", key.Name, key.StoreID)
 	}
 
-	backend, err := q.backend()
+	backend, err := q.backendForContent(content)
 	if err != nil {
 		return err
 	}
