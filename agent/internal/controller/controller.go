@@ -63,8 +63,8 @@ type NodeController struct {
 	injector                executor.RestoreMounter
 	log                     logr.Logger
 	checkpointFn            func(ctx context.Context, params CheckpointParams) error
-	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error)
-	writeControlSentinelFn  func(int, string) error
+	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
+	writeControlSentinelFn  func(int, string, []byte) error
 	controlSentinelExistsFn func(int, string) (bool, error)
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
@@ -162,6 +162,10 @@ const (
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
 var podSnapshotContentGVR = snapshotv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
+
+// restoreFailedSentinelContents is informational: readers of restore-failed
+// act on its existence only.
+var restoreFailedSentinelContents = []byte("failed\n")
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
@@ -886,12 +890,13 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 
 // runRestore runs the full restore workflow for one destination container:
 //  1. Call executor.Restore (inspect placeholder → nsrestore inside namespace).
-//     nsrestore clears any stale restore-complete sentinel on the pod control
-//     volume before CRIU, so a prior incarnation cannot release the restored
-//     process early.
-//  2. Write a restore-complete sentinel: the CRIU-restored process resumes
-//     inside the polling loop that waits on this file, exits quiescence,
-//     and resumes the engine
+//     nsrestore clears any stale restore-complete and restore-failed sentinels
+//     on the pod control volume before CRIU, so a prior incarnation cannot
+//     release the restored process early.
+//  2. Write a restore-complete sentinel holding the restored PID: the
+//     CRIU-restored process resumes inside the polling loop that waits on
+//     this file, exits quiescence, and resumes the engine. On failure, write
+//     restore-failed and kill the placeholder instead.
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) error {
 	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
 	if recovering {
@@ -911,7 +916,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		defer cancel()
 	}
 
-	placeholderHostPID, err := op.executeRestore(restoreCtx)
+	restored, err := op.executeRestore(restoreCtx)
 	if err != nil {
 		var incompatible *compat.IncompatibleError
 		if errors.As(err, &incompatible) {
@@ -927,7 +932,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		op.log.Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
-	return op.completeRestore(ctx, placeholderHostPID)
+	return op.completeRestore(ctx, restored)
 }
 
 // recoverCompletedRestore avoids replaying CRIU when the destination-scoped
@@ -973,7 +978,7 @@ func (w *NodeController) newRestoreOperation(
 	}
 }
 
-func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
+func (op *restoreOperation) executeRestore(ctx context.Context) (executor.RestoreResult, error) {
 	w := op.controller
 	req := executor.RestoreRequest{
 		ContentUID:                  op.artifact.ContentUID,
@@ -1003,24 +1008,38 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 	if err != nil {
 		return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))
 	}
+	op.markRestoreFailed(placeholderHostPID)
 	if err := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore failed"); err != nil {
 		return errors.Join(restoreErr, fmt.Errorf("placeholder could not be killed after restore failure: %w", err))
 	}
 	return restoreErr
 }
 
-func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHostPID int) error {
+func (op *restoreOperation) completeRestore(ctx context.Context, restored executor.RestoreResult) error {
 	w := op.controller
+	placeholderHostPID := restored.PlaceholderHostPID
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
-	if err := w.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreCompleteFile); err != nil {
+	contents := podcontract.FormatRestoreComplete(podcontract.RestoreComplete{PID: restored.RestoredPID})
+	if err := w.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreCompleteFile, contents); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
+		op.markRestoreFailed(placeholderHostPID)
 		if killErr := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
 			return errors.Join(fmt.Errorf("failed to write restore-complete sentinel: %w", err), fmt.Errorf("placeholder could not be killed: %w", killErr))
 		}
 		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
 	}
 	return nil
+}
+
+// markRestoreFailed writes the restore-failed sentinel before the caller kills
+// the placeholder, so a restarted container sees that this Pod's one restore
+// was already used instead of waiting for a restore that will not come. It is
+// best effort: the kill must happen whether or not the marker was written.
+func (op *restoreOperation) markRestoreFailed(placeholderHostPID int) {
+	if err := op.controller.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreFailedFile, restoreFailedSentinelContents); err != nil {
+		op.log.Error(err, "Failed to write restore-failed sentinel")
+	}
 }
 
 // applyRestoredCondition uses server-side apply against the status subresource.

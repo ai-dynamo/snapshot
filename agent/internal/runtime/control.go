@@ -24,12 +24,12 @@ import (
 //
 // The write uses create-then-rename so the workload never observes a partial
 // file.
-func WriteControlSentinel(hostPID int, name string) error {
+func WriteControlSentinel(hostPID int, name string, contents []byte) error {
 	if hostPID <= 0 {
 		return fmt.Errorf("invalid host PID %d for control sentinel %q", hostPID, name)
 	}
 	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", podcontract.SnapshotControlMountPath)
-	return writeSentinelInDir(dir, name)
+	return writeSentinelInDir(dir, name, contents)
 }
 
 // ControlSentinelExists reports whether a sentinel exists in the workload
@@ -52,10 +52,10 @@ func RemoveControlSentinel(dir, name string) error {
 	return removeSentinelInDir(dir, name)
 }
 
-func writeSentinelInDir(dir, name string) error {
+func writeSentinelInDir(dir, name string, contents []byte) error {
 	tmpPath := filepath.Join(dir, "."+name+".tmp")
 	finalPath := filepath.Join(dir, name)
-	if err := os.WriteFile(tmpPath, []byte("done\n"), 0o644); err != nil {
+	if err := os.WriteFile(tmpPath, contents, 0o644); err != nil {
 		return fmt.Errorf("write temp sentinel %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
