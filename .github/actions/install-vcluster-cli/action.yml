@@ -8,15 +8,15 @@ inputs:
   vcluster_version:
     description: vCluster CLI version to install.
     required: false
-    default: v0.33.0
+    default: v0.37.3
   vcluster_sha256_amd64:
     description: SHA256 for the linux amd64 vCluster CLI binary.
     required: false
-    default: c3c16d9b425bf6a77b8cee0136c64a3f000b7440793c0f712564e1cb26d1f824
+    default: 09ce36dc8b15c84daee6ebb931e2f961611e8ee8695d67e2f745cfeccb790454
   vcluster_sha256_arm64:
     description: SHA256 for the linux arm64 vCluster CLI binary.
     required: false
-    default: 7d81d6e59c0981bcd2010cddb554d95f85f6b856ccdc17550dd92f0071bd0dfb
+    default: 613436255d1b229a7a0492c762c6674cb49122ef3e0317900bac9e035ae511bf
 
 runs:
   using: composite
