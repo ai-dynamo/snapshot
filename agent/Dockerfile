@@ -378,7 +378,7 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # The mount destination is created by the ns-bind-mount helper inside this
 # namespace, so nothing needs pre-provisioning here.
 #
-# Three constraints follow from that and must hold for every BASE_IMAGE:
+# Four constraints follow from that and must hold for every BASE_IMAGE:
 #   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE for criu, ip
 #     and the CUDA tools: they are exec'd directly, so they take the loader
 #     from the placeholder but their libraries from the bundle, which is built
@@ -386,6 +386,14 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #     BASE_IMAGE builds green but fails at restore with "version 'GLIBC_2.38'
 #     not found". The rootfs-diff tar is exempt — see the bundle layout comment
 #     in agent/internal/nsmount/injector.go.
+#   - BASE_IMAGE must not ship /etc/ld.so.preload listing a library newer than
+#     AGENT_BASE_IMAGE's glibc. The bundled loader still reads that file from
+#     the placeholder, and the library it names is loaded into a process whose
+#     libc is the bundle's, so the rootfs-diff tar fails to start with
+#     "version 'GLIBC_2.41' not found (required by <preloaded library>)" —
+#     note this one bites when the placeholder is *newer*, unlike the
+#     constraint above. Known limitation, left undefended: preload files are
+#     rare, and the alternative is a static tar.
 #   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
 #   - The placeholder pod must NOT set readOnlyRootFilesystem: true unless a
 #     writable volume is mounted at /tmp. The agent bind-mounts the binary
