@@ -91,6 +91,15 @@ func (q *Queue) EnqueueSweep() {
 	q.queue.Add(newSweepKey())
 }
 
+// EnqueueRecoverMetadata schedules publication repair for one bound
+// container, e.g. after the reconciler finds a confirmed-but-unrecorded
+// publication. storeID is the content's expected store, carried on the key
+// so the worker can refuse a stale enqueue after a rebind. Repeated calls
+// for the same key coalesce.
+func (q *Queue) EnqueueRecoverMetadata(name string, uid types.UID, storeID, containerName string) {
+	q.queue.Add(newRecoverMetadataKey(name, uid, storeID, containerName))
+}
+
 // Start implements manager.Runnable: an immediate sweep, then one per
 // config.ScanInterval tick, and a drain on shutdown before returning.
 func (q *Queue) Start(ctx context.Context) error {
@@ -166,6 +175,8 @@ func (q *Queue) process(ctx context.Context, key WorkItemKey, logger logr.Logger
 		return q.processDeleteContent(ctx, key)
 	case ModeSweep:
 		return q.processSweep(ctx, logger)
+	case ModeRecoverMetadata:
+		return q.processRecoverMetadata(ctx, key)
 	default:
 		return fmt.Errorf("unknown maintenance mode %q", key.Mode)
 	}

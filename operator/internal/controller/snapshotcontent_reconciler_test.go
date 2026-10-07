@@ -40,6 +40,8 @@ func (f *fakeEnqueuer) EnqueueDeleteContent(name string, uid types.UID) {
 	f.calls = append(f.calls, deleteContentCall{name: name, uid: uid})
 }
 
+func (f *fakeEnqueuer) EnqueueRecoverMetadata(string, types.UID, string, string) {}
+
 func TestSnapshotContentReconcilerAddsFinalizer(t *testing.T) {
 	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
 		Name: "content", UID: types.UID("uid-1"), ResourceVersion: "1", Finalizers: []string{"example.com/other"},
