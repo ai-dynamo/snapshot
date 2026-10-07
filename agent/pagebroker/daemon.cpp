@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "daemon.hpp"
+#include "fatal_cleanup.hpp"
 
 #include <arpa/inet.h>
 #include <sys/resource.h>
@@ -43,12 +44,13 @@ constexpr int kShutdownPollTimeoutMs = 1000;
 constexpr auto kAcceptRetryInitialDelay = std::chrono::milliseconds(10);
 constexpr auto kAcceptRetryMaxDelay = std::chrono::milliseconds(1000);
 constexpr auto kTransactionReapInterval = std::chrono::minutes(2);
-volatile sig_atomic_t shutting_down;
+static_assert(std::atomic<bool>::is_always_lock_free);
+std::atomic<bool> shutting_down{false};
 
 void
 Stop(int)
 {
-  shutting_down = 1;
+  shutting_down.store(true, std::memory_order_relaxed);
 }
 
 void
@@ -331,7 +333,7 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
   std::vector<std::future<void>> handlers;
   auto next_transaction_reap = std::chrono::steady_clock::now();
   auto accept_retry_delay = kAcceptRetryInitialDelay;
-  while (!shutting_down) {
+  while (!shutting_down.load(std::memory_order_relaxed)) {
     ReapHandlers(handlers);
     const auto now = std::chrono::steady_clock::now();
     if (now >= next_transaction_reap) {
@@ -385,7 +387,8 @@ RunDaemon(
     const fs::path& storage_root,
     size_t max_concurrent_requests)
 {
-  shutting_down = 0;
+  shutting_down.store(false, std::memory_order_relaxed);
+  snapshot::pagebroker::FatalCleanupShutdown cleanup_shutdown(shutting_down);
   if (!RaiseFileDescriptorLimit())
     return ExitCode::FAILURE;
   if (const auto error = InstallSignalHandlers(); error)

@@ -5,6 +5,8 @@
 #include <atomic>
 #include <chrono>
 
+#include "fatal_cleanup.hpp"
+
 namespace snapshot::pagebroker {
 class Cancellation {
  public:
@@ -17,7 +19,7 @@ class Cancellation {
   void Cancel() { cancelled_.store(true, std::memory_order_relaxed); }
   bool DeadlineExceeded() const { return Clock::now() >= deadline_; }
   bool IsCancelled() const {
-    return cancelled_.load(std::memory_order_relaxed) || DeadlineExceeded() || (parent_ && parent_->IsCancelled());
+    return FatalCleanupPending() || cancelled_.load(std::memory_order_relaxed) || DeadlineExceeded() || (parent_ && parent_->IsCancelled());
   }
 
  private:

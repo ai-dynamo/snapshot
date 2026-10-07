@@ -34,7 +34,7 @@ class Broker {
     std::chrono::steady_clock::time_point completed;
   };
 
-  const TransferEngine& Engine(TransferEngineType engine_type) const;
+  const TransferEngine& Engine(IoEngine engine_type) const;
   const TransferEngine& Engine(const IOEngine& engine) const;
   TransactionHandle CreateOrGetTransaction(const std::string& transaction_id);
   TransactionHandle FindTransaction(const std::string& transaction_id);
