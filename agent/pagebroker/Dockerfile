@@ -115,6 +115,17 @@ COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/protobuf /legal/THIRD-PARTY.txt \
     /legal/source/libaio /legal/source/nixl /legal/source/nvtx
 
+FROM build AS gpu-test
+COPY --from=sources /legal /legal
+ARG PAGEBROKER_REVISION
+RUN test -n "${PAGEBROKER_REVISION}" \
+    && printf '%s\n' "${PAGEBROKER_REVISION}" > /pagebroker-revision \
+    && rm -rf /opt/cuda/lib64/stubs
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+# Run the compiled binaries with the host driver. Do not rebuild at runtime.
+CMD ["bash", "-euc", "test \"$(cat /pagebroker-revision)\" = \"$PAGEBROKER_EXPECTED_REVISION\" || { echo 'GPU test image revision differs from source' >&2; exit 1; }; timeout 120 /src/build/gpu-checkpoint-test; timeout 120 /src/build/gpu-transfer-test"]
+
 FROM ${PAGEBROKER_BASE_IMAGE}
 
 COPY --from=build /src/pagebroker /usr/local/bin/pagebroker

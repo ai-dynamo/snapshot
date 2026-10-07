@@ -58,8 +58,8 @@ build/gpu-engine-test: generate transfer_engine.cpp gpu/engine_test.cpp gpu/engi
 		gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer_engine.cpp v1/pagebroker.pb.cc \
 		$(GTEST_FLAGS) -lprotobuf $(NIXL_FLAGS) -ldl -o $@
 
-# Run manually with the host driver and one visible GPU.
-# No checked-in GPU CI job invokes this target.
+# Requires the host driver and one visible GPU. CI runs the compiled binaries
+# from the GPU test image without rebuilding them on the GPU node.
 test-gpu: build/gpu-checkpoint-test build/gpu-transfer-test
 	timeout 120 ./build/gpu-checkpoint-test
 	timeout 120 ./build/gpu-transfer-test
