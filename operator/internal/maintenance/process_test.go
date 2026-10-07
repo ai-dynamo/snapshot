@@ -399,3 +399,34 @@ func TestProcessDeleteContentSerializesOnSameArtifactKey(t *testing.T) {
 	unlock()
 	require.NoError(t, <-done)
 }
+
+func TestProcessRecoverMetadataNoopOnMissingContent(t *testing.T) {
+	q, _ := newTestQueue(t, t.TempDir())
+	key := newRecoverMetadataKey("gone", "uid-gone", "store-v1-"+fixedHex(), "main")
+	require.NoError(t, q.processRecoverMetadata(context.Background(), key))
+}
+
+func TestProcessRecoverMetadataNoopOnUIDMismatch(t *testing.T) {
+	content := boundTestContent(t, "content", "uid-current")
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	key := newRecoverMetadataKey("content", "uid-stale", content.Spec.Storage.StoreID, "main")
+	require.NoError(t, q.processRecoverMetadata(context.Background(), key))
+}
+
+func TestProcessRecoverMetadataRefusesStoreIDMismatch(t *testing.T) {
+	content := boundTestContent(t, "content", "uid-rebind")
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	key := newRecoverMetadataKey("content", "uid-rebind", "store-v1-"+fixedHex()+"stale", "main")
+
+	err := q.processRecoverMetadata(context.Background(), key)
+	require.ErrorContains(t, err, "no longer bound to store")
+}
+
+func TestProcessRecoverMetadataPropagatesEvidenceDiscoveryError(t *testing.T) {
+	content := boundTestContent(t, "content", "uid-evidence")
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	key := newRecoverMetadataKey("content", "uid-evidence", content.Spec.Storage.StoreID, "main")
+
+	err := q.processRecoverMetadata(context.Background(), key)
+	require.ErrorContains(t, err, "discover publication evidence")
+}

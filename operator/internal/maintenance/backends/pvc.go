@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
+	"github.com/ai-dynamo/snapshot/api/storage/coordination"
 	"github.com/go-logr/logr"
 )
 
@@ -38,6 +39,14 @@ func (b *PVCBackend) Delete(_ context.Context, contentUID string) error {
 
 func (b *PVCBackend) Candidates(_ context.Context, logger logr.Logger) (map[string]struct{}, error) {
 	return enumerateSweepCandidates(b.basePath, logger)
+}
+
+// Evidence is not yet implemented: no PVC artifact-storage backend writes
+// publication evidence this backend can read. Needs the PageBroker PVC
+// artifact-storage backend (plan item 04-C) before this can discover
+// anything real.
+func (b *PVCBackend) Evidence(_ context.Context, artifactUID string) ([]coordination.Evidence, error) {
+	return nil, fmt.Errorf("recover-metadata is not implemented for the PVC backend yet (artifact %q)", artifactUID)
 }
 
 // removeArtifactRoot refuses non-ordinary (e.g. symlinked) directories.
