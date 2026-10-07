@@ -159,10 +159,9 @@ EOF
 # single node also has to fit the workload pods. These are properties of the
 # cluster, not of the caller, so they live here rather than in CI.
 #
-# The chart sizes the agent for a GPU node: 2 CPU requested of the 4 a runner
-# has, which leaves a test workload nowhere to schedule. The values below are
-# sized for that runner rather than measured, so if the agent is OOMKilled
-# mid-dump, the memory limit is the first thing to raise.
+# The chart sizes the agent and PageBroker for a GPU node. CPU-only tests
+# allocate no CUDA staging ring and must leave room for workloads on the runner.
+# If a component is OOMKilled mid-dump, its memory limit is the first thing to raise.
 print_helm_set() {
   cat <<EOF
 runtime.socketPath=/run/k3s/containerd/containerd.sock
@@ -171,6 +170,10 @@ daemonset.resources.requests.cpu=200m
 daemonset.resources.requests.memory=256Mi
 daemonset.resources.limits.cpu=2
 daemonset.resources.limits.memory=2Gi
+pageBroker.resources.requests.cpu=200m
+pageBroker.resources.requests.memory=256Mi
+pageBroker.resources.limits.cpu=2
+pageBroker.resources.limits.memory=2Gi
 EOF
 }
 
