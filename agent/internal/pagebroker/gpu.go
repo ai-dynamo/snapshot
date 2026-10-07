@@ -120,9 +120,7 @@ func gpuTargets(capturedPIDs, hostPIDs []int) ([]*GpuTarget, error) {
 	targets := make([]*GpuTarget, len(capturedPIDs))
 	for i, capturedPID := range capturedPIDs {
 		hostPID := hostPIDs[i]
-		invalidID := hostPID <= 0 || hostPID > math.MaxInt32
-		duplicateID := seenHost[hostPID]
-		if invalidID || duplicateID {
+		if hostPID <= 0 || hostPID > math.MaxInt32 || seenHost[hostPID] {
 			return nil, fmt.Errorf("invalid or duplicate host GPU PID %d for captured PID %d", hostPID, capturedPID)
 		}
 		seenHost[hostPID] = true
