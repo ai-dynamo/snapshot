@@ -89,6 +89,9 @@ spec:
             - {{ printf "--cuinterpose-image=%s" (include "snapshot.agentImage" .) | quote }}
             - {{ printf "--cuinterpose-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
             - --snapshot-storage-config=/etc/snapshot/storage.yaml
+            {{- if .Values.operator.bindNewContents }}
+            - --bind-new-contents=true
+            {{- end }}
           volumeMounts:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}

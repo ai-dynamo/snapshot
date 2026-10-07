@@ -60,10 +60,10 @@ tests:
   - it: mounts resolved backend configuration only in PageBroker on the node
     template: templates/daemonset.yaml
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[1].args
           content: --storage-config
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[1].args
           content: /etc/snapshot/storage.yaml
       - contains:
@@ -108,6 +108,9 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: --snapshot-storage-config=/etc/snapshot/storage.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-new-contents=true
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
@@ -123,6 +126,41 @@ tests:
               items:
                 - key: storage.yaml
                   path: storage.yaml
+
+  - it: prepares compatible brokers while keeping new content unbound
+    set:
+      pageBroker.artifactAddressing: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: --storage-config
+        template: templates/daemonset.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-new-contents=true
+        template: templates/operator-deployment.yaml
+
+  - it: activates binding separately after the compatible daemon rollout
+    set:
+      pageBroker.artifactAddressing: true
+      operator.bindNewContents: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: --storage-config
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-new-contents=true
+        template: templates/operator-deployment.yaml
+
+  - it: refuses binding without an artifact backend
+    template: templates/configmap.yaml
+    set:
+      operator.bindNewContents: true
+    asserts:
+      - failedTemplate:
+          errorMessage: operator.bindNewContents requires pageBroker.artifactAddressing and a completed compatible agent rollout
 
   - it: rejects a missing PVC name
     template: templates/configmap.yaml

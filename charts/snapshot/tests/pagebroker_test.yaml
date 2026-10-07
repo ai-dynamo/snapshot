@@ -59,7 +59,7 @@ tests:
           path: spec.template.metadata.annotations["openshift.io/required-scc"]
           value: privileged
 
-  - it: points the daemon at the shared socket, staging root, checkpoint PVC path, and store identity
+  - it: keeps default daemon arguments compatible with the filesystem broker
     template: templates/daemonset.yaml
     asserts:
       - equal:
@@ -76,8 +76,18 @@ tests:
             - "134217728"
             - --custom-storage-max-pinned-bytes
             - "0"
-            - --storage-config
-            - /etc/snapshot/storage.yaml
+
+  - it: passes store identity when the artifact backend is explicitly enabled
+    template: templates/daemonset.yaml
+    set:
+      pageBroker.artifactAddressing: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: --storage-config
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: /etc/snapshot/storage.yaml
 
   - it: mounts the checkpoint PVC in both containers at the same path
     template: templates/daemonset.yaml
