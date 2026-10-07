@@ -18,7 +18,7 @@ use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_OPERATING_SYSTEM, CUDA_ERROR_UNKNOWN, CUDA_SUCCESS,
 };
 use cudarc::driver::sys::{
-    CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationHandleType,
+    CUcontext, CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationHandleType,
     CUmemAllocationProp, CUmemGenericAllocationHandle, CUmulticastObjectProp, CUresult,
 };
 use cuinterpose_abi::*;
@@ -56,6 +56,21 @@ macro_rules! exports {
 }
 // BackendAbi initialization checks these adapters against the ABI signatures.
 exports! {
+    cuCtxEnablePeerAccess(peer: CUcontext, flags: u32);
+    cuCtxDisablePeerAccess(peer: CUcontext);
+    cuCtxDestroy(context: CUcontext);
+    cuCtxDestroy_v2(context: CUcontext);
+    cuDevicePrimaryCtxRelease(device: CUdevice);
+    cuDevicePrimaryCtxRelease_v2(device: CUdevice);
+    cuDevicePrimaryCtxReset(device: CUdevice);
+    cuDevicePrimaryCtxReset_v2(device: CUdevice);
+    cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize);
+    cuMemFree_v2(address: CUdeviceptr);
+    cuMemGetAddressRange_v2(base: *mut CUdeviceptr, size: *mut usize, address: CUdeviceptr);
+    cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr);
+    cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32);
+    cuIpcOpenMemHandle_v2(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32);
+    cuIpcCloseMemHandle(address: CUdeviceptr);
     cuMemCreate(out: *mut CUmemGenericAllocationHandle, size: usize, prop: *const CUmemAllocationProp, flags: u64);
     cuMemRelease(handle: CUmemGenericAllocationHandle);
     cuMemRetainAllocationHandle(out: *mut CUmemGenericAllocationHandle, address: *mut c_void);
