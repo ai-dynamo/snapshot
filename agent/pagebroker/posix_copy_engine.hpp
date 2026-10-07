@@ -9,7 +9,7 @@ namespace snapshot::pagebroker {
 class PosixCopyEngine final : public TransferEngine {
  public:
   explicit PosixCopyEngine(Path storage_root);
-  TransferEngineType type() const override;
+  IoEngine type() const override;
   Path SourceDirectory(const StorageBackend& source) const override;
   uintmax_t RestoreSize(const StorageBackend& source) const override;
   void StageRestore(const StorageBackend& source, const Path& destination) const override;

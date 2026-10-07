@@ -5,24 +5,35 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <cstddef>
 
 #include "pagebroker_types.hpp"
 
 namespace snapshot::pagebroker {
 using Path = std::filesystem::path;
 
-enum class TransferEngineType { POSIX_COPY };
+enum class IoEngine { POSIX_COPY, NIXL };
+
+namespace io {
+enum class Operation { Read, Write };
+}
 
 class TransferEngine {
  public:
   virtual ~TransferEngine();
-  virtual TransferEngineType type() const = 0;
-  virtual Path SourceDirectory(const StorageBackend& source) const = 0;
-  virtual uintmax_t RestoreSize(const StorageBackend& source) const = 0;
-  virtual void StageRestore(const StorageBackend& source, const Path& destination) const = 0;
-  virtual void ValidateCheckpointDestination(const StorageBackend& destination) const = 0;
-  virtual bool CheckpointDestinationConflicts(const StorageBackend& destination) const = 0;
-  virtual void PublishCheckpoint(const Path& source, const StorageBackend& destination) const = 0;
-  virtual void CopyDirectory(const Path& source, const Path& destination) const = 0;
+  virtual IoEngine type() const = 0;
+  // POSIX_COPY supports directory staging. NIXL supports registered-buffer I/O.
+  // Unsupported operations fail explicitly until directory staging uses NIXL.
+  virtual void Open(int descriptor, size_t size);
+  virtual void Submit(size_t slot, io::Operation operation, size_t offset, size_t size);
+  virtual void Wait(size_t slot);
+  virtual void Close();
+  virtual Path SourceDirectory(const StorageBackend& source) const;
+  virtual uintmax_t RestoreSize(const StorageBackend& source) const;
+  virtual void StageRestore(const StorageBackend& source, const Path& destination) const;
+  virtual void ValidateCheckpointDestination(const StorageBackend& destination) const;
+  virtual bool CheckpointDestinationConflicts(const StorageBackend& destination) const;
+  virtual void PublishCheckpoint(const Path& source, const StorageBackend& destination) const;
+  virtual void CopyDirectory(const Path& source, const Path& destination) const;
 };
 }  // namespace snapshot::pagebroker

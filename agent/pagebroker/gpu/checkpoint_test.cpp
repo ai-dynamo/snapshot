@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <csignal>
 #include <memory>
+#include <limits>
+#include <fcntl.h>
 #include <stdexcept>
 #include <system_error>
 #include <string>
@@ -209,3 +211,23 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
   Check(cuDevicePrimaryCtxRelease(device), "release checkpoint context");
 }
 }  // namespace
+
+TEST(GpuTargetDescriptor, ReportsMissingFdinfoSeparatelyFromPidMismatch)
+{
+  using snapshot::pagebroker::gpu::driver::ValidateTargetDescriptor;
+  const int other_pid = getpid() + 1;
+  auto expect_message = [&](int descriptor, const char* expected) {
+    try {
+      ValidateTargetDescriptor(other_pid, descriptor);
+      FAIL() << "invalid descriptor accepted";
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what()).find(expected), std::string::npos);
+    }
+  };
+  expect_message(std::numeric_limits<int>::max(), "read GPU target fdinfo");
+  FileDescriptor file(open("/dev/null", O_RDONLY | O_CLOEXEC));
+  ASSERT_GE(file.get(), 0);
+  expect_message(file.get(), "fdinfo has no PID entry");
+  auto self = OpenPidfd(getpid());
+  expect_message(self.get(), "does not match host PID");
+}

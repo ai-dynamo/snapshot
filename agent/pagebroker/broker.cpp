@@ -226,7 +226,7 @@ Broker::AbortStaging(
 }
 
 const TransferEngine&
-Broker::Engine(TransferEngineType engine_type) const
+Broker::Engine(IoEngine engine_type) const
 {
   for (const auto& candidate : io_engines_) {
     if (candidate->type() == engine_type)
@@ -239,7 +239,7 @@ const TransferEngine&
 Broker::Engine(const IOEngine& engine) const
 {
   if (engine.has_posix_copy())
-    return Engine(TransferEngineType::POSIX_COPY);
+    return Engine(IoEngine::POSIX_COPY);
   throw std::invalid_argument("unsupported I/O engine");
 }
 

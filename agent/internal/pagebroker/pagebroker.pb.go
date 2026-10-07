@@ -247,6 +247,7 @@ type IOEngine struct {
 	// Types that are valid to be assigned to Kind:
 	//
 	//	*IOEngine_PosixCopy
+	//	*IOEngine_Nixl
 	Kind          isIOEngine_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -298,6 +299,15 @@ func (x *IOEngine) GetPosixCopy() *PosixCopyIOEngine {
 	return nil
 }
 
+func (x *IOEngine) GetNixl() *NixlIOEngine {
+	if x != nil {
+		if x, ok := x.Kind.(*IOEngine_Nixl); ok {
+			return x.Nixl
+		}
+	}
+	return nil
+}
+
 type isIOEngine_Kind interface {
 	isIOEngine_Kind()
 }
@@ -306,7 +316,13 @@ type IOEngine_PosixCopy struct {
 	PosixCopy *PosixCopyIOEngine `protobuf:"bytes,1,opt,name=posix_copy,json=posixCopy,proto3,oneof"`
 }
 
+type IOEngine_Nixl struct {
+	Nixl *NixlIOEngine `protobuf:"bytes,2,opt,name=nixl,proto3,oneof"`
+}
+
 func (*IOEngine_PosixCopy) isIOEngine_Kind() {}
+
+func (*IOEngine_Nixl) isIOEngine_Kind() {}
 
 type GpuDeviceMapping struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1779,6 +1795,43 @@ func (*Response_GpuRestoreComplete) isResponse_Result() {}
 
 func (*Response_Capabilities) isResponse_Result() {}
 
+// Registered-buffer transfers. Directory staging is not implemented for NIXL.
+type NixlIOEngine struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NixlIOEngine) Reset() {
+	*x = NixlIOEngine{}
+	mi := &file_v1_pagebroker_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NixlIOEngine) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NixlIOEngine) ProtoMessage() {}
+
+func (x *NixlIOEngine) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NixlIOEngine.ProtoReflect.Descriptor instead.
+func (*NixlIOEngine) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{28}
+}
+
 var File_v1_pagebroker_proto protoreflect.FileDescriptor
 
 const file_v1_pagebroker_proto_rawDesc = "" +
@@ -1793,10 +1846,11 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"filesystem\x18\x01 \x01(\v2).snapshot.pagebroker.v1.FilesystemStorageH\x00R\n" +
 	"filesystemB\x06\n" +
 	"\x04kind\"\x13\n" +
-	"\x11PosixCopyIOEngine\"^\n" +
+	"\x11PosixCopyIOEngine\"\x9a\x01\n" +
 	"\bIOEngine\x12J\n" +
 	"\n" +
-	"posix_copy\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PosixCopyIOEngineH\x00R\tposixCopyB\x06\n" +
+	"posix_copy\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PosixCopyIOEngineH\x00R\tposixCopy\x12:\n" +
+	"\x04nixl\x18\x02 \x01(\v2$.snapshot.pagebroker.v1.NixlIOEngineH\x00R\x04nixlB\x06\n" +
 	"\x04kind\"T\n" +
 	"\x10GpuDeviceMapping\x12\x1f\n" +
 	"\vsource_uuid\x18\x01 \x01(\tR\n" +
@@ -1902,7 +1956,8 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\fcapabilities\x18\f \x01(\v2$.snapshot.pagebroker.v1.CapabilitiesH\x00R\fcapabilitiesB\b\n" +
 	"\x06resultB\r\n" +
 	"\v_request_idB\x11\n" +
-	"\x0f_transaction_idB9Z7github.com/ai-dynamo/snapshot/agent/internal/pagebrokerb\x06proto3"
+	"\x0f_transaction_id\"\x0e\n" +
+	"\fNixlIOEngineB9Z7github.com/ai-dynamo/snapshot/agent/internal/pagebrokerb\x06proto3"
 
 var (
 	file_v1_pagebroker_proto_rawDescOnce sync.Once
@@ -1917,7 +1972,7 @@ func file_v1_pagebroker_proto_rawDescGZIP() []byte {
 }
 
 var file_v1_pagebroker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
+var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_v1_pagebroker_proto_goTypes = []any{
 	(Failure_Code)(0),                      // 0: snapshot.pagebroker.v1.Failure.Code
 	(*FilesystemStorage)(nil),              // 1: snapshot.pagebroker.v1.FilesystemStorage
@@ -1948,49 +2003,51 @@ var file_v1_pagebroker_proto_goTypes = []any{
 	(*AbortComplete)(nil),                  // 26: snapshot.pagebroker.v1.AbortComplete
 	(*Failure)(nil),                        // 27: snapshot.pagebroker.v1.Failure
 	(*Response)(nil),                       // 28: snapshot.pagebroker.v1.Response
+	(*NixlIOEngine)(nil),                   // 29: snapshot.pagebroker.v1.NixlIOEngine
 }
 var file_v1_pagebroker_proto_depIdxs = []int32{
 	1,  // 0: snapshot.pagebroker.v1.StorageBackend.filesystem:type_name -> snapshot.pagebroker.v1.FilesystemStorage
 	3,  // 1: snapshot.pagebroker.v1.IOEngine.posix_copy:type_name -> snapshot.pagebroker.v1.PosixCopyIOEngine
-	5,  // 2: snapshot.pagebroker.v1.GpuContext.device_map:type_name -> snapshot.pagebroker.v1.GpuDeviceMapping
-	7,  // 3: snapshot.pagebroker.v1.CheckpointGpuRequest.targets:type_name -> snapshot.pagebroker.v1.GpuTarget
-	6,  // 4: snapshot.pagebroker.v1.CheckpointGpuRequest.context:type_name -> snapshot.pagebroker.v1.GpuContext
-	7,  // 5: snapshot.pagebroker.v1.RestoreGpuRequest.targets:type_name -> snapshot.pagebroker.v1.GpuTarget
-	6,  // 6: snapshot.pagebroker.v1.RestoreGpuRequest.context:type_name -> snapshot.pagebroker.v1.GpuContext
-	2,  // 7: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 8: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	2,  // 9: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 10: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	2,  // 11: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 12: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	2,  // 13: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 14: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	11, // 15: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
-	13, // 16: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
-	15, // 17: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
-	16, // 18: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
-	12, // 19: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
-	14, // 20: snapshot.pagebroker.v1.Request.prepare_direct_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareDirectCheckpointRequest
-	8,  // 21: snapshot.pagebroker.v1.Request.checkpoint_gpu:type_name -> snapshot.pagebroker.v1.CheckpointGpuRequest
-	9,  // 22: snapshot.pagebroker.v1.Request.restore_gpu:type_name -> snapshot.pagebroker.v1.RestoreGpuRequest
-	10, // 23: snapshot.pagebroker.v1.Request.capabilities:type_name -> snapshot.pagebroker.v1.CapabilitiesRequest
-	22, // 24: snapshot.pagebroker.v1.GpuComplete.participants:type_name -> snapshot.pagebroker.v1.GpuParticipantResult
-	0,  // 25: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
-	18, // 26: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
-	24, // 27: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
-	25, // 28: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
-	26, // 29: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
-	27, // 30: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
-	19, // 31: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
-	20, // 32: snapshot.pagebroker.v1.Response.direct_checkpoint_directory:type_name -> snapshot.pagebroker.v1.DirectCheckpointDirectory
-	23, // 33: snapshot.pagebroker.v1.Response.gpu_checkpoint_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
-	23, // 34: snapshot.pagebroker.v1.Response.gpu_restore_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
-	21, // 35: snapshot.pagebroker.v1.Response.capabilities:type_name -> snapshot.pagebroker.v1.Capabilities
-	36, // [36:36] is the sub-list for method output_type
-	36, // [36:36] is the sub-list for method input_type
-	36, // [36:36] is the sub-list for extension type_name
-	36, // [36:36] is the sub-list for extension extendee
-	0,  // [0:36] is the sub-list for field type_name
+	29, // 2: snapshot.pagebroker.v1.IOEngine.nixl:type_name -> snapshot.pagebroker.v1.NixlIOEngine
+	5,  // 3: snapshot.pagebroker.v1.GpuContext.device_map:type_name -> snapshot.pagebroker.v1.GpuDeviceMapping
+	7,  // 4: snapshot.pagebroker.v1.CheckpointGpuRequest.targets:type_name -> snapshot.pagebroker.v1.GpuTarget
+	6,  // 5: snapshot.pagebroker.v1.CheckpointGpuRequest.context:type_name -> snapshot.pagebroker.v1.GpuContext
+	7,  // 6: snapshot.pagebroker.v1.RestoreGpuRequest.targets:type_name -> snapshot.pagebroker.v1.GpuTarget
+	6,  // 7: snapshot.pagebroker.v1.RestoreGpuRequest.context:type_name -> snapshot.pagebroker.v1.GpuContext
+	2,  // 8: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 9: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	2,  // 10: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 11: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	2,  // 12: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 13: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	2,  // 14: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 15: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	11, // 16: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
+	13, // 17: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
+	15, // 18: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
+	16, // 19: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
+	12, // 20: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
+	14, // 21: snapshot.pagebroker.v1.Request.prepare_direct_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareDirectCheckpointRequest
+	8,  // 22: snapshot.pagebroker.v1.Request.checkpoint_gpu:type_name -> snapshot.pagebroker.v1.CheckpointGpuRequest
+	9,  // 23: snapshot.pagebroker.v1.Request.restore_gpu:type_name -> snapshot.pagebroker.v1.RestoreGpuRequest
+	10, // 24: snapshot.pagebroker.v1.Request.capabilities:type_name -> snapshot.pagebroker.v1.CapabilitiesRequest
+	22, // 25: snapshot.pagebroker.v1.GpuComplete.participants:type_name -> snapshot.pagebroker.v1.GpuParticipantResult
+	0,  // 26: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
+	18, // 27: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
+	24, // 28: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
+	25, // 29: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
+	26, // 30: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
+	27, // 31: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
+	19, // 32: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
+	20, // 33: snapshot.pagebroker.v1.Response.direct_checkpoint_directory:type_name -> snapshot.pagebroker.v1.DirectCheckpointDirectory
+	23, // 34: snapshot.pagebroker.v1.Response.gpu_checkpoint_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
+	23, // 35: snapshot.pagebroker.v1.Response.gpu_restore_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
+	21, // 36: snapshot.pagebroker.v1.Response.capabilities:type_name -> snapshot.pagebroker.v1.Capabilities
+	37, // [37:37] is the sub-list for method output_type
+	37, // [37:37] is the sub-list for method input_type
+	37, // [37:37] is the sub-list for extension type_name
+	37, // [37:37] is the sub-list for extension extendee
+	0,  // [0:37] is the sub-list for field type_name
 }
 
 func init() { file_v1_pagebroker_proto_init() }
@@ -2004,6 +2061,7 @@ func file_v1_pagebroker_proto_init() {
 	}
 	file_v1_pagebroker_proto_msgTypes[3].OneofWrappers = []any{
 		(*IOEngine_PosixCopy)(nil),
+		(*IOEngine_Nixl)(nil),
 	}
 	file_v1_pagebroker_proto_msgTypes[16].OneofWrappers = []any{
 		(*Request_StagedRestore)(nil),
@@ -2038,7 +2096,7 @@ func file_v1_pagebroker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_v1_pagebroker_proto_rawDesc), len(file_v1_pagebroker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   28,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

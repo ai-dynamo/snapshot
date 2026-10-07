@@ -95,10 +95,10 @@ DirectorySize(const Path& path)
 
 PosixCopyEngine::PosixCopyEngine(Path storage_root) : storage_root_(std::filesystem::weakly_canonical(std::move(storage_root))) {}
 
-TransferEngineType
+IoEngine
 PosixCopyEngine::type() const
 {
-  return TransferEngineType::POSIX_COPY;
+  return IoEngine::POSIX_COPY;
 }
 
 Path
