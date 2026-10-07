@@ -59,7 +59,7 @@ tests:
           path: spec.template.metadata.annotations["openshift.io/required-scc"]
           value: privileged
 
-  - it: points the daemon at the shared socket, staging root, and checkpoint PVC path
+  - it: points the daemon at the shared socket, staging root, checkpoint PVC path, and store identity
     template: templates/daemonset.yaml
     asserts:
       - equal:
@@ -76,6 +76,8 @@ tests:
             - "134217728"
             - --custom-storage-max-pinned-bytes
             - "0"
+            - --storage-config
+            - /etc/snapshot/storage.yaml
 
   - it: mounts the checkpoint PVC in both containers at the same path
     template: templates/daemonset.yaml

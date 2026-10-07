@@ -87,6 +87,22 @@ the sidecar:
 - **Restore.** PageBroker copies the artifact from the PVC into staging first.
   CRIU then restores from memory instead of reading the PVC directly.
 
+The sidecar also receives the same resolved store configuration the operator
+reads (`--storage-config /etc/snapshot/storage.yaml`) and derives the store
+identity from it at startup. Checkpoints bound to that store are addressed by
+identity rather than by path: the agent names the store, the content UID and
+the container, and PageBroker publishes the image at
+`artifacts/<contentUID>/containers/<name>/`, the same layout as before, with a
+`publication.json` next to `manifest.yaml` recording the store ID, the
+artifact handle and the deterministic commit ID. Commit returns that handle
+as the publication descriptor; restores and metadata reads name the
+descriptor, and PageBroker refuses a descriptor from another store
+(`STORE_MISMATCH`), a publication that is missing (`ARTIFACT_NOT_FOUND`) or
+whose evidence does not match (`ARTIFACT_CORRUPT`). A transaction that
+outlives `--transaction-lifetime-seconds` (default 2h5m) fails Commit with
+`TRANSACTION_EXPIRED` and is cleaned up. Legacy path-addressed requests are
+unchanged, and content without a store binding keeps using them.
+
 Because the staging volume is RAM, size the agent pod for it:
 
 | Value                                | Purpose                                                                                 | Default     |
