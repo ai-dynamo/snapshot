@@ -10,7 +10,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from snapshot_e2e import gms_workload, k8s
+from snapshot_e2e import k8s
+
 
 CONTAINER = "main"
 CONTROL_DIR = "/snapshot-control"
@@ -396,145 +397,6 @@ def snapshotjob_helper_pod_template(
         }
     )
     return template
-
-
-GMS_HELPER_ANNOTATION = "nvidia.com/snapshot-helper-artifact-containers"
-GMS_CLAIM = "intrapod-shared-gpu"
-GMS_HANDSHAKE_DIR = gms_workload.HANDSHAKE_DIR
-GMS_FIXTURE_PATH = gms_workload.SCRIPT_PATH
-
-
-def gms_snapshotjob_pod_template(
-    *,
-    config: k8s.E2EConfig,
-    run: TestRun,
-    image: str,
-    claim_template: str,
-    fixture_configmap: str,
-    failure_ghost_size: int = 0,
-) -> dict[str, Any]:
-    """A real GMS worker and saver sharing one DRA GPU allocation."""
-    template = snapshotjob_pod_template(config=config, run=run, gpu=False)
-    template["metadata"]["annotations"] = {GMS_HELPER_ANNOTATION: "gms-saver"}
-    spec = template["spec"]
-    _gms_pod_storage(spec, config, claim_template, fixture_configmap)
-    worker = spec["containers"][0]
-    worker.update(
-        _gms_container(
-            CONTAINER,
-            image,
-            [
-                "python3", GMS_FIXTURE_PATH, "source", "--token", run.source_token,
-                "--failure-ghost-size", str(failure_ghost_size),
-            ],
-        )
-    )
-    # Source target control storage is injected by Snapshot. Helpers use their
-    # own handshake emptyDir; neither requires access to the capture target's
-    # snapshot-control subdirectory.
-    saver = _gms_container(
-        "gms-saver",
-        image,
-        [
-            "/bin/bash", "-lc",
-            "set -euo pipefail; "
-            f"while [ ! -f {GMS_HANDSHAKE_DIR}/quiesced ]; do sleep 0.2; done; "
-            "python3 -m gpu_memory_service.v1.snapshot.saver "
-            "--snapshot-storage-dir /checkpoints --device 0 --max-workers 1; "
-            "printf '%s\\n' '{\"phase\":\"saver-published\"}'; "
-            f"touch {GMS_HANDSHAKE_DIR}/published; "
-            f"while [ ! -f {GMS_HANDSHAKE_DIR}/release ]; do sleep 0.2; done",
-        ],
-    )
-    spec["containers"].append(saver)
-    spec["initContainers"] = [_gms_server(image)]
-    return template
-
-
-def gms_restore_pod(
-    *,
-    config: k8s.E2EConfig,
-    run: TestRun,
-    image: str,
-    claim_template: str,
-    fixture_configmap: str,
-    snapshot_name: str,
-    snapshot_job_uid: str,
-    source_node: str,
-) -> dict[str, Any]:
-    pod = restore_pod(
-        config=config, run=run, gpu=False, source_node=source_node,
-        snapshot_name=snapshot_name,
-    )
-    spec = pod["spec"]
-    _gms_pod_storage(spec, config, claim_template, fixture_configmap)
-    worker = spec["containers"][0]
-    # Retain the canonical Snapshot control mount, standby env and startup
-    # gate; CRIU restores the real source process over this inert placeholder.
-    control_mounts = [m for m in worker["volumeMounts"] if m["name"] == "snapshot-control"]
-    control_env = [e for e in worker["env"] if e["name"] in {"SNAPSHOT_CONTROL_DIR", "SNAPSHOT_RESTORE_STANDBY"}]
-    worker.update(_gms_container(CONTAINER, image, ["python3", GMS_FIXTURE_PATH, "standby"]))
-    worker["volumeMounts"] += control_mounts
-    worker["env"] += control_env
-    spec["initContainers"] = [_gms_server(image, snapshot_job_uid=snapshot_job_uid)]
-    return pod
-
-
-def _gms_pod_storage(
-    spec: dict[str, Any], config: k8s.E2EConfig,
-    claim_template: str, fixture_configmap: str,
-) -> None:
-    spec["runtimeClassName"] = "nvidia"
-    spec.setdefault("securityContext", {})["runAsUser"] = 0
-    spec["securityContext"]["runAsGroup"] = 0
-    spec["resourceClaims"] = [{"name": GMS_CLAIM, "resourceClaimTemplateName": claim_template}]
-    # The restore base already declares the PVC; source SnapshotJob templates
-    # intentionally do not, so add exactly the missing volumes.
-    existing = {v["name"] for v in spec["volumes"]}
-    for volume in [
-        {"name": "checkpoint-storage", "persistentVolumeClaim": {"claimName": config.pvc_name}},
-        {"name": "gms-control", "emptyDir": {}},
-        {"name": "gms-fixture", "configMap": {"name": fixture_configmap}},
-    ]:
-        if volume["name"] not in existing:
-            spec["volumes"].append(volume)
-
-
-def _gms_container(name: str, image: str, command: list[str]) -> dict[str, Any]:
-    return {
-        "name": name, "image": image, "imagePullPolicy": "IfNotPresent",
-        "command": command,
-        "env": [
-            {"name": "GMS_SOCKET_DIR", "value": GMS_HANDSHAKE_DIR},
-            {"name": "DYN_GMS_USE_V1", "value": "true"},
-        ],
-        "resources": {"claims": [{"name": GMS_CLAIM}]},
-        "volumeMounts": [
-            {"name": "checkpoint-storage", "mountPath": CHECKPOINT_DIR},
-            {"name": "gms-control", "mountPath": GMS_HANDSHAKE_DIR},
-            {"name": "gms-fixture", "mountPath": "/gms-fixture", "readOnly": True},
-        ],
-    }
-
-
-def _gms_server(image: str, *, snapshot_job_uid: str | None = None) -> dict[str, Any]:
-    # ConfigMap-delivered admission runs before even the loader's allocations.
-    # Keep the real server's socket/restore-ready startup probe unchanged.
-    command = ["python3", GMS_FIXTURE_PATH, "server"]
-    if snapshot_job_uid is not None:
-        command += ["--snapshot-job-uid", snapshot_job_uid]
-    server = _gms_container("gms-server", image, command)
-    server["restartPolicy"] = "Always"
-    if snapshot_job_uid is not None:
-        probe = ["python3", "-m", "gpu_memory_service.cli.server", "--probe-restore-ready"]
-    else:
-        probe = [
-            "python3", "-c",
-            "from pathlib import Path; from gpu_memory_service.v1.device import get_socket_path; "
-            "assert Path(get_socket_path(0, 'weights')).is_socket()",
-        ]
-    server["startupProbe"] = {"exec": {"command": probe}, "periodSeconds": 1, "failureThreshold": 600}
-    return server
 
 
 def snapshotjob_unschedulable_pod_template(

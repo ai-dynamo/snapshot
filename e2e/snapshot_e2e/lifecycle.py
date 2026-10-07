@@ -141,7 +141,6 @@ def create_snapshotjob(
     *,
     target_containers: list[str] | None = None,
     active_deadline_seconds: int | None = None,
-    on_failure_policy: str | None = None,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "podTemplate": pod_template,
@@ -149,8 +148,6 @@ def create_snapshotjob(
     }
     if active_deadline_seconds is not None:
         spec["activeDeadlineSeconds"] = active_deadline_seconds
-    if on_failure_policy is not None:
-        spec["onFailurePolicy"] = on_failure_policy
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "SnapshotJob",
