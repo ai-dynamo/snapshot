@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <span>
+#include <string>
 #include <string_view>
 #include "gpu/engine.hpp"
 
@@ -17,6 +18,9 @@ struct DaemonOptions {
   std::filesystem::path socket_path;
   std::filesystem::path staging_directory;
   std::filesystem::path storage_root;
+  std::filesystem::path storage_config_path;
+  // Empty means artifact-addressed requests must fail INVALID_REQUEST.
+  std::string store_id;
   size_t max_concurrent_requests = kDefaultMaxConcurrentRequests;
   snapshot::pagebroker::gpu::EngineOptions gpu;
   bool enable_gpu = true;
