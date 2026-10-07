@@ -14,7 +14,7 @@ func TestHelperArtifactSubdir(t *testing.T) {
 	dir, err := HelperArtifactSubdir("0a8c9a75-38a6-4e4e-8f87-e6d637552c25")
 	require.NoError(t, err)
 	assert.Equal(t, "helper-artifacts/0a8c9a75-38a6-4e4e-8f87-e6d637552c25", dir)
-	for _, uid := range []string{"", ".", "..", "../other", "/other", "job/other", "job\\other"} {
+	for _, uid := range []string{"", ".", "..", "../other", "/other", "job/other", `job\other`} {
 		_, err := HelperArtifactSubdir(uid)
 		require.Error(t, err, uid)
 	}
