@@ -8980,6 +8980,13 @@ spec:
                     - containers
                     type: object
                 type: object
+                x-kubernetes-validations:
+                - message: annotation nvidia.com/cuda-shared-memory-support must be
+                    enabled or disabled
+                  rule: '!has(self.metadata) || !has(self.metadata.annotations) ||
+                    !(''nvidia.com/cuda-shared-memory-support'' in self.metadata.annotations)
+                    || self.metadata.annotations[''nvidia.com/cuda-shared-memory-support''].trim()
+                    in [''enabled'', ''disabled'']'
             required:
             - podSnapshotTemplate
             - podTemplate
