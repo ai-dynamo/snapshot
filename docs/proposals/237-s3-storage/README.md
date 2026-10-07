@@ -97,8 +97,10 @@ PVC or S3 through their own backend adapters.
   clock-skew allowance has elapsed from the deletion timestamp. PageBroker expires
   every admitted transaction within that bound and checks expiry immediately before
   publishing an index or issuing another storage read. Failed, partial, unknown or
-  premature cleanup retains the finalizer. Because the transaction lifetime is a
-  2h05m constant, Stage 1 artifact reclamation lags a content deletion by at least
+  premature cleanup retains the finalizer. The clock-skew allowance also absorbs
+  provider-side completion of a request accepted just before expiry; a publication
+  that still lands after cleanup is an orphan the next sweep reclaims. Because the
+  transaction lifetime is a 2h05m constant, Stage 1 artifact reclamation lags a content deletion by at least
   that long. Stage 2 replaces the conservative wait with explicit active-operation
   tracking and generation fencing.
 - **Metadata loss:** back up Kubernetes content metadata separately. During ownership
@@ -355,7 +357,11 @@ lifetime starts at successful Prepare and retries never extend it. PageBroker ch
 expiry before every new storage operation and immediately before publishing the
 checkpoint index; expiry returns `TRANSACTION_EXPIRED` and leaves unconfirmed data
 for sweeping. Every SDK request uses a deadline no later than the transaction expiry,
-so an already-issued transfer cannot outlive the quiescence bound. Bound individual
+so no new request starts after it. Expiry bounds request issue, not provider
+completion: a request the provider accepted before expiry may finish after it. The
+clock-skew allowance in the Stage 1 deletion delay also covers that completion lag,
+and any publication that lands after cleanup belongs to an artifact UID with no
+content and is reclaimed by the next sweep as an orphan. Bound individual
 transfers through broker timeouts and SDK retries. Extend `Abort` to stop transfers
 before cleanup; it cannot undo committed data or CUDA/CRIU. Restore `Commit` cleans
 local staging.
@@ -604,8 +610,9 @@ backend integration with a disposable S3-compatible service, and GPU end-to-end 
   publications and no CUDA/CRIU replay.
 - **Lifecycle/concurrency:** inspection cleanup on success/refusal/requeue/cancellation;
   uncached deletion checks and admission-window expiry; deletion waiting the complete
-  Stage 1 quiescence bound; expiration during upload/download; stale publishers,
-  incomplete attempts and capture-node loss. Stage 2 adds concurrent
+  Stage 1 quiescence bound; expiration during upload/download; an index `PUT`
+  accepted before expiry that completes after cleanup is removed by the following
+  sweep; stale publishers, incomplete attempts and capture-node loss. Stage 2 adds concurrent
   delete/read/publish races, operation expiry and stale-generation rejection.
 - **End to end:** cross-node capture/restore/delete; recovered workload state and
   inference; restore after S3 loss following staging; PVC↔S3-A↔S3-B mismatch refusal.
