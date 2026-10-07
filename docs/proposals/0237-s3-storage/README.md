@@ -130,9 +130,11 @@ status:
         artifactFormatVersion: snapshot.pagebroker/v1  # Select that backend's reader
 ```
 
-The operator sets immutable `spec.storage.storeID` before capture. A
-`PodSnapshotContent` represents one capture attempt, so its immutable UID already
-distinguishes a new attempt from a retry of the same attempt. Derive each container's
+The operator sets `spec.storage.storeID` when it creates the `PodSnapshotContent`.
+The whole spec is immutable, so the binding can never be added or changed
+afterwards. A `PodSnapshotContent` represents one capture attempt, so its immutable
+UID already distinguishes a new attempt from a retry of the same attempt. Derive
+each container's
 `commitID` as `commit-v1-` + SHA-256 of a versioned, fixed-field encoding of
 `storeID`, `artifactUID` and `containerName`. Operator, agent, PageBroker and
 maintenance use the same derivation and shared Go/C++ fixtures; no additional
@@ -164,7 +166,9 @@ references. Legacy content without a binding is accepted only in PVC mode.
 The operator owns scheduling and retention. The operator manager enqueues a work
 item onto an in-process `client-go` `workqueue.TypedRateLimitingInterface`, and a
 bounded pool of worker goroutines drains it, calling directly into
-`operator/internal/maintenance/`.
+`operator/internal/maintenance/`. That package is the existing implementation of
+this design for PVC; the S3 additions and the changes to its current behavior are
+listed at the end of this section.
 
 - **Packaging:** `operator/internal/maintenance/` owns a common cleanup workflow
   and backend implementations for PVC, then S3 and future stores, called in-process
@@ -220,6 +224,13 @@ bounded pool of worker goroutines drains it, calling directly into
   resource-version preconditions. The new leader rebuilds pending work from cluster
   state. Backend operations remain idempotent because an already-issued request may
   finish after cancellation.
+
+Relative to the current `operator/internal/maintenance/` implementation, this
+design adds `recover-metadata` as a third `Mode`, the store ID on `WorkItemKey`
+and the shared `(storeID, artifactUID)` lock, and changes two behaviors: `Queue.Start`
+drains on every shutdown today and must not drain on leadership loss, and a failed
+sweep is deferred to the next scan interval today and must instead requeue with
+backoff.
 
 Maintenance and PageBroker share the store-ID, artifact format and Stage 1
 transaction/quiescence contracts, with Go/C++ compatibility fixtures. Stage 2 adds
@@ -324,7 +335,11 @@ PageBroker RPC. PageBroker still releases its own transaction resources through
 
 Extend `Failure.code` with `STORE_MISMATCH`, `ACCESS_DENIED`, `STORAGE_UNAVAILABLE`,
 `ARTIFACT_NOT_FOUND`, `ARTIFACT_CORRUPT`, `UNSUPPORTED_ARTIFACT`,
-`TRANSACTION_EXPIRED` and `OUTCOME_UNKNOWN`. An access error never proves absence.
+`TRANSACTION_EXPIRED` and `OUTCOME_UNKNOWN`. `TRANSACTION_EXPIRED` changes the
+current contract, which returns `TRANSACTION_NOT_FOUND` for expired transactions;
+PageBroker returns it for an expired transaction it still remembers, keeps
+`TRANSACTION_NOT_FOUND` for unknown IDs, and the agent client adds it to its
+terminal-failure set. An access error never proves absence.
 Use existing conditions with storage-specific reasons. Keep errors bounded and
 credential-free.
 
@@ -378,7 +393,8 @@ is a separate, mandatory requirement before S3 is enabled.
 
 ### Configuration
 
-PVC remains the default. For S3, add these Helm install/upgrade values:
+PVC remains the default. `storage.type` already selects the maintenance backend;
+the `s3` block below replaces the reserved `s3.uri` placeholder in the chart:
 
 ```yaml
 storage:
