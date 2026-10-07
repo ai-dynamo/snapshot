@@ -64,6 +64,7 @@ type NodeController struct {
 	injector                executor.RestoreMounter
 	log                     logr.Logger
 	checkpointFn            func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error)
+	fetchManifestFn         func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error)
 	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
 	writeControlSentinelFn  func(int, string, []byte) error
 	controlSentinelExistsFn func(int, string) (bool, error)
@@ -237,6 +238,9 @@ func newDefaultController(
 		compareFn:               compat.Compare,
 	}
 	w.checkpointFn = w.executorCheckpoint
+	w.fetchManifestFn = func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		return executor.FetchArtifactManifest(ctx, cfg.PageBroker.ControlSocketPath, artifact)
+	}
 	return w
 }
 
