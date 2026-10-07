@@ -26,8 +26,7 @@ test: test-go
 test-go:
 	go test ./...
 
-# The image build runs this full CPU mock suite with the pinned CUDA headers.
-# No GPU or NIXL installation is needed for these tests.
+# Run the PageBroker CPU tests with the PageBroker image's build dependencies.
 test-pagebroker:
 	$(MAKE) -C pagebroker test CUDA_ROOT=$(CUDA_ROOT)
 
