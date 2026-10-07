@@ -495,7 +495,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		PodIP:                params.Pod.Status.PodIP,
 		Pod:                  podEnvironment(params.Pod, params.ContainerName),
 		Clientset:            w.clientset,
-		PageBrokerRequested:  params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		PageBrokerRequested:  params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] != snapshotv1alpha1.PageBrokerAnnotationDisabled,
 		CuInterposeRequested: params.CuInterposeRequested,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {

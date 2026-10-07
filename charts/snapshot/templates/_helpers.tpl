@@ -120,3 +120,11 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 
 {{- define "snapshot.pageBrokerControlPath" -}}/pagebroker/control{{- end -}}
 {{- define "snapshot.pageBrokerStagingPath" -}}/pagebroker/staging{{- end -}}
+
+{{/* Driver access shared by the agent and PageBroker. */}}
+{{- define "snapshot.nvidiaEnvironment" -}}
+- name: NVIDIA_VISIBLE_DEVICES
+  value: all
+- name: NVIDIA_DRIVER_CAPABILITIES
+  value: compute,utility
+{{- end -}}
