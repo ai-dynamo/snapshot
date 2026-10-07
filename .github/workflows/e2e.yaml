@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: E2E Tests
+name: E2E Tests (environment check only, trial, not for merge)
 
 on:
   workflow_dispatch:
@@ -204,24 +204,6 @@ jobs:
         run: |
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests -m environment -vv
-
-      - name: Run snapshot lifecycle tests
-        timeout-minutes: 35
-        run: |
-          set -euo pipefail
-          uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
-
-      - name: Run SnapshotJob lifecycle tests
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          uv run --locked --project e2e pytest e2e/tests/test_snapshotjob.py -vv -s
-
-      - name: Run workload script tests
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          uv run --locked --project e2e pytest e2e/tests/test_workload_scripts.py -vv -s
 
       - name: Cleanup e2e vCluster
         if: ${{ always() }}
