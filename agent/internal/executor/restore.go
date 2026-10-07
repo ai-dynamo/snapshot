@@ -153,9 +153,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	var cleanupErr error
 	var activeMounts []restoreMount
-	restored := false
+	restoreComplete := false
 	cleanup := func() {
-		cleanupErr = errors.Join(cleanupErr, cleanupRestoreMounts(ctx, activeMounts, restored))
+		cleanupErr = errors.Join(cleanupErr, cleanupRestoreMounts(ctx, activeMounts, restoreComplete))
 		activeMounts = nil
 	}
 	defer func() {
@@ -193,7 +193,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		// These libraries belong to the checkpointed process. The agent supplies their
 		// files, but an upgraded bundle may differ from the bytes loaded at capture.
 		if err := cuda.VerifyCuInterposeLibraryIdentity(nsmount.CuInterposeBundlePath, manifest.CuInterpose); err != nil {
-			return 0, err
+			return RestoreResult{}, err
 		}
 	}
 
@@ -214,7 +214,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if manifest.CuInterpose != nil {
 		shimMount, err := mounts.MountCuInterpose(ctx, bundleMount)
 		if err != nil {
-			return 0, fmt.Errorf("mount cuinterpose into placeholder: %w", err)
+			return RestoreResult{}, fmt.Errorf("mount cuinterpose into placeholder: %w", err)
 		}
 		activeMounts = append(activeMounts, restoreMount{
 			action:        "unmount cuinterpose from placeholder",
@@ -296,7 +296,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	// LD_PRELOAD in later child processes. Only temporary restore mounts go away.
 	// Release closes the agent's fd. The retained bind belongs to the workload
 	// mount namespace and disappears when that namespace is destroyed.
-	restored = true
+	restoreComplete = true
 	cleanup()
 	wall := time.Since(restoreStart)
 	unaccounted := remainingDuration(wall,
