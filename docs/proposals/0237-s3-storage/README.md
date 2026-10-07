@@ -5,8 +5,6 @@ SPDX-License-Identifier: Apache-2.0
 
 # SNEP-237: S3 checkpoint storage
 
-**Status:** Draft; proposed APIs and behavior.
-
 <!-- toc -->
 - [Summary](#summary)
 - [Motivation](#motivation)
