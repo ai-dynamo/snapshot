@@ -20,6 +20,7 @@ var customStorageFlagNames = []string{
 	"host-proc-fd",
 	"pagebroker-execution-fd",
 	"cancel-fd",
+	"pagebroker-process-fd",
 	"pagebroker-socket-name",
 	"gpu-context",
 	"pagebroker-transaction",
@@ -64,7 +65,7 @@ func TestCustomStorageOptionsValidateDescriptors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	for _, kind := range []string{"directory", "closed", "socket-file", "host-proc-file", "execution-file", "cancel-file", "malformed-context"} {
+	for _, kind := range []string{"directory", "closed", "socket-file", "host-proc-file", "execution-file", "cancel-file", "broker-file", "malformed-context"} {
 		t.Run(kind, func(t *testing.T) {
 			socketSource, procSource := directory, directory
 			if kind == "socket-file" {
@@ -92,11 +93,16 @@ func TestCustomStorageOptionsValidateDescriptors(t *testing.T) {
 			}
 			defer cancelRead.Close()
 			defer cancelWrite.Close()
+			brokerFD, err := unix.PidfdOpen(os.Getpid(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
 			input := customStorageFlags{
 				pageBrokerSocketDirectoryFD: socketFD,
 				hostProcFD:                  procFD,
 				executionFD:                 executionFD,
 				cancelFD:                    int(cancelRead.Fd()),
+				brokerProcessFD:             brokerFD,
 				pageBrokerSocketName:        "broker.sock",
 				pageBrokerTransactionID:     "restore",
 				gpuContext:                  `{"captured_pids":[12],"visible_devices":["GPU-target"]}`,
@@ -107,6 +113,9 @@ func TestCustomStorageOptionsValidateDescriptors(t *testing.T) {
 			if kind == "execution-file" {
 				input.executionFD = int(file.Fd())
 			}
+			if kind == "broker-file" {
+				input.brokerProcessFD = int(file.Fd())
+			}
 			if kind == "cancel-file" {
 				input.cancelFD = int(file.Fd())
 			}
@@ -116,6 +125,7 @@ func TestCustomStorageOptionsValidateDescriptors(t *testing.T) {
 			flags := customStorageTestFlags(t, "--pagebroker-transaction=restore")
 			execution, hostProc, err := parseCustomStorageOptions(flags, input)
 			if err != nil {
+				unix.Close(brokerFD)
 				if kind != "closed" {
 					unix.Close(socketFD)
 				}
@@ -129,6 +139,10 @@ func TestCustomStorageOptionsValidateDescriptors(t *testing.T) {
 				case "socket-file", "host-proc-file", "execution-file", "cancel-file":
 					if !strings.Contains(err.Error(), "descriptor type") {
 						t.Fatalf("regular-file descriptor: %v", err)
+					}
+				case "broker-file":
+					if !errors.Is(err, unix.EBADF) {
+						t.Fatalf("broker descriptor: %v", err)
 					}
 				case "malformed-context":
 					var syntaxErr *json.SyntaxError
@@ -145,7 +159,7 @@ func TestCustomStorageOptionsValidateDescriptors(t *testing.T) {
 			if kind != "directory" {
 				t.Fatalf("accepted %s", kind)
 			}
-			for _, descriptor := range []int{socketFD, procFD, executionFD, int(cancelRead.Fd())} {
+			for _, descriptor := range []int{socketFD, procFD, executionFD, int(cancelRead.Fd()), brokerFD} {
 				flags, err := unix.FcntlInt(uintptr(descriptor), unix.F_GETFD, 0)
 				if err != nil || flags&unix.FD_CLOEXEC == 0 {
 					t.Fatalf("descriptor %d is not close-on-exec: %v", descriptor, err)

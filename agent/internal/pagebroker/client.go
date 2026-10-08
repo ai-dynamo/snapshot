@@ -128,7 +128,11 @@ func isTransportError(err error) bool {
 }
 
 func (c Client) Abort(ctx context.Context, transactionID string) error {
-	response, err := c.request(ctx, transactionID, &Request_Abort{Abort: &AbortRequest{}})
+	return c.abort(ctx, transactionID)
+}
+
+func (c Client) abort(ctx context.Context, transactionID string, files ...*os.File) error {
+	response, err := c.request(ctx, transactionID, &Request_Abort{Abort: &AbortRequest{}}, files...)
 	if err != nil {
 		return err
 	}
@@ -138,16 +142,32 @@ func (c Client) Abort(ctx context.Context, transactionID string) error {
 	return nil
 }
 
-func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command) (*Response, error) {
+func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
+	response, brokerProcess, err := c.requestWithProcess(ctx, transactionID, command, files...)
+	if brokerProcess != nil {
+		brokerProcess.Close()
+	}
+	return response, err
+}
+
+func (c Client) requestWithProcess(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
 	if err != nil {
-		return nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
 	}
 	defer connection.Close()
-	return exchange(ctx, connection.(*net.UnixConn), transactionID, command)
+	return exchangeWithProcess(ctx, connection.(*net.UnixConn), transactionID, command, files...)
 }
 
 func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
+	response, brokerProcess, err := exchangeWithProcess(ctx, connection, transactionID, command, files...)
+	if brokerProcess != nil {
+		brokerProcess.Close()
+	}
+	return response, err
+}
+
+func exchangeWithProcess(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
 	stopCancel := context.AfterFunc(ctx, func() {
 		_ = connection.CloseWrite()
 		_ = connection.Close()
@@ -161,29 +181,51 @@ func exchange(ctx context.Context, connection *net.UnixConn, transactionID strin
 	}
 	message, err := proto.Marshal(request)
 	if err != nil {
-		return nil, fmt.Errorf("marshal PageBroker request: %w", err)
+		return nil, nil, fmt.Errorf("marshal PageBroker request: %w", err)
 	}
 	if err := writeRequest(connection, message, files); err != nil {
-		return nil, transportError{cause: fmt.Errorf("write PageBroker request: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("write PageBroker request: %w", err)}
 	}
-	message, err = readMessage(connection)
+	message, receivedFiles, err := readMessageWithFiles(connection)
+	retained := false
+	defer func() {
+		if !retained {
+			for _, fd := range receivedFiles {
+				unix.Close(fd)
+			}
+		}
+	}()
 	if err != nil {
 		if errors.Is(err, errMessageTooLarge) {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, transportError{cause: fmt.Errorf("read PageBroker response: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("read PageBroker response: %w", err)}
 	}
 	response := new(Response)
 	if err := proto.Unmarshal(message, response); err != nil {
-		return nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
+		return nil, nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
 	}
 	if response.GetRequestId() != requestID || response.GetTransactionId() != transactionID {
-		return nil, fmt.Errorf("PageBroker response identifiers do not match request")
+		return nil, nil, fmt.Errorf("PageBroker response identifiers do not match request")
 	}
 	if failure := response.GetFailure(); failure != nil {
-		return nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
+		return nil, nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
 	}
-	return response, nil
+	if len(receivedFiles) > 1 {
+		return nil, nil, fmt.Errorf("unexpected PageBroker response descriptors")
+	}
+	if len(receivedFiles) == 0 {
+		return response, nil, nil
+	}
+	if response.GetDirectCheckpointDirectory() == nil && response.GetStagedCheckpointDirectory() == nil &&
+		response.GetDirectRestoreReady() == nil && response.GetStagedRestoreDirectory() == nil {
+		return nil, nil, fmt.Errorf("broker pidfd is only allowed on preparation responses")
+	}
+	if err := unix.PidfdSendSignal(receivedFiles[0], 0, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EPERM) {
+		return nil, nil, fmt.Errorf("invalid PageBroker process descriptor: %w", err)
+	}
+	retained = true
+	return response, os.NewFile(uintptr(receivedFiles[0]), "pagebroker-process"), nil
 }
 
 type failureError struct {

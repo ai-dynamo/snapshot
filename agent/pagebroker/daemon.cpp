@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#include <sys/syscall.h>
 #include "daemon.hpp"
 #include "errors.hpp"
 #include "fatal_cleanup.hpp"
@@ -25,6 +26,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <iostream>
 #include <string>
@@ -261,11 +263,36 @@ WriteAll(int fd, const void* buffer, size_t size)
 }
 
 void
-SendResponse(int connection, const Response& response)
+SendResponse(int connection, const Response& response, int pidfd = -1)
 {
   const std::string message = response.SerializeAsString();
   const uint32_t size = htonl(message.size());
-  if (!WriteAll(connection, &size, sizeof(size)) || !WriteAll(connection, message.data(), message.size())) {
+  size_t sent = 0;
+  if (pidfd >= 0) {
+    alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int))> control{};
+    iovec data{const_cast<uint32_t*>(&size), sizeof(size)};
+    msghdr header{};
+    header.msg_iov = &data;
+    header.msg_iovlen = 1;
+    header.msg_control = control.data();
+    header.msg_controllen = control.size();
+    auto* rights = CMSG_FIRSTHDR(&header);
+    rights->cmsg_level = SOL_SOCKET;
+    rights->cmsg_type = SCM_RIGHTS;
+    rights->cmsg_len = CMSG_LEN(sizeof(int));
+    std::memcpy(CMSG_DATA(rights), &pidfd, sizeof(pidfd));
+    ssize_t written;
+    do {
+      written = sendmsg(connection, &header, MSG_NOSIGNAL);
+    } while (written < 0 && errno == EINTR);
+    if (written <= 0) {
+      LogError("send broker pidfd", {errno, std::generic_category()});
+      return;
+    }
+    sent = static_cast<size_t>(written);
+  }
+  if (!WriteAll(connection, reinterpret_cast<const char*>(&size) + sent, sizeof(size) - sent) ||
+      !WriteAll(connection, message.data(), message.size())) {
     LogError("send response", {errno, std::generic_category()});
   }
 }
@@ -377,6 +404,22 @@ IsAllowedClient(int connection)
   return true;
 }
 
+bool
+IsOwnProcessDescriptor(int descriptor)
+{
+  std::ifstream info("/proc/self/fdinfo/" + std::to_string(descriptor));
+  std::string field;
+  while (info >> field) {
+    if (field == "Pid:") {
+      int pid = -1;
+      return (info >> pid) && pid == getpid();
+    }
+    std::string rest;
+    std::getline(info, rest);
+  }
+  return false;
+}
+
 class GpuConnections {
  public:
   explicit GpuConnections(Broker& broker) : broker_(broker)
@@ -477,14 +520,24 @@ HandleConnection(int connection, Broker& broker, GpuConnections& gpu_connections
   size = ntohl(size);
 
   Response response;
+  Request request;
   if (size > kMaxMessageSize) {
     response = RequestFailed(Request{}, Failure::INVALID_REQUEST, "invalid request");
   } else {
     std::string message(size, '\0');
-    Request request;
     if (!ReadAll(connection, message.data(), size) || !request.ParseFromString(message) || !request.IsInitialized()) {
       response = RequestFailed(Request{}, Failure::INVALID_REQUEST, "invalid request");
     } else {
+      if (request.has_checkpoint_gpu() || request.has_restore_gpu() || (request.has_abort() && !descriptors.empty())) {
+        // A socket path can be replaced between preparation and submission.
+        // Only the broker pinned during preparation may execute or confirm drain.
+        if (descriptors.empty() || !IsOwnProcessDescriptor(descriptors.front().get())) {
+          SendResponse(connection, RequestFailed(request, Failure::INVALID_REQUEST,
+                                                 "broker process descriptor does not match"));
+          return;
+        }
+        descriptors.erase(descriptors.begin());
+      }
       if (request.has_checkpoint_gpu() || request.has_restore_gpu()) {
         try {
           if (const auto rejected = gpu_connections.Start(connection, request, std::move(descriptors))) {
@@ -511,6 +564,17 @@ HandleConnection(int connection, Broker& broker, GpuConnections& gpu_connections
     }
   }
 
+  if (response.has_direct_checkpoint_directory() || response.has_staged_checkpoint_directory() ||
+      response.has_direct_restore_ready() || response.has_staged_restore_directory()) {
+    // The broker pins itself while alive. No peer PID lookup or namespace translation.
+    FileDescriptor pidfd(static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0)));
+    if (pidfd.get() < 0) {
+      SendResponse(connection, RequestFailed(request, Failure::INTERNAL_ERROR, "open broker pidfd"));
+    } else {
+      SendResponse(connection, response, pidfd.get());
+    }
+    return;
+  }
   SendResponse(connection, response);
 }
 

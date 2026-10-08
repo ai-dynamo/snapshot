@@ -925,6 +925,9 @@ func (*AbortRequest) Descriptor() ([]byte, []int) {
 	return file_v1_pagebroker_proto_rawDescGZIP(), []int{15}
 }
 
+// GPU requests pass the broker pidfd returned by preparation, then one target
+// pidfd per target, via SCM_RIGHTS with the first frame header bytes. GPU Abort
+// passes the same broker pidfd. The receiver verifies it refers to itself.
 type Request struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Snapshot assigns an ID to each request.
@@ -1573,6 +1576,10 @@ func (x *Failure) GetMessage() string {
 	return ""
 }
 
+// Successful storage preparation responses carry exactly one broker pidfd via
+// SCM_RIGHTS on the first frame-header bytes. The broker opens its own pidfd.
+// GPU clients retain it for execution and pass it to nsrestore. Other clients
+// close it. Failure, GPU completion, and other control responses carry no FDs.
 type Response struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RequestId     *string                `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3,oneof" json:"request_id,omitempty"`
