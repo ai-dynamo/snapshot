@@ -8,15 +8,15 @@ inputs:
   vcluster_version:
     description: vCluster CLI version to install.
     required: false
-    default: v0.37.3
+    default: v0.38.0-alpha.2
   vcluster_sha256_amd64:
     description: SHA256 for the linux amd64 vCluster CLI binary.
     required: false
-    default: 09ce36dc8b15c84daee6ebb931e2f961611e8ee8695d67e2f745cfeccb790454
+    default: 6500b7299241daaeb672d81d7f930993ff50983e152ef1e76ee7b488cbb5a9a7
   vcluster_sha256_arm64:
     description: SHA256 for the linux arm64 vCluster CLI binary.
     required: false
-    default: 613436255d1b229a7a0492c762c6674cb49122ef3e0317900bac9e035ae511bf
+    default: 475bd6b6e3b38a907a4914d5bd60b3938085330a53c0a4abe58d7d0a3525c7da
 
 runs:
   using: composite
@@ -48,7 +48,7 @@ runs:
           installed_output="$(vcluster --version 2>/dev/null || vcluster version 2>/dev/null || true)"
           installed_version="$(
             printf '%s\n' "${installed_output}" |
-            grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' |
+            grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?' |
             head -n 1 |
             sed 's/^v//' || true
           )"
