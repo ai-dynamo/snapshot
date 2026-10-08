@@ -88,10 +88,20 @@ spec:
             # CuInterpose libraries for opted-in workloads.
             - {{ printf "--cuinterpose-image=%s" (include "snapshot.agentImage" .) | quote }}
             - {{ printf "--cuinterpose-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
+            - --snapshot-storage-config=/etc/snapshot/storage.yaml
           volumeMounts:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}
+            - name: storage-config
+              mountPath: /etc/snapshot
+              readOnly: true
       volumes:
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
+        - name: storage-config
+          configMap:
+            name: {{ include "snapshot.fullname" . }}-config
+            items:
+              - key: storage.yaml
+                path: storage.yaml
