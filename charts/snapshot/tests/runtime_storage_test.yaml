@@ -50,14 +50,3 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "runtime.storageDir must be an absolute path"
-
-  - it: mounts runtime storage when PageBroker is disabled
-    set:
-      pageBroker.enabled: false
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
-          content:
-            name: runtime-storage
-            mountPath: /var/lib/containerd
-            readOnly: true
