@@ -44,6 +44,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
@@ -62,7 +63,8 @@ type NodeController struct {
 	runtime                 snapshotruntime.Runtime
 	injector                executor.RestoreMounter
 	log                     logr.Logger
-	checkpointFn            func(ctx context.Context, params CheckpointParams) error
+	checkpointFn            func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error)
+	fetchManifestFn         func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error)
 	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
 	writeControlSentinelFn  func(int, string, []byte) error
 	controlSentinelExistsFn func(int, string) (bool, error)
@@ -89,6 +91,8 @@ type restoreArtifact struct {
 	ContentUID          string
 	SourceContainerName string
 	Path                string
+	// PublishedArtifact is set only for bound content, read from status.
+	PublishedArtifact *pagebroker.PublishedArtifact
 }
 
 type restoreTarget struct {
@@ -234,6 +238,9 @@ func newDefaultController(
 		compareFn:               compat.Compare,
 	}
 	w.checkpointFn = w.executorCheckpoint
+	w.fetchManifestFn = func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		return executor.FetchArtifactManifest(ctx, cfg.PageBroker.ControlSocketPath, artifact)
+	}
 	return w
 }
 
@@ -516,7 +523,7 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if err != nil {
 		return nil, err
 	}
-	artifact, err := w.resolveRestoreArtifact(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), target)
+	artifact, err := w.resolveRestoreArtifact(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), target, content)
 	if err != nil {
 		return nil, err
 	}
@@ -633,7 +640,16 @@ func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapsh
 
 // resolveRestoreArtifact resolves the validated restore target to its physical
 // checkpoint directory. A nil error always returns a complete artifact.
-func (w *NodeController) resolveRestoreArtifact(podKey string, target *restoreTarget) (*restoreArtifact, error) {
+// resolveRestoreArtifact: legacy content is ready when the filesystem artifact
+// exists; bound content is ready once status records a published container.
+func (w *NodeController) resolveRestoreArtifact(
+	podKey string,
+	target *restoreTarget,
+	content *snapshotv1alpha1.PodSnapshotContent,
+) (*restoreArtifact, error) {
+	if content.Spec.Storage != nil {
+		return w.resolveBoundRestoreArtifact(target, content)
+	}
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, target.ContentUID, target.SourceContainerName)
 	if err != nil {
 		return nil, err
@@ -656,6 +672,31 @@ func (w *NodeController) resolveRestoreArtifact(podKey string, target *restoreTa
 		SourceContainerName: target.SourceContainerName,
 		Path:                path,
 	}, nil
+}
+
+func (w *NodeController) resolveBoundRestoreArtifact(
+	target *restoreTarget,
+	content *snapshotv1alpha1.PodSnapshotContent,
+) (*restoreArtifact, error) {
+	if content.Status.Storage != nil {
+		for _, published := range content.Status.Storage.Artifacts {
+			if published.ContainerName != target.SourceContainerName {
+				continue
+			}
+			return &restoreArtifact{
+				SnapshotName:        target.SnapshotName,
+				ContentUID:          target.ContentUID,
+				SourceContainerName: target.SourceContainerName,
+				PublishedArtifact: &pagebroker.PublishedArtifact{
+					StoreId:               content.Spec.Storage.StoreID,
+					ArtifactHandle:        published.ArtifactHandle,
+					ArtifactFormatVersion: published.ArtifactFormatVersion,
+				},
+			}, nil
+		}
+	}
+	return nil, newRestorePendingError("ArtifactPending",
+		fmt.Sprintf("Waiting for a published artifact for container %s", target.SourceContainerName))
 }
 
 // restorePodContainers owns one restore pass for the Pod. Workers never write
@@ -995,6 +1036,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		CustomStorageAvailable:      w.config.CustomStorageAvailable,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 		PageBrokerRestoreMode:       w.config.PageBroker.RestoreMode,
+		PublishedArtifact:           op.artifact.PublishedArtifact,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
 }

@@ -78,3 +78,8 @@ func failureCode(code Failure_Code) Failure_Code {
 		return Failure_UNSPECIFIED
 	}
 }
+
+// NewFailureError builds a broker failure for callers that simulate one.
+func NewFailureError(code Failure_Code, message string) *FailureError {
+	return &FailureError{code: failureCode(code), message: message}
+}

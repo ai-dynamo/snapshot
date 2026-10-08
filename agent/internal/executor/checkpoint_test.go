@@ -72,7 +72,7 @@ func TestCheckpointDoesNotCreateArtifactsBeforeInspection(t *testing.T) {
 	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, "content-uid", "main")
 	require.NoError(t, err)
 
-	err = Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+	_, err = Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
 		ContentUID:    "content-uid",
 		ContainerName: "main",
 	}, cfg)
@@ -272,7 +272,7 @@ func TestCheckpointPreparationFailure(t *testing.T) {
 					}
 					server <- nil
 				}()
-				err = checkpoint(ctx, nil, logr.Discard(), req, cfg,
+				_, err = checkpoint(ctx, nil, logr.Discard(), req, cfg,
 					func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
 						state := &types.CheckpointContainerSnapshot{PID: -1, RootFS: workingDirectory}
 						if format == "custom-storage" {
@@ -402,7 +402,7 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	start := time.Now()
-	err := checkpoint(ctx, checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+	_, err := checkpoint(ctx, checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
 		ContentUID:    "content-uid",
 		ContainerName: "main",
 	}, cfg, func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
@@ -413,6 +413,83 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	assert.Less(t, time.Since(start), 3*time.Second)
 	assert.False(t, CheckpointNeedsSourceKill(err))
 	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts"))
+}
+
+func TestCheckpointBoundRejectsMalformedStoreIDBeforeDialing(t *testing.T) {
+	cfg := &types.AgentConfig{
+		Storage:    types.StorageSpec{BasePath: t.TempDir()},
+		PageBroker: types.PageBrokerSpec{ControlSocketPath: filepath.Join(t.TempDir(), "pagebroker.sock")},
+	}
+
+	_, err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+		ContentUID:    "content-uid",
+		ContainerName: "main",
+		StoreID:       "not-a-valid-store-id",
+	}, cfg)
+	require.ErrorContains(t, err, "validate storage binding")
+	assert.NotContains(t, err.Error(), "prepare PageBroker checkpoint")
+}
+
+func TestCheckpointBoundSendsArtifactTarget(t *testing.T) {
+	storeID := "store-v1-" + fmt.Sprintf("%064x", 1)
+	target := &pagebroker.ArtifactTarget{
+		StoreId:  storeID,
+		Artifact: &pagebroker.ArtifactIdentity{ArtifactUid: "content-uid", ContainerName: "main"},
+	}
+	listener := listenPageBroker(t)
+	server := make(chan error, 1)
+	go func() {
+		for i := 0; i < 2; i++ {
+			connection, err := listener.Accept()
+			if err != nil {
+				server <- err
+				return
+			}
+			request, err := readPageBrokerTestRequest(connection)
+			if err != nil {
+				connection.Close()
+				server <- err
+				return
+			}
+			response := &pagebroker.Response{}
+			if i == 0 {
+				prepare := request.GetPrepareStagedCheckpoint()
+				if prepare == nil || !proto.Equal(prepare.GetTarget(), target) || prepare.GetDestination() != nil {
+					connection.Close()
+					server <- fmt.Errorf("wrong bound preparation: %v", request)
+					return
+				}
+				response.Result = &pagebroker.Response_Failure{Failure: &pagebroker.Failure{
+					Code: pagebroker.Failure_INVALID_REQUEST.Enum(), Message: proto.String("stop after target validation"),
+				}}
+			} else {
+				if request.GetAbort() == nil {
+					connection.Close()
+					server <- fmt.Errorf("expected Abort: %v", request)
+					return
+				}
+				response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+			}
+			err = replyPageBrokerTest(connection, request, response)
+			connection.Close()
+			if err != nil {
+				server <- err
+				return
+			}
+		}
+		server <- nil
+	}()
+	cfg := &types.AgentConfig{PageBroker: types.PageBrokerSpec{ControlSocketPath: listener.Addr().String()}}
+	ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+	defer cancel()
+	// Inspection precedes preparation; stop at the broker before CUDA or CRIU executes.
+	_, err := checkpoint(ctx, nil, logr.Discard(), CheckpointRequest{
+		ContentUID: "content-uid", ContainerName: "main", StoreID: storeID,
+	}, cfg, func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
+		return &types.CheckpointContainerSnapshot{}, 0, nil
+	})
+	require.ErrorContains(t, err, "stop after target validation")
+	waitPageBrokerTest(t, server)
 }
 
 func TestCheckpointNeedsSourceKill(t *testing.T) {
