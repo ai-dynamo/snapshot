@@ -840,9 +840,6 @@ func TestExecutorCheckpointInspectionFailureDoesNotKill(t *testing.T) {
 		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:      "worker-0",
 			Namespace: "inference",
-			Annotations: map[string]string{
-				snapshotv1alpha1.PageBrokerAnnotation: snapshotv1alpha1.PageBrokerAnnotationEnabled,
-			},
 		}},
 		ContainerName: "main",
 		ContainerID:   "abc123",

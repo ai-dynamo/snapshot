@@ -5,31 +5,113 @@ suite: PageBroker sidecar image
 templates:
   - templates/daemonset.yaml
 tests:
+  - it: rejects a separate PageBroker tag instead of silently ignoring it
+    set:
+      image.pageBroker.tag: candidate
+    asserts:
+      - failedTemplate:
+          errorMessage: "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images"
+
+  - it: embeds GPU execution in the default PageBroker sidecar
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 2
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].name
+          value: pagebroker
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].securityContext.privileged
+          value: true
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].securityContext.runAsUser
+          value: 0
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: NVIDIA_VISIBLE_DEVICES
+            value: all
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: NVIDIA_DRIVER_CAPABILITIES
+            value: compute,utility
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          value:
+            - /pagebroker/control/pagebroker.sock
+            - /pagebroker/staging
+            - /checkpoints
+            - --max-concurrent-requests
+            - "16"
+            - --custom-storage-buffer-count
+            - "32"
+            - --custom-storage-chunk-bytes
+            - "134217728"
+            - --custom-storage-max-pinned-bytes
+            - "0"
+
+  - it: applies the configured pinned-memory budget to the owning process
+    set:
+      pageBroker.transferBufferCount: 4
+      pageBroker.transferChunkBytes: 1048576
+      pageBroker.maxPinnedBytes: 8388608
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args[6]
+          value: "4"
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args[8]
+          value: "1048576"
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args[10]
+          value: "8388608"
+
+  - it: supports conventional checkpointing with PageBroker disabled
+    set:
+      pageBroker.enabled: false
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "agent")].name
+          value: agent
+
+  - it: rejects a string instead of the PageBroker enabled boolean
+    set:
+      pageBroker.enabled: "false"
+    asserts:
+      - failedTemplate:
+          errorPattern: "enabled"
+
   - it: pulls the sidecar from its own repository at the agent's tag
     set:
       pageBroker.enabled: true
       image.agent.tag: v1.2.3
     asserts:
       - equal:
-          path: spec.template.spec.containers[0].name
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].name
           value: pagebroker
       - equal:
-          path: spec.template.spec.containers[0].image
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].image
           value: ghcr.io/ai-dynamo/snapshot/pagebroker:v1.2.3
       - equal:
-          path: spec.template.spec.containers[0].imagePullPolicy
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].imagePullPolicy
           value: Always
 
   - it: defaults the sidecar tag to the chart appVersion like the agent
+    chart:
+      appVersion: v9.8.7
     set:
       pageBroker.enabled: true
     asserts:
       - equal:
-          path: spec.template.spec.containers[0].image
-          value: ghcr.io/ai-dynamo/snapshot/pagebroker:v0.1.0
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].image
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:v9.8.7
       - equal:
-          path: spec.template.spec.containers[1].image
-          value: ghcr.io/ai-dynamo/snapshot/agent:v0.1.0
+          path: spec.template.spec.containers[?(@.name == "agent")].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v9.8.7
 
   - it: follows image.pageBroker overrides
     set:
@@ -39,8 +121,78 @@ tests:
       image.pageBroker.pullPolicy: IfNotPresent
     asserts:
       - equal:
-          path: spec.template.spec.containers[0].image
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].image
           value: registry.internal/snapshot/pagebroker:v1.2.3
       - equal:
-          path: spec.template.spec.containers[0].imagePullPolicy
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].imagePullPolicy
           value: IfNotPresent
+
+  - it: rejects a nonnumeric buffer count
+    set:
+      pageBroker.transferBufferCount: "abc"
+    asserts:
+      - failedTemplate:
+          errorPattern: "transferBufferCount"
+
+  - it: rejects a string buffer count with a fraction
+    set:
+      pageBroker.transferBufferCount: "1.5"
+    asserts:
+      - failedTemplate:
+          errorPattern: "transferBufferCount"
+
+  - it: rejects a fractional buffer count
+    set:
+      pageBroker.transferBufferCount: 1.5
+    asserts:
+      - failedTemplate:
+          errorPattern: "transferBufferCount"
+
+  - it: rejects a zero buffer count
+    set:
+      pageBroker.transferBufferCount: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "transferBufferCount"
+
+  - it: rejects a negative chunk size
+    set:
+      pageBroker.transferChunkBytes: -4096
+    asserts:
+      - failedTemplate:
+          errorPattern: "transferChunkBytes"
+
+  - it: rejects an unaligned chunk size
+    set:
+      pageBroker.transferChunkBytes: 4097
+    asserts:
+      - failedTemplate:
+          errorPattern: "transferChunkBytes"
+
+  - it: rejects a nonnumeric memory cap
+    set:
+      pageBroker.maxPinnedBytes: "abc"
+    asserts:
+      - failedTemplate:
+          errorPattern: "maxPinnedBytes"
+
+  - it: rejects a negative memory cap
+    set:
+      pageBroker.maxPinnedBytes: -1
+    asserts:
+      - failedTemplate:
+          errorPattern: "maxPinnedBytes"
+
+  - it: rejects a memory cap above the integer range
+    set:
+      pageBroker.maxPinnedBytes: 1e20
+    asserts:
+      - failedTemplate:
+          errorPattern: "maxPinnedBytes"
+
+  - it: rejects a zero control request limit
+    set:
+      pageBroker.maxConcurrentRequests: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "maxConcurrentRequests"

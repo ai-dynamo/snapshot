@@ -15,9 +15,11 @@
 
 set -eu
 
-# This script's own pattern would match, so exclude it.
+# This script's own pattern would match, so exclude it. JSON Schema comments
+# encode the same two-line header with a literal \\n inside a JSON string.
 offenders=$(
     git grep -nI 'SPDX-License-Identifier:' -- . ':!hack/verify-spdx-format.sh' \
+        | grep -vE ':[0-9]+:[[:space:]]*"\$comment": "SPDX-FileCopyrightText: [^"]*\\nSPDX-License-Identifier: [^"]*",?$' \
         | grep -vE ':[0-9]+:[[:space:]]*(#|//|\*|/\*|--|;|<!--)?[[:space:]]*SPDX-License-Identifier:' \
         || true
 )

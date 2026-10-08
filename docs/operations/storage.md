@@ -57,9 +57,40 @@ reserved in the chart for future use and are not supported today.
 
 ### PageBroker restore source
 
-For pods annotated with `nvidia.com/snapshot-pagebroker: "true"`,
-`pageBroker.restoreMode` selects the restore source when PageBroker is enabled:
+When PageBroker is enabled, `pageBroker.restoreMode` selects the restore source
+for pods that do not set `nvidia.com/snapshot-pagebroker: "false"`:
 
 - `direct` (default) prepares a PageBroker transaction and mounts the original
   checkpoint directory read-only for CRIU. It does not copy CPU images into staging.
 - `staged` copies checkpoint files into PageBroker staging before CRIU runs.
+
+### Diagnose slow GPU restores
+
+The agent's `Restore timing summary` separates CPU restore (`criu_restore`), GPU
+restore (`cuda_restore`), and staging. Measure application readiness and a fresh
+inference request separately. Framework compilation and autotuning after restore
+will show up in application readiness, not in the completed CUDA restore phase.
+
+For a large CustomStorage artifact, compare its GPU payload size with the sustained
+read bandwidth available to the restoring node. For example, 520 GB takes at least
+21 seconds to read at 25 GB/s, before CPU restore and any GPU setup that does not
+overlap the transfer. Increasing pinned-memory resources alone cannot remove a
+storage bandwidth limit. Tune `pageBroker.transferBufferCount` and
+`pageBroker.transferChunkBytes` together, and account for their product on every
+visible GPU.
+
+When comparing runs, keep the model revision, workload image, GPU count, checkpoint
+preparation, and storage mount options fixed. Check the mount options actually in
+use on the destination node. A different NFS client may not support the same
+connection and multipath options. Preserve compatible model, compiler, and
+autotuning caches when a new capture is necessary.
+
+PageBroker emits NVTX ranges for CUDA setup, payload transfer, storage waits, and
+completion. An NVTX-only trace can distinguish slow native CUDA preparation from
+slow storage. CUDA API tracing can interfere with native checkpoint operations,
+so do not use it for the performance control. Confirm results with repeated
+unprofiled restores and fresh inference.
+
+When testing a build, set `image.agent.tag` for both the agent and PageBroker, and
+verify the running containers' image digests. A separate `image.pageBroker.tag` is
+rejected because the two images share an internal protocol and ship as a pair.

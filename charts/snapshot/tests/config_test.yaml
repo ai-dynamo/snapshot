@@ -5,6 +5,26 @@ suite: snapshot agent configuration validation
 templates:
   - templates/configmap.yaml
 tests:
+  - it: enables PageBroker without a helper or capture-format setting
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'pageBroker:\n  enabled: true\n  restoreMode: "direct"\n  controlSocketPath: "/pagebroker/control/pagebroker.sock"'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "cudaCheckpoint|enableChecksumDigest|transferBufferCount|storageMode"
+
+  - it: supports explicitly disabling PageBroker
+    set:
+      pageBroker.enabled: false
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'pageBroker:\n  enabled: false'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "controlSocketPath"
+
   - it: rejects a caller-selected checkpoint mount path
     set:
       storage.pvc.basePath: /other
