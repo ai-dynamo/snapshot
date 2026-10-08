@@ -3,12 +3,82 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from snapshot_e2e import benchmark as benchmark_result
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
 from snapshot_e2e.workloads import TestRun
+
+# Comma-separated test names that this run must actually execute. Set by CI,
+# unset locally. See e2e/README.md for what it is for.
+REQUIRED_TESTS_ENV = "SNAPSHOT_E2E_REQUIRED_TESTS"
+
+# What each required name matched when collection found it, before anything was
+# deselected. Comparing against that, rather than against the names that
+# survive, is what makes a dropped parameter case visible: the bare function
+# name still matches the cases that remain.
+COLLECTED_MATCHES = pytest.StashKey[dict[str, set[str]]]()
+
+
+def required_test_names() -> set[str]:
+    raw = os.environ.get(REQUIRED_TESTS_ENV, "")
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
+def item_names(item: pytest.Item) -> set[str]:
+    """The names a required entry may match, parametrized or not.
+
+    A parametrized item's ``name`` carries its parameters, so the bare function
+    name is accepted too and one entry covers every case of it.
+    """
+    return {item.name, getattr(item, "originalname", None) or item.name}
+
+
+def matches(items: list[pytest.Item], name: str) -> set[str]:
+    return {item.nodeid for item in items if name in item_names(item)}
+
+
+# tryfirst, to run before marker and -k deselection, which happen in this same
+# hook. This records only; the comparison needs the final selection.
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(
+    session: pytest.Session,
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    required = required_test_names()
+    if not required:
+        return
+    session.stash[COLLECTED_MATCHES] = {
+        name: matches(items, name) for name in required
+    }
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Refuse to run at all when a required case will not run.
+
+    Checked at the end of collection rather than during a run, because a case
+    that was never selected has nothing left to report a failure against.
+    """
+    collected = session.stash.get(COLLECTED_MATCHES, None)
+    if not collected:
+        return
+    problems = []
+    for name, found in sorted(collected.items()):
+        if not found:
+            problems.append(f"{name} (no such test was collected)")
+            continue
+        dropped = found - matches(session.items, name)
+        if dropped:
+            problems.append(f"{name} (deselected: {', '.join(sorted(dropped))})")
+    if problems:
+        raise pytest.UsageError(
+            f"{REQUIRED_TESTS_ENV} requires tests that this run did not select: "
+            + "; ".join(problems)
+        )
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -20,6 +90,14 @@ def pytest_runtest_makereport(
     report = outcome.get_result()
     setattr(item, f"benchmark_report_{call.when}", report)
     setattr(item, f"benchmark_excinfo_{call.when}", call.excinfo)
+    # A required case that skips leaves the suite green while proving nothing,
+    # so the skip is the failure. Rewriting the report rather than failing the
+    # session keeps the reason attached to the test that produced it.
+    if report.skipped and item_names(item) & required_test_names():
+        report.outcome = "failed"
+        report.longrepr = (
+            f"{item.name} is required to run, but it was skipped: {report_message(report)}"
+        )
 
 
 @pytest.fixture

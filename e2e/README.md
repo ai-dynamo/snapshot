@@ -79,6 +79,14 @@ Each stage stands alone. Against a cluster that already runs Snapshot, set
 `KUBECONFIG` and run `pytest -m cpu` on its own; against a clean cluster, run
 the `setup.py` phases below and then the tests.
 
+`SNAPSHOT_E2E_REQUIRED_TESTS` names the cases the job exists to prove, as a
+comma-separated list of test names. Any name the run deselects, or that skips,
+fails the run; a parametrized function can be named bare, which requires every
+one of its cases, or by case ID to require just that one. Without it, dropping
+a `cpu` marker would leave the check green while it tested no round trip at
+all, because pytest exits 0 for a suite that ran nothing it was asked for. It
+is unset for local runs, where skipping is legitimate.
+
 ### Local Direct Mode
 
 Use direct mode when `KUBECONFIG` already points at the cluster where Snapshot

@@ -820,7 +820,14 @@ def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str
         f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
         container=AGENT_CONTAINER,
     )
-    status = json.loads(output).get("status")
+    # exec merges stderr into the stream, and a node without /etc/crictl.yaml
+    # (k3s) makes crictl warn that it is guessing the runtime endpoint. Decode
+    # from the first brace rather than the first byte so that warning, which
+    # says nothing about the container, does not read as a missing status.
+    start = output.find("{")
+    if start < 0:
+        raise AssertionError(f"crictl printed no JSON for {container_id!r}: {output!r}")
+    status = json.loads(output[start:]).get("status")
     if not isinstance(status, dict) or not status:
         raise AssertionError(f"runtime reported no container status for {container_id!r}")
     return (status.get("imageId") or "").strip()
@@ -870,6 +877,29 @@ def checkpoint_rootfs_file(
         checkpoint_agent_pod(config, node),
         f"cd {checkpoint_artifact_path(content_uid)} && "
         f"tar -xOf rootfs-diff.tar {path}",
+        container=AGENT_CONTAINER,
+    )
+
+
+def corrupt_checkpoint_image(
+    config: k8s.E2EConfig,
+    node: str,
+    content_uid: str,
+    image: str = "inventory.img",
+) -> None:
+    """Overwrite one CRIU image in a captured artifact with junk.
+
+    The default is the inventory, which CRIU reads first to find every other
+    image, so a restore fails on it rather than part way through replaying a
+    process. The file is replaced rather than removed because a missing image
+    and an unreadable one are different failures, and the unreadable one is the
+    one a half-written or bit-rotted artifact produces.
+    """
+    k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"printf 'not-a-criu-image' > "
+        f"{checkpoint_artifact_path(content_uid)}/{shlex.quote(image)}",
         container=AGENT_CONTAINER,
     )
 
