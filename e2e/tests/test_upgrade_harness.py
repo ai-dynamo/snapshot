@@ -142,7 +142,10 @@ def test_manual_workflow_offers_every_config() -> None:
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     inputs = workflow[True]["workflow_dispatch"]["inputs"]
 
-    assert sorted(inputs["upgrade_config"]["options"]) == sorted(configs.CONFIGS)
+    options = inputs["upgrade_config"]["options"]
+
+    assert options[0] == inputs["upgrade_config"]["default"] == "default"
+    assert sorted(options[1:]) == sorted(configs.CONFIGS)
 
 
 def test_upgrade_installs_the_checked_out_chart() -> None:
