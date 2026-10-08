@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -277,4 +279,32 @@ func TestFailedSweepWaitsForNextTrigger(t *testing.T) {
 	assert.Equal(t, q.config.ListAttempts, reader.calls)
 	assert.Zero(t, q.queue.Len())
 	assert.Zero(t, q.queue.NumRequeues(newSweepKey()))
+}
+
+func TestSweepRetainsCompletedAndCanaryArtifactRoots(t *testing.T) {
+	base := t.TempDir()
+	for _, uid := range []string{"completed", "canary", "orphan"} {
+		root, err := artifact.ResolveContentRoot(base, uid)
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(root, 0o750))
+	}
+	q, _ := newTestQueue(t, base)
+	q.apiReader = &metadataReader{list: func(list *metav1.PartialObjectMetadataList, _ *client.ListOptions) error {
+		emptyMetadataPage(list, "1", "")
+		list.Items = []metav1.PartialObjectMetadata{
+			{ObjectMeta: metav1.ObjectMeta{UID: types.UID("completed")}},
+			{ObjectMeta: metav1.ObjectMeta{UID: types.UID("canary")}},
+		}
+		return nil
+	}}
+
+	require.NoError(t, q.processSweep(context.Background(), logr.Discard()))
+	for _, uid := range []string{"completed", "canary"} {
+		root, err := artifact.ResolveContentRoot(base, uid)
+		require.NoError(t, err)
+		require.DirExists(t, root)
+	}
+	orphanRoot, err := artifact.ResolveContentRoot(base, "orphan")
+	require.NoError(t, err)
+	require.NoDirExists(t, orphanRoot)
 }

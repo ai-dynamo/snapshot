@@ -103,6 +103,7 @@ jobs:
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
             DOCKER_BUILD_ARGS="--load \
+              --build-arg GO_BUILD_TAGS=snapshot_e2e \
               --cache-from=type=gha,scope=operator \
               --cache-to=type=gha,scope=operator,mode=max"
 
@@ -230,7 +231,8 @@ jobs:
           image.pageBroker.repository=${IMAGE_REGISTRY}/pagebroker
           image.operator.pullPolicy=IfNotPresent
           image.agent.pullPolicy=IfNotPresent
-          image.pageBroker.pullPolicy=IfNotPresent"
+          image.pageBroker.pullPolicy=IfNotPresent
+          operator.testFailCaptureSourceAnnotation=snapshot-e2e.nvidia.com/fail-capture"
           uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-install \
             --skip-host-preflight
@@ -254,7 +256,12 @@ jobs:
           # leave the check green while it tested no round trip at all.
           SNAPSHOT_E2E_REQUIRED_TESTS: >-
             test_one_cpu_snapshot_restores_into_two_containers,
-            test_snapshotjob_cpu_captures_and_restore_recovers_state
+            test_snapshotjob_cpu_captures_and_restore_recovers_state,
+            test_snapshotjob_fails_when_capture_fails_after_helper_succeeds,
+            test_snapshotjob_fails_when_helper_fails_after_capture,
+            test_snapshotjob_deadline_exceeded_when_helper_overruns,
+            test_snapshotjob_restart_preserves_capture_waiting_for_helper,
+            test_snapshotjob_restart_preserves_pending_capture
         run: uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
 
       - name: Collect diagnostics

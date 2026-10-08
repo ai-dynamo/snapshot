@@ -66,8 +66,9 @@ var errContentConflict = errors.New("existing PodSnapshotContent belongs to anot
 // back to the PodSnapshot, and cascades deletion to the PodSnapshotContent.
 type PodSnapshotReconciler struct {
 	client.Client
-	NonCacheReadClient client.Reader
-	Recorder           record.EventRecorder
+	NonCacheReadClient    client.Reader
+	Recorder              record.EventRecorder
+	TestFailureAnnotation string
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -300,6 +301,10 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 			return sr.failPodSnapshot(ctx, snap, "StalePodReference", err)
 		}
 		return ctrl.Result{}, fmt.Errorf("validate source pod: %w", err)
+	}
+	if annotation := sr.TestFailureAnnotation; annotation != "" && pod.Annotations[annotation] == "true" {
+		return sr.failPodSnapshot(ctx, snap, "TestCaptureFailure",
+			fmt.Errorf("test-only capture failure requested by source pod annotation %q", annotation))
 	}
 
 	content, err := sr.ensurePodSnapshotContent(ctx, snap, podSnapshotContentName(snap), pod)

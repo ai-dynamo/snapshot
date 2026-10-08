@@ -382,12 +382,23 @@ def snapshotjob_helper_pod_template(
     config: k8s.E2EConfig,
     run: TestRun,
     helper_command: str,
+    wait_for_helper_before_capture: bool = False,
 ) -> dict[str, Any]:
     # Two containers: the CRIU target plus a helper doing independent work
     # (the design's GMS-saver pattern). The dump kills only the target; the
     # SnapshotJob must wait for the helper before completing, and a helper
     # failure must fail the run even though the capture succeeded.
     template = snapshotjob_pod_template(config=config, run=run, gpu=False)
+    if wait_for_helper_before_capture:
+        template["spec"]["containers"][0]["command"] = [
+            "/bin/bash",
+            "-lc",
+            f"""set -euo pipefail
+mkdir -p {STATE_DIR}
+while [ ! -f {CONTROL_DIR}/helper-finished ]; do sleep 0.1; done
+{CPU_SOURCE}
+""",
+        ]
     template["spec"]["containers"].append(
         {
             "name": "helper",

@@ -478,6 +478,36 @@ func TestSnapshotJobReconcileHelperStillRunningWaits(t *testing.T) {
 	assert.Equal(t, snapshotv1alpha1.ReasonWaitingForPodCompletion, completed.Reason)
 }
 
+func TestSnapshotJobReconcileRestartCompletesAfterHelperFinishes(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj, job, pod, snap := helperSnapshotJob(t, s,
+		corev1.ContainerState{Running: &corev1.ContainerStateRunning{}})
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	storedPod := &corev1.Pod{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pod), storedPod))
+	storedPod.Status.ContainerStatuses[1].State = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
+	}
+	require.NoError(t, r.Status().Update(context.Background(), storedPod))
+
+	restarted := &SnapshotJobReconciler{
+		Client:             r.Client,
+		NonCacheReadClient: r.NonCacheReadClient,
+		Recorder:           r.Recorder,
+	}
+	_, err = restarted.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, restarted.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+}
+
 func TestSnapshotJobReconcileHelperMissingStatusWaits(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj, job, pod, snap := helperSnapshotJob(t, s,
