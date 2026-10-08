@@ -53,7 +53,7 @@ func newTestQueue(t *testing.T, basePath string, objects ...client.Object) (*Que
 	t.Helper()
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(maintenanceTestScheme(t)).WithObjects(objects...).Build()
 	recorder := record.NewFakeRecorder(10)
-	q, err := NewQueue(kubeClient, kubeClient, recorder, testConfig(basePath))
+	q, err := NewQueue(context.Background(), kubeClient, kubeClient, recorder, testConfig(basePath))
 	require.NoError(t, err)
 	t.Cleanup(q.queue.ShutDown)
 	return q, recorder

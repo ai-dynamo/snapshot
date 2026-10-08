@@ -5,6 +5,7 @@ package maintenance
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
@@ -25,8 +26,27 @@ type BackendRegistry struct {
 	backends map[string]Backend
 }
 
-func (r *BackendRegistry) Init(cfg operatortypes.ArtifactCleanupConfig) {
-	r.register(backends.NewPVCBackend(cfg.BasePath))
+// Init registers only the one configured backend; Stage 1 supports a single
+// configured store per installation.
+func (r *BackendRegistry) Init(ctx context.Context, cfg operatortypes.ArtifactCleanupConfig) error {
+	configuredBackend := cfg.BackendType
+	if configuredBackend == "" {
+		configuredBackend = backends.NamePVC
+	}
+	switch strings.ToUpper(configuredBackend) {
+	case backends.NamePVC:
+		r.register(backends.NewPVCBackend(cfg.BasePath))
+	case backends.NameS3:
+		if cfg.S3 == nil {
+			return fmt.Errorf("s3 maintenance backend configured without an s3 config")
+		}
+		s3Backend, err := backends.NewS3Backend(ctx, backends.NewS3Config(*cfg.S3))
+		if err != nil {
+			return fmt.Errorf("construct S3 maintenance backend: %w", err)
+		}
+		r.register(s3Backend)
+	}
+	return nil
 }
 
 func (r *BackendRegistry) register(backend Backend) {
