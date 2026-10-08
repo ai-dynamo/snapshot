@@ -16,6 +16,14 @@ newest plain v0.0.0-g<sha8> tag published for all packages. Plain tags are
 only ever produced from main/release, so the fallback cannot pick up another
 feature branch's build; it is announced loudly because the Snapshot under test
 is then main's, not the PR's.
+
+Upgrade tests also need the version a snapshot is taken on before upgrading.
+--from takes release tags or commit hashes, and --from-minor-versions N takes
+the newest patch release of each of the last N minor versions. Both print a
+JSON list of {tag, chart_version}, verified to be published for the operator
+and agent images and the chart, and drop the version under test itself. The
+pagebroker image is not required: it is only deployed when enabled, and
+releases before it existed never published one.
 """
 
 from __future__ import annotations
@@ -33,8 +41,18 @@ import urllib.request
 GITHUB_API_VERSION = "2022-11-28"
 PAGE_SIZE = 100
 ORG = "ai-dynamo"
+REPOSITORY = f"{ORG}/snapshot"
 PACKAGES = ("snapshot/operator", "snapshot/agent", "snapshot/pagebroker")
+CHART_PACKAGE = "snapshot/snapshot"
+UPGRADE_FROM_PACKAGES = ("snapshot/operator", "snapshot/agent")
 PLAIN_DEV_TAG = re.compile(r"^v0\.0\.0-g[0-9a-f]{8}$")
+VERSION_TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$")
+RELEASE_TAG = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
+COMMIT_HASH = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+class ResolveError(RuntimeError):
+    pass
 
 
 def head_sha() -> str:
@@ -136,14 +154,155 @@ def write_github_env(tag: str) -> None:
         env.write(f"SNAPSHOT_E2E_SNAPSHOT_TAG={tag}\n")
 
 
+def release_tags(headers: dict[str, str]) -> list[str]:
+    tags: list[str] = []
+    page = 0
+    while True:
+        page += 1
+        url = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page={PAGE_SIZE}&page={page}"
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=30) as response:
+            releases = json.load(response)
+        if not releases:
+            break
+        tags.extend(r["tag_name"] for r in releases if not r.get("draft") and not r.get("prerelease"))
+        if len(releases) < PAGE_SIZE:
+            break
+    return tags
+
+
+def latest_minor_releases(tags: list[str], count: int) -> list[str]:
+    newest: dict[tuple[int, int], tuple[int, int, int]] = {}
+    for tag in tags:
+        match = RELEASE_TAG.match(tag)
+        if not match:
+            continue
+        version = (int(match[1]), int(match[2]), int(match[3]))
+        if version > newest.get(version[:2], (-1, -1, -1)):
+            newest[version[:2]] = version
+    return [f"v{major}.{minor}.{patch}" for major, minor, patch in sorted(newest.values(), reverse=True)[:count]]
+
+
+def expand_commit(prefix: str) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{prefix}^{{commit}}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ResolveError(
+            f"commit {prefix} is not in the local history; pass at least 8 hex "
+            "characters or fetch more history"
+        )
+    return result.stdout.strip()
+
+
+def from_ref_tag(ref: str) -> str:
+    if VERSION_TAG.match(ref):
+        return ref
+    sha = ref.lower()
+    if not COMMIT_HASH.match(sha):
+        raise ResolveError(f"{ref!r} is neither a version tag (vX.Y.Z) nor a commit hash")
+    if len(sha) < 8:
+        sha = expand_commit(sha)
+    return dev_tag(sha)
+
+
+def chart_version(tag: str) -> str:
+    return tag.removeprefix("v")
+
+
+def resolve_from(tags: list[str], to_tag: str, headers: dict[str, str]) -> list[dict[str, str]]:
+    resolved = []
+    for tag in dict.fromkeys(tags):
+        if tag == to_tag:
+            print(f"Skipping {tag}: it is the version under test", file=sys.stderr)
+            continue
+        missing = [package for package in UPGRADE_FROM_PACKAGES if not package_has_tag(package, tag, headers)]
+        if not package_has_tag(CHART_PACKAGE, chart_version(tag), headers):
+            missing.append(CHART_PACKAGE)
+        if missing:
+            hint = (
+                " push-artifacts publishes only main and release-branch commits."
+                if PLAIN_DEV_TAG.match(tag)
+                else ""
+            )
+            raise ResolveError(f"{tag} is not published for: {', '.join(missing)}.{hint}")
+        resolved.append({"tag": tag, "chart_version": chart_version(tag)})
+    if not resolved:
+        raise ResolveError(f"no version left to upgrade from after dropping the version under test ({to_tag})")
+    return resolved
+
+
+def upgrade_from_tags(args: argparse.Namespace, headers: dict[str, str]) -> list[str]:
+    refs = [ref.strip() for ref in (args.upgrade_from or "").split(",") if ref.strip()]
+    if refs:
+        return [from_ref_tag(ref) for ref in refs]
+    count = 1 if args.from_minor_versions is None else args.from_minor_versions
+    if count < 1:
+        raise ResolveError("--from-minor-versions must be at least 1")
+    tags = latest_minor_releases(release_tags(headers), count)
+    if not tags:
+        raise ResolveError(f"{REPOSITORY} has no published release to upgrade from")
+    return tags
+
+
+def write_github_output(name: str, value: str) -> None:
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if not github_output:
+        return
+
+    with open(github_output, "a", encoding="utf-8") as output:
+        output.write(f"{name}={value}\n")
+
+
+def resolve_upgrade_from(args: argparse.Namespace, headers: dict[str, str]) -> int:
+    to_tag = args.to or os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG") or dev_tag(head_sha())
+    try:
+        resolved = resolve_from(upgrade_from_tags(args, headers), to_tag, headers)
+    except ResolveError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    encoded = json.dumps(resolved, separators=(",", ":"))
+    write_github_output("upgrade_from", encoded)
+    for entry in resolved:
+        print(f"Resolved upgrade-from version: {entry['tag']} (upgrading to {to_tag})", file=sys.stderr)
+    print(encoded)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--fallback-main",
         action="store_true",
         help=(
             "if the head commit has no published tag (plain or branch-slugged), "
             "use the newest plain v0.0.0-g<sha8> tag instead of failing"
+        ),
+    )
+    mode.add_argument(
+        "--from",
+        dest="upgrade_from",
+        metavar="REFS",
+        help=(
+            "comma-separated version tags or commit hashes to upgrade from; "
+            "empty means the latest release"
+        ),
+    )
+    mode.add_argument(
+        "--from-minor-versions",
+        type=int,
+        metavar="N",
+        help="upgrade from the newest patch release of each of the last N minor versions",
+    )
+    parser.add_argument(
+        "--to",
+        help=(
+            "version under test, dropped from the upgrade-from list; defaults to "
+            "SNAPSHOT_E2E_SNAPSHOT_TAG, then the head commit's dev tag"
         ),
     )
     args = parser.parse_args()
@@ -155,6 +314,11 @@ def main() -> int:
     token = os.environ.get("GH_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
+
+    if args.upgrade_from is not None or args.from_minor_versions is not None:
+        return resolve_upgrade_from(args, headers)
+    if args.to:
+        parser.error("--to only applies with --from or --from-minor-versions")
 
     sha = head_sha()
     tag = dev_tag(sha)

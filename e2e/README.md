@@ -181,6 +181,92 @@ kubectl delete namespace "$SNAPSHOT_E2E_HOST_NAMESPACE" --ignore-not-found
 rm -f "$SNAPSHOT_E2E_TARGET_KUBECONFIG"
 ```
 
+## Installing a Published Version
+
+`snapshot-install` installs the local `./charts/snapshot` by default. To install
+a published release or main build instead, point it at the chart in GHCR:
+
+```bash
+export SNAPSHOT_E2E_SNAPSHOT_TAG=v0.1.0
+export SNAPSHOT_E2E_CHART_REF=oci://ghcr.io/ai-dynamo/snapshot/snapshot
+export SNAPSHOT_E2E_CHART_VERSION=0.1.0
+
+uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-install
+```
+
+The chart version is the image tag without the leading `v`. Main builds use
+`v0.0.0-g<sha8>` images and chart version `0.0.0-g<sha8>`.
+
+`hack/resolve-snapshot-image-tag.py` resolves which versions to upgrade from
+and checks that their operator and agent images and chart are published. It
+prints a JSON list of `{tag, chart_version}` and drops the version under test:
+
+```bash
+# Latest release
+python3 hack/resolve-snapshot-image-tag.py --from ""
+# Newest patch release of each of the last 3 minor versions
+python3 hack/resolve-snapshot-image-tag.py --from-minor-versions 3
+# Specific release tags and main commits
+python3 hack/resolve-snapshot-image-tag.py --from v0.1.0,1a2b3c4d
+```
+
+Only main and release-branch commits are published, so a feature-branch commit
+cannot be used. Set `GH_TOKEN` to avoid GitHub API rate limits.
+
+## Upgrade Tests
+
+`tests/test_upgrade.py` checks that state created on an older Snapshot version
+survives an upgrade. Install the older version from GHCR first, then run the
+test. The test performs the upgrade itself, to the chart in this checkout.
+
+`SNAPSHOT_E2E_SNAPSHOT_TAG` names the version being installed, so it is the old
+version for `snapshot-install` and the new version for the test:
+
+```bash
+export SNAPSHOT_E2E_UPGRADE_FROM_TAG=v0.1.0
+export UPGRADE_TO_TAG=<published-main-tag>
+
+# 1. Install the old version from GHCR
+SNAPSHOT_E2E_SNAPSHOT_TAG="$SNAPSHOT_E2E_UPGRADE_FROM_TAG" \
+SNAPSHOT_E2E_CHART_REF=oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+SNAPSHOT_E2E_CHART_VERSION="${SNAPSHOT_E2E_UPGRADE_FROM_TAG#v}" \
+  uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-install
+SNAPSHOT_E2E_SNAPSHOT_TAG="$SNAPSHOT_E2E_UPGRADE_FROM_TAG" \
+  uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-ready
+
+# 2. Create state, upgrade to the new version, and validate
+SNAPSHOT_E2E_SNAPSHOT_TAG="$UPGRADE_TO_TAG" \
+  uv run --project e2e pytest e2e/tests/test_upgrade.py -m upgrade -vv -s
+```
+
+A run has three phases:
+
+1. **PreUpgrade:** each selected scenario creates its state on the old version,
+   such as a source pod and a ready `PodSnapshot`.
+2. **Upgrade:** `helm upgrade` to the new version using the local chart.
+   `test_upgrade_completed` checks the release is deployed, the operator and
+   agent run the new images with no restarts or panics, pagebroker runs next
+   to every upgraded agent exactly when the new chart deploys it, the CRD
+   installer succeeded, and the served CRDs match `api/v1alpha1/crds`.
+3. **PostUpgrade:** `test_global_invariants` checks every pre-upgrade snapshot
+   is still Ready and still has its artifacts on the PVC. Then each scenario
+   validates its own state in `test_post_upgrade[<scenario>]`.
+
+Optional settings:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SNAPSHOT_E2E_UPGRADE_PROFILE` | `basic` | `basic` runs the core scenarios; `all` runs every scenario |
+| `SNAPSHOT_E2E_UPGRADE_SCENARIOS` | empty | Comma-separated scenario names; overrides the profile |
+| `SNAPSHOT_E2E_UPGRADE_CONFIG` | `full` | How the upgrade is performed |
+
+Each phase's duration is printed at the end, and appended to
+`GITHUB_STEP_SUMMARY` in CI.
+
+To add a scenario, subclass `UpgradeScenario` in
+`snapshot_e2e/upgrade/scenarios.py`. Implement `pre_upgrade` and `post_upgrade`,
+and register it in `SCENARIOS` with the profiles it belongs to.
+
 ## Restore Verification
 
 The success tests prove restore with explicit source and restore state tokens.
