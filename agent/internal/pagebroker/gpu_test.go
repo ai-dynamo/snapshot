@@ -87,6 +87,18 @@ func TestPeerProcessFromCredentials(t *testing.T) {
 	}
 }
 
+func TestPeerProcessFromCredentialsWithoutPeer(t *testing.T) {
+	socket, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(socket)
+
+	if _, err := peerProcessFDFromCredentials(socket); !errors.Is(err, unix.ENODATA) {
+		t.Fatalf("unconnected socket: %v, want ENODATA", err)
+	}
+}
+
 func readGPURequest(connection *net.UnixConn) (*Request, []int, error) {
 	header := make([]byte, 4)
 	control := make([]byte, unix.CmsgSpace(4*maxPassedFiles))

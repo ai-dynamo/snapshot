@@ -276,6 +276,9 @@ func peerProcessFDFromCredentials(socket int) (int, error) {
 	if err != nil {
 		return -1, err
 	}
+	if peer.Pid <= 0 {
+		return -1, unix.ENODATA
+	}
 	return unix.PidfdOpen(int(peer.Pid), 0)
 }
 
