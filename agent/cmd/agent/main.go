@@ -28,7 +28,7 @@ import (
 // restore containers. Temporary: it stays false until the proxy is validated
 // end to end, and the change that turns the proxy on deletes it. It is not a
 // setting, so there is nothing to remove from the chart later.
-const nriEnabled = false
+const nriEnabled = true
 
 func main() {
 	runtimeType := flag.String("runtime", cmp.Or(os.Getenv("RUNTIME_TYPE"), snapshotruntime.RuntimeContainerd),
