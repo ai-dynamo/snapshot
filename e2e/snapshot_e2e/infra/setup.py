@@ -920,7 +920,7 @@ def snapshot_chart_command(
     chart_version: str | None = None,
     operator_tag: str | None = None,
     agent_tag: str | None = None,
-    reuse_values: bool = False,
+    reset_then_reuse_values: bool = False,
     helm_overrides: Sequence[str] = (),
 ) -> list[str]:
     command = [
@@ -937,15 +937,15 @@ def snapshot_chart_command(
     ]
     if chart_version:
         command += ["--version", chart_version]
-    if reuse_values:
-        command.append("--reuse-values")
+    if reset_then_reuse_values:
+        command.append("--reset-then-reuse-values")
     command += [
         "--set",
         f"image.operator.tag={operator_tag or image_tag}",
         "--set",
         f"image.agent.tag={agent_tag or image_tag}",
     ]
-    if not reuse_values:
+    if not reset_then_reuse_values:
         command += [
             "--set",
             "storage.pvc.create=false",
@@ -976,7 +976,7 @@ def install_snapshot_chart(
     chart_version: str | None = None,
     operator_tag: str | None = None,
     agent_tag: str | None = None,
-    reuse_values: bool = False,
+    reset_then_reuse_values: bool = False,
     helm_overrides: Sequence[str] = (),
 ) -> None:
     source = f"{chart} {chart_version}" if chart_version else chart
@@ -991,7 +991,7 @@ def install_snapshot_chart(
         chart_version=chart_version,
         operator_tag=operator_tag,
         agent_tag=agent_tag,
-        reuse_values=reuse_values,
+        reset_then_reuse_values=reset_then_reuse_values,
         helm_overrides=helm_overrides,
     )
     env = os.environ.copy()
