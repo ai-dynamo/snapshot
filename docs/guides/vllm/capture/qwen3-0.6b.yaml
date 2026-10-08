@@ -27,12 +27,15 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
           command:
             - python3
             - /snapshot-app/app.py
           env:
+            # Avoid rounding up large pinned backups or retaining them after wake-up.
+            - name: PYTORCH_ALLOC_CONF
+              value: pinned_max_round_threshold_mb:1,pinned_max_cached_size_mb:1
             - name: HF_HUB_DISABLE_XET
               value: "1"
             - name: SNAPSHOT_MODEL
@@ -41,8 +44,6 @@ spec:
               value: "2048"
             - name: VLLM_GPU_MEMORY_UTILIZATION
               value: "0.30"
-            - name: SNAPSHOT_CONTROL_DIR
-              value: /snapshot-control
           ports:
             - name: api
               containerPort: 8000
@@ -60,19 +61,18 @@ spec:
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
-            - name: tun
-              mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
             - name: app
               mountPath: /snapshot-app
               readOnly: true
       volumes:
         - name: snapshot-control
           emptyDir: {}
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
-        # Created from app.py: kubectl create configmap vllm-app --from-file=app.py
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
         - name: app
           configMap:
             name: vllm-app

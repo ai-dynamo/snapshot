@@ -4,39 +4,44 @@ This guide makes a TensorRT-LLM workload snapshot-ready by mounting an
 entrypoint into a TensorRT-LLM runtime image, implementing Snapshot's
 [workload contract](../reference/workload-contract.md). The example runs the
 TensorRT-LLM image that includes TensorRT-LLM and its runtime dependencies,
-unmodified. `deployment.yaml` pins the exact upstream image, and one
+unmodified. `capture/qwen3-0.6b.yaml` pins the exact upstream image, and one
 program, `app.py`, is mounted into it from a ConfigMap to prepare
 TensorRT-LLM for checkpoint and validate it after restore. The Snapshot
 agent injects the restore tooling at runtime.
 
 > [!NOTE]
-> TensorRT-LLM support is experimental and currently limited to a single GPU.
+> TensorRT-LLM support is experimental.
 
 ## 1. Download the example files
 
 Download [`app.py`](tensorrt-llm/app.py),
-[`deployment.yaml`](tensorrt-llm/deployment.yaml), and
-[`restore-deployment.yaml`](tensorrt-llm/restore-deployment.yaml) from the
+[`capture/qwen3-0.6b.yaml`](tensorrt-llm/capture/qwen3-0.6b.yaml), and
+[`restore/single-gpu.yaml`](tensorrt-llm/restore/single-gpu.yaml) from the
 repository:
 
 ```bash
 mkdir -p tensorrt-llm-snapshot
 cd tensorrt-llm-snapshot
+mkdir -p capture restore
 
 curl --fail --location \
   --output app.py \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/app.py
 
 curl --fail --location \
-  --output deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/deployment.yaml
+  --output capture/qwen3-0.6b.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/capture/qwen3-0.6b.yaml
 
 curl --fail --location \
-  --output restore-deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/restore-deployment.yaml
+  --output restore/single-gpu.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/restore/single-gpu.yaml
+
+curl --fail --location \
+  --output capture/qwen3-0.6b-snapshotjob.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/capture/qwen3-0.6b-snapshotjob.yaml
 ```
 
-The program loads the model selected in `deployment.yaml` and calls
+The program loads the model selected in `capture/qwen3-0.6b.yaml` and calls
 `LLM.generate()` to initialize TensorRT-LLM. The synchronous call returns only
 after generation finishes, so no request remains in flight. The program then
 runs `gc.collect()` and writes `ready-for-snapshot` when it reaches the safe
@@ -50,15 +55,14 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-`deployment.yaml` runs the TensorRT-LLM `1.3.0rc24` release image, pinned by
+`capture/qwen3-0.6b.yaml` runs the TensorRT-LLM `1.3.0rc24` release image, pinned by
 digest, unmodified, and mounts `app.py` at `/snapshot-app` from the
 `tensorrt-llm-app` ConfigMap created in step 2. A release candidate is used
 deliberately: the `1.2.1` GA image fails at `import tensorrt` because
 `libnvonnxparser.so.10` is missing from it, and no 1.3.0 GA image exists yet.
 Move to the first 1.3.x GA once it is published.
-`TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` disables NCCL registered windows that CUDA
-checkpoint does not support. `UCX_TLS=tcp,self` avoids RDMA mappings that CRIU
-cannot restore.
+`OMPI_MCA_pml=ob1` and `OMPI_MCA_btl=tcp,self` keep MPI communication on TCP
+to avoid RDMA mappings that CRIU cannot restore.
 
 The source and restore pods must use the same immutable image and mount the
 Snapshot control volume at `/snapshot-control`.
@@ -66,7 +70,7 @@ Snapshot control volume at `/snapshot-control`.
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the TensorRT-LLM pod will run, and create the
-ConfigMap `deployment.yaml` mounts `app.py` from:
+ConfigMap `capture/qwen3-0.6b.yaml` mounts `app.py` from:
 
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
@@ -90,7 +94,7 @@ kubectl create configmap tensorrt-llm-app \
 ## 3. Deploy TensorRT-LLM
 
 Select a model supported by the chosen TensorRT-LLM image through
-`SNAPSHOT_MODEL` in [`deployment.yaml`](tensorrt-llm/deployment.yaml):
+`SNAPSHOT_MODEL` in [`capture/qwen3-0.6b.yaml`](tensorrt-llm/capture/qwen3-0.6b.yaml):
 
 ```yaml
 containers:
@@ -104,9 +108,9 @@ The example uses one GPU, the PyTorch backend, and a maximum sequence length of
 512 tokens. Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
 `1024`), `TRTLLM_MAX_BATCH_SIZE` (default `1`), and
 `TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). `app.py` sets
-`trust_remote_code=False`; Qwen3 needs no custom model code. Edit
-`TRUST_REMOTE_CODE` in `app.py` for a checkpoint that ships its own modeling
-code. Revalidate checkpoint and restore before changing the model,
+`trust_remote_code=False`; Qwen3 needs no custom model code. Set additional
+`LLM` keyword arguments, including `trust_remote_code`, through the
+`TRTLLM_ENGINE_ARGS` JSON object. Revalidate checkpoint and restore before changing the model,
 TensorRT-LLM image, GPU count, backend, or engine settings.
 
 > [!NOTE]
@@ -116,12 +120,15 @@ TensorRT-LLM image, GPU count, backend, or engine settings.
 > [`LLM` API](https://nvidia.github.io/TensorRT-LLM/llm-api/reference.html) in
 > `app.py`.
 
+To capture a temporary replica automatically, use [SnapshotJob](#capture-with-snapshotjob)
+instead of the following Deployment steps.
+
 Deploy the edited manifest:
 
 ```bash
 kubectl apply \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --filename deployment.yaml
+  --filename capture/qwen3-0.6b.yaml
 ```
 
 Wait until the TensorRT-LLM replica finishes initialization and becomes safe to
@@ -144,6 +151,24 @@ kubectl get pods \
 
 Use that Pod name in the `PodSnapshot` created during the next step. The
 readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
+
+### Capture with SnapshotJob
+
+Instead of deploying and checkpointing the source manually, apply
+[`capture/qwen3-0.6b-snapshotjob.yaml`](tensorrt-llm/capture/qwen3-0.6b-snapshotjob.yaml)
+after creating the ConfigMap:
+
+```bash
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename capture/qwen3-0.6b-snapshotjob.yaml
+
+kubectl wait --namespace "$SNAPSHOT_NAMESPACE" \
+  --for=condition=Completed snapshotjob/tensorrt-llm-snapshot --timeout=60m
+```
+
+Then use the same [restore manifest](tensorrt-llm/restore/single-gpu.yaml).
+
+For multi-GPU examples, see [Multi-GPU models](cuda-shared-memory.md#multi-gpu-models).
 
 ## Next steps
 

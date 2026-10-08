@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-restored
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sglang-restored
+  template:
+    metadata:
+      labels:
+        app: sglang-restored
+      annotations:
+        nvidia.com/restore-from: sglang-snapshot
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: main
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
+          imagePullPolicy: IfNotPresent
+          # The agent restores the saved process into this inert container.
+          command:
+            - /bin/sh
+            - -c
+            - exec sleep infinity
+          env:
+            - name: SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/sglang-restore-ready
+            periodSeconds: 1
+            failureThreshold: 1800
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: shm
+              mountPath: /dev/shm
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: sglang-model-cache
+        - name: snapshot-control
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: app
+          configMap:
+            name: sglang-app

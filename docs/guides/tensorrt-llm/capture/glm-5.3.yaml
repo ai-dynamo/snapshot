@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# One-node GLM-5.3 NVFP4 example on 8 B200 GPUs.
+# Engine kwargs below use a 128K context and bounded concurrency.
+# This profile omits MTP, following the 1.3.0rc24 GLM NVFP4 guide.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tensorrt-llm-glm-5-3-source
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 3600
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tensorrt-llm-glm-5-3-source
+  template:
+    metadata:
+      annotations:
+        nvidia.com/cuda-shared-memory-support: enabled
+      labels:
+        app: tensorrt-llm-glm-5-3-source
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-B200
+      initContainers:
+        - name: snapshot-cuda-install
+          image: ${SNAPSHOT_AGENT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/cp
+          args:
+            - --preserve=mode
+            - --
+            - /usr/local/lib/snapshot/libcuinterpose.so
+            - /usr/local/lib/snapshot/libcuinterpose_core.so
+            - /usr/local/bin/cuinterpose-launch
+            - /tmp/snapshot-cuda/
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsUser: 65532
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+        - name: model-cache
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import os
+              from huggingface_hub import snapshot_download
+              snapshot_download(
+                  repo_id=os.environ["SNAPSHOT_MODEL"],
+                  revision=os.environ["SNAPSHOT_MODEL_REVISION"],
+              )
+          env:
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+      containers:
+        - name: main
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          imagePullPolicy: IfNotPresent
+          command:
+            - /tmp/snapshot-cuda/cuinterpose-launch
+            - --library
+            - /tmp/snapshot-cuda/libcuinterpose.so
+            - --
+            - python3
+            - /snapshot-app/app.py
+          env:
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
+              value: "8"
+            - name: TRTLLM_ENGINE_ARGS
+              value: |-
+                {
+                  "revision": "363e8f086905afd83db356a620f9aa401c23800a",
+                  "dtype": "bfloat16", "moe_expert_parallel_size": 8,
+                  "max_seq_len": 131072, "max_num_tokens": 8192, "max_batch_size": 32,
+                  "enable_chunked_prefill": true,
+                  "moe_config": {"backend": "TRTLLM"},
+                  "kv_cache_config": {
+                    "free_gpu_memory_fraction": 0.75, "dtype": "fp8",
+                    "enable_block_reuse": false
+                  },
+                  "cuda_graph_config": {"enable_padding": true, "max_batch_size": 32}
+                }
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: OMPI_MCA_pml
+              value: ob1
+            - name: OMPI_MCA_btl
+              value: "tcp,self"
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "16"
+              memory: 1Ti
+            limits:
+              nvidia.com/gpu: "8"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            failureThreshold: 3600
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+              readOnly: true
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: snapshot-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: snapshot-cuda
+          emptyDir: {}
+        - name: snapshot-control
+          emptyDir: {}
+        - name: app
+          configMap:
+            name: tensorrt-llm-app

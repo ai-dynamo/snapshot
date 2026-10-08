@@ -1,0 +1,189 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# One-node GLM-5.3 NVFP4 example on 8 B200 GPUs.
+# Engine kwargs below use a 128K context and bounded concurrency.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-glm-5-3-source
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 3600
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sglang-glm-5-3-source
+  template:
+    metadata:
+      annotations:
+        nvidia.com/cuda-shared-memory-support: enabled
+      labels:
+        app: sglang-glm-5-3-source
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-B200
+      initContainers:
+        - name: snapshot-cuda-install
+          image: ${SNAPSHOT_AGENT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/cp
+          args:
+            - --preserve=mode
+            - --
+            - /usr/local/lib/snapshot/libcuinterpose.so
+            - /usr/local/lib/snapshot/libcuinterpose_core.so
+            - /usr/local/bin/cuinterpose-launch
+            - /tmp/snapshot-cuda/
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsUser: 65532
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+        - name: model-cache
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import os
+              from huggingface_hub import snapshot_download
+              snapshot_download(
+                  repo_id=os.environ["SNAPSHOT_MODEL"],
+                  revision=os.environ["SNAPSHOT_MODEL_REVISION"],
+              )
+          env:
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+      containers:
+        - name: main
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
+          imagePullPolicy: IfNotPresent
+          command:
+            - /tmp/snapshot-cuda/cuinterpose-launch
+            - --library
+            - /tmp/snapshot-cuda/libcuinterpose.so
+            - --
+            - python3
+            - -u
+            - /snapshot-app/app.py
+          args:
+            - --mode
+            - snapshot
+          env:
+            - name: SGLANG_TENSOR_PARALLEL_SIZE
+              value: "8"
+            - name: SGLANG_EXPERT_PARALLEL_SIZE
+              value: "8"
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: SGLANG_ENGINE_ARGS
+              value: |-
+                {
+                  "revision": "363e8f086905afd83db356a620f9aa401c23800a",
+                  "dtype": "bfloat16", "quantization": "modelopt_fp4",
+                  "kv_cache_dtype": "fp8_e4m3", "page_size": 64,
+                  "context_length": 131072, "mem_fraction_static": 0.85,
+                  "max_running_requests": 32, "cuda_graph_max_bs_decode": 32,
+                  "chunked_prefill_size": 8192,
+                  "moe_runner_backend": "flashinfer_trtllm", "moe_a2a_backend": "none",
+                  "speculative_algorithm": "EAGLE", "speculative_num_steps": 5,
+                  "speculative_eagle_topk": 1, "speculative_num_draft_tokens": 6
+                }
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: NCCL_RAS_ENABLE
+              value: "0"
+            - name: TORCH_NCCL_ENABLE_MONITORING
+              value: "0"
+            - name: TORCH_NCCL_DUMP_ON_TIMEOUT
+              value: "0"
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "16"
+              memory: 1Ti
+            limits:
+              memory: 1Ti
+              nvidia.com/gpu: "8"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            failureThreshold: 3600
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+              readOnly: true
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: snapshot-cuda
+          emptyDir: {}
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: snapshot-model-cache
+        - name: snapshot-control
+          emptyDir: {}
+        - name: app
+          configMap:
+            name: sglang-app

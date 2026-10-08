@@ -48,10 +48,9 @@ class Engine(Protocol):
         image_pull_policy: str | None = None,
         tolerations: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """Returns a Pod manifest equivalent to the guide's `deployment.yaml`
+        """Returns a Pod manifest equivalent to the guide's capture
         pod template, for the given model. `image_pull_policy` overrides the
-        guide's own default (`Always`, which assumes a real registry push) --
-        pass `"IfNotPresent"` for an image that was built and imported
+        guide's own default. Pass `"IfNotPresent"` for an image that was built and imported
         directly into the node's container runtime with no registry.
         `tolerations` are appended to whatever the guide's own pod spec
         already declares (empty by default) -- needed on clusters whose GPU
@@ -70,5 +69,5 @@ class Engine(Protocol):
         tolerations: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         """Returns a Pod manifest equivalent to the guide's
-        `restore-deployment.yaml` pod template, restoring from `snapshot_name`."""
+        restore manifest's pod template, restoring from `snapshot_name`."""
         ...

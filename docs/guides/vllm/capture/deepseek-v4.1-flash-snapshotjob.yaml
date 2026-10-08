@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: SnapshotJob
+metadata:
+  name: vllm-deepseek-v4.1-flash-snapshot
+spec:
+  activeDeadlineSeconds: 7200
+  podSnapshotTemplate:
+    targetContainers:
+      - main
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/cuda-shared-memory-support: enabled
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-B200
+      initContainers:
+        - name: model-cache
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import os
+              from huggingface_hub import snapshot_download
+              snapshot_download(
+                  repo_id=os.environ["SNAPSHOT_MODEL"],
+                  revision=os.environ["SNAPSHOT_MODEL_REVISION"],
+              )
+          env:
+            - name: SNAPSHOT_MODEL
+              value: deepseek-ai/DeepSeek-V4.1-Flash
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+      containers:
+        - name: main
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /snapshot-app/app.py
+          env:
+            # Avoid rounding up large pinned backups or retaining them after wake-up.
+            - name: PYTORCH_ALLOC_CONF
+              value: pinned_max_round_threshold_mb:1,pinned_max_cached_size_mb:1
+            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
+              value: "8"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: SNAPSHOT_MODEL
+              value: deepseek-ai/DeepSeek-V4.1-Flash
+            - name: VLLM_ENGINE_ARGS
+              value: |-
+                {
+                  "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+                  "tokenizer_revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+                  "tokenizer_mode": "deepseek_v41", "dtype": "auto",
+                  "enable_expert_parallel": true, "language_model_only": true,
+                  "engram_config": {"cpu_offload": false},
+                  "max_model_len": 131072, "gpu_memory_utilization": 0.9,
+                  "max_num_seqs": 64, "max_num_batched_tokens": 16384,
+                  "max_cudagraph_capture_size": 384, "scheduler_reserve_full_isl": false,
+                  "speculative_config": {
+                    "method": "dspark", "num_speculative_tokens": 5,
+                    "draft_sample_method": "probabilistic", "rejection_sample_method": "block",
+                    "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027"
+                  }
+                }
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 2cba9e42aa026125f3ed06c6d98c1db82f7ca027
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "16"
+              memory: 1Ti
+            limits:
+              memory: 1Ti
+              nvidia.com/gpu: "8"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: snapshot-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: app
+          configMap:
+            name: vllm-app

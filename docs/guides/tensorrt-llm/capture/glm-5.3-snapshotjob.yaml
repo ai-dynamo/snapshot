@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: SnapshotJob
+metadata:
+  name: tensorrt-llm-glm-5-3-snapshot
+spec:
+  activeDeadlineSeconds: 7200
+  podSnapshotTemplate:
+    targetContainers:
+      - main
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/cuda-shared-memory-support: enabled
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-B200
+      initContainers:
+        - name: model-cache
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import os
+              from huggingface_hub import snapshot_download
+              snapshot_download(
+                  repo_id=os.environ["SNAPSHOT_MODEL"],
+                  revision=os.environ["SNAPSHOT_MODEL_REVISION"],
+              )
+          env:
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+      containers:
+        - name: main
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /snapshot-app/app.py
+          env:
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
+              value: "8"
+            - name: TRTLLM_ENGINE_ARGS
+              value: |-
+                {
+                  "revision": "363e8f086905afd83db356a620f9aa401c23800a",
+                  "dtype": "bfloat16", "moe_expert_parallel_size": 8,
+                  "max_seq_len": 131072, "max_num_tokens": 8192, "max_batch_size": 32,
+                  "enable_chunked_prefill": true,
+                  "moe_config": {"backend": "TRTLLM"},
+                  "kv_cache_config": {
+                    "free_gpu_memory_fraction": 0.75, "dtype": "fp8",
+                    "enable_block_reuse": false
+                  },
+                  "cuda_graph_config": {"enable_padding": true, "max_batch_size": 32}
+                }
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: OMPI_MCA_pml
+              value: ob1
+            - name: OMPI_MCA_btl
+              value: "tcp,self"
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "16"
+              memory: 1Ti
+            limits:
+              nvidia.com/gpu: "8"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: snapshot-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: app
+          configMap:
+            name: tensorrt-llm-app

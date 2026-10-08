@@ -136,7 +136,7 @@ and meets the pod and runtime requirements below is snapshot-ready. See
 ## Pod requirements
 
 The source pod gives the workload the shared directory and the conditions
-checkpointing needs. The framework `deployment.yaml` files referenced from the
+checkpointing needs. The framework capture manifests referenced from the
 [usage guides](../guides/README.md) are the complete reference; the load-bearing
 fields are:
 

@@ -1,0 +1,177 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# One-node GLM-5.3 NVFP4 example on 8 B200 GPUs.
+# Engine kwargs below use a 128K context and bounded concurrency.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-glm-5-3-source
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 3600
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-glm-5-3-source
+  template:
+    metadata:
+      annotations:
+        nvidia.com/cuda-shared-memory-support: enabled
+      labels:
+        app: vllm-glm-5-3-source
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-B200
+      initContainers:
+        - name: snapshot-cuda-install
+          image: ${SNAPSHOT_AGENT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/cp
+          args:
+            - --preserve=mode
+            - --
+            - /usr/local/lib/snapshot/libcuinterpose.so
+            - /usr/local/lib/snapshot/libcuinterpose_core.so
+            - /usr/local/bin/cuinterpose-launch
+            - /tmp/snapshot-cuda/
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsUser: 65532
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+        - name: model-cache
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import os
+              from huggingface_hub import snapshot_download
+              snapshot_download(
+                  repo_id=os.environ["SNAPSHOT_MODEL"],
+                  revision=os.environ["SNAPSHOT_MODEL_REVISION"],
+              )
+          env:
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+      containers:
+        - name: main
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
+          imagePullPolicy: IfNotPresent
+          command:
+            - /tmp/snapshot-cuda/cuinterpose-launch
+            - --library
+            - /tmp/snapshot-cuda/libcuinterpose.so
+            - --
+            - python3
+            - /snapshot-app/app.py
+          env:
+            # Avoid rounding up large pinned backups or retaining them after wake-up.
+            - name: PYTORCH_ALLOC_CONF
+              value: pinned_max_round_threshold_mb:1,pinned_max_cached_size_mb:1
+            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
+              value: "8"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: SNAPSHOT_MODEL
+              value: RadixArk/GLM-5.3-NVFP4
+            - name: VLLM_ENGINE_ARGS
+              value: |-
+                {
+                  "revision": "363e8f086905afd83db356a620f9aa401c23800a",
+                  "dtype": "bfloat16", "quantization": "modelopt_fp4", "enable_expert_parallel": true,
+                  "kv_cache_dtype": "fp8", "max_model_len": 131072, "gpu_memory_utilization": 0.85,
+                  "max_num_seqs": 32, "max_num_batched_tokens": 8192,
+                  "speculative_config": {
+                    "revision": "363e8f086905afd83db356a620f9aa401c23800a",
+                    "method": "mtp", "num_speculative_tokens": 5
+                  }
+                }
+            - name: SNAPSHOT_MODEL_REVISION
+              value: 363e8f086905afd83db356a620f9aa401c23800a
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "16"
+              memory: 1Ti
+            limits:
+              memory: 1Ti
+              nvidia.com/gpu: "8"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            failureThreshold: 3600
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+              readOnly: true
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: snapshot-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: snapshot-cuda
+          emptyDir: {}
+        - name: snapshot-control
+          emptyDir: {}
+        - name: app
+          configMap:
+            name: vllm-app
