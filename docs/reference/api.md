@@ -251,7 +251,7 @@ payload checksums.
 | `manageCgroupsMode` | `soft` | CRIU cgroup mode: `ignore` / `soft` / `full` / `strict`. |
 | `imageIoMode` | `direct` | CRIU image I/O: `writeback` or `direct`. |
 | `rstSibling` | `true` | Restore as a sibling process (required for go-criu swrk mode). |
-| `mntnsCompatMode` | `false` | Mount-namespace compatibility mode, applied during restore. |
+| `mntnsCompatMode` | `false` | Force the compatibility mount engine. Otherwise Snapshot checks external mount propagation at restore time. |
 | `evasiveDevices` | `true` | Use any device path when the original is inaccessible. |
 | `forceIrmap` | `true` | Force resolving inotify/fsnotify watch names. |
 | `autoDedup` | `false` | Auto-deduplicate memory pages. |
@@ -259,3 +259,10 @@ payload checksums.
 | `libDir` | `/usr/local/lib/snapshot/criu-plugins` | CRIU plugin directory used by the chart. |
 | `allowUprobes` | `true` | Kernel/userspace probe compatibility. |
 | `skipInFlight` | `true` | Skip in-flight TCP connections. |
+
+With `mntnsCompatMode: false`, Snapshot checks the destination mounts before
+restoring. If a saved external mount master maps to a private destination mount,
+Snapshot selects the compatibility engine for that restore. Selection is
+conservative when a master has several candidate sources: any private candidate
+selects compatibility. The checkpoint remains unchanged; recapturing it with a
+different flag is unnecessary. Setting `true` explicitly forces compatibility.

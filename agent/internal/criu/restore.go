@@ -44,6 +44,9 @@ func ExecuteRestore(
 	bundleDir string,
 	log logr.Logger,
 ) (int32, func() error, time.Duration, time.Duration, error) {
+	if err := selectRestoreMountEngine(criuOpts, checkpointPath, log); err != nil {
+		return 0, nil, 0, 0, fmt.Errorf("select CRIU mount engine: %w", err)
+	}
 	settings := m.CRIUDump.CRIU
 	var prepare, restore time.Duration
 
