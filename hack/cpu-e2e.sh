@@ -24,6 +24,7 @@ cd "$(dirname "$0")/.."
 
 # Shared with hack/k3d-cpu-e2e.sh and the installer, which read the same names.
 export SNAPSHOT_E2E_MODE="${SNAPSHOT_E2E_MODE:-direct}"
+export SNAPSHOT_E2E_CPU_ONLY=true
 export SNAPSHOT_E2E_K3D_CLUSTER="${SNAPSHOT_E2E_K3D_CLUSTER:-snapshot-k3d-cpu}"
 export SNAPSHOT_E2E_STORAGE_CLASS="${SNAPSHOT_E2E_STORAGE_CLASS:-snapshot-e2e-hostpath}"
 export SNAPSHOT_E2E_SNAPSHOT_TAG="${SNAPSHOT_E2E_SNAPSHOT_TAG:-${IMAGE_TAG}}"

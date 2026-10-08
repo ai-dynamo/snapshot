@@ -11,11 +11,9 @@
 # creates. This script supplies only the PersistentVolume behind it, because a
 # hostPath volume is the part that is specific to k3d.
 #
-# There is no GPU here, so the cluster has to satisfy three expectations the
-# chart and the test helpers inherited from the GPU environment: the GPU node
-# label, a RuntimeClass named nvidia, and a ReadWriteMany checkpoint volume.
-# Each is faked below, and each fake is safe only because the cluster has
-# exactly one node.
+# CPU-only E2E explicitly uses one node and ReadWriteOnce checkpoint storage.
+# A RuntimeClass named nvidia is still needed by the current agent chart; this
+# script maps it to runc only inside its disposable k3d cluster.
 
 set -euo pipefail
 
@@ -100,16 +98,6 @@ create_cluster() {
   chmod 0600 "${KUBECONFIG_OUT}"
 }
 
-fake_gpu_nodes() {
-  # The agent DaemonSet and the test workloads both select GPU nodes. Labelling
-  # the only node we have is what lets them schedule without a GPU.
-  log "labelling nodes as GPU-present"
-  local node
-  for node in $(kubectl get nodes -o name); do
-    kubectl label "${node}" --overwrite nvidia.com/gpu.present=true
-  done
-}
-
 fake_nvidia_runtime_class() {
   # The agent pod hardcodes runtimeClassName: nvidia. k3s ships its own nvidia
   # RuntimeClass and `handler` is immutable, so this has to be replaced rather
@@ -125,15 +113,10 @@ handler: runc
 EOF
 }
 
-fake_rwx_checkpoint_volume() {
-  # The installer requires the checkpoint PVC to offer ReadWriteMany. Kubernetes
-  # does not verify that the backing store really is shared, so a hostPath PV
-  # declared RWX is accepted. That is only honest on a single-node cluster,
-  # where every pod mounting it lands on the same machine.
-  #
-  # No provisioner serves this storage class, so the claim the installer creates
-  # binds to this volume instead of being dynamically provisioned.
-  log "creating RWX checkpoint volume (${NODE_CHECKPOINTS})"
+create_checkpoint_volume() {
+  # The canonical installer requests RWO in explicit single-node CPU mode.
+  # No provisioner serves this class, so its claim binds to this hostPath PV.
+  log "creating RWO checkpoint volume (${NODE_CHECKPOINTS})"
   kubectl apply -f - <<EOF
 apiVersion: v1
 kind: PersistentVolume
@@ -143,7 +126,7 @@ spec:
   capacity:
     storage: ${PVC_SIZE}
   accessModes:
-    - ReadWriteMany
+    - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: ${STORAGE_CLASS}
   hostPath:
@@ -166,6 +149,7 @@ print_helm_set() {
   cat <<EOF
 runtime.socketPath=/run/k3s/containerd/containerd.sock
 runtime.storageDir=/var/lib/rancher/k3s/agent/containerd
+daemonset.nodeSelector=null
 daemonset.resources.requests.cpu=200m
 daemonset.resources.requests.memory=256Mi
 daemonset.resources.limits.cpu=2
@@ -188,9 +172,8 @@ cluster_up() {
   create_cluster
   export KUBECONFIG="${KUBECONFIG_OUT}"
 
-  fake_gpu_nodes
   fake_nvidia_runtime_class
-  fake_rwx_checkpoint_volume
+  create_checkpoint_volume
 
   kubectl get nodes -o wide
   log "cluster ${CLUSTER_NAME} ready (KUBECONFIG=${KUBECONFIG_OUT})"

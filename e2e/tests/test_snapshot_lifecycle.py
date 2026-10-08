@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -459,6 +460,12 @@ def test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot(
     that the failure sticks to the pod and does not spread to the snapshot,
     which is still a correct record of a capture that did succeed.
     """
+    probe_value = os.environ.get("SNAPSHOT_E2E_RESTORE_FAILURE_PROBE", "false")
+    if probe_value not in ("", "false", "true"):
+        raise ValueError("SNAPSHOT_E2E_RESTORE_FAILURE_PROBE must be true or false")
+    probe = probe_value == "true"
+    if probe and not config.cpu_only:
+        raise ValueError("restore-failure qualification requires CPU-only mode")
     try:
         _, source_node, _ = create_valid_checkpoint(config, run, gpu=False)
         _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
@@ -475,9 +482,22 @@ def test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot(
                 source_node=source_node,
             )
         )
+        # Normal CI proves the damaged checkpoint reports a hard failure. The
+        # opt-in negative control instead demands success from that same real
+        # failure, so pytest and the workflow must turn red. Limit the probe's
+        # wait; it must not consume the normal ten-minute restore timeout.
         snap.wait_for_restored_condition(
-            config.namespace, run.restore_pod, "False", "RestoreFailed"
+            config.namespace,
+            run.restore_pod,
+            "True" if probe else "False",
+            "RestoreSucceeded" if probe else "RestoreFailed",
+            timeout=60 if probe else 600,
         )
+        if probe:
+            # If corruption did not cause a restore failure, leave this probe
+            # green so the qualification reviewer can reject that evidence.
+            # Do not force red independently of the real restore result.
+            return
 
         pod_snapshot, content = snap.wait_for_snapshot_ready(
             config.namespace,

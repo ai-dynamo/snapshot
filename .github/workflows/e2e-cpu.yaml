@@ -15,26 +15,12 @@ name: E2E CPU (k3d)
 
 on:
   pull_request:
-    # Scoped to what can change the result: the two images this job builds, the
-    # chart it installs, the CRDs they serve, and the harness that drives them.
-    paths:
-      - "agent/**"
-      - "api/**"
-      - "charts/snapshot/**"
-      - "e2e/**"
-      - "operator/**"
-      - "go.work"
-      - "go.work.sum"
-      - "**/go.mod"
-      - "**/go.sum"
-      - "Makefile"
-      - "hack/tools.mk"
-      # A named build context of the agent image, so it changes that image.
-      - "hack/compliance/**"
-      - "hack/k3d-cpu-e2e.sh"
-      - "hack/verify-bundle-glibc.sh"
-      - ".github/workflows/e2e-cpu.yaml"
   workflow_dispatch:
+    inputs:
+      qualify_restore_failure:
+        description: "Corrupt a checkpoint and require restore success; this probe must fail"
+        type: boolean
+        default: false
 
 concurrency:
   group: snapshot-e2e-cpu-${{ github.ref }}
@@ -51,6 +37,7 @@ env:
   IMAGE_REGISTRY: snapshot.local
   IMAGE_TAG: cpu-e2e
   SNAPSHOT_E2E_MODE: direct
+  SNAPSHOT_E2E_CPU_ONLY: "true"
   SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
   SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
   SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
@@ -249,12 +236,15 @@ jobs:
       - name: Run CPU checkpoint/restore tests
         timeout-minutes: 25
         env:
+          # Dispatch-only negative control. A normal PR must never enable it.
+          SNAPSHOT_E2E_RESTORE_FAILURE_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.qualify_restore_failure && 'true' || 'false' }}
           # The cases this job exists to prove. pytest exits 0 when a test is
           # deselected or skips, so without naming them a marker change could
           # leave the check green while it tested no round trip at all.
           SNAPSHOT_E2E_REQUIRED_TESTS: >-
             test_one_cpu_snapshot_restores_into_two_containers,
-            test_snapshotjob_cpu_captures_and_restore_recovers_state
+            test_snapshotjob_cpu_captures_and_restore_recovers_state,
+            test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot
         run: uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
 
       - name: Collect diagnostics

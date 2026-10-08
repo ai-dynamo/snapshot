@@ -41,21 +41,25 @@ passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
 ### CPU Mode (k3d)
 
-`e2e-cpu.yaml` runs on pull requests that touch the images, chart, CRDs, or
-harness, where no GPU cluster is available. It builds the operator and agent
-images from the pull request, creates a k3d cluster, imports the images into it,
+`e2e-cpu.yaml` runs on every pull request, where no GPU cluster is available.
+It builds the operator, agent, and PageBroker images from the pull request,
+creates a k3d cluster, imports the images into it,
 installs the chart through the same `setup.py` phases the GPU workflow uses, and
 runs `pytest -m cpu`.
 
-k3d has no GPU, so `hack/k3d-cpu-e2e.sh cluster-up` fakes the three things the
-chart and test helpers inherited from the GPU environment, each safe only
-because the cluster has a single node:
+The CPU workflow and local runner set `SNAPSHOT_E2E_CPU_ONLY=true`. This
+explicit mode requires direct setup and exactly one ready, schedulable node.
+Workloads do not select GPU-labelled nodes, and the chart overrides clear the
+agent's GPU-node selector. GPU workloads are rejected in this mode.
 
-| Faked | Why it is needed |
-| --- | --- |
-| Node label `nvidia.com/gpu.present=true` | the agent DaemonSet and workload pods both select GPU nodes |
-| `RuntimeClass/nvidia` on the `runc` handler | the agent pod hardcodes `runtimeClassName: nvidia` |
-| hostPath `PersistentVolume` declared `ReadWriteMany` | the installer requires an RWX checkpoint claim, and k3d's local-path provisioner is RWO |
+The installer creates a `ReadWriteOnce` checkpoint claim, backed by the k3d
+helper's hostPath PV. Source and restore stay on the single node; this does not
+provide cross-node shared storage. Without CPU-only mode, the installer and
+environment checks retain their `ReadWriteMany` requirement and GPU placement.
+
+The agent chart still requires `RuntimeClass/nvidia`, so the disposable k3d
+helper maps that class to `runc`. Removing this runtime-class shim is separate
+work.
 
 The script stops there. It does not install Snapshot and does not create the
 checkpoint claim — `setup.py` does both, the same way it does for a GPU cluster.
@@ -75,6 +79,10 @@ SNAPSHOT_E2E_SKIP_BUILD=true bash hack/cpu-e2e.sh -m cpu -k restores
 
 The agent is linux/amd64 only, so this does not work on an Apple Silicon Mac.
 
+When running the stages separately against the k3d helper cluster, also export
+`SNAPSHOT_E2E_MODE=direct` and `SNAPSHOT_E2E_CPU_ONLY=true` for installation,
+environment checks, and tests.
+
 Each stage stands alone. Against a cluster that already runs Snapshot, set
 `KUBECONFIG` and run `pytest -m cpu` on its own; against a clean cluster, run
 the `setup.py` phases below and then the tests.
@@ -86,6 +94,25 @@ one of its cases, or by case ID to require just that one. Without it, dropping
 a `cpu` marker would leave the check green while it tested no round trip at
 all, because pytest exits 0 for a suite that ran nothing it was asked for. It
 is unset for local runs, where skipping is legitimate.
+
+### CPU restore-failure qualification
+
+The existing damaged-checkpoint test normally passes when restore reports
+`RestoreFailed` while the snapshot remains Ready. It is a required CPU case.
+To prove an unexpected restore failure also makes the actual check red, use
+`workflow_dispatch` with `qualify_restore_failure=true` on a disposable
+candidate run. This changes that test's expectation to `RestoreSucceeded`
+after corrupting only its own checkpoint inventory; the success wait is
+limited to 60 seconds. The CPU job must fail, retain its failure diagnostics,
+and still delete the k3d cluster. A green probe is a qualification failure.
+Normal PR runs always disable the probe.
+
+For a separately authorized disposable local CPU cluster, set
+`SNAPSHOT_E2E_CPU_ONLY=true` and
+`SNAPSHOT_E2E_RESTORE_FAILURE_PROBE=true` when running the same test. The probe
+rejects non-CPU mode and invalid boolean values before capture. Do not use it
+against customer or shared checkpoint data. It does not add a second runner
+or change the normal restored-state assertions.
 
 ### Local Direct Mode
 
