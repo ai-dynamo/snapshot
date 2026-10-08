@@ -1051,7 +1051,7 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 		return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))
 	}
 	op.markRestoreFailed(placeholderHostPID)
-	if err := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore failed"); err != nil {
+	if err := op.killPlaceholder(placeholderHostPID, "restore failed"); err != nil {
 		return errors.Join(restoreErr, fmt.Errorf("placeholder could not be killed after restore failure: %w", err))
 	}
 	return restoreErr
@@ -1066,7 +1066,7 @@ func (op *restoreOperation) completeRestore(ctx context.Context, restored execut
 	if err := w.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreCompleteFile, contents); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
 		op.markRestoreFailed(placeholderHostPID)
-		if killErr := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
+		if killErr := op.killPlaceholder(placeholderHostPID, "restore sentinel failed"); killErr != nil {
 			return errors.Join(fmt.Errorf("failed to write restore-complete sentinel: %w", err), fmt.Errorf("placeholder could not be killed: %w", killErr))
 		}
 		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
@@ -1082,6 +1082,19 @@ func (op *restoreOperation) markRestoreFailed(placeholderHostPID int) {
 	if err := op.controller.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreFailedFile, restoreFailedSentinelContents); err != nil {
 		op.log.Error(err, "Failed to write restore-failed sentinel")
 	}
+}
+
+// killPlaceholder kills the destination container's init process after
+// markRestoreFailed. The restore proxy exits by itself once it sees
+// restore-failed, so it may already be gone: that is the goal of the kill,
+// not an error.
+func (op *restoreOperation) killPlaceholder(placeholderHostPID int, reason string) error {
+	err := op.controller.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, reason)
+	if errors.Is(err, syscall.ESRCH) {
+		op.log.V(1).Info("Placeholder already exited", "pid", placeholderHostPID)
+		return nil
+	}
+	return err
 }
 
 // applyRestoredCondition uses server-side apply against the status subresource.

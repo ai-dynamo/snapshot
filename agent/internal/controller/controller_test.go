@@ -1716,6 +1716,42 @@ func TestRunRestoreMarksFailureBeforeKillingPlaceholder(t *testing.T) {
 	}
 }
 
+// The restore proxy exits by itself once it sees restore-failed, so the kill
+// can find the placeholder already gone. That is not a second failure.
+func TestRunRestoreIgnoresPlaceholderThatAlreadyExited(t *testing.T) {
+	for name, tc := range map[string]struct {
+		restoreErr  error
+		completeErr error
+		want        string
+	}{
+		"restore error":                {restoreErr: errors.New("criu restore failed"), want: "criu restore failed"},
+		"restore-complete write fails": {completeErr: errors.New("control volume gone"), want: "failed to write restore-complete sentinel: control volume gone"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			w := makeTestController(t, pod)
+			w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+			artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+				return executor.RestoreResult{PlaceholderHostPID: 4242, RestoredPID: 77}, tc.restoreErr
+			}
+			w.writeControlSentinelFn = func(_ int, name string, _ []byte) error {
+				if name == podcontract.RestoreCompleteFile {
+					return tc.completeErr
+				}
+				return nil
+			}
+			w.sendSignalFn = func(_ logr.Logger, pid int, _ syscall.Signal, _ string) error {
+				return fmt.Errorf("failed to signal PID %d: %w", pid, syscall.ESRCH)
+			}
+
+			err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
+
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
 // When the container cannot be resolved, nothing can be killed, so the
 // restore-failed marker goes through the host path of the control volume.
 func TestRunRestoreFailureMarksUnresolvedContainerThroughHostPath(t *testing.T) {
