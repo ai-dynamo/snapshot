@@ -44,7 +44,7 @@ def create_engine(snapshot_mode: bool) -> Any:
         "pp_size": int(os.environ.get("SGLANG_PIPELINE_PARALLEL_SIZE", "1")),
         "trust_remote_code": False,
         "enable_memory_saver": snapshot_mode,
-        "enable_weights_cpu_backup": snapshot_mode,
+        "enable_weights_cpu_backup": False,
         "log_level": "info",
     }
     # JSON keys are Engine API keyword arguments, not CLI flags.
@@ -138,7 +138,7 @@ def main() -> None:
 
         pause_generation(engine)
         try:
-            engine.release_memory_occupation()
+            engine.release_memory_occupation(tags=["kv_cache"])
         except BaseException:
             continue_generation(engine)
             raise
@@ -156,7 +156,7 @@ def main() -> None:
         # control directory next to the success sentinel.
         try:
             progress = CONTROL_DIR.joinpath("sglang-restore-progress")
-            engine.resume_memory_occupation()
+            engine.resume_memory_occupation(tags=["kv_cache"])
             progress.write_text("memory-resumed\n", encoding="utf-8")
             continue_generation(engine)
             progress.write_text("generation-continued\n", encoding="utf-8")

@@ -44,16 +44,17 @@ curl --fail --location \
 
 The program creates a direct `sglang.Engine`, runs one generation, and calls
 `TokenizerManager.pause_generation()` followed by
-`Engine.release_memory_occupation()`. It writes `ready-for-snapshot` only after
+`Engine.release_memory_occupation(tags=["kv_cache"])` to discard the KV cache
+while keeping model weights on the GPU. It writes `ready-for-snapshot` only after
 both operations succeed.
 
-The Deployment enables SGLang's memory saver and CPU weight backup through the
-program. An init container downloads the selected model into a persistent
+The program enables SGLang's memory saver and disables CPU weight backup.
+Weights are captured directly from GPU memory without a CPU backup copy. An init container downloads the selected model into a persistent
 cache. The source application then loads that cache with `HF_HUB_OFFLINE=1` so
 the checkpointed process has no open Hugging Face connections.
 
 After restore, the checkpointed process calls
-`Engine.resume_memory_occupation()` and
+`Engine.resume_memory_occupation(tags=["kv_cache"])` and
 `TokenizerManager.continue_generation()`. It runs another generation and
 starts an API on port 8000. It writes `sglang-restore-ready` only after the
 generation succeeds and the API is listening. To validate the restored replica,
