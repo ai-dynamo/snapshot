@@ -293,6 +293,8 @@ func TestSweepRetainsCompletedAndCanaryArtifactRoots(t *testing.T) {
 		emptyMetadataPage(list, "1", "")
 		list.Items = []metav1.PartialObjectMetadata{
 			{ObjectMeta: metav1.ObjectMeta{UID: types.UID("completed")}},
+			// A live content UID is an active writer's lease on its artifact
+			// root. Sweeping it would race the writer.
 			{ObjectMeta: metav1.ObjectMeta{UID: types.UID("canary")}},
 		}
 		return nil

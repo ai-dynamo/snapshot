@@ -366,7 +366,7 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
         template = workloads.snapshotjob_helper_pod_template(
             config=config,
             run=run,
-            helper_command=f"touch {workloads.CONTROL_DIR}/helper-finished; exit 0",
+            helper_command=f"touch {workloads.HELPER_SYNC_DIR}/helper-finished; exit 0",
             wait_for_helper_before_capture=True,
         )
         template["metadata"]["annotations"] = {
@@ -408,7 +408,11 @@ def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
             workloads.snapshotjob_helper_pod_template(
                 config=config,
                 run=run,
-                helper_command="sleep 30; exit 0",
+                helper_command=(
+                    f"touch {workloads.HELPER_SYNC_DIR}/helper-finished; "
+                    f"while [ ! -f {workloads.HELPER_SYNC_DIR}/helper-release ]; do sleep 0.1; done; exit 0"
+                ),
+                wait_for_helper_before_capture=True,
             ),
         )
         snap.wait_for_condition(
@@ -419,6 +423,17 @@ def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
         )
         assert snap.condition(before_restart, "Completed").get("status") != "True"
         k8s.restart_snapshot_operator(config.namespace, config.release)
+        after_restart = snap.get_custom_object(
+            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
+        )
+        assert snap.condition(after_restart, "Completed").get("reason") == "WaitingForPodCompletion"
+        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        k8s.exec_command(
+            config.namespace,
+            source_pod.metadata.name,
+            f"touch {workloads.HELPER_SYNC_DIR}/helper-release",
+            container="helper",
+        )
         sj = snap.wait_for_condition(
             config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, condition_type="Completed", timeout=300
         )
@@ -439,18 +454,31 @@ def test_snapshotjob_restart_preserves_pending_capture(
         snap.create_snapshotjob(
             config.namespace,
             snapshotjob_name,
-            workloads.snapshotjob_hang_pod_template(config=config, run=run),
+            workloads.snapshotjob_helper_pod_template(
+                config=config,
+                run=run,
+                helper_command="sleep infinity",
+                wait_for_capture_release=True,
+            ),
         )
         snap.wait_for_status_field(
             config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, field="podSnapshotName"
         )
         k8s.restart_snapshot_operator(config.namespace, config.release)
+        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        k8s.exec_command(
+            config.namespace,
+            source_pod.metadata.name,
+            f"touch {workloads.HELPER_SYNC_DIR}/capture-release",
+            container=workloads.CONTAINER,
+        )
         sj = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
-        assert snap.condition(sj, "Captured").get("status") == "False"
+        sj = snap.wait_for_condition(
+            config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, condition_type="Captured", timeout=300
+        )
         assert snap.condition(sj, "Completed").get("status") != "True"
-        assert snap.condition(sj, "Failed").get("status") != "True"
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
         raise

@@ -23,6 +23,7 @@ SOURCE_READY = f"{CONTROL_DIR}/ready-for-snapshot"
 SNAPSHOT_COMPLETE = f"{CONTROL_DIR}/snapshot-complete"
 RESTORE_DONE = f"{CONTROL_DIR}/restore-complete"
 RESTORE_INITIAL_TOKEN = f"{CONTROL_DIR}/initial-restore-token"
+HELPER_SYNC_DIR = "/e2e-helper-sync"
 STATE_DIR = "/tmp/e2e-state"
 FILE_TOKEN = f"{STATE_DIR}/file-token"
 OBSERVATIONS = f"{STATE_DIR}/observations.log"
@@ -383,28 +384,40 @@ def snapshotjob_helper_pod_template(
     run: TestRun,
     helper_command: str,
     wait_for_helper_before_capture: bool = False,
+    wait_for_capture_release: bool = False,
 ) -> dict[str, Any]:
     # Two containers: the CRIU target plus a helper doing independent work
     # (the design's GMS-saver pattern). The dump kills only the target; the
     # SnapshotJob must wait for the helper before completing, and a helper
     # failure must fail the run even though the capture succeeded.
     template = snapshotjob_pod_template(config=config, run=run, gpu=False)
-    if wait_for_helper_before_capture:
+    if wait_for_helper_before_capture or wait_for_capture_release:
+        waits = []
+        if wait_for_helper_before_capture:
+            waits.append(f"while [ ! -f {HELPER_SYNC_DIR}/helper-finished ]; do sleep 0.1; done")
+        if wait_for_capture_release:
+            waits.append(f"while [ ! -f {HELPER_SYNC_DIR}/capture-release ]; do sleep 0.1; done")
         template["spec"]["containers"][0]["command"] = [
             "/bin/bash",
             "-lc",
             f"""set -euo pipefail
 mkdir -p {STATE_DIR}
-while [ ! -f {CONTROL_DIR}/helper-finished ]; do sleep 0.1; done
+{chr(10).join(waits)}
 {CPU_SOURCE}
 """,
         ]
+    template["spec"]["volumes"].append({"name": "e2e-helper-sync", "emptyDir": {}})
+    for container in template["spec"]["containers"]:
+        container.setdefault("volumeMounts", []).append(
+            {"name": "e2e-helper-sync", "mountPath": HELPER_SYNC_DIR}
+        )
     template["spec"]["containers"].append(
         {
             "name": "helper",
             "image": run.image,
             "imagePullPolicy": "IfNotPresent",
             "command": ["/bin/bash", "-lc", helper_command],
+            "volumeMounts": [{"name": "e2e-helper-sync", "mountPath": HELPER_SYNC_DIR}],
         }
     )
     return template
