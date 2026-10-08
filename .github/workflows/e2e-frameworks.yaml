@@ -290,38 +290,6 @@ jobs:
             echo "::notice::Shared model cache uses the workflow default ${SNAPSHOT_E2E_MODEL_CACHE_SERVER}:${SNAPSHOT_E2E_MODEL_CACHE_PATH}; set repository variables SNAPSHOT_E2E_MODEL_CACHE_SERVER and SNAPSHOT_E2E_MODEL_CACHE_PATH to override."
           fi
 
-      - name: Configure checkpoint storage permissions
-        if: ${{ steps.selected.outputs.run == 'true' }}
-        id: storage
-        timeout-minutes: 3
-        run: |
-          set -euo pipefail
-          host_context="$(kubectl config current-context)"
-          echo "context=${host_context}" >> "$GITHUB_OUTPUT"
-          storage_class="${HOST_NAMESPACE}"
-          echo "created=${storage_class}" >> "$GITHUB_OUTPUT"
-          # SMB reports the mount's modes for every directory. Preserve the
-          # shared class and give this run private modes required by PageBroker.
-          kubectl --context "${host_context}" -n "${HOST_NAMESPACE}" get storageclass "${SNAPSHOT_E2E_STORAGE_CLASS}" -o json > /tmp/snapshot-storage-class.json
-          python3 - "${storage_class}" <<'PY' > /tmp/snapshot-private-storage-class.json
-          import json
-          import sys
-          with open("/tmp/snapshot-storage-class.json") as source:
-              original = json.load(source)
-          keys = ("provisioner", "parameters", "reclaimPolicy", "volumeBindingMode", "allowVolumeExpansion", "mountOptions")
-          private = {key: original[key] for key in keys if key in original}
-          private.update(apiVersion="storage.k8s.io/v1", kind="StorageClass",
-                         metadata={"name": sys.argv[1], "labels": {"snapshot-e2e": "true"}})
-          if private["provisioner"] == "file.csi.azure.com" and private.get("parameters", {}).get("protocol", "smb").lower() == "smb":
-              options = [option for option in private.get("mountOptions", [])
-                         if option.split("=", 1)[0] not in ("dir_mode", "file_mode", "uid", "gid")]
-              private["mountOptions"] = options + ["dir_mode=0700", "file_mode=0600", "uid=0", "gid=0"]
-          print(json.dumps(private))
-          PY
-          kubectl --context "${host_context}" -n "${HOST_NAMESPACE}" create -f /tmp/snapshot-private-storage-class.json
-          echo "SNAPSHOT_E2E_STORAGE_CLASS=${storage_class}" >> "$GITHUB_ENV"
-          kubectl --context "${host_context}" -n "${HOST_NAMESPACE}" get storageclass "${storage_class}" -o jsonpath='{.provisioner}{" protocol="}{.parameters.protocol}{" mountOptions="}{.mountOptions}{"\n"}'
-
       - name: Validate host GPU cluster
         if: ${{ steps.selected.outputs.run == 'true' }}
         timeout-minutes: 3
@@ -519,14 +487,6 @@ jobs:
             vcluster delete "${VCLUSTER_NAME}" --namespace "${HOST_NAMESPACE}"
           fi
           kubectl delete namespace "${HOST_NAMESPACE}" --ignore-not-found --wait=false
-
-      - name: Cleanup checkpoint storage class
-        if: ${{ always() && steps.storage.outputs.created != '' }}
-        env:
-          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
-          HOST_CONTEXT: ${{ steps.storage.outputs.context }}
-          STORAGE_CLASS: ${{ steps.storage.outputs.created }}
-        run: kubectl --context "${HOST_CONTEXT}" -n "${HOST_NAMESPACE}" delete storageclass "${STORAGE_CLASS}" --ignore-not-found
 
   datadog-restore:
     name: datadog gpu monitoring back on
