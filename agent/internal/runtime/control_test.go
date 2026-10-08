@@ -129,7 +129,7 @@ func TestPodControlDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PodControlDir: %v", err)
 	}
-	want := "/var/lib/kubelet/pods/0f6c2c1e-uid/volumes/kubernetes.io~empty-dir/snapshot-control/engine-0"
+	want := "/host/proc/1/root/var/lib/kubelet/pods/0f6c2c1e-uid/volumes/kubernetes.io~empty-dir/snapshot-control/engine-0"
 	if dir != want {
 		t.Errorf("PodControlDir = %q, want %q", dir, want)
 	}

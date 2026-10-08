@@ -34,7 +34,11 @@ func WriteControlSentinel(hostPID int, name string, contents []byte) error {
 
 // KubeletPodsDir is kubelet's per-Pod directory. The chart mounts it into the
 // agent at the same path.
-const KubeletPodsDir = "/var/lib/kubelet/pods"
+//
+// TEST ONLY (never merged): vCluster rewrites the agent's hostPath for
+// /var/lib/kubelet/pods, so go through the node's root instead. hostPID makes
+// /host/proc/1 the node's init process.
+const KubeletPodsDir = HostProcPath + "/1/root/var/lib/kubelet/pods"
 
 // PodControlDir is a container's snapshot-control directory as seen from the
 // host: the container's subPath directory inside the Pod's control emptyDir.
