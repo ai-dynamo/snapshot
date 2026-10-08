@@ -564,8 +564,9 @@ HandleConnection(int connection, Broker& broker, GpuConnections& gpu_connections
     }
   }
 
-  if (response.has_direct_checkpoint_directory() || response.has_staged_checkpoint_directory() ||
-      response.has_direct_restore_ready() || response.has_staged_restore_directory()) {
+  if (request.request_broker_pidfd() &&
+      (response.has_direct_checkpoint_directory() || response.has_staged_checkpoint_directory() ||
+       response.has_direct_restore_ready() || response.has_staged_restore_directory())) {
     // The broker pins itself while alive. No peer PID lookup or namespace translation.
     FileDescriptor pidfd(static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0)));
     if (pidfd.get() < 0) {

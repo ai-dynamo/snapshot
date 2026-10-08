@@ -794,9 +794,10 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
       int descriptor;
       std::memcpy(&descriptor, CMSG_DATA(rights), sizeof(descriptor));
       FileDescriptor process(descriptor);
-      if (broker_process) {
-        *broker_process = std::move(process);
+      if (!broker_process) {
+        throw std::runtime_error("unexpected response descriptor");
       }
+      *broker_process = std::move(process);
     }
     if (header.msg_flags & MSG_CTRUNC ||
         (received < static_cast<ssize_t>(sizeof(size)) &&
@@ -858,9 +859,15 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
   fs::path socket_path_;
 };
 
-TEST_F(DaemonTransportTest, PreparationPinsBrokerAndRejectsOtherProcess)
+TEST_F(DaemonTransportTest, PreparationPidfdIsOptInAndRejectsOtherProcess)
 {
+  auto ordinary = RequestFor("ordinary");
+  Configure(ordinary.mutable_prepare_direct_checkpoint()->mutable_destination(),
+            ordinary.mutable_prepare_direct_checkpoint()->mutable_io_engine(), root_ / "storage" / "ordinary");
+  EXPECT_TRUE(Exchange(ordinary).has_direct_checkpoint_directory());
+
   auto preparation = RequestFor("prepared");
+  preparation.set_request_broker_pidfd(true);
   Configure(preparation.mutable_prepare_direct_checkpoint()->mutable_destination(),
             preparation.mutable_prepare_direct_checkpoint()->mutable_io_engine(), root_ / "storage" / "checkpoint");
   auto connection = Connect();

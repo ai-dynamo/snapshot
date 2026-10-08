@@ -938,6 +938,10 @@ type Request struct {
 	// After two hours and five minutes, the transaction expires. This cancels GPU
 	// work. Expiry cleanup waits for active GPU transfers to stop.
 	TransactionId *string `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3,oneof" json:"transaction_id,omitempty"`
+	// Requests a pidfd for the serving PageBroker on a successful storage
+	// preparation response. GPU clients retain it to bind later execution and
+	// cleanup to the broker that prepared the transaction.
+	RequestBrokerPidfd bool `protobuf:"varint,12,opt,name=request_broker_pidfd,json=requestBrokerPidfd,proto3" json:"request_broker_pidfd,omitempty"`
 	// Types that are valid to be assigned to Command:
 	//
 	//	*Request_StagedRestore
@@ -996,6 +1000,13 @@ func (x *Request) GetTransactionId() string {
 		return *x.TransactionId
 	}
 	return ""
+}
+
+func (x *Request) GetRequestBrokerPidfd() bool {
+	if x != nil {
+		return x.RequestBrokerPidfd
+	}
+	return false
 }
 
 func (x *Request) GetCommand() isRequest_Command {
@@ -1578,10 +1589,10 @@ func (x *Failure) GetMessage() string {
 	return ""
 }
 
-// Successful storage preparation responses carry exactly one broker pidfd via
-// SCM_RIGHTS on the first frame-header bytes. The broker opens its own pidfd.
-// GPU clients retain it for execution and pass it to nsrestore. Other clients
-// close it. Failure, GPU completion, and other control responses carry no FDs.
+// Successful storage preparation responses requested with request_broker_pidfd
+// carry exactly one broker pidfd via SCM_RIGHTS on the first frame-header bytes.
+// The broker opens its own pidfd. GPU clients retain it for execution and pass
+// it to nsrestore. Other responses carry no FDs.
 type Response struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RequestId     *string                `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3,oneof" json:"request_id,omitempty"`
@@ -1900,11 +1911,12 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\vdestination\x12=\n" +
 	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\x0f\n" +
 	"\rCommitRequest\"\x0e\n" +
-	"\fAbortRequest\"\x97\a\n" +
+	"\fAbortRequest\"\xc9\a\n" +
 	"\aRequest\x12\"\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tH\x01R\trequestId\x88\x01\x01\x12*\n" +
-	"\x0etransaction_id\x18\x02 \x01(\tH\x02R\rtransactionId\x88\x01\x01\x12U\n" +
+	"\x0etransaction_id\x18\x02 \x01(\tH\x02R\rtransactionId\x88\x01\x01\x120\n" +
+	"\x14request_broker_pidfd\x18\f \x01(\bR\x12requestBrokerPidfd\x12U\n" +
 	"\x0estaged_restore\x18\x03 \x01(\v2,.snapshot.pagebroker.v1.StagedRestoreRequestH\x00R\rstagedRestore\x12t\n" +
 	"\x19prepare_staged_checkpoint\x18\x04 \x01(\v26.snapshot.pagebroker.v1.PrepareStagedCheckpointRequestH\x00R\x17prepareStagedCheckpoint\x12?\n" +
 	"\x06commit\x18\x05 \x01(\v2%.snapshot.pagebroker.v1.CommitRequestH\x00R\x06commit\x12<\n" +

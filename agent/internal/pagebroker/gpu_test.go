@@ -420,6 +420,9 @@ func TestGPUParentRetainsOriginalPeerAfterChildExit(t *testing.T) {
 				unix.Close(fd)
 			}
 			if err == nil && request.GetDirectRestore() != nil {
+				if !request.GetRequestBrokerPidfd() {
+					t.Fatal("GPU preparation did not request a broker pidfd")
+				}
 				message, marshalErr := proto.Marshal(&Response{RequestId: request.RequestId, TransactionId: request.TransactionId,
 					Result: &Response_DirectRestoreReady{DirectRestoreReady: &DirectRestoreReady{}}})
 				if marshalErr != nil {

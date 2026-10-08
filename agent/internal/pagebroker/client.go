@@ -144,7 +144,7 @@ func (c Client) abort(ctx context.Context, transactionID string, files ...*os.Fi
 }
 
 func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
-	response, brokerProcess, err := c.requestWithProcess(ctx, transactionID, command, files...)
+	response, brokerProcess, err := c.requestResponse(ctx, transactionID, false, command, files...)
 	if brokerProcess != nil {
 		brokerProcess.Close()
 	}
@@ -152,23 +152,27 @@ func (c Client) request(ctx context.Context, transactionID string, command isReq
 }
 
 func (c Client) requestWithProcess(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
+	return c.requestResponse(ctx, transactionID, true, command, files...)
+}
+
+func (c Client) requestResponse(ctx context.Context, transactionID string, requestBrokerPidfd bool, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
 	if err != nil {
 		return nil, nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
 	}
 	defer connection.Close()
-	return exchangeWithProcess(ctx, connection.(*net.UnixConn), transactionID, command, files...)
+	return exchangeResponse(ctx, connection.(*net.UnixConn), transactionID, requestBrokerPidfd, command, files...)
 }
 
 func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
-	response, brokerProcess, err := exchangeWithProcess(ctx, connection, transactionID, command, files...)
+	response, brokerProcess, err := exchangeResponse(ctx, connection, transactionID, false, command, files...)
 	if brokerProcess != nil {
 		brokerProcess.Close()
 	}
 	return response, err
 }
 
-func exchangeWithProcess(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
+func exchangeResponse(ctx context.Context, connection *net.UnixConn, transactionID string, requestBrokerPidfd bool, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
 	stopCancel := context.AfterFunc(ctx, func() {
 		_ = connection.CloseWrite()
 		_ = connection.Close()
@@ -176,7 +180,7 @@ func exchangeWithProcess(ctx context.Context, connection *net.UnixConn, transact
 	defer stopCancel()
 
 	requestID := uuid.NewString()
-	request := &Request{RequestId: &requestID, Command: command}
+	request := &Request{RequestId: &requestID, Command: command, RequestBrokerPidfd: requestBrokerPidfd}
 	if transactionID != "" {
 		request.TransactionId = &transactionID
 	}

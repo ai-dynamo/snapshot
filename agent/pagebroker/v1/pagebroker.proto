@@ -97,6 +97,10 @@ message Request
   // After two hours and five minutes, the transaction expires. This cancels GPU
   // work. Expiry cleanup waits for active GPU transfers to stop.
   optional string transaction_id = 2;
+  // Requests a pidfd for the serving PageBroker on a successful storage
+  // preparation response. GPU clients retain it to bind later execution and
+  // cleanup to the broker that prepared the transaction.
+  bool request_broker_pidfd = 12;
   oneof command
   {
     StagedRestoreRequest staged_restore = 3;
@@ -155,10 +159,10 @@ message Failure
   optional Code code = 1;
   optional string message = 2;
 }
-// Successful storage preparation responses carry exactly one broker pidfd via
-// SCM_RIGHTS on the first frame-header bytes. The broker opens its own pidfd.
-// GPU clients retain it for execution and pass it to nsrestore. Other clients
-// close it. Failure, GPU completion, and other control responses carry no FDs.
+// Successful storage preparation responses requested with request_broker_pidfd
+// carry exactly one broker pidfd via SCM_RIGHTS on the first frame-header bytes.
+// The broker opens its own pidfd. GPU clients retain it for execution and pass
+// it to nsrestore. Other responses carry no FDs.
 message Response
 {
   optional string request_id = 1;

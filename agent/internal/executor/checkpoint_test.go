@@ -179,8 +179,8 @@ func replyPageBrokerTest(connection net.Conn, request *pagebroker.Request, respo
 	}
 	header := make([]byte, 4)
 	binary.BigEndian.PutUint32(header, uint32(len(message)))
-	if response.GetDirectCheckpointDirectory() != nil || response.GetStagedCheckpointDirectory() != nil ||
-		response.GetDirectRestoreReady() != nil || response.GetStagedRestoreDirectory() != nil {
+	if request.GetRequestBrokerPidfd() && (response.GetDirectCheckpointDirectory() != nil || response.GetStagedCheckpointDirectory() != nil ||
+		response.GetDirectRestoreReady() != nil || response.GetStagedRestoreDirectory() != nil) {
 		fd, err := unix.PidfdOpen(os.Getpid(), 0)
 		if err != nil {
 			return err

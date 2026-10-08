@@ -267,6 +267,10 @@ func TestImageDirectoryResponses(t *testing.T) {
 						server <- err
 						return
 					}
+					if request.GetRequestBrokerPidfd() {
+						server <- fmt.Errorf("ordinary storage request asked for a broker pidfd")
+						return
+					}
 					if tc.name == "direct-checkpoint" {
 						prepare := request.GetPrepareDirectCheckpoint()
 						if prepare == nil || prepare.GetDestination().GetFilesystem().GetDirectory() != "/checkpoints/destination" || prepare.GetIoEngine().GetPosixCopy() == nil {
