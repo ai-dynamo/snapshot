@@ -71,6 +71,28 @@ protected:
   FileDescriptor directory_{-1};
 };
 
+TEST(EngineValidation, PreservesInheritedCancellationReason)
+{
+  for (bool deadline : {false, true}) {
+    Cancellation parent(deadline ? Cancellation::Clock::now() : Cancellation::Clock::time_point::max());
+    Cancellation child(&parent);
+    Cancellation grandchild(&child);
+    if (!deadline) {
+      EXPECT_NO_THROW(grandchild.ThrowIfCancelled());
+      parent.Cancel();
+    }
+    for (const auto* token : {&parent, &child, &grandchild}) {
+      EXPECT_TRUE(token->IsCancelled());
+      try {
+        token->ThrowIfCancelled();
+        FAIL() << "expected cancellation";
+      } catch (const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(), deadline ? "operation deadline exceeded" : "operation cancelled");
+      }
+    }
+  }
+}
+
 TEST(EngineValidation, CancelsContendedDeviceWaitAndReusesMutex)
 {
   std::timed_mutex mutex;

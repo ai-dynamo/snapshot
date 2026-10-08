@@ -24,9 +24,15 @@ class Cancellation {
   }
 
   void ThrowIfCancelled() const {
-    if (IsCancelled()) {
-      throw std::runtime_error(DeadlineExceeded() ? "operation deadline exceeded" : "operation cancelled");
+    if (!IsCancelled()) {
+      return;
     }
+    for (const Cancellation* token = this; token; token = token->parent_) {
+      if (token->DeadlineExceeded()) {
+        throw std::runtime_error("operation deadline exceeded");
+      }
+    }
+    throw std::runtime_error("operation cancelled");
   }
 
  private:
