@@ -44,15 +44,23 @@ curl --fail --location \
 The program loads the model selected in `capture/qwen3-0.6b.yaml` and calls
 `LLM.generate()` to initialize TensorRT-LLM. The synchronous call returns only
 after generation finishes, so no request remains in flight. The program then
-runs `gc.collect()` and writes `ready-for-snapshot` when it reaches the safe
-checkpoint point.
+releases KV cache on every rank, runs `gc.collect()`, and writes
+`ready-for-snapshot` when it reaches the safe checkpoint point.
 
-TensorRT-LLM does not use a framework pause or sleep call in this example. The
-model and initialized CUDA state remain resident. After restore, the checkpointed
-process calls `LLM.generate()` again and starts an API on port 8000. It writes
-`trtllm-restore-ready` only after the generation succeeds and the API is
-listening. To validate the restored replica, send a `POST` request to
-`/generate` with a JSON body such as
+The recipe uses the pinned rc24 image's private executor collective RPC for
+KV-only `sleep` and `wakeup`. `sleep_config` sets the KV restore mode to `NONE`,
+so cache contents are discarded. Weights remain on the GPU with no CPU backup.
+KV manager V1 and disabled block reuse avoid retaining prefix-cache entries
+across this release. These settings are enforced by `app.py`.
+
+`TORCHINDUCTOR_COMPILE_THREADS=1` disables forked asynchronous compiler workers,
+which can inherit CUDA device mappings that prevent CRIU capture. Compilation
+still uses the configured compiler cache.
+
+After restore, the process recreates KV cache, calls `LLM.generate()` again,
+and starts an API on port 8000. It writes `trtllm-restore-ready` only after
+that generation succeeds and the API is listening. To validate the restored
+replica, send a `POST` request to `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
 `capture/qwen3-0.6b.yaml` runs the TensorRT-LLM `1.3.0rc24` release image, pinned by
