@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -29,6 +30,7 @@ func main() {
 	flag.IntVar(&customStorage.pageBrokerSocketDirectoryFD, "pagebroker-socket-directory-fd", -1, "Inherited PageBroker socket directory")
 	flag.IntVar(&customStorage.hostProcFD, "host-proc-fd", -1, "Inherited host proc directory for PID resolution")
 	flag.IntVar(&customStorage.executionFD, "pagebroker-execution-fd", -1, "Inherited PageBroker execution socket")
+	flag.IntVar(&customStorage.brokerProcessFD, "pagebroker-process-fd", -1, "Inherited PageBroker pidfd")
 	flag.IntVar(&customStorage.cancelFD, "cancel-fd", -1, "Inherited cancellation pipe")
 	flag.StringVar(&customStorage.pageBrokerSocketName, "pagebroker-socket-name", "", "PageBroker control socket name")
 	flag.StringVar(&customStorage.gpuContext, "gpu-context", "", "GPU context JSON")
@@ -102,6 +104,7 @@ type customStorageFlags struct {
 	hostProcFD                  int
 	executionFD                 int
 	cancelFD                    int
+	brokerProcessFD             int
 	pageBrokerSocketName        string
 	gpuContext                  string
 	pageBrokerTransactionID     string
@@ -131,7 +134,7 @@ func parseCustomStorageOptions(flags *flag.FlagSet, input customStorageFlags) (*
 	supplied := false
 	flags.Visit(func(option *flag.Flag) {
 		switch option.Name {
-		case "pagebroker-socket-directory-fd", "host-proc-fd", "pagebroker-execution-fd", "cancel-fd", "pagebroker-socket-name", "gpu-context", "pagebroker-transaction":
+		case "pagebroker-process-fd", "pagebroker-socket-directory-fd", "host-proc-fd", "pagebroker-execution-fd", "cancel-fd", "pagebroker-socket-name", "gpu-context", "pagebroker-transaction":
 			supplied = true
 		}
 	})
@@ -139,9 +142,9 @@ func parseCustomStorageOptions(flags *flag.FlagSet, input customStorageFlags) (*
 		return nil, nil, nil
 	}
 	if input.pageBrokerSocketDirectoryFD < minimumInheritedDescriptor || input.hostProcFD < minimumInheritedDescriptor ||
-		input.executionFD < minimumInheritedDescriptor || input.cancelFD < minimumInheritedDescriptor ||
+		input.executionFD < minimumInheritedDescriptor || input.cancelFD < minimumInheritedDescriptor || input.brokerProcessFD < minimumInheritedDescriptor ||
 		input.pageBrokerSocketName == "" || input.pageBrokerTransactionID == "" || input.gpuContext == "" {
-		return nil, nil, fmt.Errorf("CustomStorage requires socket and host proc directories, an execution socket, a cancellation pipe, a socket name, a transaction ID, and GPU context")
+		return nil, nil, fmt.Errorf("CustomStorage requires socket and host proc directories, an execution socket, a cancellation pipe, a broker pidfd, a socket name, a transaction ID, and GPU context")
 	}
 	if err := validateInheritedDescriptors([]inheritedDescriptor{
 		{"PageBroker socket directory", input.pageBrokerSocketDirectoryFD, unix.S_IFDIR},
@@ -151,6 +154,13 @@ func parseCustomStorageOptions(flags *flag.FlagSet, input customStorageFlags) (*
 	}); err != nil {
 		return nil, nil, err
 	}
+	// Signal 0 validates the descriptor. EINVAL is expected when the broker is
+	// outside our PID namespace. Polling that pidfd still observes its exit.
+	if err := unix.PidfdSendSignal(input.brokerProcessFD, 0, nil, 0); err != nil &&
+		!errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EPERM) && !errors.Is(err, unix.EINVAL) {
+		return nil, nil, fmt.Errorf("invalid PageBroker process descriptor: %w", err)
+	}
+	unix.CloseOnExec(input.brokerProcessFD)
 	gpuContext := new(pagebroker.GpuContext)
 	if err := json.Unmarshal([]byte(input.gpuContext), gpuContext); err != nil {
 		return nil, nil, fmt.Errorf("decode GPU context: %w", err)
@@ -158,6 +168,7 @@ func parseCustomStorageOptions(flags *flag.FlagSet, input customStorageFlags) (*
 	execution := &pagebroker.CustomStorageExecution{
 		SocketDirectory: os.NewFile(uintptr(input.pageBrokerSocketDirectoryFD), "pagebroker-socket-directory"),
 		Socket:          os.NewFile(uintptr(input.executionFD), "pagebroker-execution"),
+		BrokerProcess:   os.NewFile(uintptr(input.brokerProcessFD), "pagebroker-process"),
 		SocketName:      input.pageBrokerSocketName,
 		GPUContext:      gpuContext,
 		TransactionID:   input.pageBrokerTransactionID,

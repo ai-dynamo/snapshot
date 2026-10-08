@@ -40,7 +40,7 @@ func gpuListener(t *testing.T) (*net.UnixListener, *CustomStorageExecution) {
 	if err := listener.SetDeadline(time.Now().Add(gpuTestTimeout)); err != nil {
 		t.Fatal(err)
 	}
-	gpu, err := (Client{ControlSocketPath: listener.Addr().String()}).OpenCustomStorageExecution("restore", &GpuContext{CapturedPids: []uint32{12}})
+	gpu, err := (Client{ControlSocketPath: listener.Addr().String()}).openCustomStorageExecution("restore", &GpuContext{CapturedPids: []uint32{12}}, openTestPidfd(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,41 +62,6 @@ func openTestPidfd(t *testing.T) *os.File {
 	file := os.NewFile(uintptr(fd), "target-pidfd")
 	t.Cleanup(func() { _ = file.Close() })
 	return file
-}
-
-func TestPeerProcessFromCredentials(t *testing.T) {
-	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(sockets[0])
-	defer unix.Close(sockets[1])
-
-	fd, err := peerProcessFDFromCredentials(sockets[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(fd)
-
-	identity, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(identity), fmt.Sprintf("Pid:\t%d\n", os.Getpid())) {
-		t.Fatalf("fallback opened wrong process descriptor: %s", identity)
-	}
-}
-
-func TestPeerProcessFromCredentialsWithoutPeer(t *testing.T) {
-	socket, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(socket)
-
-	if _, err := peerProcessFDFromCredentials(socket); !errors.Is(err, unix.ENODATA) {
-		t.Fatalf("unconnected socket: %v, want ENODATA", err)
-	}
 }
 
 func readGPURequest(connection *net.UnixConn) (*Request, []int, error) {
@@ -158,11 +123,11 @@ func TestGPURequestCarriesHostPIDsAfterControlPathMoves(t *testing.T) {
 			server <- err
 			return
 		}
-		if len(descriptors) != 1 {
-			server <- fmt.Errorf("received %d pidfds, want one", len(descriptors))
+		if len(descriptors) != 2 {
+			server <- fmt.Errorf("received %d pidfds, want broker and target", len(descriptors))
 			return
 		}
-		identity, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", descriptors[0]))
+		identity, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", descriptors[1]))
 		if err != nil || !strings.Contains(string(identity), fmt.Sprintf("Pid:\t%d\n", os.Getpid())) {
 			server <- fmt.Errorf("received wrong process descriptor: %s, %v", identity, err)
 			return
@@ -215,7 +180,7 @@ func TestGPUCancellationWaitsForAbortConfirmation(t *testing.T) {
 			unix.Close(fd)
 		}
 	}()
-	if err != nil || request.GetCheckpointGpu() == nil || len(descriptors) != 1 {
+	if err != nil || request.GetCheckpointGpu() == nil || len(descriptors) != 2 {
 		t.Fatalf("GPU checkpoint request: %v, descriptors %v, %v", request, descriptors, err)
 	}
 	cancel()
@@ -236,7 +201,7 @@ func TestGPUCancellationWaitsForAbortConfirmation(t *testing.T) {
 	if err := pidfd.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := unix.PidfdSendSignal(descriptors[0], 0, nil, 0); err != nil {
+	if err := unix.PidfdSendSignal(descriptors[1], 0, nil, 0); err != nil {
 		t.Fatalf("receiver lost target reference after sender closed it: %v", err)
 	}
 	message, _ := proto.Marshal(&Response{RequestId: abort.RequestId, TransactionId: abort.TransactionId,
@@ -332,6 +297,45 @@ func TestGPUCompletionDoesNotWaitForUnknownCommittedTransaction(t *testing.T) {
 		}
 	case <-time.After(gpuTestTimeout):
 		t.Fatal("completed GPU execution waited for broker exit")
+	}
+}
+
+func TestGPUCleanupDoesNotWaitForExpiredOriginalTransaction(t *testing.T) {
+	listener, gpu := gpuListener(t)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := gpu.Restore(context.Background(), []int{12}, []int{os.Getpid()}, []*os.File{openTestPidfd(t)})
+		finished <- err
+	}()
+	peer, err := listener.AcceptUnix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, descriptors, err := readGPURequest(peer)
+	for _, descriptor := range descriptors {
+		unix.Close(descriptor)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Lose the GPU reply, then let the same broker report expired state.
+	peer.Close()
+	abortPeer, abort := acceptGPUAbort(t, listener)
+	message, _ := proto.Marshal(&Response{RequestId: abort.RequestId, TransactionId: abort.TransactionId,
+		Result: &Response_Failure{Failure: &Failure{Code: Failure_TRANSACTION_NOT_FOUND.Enum()}}})
+	if err := writeMessage(abortPeer, message); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("GPU response loss: %v", err)
+		}
+	case <-time.After(gpuTestTimeout):
+		t.Fatal("cleanup waited for a broker that had already drained the transaction")
+	}
+	if err := gpu.Abort(context.Background()); err != nil {
+		t.Fatalf("drained transaction retried Abort: %v", err)
 	}
 }
 
@@ -440,6 +444,16 @@ func TestGPUParentRetainsOriginalPeerAfterChildExit(t *testing.T) {
 			for _, fd := range descriptors {
 				unix.Close(fd)
 			}
+			if err == nil && request.GetDirectRestore() != nil {
+				message, marshalErr := proto.Marshal(&Response{RequestId: request.RequestId, TransactionId: request.TransactionId,
+					Result: &Response_DirectRestoreReady{DirectRestoreReady: &DirectRestoreReady{}}})
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				if err := writeRequest(connection, message, []*os.File{openTestPidfd(t)}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			connection.Close()
 			if err != nil {
 				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -453,7 +467,7 @@ func TestGPUParentRetainsOriginalPeerAfterChildExit(t *testing.T) {
 		}
 	case "client":
 		gpu := &CustomStorageExecution{
-			Socket: os.NewFile(3, "execution"), SocketDirectory: os.NewFile(4, "directory"),
+			Socket: os.NewFile(3, "execution"), SocketDirectory: os.NewFile(4, "directory"), BrokerProcess: os.NewFile(5, "broker"),
 			SocketName: "broker.sock", TransactionID: "restore", GPUContext: &GpuContext{CapturedPids: []uint32{12}},
 		}
 		defer gpu.Close()
@@ -500,14 +514,14 @@ func TestGPUParentRetainsOriginalPeerAfterChildExit(t *testing.T) {
 				}
 			}
 			await("ready")
-			gpu, err := (Client{ControlSocketPath: socketPath}).OpenCustomStorageExecution("restore", &GpuContext{})
+			_, gpu, err := (Client{ControlSocketPath: socketPath}).PrepareGPURestore(context.Background(), "restore", "/checkpoint", true, &GpuContext{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer gpu.Close()
 			child := exec.Command(os.Args[0], "-test.run=^TestGPUParentRetainsOriginalPeerAfterChildExit$")
 			child.Env = append(os.Environ(), "SNAPSHOT_TEST_GPU_PROCESS=client")
-			child.ExtraFiles = []*os.File{gpu.Socket, gpu.SocketDirectory}
+			child.ExtraFiles = []*os.File{gpu.Socket, gpu.SocketDirectory, gpu.BrokerProcess}
 			if err := child.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -524,13 +538,8 @@ func TestGPUParentRetainsOriginalPeerAfterChildExit(t *testing.T) {
 				_ = broker.Process.Kill()
 				_ = broker.Wait()
 			} else {
-				peer, err := gpu.peerProcess()
-				if err != nil {
-					t.Fatal(err)
-				}
-				poll := []unix.PollFd{{Fd: int32(peer.Fd()), Events: unix.POLLIN}}
+				poll := []unix.PollFd{{Fd: int32(gpu.BrokerProcess.Fd()), Events: unix.POLLIN}}
 				n, err := unix.Poll(poll, 0)
-				peer.Close()
 				if err != nil || n != 0 {
 					t.Fatalf("original broker exited with the client: %v, %v", poll, err)
 				}
@@ -551,7 +560,7 @@ func TestGPUParentRetainsOriginalPeerAfterChildExit(t *testing.T) {
 			if !reaped {
 				peer, abort := acceptGPUAbort(t, replacement)
 				message, _ := proto.Marshal(&Response{RequestId: abort.RequestId, TransactionId: abort.TransactionId,
-					Result: &Response_Failure{Failure: &Failure{Code: Failure_TRANSACTION_NOT_FOUND.Enum()}}})
+					Result: &Response_Failure{Failure: &Failure{Code: Failure_INVALID_REQUEST.Enum()}}})
 				if err := writeMessage(peer, message); err != nil {
 					t.Fatal(err)
 				}
@@ -597,7 +606,7 @@ func TestGPUConnectCancellationWithFullListener(t *testing.T) {
 	if err := unix.Connect(queued, address); err != nil {
 		t.Fatal(err)
 	}
-	gpu, err := (Client{ControlSocketPath: socketPath}).OpenCustomStorageExecution("restore", &GpuContext{})
+	gpu, err := (Client{ControlSocketPath: socketPath}).openCustomStorageExecution("restore", &GpuContext{}, openTestPidfd(t))
 	if err != nil {
 		t.Fatal(err)
 	}

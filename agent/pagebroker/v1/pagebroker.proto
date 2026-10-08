@@ -82,8 +82,13 @@ message CommitRequest {}
 // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
 // one hour. Repeating Abort for a retained aborted transaction returns AbortComplete. Abort for a committed or
 // expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
+// For an Abort authenticated with the original broker pidfd, TRANSACTION_NOT_FOUND
+// also confirms that this broker has no running GPU work for the transaction.
 message AbortRequest {}
 
+// GPU requests pass the broker pidfd returned by preparation, then one target
+// pidfd per target, via SCM_RIGHTS with the first frame header bytes. GPU Abort
+// passes the same broker pidfd. The receiver verifies it refers to itself.
 message Request
 {
   // Snapshot assigns an ID to each request.
@@ -150,6 +155,10 @@ message Failure
   optional Code code = 1;
   optional string message = 2;
 }
+// Successful storage preparation responses carry exactly one broker pidfd via
+// SCM_RIGHTS on the first frame-header bytes. The broker opens its own pidfd.
+// GPU clients retain it for execution and pass it to nsrestore. Other clients
+// close it. Failure, GPU completion, and other control responses carry no FDs.
 message Response
 {
   optional string request_id = 1;

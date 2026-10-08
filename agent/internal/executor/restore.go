@@ -275,7 +275,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		stageStart := time.Now()
 		direct := req.PageBrokerRestoreMode != "staged"
 		var staged string
-		if direct {
+		if usePageBrokerGPU {
+			staged, gpu, err = broker.PrepareGPURestore(ctx, transactionID, artifactPath, direct, gpuContext)
+		} else if direct {
 			err = broker.DirectRestore(ctx, transactionID, artifactPath)
 		} else {
 			staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
@@ -283,12 +285,6 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		pageBrokerStageDuration = time.Since(stageStart)
 		if err != nil {
 			return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
-		}
-		if usePageBrokerGPU {
-			gpu, err = broker.OpenCustomStorageExecution(transactionID, gpuContext)
-			if err != nil {
-				return RestoreResult{}, err
-			}
 		}
 		mountStart := time.Now()
 		var sourceMount nsmount.MountPoint
@@ -657,16 +653,18 @@ func addCustomStorageFiles(ctx context.Context, cmd *exec.Cmd, execution *pagebr
 	hostProcFD := socketDirectoryFD + 1
 	socketFD := socketDirectoryFD + 2
 	cancelFD := socketDirectoryFD + 3
+	brokerProcessFD := socketDirectoryFD + 4
 	cmd.Args = append(cmd.Args,
 		"--pagebroker-transaction", execution.TransactionID,
 		"--pagebroker-socket-directory-fd", strconv.Itoa(socketDirectoryFD),
 		"--host-proc-fd", strconv.Itoa(hostProcFD),
 		"--pagebroker-execution-fd", strconv.Itoa(socketFD),
 		"--cancel-fd", strconv.Itoa(cancelFD),
+		"--pagebroker-process-fd", strconv.Itoa(brokerProcessFD),
 		"--pagebroker-socket-name", execution.SocketName,
 		"--gpu-context", string(gpuContext),
 	)
-	cmd.ExtraFiles = append(cmd.ExtraFiles, execution.SocketDirectory, hostProc, execution.Socket, cancelRead)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, execution.SocketDirectory, hostProc, execution.Socket, cancelRead, execution.BrokerProcess)
 	return func() {
 		stopCancel()
 		cancelRead.Close()
