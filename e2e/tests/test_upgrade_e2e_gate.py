@@ -9,6 +9,7 @@ import json
 import sys
 from pathlib import Path
 from types import ModuleType
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import yaml
@@ -126,6 +127,39 @@ def test_last_successes_reads_the_newest_passing_job_per_pair(gate: ModuleType, 
 
     assert found == {gate.job_name(PAIR): SHA, gate.job_name(other): SHA}
     assert "branch=main" in urls[0] and "status=completed" in urls[0]
+    assert "event=schedule" in urls[0]
+
+
+@pytest.mark.parametrize("has_scheduled_pass", [False, True])
+def test_manual_pass_cannot_suppress_nightly_coverage(
+    gate: ModuleType, monkeypatch: pytest.MonkeyPatch, has_scheduled_pass: bool
+) -> None:
+    previous_sha = "b" * 40
+    runs = [{"id": 2, "head_sha": SHA, "event": "workflow_dispatch"}]
+    if has_scheduled_pass:
+        runs.append({"id": 1, "head_sha": previous_sha, "event": "schedule"})
+    name = gate.job_name(PAIR)
+
+    def github_json(url: str, headers: dict) -> dict:
+        if "/workflows/" in url:
+            # Model the Actions API's event filter. A manual run can use a
+            # different image or fewer scenarios with exactly the same job name.
+            event = parse_qs(urlsplit(url).query).get("event", [None])[0]
+            return {"workflow_runs": [run for run in runs if event is None or run["event"] == event]}
+        return {"jobs": [{"name": name, "conclusion": "success"}]}
+
+    monkeypatch.setattr(gate, "github_json", github_json)
+    successes = gate.last_successes(
+        {name}, repository="ai-dynamo/snapshot", workflow="e2e-upgrade.yaml", branch="main", max_runs=50, headers={}
+    )
+    run, _ = decide(
+        gate,
+        last_success=successes.get(name),
+        changed_since=lambda sha: sha != SHA,
+    )
+
+    assert run, "a matching manual job cannot establish coverage for the current commit"
+    assert successes == ({name: previous_sha} if has_scheduled_pass else {})
 
 
 def test_unknown_workflow_means_no_passing_runs(gate: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:

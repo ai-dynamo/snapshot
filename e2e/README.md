@@ -291,6 +291,8 @@ fewer releases, every existing release is tested.
 
 The workflow-level `env` block holds these settings. `hack/upgrade-e2e-gate.py`
 decides which pairs run and lists every decision in the job summary.
+Only scheduled runs count toward the nightly skip rule; manual runs can test
+a different target image or a reduced scenario set under the same job name.
 
 Manual runs accept `upgrade_from` as a comma-separated list of release tags or
 main commit hashes, and `snapshot_tag` for a version to upgrade to other than

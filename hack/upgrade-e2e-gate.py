@@ -5,9 +5,9 @@
 
 A pair is one version to upgrade from, one upgrade config, and one scenario
 profile. Every pair runs when --always is set (manual and weekly runs). For
-nightly runs, a pair runs only if it never passed on main, if its last passing
-commit is not in the current history, or if anything that shapes the upgrade
-changed since then. Prints the JSON list of pairs to run.
+nightly runs, a pair runs only if it never passed in a scheduled run on main,
+if its last passing commit is not in the current history, or if anything that
+shapes the upgrade changed since then. Prints the JSON list of pairs to run.
 """
 
 from __future__ import annotations
@@ -86,7 +86,11 @@ def last_successes(
     headers: dict[str, str],
 ) -> dict[str, str]:
     base = f"https://api.github.com/repos/{repository}/actions"
-    query = urllib.parse.urlencode({"branch": branch, "status": "completed", "per_page": max_runs})
+    # Manual runs may override the target image or scenario set while keeping
+    # the same job name, so they cannot establish nightly coverage.
+    query = urllib.parse.urlencode(
+        {"branch": branch, "status": "completed", "event": "schedule", "per_page": max_runs}
+    )
     try:
         runs = github_json(f"{base}/workflows/{workflow}/runs?{query}", headers).get("workflow_runs", [])
     except urllib.error.HTTPError as exc:
