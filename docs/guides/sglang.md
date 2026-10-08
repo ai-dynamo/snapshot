@@ -4,7 +4,7 @@ This guide makes an SGLang workload snapshot-ready by mounting an entrypoint
 into an SGLang runtime image, implementing Snapshot's [workload
 contract](../reference/workload-contract.md). The example runs an SGLang
 image that includes SGLang, CUDA, and `torch_memory_saver`, unmodified.
-`deployment.yaml` pins the exact upstream image, and one program, `app.py`, is
+`capture/qwen3-0.6b.yaml` pins the exact upstream image, and one program, `app.py`, is
 mounted into it from a ConfigMap to prepare SGLang for checkpoint and resume
 it after restore. The Snapshot agent injects the restore tooling at runtime.
 
@@ -12,13 +12,18 @@ it after restore. The Snapshot agent injects the restore tooling at runtime.
 
 Download [`app.py`](sglang/app.py),
 [`model-cache-pvc.yaml`](sglang/model-cache-pvc.yaml),
-[`deployment.yaml`](sglang/deployment.yaml), and
-[`restore-deployment.yaml`](sglang/restore-deployment.yaml) from the
-repository:
+[`capture/qwen3-0.6b.yaml`](sglang/capture/qwen3-0.6b.yaml), and
+[`restore/single-gpu.yaml`](sglang/restore/single-gpu.yaml) from the
+repository, along with the [compiler-cache PVC](compiler-cache-pvc.yaml):
 
 ```bash
 mkdir -p sglang-snapshot
 cd sglang-snapshot
+mkdir -p capture restore
+
+curl --fail --location \
+  --output compiler-cache-pvc.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/compiler-cache-pvc.yaml
 
 curl --fail --location \
   --output app.py \
@@ -29,47 +34,59 @@ curl --fail --location \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/model-cache-pvc.yaml
 
 curl --fail --location \
-  --output deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/deployment.yaml
+  --output capture/qwen3-0.6b.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/capture/qwen3-0.6b.yaml
 
 curl --fail --location \
-  --output restore-deployment.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/restore-deployment.yaml
+  --output restore/single-gpu.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/restore/single-gpu.yaml
+
+curl --fail --location \
+  --output capture/qwen3-0.6b-snapshotjob.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/capture/qwen3-0.6b-snapshotjob.yaml
 ```
 
 The program creates a direct `sglang.Engine`, runs one generation, and calls
 `TokenizerManager.pause_generation()` followed by
-`Engine.release_memory_occupation()`. It writes `ready-for-snapshot` only after
+`Engine.release_memory_occupation(tags=["kv_cache"])` to discard the KV cache
+while keeping model weights on the GPU. It writes `ready-for-snapshot` only after
 both operations succeed.
 
-The Deployment enables SGLang's memory saver and CPU weight backup through the
-program. An init container downloads the selected model into a persistent
+The program enables SGLang's memory saver and disables CPU weight backup.
+Weights are captured directly from GPU memory without a CPU backup copy. An init container downloads the selected model into a persistent
 cache. The source application then loads that cache with `HF_HUB_OFFLINE=1` so
 the checkpointed process has no open Hugging Face connections.
 
 After restore, the checkpointed process calls
-`Engine.resume_memory_occupation()` and
+`Engine.resume_memory_occupation(tags=["kv_cache"])` and
 `TokenizerManager.continue_generation()`. It runs another generation and
 starts an API on port 8000. It writes `sglang-restore-ready` only after the
 generation succeeds and the API is listening. To validate the restored replica,
 send a `POST` request to `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-`deployment.yaml` runs the tested SGLang image unmodified, and mounts `app.py`
+`capture/qwen3-0.6b.yaml` runs the tested SGLang image unmodified, and mounts `app.py`
 at `/snapshot-app` from the `sglang-app` ConfigMap created in step 2.
 
 The source and restore pods must use the same immutable image, mount the
 Snapshot control volume at `/snapshot-control`, and mount the same model cache
 at `/hf-cache`.
 
+The capture and restore manifests mount a [persistent compiler cache](compiler-cache.md).
+Use a ReadWriteMany storage class, such as `vast` on nscale, and retain this PVC
+for every checkpoint that uses it. Set `storageClassName` in
+`compiler-cache-pvc.yaml` when the default class does not provide RWX storage.
+
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the SGLang pod will run, and create the ConfigMap
-`deployment.yaml` mounts `app.py` from:
+`capture/qwen3-0.6b.yaml` mounts `app.py` from:
 
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
+
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename compiler-cache-pvc.yaml
 
 kubectl create configmap sglang-app \
   --namespace "$SNAPSHOT_NAMESPACE" \
@@ -88,7 +105,7 @@ kubectl create configmap sglang-app \
 
 ## 3. Deploy SGLang
 
-Select the model through `SNAPSHOT_MODEL` in [`deployment.yaml`](sglang/deployment.yaml).
+Select the model through `SNAPSHOT_MODEL` in [`capture/qwen3-0.6b.yaml`](sglang/capture/qwen3-0.6b.yaml).
 Both the init container and the main container carry the value:
 
 ```yaml
@@ -109,7 +126,8 @@ GPU. Reduce `SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
 validating the resulting memory use. The KV cache page size is set through
 `SGLANG_PAGE_SIZE` (default `16`); the engine runs with `tp_size=1`.
 `app.py` sets `trust_remote_code=False`; Qwen3 needs no custom model code.
-Edit that line in `app.py` for a checkpoint that ships its own modeling code.
+Set additional `sglang.Engine` keyword arguments, including `trust_remote_code`,
+through the `SGLANG_ENGINE_ARGS` JSON object.
 
 > [!NOTE]
 > This example runs SGLang directly through `sglang.Engine` rather than
@@ -126,15 +144,18 @@ kubectl apply \
   --filename model-cache-pvc.yaml
 ```
 
+To capture a temporary replica automatically, use [SnapshotJob](#capture-with-snapshotjob)
+instead of the following Deployment steps.
+
 Deploy the edited manifest:
 
 ```bash
 kubectl apply \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --filename deployment.yaml
+  --filename capture/qwen3-0.6b.yaml
 ```
 
-The init container downloads the model when its cache marker does not exist. The
+The init container reuses cached model files and downloads missing files. The
 main container then starts SGLang from the offline cache.
 
 Wait until the SGLang replica finishes initialization and becomes safe to
@@ -157,6 +178,24 @@ kubectl get pods \
 
 Use that Pod name in the `PodSnapshot` created during the next step. The
 readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
+
+### Capture with SnapshotJob
+
+Instead of deploying and checkpointing the source manually, apply
+[`capture/qwen3-0.6b-snapshotjob.yaml`](sglang/capture/qwen3-0.6b-snapshotjob.yaml)
+after creating the ConfigMap and model-cache PVC:
+
+```bash
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename capture/qwen3-0.6b-snapshotjob.yaml
+
+kubectl wait --namespace "$SNAPSHOT_NAMESPACE" \
+  --for=condition=Completed snapshotjob/sglang-snapshot --timeout=60m
+```
+
+Then use the same [restore manifest](sglang/restore/single-gpu.yaml).
+
+For multi-GPU examples, see [Multi-GPU models](cuda-shared-memory.md#multi-gpu-models).
 
 ## Next steps
 

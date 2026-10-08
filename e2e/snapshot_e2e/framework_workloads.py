@@ -16,13 +16,18 @@ pass here.
 from __future__ import annotations
 
 import copy
+import json
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
 import yaml
+from kubernetes import client
 
 from snapshot_e2e import k8s
+from snapshot_e2e import lifecycle
+from snapshot_e2e.frameworks import CONTAINER
 from snapshot_e2e.frameworks import MODEL_CACHE_MOUNT
 from snapshot_e2e.frameworks import MODEL_CACHE_VOLUME
 from snapshot_e2e.frameworks import FrameworkSpec
@@ -31,14 +36,73 @@ from snapshot_e2e.frameworks import framework_image
 from snapshot_e2e.frameworks import framework_image_overridden
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import same_node_affinity
+from snapshot_e2e.workloads import workload_image
 from snapshot_e2e.workloads import workload_scheduling
 
 RESTORE_FROM_ANNOTATION = "nvidia.com/restore-from"
+SHARED_MEMORY_ANNOTATION = "nvidia.com/cuda-shared-memory-support"
 # The guides' own cache plumbing, replaced when a shared cache is configured:
 # the init container downloads into the guide PVC, which the shared export
 # makes both unnecessary and impossible offline.
 GUIDE_CACHE_INIT_CONTAINER = "model-cache"
 MANIFESTS_DIR = Path(__file__).resolve().parent / "manifests"
+
+
+# Run from the privileged agent: ordinary exec cannot dereference a restored,
+# nondumpable process's root and can inhabit a different mount namespace.
+CUINTERPOSE_LIBRARY_PROBE = r'''
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+libraries = None
+for process in Path(sys.argv[1]).glob("[0-9]*"):
+    try:
+        if sys.argv[2] not in (process / "cgroup").read_text():
+            continue
+        args = (process / "cmdline").read_bytes().split(b"\0")
+    except FileNotFoundError:
+        continue
+    if not args or args[0].rsplit(b"/", 1)[-1] not in {b"python", b"python3"}:
+        continue
+    if b"/snapshot-app/app.py" not in args[1:3]:
+        continue
+    current = {}
+    for name in ("libcuinterpose.so", "libcuinterpose_core.so"):
+        with (process / "root/tmp/snapshot-cuda" / name).open("rb") as library:
+            current[name] = hashlib.sha256(library.read()).hexdigest()
+    if libraries is not None and libraries != current:
+        raise RuntimeError("guide processes have different libraries")
+    libraries = current
+if libraries is None:
+    raise RuntimeError("no running /snapshot-app/app.py guide process")
+print(json.dumps(libraries))
+'''
+
+
+def cuinterpose_library_hashes(config: k8s.E2EConfig, pod: client.V1Pod) -> dict[str, str]:
+    """Require both delivered libraries to remain readable by the guide process."""
+    container_id = next(
+        status.container_id for status in pod.status.container_statuses
+        if status.name == CONTAINER
+    )
+    runtime_id = (container_id or "").split("://", 1)[-1]
+    if len(runtime_id) != 64 or any(char not in "0123456789abcdef" for char in runtime_id):
+        raise AssertionError(f"missing or invalid guide container ID: {container_id!r}")
+    agent = lifecycle.checkpoint_agent_pod(config, pod.spec.node_name)
+    # The same host-tools seam used for crictl metadata. Host Python 3 is required.
+    output = k8s.exec_payload(
+        config.namespace, agent,
+        f"timeout 30s nsenter -t 1 -m -r -w -- /usr/bin/python3 -c "
+        f"{shlex.quote(CUINTERPOSE_LIBRARY_PROBE)} /proc {shlex.quote(runtime_id)}",
+    )
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"cuinterpose library probe failed for {pod.metadata.name}: {output}"
+        ) from exc
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -63,9 +127,10 @@ def source_pod(
         image=image or framework_image(spec),
         model_cache=model_cache,
     )
-    # The direct PodSnapshot flow: the test creates the PodSnapshot itself, so
-    # the source must carry no restore/snapshot annotations of its own.
-    pod["metadata"]["annotations"] = {}
+    # The test creates the PodSnapshot itself. Preserve workload activation and
+    # other annotations, but do not treat the source as a restore destination.
+    for annotation in (RESTORE_FROM_ANNOTATION, "nvidia.com/restore-container-map"):
+        pod["metadata"]["annotations"].pop(annotation, None)
     return pod
 
 
@@ -87,9 +152,9 @@ def restore_pod(
         image=image or framework_image(spec),
         model_cache=model_cache,
     )
-    # The guide's placeholder annotation names its own PodSnapshot; this run's
-    # PodSnapshot is what must be restored. Restore is node-pinned: the agent
-    # that holds the artifact is the one on the source node.
+    # The guide names its own PodSnapshot, so the restore annotation must instead
+    # identify this run's snapshot. Restore on the source node where its checkpoint
+    # is stored.
     pod["metadata"]["annotations"] = {RESTORE_FROM_ANNOTATION: run.snapshot_name}
     pod["spec"]["affinity"] = same_node_affinity(source_node)
     return pod
@@ -100,7 +165,7 @@ def app_configmap(
     config: k8s.E2EConfig,
     spec: FrameworkSpec,
 ) -> dict[str, Any]:
-    """The ConfigMap the guide's deployment.yaml mounts app.py from.
+    """The ConfigMap the guide's capture manifest mounts app.py from.
 
     Matches spec.app_configmap_name, the name the guide's own manifest
     references, and the same `kubectl create configmap --from-file=app.py`
@@ -115,20 +180,23 @@ def app_configmap(
     }
 
 
-def model_cache_pvc(
+def cache_pvcs(
     *,
     config: k8s.E2EConfig,
     spec: FrameworkSpec,
-) -> dict[str, Any] | None:
-    path = spec.model_cache_manifest_path
-    if path is None:
-        return None
-    pvc = load_manifest(path)
-    pvc["metadata"]["namespace"] = config.namespace
-    storage_class = os.environ.get("SNAPSHOT_E2E_STORAGE_CLASS")
-    if storage_class:
-        pvc["spec"]["storageClassName"] = storage_class
-    return pvc
+) -> list[dict[str, Any]]:
+    paths = [spec.manifest_dir.parent / "compiler-cache-pvc.yaml"]
+    if spec.model_cache_manifest_path is not None:
+        paths.append(spec.model_cache_manifest_path)
+    pvcs = []
+    for path in paths:
+        pvc = load_manifest(path)
+        pvc["metadata"]["namespace"] = config.namespace
+        storage_class = os.environ.get("SNAPSHOT_E2E_STORAGE_CLASS")
+        if storage_class:
+            pvc["spec"]["storageClassName"] = storage_class
+        pvcs.append(pvc)
+    return pvcs
 
 
 def shared_model_cache_volume(
@@ -176,13 +244,23 @@ def pod_from_deployment(
     if model_cache is not None:
         use_shared_model_cache(pod_spec, model_cache)
 
+    main = main_container({"spec": pod_spec})
     # Content-addressed tags are immutable, so a cached pull is correct and
     # saves minutes on multi-GB images. An override (SNAPSHOT_E2E_FRAMEWORK_IMAGE)
     # is typically a mutable dev tag, where a cached image would test stale bits.
     pull_policy = "Always" if framework_image_overridden() else "IfNotPresent"
+    original_image = main["image"]
     for container in pod_spec.get("initContainers", []) + pod_spec["containers"]:
-        container["image"] = image
-        container["imagePullPolicy"] = pull_policy
+        if container["image"] == "${SNAPSHOT_AGENT_IMAGE}":
+            # Resolve only the guide's installer placeholder. Its image supplies
+            # the same bundle as the installed Snapshot agent, not the engine.
+            container["image"] = workload_image()
+            container["imagePullPolicy"] = (
+                "IfNotPresent" if "@sha256:" in container["image"] else "Always"
+            )
+        elif container["image"] == original_image:
+            container["image"] = image
+            container["imagePullPolicy"] = pull_policy
 
     scheduling = workload_scheduling()
     pod_spec["nodeSelector"] = {**pod_spec.get("nodeSelector", {}), **scheduling["nodeSelector"]}
@@ -205,8 +283,8 @@ def use_shared_model_cache(pod_spec: dict[str, Any], cache: SharedModelCache) ->
     """Point the Pod at the shared cache instead of downloading.
 
     Drops the guide's download init container, rebinds (or adds) the
-    model-cache volume to the shared claim, mounts it at MODEL_CACHE_MOUNT on
-    every remaining container, and sets HF_HOME there with HF_HUB_OFFLINE=1 so
+    model and compiler cache volumes to the shared claim, mounts the model
+    cache at MODEL_CACHE_MOUNT, and sets HF_HOME there with HF_HUB_OFFLINE=1 so
     a missing model fails immediately instead of hanging on the network.
     """
     pod_spec["initContainers"] = [
@@ -220,6 +298,9 @@ def use_shared_model_cache(pod_spec: dict[str, Any], cache: SharedModelCache) ->
         "persistentVolumeClaim": {"claimName": cache.pvc_name},
     }
     volumes = [v for v in pod_spec.get("volumes", []) if v["name"] != MODEL_CACHE_VOLUME]
+    for existing in volumes:
+        if existing["name"] == "compiler-cache":
+            existing["persistentVolumeClaim"]["claimName"] = cache.pvc_name
     pod_spec["volumes"] = volumes + [volume]
 
     for container in pod_spec["containers"]:

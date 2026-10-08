@@ -86,15 +86,19 @@ not touch the operator or the agent. See the
 [usage guides](docs/guides/README.md) for the shape of the flow.
 
 To add one, follow an existing framework end to end —
-[vLLM](docs/guides/vllm.md) is the smallest — and provide the same four pieces
+[vLLM](docs/guides/vllm.md) is the smallest — and provide these files
 under `docs/guides/<framework>/`:
 
 | File | What it does |
 | --- | --- |
-| `Dockerfile.<framework>` | Starts from the framework's runtime image and adds the entrypoint program |
 | `app.py` | Cooperates with the checkpoint/restore lifecycle: loads the model, then signals readiness |
-| `deployment.yaml` | Deploys the replica that gets checkpointed |
-| `restore-deployment.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
+| `capture/<model>.yaml` | Deploys the replica that gets checkpointed |
+| `capture/<model>-snapshotjob.yaml` | Runs and checkpoints a temporary replica automatically |
+| `restore/single-gpu.yaml`, `restore/8-gpu.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
+
+These examples use upstream runtime images and mount `app.py` from a ConfigMap.
+Keep capture manifests model-specific and reuse restore manifests for models
+with the same GPU count and Pod requirements.
 
 Plus `docs/guides/<framework>.md` walking through it, and an entry in the
 [guides index](docs/guides/README.md).

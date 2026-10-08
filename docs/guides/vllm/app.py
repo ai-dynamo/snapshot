@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
 import traceback
 from pathlib import Path
@@ -91,14 +92,18 @@ async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
 async def main() -> None:
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
+    engine_args = {
+        "model": MODEL,
+        "tensor_parallel_size": int(os.environ.get("SNAPSHOT_TENSOR_PARALLEL_SIZE", "1")),
+        "enable_sleep_mode": True,
+        "max_model_len": MAX_MODEL_LEN,
+        "gpu_memory_utilization": GPU_MEMORY_UTILIZATION,
+        "trust_remote_code": TRUST_REMOTE_CODE,
+    }
+    # JSON keys are AsyncEngineArgs API keyword arguments, not CLI flags.
+    engine_args.update(json.loads(os.environ.get("VLLM_ENGINE_ARGS", "{}")))
     engine = AsyncLLM.from_engine_args(
-        AsyncEngineArgs(
-            model=MODEL,
-            enable_sleep_mode=True,
-            max_model_len=MAX_MODEL_LEN,
-            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            trust_remote_code=TRUST_REMOTE_CODE,
-        ),
+        AsyncEngineArgs(**engine_args),
         usage_context=UsageContext.LLM_CLASS,
     )
 
@@ -110,7 +115,9 @@ async def main() -> None:
     print(f"vLLM pre-checkpoint output={text!r}", flush=True)
 
     await engine.pause_generation()
-    await engine.sleep()
+    await engine.sleep(level=1)
+    # Keep weights on the GPU for capture, while leaving KV cache released.
+    await engine.wake_up(tags=["weights"])
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
         "ready\n",
         encoding="utf-8",

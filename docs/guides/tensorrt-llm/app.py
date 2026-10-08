@@ -9,11 +9,15 @@ import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+# Forked compiler workers can inherit CUDA mappings that CRIU cannot restore.
+os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+
 from tensorrt_llm import LLM, SamplingParams
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 MODEL = os.environ["SNAPSHOT_MODEL"]
-# Small single-GPU sizing so the example fits alongside other GPU tenants and
+TENSOR_PARALLEL_SIZE = int(os.environ.get("SNAPSHOT_TENSOR_PARALLEL_SIZE", "1"))
+# Small default sizing so the example fits alongside other GPU tenants and
 # keeps the checkpoint artifact small. Override through the Pod template.
 MAX_NUM_TOKENS = int(os.environ.get("TRTLLM_MAX_NUM_TOKENS", "1024"))
 MAX_BATCH_SIZE = int(os.environ.get("TRTLLM_MAX_BATCH_SIZE", "1"))
@@ -80,18 +84,34 @@ def serve_api(llm: LLM, restored_text: str) -> None:
 def main() -> None:
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
-    llm = LLM(
-        model=MODEL,
-        backend="pytorch",
-        dtype="float16",
-        trust_remote_code=TRUST_REMOTE_CODE,
-        tensor_parallel_size=1,
-        max_num_tokens=MAX_NUM_TOKENS,
-        max_seq_len=512,
-        max_batch_size=MAX_BATCH_SIZE,
-        enable_chunked_prefill=False,
-        kv_cache_config={"free_gpu_memory_fraction": FREE_GPU_MEMORY_FRACTION},
-    )
+    engine_args = {
+        "model": MODEL,
+        "backend": "pytorch",
+        "dtype": "auto",
+        "trust_remote_code": TRUST_REMOTE_CODE,
+        "tensor_parallel_size": TENSOR_PARALLEL_SIZE,
+        "max_num_tokens": MAX_NUM_TOKENS,
+        "max_seq_len": 512,
+        "max_batch_size": MAX_BATCH_SIZE,
+        "enable_chunked_prefill": False,
+        "kv_cache_config": {"free_gpu_memory_fraction": FREE_GPU_MEMORY_FRACTION},
+    }
+    # JSON keys are LLM API keyword arguments, not CLI flags.
+    engine_args.update(json.loads(os.environ.get("TRTLLM_ENGINE_ARGS", "{}")))
+    revision = engine_args.pop("revision", None)
+    if revision is not None:
+        from huggingface_hub import snapshot_download
+
+        # rc24 does not forward revision to every tokenizer/config read.
+        engine_args["model"] = snapshot_download(
+            repo_id=engine_args["model"], revision=revision, local_files_only=True
+        )
+    # rc24 supports KV-only sleep through its executor collective RPC.
+    # Discard KV contents and keep weights resident, without a CPU backup.
+    engine_args["kv_cache_config"]["use_kv_cache_manager_v2"] = False
+    engine_args["kv_cache_config"]["enable_block_reuse"] = False
+    engine_args["sleep_config"] = {"restore_modes": {"kv_cache": "NONE"}}
+    llm = LLM(**engine_args)
 
     for text in generate_text(
         llm,
@@ -102,6 +122,7 @@ def main() -> None:
     ):
         print(f"TensorRT-LLM pre-checkpoint output={text!r}", flush=True)
 
+    llm._collective_rpc("sleep", args=(["kv_cache"],))
     gc.collect()
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
         "ready\n",
@@ -115,6 +136,7 @@ def main() -> None:
             # in the control directory next to the success sentinel.
             try:
                 progress = CONTROL_DIR.joinpath("trtllm-restore-progress")
+                llm._collective_rpc("wakeup", args=(["kv_cache"],))
                 text = generate_text(llm, ["The capital city of Germany is"])[0]
                 progress.write_text("generated\n", encoding="utf-8")
                 print(f"TensorRT-LLM restored output={text!r}", flush=True)

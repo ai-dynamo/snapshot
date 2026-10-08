@@ -10,7 +10,7 @@ pull request, without a cluster:
 
 - the source and restore pods carry the restore-pod contract pieces the agent
   relies on (control volume at /snapshot-control with subPath main,
-  SNAPSHOT_CONTROL_DIR, io_uring seccomp profile, /dev/net/tun, nvidia
+  the apps' default control directory, io_uring seccomp profile, nvidia
   RuntimeClass, one GPU);
 - the restore pod is an inert placeholder (an explicit sleep command) that
   restores this run's PodSnapshot;
@@ -34,6 +34,7 @@ CONFIG = k8s.E2EConfig(
     kubeconfig=None,
 )
 IMAGE = "framework-under-test:local"
+AGENT_IMAGE = "snapshot-agent:test"
 CACHE = frameworks.SharedModelCache(
     server="nfs.example.internal", path="/exports/models", pvc_name="model-cache"
 )
@@ -43,7 +44,7 @@ CACHE = frameworks.SharedModelCache(
 def _workload_image(monkeypatch: pytest.MonkeyPatch) -> None:
     # TestRun.new resolves the generic workload image eagerly; these checks
     # never schedule anything, so any value satisfies it.
-    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", "snapshot-workload:test")
+    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", AGENT_IMAGE)
 
 
 @pytest.fixture(params=sorted(frameworks.FRAMEWORKS))
@@ -63,6 +64,16 @@ def pods(spec: frameworks.FrameworkSpec) -> tuple[dict, dict, workloads.TestRun]
 @pytest.mark.workload
 def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
+    cache_claims = {pvc["metadata"]["name"] for pvc in fw.cache_pvcs(config=CONFIG, spec=spec)}
+    source_cache_mounts = [
+        mount for mount in fw.main_container(source)["volumeMounts"]
+        if mount["name"] == "compiler-cache"
+    ]
+    assert source_cache_mounts == [
+        mount for mount in fw.main_container(restore)["volumeMounts"]
+        if mount["name"] == "compiler-cache"
+    ]
+    assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
         assert pod_spec["runtimeClassName"] == "nvidia"
@@ -75,16 +86,20 @@ def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec)
         main = fw.main_container(pod)
         assert main["image"] == IMAGE
         assert main["resources"]["limits"]["nvidia.com/gpu"] == "1"
-        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
+        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") in (None, workloads.CONTROL_DIR)
         assert {
             "name": "snapshot-control",
             "mountPath": workloads.CONTROL_DIR,
             "subPath": workloads.CONTAINER,
         } in main["volumeMounts"]
-        assert any(mount["mountPath"] == "/dev/net/tun" for mount in main["volumeMounts"])
+        assert all(mount["mountPath"] != "/dev/net/tun" for mount in main["volumeMounts"])
         volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+        assert {
+            volume["persistentVolumeClaim"]["claimName"] for volume in volumes.values()
+            if "persistentVolumeClaim" in volume
+        } <= cache_claims
         assert volumes["snapshot-control"] == {"name": "snapshot-control", "emptyDir": {}}
-        assert volumes["tun"]["hostPath"] == {"path": "/dev/net/tun", "type": "CharDevice"}
+        assert not any(v.get("hostPath", {}).get("path") == "/dev/net/tun" for v in volumes.values())
         for container in pod_spec.get("initContainers", []):
             assert container["image"] == IMAGE
 
@@ -205,6 +220,7 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
     restore = fw.restore_pod(
         config=CONFIG, run=run, spec=spec, source_node="n0", image=IMAGE, model_cache=CACHE
     )
+    assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
         # No download init container: the export is mounted read-mostly and the
@@ -214,6 +230,9 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         )
         volumes = {v["name"]: v for v in pod_spec["volumes"]}
         assert volumes[frameworks.MODEL_CACHE_VOLUME]["persistentVolumeClaim"] == {
+            "claimName": CACHE.pvc_name
+        }
+        assert volumes["compiler-cache"]["persistentVolumeClaim"] == {
             "claimName": CACHE.pvc_name
         }
         # The guide's own claim (SGLang's sglang-model-cache) must not linger.
@@ -228,8 +247,8 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         # Exactly one HF_HOME even when the guide already set one (SGLang).
         assert sum(1 for e in main["env"] if e["name"] == "HF_HOME") == 1
         # Contract pieces are untouched by the cache rewrite.
-        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
-        assert any(m["mountPath"] == "/dev/net/tun" for m in main["volumeMounts"])
+        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") in (None, workloads.CONTROL_DIR)
+        assert all(m["mountPath"] != "/dev/net/tun" for m in main["volumeMounts"])
 
 
 @pytest.mark.workload
@@ -246,3 +265,35 @@ def test_control_file_names_match_the_guide_program(spec: frameworks.FrameworkSp
     for path in sentinels:
         name = path.rsplit("/", 1)[-1]
         assert f'"{name}"' in program, f"{spec.name}/app.py does not write {name!r}"
+
+
+@pytest.mark.workload
+@pytest.mark.parametrize("engine,recipe", [
+    ("vllm", "glm-5.3"),
+    ("sglang", "glm-5.3"),
+    ("tensorrt-llm", "glm-5.3"),
+    ("vllm", "deepseek-v4.1-flash"),
+    ("sglang", "deepseek-v4.1-flash"),
+])
+def test_multi_gpu_recipe_preserves_capture_restore_contract(
+    monkeypatch: pytest.MonkeyPatch, engine: str, recipe: str,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RECIPE", recipe)
+    spec = frameworks.framework_spec(engine)
+    run = workloads.TestRun.new("recipe")
+    source = fw.source_pod(config=CONFIG, run=run, spec=spec, image=IMAGE, model_cache=CACHE)
+    restore = fw.restore_pod(
+        config=CONFIG, run=run, spec=spec, source_node="n0", image=IMAGE, model_cache=CACHE,
+    )
+    assert source["metadata"]["annotations"][fw.SHARED_MEMORY_ANNOTATION] == "enabled"
+    installer = next(c for c in source["spec"]["initContainers"] if c["name"] == "snapshot-cuda-install")
+    assert installer["image"] == AGENT_IMAGE
+    assert fw.env_value(fw.main_container(source), "SNAPSHOT_MODEL") == spec.model
+    for pod in (source, restore):
+        main = fw.main_container(pod)
+        assert main["image"] == IMAGE
+        assert main["resources"]["limits"]["nvidia.com/gpu"] == "8"
+    restore_main = fw.main_container(restore)
+    assert fw.env_value(restore_main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
+    assert restore_main["command"] == ["/bin/sh", "-c", "exec sleep infinity"]
+    assert restore["metadata"]["annotations"][fw.RESTORE_FROM_ANNOTATION] == run.snapshot_name

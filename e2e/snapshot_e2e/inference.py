@@ -14,10 +14,82 @@ from __future__ import annotations
 
 import json
 import shlex
+import unicodedata
 
 from snapshot_e2e import k8s
 from snapshot_e2e.frameworks import API_PORT
 from snapshot_e2e.frameworks import REQUEST_TIMEOUT_SECONDS
+
+# Short answers fit the guide APIs' existing generation limits.
+_CHAT_CHECKS = {
+    "capital": ("What is the capital of Germany? Reply with the city name only.", {"berlin"}),
+    "arithmetic": ("What is 2 + 2? Reply with the number only.", {"4", "four", "2+2=4"}),
+    "translation": ("Translate hello into French. Reply with the translation only.", {"bonjour"}),
+}
+
+_CHAT_PROMPTS = """
+import json, os, sys
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+model = os.environ["SNAPSHOT_MODEL"]
+revision = os.environ.get("SNAPSHOT_MODEL_REVISION")
+path = model
+if not Path(path).is_dir():
+    # The lexical parent preserves the snapshot directory for cached symlinks.
+    path = str(Path(hf_hub_download(
+        repo_id=model, filename="config.json", revision=revision, local_files_only=True,
+    )).parent)
+config = json.loads((Path(path) / "config.json").read_text())
+# rc24's AutoConfig rejects GLM's layer types while its fast tokenizer works.
+tokenizer_type = PreTrainedTokenizerFast if config.get("model_type") == "glm_moe_dsa" else AutoTokenizer
+tokenizer = tokenizer_type.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+prompts = {}
+for name, question in json.loads(sys.argv[1]).items():
+    messages = [{"role": "user", "content": question}]
+    kwargs = {"add_generation_prompt": True, "enable_thinking": False}
+    if config.get("model_type") == "glm_moe_dsa":
+        # This pinned template ignores enable_thinking. Render an empty assistant
+        # turn so the template itself closes reasoning within the short token budget.
+        messages.append({"role": "assistant", "content": "", "reasoning_content": ""})
+        kwargs["add_generation_prompt"] = False
+    prompts[name] = tokenizer.apply_chat_template(messages, tokenize=False, **kwargs)
+print("__snapshot_e2e_chat_prompts__" + json.dumps(prompts))
+"""
+
+
+def chat_prompts(namespace: str, pod: str) -> dict[str, str]:
+    """Render the source model's cached template before its rootfs is captured."""
+    questions = {name: question for name, (question, _) in _CHAT_CHECKS.items()}
+    command = (
+        f"timeout 60s python3 -c {shlex.quote(_CHAT_PROMPTS)} "
+        f"{shlex.quote(json.dumps(questions))}"
+    )
+    output = k8s.exec_command(namespace, pod, command)
+    marker = "__snapshot_e2e_chat_prompts__"
+    if marker not in output:
+        raise AssertionError(f"could not render source chat prompts: {output}")
+    prompts = json.loads(output.rsplit(marker, 1)[1])
+    if prompts.keys() != _CHAT_CHECKS.keys() or not all(
+        isinstance(prompt, str) and prompt.strip() for prompt in prompts.values()
+    ):
+        raise AssertionError(f"invalid source chat prompts: {prompts!r}")
+    return prompts
+
+
+def verify_chat_answers(namespace: str, pod: str, prompts: dict[str, str]) -> dict[str, str]:
+    """Check whole answers, allowing case, whitespace and surrounding punctuation."""
+    answers = {}
+    for name, (_, expected) in _CHAT_CHECKS.items():
+        answer = request_generate(namespace, pod, prompts[name])
+        normalized = unicodedata.normalize("NFKC", answer).casefold().strip(" \t\r\n.!?\"'")
+        normalized = "".join(normalized.split())
+        if normalized not in expected:
+            raise AssertionError(f"{name}: expected {sorted(expected)!r}, got {answer!r}")
+        answers[name] = answer
+    return answers
+
 
 _CLIENT = """
 import json, sys, urllib.request

@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-source
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-source
+  template:
+    metadata:
+      labels:
+        app: vllm-source
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: main
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /snapshot-app/app.py
+          env:
+            # Avoid rounding up large pinned backups or retaining them after wake-up.
+            - name: PYTORCH_ALLOC_CONF
+              value: pinned_max_round_threshold_mb:1,pinned_max_cached_size_mb:1
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
+            - name: VLLM_MAX_MODEL_LEN
+              value: "2048"
+            - name: VLLM_GPU_MEMORY_UTILIZATION
+              value: "0.30"
+            # Keep compiler artifacts on the PVC mounted at /compile-cache.
+            - name: XDG_CACHE_HOME
+              value: /compile-cache/xdg
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /compile-cache/torchinductor
+            - name: TRITON_CACHE_DIR
+              value: /compile-cache/triton
+            - name: CUDA_CACHE_PATH
+              value: /compile-cache/cuda
+            - name: DG_JIT_CACHE_DIR
+              value: /compile-cache/deepgemm
+            - name: FLASHINFER_WORKSPACE_BASE
+              value: /compile-cache/flashinfer
+            - name: VLLM_CACHE_ROOT
+              value: /compile-cache/vllm
+            - name: VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
+              value: /compile-cache/vllm/flashinfer_autotune
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            failureThreshold: 1200
+          volumeMounts:
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: shm
+              mountPath: /dev/shm
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+            - name: compiler-cache
+              mountPath: /compile-cache
+              subPath: compiler-cache/vllm
+            - name: compiler-cache
+              mountPath: /root/.cache/flashinfer
+              subPath: compiler-cache/vllm/flashinfer-fixed
+      volumes:
+        - name: snapshot-control
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: app
+          configMap:
+            name: vllm-app
+        - name: compiler-cache
+          persistentVolumeClaim:
+            claimName: snapshot-compiler-cache

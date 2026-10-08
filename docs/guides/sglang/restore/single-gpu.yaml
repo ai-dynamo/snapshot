@@ -4,18 +4,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-source
+  name: sglang-restored
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: vllm-source
+      app: sglang-restored
   template:
     metadata:
       labels:
-        app: vllm-source
+        app: sglang-restored
+      annotations:
+        nvidia.com/restore-from: sglang-snapshot
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -27,20 +29,14 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
+          # The agent restores the saved process into this inert container.
           command:
-            - python3
-            - /snapshot-app/app.py
+            - /bin/sh
+            - -c
+            - exec sleep infinity
           env:
-            - name: HF_HUB_DISABLE_XET
-              value: "1"
-            - name: SNAPSHOT_MODEL
-              value: Qwen/Qwen3-0.6B
-            - name: VLLM_MAX_MODEL_LEN
-              value: "2048"
-            - name: VLLM_GPU_MEMORY_UTILIZATION
-              value: "0.30"
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
           ports:
@@ -53,26 +49,39 @@ spec:
             exec:
               command:
                 - cat
-                - /snapshot-control/ready-for-snapshot
+                - /snapshot-control/sglang-restore-ready
             periodSeconds: 1
-            failureThreshold: 1200
+            failureThreshold: 1800
           volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
-            - name: tun
-              mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
             - name: app
               mountPath: /snapshot-app
               readOnly: true
+            - name: compiler-cache
+              mountPath: /compile-cache
+              subPath: compiler-cache/sglang
+            - name: compiler-cache
+              mountPath: /root/.cache/flashinfer
+              subPath: compiler-cache/sglang/flashinfer-fixed
       volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: sglang-model-cache
         - name: snapshot-control
           emptyDir: {}
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
-        # Created from app.py: kubectl create configmap vllm-app --from-file=app.py
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
         - name: app
           configMap:
-            name: vllm-app
+            name: sglang-app
+        - name: compiler-cache
+          persistentVolumeClaim:
+            claimName: snapshot-compiler-cache

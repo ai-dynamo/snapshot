@@ -44,14 +44,27 @@ spec:
               value: "1"
             - name: TRTLLM_FREE_GPU_MEMORY_FRACTION
               value: "0.10"
-            - name: SNAPSHOT_CONTROL_DIR
-              value: /snapshot-control
             - name: HF_HUB_DISABLE_XET
               value: "1"
-            - name: TLLM_NCCL_SYMMETRIC_ZERO_COPY
-              value: "0"
-            - name: UCX_TLS
-              value: tcp,self
+            - name: OMPI_MCA_pml
+              value: ob1
+            - name: OMPI_MCA_btl
+              value: "tcp,self"
+            # Keep compiler artifacts on the PVC mounted at /compile-cache.
+            - name: XDG_CACHE_HOME
+              value: /compile-cache/xdg
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /compile-cache/torchinductor
+            - name: TRITON_CACHE_DIR
+              value: /compile-cache/triton
+            - name: CUDA_CACHE_PATH
+              value: /compile-cache/cuda
+            - name: DG_JIT_CACHE_DIR
+              value: /compile-cache/deepgemm
+            - name: FLASHINFER_WORKSPACE_BASE
+              value: /compile-cache/flashinfer
+            - name: TORCH_EXTENSIONS_DIR
+              value: /compile-cache/torch-extensions
           ports:
             - name: api
               containerPort: 8000
@@ -69,19 +82,30 @@ spec:
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
-            - name: tun
-              mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
             - name: app
               mountPath: /snapshot-app
               readOnly: true
+            - name: compiler-cache
+              mountPath: /compile-cache
+              subPath: compiler-cache/tensorrt-llm
+            - name: compiler-cache
+              mountPath: /root/.cache/flashinfer
+              subPath: compiler-cache/tensorrt-llm/flashinfer-fixed
+            - name: compiler-cache
+              mountPath: /tmp/torchinductor_root
+              subPath: compiler-cache/tensorrt-llm/torchinductor-default
       volumes:
         - name: snapshot-control
           emptyDir: {}
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
-        # Created from app.py: kubectl create configmap tensorrt-llm-app --from-file=app.py
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
         - name: app
           configMap:
             name: tensorrt-llm-app
+        - name: compiler-cache
+          persistentVolumeClaim:
+            claimName: snapshot-compiler-cache
