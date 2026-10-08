@@ -123,3 +123,26 @@ func TestRemoveControlSentinel_MissingDir(t *testing.T) {
 		t.Fatal("expected error for missing control mount")
 	}
 }
+
+func TestPodControlDir(t *testing.T) {
+	dir, err := PodControlDir("0f6c2c1e-uid", "engine-0")
+	if err != nil {
+		t.Fatalf("PodControlDir: %v", err)
+	}
+	want := "/var/lib/kubelet/pods/0f6c2c1e-uid/volumes/kubernetes.io~empty-dir/snapshot-control/engine-0"
+	if dir != want {
+		t.Errorf("PodControlDir = %q, want %q", dir, want)
+	}
+
+	for _, tc := range []struct{ uid, container string }{
+		{"", "main"},
+		{"uid", ""},
+		{"..", "main"},
+		{"uid", "../other"},
+		{"a/b", "main"},
+	} {
+		if _, err := PodControlDir(tc.uid, tc.container); err == nil {
+			t.Errorf("PodControlDir(%q, %q) succeeded, want error", tc.uid, tc.container)
+		}
+	}
+}

@@ -170,10 +170,18 @@ spec:
             # so overrides stay reachable inside the container.
             - name: runtime-run
               mountPath: {{ $socketDir | quote }}
-            # Mount kubelet pods directory for volume discovery
+            # Kubelet pods directory: volume discovery, and the per-Pod
+            # snapshot-control emptyDir. The agent writes there: the restore
+            # proxy binary, and restore-failed when the container cannot be
+            # resolved. HostToContainer lets it see emptyDirs that kubelet
+            # mounts later, such as medium: Memory.
             - name: kubelet-pods
               mountPath: /var/lib/kubelet/pods
-              readOnly: true
+              mountPropagation: HostToContainer
+            # NRI socket directory, for the plugin that makes the restore
+            # proxy PID 1 in restore containers.
+            - name: nri
+              mountPath: /var/run/nri
             # Per-container storage: agent reads overlay upperdirs from here
             # to capture the rootfs diff at checkpoint time.
             - name: runtime-storage
@@ -235,11 +243,17 @@ spec:
           hostPath:
             path: {{ $socketDir | quote }}
             type: Directory
-        # Kubelet pods directory (for volume discovery)
+        # Kubelet pods directory (volume discovery, snapshot-control emptyDirs)
         - name: kubelet-pods
           hostPath:
             path: /var/lib/kubelet/pods
             type: Directory
+        # NRI socket directory. A directory, not the socket itself, so the
+        # agent still starts on a node where the runtime has NRI turned off.
+        - name: nri
+          hostPath:
+            path: /var/run/nri
+            type: DirectoryOrCreate
         # Per-container storage (overlay upperdirs for rootfs-diff capture).
         - name: runtime-storage
           hostPath:
