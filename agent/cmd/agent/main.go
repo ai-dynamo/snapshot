@@ -9,15 +9,18 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"flag"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/controller"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
 
@@ -59,6 +62,15 @@ func main() {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if cfg.PageBroker.Enabled {
+		ctx, cancel := context.WithTimeout(rootCtx, pageBrokerStartupTimeout)
+		capabilities, err := waitForPageBroker(ctx, pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath})
+		cancel()
+		if err != nil {
+			fatal(agentLog, err, "Failed to read PageBroker capabilities")
+		}
+		cfg.CustomStorageAvailable = capabilities.CustomStorageAvailable
+	}
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
@@ -75,6 +87,24 @@ func main() {
 	}
 
 	agentLog.Info("Agent stopped")
+}
+
+// The sidecar allocates its GPU transfer rings before it creates the control socket.
+const pageBrokerStartupTimeout = 5 * time.Minute
+
+// waitForPageBroker retries while the sidecar is not yet listening.
+func waitForPageBroker(ctx context.Context, client pagebroker.Client) (*pagebroker.Capabilities, error) {
+	for {
+		capabilities, err := client.Capabilities(ctx)
+		if err == nil || !(errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)) {
+			return capabilities, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func fatal(log logr.Logger, err error, msg string, keysAndValues ...interface{}) {

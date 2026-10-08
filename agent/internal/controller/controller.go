@@ -994,6 +994,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		Clientset:                   w.clientset,
 		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
 		PageBrokerEnabled:           w.config.PageBroker.Enabled,
+		CustomStorageAvailable:      w.config.CustomStorageAvailable,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 		PageBrokerRestoreMode:       w.config.PageBroker.RestoreMode,
 	}

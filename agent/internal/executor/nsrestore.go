@@ -17,6 +17,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
@@ -24,11 +25,13 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath  string
-	CUDADeviceMap   string
-	GPUMountAliases map[string]string
-	CgroupRoot      string
-	TargetPodIP     string
+	CustomStorageExecution *pagebroker.CustomStorageExecution
+	HostProc               *os.File // Host proc remains accessible after CRIU changes mounts.
+	CheckpointPath         string
+	CUDADeviceMap          string
+	GPUMountAliases        map[string]string
+	CgroupRoot             string
+	TargetPodIP            string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
 }
@@ -65,6 +68,17 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	if err != nil {
 		return nil, fmt.Errorf("failed to read manifest: %w", err)
 	}
+	if m.CUDA.CustomStorage && opts.CustomStorageExecution == nil {
+		return nil, fmt.Errorf("CustomStorage checkpoint requires PageBroker execution")
+	}
+	if !m.CUDA.CustomStorage && opts.CustomStorageExecution != nil {
+		return nil, fmt.Errorf("checkpoint does not use CustomStorage but PageBroker execution was supplied")
+	}
+	if opts.CustomStorageExecution != nil {
+		if opts.CustomStorageExecution.SocketDirectory == nil || opts.CustomStorageExecution.Socket == nil || opts.HostProc == nil || opts.CustomStorageExecution.GPUContext == nil || opts.CustomStorageExecution.TransactionID == "" {
+			return nil, fmt.Errorf("invalid PageBroker CustomStorage execution context")
+		}
+	}
 	log.V(1).Info("Loaded checkpoint manifest",
 		"ext_mounts", len(m.CRIUDump.ExtMnt),
 		"criu_log_level", m.CRIUDump.CRIU.LogLevel,
@@ -72,7 +86,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
 	cudaJobFile := ""
-	if !m.CUDA.IsEmpty() {
+	if !m.CUDA.IsEmpty() && !m.CUDA.CustomStorage {
 		cudaJobFile, err = cuda.JobFileFromCheckpoint(opts.CheckpointPath)
 		if err != nil {
 			return nil, err
@@ -182,7 +196,7 @@ func executeRestore(
 	// the fd remains valid even if the mount is gone.
 	var cudaHelperFdPath string
 	var coordinatorFdPath string
-	if !m.CUDA.IsEmpty() {
+	if !m.CUDA.IsEmpty() && !m.CUDA.CustomStorage {
 		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
 		f, err := os.Open(helperPath)
 		if err != nil {
@@ -275,10 +289,14 @@ func executeRestore(
 		cudaStart := time.Now()
 		for _, pid := range restorePIDs {
 			if err := gpuMounts.RestoreNativePaths(pid); err != nil {
-				return nil, 0, nil, fmt.Errorf("restore native GPU device mounts: %w", err)
+				return nil, 0, nil, fmt.Errorf("restore GPU device mounts: %w", err)
 			}
 		}
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+		if m.CUDA.CustomStorage {
+			err = restoreCustomStorage(ctx, opts, m.CUDA.PIDs, restorePIDs, log)
+		} else {
+			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
@@ -297,4 +315,32 @@ func executeRestore(
 	// Retain aliases only once CUDA restore and unlock have also succeeded.
 	gpuMountsCommitted = true
 	return timings, restoredPID, nil, nil
+}
+
+func restoreCustomStorage(ctx context.Context, opts RestoreOptions, capturedPIDs, restorePIDs []int, log logr.Logger) error {
+	// These PIDs are visible in nsrestore's namespace. Host PIDs are not valid
+	// inputs to pidfd_open after namespace entry.
+	pidfds, err := snapshotruntime.OpenProcessHandles(restorePIDs)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for _, file := range pidfds {
+			file.Close()
+		}
+	}()
+	hostProcRoot := fmt.Sprintf("/proc/self/fd/%d", opts.HostProc.Fd())
+	hostPIDs, err := snapshotruntime.ResolveHostPIDs(hostProcRoot, "/proc", restorePIDs)
+	if err != nil {
+		return fmt.Errorf("resolve restored GPU host PIDs: %w", err)
+	}
+	if err := snapshotruntime.CheckProcessHandles(pidfds); err != nil {
+		return err
+	}
+	result, err := opts.CustomStorageExecution.Restore(ctx, capturedPIDs, hostPIDs, pidfds)
+	if err != nil {
+		return err
+	}
+	logGPUResult(log, result)
+	return nil
 }

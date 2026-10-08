@@ -149,7 +149,7 @@ func TestResolveVisibleDevices(t *testing.T) {
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			gpus, err := resolveSelectedGPUs(context.Background(), tc.value)
-			got := gpuUUIDsOf(gpus)
+			got := GPUUUIDs(gpus)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error = %v", err)
 			}
@@ -870,7 +870,7 @@ func TestDescribeGPUs(t *testing.T) {
 	}
 }
 
-func TestGPUUUIDsOf(t *testing.T) {
+func TestGPUUUIDs(t *testing.T) {
 	env := compat.GPUInfo{
 		Devices: []compat.GPUDevice{
 			{UUID: "GPU-a"},
@@ -879,10 +879,10 @@ func TestGPUUUIDsOf(t *testing.T) {
 		},
 	}
 
-	got := gpuUUIDsOf(env)
+	got := GPUUUIDs(env)
 	want := []string{"GPU-a", "GPU-b"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("gpuUUIDsOf() = %v, want %v", got, want)
+		t.Fatalf("GPUUUIDs() = %v, want %v", got, want)
 	}
 }
 
