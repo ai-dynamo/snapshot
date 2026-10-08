@@ -457,7 +457,7 @@ jobs:
       # The test already prints its own dump; this preserves the raw cluster
       # state and full agent logs, which do not fit in a job log.
       - name: Collect diagnostics
-        if: ${{ failure() && steps.selected.outputs.run == 'true' }}
+        if: ${{ always() && steps.selected.outputs.run == 'true' }}
         timeout-minutes: 5
         run: |
           set +e
@@ -485,13 +485,28 @@ jobs:
           echo "DIAGNOSTICS_DIR=${out}" >> "$GITHUB_ENV"
 
       - name: Upload diagnostics
-        if: ${{ failure() && steps.selected.outputs.run == 'true' }}
+        if: ${{ always() && steps.selected.outputs.run == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-frameworks-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.DIAGNOSTICS_DIR }}
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Require PageBroker GPU checkpoint and restore evidence
+        if: ${{ success() && steps.selected.outputs.run == 'true' }}
+        run: |
+          python3 - <<'PYCODE'
+          import os
+          from pathlib import Path
+
+          text = (Path(os.environ["DIAGNOSTICS_DIR"]) / "snapshot-agent.log").read_text()
+          for command, result in [("checkpoint_gpu", "gpu_checkpoint_complete"), ("restore_gpu", "gpu_restore_complete")]:
+              matching = [line for line in text.splitlines() if f"command={command} result={result}" in line]
+              if not matching:
+                  raise SystemExit(f"Missing successful PageBroker {command} evidence")
+              print("\n".join(matching))
+          PYCODE
 
       - name: Cleanup e2e vCluster
         if: ${{ always() && steps.selected.outputs.run == 'true' }}
