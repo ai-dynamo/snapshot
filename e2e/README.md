@@ -29,6 +29,13 @@ were built locally rather than published. Assignments reach `helm --set`
 unchanged and follow its syntax, so a literal comma in a value has to be
 escaped as `\,`.
 
+The lifecycle suite requires store-bound publications. Its installer enables
+`pageBroker.artifactAddressing` and `operator.bindNewContents`, so use matching
+images with the PVC artifact backend. Finish `snapshot-ready` before submitting
+captures. This setup is for an isolated test installation; use the
+[two-step activation procedure](../docs/operations/storage.md#enable-artifact-addressing)
+when upgrading an installation that is already accepting captures.
+
 ## Modes
 
 ### CI Mode

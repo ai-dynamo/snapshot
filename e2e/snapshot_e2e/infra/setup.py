@@ -928,9 +928,14 @@ def install_snapshot_chart(
         f"storage.pvc.name={pvc_name}",
         "--set",
         "operator.artifactCleanup.scanInterval=5s",
+        "--set",
+        "pageBroker.artifactAddressing=true",
+        "--set",
+        "operator.bindNewContents=true",
         "--set-json",
         "daemonset.imagePullSecrets=[]",
     ]
+    # Lifecycle tests require bound publications; setup waits for every agent before testing.
     # Appended last so a caller can override any of the defaults above. Clusters
     # without published images need this for image repositories, pull policy,
     # and the container runtime paths.

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import time
 from datetime import datetime, timezone
@@ -1610,3 +1611,66 @@ def wait_for(
         time.sleep(poll_interval)
     suffix = f": {last_detail}" if last_detail else ""
     raise LifecycleTimeoutError(f"timed out waiting for {description}{suffix}")
+
+
+STORE_ID_PATTERN = re.compile(r"^store-v1-[0-9a-f]{64}$")
+ARTIFACT_FORMAT_VERSION = "snapshot.pagebroker/v1"
+
+
+def published_artifact(content: dict[str, Any], container: str = CONTAINER) -> dict[str, Any]:
+    """The descriptor the agent persisted for one captured container.
+
+    Fails when the content is not store-bound or the container has no
+    publication: that is the legacy path, not the one under test.
+    """
+    binding = content.get("spec", {}).get("storage")
+    if not binding or not STORE_ID_PATTERN.match(binding.get("storeID", "")):
+        raise AssertionError(
+            f"PodSnapshotContent {content['metadata']['name']} has no store binding: {binding!r}"
+        )
+    artifacts = content.get("status", {}).get("storage", {}).get("artifacts") or []
+    for artifact in artifacts:
+        if artifact.get("containerName") == container:
+            return artifact
+    raise AssertionError(
+        f"PodSnapshotContent {content['metadata']['name']} records no publication for "
+        f"{container}: {artifacts!r}"
+    )
+
+
+def assert_store_bound_publication(content: dict[str, Any], container: str = CONTAINER) -> None:
+    content_uid = content["metadata"]["uid"]
+    artifact = published_artifact(content, container)
+    assert artifact["artifactHandle"] == f"artifacts/{content_uid}/containers/{container}", artifact
+    assert artifact["artifactFormatVersion"] == ARTIFACT_FORMAT_VERSION, artifact
+
+
+def assert_snapshot_stays_pending(
+    namespace: str,
+    name: str,
+    *,
+    hold_seconds: int,
+) -> None:
+    """Fail if the PodSnapshot or its content reaches Ready or Failed during the hold."""
+    api = client.CustomObjectsApi()
+    deadline = time.monotonic() + hold_seconds
+    while time.monotonic() < deadline:
+        snap = get_custom_object(api, namespace, name, PODSNAPSHOTS)
+        for condition_type in ("Ready", "Failed"):
+            cond = condition(snap, condition_type)
+            if cond and cond.get("status") == "True":
+                raise AssertionError(
+                    f"PodSnapshot {namespace}/{name} became {condition_type} while paused: "
+                    f"{condition_summary(cond)}"
+                )
+        content_name = snap.get("status", {}).get("boundSnapshotContentName")
+        if content_name:
+            content = get_custom_object(api, None, content_name, PODSNAPSHOTCONTENTS)
+            for condition_type in ("Ready", "Failed"):
+                cond = condition(content, condition_type)
+                if cond and cond.get("status") == "True":
+                    raise AssertionError(
+                        f"PodSnapshotContent {content_name} became {condition_type} while paused: "
+                        f"{condition_summary(cond)}"
+                    )
+        time.sleep(5)
