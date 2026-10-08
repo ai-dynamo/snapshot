@@ -94,6 +94,25 @@ const (
 	// RestoreCompletePIDKey names the restored process's PID, relative to the
 	// destination container's PID namespace, in RestoreCompleteFile.
 	RestoreCompletePIDKey = "pid"
+
+	// RestoreProxyBinaryName is the PID 1 process Snapshot runs in restore
+	// destination containers. It waits for RestoreCompleteFile, then follows
+	// the restored process and exits with its status.
+	RestoreProxyBinaryName = "snapshot-restore-proxy"
+)
+
+// Exit codes reserved by the restore proxy. Every other code is the restored
+// workload's own, or 128 plus the signal number that killed it.
+const (
+	// RestoreNotRepeatableExitCode means this Pod's one restore is spent: the
+	// proxy found RestoreCompleteFile or RestoreFailedFile at start, left by an
+	// earlier container, or RestoreFailedFile appeared while it waited.
+	RestoreNotRepeatableExitCode = 112
+
+	// RestoreProxyErrorExitCode means the proxy could not follow the restored
+	// process, for example because RestoreCompleteFile was malformed or the
+	// restored PID was not its child.
+	RestoreProxyErrorExitCode = 113
 )
 
 // RestoreComplete is the content of RestoreCompleteFile.

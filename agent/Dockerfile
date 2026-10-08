@@ -113,6 +113,9 @@ ARG TARGETARCH=amd64
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
+# Static: it runs as PID 1 inside the user's restore image, which may not
+# carry a compatible libc or loader.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-restore-proxy ./cmd/snapshot-restore-proxy
 
 # Corresponding source for the Go modules compiled into the binaries above.
 RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
@@ -331,6 +334,7 @@ RUN mkdir -p /snapshot-binaries/snapshot-cuda \
     && install -m 0644 /usr/local/lib/snapshot/libcuinterpose_core.so /snapshot-binaries/snapshot-cuda/libcuinterpose_core.so \
     && install -m 0755 /usr/local/bin/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
+COPY --from=builder /snapshot-restore-proxy /snapshot-binaries/snapshot-restore-proxy
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
@@ -346,7 +350,7 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 # path under the bundled loader (see the libc/ stage below).
 RUN set -eu; \
     cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
-    chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
+    chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore /snapshot-binaries/snapshot-restore-proxy \
              /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
 
