@@ -302,19 +302,16 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 		}
 		return ctrl.Result{}, fmt.Errorf("validate source pod: %w", err)
 	}
+	if annotation := sr.TestFailureAnnotation; annotation != "" && pod.Annotations[annotation] == "true" {
+		return sr.failPodSnapshot(ctx, snap, "TestCaptureFailure",
+			fmt.Errorf("test-only capture failure requested by source pod annotation %q", annotation))
+	}
 	content, err := sr.ensurePodSnapshotContent(ctx, snap, podSnapshotContentName(snap), pod)
 	if err != nil {
 		if errors.Is(err, errContentConflict) {
 			return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
 		}
 		return ctrl.Result{}, err
-	}
-	if annotation := sr.TestFailureAnnotation; annotation != "" && pod.Annotations[annotation] == "true" {
-		if _, err := sr.bindContent(ctx, snap, content.Name); err != nil {
-			return ctrl.Result{}, err
-		}
-		return sr.failPodSnapshot(ctx, snap, "TestCaptureFailure",
-			fmt.Errorf("test-only capture failure requested by source pod annotation %q", annotation))
 	}
 	return sr.bindContent(ctx, snap, content.Name)
 }

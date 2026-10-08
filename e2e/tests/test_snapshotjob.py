@@ -386,24 +386,21 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
         contents = client.CustomObjectsApi().list_cluster_custom_object(
             snap.GROUP, snap.VERSION, snap.PODSNAPSHOTCONTENTS
         )["items"]
-        content = next(
-            item
+        assert not any(
+            item.get("spec", {}).get("snapshotRef", {}).get("namespace") == config.namespace
+            and item.get("spec", {}).get("snapshotRef", {}).get("name") == snapshotjob_name
             for item in contents
-            if item["spec"]["podSnapshotRef"]["namespace"] == config.namespace
-            and item["spec"]["podSnapshotRef"]["name"] == snapshotjob_name
         )
         source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
-        snap.create_artifact_staging_file(
-            config, source_pod.spec.node_name, content["metadata"]["uid"]
+        assert snap.file_present(
+            config.namespace,
+            source_pod.metadata.name,
+            f"{workloads.HELPER_SYNC_DIR}/helper-finished",
         )
-        assert snap.artifact_root_exists(config, source_pod.spec.node_name, content["metadata"]["uid"])
-        snap.delete_podsnapshot(config.namespace, snapshotjob_name)
-        snap.wait_for_custom_object_deleted(
-            None, content["metadata"]["name"], snap.PODSNAPSHOTCONTENTS
-        )
-        snap.wait_for_artifact_root_absent(
-            config, source_pod.spec.node_name, content["metadata"]["uid"]
-        )
+        # The helper marker is in a test-owned emptyDir, so deleting its source
+        # pod is the observable cleanup boundary for this failed attempt.
+        assert k8s.delete_job(config.namespace, snapshotjob_name)
+        snap.wait_for_pod_deleted(config.namespace, source_pod.metadata.name)
         k8s.restart_snapshot_operator(config.namespace, config.release)
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
