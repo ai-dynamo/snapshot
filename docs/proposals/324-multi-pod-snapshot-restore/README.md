@@ -25,7 +25,7 @@ Status: Draft
     - [Components and Communication](#components-and-communication)
     - [Data and Storage](#data-and-storage)
     - [Runtime Session](#runtime-session)
-    - [Coordination Rules](#coordination-rules)
+    - [Runtime Extension Contract](#runtime-extension-contract)
   - [API](#api)
     - [Resource Definitions](#resource-definitions)
     - [Validation and Binding](#validation-and-binding)
@@ -47,6 +47,7 @@ Status: Draft
   - [Dependencies](#dependencies)
   - [Test Plan](#test-plan)
     - [Unit and Controller Tests](#unit-and-controller-tests)
+    - [Runtime Contract Tests](#runtime-contract-tests)
     - [Agent and Failure Tests](#agent-and-failure-tests)
     - [End-to-End Qualification](#end-to-end-qualification)
   - [Graduation Criteria](#graduation-criteria)
@@ -185,12 +186,14 @@ targets and the same set checkpoint.
 A **member** is one Pod and its selected workload container. Its member ID is
 stable; its **rank** is its position in the checkpoint's member list. A member
 can contain several application processes. A **participant** is an application
-process with the cuInterpose shim loaded.
+process with the cuInterpose shim loaded. Across the group, its identity is
+`(member ID, namespace PID)`; a PID alone is not unique across Pods.
 
 Each node agent starts one temporary cuInterpose coordinator process per member.
 Rank 0's coordinator is the **brain**; every other member's coordinator is a
 **relay**. They are separate from the application processes and their shims,
-not additional Kubernetes containers or a controller-hosted service.
+not additional Kubernetes containers or a controller-hosted service. These
+coordination ranks do not change the application's own ranks.
 
 Coordinators run inside the selected member container's namespaces, including
 the Pod's network namespace. During capture they run in the source member;
@@ -201,7 +204,7 @@ CUDA reconstruction. The agent owns their lifecycle.
 | --- | --- | --- |
 | Workload owner | Outside Snapshot; usually a workload controller | Create and place source or placeholder Pods, request set operations, and handle application readiness and recovery. |
 | Snapshot set controller | Snapshot's Kubernetes controller | Validate and bind the set, publish context and credentials, admit restores, and aggregate member results. It does not run CUDA coordination rounds. |
-| Snapshot node agent | One agent per node | Watch assigned work, perform preflight, run CRIU and native CUDA checkpoint/restore, start and observe coordinators, and manage local journals, network locks, and release markers. One agent can handle several members. |
+| Snapshot node agent | One agent per node | Watch assigned work, perform preflight, grant or refuse local capture permission, run CRIU and native CUDA checkpoint/restore, and manage coordinators, journals, network locks, and release markers. One agent can handle several members. |
 | Brain | Rank 0's coordinator, inside the selected member container's namespaces | Collect the group, validate runtime compatibility, coordinate phases and handle exchange, and authorize completion. It drives its own local participants directly. |
 | Relay | Each other member's coordinator, inside the selected member container's namespaces | Drive that member's local participants and report their results to the brain. It carries coordination messages, not application traffic. |
 | Application shim | A cuInterpose library inside each participating application process | Intercept CUDA calls, track that process's resources, and perform the local preparation and reconstruction requested by its coordinator. |
@@ -226,7 +229,7 @@ flowchart TB
             end
             B <-->|"Local coordination"| S0
         end
-        A0 -->|"Starts and observes"| B
+        A0 <-->|"Lifecycle and capture permission"| B
     end
     subgraph N1["Node B"]
         A1["Snapshot node agent"]
@@ -237,7 +240,7 @@ flowchart TB
             end
             R <-->|"Local coordination"| S1
         end
-        A1 -->|"Starts and observes"| R
+        A1 <-->|"Lifecycle and capture permission"| R
     end
     B <-->|"Cross-Pod coordination"| R
 ```
@@ -279,9 +282,9 @@ coordinators do not discover a different group or choose replacement Pods.
 | Source Pod IPs | Controller records the source Pods' assigned IPs before capture | `PodSetSnapshot.status.members[].sourcePodIP` | Capture identity checks and the controller building each restore's IP pairs |
 | Source-to-target IP pairs | Controller matches saved source IPs with bound target Pod IPs by member ID | `PodSetRestore.status.members[].sourcePodIP` and `.targetPodIP` | Every agent supplies the full map to CRIU and uses peer target IPs for its network lock |
 | Member checkpoint artifact | Node agent, through the existing per-Pod capture path | Artifact storage and its `PodSnapshotContent`, whose exact name and UID are recorded in `PodSetSnapshot.status.members[].content` | Restoring agents |
-| Checkpointed CUDA metadata (cuInterpose members) | Each coordinator collects its local shims' records | That member's checkpoint artifact: rank, group size, and participant/resource records | Restore coordinators; relays send their saved records to the brain |
+| Member runtime metadata | Each coordinator records the group context and any local shim records | That member's checkpoint artifact: capture UID, ordered membership, member ID and rank, compatible format versions, and participant/resource records, empty for members without shims | Agents checking artifact identity and restore coordinators validating the resource graph |
 | Old-to-new GPU-handle map and current round state | Brain collects member results and newly exported GPU handles | Coordinator memory for this session; no shared database | Brain, relays, and local shims during reconstruction |
-| Release marker | Node agent | `restore-complete` in the placeholder's control volume, containing the attempt UID and admitted container ID | Placeholder startup gate and agent recovery |
+| Release marker | Node agent | `restore-complete` in the placeholder's control volume, containing the restored `pid`, attempt UID and admitted container ID | Placeholder startup gate, PID-reading consumers and agent recovery |
 | Restore member report | Node agent | `PodSetRestore.status.members[].report` | Controller validating preflight and execution results |
 | Restore member outcome | Controller, from validated reports and observations | `PodSetRestore.status.members[].outcome` | Workload owner and controller aggregating the attempt's result |
 | Peer network lock | Node agent | Target Pod's network namespace; cleanup ownership recorded in the journal | Agent holding peer traffic until release and cleaning up after restart |
@@ -297,9 +300,12 @@ map for CRIU socket remapping and the peer target IPs for its network lock.
 The brain hosts the session endpoint; it does not use the socket-remapping map.
 
 For CUDA reconstruction, each coordinator loads its member's saved metadata.
-The brain combines those records with freshly exported handles and builds the
-GPU-handle map in memory. It sends the required updates through relays or its
-own local participant path. This map is rebuilt for each restore, not stored in
+The brain validates that every member's records belong to the same checkpoint,
+combines them with freshly exported handles, and builds the GPU-handle map in
+memory. Allocation identities stay stable; the original creator and the holder
+selected to save or export an allocation are distinct identities.
+The brain sends the required updates through relays or its own local participant
+path. This map is rebuilt for each restore, not stored in
 Kubernetes or carried over from the capture session.
 
 The diagram follows these two data paths. Arrows show data movement, not the
@@ -326,78 +332,106 @@ flowchart TB
 
 #### Runtime Session
 
-A **runtime session** is the temporary coordination group formed by these
-coordinator processes for one capture or restore operation. It is not another
-CRD or a reusable part of the checkpoint. Each restore attempt starts a new
-session, even when it uses the same checkpoint.
+A **runtime session** joins the temporary coordinators for one operation. Its
+identity is the operation object's UID: `PodSetSnapshot` for capture or
+`PodSetRestore` for restore. It is not a CRD or reusable checkpoint state.
+Each restore attempt gets a fresh session and credential. The endpoint exists
+only while that session is running.
 
-The session identity is the operation object's UID: `PodSetSnapshot` for capture
-or `PodSetRestore` for restore. Member ranks and group size come from the
-checkpoint's member list. Rank 0 hosts the TCP endpoint in its source Pod's
-network namespace during capture, or its target Pod's network namespace during
-restore.
+Rank 0 hosts the TCP endpoint in its source Pod during capture or target Pod
+during restore. The controller publishes immutable `status.session` and creates
+the referenced Secret. Agents pass the fixed context to their coordinators;
+coordinators do not read Kubernetes or choose replacement members.
 
-The controller publishes the immutable `status.session` descriptor and creates
-the referenced Secret. Agents supply this context to their coordinators. The
-credential authenticates membership in this attempt and excludes unrelated or
-stale relays; it does not encrypt session traffic or checkpoint data. Empty or
-mismatched credentials are refused. Credentials must not appear in status, Pod
-annotations, command arguments, or logs. The controller cleans up the Secret
-after session work stops or the cleanup grace period ends.
+Agents start coordinators independently. Relays may start before the brain and
+retry joining until the operation's absolute deadline:
+`metadata.creationTimestamp + spec.deadlineSeconds`. Once a member has joined,
+unexpected loss of it or the brain fails the session. There is no leader
+failover, session replay or retry of a mutating round.
 
-Agents start their coordinators independently; rank 0 need not start first.
-Relays wait and retry joining until the brain is available, bounded by the
-operation deadline. The endpoint exists only for this session, not as a
-long-lived service. Unexpected loss of an established session fails the
-operation; this design does not promise session replay or rejoining after failure.
+Capture sessions start before inspection and end before CRIU dumping. Restore
+sessions start after local CRIU and native CUDA restore. Session connections
+therefore stay out of the application's checkpointed connections. Live round
+state and fresh GPU handles stay in coordinator memory; agent journals provide
+execution and cleanup recovery, not runtime-round replay.
 
-Live session state stays in coordinator memory, as listed in Data and Storage.
-The agent journal supports execution and cleanup recovery; it does not allow the
-brain to resume a lost round. Saved CUDA metadata remains in the member artifacts
-for future restores, but session connections and credentials are not reused.
+Credentials authenticate membership but do not encrypt traffic or artifacts.
+Empty or mismatched credentials are rejected. No credential may appear in
+arguments, status, annotations, artifacts or logs. The controller cleans up the
+Secret after session work stops or the cleanup grace period ends.
 
-At capture, coordinators connect before group inspection and disconnect before
-the CRIU dump. At restore, they connect after local CRIU and native CUDA restore.
-The session connection is therefore not part of the application's checkpointed
-connections. All join and round waits obey the operation's absolute deadline:
-`metadata.creationTimestamp + spec.deadlineSeconds`.
+Coordination traffic must remain possible while peer application traffic is held.
+[Network Identity and Release](#network-identity-and-release) defines the reserved
+session port and traffic separation.
 
-Restore coordination traffic must remain possible while application peer traffic
-is held. [Network Identity and Release](#network-identity-and-release) defines
-that separation and the reserved session port.
+Standalone cuInterpose capture and restore use the local coordinator without a
+cross-Pod TCP session. Standalone capture without cuInterpose uses the native
+CUDA/CRIU path. Set members without shims still join the group barriers.
 
-A standalone cuInterpose-enabled Pod uses the same coordinator locally, as a
-group of one, without a cross-Pod TCP session. Standalone capture without
-cuInterpose uses the native CUDA/CRIU path and needs no cuInterpose coordinator.
-A set member without cuInterpose still joins the session as a barrier member,
-but has no local shims to drive.
+#### Runtime Extension Contract
 
-#### Coordination Rules
+The set controller owns restore admission. The runtime owns capture inspection
+and the shared CUDA rounds. This section defines their integration contract;
+wire formats, CLI flags and internal storage layouts are implementation choices.
 
-The controller owns restore admission; the runtime session owns capture
-admission and the runtime rounds. The controller does not add another brain.
-The session must:
+Agents supply the following fixed inputs:
 
-- Collect every capture member, inspect local capabilities, and validate the
-  group before any member starts destructive preparation.
-- Recheck each cuInterpose member's recorded source identity and sandbox IP
-  immediately before its first destructive preparation step. The relay performs
-  this check for remote members; the brain's local path does it for rank 0. A
-  mismatch refuses local preparation rather than changing the context.
-- Support safe capture refusal before destructive work. A coordinator reports a
-  refused result only when nothing destructive ran locally and the source can
-  continue running.
-- Include members with no cuInterpose participants in the group barriers.
-- Coordinate cuInterpose preparation and reconstruction rounds across Pods.
-- Authorize restore release only after every member completes its required
-  reconstruction and verification. Each agent validates its local
-  reconstructed process before joining the restore session.
-- Fail on a lost participant or failed round. Completion and release authorization
-  reach members asynchronously, not as an atomic broadcast.
+| Input | Required meaning |
+| --- | --- |
+| Session | Operation UID, capture or restore mode, rank-zero endpoint, credential and absolute deadline. |
+| Members | Complete ordered list of stable IDs and ranks, plus the local member's identity. Bindings cannot change during the session. |
+| Participants | Exact local participant list, identified across Pods by member ID and namespace PID. |
+| Compatibility | Supported protocol and artifact versions, required handle types and GPU-topology constraints. No silent transport or topology fallback. |
+| Saved records, for restore | Capture UID, ordered membership, member ID and rank, versions, and participant/resource records from each member artifact. Mixed or mismatched metadata is rejected. |
 
-All members, including those sharing a node, must be able to execute concurrently.
-The capture and restore flows below describe when agents start coordinators and
-how runtime results become Kubernetes status.
+The runtime must:
+
+- Validate every expected member during join. Missing, duplicate, stale or
+  unauthenticated members cannot satisfy a barrier, including members with no
+  shims.
+- Collect read-only capture inspections and validate the complete resource graph
+  before any member sends `BeginCheckpoint`. Inspection does not pause the
+  application or drain GPU work. The workload must meet its checkpoint pause and
+  synchronization requirements before `BeginCheckpoint`.
+- After group inspection, have each coordinator, including rank 0, ask its own
+  agent for permission to prepare this member in this session. The agent checks
+  that the operation is active, the recorded Pod, container and sandbox IP still
+  match, and its local prerequisites still hold. It grants or refuses permission;
+  inability to validate is a refusal. Coordinators do not read Kubernetes.
+  The local exchange must meet the isolation requirements in [Security](#security).
+- Collect permission from every member before the brain authorizes any
+  preparation. Refusal, cancellation or expiry before that authorization leaves
+  every source untouched. Permissions apply only to this session and the checked
+  member incarnation; they cannot be reused for another operation.
+- After group authorization, each coordinator asks its agent to make execution
+  intent durable and waits for confirmation before sending `BeginCheckpoint`.
+  Permission alone is not execution intent. The agent stops the handoff if it
+  has observed cancellation, failure, expiry or an
+  identity change. Changes and failures after group permission can still leave
+  peers preparing; this barrier does not make capture atomic.
+- Revalidate frozen records, coordinate dependency-ordered preparation and
+  reconstruction, and verify the reconstructed graph against the checkpoint.
+- Advance a phase only after every required participant succeeds. Peers must
+  be able to make progress concurrently, including members sharing a node.
+- Keep every join and round within the same absolute deadline. A local timeout
+  may be shorter but cannot renew that budget.
+- Fail on participant loss or a failed round. Neither cancellation nor failure
+  retries mutating work or promises rollback.
+
+Runtime results identify the session, member, phase and reason. Capture failure
+also records whether local preparation began or its boundary is unknown. Agents
+journal these results; coordinator memory is not durable evidence.
+
+| Runtime result | Contract with the agent |
+| --- | --- |
+| `Refused` during capture | No local preparation began. Leave that source untouched. Refusal before group preparation authorization leaves every source untouched; after authorization, peers may already be unsafe. |
+| `ReadyForDump` | All required group preparation and saved metadata succeeded. End the capture session and proceed through per-Pod capture. This is not artifact readiness. |
+| `ReleaseAuthorized` | Every member completed reconstruction and verification. The agent may perform its final checks and publish local release. Authorization is not proof of release. |
+| Failed or uncertain preparation | Apply unsafe-source handling to members whose preparation began or cannot be excluded. Never call a lost preparation reply a safe refusal. |
+
+The capture and restore flows below define where these results enter per-Pod
+execution. Only the agent publishes the release marker; the brain and relays
+never publish it or overwrite a released member's outcome.
 
 ### API
 
@@ -963,11 +997,11 @@ released results. Deleting the parent set follows the ordered cleanup below.
 
 ### Checkpoint Flow
 
-The diagram below describes **set capture**, including the child resources that
-trigger agent work. The `Agent` lane covers each member's local work, including
-its coordinator's local path; the `Brain` lane shows group-wide coordination.
-The architecture diagrams above show the separate processes. Individual members
-can finish at different times.
+This sequence describes **set capture**. The Agent lane includes each member's
+local coordinator work and its exchanges with the agent; the Brain lane shows
+group-wide coordination. Every coordinator, including rank 0, asks its own agent
+for permission. A refusal before group authorization leaves every source
+untouched; changes after authorization can still cause partial failure.
 
 ```mermaid
 sequenceDiagram
@@ -977,67 +1011,87 @@ sequenceDiagram
     participant A as Agent (each member)
     participant B as Runtime brain
     O->>C: Create PodSetSnapshot
-    C->>C: Validate and record source identities and session
+    C->>C: Record source identities and session
     C->>P: Create child PodSnapshots
-    P->>A: Create PodSnapshotContents, triggering agent work
-    A->>A: Check recorded context and complete local preflight
+    P->>A: Create PodSnapshotContents, triggering validation
+    A->>A: Check source identity, preflight and reserve capacity
     A->>B: Start coordinator and join capture session
-    B->>B: Inspect all members and admit the group
-    alt Admission refused or deadline reached
-        B-->>A: Refuse before destructive work
-        A->>P: Record refusal, leave source running
-        P->>C: Child Failed
-    else Group admitted
-        B->>A: Coordinate preparation across members
-        A->>A: Recheck source identity before destructive work
-        A-->>B: Preparation result
-        B-->>A: Preparation complete, delivered per member
-        A->>A: Save required metadata and perform per-Pod capture
-        A->>P: Member artifact Ready or Failed
-        P->>C: Child result
-        C->>C: Publish Ready only when all artifacts are available
+    B->>B: Inspect and validate every member
+    alt Group inspection refused or deadline reached
+        B-->>A: Refused before any preparation
+        A->>P: Child Failed, source untouched
+    else Group inspection passed
+        B->>A: Collect permission from every member
+        A->>A: Coordinator asks agent, agent checks operation and source
+        A-->>B: Local permission granted or refused
+        alt Any permission refused, cancelled or expired
+            B-->>A: Do not start preparation
+            A->>P: Child Failed, every source untouched
+        else Every member granted permission
+            B->>A: Authorize preparation
+            A->>A: Coordinator requests durable intent, waits for agent confirmation
+            A->>A: Coordinator starts local preparation
+            A-->>B: Preparation and saved metadata results
+            alt Preparation failed or its outcome is uncertain
+                B-->>A: Failed, with per-member boundary information
+                A->>A: Unsafe-source handling where required, no rollback
+                A->>P: Child Failed
+            else Every member prepared and metadata saved
+                B-->>A: ReadyForDump, delivered per member
+                A->>A: End session, perform per-Pod CUDA and CRIU capture
+                A->>P: Member artifact Ready or Failed
+            end
+        end
     end
+    P->>C: Child results
+    C->>C: Ready only when every exact member artifact is available
 ```
 
-The controller validates the complete source list before creating children. It
-stores each source IP and node in `PodSetSnapshot.status.members`, creates the
-session Secret, and writes the endpoint and Secret reference to `status.session`.
-It then creates the children.
+1. **Publish context and activate children.** The controller validates the full
+   source list, records nodes and source IPs, and publishes the session and Secret.
+   It creates one child `PodSnapshot` per member. Creation of each child's
+   `PodSnapshotContent` triggers its node agent. Missing set context makes that
+   work wait, never fall back to standalone capture.
+2. **Inspect the group.** Agents check the recorded Pod UID, node, container and
+   sandbox IP, complete local preflight and reserve capacity durably. Coordinators
+   join while the operation is active. Every member's read-only inspection must
+   pass before any preparation begins.
+3. **Get permission from every agent.** Each coordinator, including rank 0, asks
+   its agent whether this member may begin preparation for this session. The
+   agent checks operation state, the recorded Pod UID, container incarnation and
+   sandbox IP, and its local prerequisites. Failure, deletion, deadline expiry,
+   an identity mismatch or inability to validate produces a refusal. An IP
+   mismatch is `PodIPChanged`; it never changes the recorded context. The brain
+   waits for every member's permission before authorizing preparation. A refusal
+   at this barrier leaves every source untouched. Permission alone does not
+   record that execution started.
+4. **Prepare, then capture.** After group authorization, each coordinator asks
+   its agent to make execution intent durable and waits for confirmation before
+   sending **`BeginCheckpoint`**. This request freezes registries and is the
+   destructive boundary, not the later removal of mappings. If the agent has
+   observed a new failure, cancellation,
+   expiry or identity change, it stops that local handoff. Peers may already have
+   started; permission is not a guarantee against later changes. The runtime
+   validates the frozen records and coordinates shared-resource preparation.
+   Each coordinator saves metadata for its member artifact. `ReadyForDump`
+   requires every member's preparation and metadata to succeed. Session
+   connections close before CRIU dumping. Agents then run per-Pod capture. A
+   member without shims participates in the permission barrier and rechecks
+   identity before its own native CUDA boundary, or CRIU boundary for CPU-only
+   capture.
+5. **Publish the checkpoint.** Each child reports its artifact result. The set
+   becomes Ready only when every child is Ready and its exact content name and
+   UID are recorded. A partial capture is not a usable set checkpoint. Source
+   disappearance before capture completes fails the member; disappearance after
+   capture does not invalidate its artifact.
 
-Each child is reconciled into a `PodSnapshotContent`. Creation of that content
-triggers the node agent through its existing watch. The agent verifies the set
-ownership and published member binding, then reads the parent's recorded inputs
-and session descriptor. It waits if required inputs have not yet been published.
-
-Each agent checks the live source Pod UID, node, sandbox IP, and container against
-the recorded source, completes node-local preflight, and secures the required
-local capacity. Reservations and execution intent must be durable before their
-corresponding work proceeds. The agent starts its member's coordinator only while
-the operation is active. The brain waits for every member and validates the group.
-No member crosses its destructive boundary before this barrier succeeds.
-
-For a cuInterpose member, the first destructive step is GPU preparation. Its
-relay, or rank 0's local participant path, rechecks the recorded source identity
-and sandbox IP immediately before that step, and prepares only the inspected
-participants. For a member without cuInterpose, the agent performs the same
-check immediately before native CUDA checkpoint, or before the CRIU dump for a
-CPU-only member. An IP change fails the member with `PodIPChanged`; the controller
-never substitutes a new IP into the capture context. These local checks are not
-a guarantee against a concurrent Pod lifetime change.
-
-Refusal before the destructive boundary leaves the source running. Failure or
-cancellation after that boundary follows the existing unsafe-source handling,
-including `CheckpointNeedsSourceKill` where applicable. Snapshot does not promise
-that a failed capture leaves a working deployment.
-
-For a cuInterpose member, the coordinator writes its saved metadata into that
-member's checkpoint artifact before the agent proceeds with the native CUDA and
-CRIU checkpoint. Each child records its own result. The set controller publishes
-Ready only after all children are Ready and it has recorded each exact content
-name and UID. A failed set can contain successfully captured members, but it is
-not a usable set checkpoint. Source disappearance before its child completes
-fails that member; disappearance after a completed capture does not invalidate
-its artifact.
+A safe refusal requires proof that local preparation never began. A lost
+`BeginCheckpoint` reply or an interrupted preparation is not that proof.
+Failure or cancellation after the boundary, or when crossing it cannot be
+excluded, uses existing unsafe-source handling, including
+`CheckpointNeedsSourceKill` where applicable. No rollback or working source
+deployment is promised. `ReadyForDump` delivery and per-Pod dumps are also
+asynchronous; successful preparation cannot guarantee that every dump succeeds.
 
 ### Restore Flow
 
@@ -1055,7 +1109,7 @@ sequenceDiagram
     O->>C: Create placeholder Pods and PodSetRestore, in either order
     C->>C: Bind targets and publish artifacts, IP pairs and session
     C-->>A: ContextReady
-    A->>A: Complete local preflight and reserve capacity
+    A->>A: Preflight identities and artifacts, then reserve capacity
     A->>C: Passed or Refused for the current container
     alt Any member refused
         C-->>A: Failed, no member starts reconstruction
@@ -1067,9 +1121,10 @@ sequenceDiagram
         A->>A: Validate local reconstructed process
         A->>B: Start coordinator and join restore session
         B->>A: Coordinate shared GPU reconstruction
-        A-->>B: Runtime result
-        B-->>A: Authorize release, delivered per member
-        A->>A: Final checks and durable release marker
+        A-->>B: Member reconstruction and verification result
+        B->>B: Wait for every required member to pass
+        B-->>A: ReleaseAuthorized, delivered per member
+        A->>A: Final checks, publish marker and journal release
         A->>A: Unblock peer traffic and finish local cleanup
         A->>C: Report Restored
         C->>C: Ready when all Restored, Failed on failure or unknown outcome
@@ -1088,8 +1143,10 @@ sequenceDiagram
    waits for a running placeholder and checks the live Pod UID, node, sandbox IP,
    and container. It verifies the placeholder contract and remaining startup-gate
    time, refuses standalone restore annotations, and checks artifact compatibility,
-   IP-map support, session port, and target reuse rules. It reserves the Pod UID
-   and all required local slots together. The reservation must be durable before
+   IP-map support, session port, and target reuse rules. Saved metadata must match
+   the referenced capture UID, membership, member ID and rank, not just parse
+   successfully. It reserves the Pod UID and all required local slots together.
+   The reservation must be durable before
    Passed is reported. Concurrent attempts cannot reserve the same target.
 3. **Admit the set.** The controller accepts only reports for live container IDs.
    Any refusal fails the attempt before CRIU, leaving placeholders running.
@@ -1104,16 +1161,22 @@ sequenceDiagram
    reconstructed process before entering the runtime session.
 5. **Coordinate the runtime.** Agents start coordinators after local process
    and native CUDA restore: rank 0 starts the brain, and the other ranks connect
-   as relays. For cuInterpose members, coordinators load the saved CUDA metadata;
-   relays send their records to the brain. The brain builds the temporary
-   GPU-handle map and coordinates shared GPU resource reconstruction. It authorizes
-   release only when every member completes its required work. Until then, the
-   placeholder gate and peer network lock prevent normal member traffic.
-6. **Release and report.** After runtime authorization, the agent checks the
-   operation and bound execution identity once more, atomically publishes the
-   release marker, records release durably, removes its lock, and frees its slots.
+   as relays. Each coordinator loads its member's runtime metadata, with empty
+   participant records for members without shims. Relays send their records to
+   the brain. The brain validates the complete group,
+   builds the temporary GPU-handle map, coordinates reconstruction, and verifies
+   the reconstructed resource graph against the checkpoint. Participant-free
+   members also report completion. Only then does it return `ReleaseAuthorized`.
+   Until then, the placeholder gate and peer network lock prevent normal member
+   traffic.
+6. **Release and report.** Authorization is permission, not proof of release.
+   After receiving it, the agent checks the operation and bound execution
+   identity once more, atomically publishes the release marker with the restored
+   PID, attempt UID and admitted container ID,
+   records release durably, removes its lock, and frees its slots.
    It reports Restored and writes the Pod Restored condition. Recovery must
-   distinguish release from completed cleanup.
+   distinguish release from completed cleanup. The runtime never publishes the
+   marker, and the set path must not publish it on local executor success alone.
 
 A container change before release fails the member. After release, release
 evidence takes precedence over container changes and cancellation. A later
@@ -1181,9 +1244,13 @@ sandbox. A container restart does not remove the sandbox's network namespace
 or its lock.
 
 The **release point** is publication of `restore-complete` in the placeholder's
-control directory. The file contains the attempt UID and admitted container ID.
-Publication is atomic: the gate and recovery must never observe a partial marker.
-The placeholder checks that the file exists; recovery verifies its contents.
+control directory, after runtime authorization and the agent's final checks.
+The file preserves the existing `key=value` format and `pid` field and adds the
+attempt UID and admitted container ID. New fields must remain compatible with
+readers that ignore unknown keys. Publication is atomic: readers must never see a
+partial marker.
+Existence-based gates and PID-reading consumers remain compatible; recovery
+verifies the attempt and container fields.
 
 The marker is published before removing the lock. An application can begin to
 run during that gap, but its peer traffic remains blocked. If the agent crashes,
@@ -1207,8 +1274,13 @@ The journal must distinguish:
 
 - A capacity reservation, made durable before Passed is reported. Reservation
   alone does not mean execution started or make the target non-reusable.
-- Execution intent, made durable before capture's coordinator or local restore
-  starts. An interrupted execution is never replayed.
+- Capture permission, if recorded, separate from execution intent. An unused
+  permission does not mean preparation began or justify killing the source.
+- Execution intent, made durable before `BeginCheckpoint`, the local native
+  capture boundary, or local restore starts. For cuInterpose capture, it is
+  recorded only after group permission succeeds and before local preparation can
+  be dispatched. Read-only inspection and permission do not cross that boundary.
+  An interrupted mutating execution is never replayed.
 - Local restore completion without release. That member is still unreleased.
 - Proven release, retained independently of cleanup and reporting completion.
 - Completed capture and its artifact result.
@@ -1217,9 +1289,11 @@ These are recovery facts, not additional Kubernetes phases or a prescribed
 journal format.
 
 A matching release marker **or** a durable journal release record proves release.
-The marker covers a crash before release is journaled; the journal keeps that
-knowledge if the marker later becomes unavailable. Neither proof is overridden
-by failure, deletion, deadline, or loss of the Pod.
+The marker covers a crash before release is journaled. Recovery makes that proof
+durable before proceeding with cleanup. Once release is journaled, recovery no
+longer depends on the marker surviving, even if a later container incarnation
+clears it. Clearing a stale marker must not discard the earlier release record.
+Neither proof is overridden by failure, deletion, deadline, or loss of the Pod.
 
 Recovery checks release evidence first, then uses the following rules:
 
@@ -1231,6 +1305,7 @@ Recovery checks release evidence first, then uses the following rules:
 | Restore execution recorded; no release evidence; target still exists | Never rerun CRIU. Stop any remaining helper and tear down the recorded, unreleased execution with the lock in place. Do not act on a replacement container. Fail the member and free slots. |
 | Restore execution recorded; target gone; no release evidence | Free slots and report Unknown with reason TargetGone if the attempt still exists. Do not guess Failed. |
 | Orphaned restore record; no release evidence | Tear down unreleased execution if it exists and free slots. It cannot override release evidence. |
+| Capture has no execution intent, including an unused permission | Stop the old helpers before freeing slots. Leave the source untouched; discard the old permission rather than reuse it. |
 | Capture execution recorded; no completed artifact | Never rerun preparation or dump. Fail the child snapshot and apply the existing unsafe-source handling. Free slots. |
 
 Before handling an interrupted attempt, the agent must establish that its old
@@ -1270,8 +1345,9 @@ node journals support cleanup after it is gone.
 | Capture stage at cancellation | Action |
 | --- | --- |
 | Before the coordinator starts | Stop and free reservations. Mark the child Failed with reason Cancelled; the source is untouched. |
-| In the session, before any destructive round ran locally | Abort the coordinator through the refused path. The brain aborts the group and the source keeps running. Mark the child Failed with reason Cancelled. |
-| After destructive preparation, native CUDA checkpoint, or dump begins | Use existing unsafe-source handling. Mark the child Failed with reason Cancelled. There is no rollback. |
+| During inspection or permission collection, before group preparation authorization | Stop through the refused path and free reservations. No member starts preparation; every source is untouched. Mark the child Failed with reason Cancelled. |
+| After group preparation authorization, with proof that no local `BeginCheckpoint` or native capture began | Stop through the refused path and leave this source untouched. Peers may already have begun preparation. Mark the child Failed with reason Cancelled. |
+| After `BeginCheckpoint`, native CUDA checkpoint or dump begins, or boundary crossing is unknown | Use existing unsafe-source handling. Mark the child Failed with reason Cancelled. There is no rollback. |
 
 A forced crash without proof that capture stayed pre-destructive is not classified
 as a safe refusal. Interrupted capture uses the conservative unsafe-source path.
@@ -1349,6 +1425,11 @@ must permit the session traffic, and Snapshot must not bypass unrelated filterin
 Only the attempt's own network lock is removed during cleanup. The session port
 is reserved from checkpointed application traffic.
 
+The agent-coordinator exchange must prevent workload processes from impersonating
+either endpoint or forging permissions and durable execution-intent
+acknowledgements. It must not rely on files or unauthenticated endpoints in
+workload-writable storage. The communication mechanism is an implementation choice.
+
 Checkpoint images, credentials, and process memory can contain secrets. They
 remain subject to the existing artifact storage and node-agent security model.
 The journal is not mounted into workload containers. The release marker remains
@@ -1410,32 +1491,38 @@ attempt UIDs belong in logs and status, not metric labels.
 
 ### Dependencies
 
-The agents require CRIU TCP repair and remapping, the placeholder and artifact
-contracts, and cuInterpose's cross-Pod coordinator.
+The local cuInterpose foundation supplies read-only inspection, fail-stop
+preparation from `BeginCheckpoint`, shared CUDA reconstruction, and agent
+integration. The
+[implementation baseline](https://github.com/ai-dynamo/snapshot/commit/bc9d2161d2a7f203551e5b7e237defd90b1e9aa1)
+uses local namespace PIDs and Unix sockets, with POSIX-FD sharing. It does not
+supply the cross-Pod TCP session or cross-node FABRIC reconstruction described
+here. [SNEP-295](https://github.com/ai-dynamo/snapshot/issues/295) covers that local
+foundation.
 
-[SNEP-295](https://github.com/ai-dynamo/snapshot/issues/295) defines the per-node
-cuInterpose foundation for shared CUDA memory, not cross-Pod coordination. This
-design reuses the cross-Pod coordinator's group validation, phase barriers, handle
-exchange, and release authorization. It does not require another brain in the
-Kubernetes controller.
+The extension must implement the
+[Runtime Extension Contract](#runtime-extension-contract): member-scoped
+identities, fixed authenticated sessions, group inspection, cross-Pod rounds and
+handle exchange, participant-free members, and one absolute deadline. Capture
+also needs a local agent/coordinator permission exchange and an all-member
+permission barrier. It requires safe refusal before preparation, not rollback
+after `BeginCheckpoint`.
 
-Integration must provide the full Coordination Rules above. Safe capture
-abort requires protocol and shim support to return a pre-destructive participant
-to its active state. Participant-free relays, local source-identity checks
-(including rank 0), and the shared absolute deadline are also required. These
-checks and transitions belong to the relevant coordinator, relay, and shim paths,
-not all to the brain.
+Snapshot must integrate that runtime with its existing CRIU TCP repair,
+placeholder and artifact contracts. Agents add local boundary checks, journals,
+network holds, and delayed publication of `restore-complete` after group release
+authorization. The completion marker retains the restored PID expected by
+existing consumers.
 
-The set controller supplies membership, bindings, credentials, and durable API
-status. Agents supply local preflight, journal recovery, network locks, and release
-markers. Adding the set CRDs alone does not implement those runtime and agent
-contracts; they must be integrated and tested before the feature is supported.
+For the initial cross-node NVLink scope, the runtime must reconstruct
+FABRIC-backed resources and validate the required ComputeDomain and clique.
+In-place restore must not proceed with conflicting source channel claims.
+Other transports and topologies require separate qualification.
 
-Supported GPU restores must validate topology rather than accept an arbitrary
-placement. For MNNVL, every member restores into the required ComputeDomain and
-clique, and in-place restore requires release of the source channel claims. The
-runtime validates these identities during join. Supporting other transports or
-topologies requires their own compatibility checks and qualification.
+These runtime and agent capabilities remain required implementation work.
+Adding the set CRDs, or running independent local coordinators in parallel, does
+not provide them. The existing local coordinator and standalone APIs remain
+usable without set mode.
 
 ### Test Plan
 
@@ -1478,10 +1565,37 @@ set API, not only direct executor calls.
   finalizer grace, orphan Secret cleanup, and controller restart idempotence.
   A completed checkpoint must not expire when its capture deadline passes.
 
+#### Runtime Contract Tests
+
+- Join members with identical namespace PIDs and a member with no shims. Reject
+  wrong credentials, stale sessions, duplicate members and incompatible versions.
+- Reject mixed capture metadata, changed membership or ranks, unsupported handle
+  types and incompatible topology. Verify stable allocation identities and the
+  distinction between the original creator and the selected holder.
+- Prove inspection leaves registries unchanged. A failed group inspection must
+  prevent every `BeginCheckpoint`. Revalidate the graph after registries freeze.
+- Delay, refuse or expire one member's permission, including rank 0 and a member
+  without shims. No coordinator may send `BeginCheckpoint` before every member
+  grants permission. Refusal before group authorization leaves all sources
+  untouched. Reject permissions from another session or member incarnation.
+- Attempt to forge permissions or durable execution-intent acknowledgements from
+  a workload process, including through control-volume files or endpoints. Reject
+  them without authorizing preparation.
+- Fail or lose a reply at `BeginCheckpoint` and each later phase. Never report
+  uncertain preparation as a safe refusal or retry a mutating round.
+- Delay a required participant or a member with no shims. No next phase or
+  `ReleaseAuthorized` result may pass its barrier. Include same-node members.
+- Verify that joining, phase timeouts and cancellation share the original
+  absolute deadline. A lost established member fails the session without replay.
+- Pass extended `restore-complete` markers to the baseline PID parser and restore
+  proxy, as well as existence-based readers. Preserve `pid`; additional
+  `key=value` fields must not break older readers.
+
 #### Agent and Failure Tests
 
-- Refuse one capture member before preparation and prove all sources remain
-  running; cancel capture before and after each destructive boundary.
+- Refuse one capture member during group inspection and prove every source stays
+  untouched. Cancel capture before and after `BeginCheckpoint` and each native
+  capture boundary; do not confuse registry freezing with mapping removal.
 - Refuse one restore member and prove no CRIU restore starts and placeholders
   remain running.
 - Test a new placeholder and one that has already spent part of its gate budget.
@@ -1491,15 +1605,29 @@ set API, not only direct executor calls.
   preflight and before execution. Refuse the stale identity without rebuilding
   the map. Repeat before release and ensure cleanup touches only the recorded
   sandbox and container.
-- Change a cuInterpose source's identity or IP after session inspection but before
-  its first preparation step. Both a remote relay and rank 0's local participant
-  path must refuse before local destructive work.
+- Change a cuInterpose source's identity or IP, or delete or fail the operation,
+  after inspection but before permission is granted. Test both a relay and rank
+  0: the agent refuses and every source stays untouched. Repeat after group
+  authorization; stop local work when the change is observed, but use unsafe-
+  source handling for any peer already preparing or whose crossing is uncertain.
+- Crash after a local permission grant but before group authorization, and after
+  authorization but before local execution intent. Stop helpers during recovery
+  and leave sources without execution intent untouched. Crash after intent is
+  durable but before the preparation reply; recover conservatively without
+  replay. A permission record alone must never cause source termination.
 - Crash the agent before CRIU, during CRIU, while held, after release
   authorization, after marker publication, and after release is journaled
   but before cleanup completes.
-- Repeat released recovery with the marker unreadable, the API unavailable,
-  the set failed or deleted, and the original Pod gone. Never kill or replay a
-  released workload; remove only the original attempt's lock.
+- Prove that local executor success cannot publish the set member's marker before
+  group authorization. Preserve `pid` alongside attempt and container identity,
+  verify atomic marker publication, and test existing existence-based and
+  PID-reading consumers. Keep standalone capture and restore behavior unchanged.
+- Recover a crash after marker publication but before release is journaled;
+  retain the matching marker's proof durably before cleanup. Then repeat recovery
+  with a journaled release and the marker unreadable or cleared by a later
+  container incarnation, the API unavailable, the set failed or deleted, and the
+  original Pod gone. Never kill or replay a released workload; remove only the
+  original attempt's lock.
 - Crash after Passed but before Admitted; rebuild reserved slots, revalidate,
   and free them if the attempt cannot continue.
 - Crash the brain during partial release authorization and a relay mid-round.
@@ -1525,9 +1653,11 @@ set API, not only direct executor calls.
    connections. Include a negative control with peer remapping disabled. Run
    each case at least three times.
 2. **MPI workload:** run ping-pong after in-place and relocated restore.
-3. **GPU plus application TCP:** reconstruct cuInterpose GPU resources in the
-   same workload that holds checkpointed cross-Pod TCP connections. Verify both
-   the GPU result and those connections after release. This must exercise the
+3. **GPU plus application TCP:** use Pods on different nodes to reconstruct
+   FABRIC-backed resources over the target NVLink topology, in the same workload
+   that holds checkpointed cross-Pod TCP connections. Verify ComputeDomain and
+   clique compatibility, in-place source-claim release, GPU results and preserved
+   connections. Run fresh application work after release. This must exercise the
    runtime port exemption while application sockets remain locked.
 4. **Inference engines:** qualify a real distributed TensorRT-LLM workload, then
    vLLM and SGLang combinations before claiming support for them. Record the
@@ -1541,8 +1671,9 @@ set API, not only direct executor calls.
 
 **Alpha:** the two CRDs and controller/agent path are implemented; admission,
 partial failure, journal recovery, deletion, and deadlines pass the CPU and fault
-tests. GPU reconstruction and preserved TCP pass together, and at least one real
-inference workload is qualified. Source lifetime results define the supported
+tests. The runtime contract tests pass. Cross-node GPU reconstruction and
+preserved TCP pass together, and at least one real inference workload is qualified.
+Source lifetime results define the supported
 operating constraints. Documentation states those constraints without claiming
 generic transport or backend support.
 
