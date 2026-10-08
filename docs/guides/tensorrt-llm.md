@@ -121,6 +121,11 @@ The example uses one GPU, the PyTorch backend, and a maximum sequence length of
 `TRTLLM_ENGINE_ARGS` JSON object. Revalidate checkpoint and restore before changing the model,
 TensorRT-LLM image, GPU count, backend, or engine settings.
 
+The eight-GPU GLM-5.3 profiles explicitly select `allreduce_strategy="NCCL"`.
+With the pinned engine, AUTO produced intermittent incorrect source answers
+before checkpointing in validation. NCCL passed source inference, KV release
+and resume, and three restored inference checks on the same eight B200 GPUs.
+
 > [!NOTE]
 > This example runs TensorRT-LLM through the `LLM` API rather than `trtllm-serve`,
 > so the standard `trtllm-serve` command-line arguments do not apply. The model is

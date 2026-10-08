@@ -63,6 +63,7 @@ spec:
                 {
                   "revision": "363e8f086905afd83db356a620f9aa401c23800a",
                   "dtype": "bfloat16", "moe_expert_parallel_size": 8,
+                  "allreduce_strategy": "NCCL",
                   "max_seq_len": 131072, "max_num_tokens": 8192, "max_batch_size": 32,
                   "enable_chunked_prefill": true,
                   "moe_config": {"backend": "TRTLLM"},
