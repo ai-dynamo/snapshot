@@ -565,18 +565,26 @@ is a separate, mandatory requirement before S3 is enabled.
 ### Configuration
 
 PVC remains the default. `storage.type` already selects the maintenance backend;
-the `s3` block below replaces the reserved `s3.uri` placeholder in the chart. Any
-S3-compatible endpoint is supported; other object-storage APIs would be separate
-backends.
+the `s3` block below replaces the reserved `s3.uri` placeholder in the chart.
+
+**Supported stores.** `s3` means the S3 API, not one vendor. The backend works
+against AWS S3 or any S3-compatible store, selected by `endpoint`; an empty
+endpoint means AWS. A store must provide Signature V4 authentication with a static
+access key and secret, `ListObjectsV2`, multipart upload, and read-after-write
+consistency for `PUT` followed by `GET` and `LIST`. Stage 2 fencing additionally
+needs conditional `PUT` with `If-None-Match`. Stores that do not speak the S3 API,
+and provider-native identity models, are separate backends behind the same
+adapter interface.
 
 ```yaml
 storage:
-  type: s3
+  type: s3                       # AWS S3 or any S3-compatible store, selected by endpoint
   s3:
     bucket: checkpoint-bucket
     prefix: snapshots
     region: us-east-1
-    endpoint: ""                 # Default endpoint; HTTPS override for other providers
+    endpoint: ""                 # Empty = AWS; HTTPS endpoint of any S3-compatible store
+    addressingMode: path         # path | virtual-host; path for most non-AWS stores
     auth:
       mode: secret              # Stage 1; workloadIdentity may be added later
       credentialsSecretRef:
@@ -596,6 +604,7 @@ type Config struct {
     S3   *S3    `json:"s3,omitempty"`
 }
 
+// S3 is the S3 API configuration. Endpoint selects the store; empty means AWS.
 type S3 struct {
     Bucket         string `json:"bucket"`
     Prefix         string `json:"prefix"`
