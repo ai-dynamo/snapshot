@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "cuinterpose-gpu-tests"
+version = "0.0.0"
+description = "GPU integration tests for the cuinterpose shim and coordinator"
+requires-python = ">=3.12"
+# These versions, including torch from the cu130 index below, match the validated suite.
+# Keep updates explicit so dependency changes do not silently change qualification.
+dependencies = [
+  "cuda-bindings==13.3.1",
+  "msgpack==1.1.1",
+  "pytest==8.4.2",
+  "torch==2.11.0",
+]
+
+[tool.uv]
+package = false
+
+# CUDA 13 wheels: the tests exercise a CUDA 13 driver and cuda-bindings 13.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+markers = [
+  "gpu: requires two CUDA GPUs and a CUDA 13 driver",
+  "multicast: additionally needs NVLink between the two GPUs",
+  "host_numa: requires POSIX-shareable HOST_NUMA VMM",
+]

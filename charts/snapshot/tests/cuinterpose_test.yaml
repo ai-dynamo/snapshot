@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: cuinterpose delivery flags on the operator
+templates:
+  - templates/operator-deployment.yaml
+  - templates/daemonset.yaml
+tests:
+  - it: defaults the installer and daemonset to the chart appVersion
+    chart:
+      appVersion: v1.2.3
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--cuinterpose-image=ghcr.io/ai-dynamo/snapshot/agent:v1.2.3"
+        template: templates/operator-deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == 'agent')].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v1.2.3
+        template: templates/daemonset.yaml
+
+  - it: passes the agent image and pull policy to the installer flags
+    set:
+      image.agent.tag: v9.9.9
+      image.agent.pullPolicy: IfNotPresent
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--cuinterpose-image=ghcr.io/ai-dynamo/snapshot/agent:v9.9.9"
+        template: templates/operator-deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--cuinterpose-image-pull-policy=IfNotPresent"
+        template: templates/operator-deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == 'agent')].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v9.9.9
+        template: templates/daemonset.yaml
