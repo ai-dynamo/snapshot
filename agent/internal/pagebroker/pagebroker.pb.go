@@ -889,6 +889,8 @@ func (*CommitRequest) Descriptor() ([]byte, []int) {
 // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
 // one hour. Repeating Abort for a retained aborted transaction returns AbortComplete. Abort for a committed or
 // expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
+// For an Abort authenticated with the original broker pidfd, TRANSACTION_NOT_FOUND
+// also confirms that this broker has no running GPU work for the transaction.
 type AbortRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields

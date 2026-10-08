@@ -300,6 +300,45 @@ func TestGPUCompletionDoesNotWaitForUnknownCommittedTransaction(t *testing.T) {
 	}
 }
 
+func TestGPUCleanupDoesNotWaitForExpiredOriginalTransaction(t *testing.T) {
+	listener, gpu := gpuListener(t)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := gpu.Restore(context.Background(), []int{12}, []int{os.Getpid()}, []*os.File{openTestPidfd(t)})
+		finished <- err
+	}()
+	peer, err := listener.AcceptUnix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, descriptors, err := readGPURequest(peer)
+	for _, descriptor := range descriptors {
+		unix.Close(descriptor)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Lose the GPU reply, then let the same broker report expired state.
+	peer.Close()
+	abortPeer, abort := acceptGPUAbort(t, listener)
+	message, _ := proto.Marshal(&Response{RequestId: abort.RequestId, TransactionId: abort.TransactionId,
+		Result: &Response_Failure{Failure: &Failure{Code: Failure_TRANSACTION_NOT_FOUND.Enum()}}})
+	if err := writeMessage(abortPeer, message); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("GPU response loss: %v", err)
+		}
+	case <-time.After(gpuTestTimeout):
+		t.Fatal("cleanup waited for a broker that had already drained the transaction")
+	}
+	if err := gpu.Abort(context.Background()); err != nil {
+		t.Fatalf("drained transaction retried Abort: %v", err)
+	}
+}
+
 func TestGPURejectsInvalidParticipantMappingBeforeSending(t *testing.T) {
 	for _, hostPIDs := range [][]int{{}, {0}, {2, 2}} {
 		if _, err := gpuTargets([]int{12}, hostPIDs); err == nil {
@@ -521,7 +560,7 @@ func TestGPUParentRetainsOriginalPeerAfterChildExit(t *testing.T) {
 			if !reaped {
 				peer, abort := acceptGPUAbort(t, replacement)
 				message, _ := proto.Marshal(&Response{RequestId: abort.RequestId, TransactionId: abort.TransactionId,
-					Result: &Response_Failure{Failure: &Failure{Code: Failure_TRANSACTION_NOT_FOUND.Enum()}}})
+					Result: &Response_Failure{Failure: &Failure{Code: Failure_INVALID_REQUEST.Enum()}}})
 				if err := writeMessage(peer, message); err != nil {
 					t.Fatal(err)
 				}
