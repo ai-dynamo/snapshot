@@ -22,6 +22,8 @@ image:
 replicaCount: 1
 
 operator:
+  # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/storage.md.
+  bindNewContents: false
   resources:
     limits:
       cpu: 500m
@@ -117,6 +119,8 @@ storage:
 # PageBroker sidecar: stages checkpoint images in memory and publishes them to
 # the checkpoint PVC it shares with the agent. See docs/operations/storage.md.
 pageBroker:
+  # Requires a PageBroker image implementing the PVC artifact backend. Roll this out before binding new contents.
+  artifactAddressing: false
   # Restore directly from the checkpoint directory, or opt into a staged copy.
   restoreMode: direct
   maxConcurrentRequests: 16

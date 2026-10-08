@@ -186,6 +186,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `pageBroker.maxPinnedBytes` | Total pinned memory limit, including allocation rounding. Zero sets no limit | `0` |
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
 | `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 128Mi limit |
+| `operator.bindNewContents` | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../../docs/operations/storage.md#enable-artifact-addressing) | `false` |
 | `operator.nodeSelector` | Node selector for the operator pod | `{}` |
 | `operator.affinity` | Affinity rules for the operator pod | `{}` |
 | `operator.tolerations` | Tolerations for the operator pod | `[]` |
@@ -197,6 +198,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |
 | `pageBroker.staging.sizeLimit` | Cap on the memory-backed staging volume shared by the agent and PageBroker. Keep at or below both memory limits so oversized transfers are refused instead of OOM-killed | `64Gi` |
 | `pageBroker.maxConcurrentRequests` | Concurrent control-socket requests the daemon serves | `16` |
+| `pageBroker.artifactAddressing` | Pass store configuration to a compatible PVC artifact backend. Deploy this before enabling `operator.bindNewContents` | `false` |
 | `pageBroker.resources` | CPU and memory requests/limits for the PageBroker sidecar. The memory limit bounds restore prefetch into staging | 8 CPU / 32Gi request, 32 CPU / 256Gi limit |
 | `daemonset.resources` | CPU and memory requests/limits for the agent. The agent's memory limit also bounds the largest checkpoint image, because CRIU writes it into memory-backed PageBroker staging | 2 CPU / 1Gi request, 4 CPU / 64Gi limit |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |

@@ -26,7 +26,14 @@ func main() {
 
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
+	bindNewContents := flag.Bool("bind-new-contents", false,
+		"Bind new content to the configured store after all agents support artifact addressing")
 	storeID := mustConfigureStoreID()
+	captureStoreID, err := newContentStoreID(storeID, *bindNewContents)
+	if err != nil {
+		ctrl.Log.Error(err, "invalid content binding configuration")
+		os.Exit(1)
+	}
 	artifactCleanupConfig.StoreID = storeID
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
@@ -77,6 +84,7 @@ func main() {
 		Client:             mgr.GetClient(),
 		NonCacheReadClient: mgr.GetAPIReader(),
 		Recorder:           mgr.GetEventRecorderFor("podsnapshot-controller"),
+		StoreID:            captureStoreID,
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")

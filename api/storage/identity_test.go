@@ -157,3 +157,19 @@ func TestCommitIDRejectsInvalidIdentity(t *testing.T) {
 		t.Fatalf("UIDs need not use UUID syntax: %v", err)
 	}
 }
+
+// The PageBroker C++ tests consume a copy of these vectors because the image
+// build context is agent/pagebroker alone. Both copies must stay identical.
+func TestPageBrokerVectorCopyMatches(t *testing.T) {
+	want, err := os.ReadFile("testdata/identity.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile("../../agent/pagebroker/testdata/storage-contract/identity.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("agent/pagebroker/testdata/storage-contract/identity.json differs from api/storage/testdata/identity.json")
+	}
+}

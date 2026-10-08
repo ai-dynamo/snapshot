@@ -36,13 +36,38 @@ is `/`, independent of the container-local `/checkpoints` mount. Neither a
 caller-supplied store ID nor an additional PVC namespace setting is required.
 `storage.pvc.basePath` retains its existing mount-path meaning.
 
-The operator validates this resolved identity at startup. Content storage
-bindings and publication descriptors are additive API groundwork: the current
-checkpoint/restore callers still use the existing filesystem flow, and the
-current PageBroker executable keeps its existing arguments. Artifact-addressed
-flow activation requires a compatible PageBroker build that consumes the
-resolved storage configuration; mounting the file does not enable that flow.
-S3 remains unsupported.
+The operator validates this resolved identity at startup and uses it to check
+artifact cleanup against each content's recorded store. New captures use the
+legacy filesystem flow by default. Artifact addressing requires a compatible
+PageBroker image and the separate activation steps below. S3 remains unsupported.
+
+### Enable artifact addressing
+
+The operator Deployment and agent DaemonSet roll independently. Keep new content
+unbound while upgrading agents: an older agent cannot record a bound publication
+descriptor. Use two Helm upgrades when enabling this contract on an existing
+installation:
+
+1. Select matching agent/operator/PageBroker images that implement the artifact
+   contract, including the PageBroker PVC backend. Set
+   `pageBroker.artifactAddressing=true` and keep
+   `operator.bindNewContents=false`. This configures compatible brokers while
+   allowing legacy captures throughout the rollout. Wait for the agent DaemonSet
+   rollout to complete on every node before continuing.
+2. Set `operator.bindNewContents=true`, keeping
+   `pageBroker.artifactAddressing=true`. This changes only the operator's capture
+   activation; it does not roll the agents again. New contents now record the
+   configured store and require publication descriptors.
+
+Both settings default to `false`, so the chart adds no artifact-backend arguments
+until explicitly enabled. Agent and PageBroker images must still match. A fresh installation with compatible images may enable
+both settings together, provided no captures are submitted until all agents are
+ready. Existing unbound contents remain readable through the legacy path.
+
+Once bound content exists, keep a compatible broker with artifact addressing
+enabled for its reads and restores. Turning off `operator.bindNewContents` stops
+new bound captures while preserving support for existing ones; it does not
+convert their storage format or permit downgrading the agents to a legacy build.
 
 If the cluster has no default storage class that can provision RWX, set one:
 
@@ -86,6 +111,30 @@ the sidecar:
   and never touches the PVC.
 - **Restore.** PageBroker copies the artifact from the PVC into staging first.
   CRIU then restores from memory instead of reading the PVC directly.
+
+With `pageBroker.artifactAddressing=true`, the sidecar receives the resolved
+store configuration (`--storage-config /etc/snapshot/storage.yaml`) and derives
+the store identity from it at startup. Checkpoints bound to that store are addressed by
+identity rather than by path: the agent names the store, the content UID and
+the container, and PageBroker publishes the image at
+`artifacts/<contentUID>/containers/<name>/`, the same layout as before, with a
+`publication.json` next to `manifest.yaml` recording the store ID, the
+artifact handle and the deterministic commit ID. Commit returns that handle
+as the publication descriptor; restores and metadata reads name the
+descriptor, and PageBroker refuses a descriptor from another store
+(`STORE_MISMATCH`), a publication that is missing (`ARTIFACT_NOT_FOUND`) or
+whose evidence does not match (`ARTIFACT_CORRUPT`). A transaction that
+outlives PageBroker's fixed 2h5m lifetime fails Commit with
+`TRANSACTION_EXPIRED` and is cleaned up. Legacy path-addressed requests are
+unchanged, and content without a store binding keeps using them.
+
+If a bound checkpoint's Commit reply is lost, the agent records Ready as Unknown
+with reason `CheckpointCommitPending` and probes the durable publication. It
+does not dump the source again. A matching publication becomes Ready. Missing or
+unavailable evidence keeps the outcome pending: the transaction lifetime does
+not prove that an in-progress publication has stopped. An unresolved outcome
+requires operator investigation of the broker and storage; it is not
+automatically recaptured.
 
 Because the staging volume is RAM, size the agent pod for it:
 
