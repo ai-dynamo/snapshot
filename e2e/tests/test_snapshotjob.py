@@ -383,6 +383,27 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
         assert captured and captured.get("status") == "False"
         assert snap.condition(sj, "Completed").get("status") != "True"
         assert k8s.read_job(config.namespace, snapshotjob_name) is not None
+        contents = client.CustomObjectsApi().list_cluster_custom_object(
+            snap.GROUP, snap.VERSION, snap.PODSNAPSHOTCONTENTS
+        )["items"]
+        content = next(
+            item
+            for item in contents
+            if item["spec"]["podSnapshotRef"]["namespace"] == config.namespace
+            and item["spec"]["podSnapshotRef"]["name"] == snapshotjob_name
+        )
+        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        snap.create_artifact_staging_file(
+            config, source_pod.spec.node_name, content["metadata"]["uid"]
+        )
+        assert snap.artifact_root_exists(config, source_pod.spec.node_name, content["metadata"]["uid"])
+        snap.delete_podsnapshot(config.namespace, snapshotjob_name)
+        snap.wait_for_custom_object_deleted(
+            None, content["metadata"]["name"], snap.PODSNAPSHOTCONTENTS
+        )
+        snap.wait_for_artifact_root_absent(
+            config, source_pod.spec.node_name, content["metadata"]["uid"]
+        )
         k8s.restart_snapshot_operator(config.namespace, config.release)
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
