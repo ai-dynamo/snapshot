@@ -31,7 +31,7 @@ _CHAT_PROMPTS = """
 import json, os, sys
 from pathlib import Path
 from huggingface_hub import hf_hub_download
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 model = os.environ["SNAPSHOT_MODEL"]
 revision = os.environ.get("SNAPSHOT_MODEL_REVISION")
@@ -41,8 +41,10 @@ if not Path(path).is_dir():
     path = str(Path(hf_hub_download(
         repo_id=model, filename="config.json", revision=revision, local_files_only=True,
     )).parent)
-tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
 config = json.loads((Path(path) / "config.json").read_text())
+# rc24's AutoConfig rejects GLM's layer types while its fast tokenizer works.
+tokenizer_type = PreTrainedTokenizerFast if config.get("model_type") == "glm_moe_dsa" else AutoTokenizer
+tokenizer = tokenizer_type.from_pretrained(path, local_files_only=True, trust_remote_code=False)
 prompts = {}
 for name, question in json.loads(sys.argv[1]).items():
     messages = [{"role": "user", "content": question}]
