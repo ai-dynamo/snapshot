@@ -281,7 +281,8 @@ and upgrades to the version under test.
 
 The versions to upgrade from are the newest patch release of each of the last
 `UPGRADE_FROM_MINOR_VERSIONS` (3) minor versions, prereleases excluded. With
-fewer releases, every existing release is tested.
+fewer minor versions, the newest patch release of each existing minor version
+is tested.
 
 | Trigger | Profile | Configs | Skipping |
 | --- | --- | --- | --- |
@@ -290,7 +291,8 @@ fewer releases, every existing release is tested.
 | Manual | `upgrade_profile` input | `upgrade_config` input; `default` uses the profile's configs | None |
 
 The workflow-level `env` block holds these settings. `hack/upgrade-e2e-gate.py`
-decides which pairs run and lists every decision in the job summary.
+decides which pairs run and lists every decision in the job summary. If it
+cannot read the run history from the GitHub API, every pair runs.
 Only scheduled runs count toward the nightly skip rule; manual runs can test
 a different target image or a reduced scenario set under the same job name.
 

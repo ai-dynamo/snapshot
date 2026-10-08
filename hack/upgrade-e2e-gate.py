@@ -7,7 +7,8 @@ A pair is one version to upgrade from, one upgrade config, and one scenario
 profile. Every pair runs when --always is set (manual and weekly runs). For
 nightly runs, a pair runs only if it never passed in a scheduled run on main,
 if its last passing commit is not in the current history, or if anything that
-shapes the upgrade changed since then. Prints the JSON list of pairs to run.
+shapes the upgrade changed since then. If the run history cannot be read, every
+pair runs. Prints the JSON list of pairs to run.
 """
 
 from __future__ import annotations
@@ -151,29 +152,37 @@ def main() -> int:
     pairs = build_pairs(json.loads(args.versions), configs, args.profile)
 
     successes: dict[str, str] = {}
+    history_error: str | None = None
     if not args.always and pairs:
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": GITHUB_API_VERSION}
         token = os.environ.get("GH_TOKEN")
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        successes = last_successes(
-            {job_name(pair) for pair in pairs},
-            repository=args.repository,
-            workflow=args.workflow,
-            branch=args.branch,
-            max_runs=args.max_runs,
-            headers=headers,
-        )
+        try:
+            successes = last_successes(
+                {job_name(pair) for pair in pairs},
+                repository=args.repository,
+                workflow=args.workflow,
+                branch=args.branch,
+                max_runs=args.max_runs,
+                headers=headers,
+            )
+        except (OSError, ValueError) as exc:
+            history_error = f"run history unavailable ({exc})"
+            print(f"warning: {history_error}; running every pair", file=sys.stderr)
 
     decisions = []
     for pair in pairs:
-        run, reason = decide(
-            pair,
-            always=args.always,
-            last_success=successes.get(job_name(pair)),
-            is_ancestor=is_ancestor,
-            changed_since=changed_since,
-        )
+        if history_error:
+            run, reason = True, history_error
+        else:
+            run, reason = decide(
+                pair,
+                always=args.always,
+                last_success=successes.get(job_name(pair)),
+                is_ancestor=is_ancestor,
+                changed_since=changed_since,
+            )
         decisions.append((pair, run, reason))
         print(f"{'run' if run else 'skip'} {job_name(pair)}: {reason}", file=sys.stderr)
 

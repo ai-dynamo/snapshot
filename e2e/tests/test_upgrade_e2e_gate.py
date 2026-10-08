@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import sys
+import urllib.error
 from pathlib import Path
 from types import ModuleType
 from urllib.parse import parse_qs, urlsplit
@@ -190,6 +191,54 @@ def test_main_writes_the_selected_pairs(gate: ModuleType, monkeypatch: pytest.Mo
     assert [pair["config"] for pair in selected] == ["agent-first"]
     assert output.read_text(encoding="utf-8") == f"pairs={json.dumps(selected, separators=(',', ':'))}\n"
     assert "| `v0.1.0` | `full` | `basic` | skip |" in summary.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(lambda url: urllib.error.HTTPError(url, 502, "Bad Gateway", {}, io.BytesIO(b"")), id="http-5xx"),
+        pytest.param(lambda url: urllib.error.HTTPError(url, 403, "rate limited", {}, io.BytesIO(b"")), id="rate-limit"),
+        pytest.param(lambda url: urllib.error.URLError("connection reset"), id="network"),
+        pytest.param(lambda url: TimeoutError("timed out"), id="timeout"),
+        pytest.param(lambda url: json.JSONDecodeError("bad", "", 0), id="bad-json"),
+    ],
+)
+def test_unreadable_history_runs_every_pair(
+    gate: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, error
+) -> None:
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    def github_json(url: str, headers: dict) -> dict:
+        raise error(url)
+
+    monkeypatch.setattr(gate, "github_json", github_json)
+    versions = json.dumps([{"tag": "v0.1.0", "chart_version": "0.1.0"}])
+    monkeypatch.setattr(
+        sys, "argv", ["upgrade-e2e-gate.py", "--versions", versions, "--configs", "full,agent-first", "--profile", "basic"]
+    )
+
+    assert gate.main() == 0
+
+    captured = capsys.readouterr()
+    assert [pair["config"] for pair in json.loads(captured.out)] == ["full", "agent-first"]
+    assert "running every pair" in captured.err
+    assert summary.read_text(encoding="utf-8").count("| run | run history unavailable") == 2
+
+
+def test_unreadable_jobs_of_a_run_runs_every_pair(gate: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    def github_json(url: str, headers: dict) -> dict:
+        if "/jobs" in url:
+            raise urllib.error.HTTPError(url, 500, "Server Error", {}, io.BytesIO(b""))
+        return {"workflow_runs": [{"id": 1, "head_sha": SHA}]}
+
+    monkeypatch.setattr(gate, "github_json", github_json)
+    versions = json.dumps([{"tag": "v0.1.0", "chart_version": "0.1.0"}])
+    monkeypatch.setattr(sys, "argv", ["upgrade-e2e-gate.py", "--versions", versions, "--configs", "full", "--profile", "basic"])
+
+    assert gate.main() == 0
+
+    assert [pair["config"] for pair in json.loads(capsys.readouterr().out)] == ["full"]
 
 
 def test_nothing_selected_writes_an_empty_list(gate: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
