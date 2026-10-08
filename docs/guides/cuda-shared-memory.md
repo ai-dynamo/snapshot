@@ -17,6 +17,8 @@ B200 GPUs. The single-GPU [vLLM](vllm.md), [SGLang](sglang.md), and
   or set `claimName` in the chosen capture and restore manifests to an existing
   Hugging Face cache PVC.
   Set the cache PVC's `storageClassName` if that class is not the default.
+- Create the 100 GiB [compiler cache](compiler-cache-pvc.yaml) on RWX storage.
+  See [compiler-cache requirements](compiler-cache.md) for cache retention and fixed paths.
 - For Deployment capture, install `envsubst` (`gettext-base` on Debian and Ubuntu).
 
 ## Multi-GPU models
@@ -49,6 +51,9 @@ export SNAPSHOT_NAMESPACE=<namespace>
 
 kubectl apply --namespace "$SNAPSHOT_NAMESPACE" \
   --filename docs/guides/model-cache-pvc.yaml
+
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename docs/guides/compiler-cache-pvc.yaml
 
 kubectl create configmap vllm-app --namespace "$SNAPSHOT_NAMESPACE" \
   --from-file=app.py=docs/guides/vllm/app.py \

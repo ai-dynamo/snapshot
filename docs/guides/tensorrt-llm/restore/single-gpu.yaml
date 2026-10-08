@@ -64,6 +64,15 @@ spec:
             - name: app
               mountPath: /snapshot-app
               readOnly: true
+            - name: compiler-cache
+              mountPath: /compile-cache
+              subPath: compiler-cache/tensorrt-llm
+            - name: compiler-cache
+              mountPath: /root/.cache/flashinfer
+              subPath: compiler-cache/tensorrt-llm/flashinfer-fixed
+            - name: compiler-cache
+              mountPath: /tmp/torchinductor_root
+              subPath: compiler-cache/tensorrt-llm/torchinductor-default
       volumes:
         - name: snapshot-control
           emptyDir: {}
@@ -74,3 +83,6 @@ spec:
         - name: app
           configMap:
             name: tensorrt-llm-app
+        - name: compiler-cache
+          persistentVolumeClaim:
+            claimName: snapshot-compiler-cache

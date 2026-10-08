@@ -137,6 +137,27 @@ spec:
               value: "0"
             - name: TORCH_NCCL_DUMP_ON_TIMEOUT
               value: "0"
+            # Keep compiler artifacts on the PVC mounted at /compile-cache.
+            - name: XDG_CACHE_HOME
+              value: /compile-cache/xdg
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /compile-cache/torchinductor
+            - name: TRITON_CACHE_DIR
+              value: /compile-cache/triton
+            - name: CUDA_CACHE_PATH
+              value: /compile-cache/cuda
+            - name: DG_JIT_CACHE_DIR
+              value: /compile-cache/deepgemm
+            - name: FLASHINFER_WORKSPACE_BASE
+              value: /compile-cache/flashinfer
+            - name: TORCH_EXTENSIONS_DIR
+              value: /compile-cache/torch-extensions
+            - name: SGLANG_CACHE_DIR
+              value: /compile-cache/sglang
+            - name: SGLANG_JIT_CACHE_DIR
+              value: /compile-cache/sglang-jit
+            - name: TILELANG_CACHE_DIR
+              value: /compile-cache/tilelang
           ports:
             - name: api
               containerPort: 8000
@@ -168,6 +189,12 @@ spec:
             - name: app
               mountPath: /snapshot-app
               readOnly: true
+            - name: compiler-cache
+              mountPath: /compile-cache
+              subPath: compiler-cache/sglang
+            - name: compiler-cache
+              mountPath: /root/.cache/flashinfer
+              subPath: compiler-cache/sglang/flashinfer-fixed
       volumes:
         - name: shm
           emptyDir:
@@ -183,3 +210,6 @@ spec:
         - name: app
           configMap:
             name: sglang-app
+        - name: compiler-cache
+          persistentVolumeClaim:
+            claimName: snapshot-compiler-cache

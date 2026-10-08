@@ -16,12 +16,16 @@ after restore. The Snapshot agent injects the restore tooling at runtime.
 
 Download [`app.py`](vllm/app.py), [`capture/qwen3-0.6b.yaml`](vllm/capture/qwen3-0.6b.yaml),
 and [`restore/single-gpu.yaml`](vllm/restore/single-gpu.yaml) from the
-repository:
+repository, along with the [compiler-cache PVC](compiler-cache-pvc.yaml):
 
 ```bash
 mkdir -p vllm-snapshot
 cd vllm-snapshot
 mkdir -p capture restore
+
+curl --fail --location \
+  --output compiler-cache-pvc.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/compiler-cache-pvc.yaml
 
 curl --fail --location \
   --output app.py \
@@ -75,6 +79,11 @@ example keeps Engram weights on the GPU and does not enable a host KV connector.
 The source and restore pods must mount the Snapshot control volume at
 `/snapshot-control`.
 
+The capture and restore manifests mount a [persistent compiler cache](compiler-cache.md).
+Use a ReadWriteMany storage class, such as `vast` on nscale, and retain this PVC
+for every checkpoint that uses it. Set `storageClassName` in
+`compiler-cache-pvc.yaml` when the default class does not provide RWX storage.
+
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the vLLM pod will run, and create the ConfigMap
@@ -83,6 +92,8 @@ Set the namespace where the vLLM pod will run, and create the ConfigMap
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
+
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename compiler-cache-pvc.yaml
 
 kubectl create configmap vllm-app \
   --namespace "$SNAPSHOT_NAMESPACE" \

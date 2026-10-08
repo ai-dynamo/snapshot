@@ -34,6 +34,23 @@ spec:
               value: "2048"
             - name: VLLM_GPU_MEMORY_UTILIZATION
               value: "0.30"
+            # Keep compiler artifacts on the PVC mounted at /compile-cache.
+            - name: XDG_CACHE_HOME
+              value: /compile-cache/xdg
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /compile-cache/torchinductor
+            - name: TRITON_CACHE_DIR
+              value: /compile-cache/triton
+            - name: CUDA_CACHE_PATH
+              value: /compile-cache/cuda
+            - name: DG_JIT_CACHE_DIR
+              value: /compile-cache/deepgemm
+            - name: FLASHINFER_WORKSPACE_BASE
+              value: /compile-cache/flashinfer
+            - name: VLLM_CACHE_ROOT
+              value: /compile-cache/vllm
+            - name: VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
+              value: /compile-cache/vllm/flashinfer_autotune
           ports:
             - name: api
               containerPort: 8000
@@ -46,6 +63,12 @@ spec:
             - name: app
               mountPath: /snapshot-app
               readOnly: true
+            - name: compiler-cache
+              mountPath: /compile-cache
+              subPath: compiler-cache/vllm
+            - name: compiler-cache
+              mountPath: /root/.cache/flashinfer
+              subPath: compiler-cache/vllm/flashinfer-fixed
       volumes:
         - name: shm
           emptyDir:
@@ -54,3 +77,6 @@ spec:
         - name: app
           configMap:
             name: vllm-app
+        - name: compiler-cache
+          persistentVolumeClaim:
+            claimName: snapshot-compiler-cache

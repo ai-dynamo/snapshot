@@ -64,6 +64,15 @@ def pods(spec: frameworks.FrameworkSpec) -> tuple[dict, dict, workloads.TestRun]
 @pytest.mark.workload
 def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
+    cache_claims = {pvc["metadata"]["name"] for pvc in fw.cache_pvcs(config=CONFIG, spec=spec)}
+    source_cache_mounts = [
+        mount for mount in fw.main_container(source)["volumeMounts"]
+        if mount["name"] == "compiler-cache"
+    ]
+    assert source_cache_mounts == [
+        mount for mount in fw.main_container(restore)["volumeMounts"]
+        if mount["name"] == "compiler-cache"
+    ]
     assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
@@ -85,6 +94,10 @@ def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec)
         } in main["volumeMounts"]
         assert all(mount["mountPath"] != "/dev/net/tun" for mount in main["volumeMounts"])
         volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+        assert {
+            volume["persistentVolumeClaim"]["claimName"] for volume in volumes.values()
+            if "persistentVolumeClaim" in volume
+        } <= cache_claims
         assert volumes["snapshot-control"] == {"name": "snapshot-control", "emptyDir": {}}
         assert not any(v.get("hostPath", {}).get("path") == "/dev/net/tun" for v in volumes.values())
         for container in pod_spec.get("initContainers", []):
@@ -217,6 +230,9 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         )
         volumes = {v["name"]: v for v in pod_spec["volumes"]}
         assert volumes[frameworks.MODEL_CACHE_VOLUME]["persistentVolumeClaim"] == {
+            "claimName": CACHE.pvc_name
+        }
+        assert volumes["compiler-cache"]["persistentVolumeClaim"] == {
             "claimName": CACHE.pvc_name
         }
         # The guide's own claim (SGLang's sglang-model-cache) must not linger.

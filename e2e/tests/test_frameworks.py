@@ -145,8 +145,7 @@ def test_framework_checkpoint_restore_serves_inference(
             snap.ensure_pv(pv)
             snap.ensure_pvc(pvc)
         else:
-            guide_pvc = fw.model_cache_pvc(config=config, spec=framework)
-            if guide_pvc is not None:
+            for guide_pvc in fw.cache_pvcs(config=config, spec=framework):
                 snap.ensure_pvc(guide_pvc)
 
         k8s.apply_configmap(config.namespace, fw.app_configmap(config=config, spec=framework))

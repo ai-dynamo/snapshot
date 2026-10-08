@@ -68,6 +68,12 @@ spec:
             - name: app
               mountPath: /snapshot-app
               readOnly: true
+            - name: compiler-cache
+              mountPath: /compile-cache
+              subPath: compiler-cache/sglang
+            - name: compiler-cache
+              mountPath: /root/.cache/flashinfer
+              subPath: compiler-cache/sglang/flashinfer-fixed
       volumes:
         - name: shm
           emptyDir:
@@ -81,3 +87,6 @@ spec:
         - name: app
           configMap:
             name: sglang-app
+        - name: compiler-cache
+          persistentVolumeClaim:
+            claimName: snapshot-compiler-cache

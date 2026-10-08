@@ -61,6 +61,12 @@ spec:
             - name: app
               mountPath: /snapshot-app
               readOnly: true
+            - name: compiler-cache
+              mountPath: /compile-cache
+              subPath: compiler-cache/vllm
+            - name: compiler-cache
+              mountPath: /root/.cache/flashinfer
+              subPath: compiler-cache/vllm/flashinfer-fixed
       volumes:
         - name: snapshot-control
           emptyDir: {}
@@ -71,3 +77,6 @@ spec:
         - name: app
           configMap:
             name: vllm-app
+        - name: compiler-cache
+          persistentVolumeClaim:
+            claimName: snapshot-compiler-cache

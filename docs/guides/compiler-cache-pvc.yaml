@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: snapshot-compiler-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  # Select your RWX storage class here, for example storageClassName: vast on nscale.
+  resources:
+    requests:
+      storage: 100Gi

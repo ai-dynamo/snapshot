@@ -180,20 +180,23 @@ def app_configmap(
     }
 
 
-def model_cache_pvc(
+def cache_pvcs(
     *,
     config: k8s.E2EConfig,
     spec: FrameworkSpec,
-) -> dict[str, Any] | None:
-    path = spec.model_cache_manifest_path
-    if path is None:
-        return None
-    pvc = load_manifest(path)
-    pvc["metadata"]["namespace"] = config.namespace
-    storage_class = os.environ.get("SNAPSHOT_E2E_STORAGE_CLASS")
-    if storage_class:
-        pvc["spec"]["storageClassName"] = storage_class
-    return pvc
+) -> list[dict[str, Any]]:
+    paths = [spec.manifest_dir.parent / "compiler-cache-pvc.yaml"]
+    if spec.model_cache_manifest_path is not None:
+        paths.append(spec.model_cache_manifest_path)
+    pvcs = []
+    for path in paths:
+        pvc = load_manifest(path)
+        pvc["metadata"]["namespace"] = config.namespace
+        storage_class = os.environ.get("SNAPSHOT_E2E_STORAGE_CLASS")
+        if storage_class:
+            pvc["spec"]["storageClassName"] = storage_class
+        pvcs.append(pvc)
+    return pvcs
 
 
 def shared_model_cache_volume(
@@ -280,8 +283,8 @@ def use_shared_model_cache(pod_spec: dict[str, Any], cache: SharedModelCache) ->
     """Point the Pod at the shared cache instead of downloading.
 
     Drops the guide's download init container, rebinds (or adds) the
-    model-cache volume to the shared claim, mounts it at MODEL_CACHE_MOUNT on
-    every remaining container, and sets HF_HOME there with HF_HUB_OFFLINE=1 so
+    model and compiler cache volumes to the shared claim, mounts the model
+    cache at MODEL_CACHE_MOUNT, and sets HF_HOME there with HF_HUB_OFFLINE=1 so
     a missing model fails immediately instead of hanging on the network.
     """
     pod_spec["initContainers"] = [
@@ -295,6 +298,9 @@ def use_shared_model_cache(pod_spec: dict[str, Any], cache: SharedModelCache) ->
         "persistentVolumeClaim": {"claimName": cache.pvc_name},
     }
     volumes = [v for v in pod_spec.get("volumes", []) if v["name"] != MODEL_CACHE_VOLUME]
+    for existing in volumes:
+        if existing["name"] == "compiler-cache":
+            existing["persistentVolumeClaim"]["claimName"] = cache.pvc_name
     pod_spec["volumes"] = volumes + [volume]
 
     for container in pod_spec["containers"]:
