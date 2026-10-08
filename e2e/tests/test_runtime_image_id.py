@@ -43,6 +43,43 @@ def test_runtime_image_id_reads_optional_field_once(monkeypatch, image_fields, w
     ]
 
 
+def test_runtime_image_id_reads_past_a_runtime_endpoint_warning(monkeypatch):
+    """crictl warns on a node with no /etc/crictl.yaml, and k3s ships none.
+
+    exec merges stderr into the stream, so the warning arrives ahead of the
+    JSON. It describes how crictl found the runtime, not the container, and
+    must not read as a container the runtime could not describe.
+    """
+    config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
+    warning = (
+        'time="2026-10-07T09:09:23Z" level=warning '
+        'msg="runtime connect using default endpoints: '
+        '[unix:///run/k3s/containerd/containerd.sock]"\n'
+    )
+    payload = json.dumps({"status": {"id": "container-id", "imageId": "sha256:config"}})
+
+    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
+    monkeypatch.setattr(k8s, "exec_payload", lambda *_: warning + payload)
+
+    got = lifecycle.runtime_image_id(config, "node", "containerd://container-id")
+    assert got == "sha256:config"
+
+
+@pytest.mark.parametrize("output", ["", "crictl: not found\n", "   "])
+def test_runtime_image_id_reports_output_that_is_not_json(monkeypatch, output):
+    """A failed inspection must say what the node printed.
+
+    Decoding from the first brace means there is no brace to decode from when
+    the command itself failed, and a JSON decoder's complaint about column 1
+    says nothing about why.
+    """
+    config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
+    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
+    monkeypatch.setattr(k8s, "exec_payload", lambda *_: output)
+    with pytest.raises(AssertionError, match="printed no JSON"):
+        lifecycle.runtime_image_id(config, "node", "containerd://container-id")
+
+
 @pytest.mark.parametrize("response", [{}, {"status": None}, {"status": {}}, {"status": []}])
 def test_runtime_image_id_rejects_missing_status(monkeypatch, response):
     config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)

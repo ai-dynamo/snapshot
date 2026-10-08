@@ -3,12 +3,60 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from snapshot_e2e import benchmark as benchmark_result
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
 from snapshot_e2e.workloads import TestRun
+
+# Tests named here must actually run. A case that stops being selected, or
+# starts skipping, is the one regression a green check cannot show: pytest
+# exits 0 having run whatever it found, and exits non-zero only when it
+# collected nothing at all. CI names the cases it is there to prove; local runs
+# leave this unset, where skipping is legitimate.
+REQUIRED_TESTS_ENV = "SNAPSHOT_E2E_REQUIRED_TESTS"
+
+
+def required_test_names() -> set[str]:
+    raw = os.environ.get(REQUIRED_TESTS_ENV, "")
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
+def item_names(item: pytest.Item) -> set[str]:
+    """The names a required entry may match, parametrized or not.
+
+    A parametrized item's ``name`` carries its parameters, so the bare function
+    name is accepted too and one entry covers every case of it.
+    """
+    return {item.name, getattr(item, "originalname", None) or item.name}
+
+
+# trylast, because deselection by marker and by -k happens in this same hook:
+# running first would see the full collection and find nothing missing.
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(
+    session: pytest.Session,
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    """Refuse to run at all when a required case was not selected.
+
+    Deselection is checked here rather than at the end because a run that
+    never collects the case has nothing left to report it against.
+    """
+    required = required_test_names()
+    if not required:
+        return
+    selected = {name for item in items for name in item_names(item)}
+    missing = sorted(required - selected)
+    if missing:
+        raise pytest.UsageError(
+            f"{REQUIRED_TESTS_ENV} requires tests that this run did not select: "
+            + ", ".join(missing)
+        )
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -20,6 +68,14 @@ def pytest_runtest_makereport(
     report = outcome.get_result()
     setattr(item, f"benchmark_report_{call.when}", report)
     setattr(item, f"benchmark_excinfo_{call.when}", call.excinfo)
+    # A required case that skips leaves the suite green while proving nothing,
+    # so the skip is the failure. Rewriting the report rather than failing the
+    # session keeps the reason attached to the test that produced it.
+    if report.skipped and item_names(item) & required_test_names():
+        report.outcome = "failed"
+        report.longrepr = (
+            f"{item.name} is required to run, but it was skipped: {report_message(report)}"
+        )
 
 
 @pytest.fixture

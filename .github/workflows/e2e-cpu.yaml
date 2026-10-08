@@ -137,6 +137,28 @@ jobs:
               --cache-from=type=gha,scope=pagebroker \
               --cache-to=type=gha,scope=pagebroker,mode=max"
 
+      # A pass has to be attributable to the images this job built, not to
+      # whatever a registry happened to serve. Nothing is pushed here, so the
+      # local image ID is the only digest they have. Last of the build steps,
+      # so every image it names has been built.
+      - name: Record image provenance
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Images under test"
+            echo
+            echo "Built from commit \`${SOURCE_SHA}\`."
+            echo
+            echo "| Image | Local image ID |"
+            echo "| --- | --- |"
+            for component in operator agent pagebroker; do
+              image="${IMAGE_REGISTRY}/${component}:${IMAGE_TAG}"
+              echo "| \`${image}\` | \`$(docker image inspect --format '{{.Id}}' "${image}")\` |"
+            done
+          } >>"${GITHUB_STEP_SUMMARY}"
+
       - name: Install kubectl
         run: |
           set -euo pipefail
@@ -215,6 +237,13 @@ jobs:
 
       - name: Run CPU checkpoint/restore tests
         timeout-minutes: 25
+        env:
+          # The cases this job exists to prove. pytest exits 0 when a test is
+          # deselected or skips, so without naming them a marker change could
+          # leave the check green while it tested no round trip at all.
+          SNAPSHOT_E2E_REQUIRED_TESTS: >-
+            test_one_cpu_snapshot_restores_into_two_containers,
+            test_snapshotjob_cpu_captures_and_restore_recovers_state
         run: uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
 
       - name: Collect diagnostics

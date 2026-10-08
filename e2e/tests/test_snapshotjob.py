@@ -199,6 +199,8 @@ def test_snapshotjob_cpu_captures_and_restore_recovers_state(
         assert_snapshotjob_completed(sj)
 
         pod_snapshot_name = sj["status"]["podSnapshotName"]
+        assert pod_snapshot_name == snapshotjob_name
+
         _, content = snap.wait_for_snapshot_ready(
             config.namespace,
             pod_snapshot_name,
@@ -210,13 +212,25 @@ def test_snapshotjob_cpu_captures_and_restore_recovers_state(
         # it. The GPU test can watch for the pod because its workload takes
         # long enough to be caught; here the recorded name is the only one that
         # is guaranteed to still be readable.
+        #
+        # That makes the manifest check below a comparison between two things
+        # the system wrote, so the independent anchor is the assertion above:
+        # the PodSnapshot carries the name this test chose for the SnapshotJob.
         source = content["spec"]["source"]
         source_node = source["nodeName"]
         source_pod_name = source["podRef"]["name"]
+        assert source["podRef"]["containers"] == [workloads.CONTAINER]
         manifest = snap.checkpoint_artifact_manifest(
             config, source_node, content["metadata"]["uid"]
         )
+        assert "criuDump:" in manifest
         assert f"podName: {source_pod_name}" in manifest
+
+        artifact_listing = snap.checkpoint_artifact_listing(
+            config, source_node, content["metadata"]["uid"]
+        )
+        assert "./inventory.img" in artifact_listing
+        assert "./manifest.yaml" in artifact_listing
 
         snap.wait_for_pod_deleted(config.namespace, source_pod_name, timeout=120)
         assert k8s.read_job(config.namespace, snapshotjob_name) is None
