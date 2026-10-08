@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <stdexcept>
 
 #include "fatal_cleanup.hpp"
@@ -40,4 +41,5 @@ class Cancellation {
   Clock::time_point deadline_ = Clock::time_point::max();
   const Cancellation* parent_ = nullptr;
 };
+using CancellationPtr = std::shared_ptr<Cancellation>;
 }  // namespace snapshot::pagebroker

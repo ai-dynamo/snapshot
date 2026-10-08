@@ -41,6 +41,8 @@ const (
 	Failure_STORAGE_ERROR Failure_Code = 5
 	// The operation failed or was cancelled. Abort the transaction before retrying.
 	Failure_INTERNAL_ERROR Failure_Code = 6
+	// PageBroker is stopping or its GPU handler budget is full. No operation started.
+	Failure_UNAVAILABLE Failure_Code = 7
 )
 
 // Enum value maps for Failure_Code.
@@ -53,6 +55,7 @@ var (
 		4: "INSUFFICIENT_STORAGE",
 		5: "STORAGE_ERROR",
 		6: "INTERNAL_ERROR",
+		7: "UNAVAILABLE",
 	}
 	Failure_Code_value = map[string]int32{
 		"UNSPECIFIED":           0,
@@ -62,6 +65,7 @@ var (
 		"INSUFFICIENT_STORAGE":  4,
 		"STORAGE_ERROR":         5,
 		"INTERNAL_ERROR":        6,
+		"UNAVAILABLE":           7,
 	}
 )
 
@@ -1924,10 +1928,10 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x0fimage_directory\x18\x01 \x01(\tH\x00R\x0eimageDirectory\x88\x01\x01B\x12\n" +
 	"\x10_image_directory\"\x10\n" +
 	"\x0eCommitComplete\"\x0f\n" +
-	"\rAbortComplete\"\xa1\x02\n" +
+	"\rAbortComplete\"\xb2\x02\n" +
 	"\aFailure\x12=\n" +
 	"\x04code\x18\x01 \x01(\x0e2$.snapshot.pagebroker.v1.Failure.CodeH\x00R\x04code\x88\x01\x01\x12\x1d\n" +
-	"\amessage\x18\x02 \x01(\tH\x01R\amessage\x88\x01\x01\"\xa2\x01\n" +
+	"\amessage\x18\x02 \x01(\tH\x01R\amessage\x88\x01\x01\"\xb3\x01\n" +
 	"\x04Code\x12\x0f\n" +
 	"\vUNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fINVALID_REQUEST\x10\x01\x12\x19\n" +
@@ -1935,7 +1939,8 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x14TRANSACTION_CONFLICT\x10\x03\x12\x18\n" +
 	"\x14INSUFFICIENT_STORAGE\x10\x04\x12\x11\n" +
 	"\rSTORAGE_ERROR\x10\x05\x12\x12\n" +
-	"\x0eINTERNAL_ERROR\x10\x06B\a\n" +
+	"\x0eINTERNAL_ERROR\x10\x06\x12\x0f\n" +
+	"\vUNAVAILABLE\x10\aB\a\n" +
 	"\x05_codeB\n" +
 	"\n" +
 	"\b_message\"\xa0\b\n" +

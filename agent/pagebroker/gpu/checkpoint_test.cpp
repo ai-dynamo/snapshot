@@ -5,27 +5,119 @@
 // the real driver. The child owns the allocation being checkpointed.
 #include "checkpoint.hpp"
 #include "../file_descriptor.hpp"
+#include "../broker.hpp"
+#include "storage_manifest.hpp"
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
+#include <filesystem>
+#include <fstream>
+#include <future>
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
+#include <fcntl.h>
 #include <memory>
 #include <limits>
-#include <fcntl.h>
+#include <mutex>
+#include <poll.h>
 #include <stdexcept>
 #include <system_error>
 #include <string>
 #include <sys/wait.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace {
 using snapshot::pagebroker::gpu::driver::CheckpointAPI;
 using snapshot::pagebroker::gpu::driver::Operation;
+
+constexpr auto kGpuTestWait = std::chrono::seconds{30};
+constexpr auto kAbortResponseWait = std::chrono::seconds{35};
+constexpr auto kExpiryAdvance = std::chrono::hours{3};
+
+// Test synchronization only. The wrappers below call the real CUDA functions.
+// A copy pause holds stream work, while an unlock pause holds its completed
+// call's return. Neither changes CUDA results or substitutes an engine.
+class CudaPause {
+ public:
+  void Arm()
+  {
+    std::lock_guard lock(mutex_);
+    armed_ = true;
+    reached_ = false;
+    released_ = false;
+  }
+
+  bool Claim()
+  {
+    std::lock_guard lock(mutex_);
+    return std::exchange(armed_, false);
+  }
+
+  void Arrive(CUresult result, CUstream stream = nullptr)
+  {
+    std::lock_guard lock(mutex_);
+    result_ = result;
+    stream_ = stream;
+    reached_ = true;
+    changed_.notify_all();
+  }
+
+  bool Wait()
+  {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(lock, kGpuTestWait, [&] { return reached_; });
+  }
+
+  void Hold()
+  {
+    std::unique_lock lock(mutex_);
+    changed_.wait(lock, [&] { return released_; });
+  }
+
+  void Release()
+  {
+    std::lock_guard lock(mutex_);
+    armed_ = false;
+    released_ = true;
+    changed_.notify_all();
+  }
+
+  // Read after Wait, which synchronizes with Arrive.
+  CUresult result_ = CUDA_ERROR_NOT_READY;
+  CUstream stream_ = nullptr;
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable changed_;
+  bool armed_ = false;
+  bool reached_ = false;
+  bool released_ = false;
+};
+
+CudaPause copy_pause;
+CudaPause unlock_pause;
+
+class ScopedPause {
+ public:
+  explicit ScopedPause(CudaPause& pause) : pause_(pause)
+  {
+    pause_.Arm();
+  }
+  ~ScopedPause()
+  {
+    pause_.Release();
+  }
+ private:
+  CudaPause& pause_;
+};
 
 FileDescriptor OpenPidfd(int pid)
 {
@@ -144,11 +236,264 @@ void SelectContext(CUstream stream)
   Check(cuCtxSetCurrent(context), "select checkpoint stream context");
 }
 
+struct RestoreCase {
+  snapshot::pagebroker::Request request;
+  std::filesystem::path staging;
+  std::filesystem::path source;
+};
+
+namespace fs = std::filesystem;
+using namespace snapshot::pagebroker;
+
+// All scenarios share one engine to verify reuse after failed operations.
+class BrokerGpuTest {
+ public:
+  enum class Interruption { Abort, Expiry };
+
+  BrokerGpuTest(const fs::path& root, std::string visible_device, gpu::GpuEnginePtr engine)
+      : root_(root), visible_device_(std::move(visible_device)),
+        broker_(root / "staging", root / "storage", std::move(engine)) {}
+
+  void InterruptedRestore(Target& workload, const std::string& name, Interruption interruption)
+  {
+    SCOPED_TRACE(name);
+    const auto restore = PrepareRestore(workload, name);
+    auto process = OpenPidfd(workload.pid);
+    auto cancellation = std::make_shared<Cancellation>();
+    auto finish = RequestFor(name);
+    finish.mutable_commit();
+    // Release the pause before future destructors join, including on assertion failure.
+    std::future<Response> work;
+    std::future<Response> abort;
+    ScopedPause paused(copy_pause);
+    work = std::async(std::launch::async, [&] { return RunGpu(restore.request, cancellation); });
+    ASSERT_TRUE(copy_pause.Wait()) << "restore did not submit a CUDA copy";
+    ASSERT_EQ(copy_pause.result_, CUDA_SUCCESS);
+    // A real NIXL read completed before HtoD submission. The stream gate
+    // now holds that real copy pending, not merely a worker before Transfer.
+    SelectContext(copy_pause.stream_);
+    ASSERT_EQ(cuStreamQuery(copy_pause.stream_), CUDA_ERROR_NOT_READY);
+    ASSERT_EQ(work.wait_for(std::chrono::seconds{0}), std::future_status::timeout);
+    if (interruption == Interruption::Abort) {
+      auto request = RequestFor(name);
+      request.mutable_abort();
+      abort = std::async(std::launch::async, [&, request] { return broker_.HandleRequest(request); });
+      ASSERT_EQ(abort.wait_for(kAbortResponseWait), std::future_status::ready);
+      const auto response = abort.get();
+      ASSERT_TRUE(response.has_failure()) << response.DebugString();
+      EXPECT_EQ(response.failure().message(), "GPU cleanup is still running");
+    } else {
+      broker_.ReapExpiredTransactions(std::chrono::steady_clock::now() + kExpiryAdvance);
+    }
+    EXPECT_TRUE(cancellation->IsCancelled());
+    EXPECT_EQ(work.wait_for(std::chrono::seconds{0}), std::future_status::timeout);
+    EXPECT_TRUE(fs::exists(restore.staging / "image"));
+    EXPECT_TRUE(fs::exists(restore.source / gpu::kDataDirectory));
+    pollfd target_state{process.get(), POLLIN, 0};
+    EXPECT_EQ(poll(&target_state, 1, 0), 0) << "target exited before CUDA drained";
+    const auto rejected = broker_.HandleRequest(finish);
+    ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
+    EXPECT_EQ(rejected.failure().message(), "transaction is aborting");
+
+    copy_pause.Release();
+    ASSERT_EQ(work.wait_for(kGpuTestWait), std::future_status::ready);
+    const auto failed = work.get();
+    ASSERT_TRUE(failed.has_failure()) << failed.DebugString();
+    EXPECT_EQ(failed.failure().code(), Failure::INTERNAL_ERROR);
+    EXPECT_EQ(poll(&target_state, 1, 0), 1) << "failed restore target is still running";
+    EXPECT_NE(target_state.revents & (POLLIN | POLLHUP), 0);
+    if (interruption == Interruption::Abort) {
+      finish.mutable_abort();
+      const auto drained = broker_.HandleRequest(finish);
+      EXPECT_TRUE(drained.has_abort_complete()) << drained.DebugString();
+    } else {
+      broker_.ReapExpiredTransactions(std::chrono::steady_clock::now() + kExpiryAdvance);
+    }
+    EXPECT_FALSE(fs::exists(restore.staging));
+    EXPECT_TRUE(fs::exists(restore.source / gpu::kDataDirectory));
+  }
+
+  void LateSuccessCannotCommit(Target& late_target)
+  {
+    const auto restore = PrepareRestore(late_target, "late-success");
+
+    std::future<Response> work;
+    ScopedPause paused(unlock_pause);
+    work = std::async(std::launch::async, [&] { return RunGpu(restore.request); });
+    ASSERT_TRUE(unlock_pause.Wait()) << "restore did not unlock its target";
+    ASSERT_EQ(unlock_pause.result_, CUDA_SUCCESS);
+    broker_.ReapExpiredTransactions(std::chrono::steady_clock::now() + kExpiryAdvance);
+    EXPECT_TRUE(fs::exists(restore.staging / "image"));
+    unlock_pause.Release();
+    ASSERT_EQ(work.wait_for(kGpuTestWait), std::future_status::ready);
+    const auto restored = work.get();
+    ASSERT_TRUE(restored.has_gpu_restore_complete()) << restored.DebugString();
+    auto commit = RequestFor("late-success");
+    commit.mutable_commit();
+    const auto rejected = broker_.HandleRequest(commit);
+    ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
+    EXPECT_EQ(rejected.failure().message(), "transaction is aborting");
+    EXPECT_TRUE(fs::exists(restore.staging / "image"));
+    broker_.ReapExpiredTransactions(std::chrono::steady_clock::now() + kExpiryAdvance);
+    EXPECT_FALSE(fs::exists(restore.staging));
+    EXPECT_TRUE(fs::exists(restore.source / gpu::kDataDirectory));
+    EXPECT_EQ(late_target.Verify(), 0);
+  }
+
+  void BatchRoundTrip(Target& target, Target& next_target)
+  {
+    const auto destination = root_ / "storage" / "batch";
+    auto prepare = RequestFor("save-batch");
+    auto* storage = prepare.mutable_prepare_direct_checkpoint();
+    storage->mutable_destination()->mutable_filesystem()->set_directory(destination.string());
+    storage->mutable_io_engine()->mutable_posix_copy();
+    const auto prepared = broker_.HandleRequest(prepare);
+    ASSERT_TRUE(prepared.has_direct_checkpoint_directory()) << prepared.DebugString();
+    std::ofstream(fs::path(prepared.direct_checkpoint_directory().image_directory()) / "image") << "CPU image";
+
+    auto save = RequestFor("save-batch");
+    auto* checkpoint = save.mutable_checkpoint_gpu();
+    checkpoint->mutable_context()->add_visible_devices(visible_device_);
+    for (const Target* workload : {&target, &next_target}) {
+      checkpoint->mutable_context()->add_captured_pids(workload->pid);
+      auto* participant = checkpoint->add_targets();
+      participant->set_captured_pid(workload->pid);
+      participant->set_target_pid(workload->pid);
+    }
+    auto invalid = save;
+    invalid.mutable_checkpoint_gpu()->mutable_context()->set_visible_devices(0, "invalid-uuid");
+    const auto rejected = RunGpu(invalid);
+    ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
+    EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
+
+    const auto saved = RunGpu(save);
+    ASSERT_TRUE(saved.has_gpu_checkpoint_complete()) << saved.DebugString();
+    ASSERT_EQ(saved.gpu_checkpoint_complete().participants_size(), 2);
+
+    // Reordering a participant set must reuse the saved result, not execute CUDA again.
+    save.set_request_id(RequestFor("save-batch").request_id());
+    checkpoint->mutable_targets()->SwapElements(0, 1);
+    checkpoint->mutable_context()->mutable_captured_pids()->SwapElements(0, 1);
+    const auto repeated = RunGpu(save);
+    ASSERT_TRUE(repeated.has_gpu_checkpoint_complete()) << repeated.DebugString();
+    EXPECT_EQ(saved.gpu_checkpoint_complete().SerializeAsString(), repeated.gpu_checkpoint_complete().SerializeAsString());
+    EXPECT_EQ(repeated.request_id(), save.request_id());
+    auto changed = save;
+    changed.mutable_checkpoint_gpu()->mutable_targets()->SwapElements(0, 1);
+    auto* changed_targets = changed.mutable_checkpoint_gpu()->mutable_targets();
+    const auto first_pid = changed_targets->Get(0).target_pid();
+    changed_targets->Mutable(0)->set_target_pid(changed_targets->Get(1).target_pid());
+    changed_targets->Mutable(1)->set_target_pid(first_pid);
+    const auto conflict = RunGpu(changed);
+    ASSERT_TRUE(conflict.has_failure()) << conflict.DebugString();
+    EXPECT_EQ(conflict.failure().code(), Failure::TRANSACTION_CONFLICT);
+    auto commit = RequestFor("save-batch");
+    commit.mutable_commit();
+    const auto committed = broker_.HandleRequest(commit);
+    ASSERT_TRUE(committed.has_commit_complete()) << committed.DebugString();
+
+    auto stage = RequestFor("restore-batch");
+    auto* restore_storage = stage.mutable_staged_restore();
+    restore_storage->mutable_source()->mutable_filesystem()->set_directory(destination.string());
+    restore_storage->mutable_io_engine()->mutable_posix_copy();
+    const auto staged = broker_.HandleRequest(stage);
+    ASSERT_TRUE(staged.has_staged_restore_directory()) << staged.DebugString();
+    const fs::path directory(staged.staged_restore_directory().image_directory());
+    EXPECT_TRUE(fs::exists(directory / "image"));
+    EXPECT_FALSE(fs::exists(directory / gpu::kDataDirectory));
+    auto restore = RequestFor("restore-batch");
+    *restore.mutable_restore_gpu()->mutable_context() = checkpoint->context();
+    *restore.mutable_restore_gpu()->mutable_targets() = checkpoint->targets();
+    const auto restored = RunGpu(restore);
+    ASSERT_TRUE(restored.has_gpu_restore_complete()) << restored.DebugString();
+    ASSERT_EQ(restored.gpu_restore_complete().participants_size(), 2);
+    auto finish = RequestFor("restore-batch");
+    finish.mutable_commit();
+    const auto completed = broker_.HandleRequest(finish);
+    EXPECT_TRUE(completed.has_commit_complete()) << completed.DebugString();
+    EXPECT_FALSE(fs::exists(directory));
+    EXPECT_TRUE(fs::exists(destination / gpu::kDataDirectory));
+  }
+
+ private:
+  Request RequestFor(const std::string& transaction_id)
+  {
+    Request request;
+    request.set_request_id("request-" + transaction_id + "-" + std::to_string(++sequence_));
+    request.set_transaction_id(transaction_id);
+    return request;
+  }
+
+  Response RunGpu(const Request& request, CancellationPtr cancellation = std::make_shared<Cancellation>())
+  {
+    const auto& targets = request.has_checkpoint_gpu() ? request.checkpoint_gpu().targets() : request.restore_gpu().targets();
+    std::vector<FileDescriptor> descriptors;
+    for (const auto& participant : targets) {
+      descriptors.push_back(OpenPidfd(static_cast<int>(participant.target_pid())));
+    }
+    return broker_.HandleGpuRequest(request, std::move(cancellation), std::move(descriptors));
+  }
+
+  RestoreCase PrepareRestore(Target& workload, const std::string& name)
+  {
+    const auto source = root_ / "storage" / name;
+    auto prepare = RequestFor("save-" + name);
+    prepare.mutable_prepare_direct_checkpoint()->mutable_destination()->mutable_filesystem()->set_directory(source.string());
+    prepare.mutable_prepare_direct_checkpoint()->mutable_io_engine()->mutable_posix_copy();
+    auto response = broker_.HandleRequest(prepare);
+    if (!response.has_direct_checkpoint_directory()) {
+      throw std::runtime_error(response.DebugString());
+    }
+    std::ofstream(fs::path(response.direct_checkpoint_directory().image_directory()) / "image") << "CPU image";
+    auto save = RequestFor("save-" + name);
+    auto* checkpoint = save.mutable_checkpoint_gpu();
+    checkpoint->mutable_context()->add_captured_pids(workload.pid);
+    checkpoint->mutable_context()->add_visible_devices(visible_device_);
+    auto* participant = checkpoint->add_targets();
+    participant->set_captured_pid(workload.pid);
+    participant->set_target_pid(workload.pid);
+    response = RunGpu(save);
+    if (!response.has_gpu_checkpoint_complete()) {
+      throw std::runtime_error(response.DebugString());
+    }
+    prepare.mutable_commit();
+    response = broker_.HandleRequest(prepare);
+    if (!response.has_commit_complete()) {
+      throw std::runtime_error(response.DebugString());
+    }
+    auto stage = RequestFor(name);
+    stage.mutable_staged_restore()->mutable_source()->mutable_filesystem()->set_directory(source.string());
+    stage.mutable_staged_restore()->mutable_io_engine()->mutable_posix_copy();
+    response = broker_.HandleRequest(stage);
+    if (!response.has_staged_restore_directory()) {
+      throw std::runtime_error(response.DebugString());
+    }
+    auto restore = RequestFor(name);
+    *restore.mutable_restore_gpu()->mutable_context() = checkpoint->context();
+    *restore.mutable_restore_gpu()->mutable_targets() = checkpoint->targets();
+    return RestoreCase{std::move(restore), response.staged_restore_directory().image_directory(), source};
+  }
+
+  fs::path root_;
+  std::string visible_device_;
+  Broker broker_;
+  unsigned sequence_ = 0;
+};
+
 TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
 {
   // Fork before the parent initializes CUDA.
   Target target;
+  Target next_target;
+  // Broker failure cases also fork before the parent initializes CUDA.
+  Target cancelled_target;
+  Target expired_target;
+  Target late_target;
   target.Ready();
+  next_target.Ready();
+  cancelled_target.Ready();
+  expired_target.Ready();
+  late_target.Ready();
   CheckpointAPI api;
   api.RequireCustomStorage();
   CUdevice device;
@@ -200,6 +545,35 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
     restore.Complete();
     restore.Unlock();
   }
+  // Use the same workloads to exercise the broker with real CUDA and NIXL.
+  namespace fs = std::filesystem;
+  using namespace snapshot::pagebroker;
+  const auto root = fs::temp_directory_path() / ("pagebroker-gpu-" + std::to_string(getpid()));
+  fs::remove_all(root);
+  fs::create_directories(root / "storage");
+  CUuuid uuid;
+  Check(cuDeviceGetUuid(&uuid, device), "get workload GPU UUID");
+  std::array<unsigned char, 16> uuid_bytes;
+  std::copy(std::begin(uuid.bytes), std::end(uuid.bytes), uuid_bytes.begin());
+  const auto visible_device = gpu::storage::FormatGPUUUID(uuid_bytes);
+  constexpr size_t kTestBufferCount = 2;
+  constexpr size_t kTestChunkBytes = 1024 * 1024;
+  const gpu::EngineOptions options{kTestBufferCount, kTestChunkBytes, 0};
+  gpu::GpuEnginePtr engine = std::make_shared<gpu::GpuEngine>(options);
+  ASSERT_TRUE(engine->Available());
+  {
+    BrokerGpuTest broker(root, visible_device, engine);
+    ASSERT_NO_FATAL_FAILURE(broker.InterruptedRestore(
+        cancelled_target, "cancel-active", BrokerGpuTest::Interruption::Abort));
+    ASSERT_NO_FATAL_FAILURE(broker.InterruptedRestore(
+        expired_target, "expire-active", BrokerGpuTest::Interruption::Expiry));
+    ASSERT_NO_FATAL_FAILURE(broker.LateSuccessCannotCommit(late_target));
+    // Prove that the same engine and buffers still work after both failures.
+    ASSERT_NO_FATAL_FAILURE(broker.BatchRoundTrip(target, next_target));
+  }
+  engine.reset();
+  EXPECT_EQ(next_target.Verify(), 0);
+  fs::remove_all(root);
   Operation exited(api, target.pid, OpenPidfd(target.pid));
   EXPECT_EQ(target.Verify(), 0);
   try {
@@ -211,6 +585,34 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
   Check(cuDevicePrimaryCtxRelease(device), "release checkpoint context");
 }
 }  // namespace
+
+extern "C" CUresult CUDAAPI __real_cuMemcpyHtoDAsync_v2(CUdeviceptr, const void*, size_t, CUstream);
+extern "C" CUresult CUDAAPI __real_cuCheckpointProcessUnlock(int, CUcheckpointUnlockArgs*);
+
+extern "C" CUresult CUDAAPI
+__wrap_cuMemcpyHtoDAsync_v2(CUdeviceptr device, const void* host, size_t bytes, CUstream stream)
+{
+  if (!copy_pause.Claim()) {
+    return __real_cuMemcpyHtoDAsync_v2(device, host, bytes, stream);
+  }
+  // The callback only waits on a CPU latch. The test releases it before
+  // waiting for CUDA completion. No CUDA API runs inside the callback.
+  const auto gate = cuLaunchHostFunc(stream, [](void*) { copy_pause.Hold(); }, nullptr);
+  const auto result = __real_cuMemcpyHtoDAsync_v2(device, host, bytes, stream);
+  copy_pause.Arrive(result == CUDA_SUCCESS ? gate : result, stream);
+  return result;
+}
+
+extern "C" CUresult CUDAAPI
+__wrap_cuCheckpointProcessUnlock(int pid, CUcheckpointUnlockArgs* arguments)
+{
+  const auto result = __real_cuCheckpointProcessUnlock(pid, arguments);
+  if (unlock_pause.Claim()) {
+    unlock_pause.Arrive(result);
+    unlock_pause.Hold();
+  }
+  return result;
+}
 
 TEST(GpuTargetDescriptor, ReportsMissingFdinfoSeparatelyFromPidMismatch)
 {

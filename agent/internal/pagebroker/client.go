@@ -170,7 +170,7 @@ type failureError struct {
 func failureCode(code Failure_Code) Failure_Code {
 	switch code {
 	case Failure_UNSPECIFIED, Failure_INVALID_REQUEST, Failure_TRANSACTION_NOT_FOUND, Failure_TRANSACTION_CONFLICT,
-		Failure_INSUFFICIENT_STORAGE, Failure_STORAGE_ERROR, Failure_INTERNAL_ERROR:
+		Failure_INSUFFICIENT_STORAGE, Failure_STORAGE_ERROR, Failure_INTERNAL_ERROR, Failure_UNAVAILABLE:
 		return code
 	default:
 		return Failure_UNSPECIFIED

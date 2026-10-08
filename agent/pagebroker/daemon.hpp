@@ -5,11 +5,22 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <span>
+#include <string_view>
+#include "gpu/engine.hpp"
 
 enum class ExitCode { SUCCESS = 0, FAILURE = 1, INVALID_ARGUMENTS = 2 };
 
-ExitCode RunDaemon(
-    const std::filesystem::path& socket_path,
-    const std::filesystem::path& staging_directory,
-    const std::filesystem::path& storage_root,
-    size_t max_concurrent_requests);
+inline constexpr size_t kDefaultMaxConcurrentRequests = 16;
+
+struct DaemonOptions {
+  std::filesystem::path socket_path;
+  std::filesystem::path staging_directory;
+  std::filesystem::path storage_root;
+  size_t max_concurrent_requests = kDefaultMaxConcurrentRequests;
+  snapshot::pagebroker::gpu::EngineOptions gpu;
+  bool enable_gpu = true;
+};
+
+DaemonOptions ParseDaemonOptions(std::span<const std::string_view> arguments);
+ExitCode RunDaemon(const DaemonOptions& options);
