@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	contentvalidation "k8s.io/apimachinery/pkg/api/validate/content"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
@@ -50,6 +51,9 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	}
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
+	if err := injectHelperArtifactContract(podTemplate, targetContainer, string(sj.UID)); err != nil {
+		return nil, err
+	}
 
 	return protocol.NewSourceJob(podTemplate, protocol.SourceJobOptions{
 		Namespace:             sj.Namespace,
@@ -60,4 +64,39 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 		TTLSecondsAfterFinish: nil,
 		WrapLaunchJob:         false,
 	})
+}
+
+func injectHelperArtifactContract(template *corev1.PodTemplateSpec, target, uid string) error {
+	helpers, err := podcontract.HelperArtifactContainers(template.Annotations)
+	if err != nil || len(helpers) == 0 {
+		return err
+	}
+	subdir, err := podcontract.HelperArtifactSubdir(uid)
+	if err != nil {
+		return err
+	}
+	for _, name := range helpers {
+		if name == target {
+			return fmt.Errorf("%s must not name capture target %q", podcontract.HelperArtifactContainersAnnotation, name)
+		}
+		var helper *corev1.Container
+		for i := range template.Spec.Containers {
+			if template.Spec.Containers[i].Name == name {
+				helper = &template.Spec.Containers[i]
+				break
+			}
+		}
+		if helper == nil {
+			return fmt.Errorf("%s names missing regular helper container %q", podcontract.HelperArtifactContainersAnnotation, name)
+		}
+		for _, env := range helper.Env {
+			if env.Name == podcontract.SnapshotJobUIDEnv || env.Name == podcontract.HelperArtifactSubdirEnv {
+				return fmt.Errorf("helper container %q sets controller-owned environment variable %s", name, env.Name)
+			}
+		}
+		helper.Env = append(helper.Env,
+			corev1.EnvVar{Name: podcontract.SnapshotJobUIDEnv, Value: uid},
+			corev1.EnvVar{Name: podcontract.HelperArtifactSubdirEnv, Value: subdir})
+	}
+	return nil
 }

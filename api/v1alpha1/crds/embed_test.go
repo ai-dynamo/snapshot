@@ -195,6 +195,22 @@ func TestSnapshotJobIncludesTemplateMetadataAdmissionRules(t *testing.T) {
 	}
 }
 
+func TestSnapshotJobPodTemplateRetainsHelperOptInMetadata(t *testing.T) {
+	schema := snapshotJobOpenAPISchema(t)
+	metadata := nestedMap(t, schema,
+		"properties", "spec", "properties", "podTemplate", "properties", "metadata")
+	for _, field := range []string{"labels", "annotations"} {
+		property := nestedMap(t, metadata, "properties", field)
+		if property["type"] != "object" {
+			t.Errorf("podTemplate.metadata.%s must be an object", field)
+		}
+		values := nestedMap(t, property, "additionalProperties")
+		if values["type"] != "string" {
+			t.Errorf("podTemplate.metadata.%s must retain string map entries", field)
+		}
+	}
+}
+
 func snapshotJobOpenAPISchema(t *testing.T) map[string]any {
 	t.Helper()
 	manifestJSON, err := utilyaml.ToJSON([]byte(SnapshotJobCRD()))

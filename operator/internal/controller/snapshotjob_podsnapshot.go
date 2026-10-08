@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -233,6 +234,12 @@ func podSnapshotTemplateMetadata(sj *snapshotv1alpha1.SnapshotJob) (map[string]s
 	}
 	labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
 	labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
+	if helpers, present := sj.Spec.PodTemplate.Annotations[podcontract.HelperArtifactContainersAnnotation]; present {
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[podcontract.HelperArtifactContainersAnnotation] = helpers
+	}
 	return labels, annotations, nil
 }
 

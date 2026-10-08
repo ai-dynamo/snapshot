@@ -109,9 +109,17 @@ func IsSnapshotJobTerminal(j *SnapshotJob) bool {
 	return IsSnapshotJobCompleted(j) || IsSnapshotJobFailed(j)
 }
 
-// +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
+// SnapshotJobOnFailurePolicy controls reclamation of managed helper artifacts.
+// +kubebuilder:validation:Enum=Retain;CleanupHelpers
+type SnapshotJobOnFailurePolicy string
+
+const (
+	SnapshotJobOnFailureRetain         SnapshotJobOnFailurePolicy = "Retain"
+	SnapshotJobOnFailureCleanupHelpers SnapshotJobOnFailurePolicy = "CleanupHelpers"
+)
 
 // SnapshotJobSpec defines the desired state of SnapshotJob.
+// +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
 type SnapshotJobSpec struct {
 	// PodTemplate defines the workload to run and capture. The controller injects
 	// the snapshot contract (control volume, readiness probe, seccomp, sidecar
@@ -128,6 +136,14 @@ type SnapshotJobSpec struct {
 	// +kubebuilder:default=3600
 	// +kubebuilder:validation:Minimum=1
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+
+	// OnFailurePolicy defaults to Retain when omitted. CleanupHelpers permits
+	// reclamation of this failed attempt's declared, UID-owned helper artifacts
+	// only after every source writer stops. It never deletes capture artifacts,
+	// source objects, or failure status. Like the rest of spec, it is immutable.
+	// No server default is inserted into existing immutable specs.
+	// +optional
+	OnFailurePolicy SnapshotJobOnFailurePolicy `json:"onFailurePolicy,omitempty"`
 
 	// PodSnapshotTemplate defines the properties of the PodSnapshot produced by
 	// this job. The controller fills in spec.source from the pod it creates.

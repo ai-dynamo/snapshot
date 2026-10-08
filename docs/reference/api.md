@@ -79,6 +79,7 @@ declarative object.
 | `podTemplate` | PodTemplateSpec | yes | — | The workload to run and capture. The controller injects the snapshot contract (control volume, readiness probe, seccomp); image, command, GPU resources, and sidecars are the caller's. |
 | `podSnapshotTemplate.targetContainers` | []string | no | `["main"]` | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must name a container present in `podTemplate`. |
 | `activeDeadlineSeconds` | int64 | no | `3600` | Total time allowed for scheduling, quiesce, and dump; applied to the batch/v1 Job. |
+| `onFailurePolicy` | string | no | `Retain` (when omitted) | `Retain` preserves helper bytes for diagnosis. `CleanupHelpers` enables safe reclamation of this failed attempt's declared, UID-owned helper root after writers stop. Neither value changes capture-artifact or source-object deletion. |
 
 `podSnapshotTemplate` itself is required; its only field, `targetContainers`,
 defaults. The object's `metadata.name` must be at most 63 characters (it is used
@@ -103,6 +104,20 @@ as a label value).
 | `Captured` | The CRIU dump of the target container is complete (the `PodSnapshot` is Ready). |
 | `Completed` | The checkpoint is durable and the source Job has finished. |
 | `Failed` | A terminal failure occurred. |
+
+### Managed helper artifacts
+
+A helper that publishes additional checkpoint data can opt into attempt-owned storage with `spec.podTemplate.metadata.annotations.nvidia.com/snapshot-helper-artifact-containers`. The value is a comma-separated list of regular, non-target container names, for example `"weight-saver"`. Empty entries, duplicates, capture targets, and names absent from `podTemplate.spec.containers` are rejected before the source Job starts. The opt-in annotation is copied to the resulting `PodSnapshot`.
+
+Snapshot injects `SNAPSHOT_JOB_UID` and `SNAPSHOT_HELPER_ARTIFACT_SUBDIR` into each declared helper. The subdirectory is `helper-artifacts/<SnapshotJob UID>`, relative to the root of the shared checkpoint PVC. These environment variables are controller-owned; a declared helper must not set them in its own `env`. The caller supplies the PVC volume and mount, using the same shared storage root configured for operator artifact maintenance; Snapshot does not infer or inject a storage mount. Helpers can use different absolute mount paths and should place their own data in separate child directories beneath the injected subdirectory. The directory ownership, group, and permissions must allow the maintenance operator to traverse the tree and remove its entries, for example through a compatible UID or a shared writable group. Do not rely on the operator's root UID bypassing permissions: its security context drops capabilities. A helper must keep all managed bytes beneath this root, finish its writes before exiting, and must not use an independent background writer or an external shard directory.
+
+Restore consumers recover the original attempt UID from the produced `PodSnapshot`'s `nvidia.com/snapshot-job-uid` label and resolve the same relative directory. They must not select helper data by a reusable checkpoint name or attach it to a later attempt. Declaring a helper does not by itself make a checkpoint successful: `Completed=True` still requires a durable capture and successful helper termination.
+
+The storage annotation does not grant permission to delete bytes. Set `spec.onFailurePolicy: CleanupHelpers` at creation to enable failure reclamation; omission or `Retain` preserves the bytes, including for existing managed jobs. The field is immutable with the rest of `spec`, and no server default is inserted into existing specs. This policy affects only managed helper storage, not CRIU capture artifacts, source objects, or failure status. Install the matching CRD and operator before relying on cleanup; an older schema may prune the field and an older operator does not implement it.
+
+The operator's existing maintenance runnable inspects managed helper roots on startup and at `operator.artifactCleanup.scanInterval`. It reclaims a root only when the corresponding `SnapshotJob` explicitly selects `CleanupHelpers` and is positively `Failed=True`, the immutable source Job template proves the helper was given that exact UID and subdirectory, the recorded source Job incarnation is terminal, and authoritative source Pod records show every regular, init, and ephemeral container terminated in a terminal Pod. This prevents a failed target or controller restart from racing a saver that is still publishing. Cleanup may therefore wait until the source Job's deadline terminates an outstanding helper. Retries are idempotent, successful cleanup emits a `HelperArtifactsReclaimed` event and log with the attempt UID, and the failed source Job and capture records remain available for debugging.
+
+Completed, different, legacy, and unknown attempt roots are retained. Deleting a `SnapshotJob` does not prove failure, because successful artifacts outlive that object. Deleting a failed SnapshotJob or its source Job/Pod before maintenance proves writer termination also leaves the helper root retained; verify the attempt identity and that writers have stopped before manual removal. Uncertain API reads and unsafe filesystem roots likewise prevent deletion. The managed contract applies only to the shared PVC namespace; existing helper paths and external storage are unchanged.
 
 ## Restore
 

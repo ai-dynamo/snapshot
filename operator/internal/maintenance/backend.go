@@ -18,6 +18,8 @@ type Backend interface {
 	// Delete is a no-op when contentUID has nothing to remove.
 	Delete(ctx context.Context, contentUID string) error
 	Candidates(ctx context.Context, logger logr.Logger) (map[string]struct{}, error)
+	DeleteHelpers(ctx context.Context, jobUID string) error
+	HelperCandidates(ctx context.Context, logger logr.Logger) (map[string]struct{}, error)
 }
 
 // BackendRegistry looks up a Backend by Name(), case-insensitively.
