@@ -213,14 +213,22 @@ def exec_command(
 PAYLOAD_MARKER = "e2e-payload-follows"
 
 
-def exec_payload(namespace: str, pod: str, command: str) -> str:
+def exec_payload(
+    namespace: str,
+    pod: str,
+    command: str,
+    *,
+    container: str | None = None,
+) -> str:
     """Exec output with whatever the login shell printed first dropped.
 
     exec_command merges stderr into the stream, so a container whose profile
     writes anything breaks every caller that parses the result rather than
     matching a substring in it.
     """
-    output = exec_command(namespace, pod, f"echo {PAYLOAD_MARKER}; {command}")
+    output = exec_command(
+        namespace, pod, f"echo {PAYLOAD_MARKER}; {command}", container=container
+    )
     _, marker, payload = output.partition(PAYLOAD_MARKER)
     if not marker:
         raise AssertionError(f"exec output carried no payload marker: {output!r}")
