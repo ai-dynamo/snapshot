@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "posix_copy_engine.hpp"
+#include "gpu/storage_manifest.hpp"
 
 #include <filesystem>
 #include <stdexcept>
@@ -79,13 +80,34 @@ class RestorePreviousOnFailure {
   bool cancelled_ = false;
 };
 
+void
+ReplaceDirectory(const Path& from, const Path& to)
+{
+  if (!std::filesystem::exists(to)) {
+    std::filesystem::rename(from, to);
+    return;
+  }
+  const Path previous = PreviousPath(to);
+  std::filesystem::rename(to, previous);
+  RestorePreviousOnFailure restore_previous(previous, to);
+  std::filesystem::rename(from, to);
+  restore_previous.Cancel();
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(previous, cleanup_error);
+}
+
 uintmax_t
 DirectorySize(const Path& path)
 {
   uintmax_t bytes = 0;
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(path)) {
+  for (auto it = std::filesystem::recursive_directory_iterator(path); it != std::filesystem::recursive_directory_iterator(); ++it) {
+    const auto& entry = *it;
     if (entry.is_symlink())
       throw std::runtime_error("checkpoint contains symlink");
+    if (entry.path() == path / gpu::kDataDirectory) {
+      it.disable_recursion_pending();
+      continue;
+    }
     if (entry.is_regular_file())
       bytes += entry.file_size();
   }
@@ -101,12 +123,6 @@ PosixCopyEngine::type() const
   return IoEngine::POSIX_COPY;
 }
 
-Path
-PosixCopyEngine::SourceDirectory(const StorageBackend& source) const
-{
-  return SourcePath(source, storage_root_);
-}
-
 uintmax_t
 PosixCopyEngine::RestoreSize(const StorageBackend& source) const
 {
@@ -116,7 +132,37 @@ PosixCopyEngine::RestoreSize(const StorageBackend& source) const
 void
 PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destination) const
 {
-  CopyDirectory(SourcePath(source, storage_root_), destination);
+  const Path root = SourcePath(source, storage_root_);
+  std::filesystem::create_directory(destination);
+  for (auto it = std::filesystem::recursive_directory_iterator(root); it != std::filesystem::recursive_directory_iterator(); ++it) {
+    const auto& entry = *it;
+    const Path target = destination / entry.path().lexically_relative(root);
+    if (entry.is_symlink())
+      throw std::runtime_error("checkpoint contains symlink");
+    if (entry.path() == root / gpu::kDataDirectory) {
+      it.disable_recursion_pending();
+      continue;
+    }
+    if (entry.is_directory()) {
+      std::filesystem::create_directory(target);
+    } else if (entry.is_regular_file()) {
+      std::filesystem::copy_file(entry.path(), target);
+    } else {
+      throw std::runtime_error("checkpoint contains non-regular entry");
+    }
+  }
+}
+
+Path
+PosixCopyEngine::SourceDirectory(const StorageBackend& source) const
+{
+  return SourcePath(source, storage_root_);
+}
+
+Path
+PosixCopyEngine::DestinationDirectory(const StorageBackend& destination) const
+{
+  return DestinationPath(destination, storage_root_);
 }
 
 void
@@ -136,26 +182,23 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
 {
   const Path published = DestinationPath(destination, storage_root_);
   const Path partial = PartialPath(published);
-  const Path previous = PreviousPath(published);
   try {
     std::filesystem::create_directories(published.parent_path());
     CopyDirectory(source, partial);
-    if (std::filesystem::exists(published)) {
-      std::filesystem::rename(published, previous);
-      RestorePreviousOnFailure restore_previous(previous, published);
-      std::filesystem::rename(partial, published);
-      restore_previous.Cancel();
-      std::error_code cleanup_error;
-      std::filesystem::remove_all(previous, cleanup_error);
-      return;
-    }
-    std::filesystem::rename(partial, published);
+    ReplaceDirectory(partial, published);
   }
   catch (...) {
     std::error_code cleanup_error;
     std::filesystem::remove_all(partial, cleanup_error);
     throw;
   }
+}
+
+void
+PosixCopyEngine::PromoteCheckpoint(const Path& output, const StorageBackend& destination) const
+{
+  // Direct output is created beside the destination, so promotion cannot cross filesystems.
+  ReplaceDirectory(output, DestinationPath(destination, storage_root_));
 }
 
 void

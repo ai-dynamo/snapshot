@@ -7,9 +7,9 @@
 
 namespace snapshot::pagebroker {
 CheckpointTransactionDescriptor::CheckpointTransactionDescriptor(
-    Path staging_directory, StorageBackend destination_storage, IoEngine engine_type)
+    Path staging_directory, StorageBackend destination_storage, IoEngine engine_type, CheckpointOutput output)
     : staging_directory_(std::move(staging_directory)), destination_storage_(std::move(destination_storage)),
-      engine_type_(engine_type)
+      engine_type_(engine_type), output_(output)
 {
 }
 

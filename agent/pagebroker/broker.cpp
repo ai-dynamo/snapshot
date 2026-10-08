@@ -4,7 +4,11 @@
 #include "broker.hpp"
 
 #include <sys/statvfs.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -12,11 +16,14 @@
 #include <system_error>
 
 #include "posix_copy_engine.hpp"
+#include "gpu/storage_manifest.hpp"
+#include "gpu/checkpoint.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
 
+constexpr auto kGpuAbortTimeout = std::chrono::seconds{30};
 constexpr auto kTerminalTransactionRetention = std::chrono::hours(1);
 constexpr size_t kMaxRetainedTerminalTransactions = 1024;
 constexpr auto kLiveTransactionLifetime = std::chrono::hours(2) + std::chrono::minutes(5);
@@ -78,6 +85,15 @@ ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
   return request.destination();
 }
 
+FileDescriptor
+OpenDirectory(const Path& path)
+{
+  FileDescriptor directory(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (directory.get() < 0)
+    throw std::system_error(errno, std::generic_category(), "open artifact directory");
+  return directory;
+}
+
 void
 RejectSymlinks(const Path& directory)
 {
@@ -102,9 +118,154 @@ TransactionDirectory(const Path& transaction_root, const std::string& transactio
   return transaction_root / transaction_id;
 }
 
+using GpuRequest = Transaction::GpuRequest;
+using GpuOperation = Transaction::GpuOperation;
+using GpuState = GpuOperation::State;
+
+Path
+CheckpointOutputDirectory(const Path& destination, const std::string& transaction_id)
+{
+  return Path(destination.string() + ".pagebroker-tx-" + transaction_id);
+}
+
+void
+BeginAbort(Transaction& transaction)
+{
+  transaction.set_state(Transaction::State::ABORTING);
+  if (transaction.gpu_operation) {
+    transaction.gpu_operation->cancellation->Cancel();
+  }
+}
+
+std::string
+CanonicalUuid(const std::string& input)
+{
+  std::string uuid;
+  if (!gpu::storage::CanonicalizeGPUUUID(input, &uuid)) {
+    throw std::invalid_argument("invalid GPU UUID");
+  }
+  return uuid;
+}
+
+GpuRequest
+DecodeGpuRequest(const Request& request, std::span<const FileDescriptor> descriptors)
+{
+  GpuRequest decoded;
+  const v1::GpuContext* context;
+  const google::protobuf::RepeatedPtrField<v1::GpuTarget>* targets;
+  switch (request.command_case()) {
+    case Request::kCheckpointGpu:
+      decoded.direction = gpu::Direction::Checkpoint;
+      context = &request.checkpoint_gpu().context();
+      targets = &request.checkpoint_gpu().targets();
+      break;
+    case Request::kRestoreGpu:
+      decoded.direction = gpu::Direction::Restore;
+      context = &request.restore_gpu().context();
+      targets = &request.restore_gpu().targets();
+      break;
+    default:
+      throw std::invalid_argument("expected GPU checkpoint or restore request");
+  }
+  decoded.captured_pids.assign(context->captured_pids().begin(), context->captured_pids().end());
+  if (descriptors.size() != static_cast<size_t>(targets->size())) {
+    throw std::invalid_argument("GPU request requires one pidfd per target");
+  }
+  for (int index = 0; index < targets->size(); ++index) {
+    const auto& target = targets->Get(index);
+    const int pidfd = descriptors[index].get();
+    decoded.targets.push_back({target.captured_pid(), target.target_pid(), pidfd});
+  }
+  gpu::ValidateParticipants(decoded.captured_pids, decoded.targets);
+  for (const auto& target : decoded.targets) {
+    gpu::driver::ValidateTargetDescriptor(static_cast<int>(target.target_pid), target.pidfd);
+  }
+  for (const auto& device : context->visible_devices()) {
+    decoded.visible_devices.push_back(CanonicalUuid(device));
+  }
+  if (decoded.visible_devices.empty()) {
+    throw std::invalid_argument("GPU request requires visible devices");
+  }
+  for (const auto& mapping : context->device_map()) {
+    decoded.device_map.push_back({CanonicalUuid(mapping.source_uuid()), CanonicalUuid(mapping.target_uuid())});
+  }
+  // These fields describe sets. Their wire order does not change the operation.
+  std::sort(decoded.captured_pids.begin(), decoded.captured_pids.end());
+  std::sort(decoded.visible_devices.begin(), decoded.visible_devices.end());
+  std::ranges::sort(decoded.targets, {}, &gpu::Participant::captured_pid);
+  std::ranges::sort(decoded.device_map, {}, &gpu::DeviceMapping::source_uuid);
+  return decoded;
+}
+
+gpu::ArtifactPtr
+CreateGpuArtifact(const Transaction& transaction, const GpuRequest& request)
+{
+  if (request.direction == gpu::Direction::Restore) {
+    const auto* restore = std::get_if<RestoreTransactionDescriptor>(&transaction.descriptor());
+    if (!restore) {
+      throw std::invalid_argument("GPU restore requires a restore transaction");
+    }
+    return std::make_unique<gpu::Artifact>(restore->source_fd(), request.direction,
+        request.captured_pids, request.visible_devices, request.device_map);
+  }
+  const auto* checkpoint = std::get_if<CheckpointTransactionDescriptor>(&transaction.descriptor());
+  if (!checkpoint) {
+    throw std::invalid_argument("GPU checkpoint requires a checkpoint transaction");
+  }
+  auto directory = OpenDirectory(checkpoint->staging_directory());
+  return std::make_unique<gpu::Artifact>(directory.get(), request.direction,
+      request.captured_pids, request.visible_devices, request.device_map);
+}
+
+Response
+GpuSucceeded(const Request& request, gpu::Direction direction, const std::vector<gpu::ParticipantResult>& results)
+{
+  auto response = Reply(request);
+  auto* complete = direction == gpu::Direction::Checkpoint
+      ? response.mutable_gpu_checkpoint_complete() : response.mutable_gpu_restore_complete();
+  for (const auto& participant : results) {
+    auto* result = complete->add_participants();
+    result->set_captured_pid(participant.captured_pid);
+    result->set_bytes(participant.bytes);
+  }
+  return response;
+}
+
+// The engine returns only after its work is drained. Fatal cleanup exits in the
+// engine, so this owner never needs to expose CUDA resource state to the broker.
+class GpuCompletion {
+ public:
+  GpuCompletion(std::unique_lock<std::mutex>& lock, GpuOperation& operation)
+      : lock_(lock), operation_(operation)
+  {
+    operation_.state = GpuState::Running;
+    lock_.unlock();
+  }
+
+  ~GpuCompletion()
+  {
+    if (!lock_.owns_lock()) {
+      lock_.lock();
+    }
+    operation_.state = outcome_;
+    operation_.completed.notify_all();
+  }
+
+  void MarkRetryable()
+  {
+    outcome_ = GpuState::Ready;
+  }
+
+ private:
+  std::unique_lock<std::mutex>& lock_;
+  GpuOperation& operation_;
+  GpuState outcome_ = GpuState::Finished;
+};
+
 }  // namespace
 
-Broker::Broker(Path staging_root, Path storage_root) : staging_root_(fs::weakly_canonical(std::move(staging_root)))
+Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine)
+    : staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
   io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
   fs::remove_all(staging_root_ / "restore");
@@ -113,33 +274,74 @@ Broker::Broker(Path staging_root, Path storage_root) : staging_root_(fs::weakly_
   fs::create_directories(staging_root_ / "checkpoint");
 }
 
+Broker::~Broker()
+{
+  CancelGpuWork();
+}
+
+std::vector<std::pair<std::string, Broker::TransactionHandle>>
+Broker::TransactionSnapshot()
+{
+  std::lock_guard lock(transactions_mutex_);
+  return {transactions_.begin(), transactions_.end()};
+}
+
+void
+Broker::CancelGpuWork()
+{
+  for (const auto& [id, transaction] : TransactionSnapshot()) {
+    std::lock_guard lock(transaction->mutex());
+    if (transaction->gpu_operation) {
+      transaction->gpu_operation->cancellation->Cancel();
+    }
+  }
+}
+
+std::error_code
+Broker::CleanupTransactionDirectory(const std::string& id, Transaction& transaction)
+{
+  std::error_code error;
+  if (const auto* checkpoint = std::get_if<CheckpointTransactionDescriptor>(&transaction.descriptor())) {
+    fs::remove_all(checkpoint->staging_directory(), error);
+    if (error) {
+      return error;
+    }
+  }
+  fs::remove_all(TransactionDirectory(staging_root_ / "restore", id), error);
+  if (error) {
+    return error;
+  }
+  fs::remove_all(TransactionDirectory(staging_root_ / "checkpoint", id), error);
+  return error;
+}
+
 void
 Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
 {
-  std::vector<std::pair<std::string, TransactionHandle>> transactions;
-  {
-    std::lock_guard lock(transactions_mutex_);
-    for (const auto& [id, transaction] : transactions_) transactions.emplace_back(id, transaction);
-  }
-
-  for (const auto& [id, transaction] : transactions) {
+  for (const auto& [id, transaction] : TransactionSnapshot()) {
     std::lock_guard transaction_lock(transaction->mutex());
-    if (!transaction->expired(now, kLiveTransactionLifetime))
+    if (!transaction->expired(now, kLiveTransactionLifetime)) {
       continue;
-
-    std::error_code restore_error;
-    std::error_code checkpoint_error;
-    fs::remove_all(TransactionDirectory(staging_root_ / "restore", id), restore_error);
-    fs::remove_all(TransactionDirectory(staging_root_ / "checkpoint", id), checkpoint_error);
-    if (restore_error || checkpoint_error)
+    }
+    if (const auto& operation = transaction->gpu_operation) {
+      BeginAbort(*transaction);
+      // Expiry retries cleanup on a later sweep instead of waiting for I/O.
+      if (operation->state == GpuState::Running) {
+        continue;
+      }
+      operation->artifact.reset();
+    }
+    if (CleanupTransactionDirectory(id, *transaction)) {
       continue;
+    }
     transaction->clear_descriptor();
     transaction->set_state(Transaction::State::ABORTED);
 
     std::lock_guard transactions_lock(transactions_mutex_);
     const auto current = transactions_.find(id);
-    if (current != transactions_.end() && current->second == transaction)
+    if (current != transactions_.end() && current->second == transaction) {
       transactions_.erase(current);
+    }
   }
 }
 
@@ -246,6 +448,11 @@ Broker::Engine(const IOEngine& engine) const
 Response
 Broker::HandleRequest(const Request& request)
 {
+  if (request.has_capabilities() && !request.request_id().empty()) {
+    auto response = Reply(request);
+    response.mutable_capabilities()->set_custom_storage_available(gpu_engine_ && gpu_engine_->Available());
+    return response;
+  }
   if (!request.has_request_id() || request.request_id().empty() || !request.has_transaction_id() ||
       !IsSafePathComponent(request.transaction_id()))
     return Fail(request, Failure::INVALID_REQUEST, "request and transaction IDs are required");
@@ -255,6 +462,9 @@ Broker::HandleRequest(const Request& request)
     switch (request.command_case()) {
       case Request::kDirectRestore:
         response = DirectRestore(request);
+        break;
+      case Request::kPrepareDirectCheckpoint:
+        response = PrepareDirectCheckpoint(request);
         break;
       case Request::kStagedRestore:
         response = Restore(request);
@@ -289,13 +499,14 @@ Broker::DirectRestore(const Request& request)
 {
   const auto& input = request.direct_restore();
   const auto& engine = Engine(input.io_engine());
-  engine.SourceDirectory(input.source());
+  // GPU restore reads its payload through this descriptor.
+  auto source = OpenDirectory(engine.SourceDirectory(input.source()));
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());
   if (transaction->state() != Transaction::State::NEW)
     return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
   transaction->set_state(Transaction::State::PREPARING);
-  transaction->set_descriptor(RestoreTransactionDescriptor({}));
+  transaction->set_descriptor(RestoreTransactionDescriptor({}, std::move(source)));
   transaction->set_state(Transaction::State::STAGED);
   auto response = Reply(request);
   response.mutable_direct_restore_ready();
@@ -334,7 +545,7 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     engine.StageRestore(source, staging_directory);
     ReleaseStaging(bytes);
     staging_reserved = false;
-    transaction->set_descriptor(RestoreTransactionDescriptor(staging_directory));
+    transaction->set_descriptor(RestoreTransactionDescriptor(staging_directory, OpenDirectory(engine.SourceDirectory(source))));
     transaction->set_state(Transaction::State::STAGED);
   }
   catch (const std::exception& error) {
@@ -369,7 +580,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
   try {
     transaction->set_state(Transaction::State::PREPARING);
     fs::create_directory(staging_directory);
-    transaction->set_descriptor(CheckpointTransactionDescriptor(staging_directory, destination, engine.type()));
+    transaction->set_descriptor(CheckpointTransactionDescriptor(staging_directory, destination, engine.type(), CheckpointOutput::Staged));
     transaction->set_state(Transaction::State::STAGED);
   }
   catch (const std::exception& error) {
@@ -384,22 +595,37 @@ Response
 Broker::Commit(const Request& request)
 {
   auto transaction = FindTransaction(request.transaction_id());
-  if (!transaction)
+  if (!transaction) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
+  }
   std::lock_guard lock(transaction->mutex());
-  if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::ABORTED)
+  if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::ABORTED) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
-  if (transaction->state() == Transaction::State::PREPARING)
+  }
+  if (transaction->state() == Transaction::State::PREPARING) {
     return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction is preparing");
-  if (transaction->state() == Transaction::State::COMMITTED)
+  }
+  if (transaction->state() == Transaction::State::ABORTING) {
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction is aborting");
+  }
+  if (transaction->state() == Transaction::State::COMMITTED) {
     return CommitSucceeded(request);
+  }
+  if (const auto& operation = transaction->gpu_operation) {
+    if (operation->state != GpuState::Finished || operation->result.has_failure()) {
+      return Fail(request, Failure::TRANSACTION_CONFLICT, "GPU operation has not succeeded");
+    }
+    operation->artifact.reset();
+  }
 
-  if (const auto* restore = std::get_if<RestoreTransactionDescriptor>(&transaction->descriptor()))
+  if (const auto* restore = std::get_if<RestoreTransactionDescriptor>(&transaction->descriptor())) {
     return CleanupRestore(request, *transaction, *restore);
+  }
 
   const auto* checkpoint = std::get_if<CheckpointTransactionDescriptor>(&transaction->descriptor());
-  if (checkpoint == nullptr)
+  if (checkpoint == nullptr) {
     return Fail(request, Failure::INTERNAL_ERROR, "live transaction has no descriptor");
+  }
   return PublishCheckpoint(request, *transaction, *checkpoint);
 }
 
@@ -425,7 +651,11 @@ Broker::PublishCheckpoint(
     return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint destination conflicts");
   RejectSymlinks(staging_directory);
   try {
-    engine.PublishCheckpoint(staging_directory, descriptor.destination_storage());
+    if (descriptor.output() == CheckpointOutput::Direct) {
+      engine.PromoteCheckpoint(staging_directory, descriptor.destination_storage());
+    } else {
+      engine.PublishCheckpoint(staging_directory, descriptor.destination_storage());
+    }
     transaction.clear_descriptor();
     transaction.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;
@@ -441,21 +671,156 @@ Response
 Broker::Abort(const Request& request)
 {
   auto transaction = FindTransaction(request.transaction_id());
-  if (!transaction)
+  if (!transaction) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
-  std::lock_guard lock(transaction->mutex());
-  if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::COMMITTED)
+  }
+  std::unique_lock lock(transaction->mutex());
+  if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::COMMITTED) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
-  if (transaction->state() == Transaction::State::ABORTED)
+  }
+  if (transaction->state() == Transaction::State::ABORTED) {
     return AbortSucceeded(request);
-
-  const Path restore_root = staging_root_ / "restore";
-  const Path checkpoint_root = staging_root_ / "checkpoint";
-  fs::remove_all(TransactionDirectory(restore_root, request.transaction_id()));
-  fs::remove_all(TransactionDirectory(checkpoint_root, request.transaction_id()));
+  }
+  if (const auto operation = transaction->gpu_operation) {
+    BeginAbort(*transaction);
+    if (!operation->completed.wait_for(lock, kGpuAbortTimeout, [&] { return operation->state != GpuState::Running; })) {
+      return Fail(request, Failure::INTERNAL_ERROR, "GPU cleanup is still running");
+    }
+    operation->artifact.reset();
+  }
+  if (const auto error = CleanupTransactionDirectory(request.transaction_id(), *transaction)) {
+    return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
+  }
   transaction->clear_descriptor();
   transaction->set_state(Transaction::State::ABORTED);
   return AbortSucceeded(request);
+}
+
+Response
+Broker::PrepareDirectCheckpoint(const Request& request)
+{
+  const auto& input = request.prepare_direct_checkpoint();
+  const auto& storage_engine = Engine(input.io_engine());
+  storage_engine.ValidateCheckpointDestination(input.destination());
+  const auto destination = storage_engine.DestinationDirectory(input.destination());
+  const Path checkpoint_directory = CheckpointOutputDirectory(destination, request.transaction_id());
+  auto transaction = CreateOrGetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction->mutex());
+  if (transaction->state() != Transaction::State::NEW) {
+    const auto* prepared = std::get_if<CheckpointTransactionDescriptor>(&transaction->descriptor());
+    const bool same_destination = prepared && prepared->engine_type() == storage_engine.type() &&
+        storage_engine.DestinationDirectory(prepared->destination_storage()) == destination;
+    if (transaction->state() != Transaction::State::STAGED || !same_destination ||
+        prepared->staging_directory() != checkpoint_directory) {
+      return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction is already prepared");
+    }
+  } else {
+    fs::create_directories(destination.parent_path());
+    if (mkdir(checkpoint_directory.c_str(), S_IRWXU)) {
+      if (errno == EEXIST) {
+        return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
+      }
+      throw std::system_error(errno, std::generic_category(), "create checkpoint directory");
+    }
+    // Only this successful mkdir gives the transaction ownership for cleanup.
+    try {
+      transaction->set_state(Transaction::State::PREPARING);
+      transaction->set_descriptor(CheckpointTransactionDescriptor(
+          checkpoint_directory, input.destination(), storage_engine.type(), CheckpointOutput::Direct));
+      // STAGED means the output directory is ready. Checkpoint data is written next.
+      transaction->set_state(Transaction::State::STAGED);
+    } catch (const std::exception& error) {
+      return AbortStaging(request, *transaction, checkpoint_directory, error);
+    }
+  }
+  auto response = Reply(request);
+  response.mutable_direct_checkpoint_directory()->set_image_directory(checkpoint_directory.string());
+  return response;
+}
+
+Response
+Broker::HandleGpuRequest(const Request& request, CancellationPtr cancellation,
+                         std::vector<FileDescriptor> target_descriptors)
+{
+  if (request.request_id().empty() || !IsSafePathComponent(request.transaction_id()) || !cancellation) {
+    return Fail(request, Failure::INVALID_REQUEST, "GPU request requires IDs and cancellation token");
+  }
+  try {
+    auto decoded = DecodeGpuRequest(request, target_descriptors);
+    if (!gpu_engine_ || !gpu_engine_->Available()) {
+      return Fail(request, Failure::INVALID_REQUEST, "CustomStorage is unavailable");
+    }
+    auto transaction = FindTransaction(request.transaction_id());
+    if (!transaction) {
+      return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
+    }
+    std::unique_lock lock(transaction->mutex());
+    if (transaction->state() != Transaction::State::STAGED) {
+      return Fail(request, Failure::TRANSACTION_CONFLICT, "storage transaction is not ready");
+    }
+    if (const auto& previous = transaction->gpu_operation) {
+      if (previous->state == GpuState::Running) {
+        return Fail(request, Failure::TRANSACTION_CONFLICT, "GPU operation is running");
+      }
+      // A live original pidfd and equal host PID identify the same process.
+      // Once it exits, do not replay a result for a reused numeric PID.
+      for (const auto& target : previous->request.targets) {
+        gpu::driver::ValidateTargetDescriptor(static_cast<int>(target.target_pid), target.pidfd);
+      }
+      if (previous->request != decoded) {
+        return Fail(request, Failure::TRANSACTION_CONFLICT, "GPU operation already submitted with different inputs");
+      }
+      if (previous->state == GpuState::Finished) {
+        auto response = previous->result;
+        response.set_request_id(request.request_id());
+        return response;
+      }
+      previous->cancellation = std::move(cancellation);
+      return ExecuteGpu(request, previous, std::move(lock));
+    }
+    auto operation = std::make_shared<GpuOperation>();
+    operation->artifact = CreateGpuArtifact(*transaction, decoded);
+    operation->request = std::move(decoded);
+    operation->target_descriptors = std::move(target_descriptors);
+    operation->cancellation = std::move(cancellation);
+    transaction->gpu_operation = operation;
+    return ExecuteGpu(request, operation, std::move(lock));
+  } catch (const std::invalid_argument& error) {
+    return Fail(request, Failure::INVALID_REQUEST, error.what());
+  } catch (const std::exception& error) {
+    return Fail(request, Failure::INTERNAL_ERROR, error.what());
+  }
+}
+
+Response
+Broker::ExecuteGpu(const Request& request, const Transaction::GpuOperationPtr& operation,
+                   std::unique_lock<std::mutex> lock)
+{
+  operation->result = Fail(request, Failure::INTERNAL_ERROR, "GPU operation did not return a result");
+  GpuCompletion completion(lock, *operation);
+  Response response;
+  const auto& input = operation->request;
+  try {
+    std::vector<gpu::ParticipantResult> results;
+    switch (input.direction) {
+      case gpu::Direction::Checkpoint:
+        results = gpu_engine_->Checkpoint(*operation->artifact, input.targets, *operation->cancellation);
+        break;
+      case gpu::Direction::Restore:
+        results = gpu_engine_->Restore(*operation->artifact, input.targets, *operation->cancellation);
+        break;
+    }
+    response = GpuSucceeded(request, input.direction, results);
+  } catch (const gpu::TargetConflict& error) {
+    // No CUDA work started. Keep the artifact available for this request's retry.
+    completion.MarkRetryable();
+    response = Fail(request, Failure::TRANSACTION_CONFLICT, error.what());
+  } catch (const std::exception& error) {
+    response = Fail(request, Failure::INTERNAL_ERROR, error.what());
+  }
+  lock.lock();
+  operation->result.Swap(&response);
+  return operation->result;
 }
 
 }  // namespace snapshot::pagebroker

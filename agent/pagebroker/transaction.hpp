@@ -4,17 +4,47 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <variant>
+#include <string>
+#include <vector>
 
 #include "checkpoint_transaction_descriptor.hpp"
 #include "restore_transaction_descriptor.hpp"
+#include "gpu/engine.hpp"
 
 namespace snapshot::pagebroker {
 class Transaction {
  public:
-  enum class State { NEW, PREPARING, STAGED, COMMITTED, ABORTED };
+  enum class State { NEW, PREPARING, STAGED, ABORTING, COMMITTED, ABORTED };
   using Descriptor = std::variant<std::monostate, RestoreTransactionDescriptor, CheckpointTransactionDescriptor>;
+
+  struct GpuRequest {
+    gpu::Direction direction;
+    std::vector<uint32_t> captured_pids;
+    std::vector<std::string> visible_devices;
+    std::vector<gpu::DeviceMapping> device_map;
+    std::vector<gpu::Participant> targets;
+
+    bool operator==(const GpuRequest&) const = default;
+  };
+  struct GpuOperation {
+    enum class State { Ready, Running, Finished };
+
+    gpu::ArtifactPtr artifact;
+    GpuRequest request;
+    // Own the pidfds referenced by request.targets, including conflict retries.
+    std::vector<FileDescriptor> target_descriptors;
+    CancellationPtr cancellation;
+    State state = State::Ready;
+    Response result;
+    std::condition_variable completed;
+  };
+  using GpuOperationPtr = std::shared_ptr<GpuOperation>;
+  // Protected by mutex(), except the atomic cancellation token.
+  GpuOperationPtr gpu_operation;
 
   // Callers hold mutex() while accessing transaction state.
   std::mutex& mutex();
