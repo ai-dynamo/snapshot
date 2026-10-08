@@ -1001,6 +1001,7 @@ def assert_restored_state(
     container: str | None = None,
 ) -> str:
     expected_gpu = source_token if gpu else "disabled"
+    success_marker = "__snapshot_restored_state_verified__"
     command = f"""
     set -euo pipefail
     source_token={shlex.quote(source_token)}
@@ -1022,8 +1023,15 @@ def assert_restored_state(
     echo "source_token=$source_token restore_token=$restore_token checkpoint_observations={checkpoint_observations} before=$before after=$after"
     test "$before" -ge "{checkpoint_observations}"
     test "$after" -gt "$before"
+    echo {success_marker}
     """
-    return k8s.exec_command(namespace, pod, command, container=container)
+    output = k8s.exec_command(namespace, pod, command, container=container)
+    # The preloaded Kubernetes exec stream returns output even when the remote
+    # shell exits nonzero. Only this final marker proves every assertion ran.
+    assert success_marker in output.splitlines(), (
+        f"restored state check failed for {namespace}/{pod}:\n{output}"
+    )
+    return output
 
 
 def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:

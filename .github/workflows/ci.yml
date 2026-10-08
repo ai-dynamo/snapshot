@@ -87,6 +87,7 @@ jobs:
             e2e/tests/test_pod_status_writers.py \
             e2e/tests/test_required_tests.py \
             e2e/tests/test_resolve_snapshot_image_tag.py \
+            e2e/tests/test_restored_state.py \
             e2e/tests/test_runtime_image_id.py \
             e2e/tests/test_setup_chart_command.py \
             e2e/tests/test_setup_helm_overrides.py \
