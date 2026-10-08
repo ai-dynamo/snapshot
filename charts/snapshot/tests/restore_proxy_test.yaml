@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: restore proxy mounts
+templates:
+  - templates/daemonset.yaml
+tests:
+  # The agent copies the restore proxy into each restore container's
+  # snapshot-control emptyDir and writes restore-failed there, so the mount is
+  # writable. HostToContainer makes emptyDirs mounted after the agent started,
+  # such as medium: Memory, visible to it.
+  - it: mounts the kubelet pods directory writable with HostToContainer propagation
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: kubelet-pods
+            mountPath: /var/lib/kubelet/pods
+            mountPropagation: HostToContainer
+
+  # The directory, not the socket: a socket-typed hostPath would keep the agent
+  # from starting on nodes where the runtime has NRI turned off.
+  - it: mounts the NRI socket directory
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: nri
+            mountPath: /var/run/nri
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nri
+            hostPath:
+              path: /var/run/nri
+              type: DirectoryOrCreate

@@ -55,21 +55,24 @@ import (
 // snapshot execution for checkpoint and restore requests. Both paths are workqueue
 // driven, with typed reads/writes via an uncached controller-runtime client.
 type NodeController struct {
-	config                  *types.AgentConfig
-	clientset               kubernetes.Interface
-	client                  client.Client
-	dynClient               dynamic.Interface
-	runtime                 snapshotruntime.Runtime
-	injector                executor.RestoreMounter
-	log                     logr.Logger
-	checkpointFn            func(ctx context.Context, params CheckpointParams) error
-	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
-	writeControlSentinelFn  func(int, string, []byte) error
-	controlSentinelExistsFn func(int, string) (bool, error)
-	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
-	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
-	restorePodLister        corev1listers.PodLister
-	compareFn               func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
+	config                 *types.AgentConfig
+	clientset              kubernetes.Interface
+	client                 client.Client
+	dynClient              dynamic.Interface
+	runtime                snapshotruntime.Runtime
+	injector               executor.RestoreMounter
+	log                    logr.Logger
+	checkpointFn           func(ctx context.Context, params CheckpointParams) error
+	restoreFn              func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
+	writeControlSentinelFn func(int, string, []byte) error
+	// writePodControlSentinelFn writes through the host path of the control
+	// volume, for when no process in the container can be resolved.
+	writePodControlSentinelFn func(string, string, string, []byte) error
+	controlSentinelExistsFn   func(int, string) (bool, error)
+	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
+	restoreQueue              workqueue.TypedDelayingInterface[client.ObjectKey]
+	restorePodLister          corev1listers.PodLister
+	compareFn                 func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
 
 	// captureQueue holds PodSnapshotContent names. Its per-key exclusion is the capture path's only
 	// lock, which is enough because exactly one agent runs per node.
@@ -227,11 +230,12 @@ func newDefaultController(
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "capture-contents"},
 		),
 
-		restoreFn:               executor.Restore,
-		writeControlSentinelFn:  snapshotruntime.WriteControlSentinel,
-		controlSentinelExistsFn: snapshotruntime.ControlSentinelExists,
-		sendSignalFn:            snapshotruntime.SendSignalToPID,
-		compareFn:               compat.Compare,
+		restoreFn:                 executor.Restore,
+		writeControlSentinelFn:    snapshotruntime.WriteControlSentinel,
+		writePodControlSentinelFn: snapshotruntime.WritePodControlSentinel,
+		controlSentinelExistsFn:   snapshotruntime.ControlSentinelExists,
+		sendSignalFn:              snapshotruntime.SendSignalToPID,
+		compareFn:                 compat.Compare,
 	}
 	w.checkpointFn = w.executorCheckpoint
 	return w
@@ -608,6 +612,37 @@ func validatePodSnapshotContentForRestore(content *snapshotv1alpha1.PodSnapshotC
 		return newRestorePendingError("ContentPending", fmt.Sprintf("Waiting for PodSnapshotContent %s to become Ready", content.Name))
 	}
 	return nil
+}
+
+// RestoreDestinations returns the names of the containers a restore Pod
+// restores into. When the Pod carries no container map, the destination is the
+// captured container, which only the bound PodSnapshotContent records, so that
+// case reads the PodSnapshot and its content. It checks nothing else: the
+// restore itself still runs the full preflight.
+func (w *NodeController) RestoreDestinations(ctx context.Context, pod *corev1.Pod) ([]string, error) {
+	source := ""
+	if _, mapped := pod.Annotations[podcontract.RestoreContainerMapAnnotation]; !mapped {
+		snapshot, err := w.getPodSnapshotFromPod(ctx, pod)
+		if err != nil {
+			return nil, err
+		}
+		content, err := w.getPodSnapshotContentFromSnapshot(ctx, pod, snapshot)
+		if err != nil {
+			return nil, err
+		}
+		if source, err = singleTargetContainer(content); err != nil {
+			return nil, err
+		}
+	}
+	mappings, err := podcontract.ContainerMappingsFromAnnotations(pod.Annotations, source)
+	if err != nil {
+		return nil, err
+	}
+	destinations := make([]string, 0, len(mappings))
+	for _, mapping := range mappings {
+		destinations = append(destinations, mapping.Destination)
+	}
+	return destinations, nil
 }
 
 // validateRestoreTarget resolves the captured source and validates every
@@ -1007,6 +1042,12 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 	// Re-resolve because restore may fail before discovering the placeholder PID.
 	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
 	if err != nil {
+		// Nothing can be killed, so the marker is the only way the container's
+		// proxy learns that no restore is coming. Without a PID it goes
+		// through the host path of the control volume.
+		if markErr := w.writePodControlSentinelFn(string(op.pod.UID), op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
+			op.log.Error(markErr, "Failed to write restore-failed sentinel through the host path")
+		}
 		return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))
 	}
 	op.markRestoreFailed(placeholderHostPID)
