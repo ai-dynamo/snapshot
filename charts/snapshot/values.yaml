@@ -149,6 +149,12 @@ daemonset:
   # override is hosted in a private registry.
   imagePullSecrets: []
 
+  # RuntimeClass for the agent pod. CUDA checkpoint/restore requires the NVIDIA
+  # container runtime, which the GPU Operator exposes as RuntimeClass "nvidia".
+  # Set to "" when the NVIDIA runtime is already containerd's default and no
+  # such RuntimeClass exists; the field is then left out of the pod spec.
+  runtimeClassName: nvidia
+
   # Resource limits and requests
   resources:
     limits:

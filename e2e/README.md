@@ -54,7 +54,7 @@ because the cluster has a single node:
 | Faked | Why it is needed |
 | --- | --- |
 | Node label `nvidia.com/gpu.present=true` | the agent DaemonSet and workload pods both select GPU nodes |
-| `RuntimeClass/nvidia` on the `runc` handler | the agent pod hardcodes `runtimeClassName: nvidia` |
+| `RuntimeClass/nvidia` on the `runc` handler | the agent pod defaults to `runtimeClassName: nvidia` |
 | hostPath `PersistentVolume` declared `ReadWriteMany` | the installer requires an RWX checkpoint claim, and k3d's local-path provisioner is RWO |
 
 The script stops there. It does not install Snapshot and does not create the

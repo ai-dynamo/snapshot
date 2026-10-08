@@ -111,7 +111,7 @@ fake_gpu_nodes() {
 }
 
 fake_nvidia_runtime_class() {
-  # The agent pod hardcodes runtimeClassName: nvidia. k3s ships its own nvidia
+  # The agent pod defaults to runtimeClassName: nvidia. k3s ships its own nvidia
   # RuntimeClass and `handler` is immutable, so this has to be replaced rather
   # than applied over.
   log "pointing RuntimeClass/nvidia at the runc handler"
