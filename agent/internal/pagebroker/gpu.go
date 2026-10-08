@@ -252,9 +252,7 @@ func (g *CustomStorageExecution) peerProcess() (*os.File, error) {
 		fd, err = peerProcessFD(socket)
 		return err
 	})
-	// SO_PEERPIDFD uses the socket's stored process identity. The credential
-	// fallback can report ESRCH if the peer exits before pidfd_open. A reaped
-	// peer can otherwise report EINVAL, ESRCH, or return a readable pidfd.
+	// A peer that exits before or during pidfd lookup is already done.
 	if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ESRCH) {
 		return nil, os.ErrProcessDone
 	}
@@ -273,10 +271,7 @@ func peerProcessFD(socket int) (int, error) {
 }
 
 func peerProcessFDFromCredentials(socket int) (int, error) {
-	// SO_PEERPIDFD was added in Linux 6.5. On older kernels, read the
-	// credentials captured when the Unix socket connected and open the pidfd
-	// directly. The caller does this immediately after connect and keeps the
-	// resulting pidfd for the lifetime of the GPU operation.
+	// Linux before 6.5 lacks SO_PEERPIDFD; use the PID captured at connect time.
 	peer, err := unix.GetsockoptUcred(socket, unix.SOL_SOCKET, unix.SO_PEERCRED)
 	if err != nil {
 		return -1, err
