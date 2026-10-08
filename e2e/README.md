@@ -104,7 +104,9 @@ To prove an unexpected restore failure also makes the actual check red, use
 candidate run. This changes that test's expectation to `RestoreSucceeded`
 after corrupting only its own checkpoint inventory; the success wait is
 limited to 60 seconds. The CPU job must fail, retain its failure diagnostics,
-and still delete the k3d cluster. A green probe is a qualification failure.
+and still delete the k3d cluster. If pytest unexpectedly passes, a separate
+workflow guard fails the job because the corruption did not prove a restore
+failure; that guard failure does not qualify failure propagation.
 Normal PR runs always disable the probe.
 
 For a separately authorized disposable local CPU cluster, set

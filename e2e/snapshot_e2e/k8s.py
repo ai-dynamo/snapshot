@@ -19,11 +19,15 @@ from snapshot_e2e.infra.preflight import load_config
 SNAPSHOT_LABEL = "app.kubernetes.io/name=snapshot"
 
 
-def cpu_only_mode() -> bool:
-    value = os.environ.get("SNAPSHOT_E2E_CPU_ONLY", "false")
+def bool_env(name: str) -> bool:
+    value = os.environ.get(name, "false")
     if value not in ("", "false", "true"):
-        raise ValueError("SNAPSHOT_E2E_CPU_ONLY must be true or false")
+        raise ValueError(f"{name} must be true or false")
     return value == "true"
+
+
+def cpu_only_mode() -> bool:
+    return bool_env("SNAPSHOT_E2E_CPU_ONLY")
 
 
 def require_single_cpu_node() -> None:
@@ -36,6 +40,15 @@ def require_single_cpu_node() -> None:
     )
     if node.spec.unschedulable or not ready:
         raise ValueError("CPU-only E2E requires a ready, schedulable node")
+    # CPU workloads declare no tolerations for blocking node taints. A Ready
+    # node can still leave every source/restore pod Pending.
+    blocking = [
+        f"{taint.key}={taint.value or ''}:{taint.effect}"
+        for taint in node.spec.taints or []
+        if taint.effect in ("NoSchedule", "NoExecute")
+    ]
+    if blocking:
+        raise ValueError(f"CPU-only E2E node has blocking taints: {', '.join(blocking)}")
 
 
 @dataclass(frozen=True)

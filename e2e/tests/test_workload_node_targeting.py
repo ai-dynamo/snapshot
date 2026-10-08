@@ -96,3 +96,35 @@ def test_cpu_mode_accepts_one_ready_node(monkeypatch):
     )
     monkeypatch.setattr(client.CoreV1Api, "list_node", lambda self: client.V1NodeList(items=[node]))
     k8s.require_single_cpu_node()
+
+
+@pytest.mark.parametrize("effect", ["NoSchedule", "NoExecute", "PreferNoSchedule"])
+def test_cpu_mode_checks_ready_node_taints(monkeypatch, effect):
+    node = client.V1Node(
+        spec=client.V1NodeSpec(taints=[client.V1Taint(key="dedicated", value="gpu", effect=effect)]),
+        status=client.V1NodeStatus(conditions=[client.V1NodeCondition(type="Ready", status="True")]),
+    )
+    monkeypatch.setattr(client.CoreV1Api, "list_node", lambda self: client.V1NodeList(items=[node]))
+    if effect == "PreferNoSchedule":
+        k8s.require_single_cpu_node()
+    else:
+        with pytest.raises(ValueError, match=f"blocking taints: dedicated=gpu:{effect}"):
+            k8s.require_single_cpu_node()
+
+
+@pytest.mark.parametrize("name", ["SNAPSHOT_E2E_CPU_ONLY", "SNAPSHOT_E2E_RESTORE_FAILURE_PROBE"])
+@pytest.mark.parametrize("value,expected", [(None, False), ("", False), ("false", False), ("true", True)])
+def test_boolean_environment_contract(monkeypatch, name, value, expected):
+    if value is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, value)
+    assert k8s.bool_env(name) is expected
+
+
+@pytest.mark.parametrize("name", ["SNAPSHOT_E2E_CPU_ONLY", "SNAPSHOT_E2E_RESTORE_FAILURE_PROBE"])
+@pytest.mark.parametrize("value", ["TRUE", "1", "typo"])
+def test_boolean_environment_rejects_invalid_input(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=f"{name} must be true or false"):
+        k8s.bool_env(name)

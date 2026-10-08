@@ -3,10 +3,12 @@
 
 """Run the canonical failure case against observations without a cluster."""
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 import test_snapshot_lifecycle as cases
 
 from snapshot_e2e import k8s
@@ -112,3 +114,30 @@ def test_real_restore_failure_probe(monkeypatch):
     result.assert_outcomes(failed=1)
     assert result.ret == pytest.ExitCode.TESTS_FAILED
     result.stdout.fnmatch_lines(["*unexpected terminal condition*RestoreFailed*"])
+
+
+def test_workflow_rejects_a_green_manual_probe():
+    workflow = yaml.safe_load((Path(__file__).parents[2] / ".github/workflows/e2e-cpu.yaml").read_text())
+    steps = workflow["jobs"]["cpu-e2e"]["steps"]
+    names = [step["name"] for step in steps]
+    guard = steps[names.index("Reject an unexpectedly successful restore-failure probe")]
+    assert "success()" in guard["if"]
+    assert "github.event_name == 'workflow_dispatch'" in guard["if"]
+    assert "inputs.qualify_restore_failure" in guard["if"]
+    assert names.index("Run CPU checkpoint/restore tests") < names.index(guard["name"]) < names.index("Collect diagnostics")
+    # Execute the exact workflow shell: unexpected pytest success must become
+    # a blocking, explicitly ineffective-injection verdict with diagnostics.
+    result = subprocess.run(["bash", "-e", "-c", guard["run"]], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "::error::" in result.stdout
+    assert "did not prove a restore failure" in result.stdout
+    assert steps[-1]["name"] == "Delete k3d cluster"
+    assert steps[-1]["if"] == "${{ always() }}"
+
+
+def test_manual_qualification_is_not_cancelled_by_a_pr_update():
+    workflow = yaml.safe_load((Path(__file__).parents[2] / ".github/workflows/e2e-cpu.yaml").read_text())
+    concurrency = workflow["concurrency"]
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+    assert "github.event_name" in concurrency["group"]
+    assert "github.event.pull_request.number || github.run_id" in concurrency["group"]

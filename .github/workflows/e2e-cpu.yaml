@@ -23,8 +23,10 @@ on:
         default: false
 
 concurrency:
-  group: snapshot-e2e-cpu-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR runs can be cancelled on their disposable hosted runners.
+  # Manual qualification runs have separate groups and must retain evidence.
+  group: snapshot-e2e-cpu-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -246,6 +248,12 @@ jobs:
             test_snapshotjob_cpu_captures_and_restore_recovers_state,
             test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot
         run: uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
+
+      - name: Reject an unexpectedly successful restore-failure probe
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.qualify_restore_failure }}
+        run: |
+          echo "::error::The restore-failure probe passed; checkpoint corruption did not prove a restore failure."
+          exit 1
 
       - name: Collect diagnostics
         if: ${{ failure() }}

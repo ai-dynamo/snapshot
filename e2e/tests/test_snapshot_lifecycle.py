@@ -460,10 +460,7 @@ def test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot(
     that the failure sticks to the pod and does not spread to the snapshot,
     which is still a correct record of a capture that did succeed.
     """
-    probe_value = os.environ.get("SNAPSHOT_E2E_RESTORE_FAILURE_PROBE", "false")
-    if probe_value not in ("", "false", "true"):
-        raise ValueError("SNAPSHOT_E2E_RESTORE_FAILURE_PROBE must be true or false")
-    probe = probe_value == "true"
+    probe = k8s.bool_env("SNAPSHOT_E2E_RESTORE_FAILURE_PROBE")
     if probe and not config.cpu_only:
         raise ValueError("restore-failure qualification requires CPU-only mode")
     try:
