@@ -80,15 +80,6 @@ func (c Client) OpenCustomStorageExecution(transactionID string, gpuContext *Gpu
 		GPUContext:      gpuContext,
 		TransactionID:   transactionID,
 	}
-	// An unconnected socket has no peer. Require this option before GPU work.
-	if peer, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_PEERPIDFD); !errors.Is(err, unix.ENODATA) {
-		if err == nil {
-			unix.Close(peer)
-			err = errors.New("unconnected socket has a peer")
-		}
-		execution.Close()
-		return nil, fmt.Errorf("PageBroker GPU execution requires SO_PEERPIDFD: %w", err)
-	}
 	return execution, nil
 }
 
@@ -258,12 +249,12 @@ func (g *CustomStorageExecution) peerProcess() (*os.File, error) {
 	var fd int
 	err := g.socketControl(func(socket int) error {
 		var err error
-		fd, err = unix.GetsockoptInt(socket, unix.SOL_SOCKET, unix.SO_PEERPIDFD)
+		fd, err = peerProcessFD(socket)
 		return err
 	})
-	// This fixed-size SO_PEERPIDFD call uses the socket's stored process identity.
-	// Older kernels report EINVAL after that process is reaped. Newer kernels
-	// report ESRCH or return a pidfd that is already readable.
+	// SO_PEERPIDFD uses the socket's stored process identity. The credential
+	// fallback can report ESRCH if the peer exits before pidfd_open. A reaped
+	// peer can otherwise report EINVAL, ESRCH, or return a readable pidfd.
 	if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ESRCH) {
 		return nil, os.ErrProcessDone
 	}
@@ -271,6 +262,26 @@ func (g *CustomStorageExecution) peerProcess() (*os.File, error) {
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), "pagebroker-process"), nil
+}
+
+func peerProcessFD(socket int) (int, error) {
+	fd, err := unix.GetsockoptInt(socket, unix.SOL_SOCKET, unix.SO_PEERPIDFD)
+	if !errors.Is(err, unix.ENOPROTOOPT) {
+		return fd, err
+	}
+	return peerProcessFDFromCredentials(socket)
+}
+
+func peerProcessFDFromCredentials(socket int) (int, error) {
+	// SO_PEERPIDFD was added in Linux 6.5. On older kernels, read the
+	// credentials captured when the Unix socket connected and open the pidfd
+	// directly. The caller does this immediately after connect and keeps the
+	// resulting pidfd for the lifetime of the GPU operation.
+	peer, err := unix.GetsockoptUcred(socket, unix.SOL_SOCKET, unix.SO_PEERCRED)
+	if err != nil {
+		return -1, err
+	}
+	return unix.PidfdOpen(int(peer.Pid), 0)
 }
 
 // Abort retains the execution until PageBroker confirms cleanup or exits.

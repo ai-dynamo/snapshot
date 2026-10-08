@@ -64,6 +64,29 @@ func openTestPidfd(t *testing.T) *os.File {
 	return file
 }
 
+func TestPeerProcessFromCredentials(t *testing.T) {
+	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(sockets[0])
+	defer unix.Close(sockets[1])
+
+	fd, err := peerProcessFDFromCredentials(sockets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+
+	identity, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(identity), fmt.Sprintf("Pid:\t%d\n", os.Getpid())) {
+		t.Fatalf("fallback opened wrong process descriptor: %s", identity)
+	}
+}
+
 func readGPURequest(connection *net.UnixConn) (*Request, []int, error) {
 	header := make([]byte, 4)
 	control := make([]byte, unix.CmsgSpace(4*maxPassedFiles))
