@@ -25,6 +25,7 @@
 #include <utility>
 
 #include "checkpoint.hpp"
+#include "../errors.hpp"
 #include "file_descriptor.hpp"
 #include "storage_manifest.hpp"
 #include "transfer.hpp"
@@ -33,40 +34,6 @@ namespace snapshot::pagebroker::gpu {
 namespace {
 namespace transfer = snapshot::pagebroker::cuda;
 constexpr auto kGpuWaitInterval = std::chrono::milliseconds{100};
-
-void
-Require(bool condition, const char* message)
-{
-  if (!condition) {
-    throw std::runtime_error(message);
-  }
-}
-
-void
-Validate(bool condition, const char* message)
-{
-  if (!condition) {
-    throw std::invalid_argument(message);
-  }
-}
-
-void
-LogException(const char* operation, std::exception_ptr exception) noexcept
-{
-  try {
-    std::rethrow_exception(exception);
-  } catch (const std::exception& error) {
-    std::fprintf(stderr, "%s: %s\n", operation, error.what());
-  } catch (...) {
-    std::fprintf(stderr, "%s: unknown exception\n", operation);
-  }
-}
-
-void
-CheckCancellation(const Cancellation& cancellation)
-{
-  Require(!cancellation.IsCancelled(), "GPU operation cancelled");
-}
 
 FileDescriptor
 OpenDirectory(int parent, const char* name)
@@ -389,9 +356,9 @@ AcquireDevice(std::timed_mutex& mutex, const Cancellation& cancellation)
 {
   std::unique_lock lock(mutex, std::defer_lock);
   do {
-    CheckCancellation(cancellation);
+    cancellation.ThrowIfCancelled();
   } while (!lock.try_lock_for(kGpuWaitInterval));
-  CheckCancellation(cancellation);
+  cancellation.ThrowIfCancelled();
   return lock;
 }
 
@@ -572,7 +539,7 @@ public:
       operations_.push_back(std::make_unique<Operation>(engine, participant,
           targets.at(participant.captured_pid), cancellation_, results_[index]));
     }
-    CheckCancellation(cancellation_);
+    cancellation_.ThrowIfCancelled();
     claim_ = std::make_unique<TargetClaim>(engine.targets_mutex, engine.active_targets, std::move(host_pids));
   }
 
@@ -600,7 +567,7 @@ public:
         for (auto& operation : operations_) {
           operation->WriteManifest();
         }
-        CheckCancellation(cancellation_);
+        cancellation_.ThrowIfCancelled();
       } catch (...) {
         RecordFailure(std::current_exception());
       }
@@ -624,7 +591,7 @@ public:
     if (!failure_) {
       try {
         CompleteAll();
-        CheckCancellation(cancellation_);
+        cancellation_.ThrowIfCancelled();
         // CUDA unlocks one process at a time. Ignore cancellation once this
         // sequence starts. A later unlock failure fails the whole restore and
         // cleanup terminates its targets, including any that already resumed.
@@ -641,7 +608,7 @@ public:
 private:
   void Begin(Operation& operation)
   {
-    CheckCancellation(cancellation_);
+    cancellation_.ThrowIfCancelled();
     operation.CheckTarget();
     if (!started_) {
       Require(!artifact_.consumed.exchange(true), "GPU artifact operation already executed");
@@ -669,7 +636,7 @@ private:
 
   void StartTransfer(Operation& operation, void (Operation::*transfer)())
   {
-    CheckCancellation(cancellation_);
+    cancellation_.ThrowIfCancelled();
     transfers_.emplace_back([this, &operation, transfer] {
       try {
         (operation.*transfer)();
@@ -688,7 +655,7 @@ private:
 
   void CompleteAll()
   {
-    CheckCancellation(cancellation_);
+    cancellation_.ThrowIfCancelled();
     for (auto operation = operations_.rbegin(); operation != operations_.rend(); ++operation) {
       (*operation)->Complete();
     }

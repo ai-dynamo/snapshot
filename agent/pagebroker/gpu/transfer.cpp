@@ -3,6 +3,7 @@
 
 #include "transfer.hpp"
 #include "errors.hpp"
+#include "../errors.hpp"
 #include "../io_engine.hpp"
 #include "../fatal_cleanup.hpp"
 #include <cerrno>
@@ -33,13 +34,6 @@ struct TransferChunks {
   size_t Offset(size_t index) const { return index * capacity; }
   size_t Length(size_t index) const { return std::min(capacity, bytes - Offset(index)); }
 };
-
-void CheckCancelled(const Cancellation& cancellation)
-{
-  if (cancellation.IsCancelled()) {
-    throw std::runtime_error(cancellation.DeadlineExceeded() ? "transfer deadline exceeded" : "transfer cancelled");
-  }
-}
 
 CUresult HostAllocationProperties(CUdevice* device, CUmemAllocationProp* properties,
                                   size_t* granularity)
@@ -208,20 +202,16 @@ class TransferSlot {
 
 size_t TransferMemoryBytes(const TransferOptions& options, size_t device_count, size_t memory_limit_bytes)
 {
-  if (!options.buffer_count || !options.chunk_bytes || options.chunk_bytes % kDirectIOAlignment) {
-    throw std::invalid_argument("transfer ring requires buffers with 4 KiB-aligned capacity");
-  }
-  if (options.buffer_count > std::numeric_limits<size_t>::max() / options.chunk_bytes) {
-    throw std::invalid_argument("transfer ring memory size overflows");
-  }
+  Validate(options.buffer_count && options.chunk_bytes && options.chunk_bytes % kDirectIOAlignment == 0,
+           "transfer ring requires buffers with 4 KiB-aligned capacity");
+  Validate(options.buffer_count <= std::numeric_limits<size_t>::max() / options.chunk_bytes,
+           "transfer ring memory size overflows");
   const size_t per_device = options.buffer_count * options.chunk_bytes;
-  if (device_count > std::numeric_limits<size_t>::max() / per_device) {
-    throw std::invalid_argument("total transfer ring memory size overflows");
-  }
+  Validate(device_count <= std::numeric_limits<size_t>::max() / per_device,
+           "total transfer ring memory size overflows");
   const size_t total = per_device * device_count;
-  if (memory_limit_bytes && total > memory_limit_bytes) {
-    throw std::invalid_argument("total transfer ring memory exceeds configured limit");
-  }
+  Validate(!memory_limit_bytes || total <= memory_limit_bytes,
+           "total transfer ring memory exceeds configured limit");
   return total;
 }
 
@@ -307,20 +297,20 @@ void TransferBuffers::Impl::Checkpoint(CUdeviceptr device, size_t size, CUstream
 
   // Fill the ring with device copies, then overlap copies with file writes.
   for (size_t i = 0; i < std::min(width, count); ++i) {
-    CheckCancelled(cancellation);
+    cancellation.ThrowIfCancelled();
     slots[i]->CopyFromDevice(device + chunks.Offset(i), chunks.Length(i), stream);
   }
   for (size_t i = 0; i < count; ++i) {
-    CheckCancelled(cancellation);
+    cancellation.ThrowIfCancelled();
     const size_t index = i % width;
     auto& slot = *slots[index];
     storage->Wait(index);
     if (i >= width) {
-      CheckCancelled(cancellation);
+      cancellation.ThrowIfCancelled();
       slot.CopyFromDevice(device + chunks.Offset(i), chunks.Length(i), stream);
     }
     slot.Wait();
-    CheckCancelled(cancellation);
+    cancellation.ThrowIfCancelled();
     storage->Submit(index, io::Operation::Write, chunks.Offset(i), chunks.Length(i));
   }
 }
@@ -334,20 +324,20 @@ void TransferBuffers::Impl::Restore(CUdeviceptr device, size_t size, CUstream st
 
   // Read ahead into the ring, then copy each completed chunk to the device.
   for (size_t i = 0; i < std::min(width, count); ++i) {
-    CheckCancelled(cancellation);
+    cancellation.ThrowIfCancelled();
     storage->Submit(i, io::Operation::Read, chunks.Offset(i), chunks.Length(i));
   }
   for (size_t i = 0; i < count; ++i) {
-    CheckCancelled(cancellation);
+    cancellation.ThrowIfCancelled();
     const size_t index = i % width;
     auto& slot = *slots[index];
     storage->Wait(index);
     slot.Wait();
-    CheckCancelled(cancellation);
+    cancellation.ThrowIfCancelled();
     slot.CopyToDevice(device + chunks.Offset(i), chunks.Length(i), stream);
     // The next storage read reuses this slot. Finish its CUDA copy first.
     slot.Wait();
-    CheckCancelled(cancellation);
+    cancellation.ThrowIfCancelled();
     if (i + width < count) {
       storage->Submit(index, io::Operation::Read, chunks.Offset(i + width), chunks.Length(i + width));
     }
@@ -357,7 +347,7 @@ void TransferBuffers::Impl::Restore(CUdeviceptr device, size_t size, CUstream st
 void TransferBuffers::Impl::Transfer(int fd, CUdeviceptr device, size_t size, CUstream stream,
                                      io::Operation operation, const Cancellation& cancellation)
 {
-  CheckCancelled(cancellation);
+  cancellation.ThrowIfCancelled();
   if (slots.empty()) {
     throw std::logic_error("transfer ring is not initialized");
   }
@@ -386,7 +376,7 @@ void TransferBuffers::Impl::Transfer(int fd, CUdeviceptr device, size_t size, CU
       for (auto& slot : slots) {
         slot->Wait();
       }
-      CheckCancelled(cancellation);
+      cancellation.ThrowIfCancelled();
     } catch (...) {
       try {
         storage->Close();
@@ -415,7 +405,7 @@ void TransferBuffers::Checkpoint(int fd, CUdeviceptr device, size_t size, CUstre
   if (fsync(fd)) {
     throw std::system_error(errno, std::generic_category(), "sync GPU extent");
   }
-  CheckCancelled(cancellation);
+  cancellation.ThrowIfCancelled();
 }
 
 void TransferBuffers::Restore(int fd, CUdeviceptr device, size_t size, CUstream stream,

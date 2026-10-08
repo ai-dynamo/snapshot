@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 
 #include "fatal_cleanup.hpp"
 
@@ -20,6 +21,12 @@ class Cancellation {
   bool DeadlineExceeded() const { return Clock::now() >= deadline_; }
   bool IsCancelled() const {
     return FatalCleanupPending() || cancelled_.load(std::memory_order_relaxed) || DeadlineExceeded() || (parent_ && parent_->IsCancelled());
+  }
+
+  void ThrowIfCancelled() const {
+    if (IsCancelled()) {
+      throw std::runtime_error(DeadlineExceeded() ? "operation deadline exceeded" : "operation cancelled");
+    }
   }
 
  private:

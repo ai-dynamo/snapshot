@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "daemon.hpp"
+#include "errors.hpp"
 #include "fatal_cleanup.hpp"
 
 #include <arpa/inet.h>
@@ -300,11 +301,8 @@ WaitForHandler(std::future<void>& handler)
   try {
     handler.get();
   }
-  catch (const std::exception& error) {
-    std::cerr << "connection handler: " << error.what() << '\n';
-  }
   catch (...) {
-    std::cerr << "connection handler: unknown exception\n";
+    snapshot::pagebroker::LogException("connection handler", std::current_exception());
   }
 }
 
