@@ -156,7 +156,7 @@ jobs:
           make docker-build-operator \
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--push ${cache_flags}"
+            DOCKER_BUILD_ARGS="--push --build-arg GO_BUILD_TAGS=snapshot_e2e ${cache_flags}"
           hack/ci-phase.sh "Build operator image" "${start}" \
             "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
 
@@ -285,7 +285,8 @@ jobs:
           image.pageBroker.repository=${IMAGE_REGISTRY}/pagebroker
           image.operator.pullPolicy=IfNotPresent
           image.agent.pullPolicy=IfNotPresent
-          image.pageBroker.pullPolicy=IfNotPresent"
+          image.pageBroker.pullPolicy=IfNotPresent
+          operator.testFailCaptureSourceAnnotation=snapshot-e2e.nvidia.com/fail-capture"
           # For the install without the restore proxy, below.
           printf 'SNAPSHOT_E2E_HELM_SET<<EOF\n%s\nEOF\n' "${SNAPSHOT_E2E_HELM_SET}" >>"${GITHUB_ENV}"
           uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
@@ -315,7 +316,12 @@ jobs:
           SNAPSHOT_E2E_REQUIRED_TESTS: >-
             test_one_cpu_snapshot_restores_into_two_containers,
             test_snapshotjob_cpu_captures_and_restore_recovers_state,
-            test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot
+            test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot,
+            test_snapshotjob_fails_when_capture_fails_after_helper_succeeds,
+            test_snapshotjob_fails_when_helper_fails_after_capture,
+            test_snapshotjob_deadline_exceeded_when_helper_overruns,
+            test_snapshotjob_restart_preserves_capture_waiting_for_helper,
+            test_snapshotjob_restart_preserves_pending_capture
         run: |
           set -euo pipefail
           start=$(date +%s)

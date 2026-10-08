@@ -86,6 +86,9 @@ spec:
             - {{ printf "--artifact-cleanup-workers=%v" .Values.operator.artifactCleanup.workers | quote }}
             - {{ printf "--artifact-cleanup-backend-type=%v" .Values.storage.type | quote }}
             - {{ printf "--artifact-cleanup-task-timeout=%v" .Values.operator.artifactCleanup.taskTimeout | quote }}
+            {{- if .Values.operator.testFailCaptureSourceAnnotation }}
+            - {{ printf "--test-fail-capture-source-annotation=%v" .Values.operator.testFailCaptureSourceAnnotation | quote }}
+            {{- end }}
             # CuInterpose libraries for opted-in workloads.
             - {{ printf "--cuinterpose-image=%s" (include "snapshot.agentImage" .) | quote }}
             - {{ printf "--cuinterpose-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
