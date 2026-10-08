@@ -172,10 +172,16 @@ func waitForRestore(cfg Config) (restoreOutcome, error) {
 			if !ok || (sig != syscall.SIGTERM && sig != syscall.SIGINT) {
 				continue
 			}
-			// The restore may have landed in the same instant. If it did,
-			// follow the workload and forward the signal instead of exiting.
-			outcome, _, _ := checkRestore(cfg.ControlDir)
-			return restoreOutcome{complete: outcome.complete, signal: sig}, nil
+			// The restore may have landed or failed in the same instant. Run
+			// decides with its usual order: complete, then failed, then the
+			// signal. If the directory cannot be read, the signal still wins:
+			// the container is being stopped either way.
+			next, _, err := checkRestore(cfg.ControlDir)
+			if err != nil {
+				cfg.Log.Error(err, "Cannot recheck control directory after signal")
+			}
+			next.signal = sig
+			return next, nil
 		case <-changed:
 		case <-ticker.C:
 		}

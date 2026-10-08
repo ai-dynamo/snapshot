@@ -194,6 +194,20 @@ func TestRunForwardsSignalThatRacesRestore(t *testing.T) {
 	assert.Equal(t, 42, r.exitCode(t), "the proxy must forward the signal, not exit with 143")
 }
 
+func TestRunPrefersRestoreFailedOverSignal(t *testing.T) {
+	// As above: only the signal can wake the wait, so it finds restore-failed.
+	watchDirFn = func(string, logr.Logger) (<-chan struct{}, func()) { return nil, func() {} }
+	t.Cleanup(func() { watchDirFn = watchDir })
+
+	r := startProxy(t, time.Hour)
+	r.assertRunning(t)
+	require.NoError(t, os.WriteFile(filepath.Join(r.dir, podcontract.RestoreFailedFile), []byte("failed\n"), 0o644))
+
+	r.signals <- syscall.SIGTERM
+
+	assert.Equal(t, podcontract.RestoreNotRepeatableExitCode, r.exitCode(t), "restore-failed must win over the signal, not exit with 143")
+}
+
 func TestRunProxyErrors(t *testing.T) {
 	for name, contents := range map[string]string{
 		"malformed":   "done\n",
