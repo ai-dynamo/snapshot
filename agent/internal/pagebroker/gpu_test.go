@@ -6,7 +6,6 @@ package pagebroker
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -65,33 +64,9 @@ func openTestPidfd(t *testing.T) *os.File {
 }
 
 func readGPURequest(connection *net.UnixConn) (*Request, []int, error) {
-	header := make([]byte, 4)
-	control := make([]byte, unix.CmsgSpace(4*maxPassedFiles))
-	n, controlSize, flags, _, err := connection.ReadMsgUnix(header, control)
+	message, descriptors, err := readMessageWithFiles(connection)
 	if err != nil {
 		return nil, nil, err
-	}
-	messages, err := unix.ParseSocketControlMessage(control[:controlSize])
-	if err != nil {
-		return nil, nil, err
-	}
-	var descriptors []int
-	for _, message := range messages {
-		files, err := unix.ParseUnixRights(&message)
-		if err != nil {
-			return nil, descriptors, err
-		}
-		descriptors = append(descriptors, files...)
-	}
-	if flags&unix.MSG_CTRUNC != 0 {
-		return nil, descriptors, fmt.Errorf("truncated GPU descriptors")
-	}
-	if _, err := io.ReadFull(connection, header[n:]); err != nil {
-		return nil, descriptors, err
-	}
-	message := make([]byte, binary.BigEndian.Uint32(header))
-	if _, err := io.ReadFull(connection, message); err != nil {
-		return nil, descriptors, err
 	}
 	request := new(Request)
 	err = proto.Unmarshal(message, request)
