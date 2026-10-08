@@ -656,6 +656,8 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
         throw std::invalid_argument("invalid value for --custom-storage-engine: " + std::string(input));
       }
       options.enable_gpu = input == "on";
+    } else if (option == "--storage-config") {
+      options.storage_config_path = input;
     } else if (option == "--max-concurrent-requests") {
       options.max_concurrent_requests = ParseSize(option, input, false);
     } else if (option == "--custom-storage-buffer-count") {
@@ -703,7 +705,7 @@ RunDaemon(const DaemonOptions& options)
     return Fail("protect control socket", {errno, std::generic_category()});
   }
   try {
-    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine));
+    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine), options.store_id);
     Serve(listener, broker, options.max_concurrent_requests);
   } catch (const std::exception& failure) {
     std::cerr << "PageBroker: " << failure.what() << '\n';

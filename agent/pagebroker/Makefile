@@ -10,7 +10,7 @@ NVTX_ROOT ?= /usr/local
 CPPFLAGS := -I. -Igpu -I$(CUDA_INCLUDE_DIR) -isystem $(NVTX_ROOT)/include
 PROTO := v1/pagebroker.proto
 GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
-BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp
+BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp identity.cpp artifact_store.cpp storage_config.cpp
 COMMON_SOURCES := file_descriptor.cpp
 IO_SOURCES := io_engine.cpp
 GPU_SOURCES := gpu/engine.cpp gpu/checkpoint.cpp gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp
@@ -21,6 +21,7 @@ GPU_TEST_SOURCES := $(filter-out gpu/cuda_driver.cpp,$(PAGEBROKER_SOURCES))
 
 # Production and transfer tests use the same NIXL storage path.
 NIXL_FLAGS := -isystem $(NIXL_ROOT)/include -L$(NIXL_ROOT)/lib -lnixl -lnixl_build
+TEST_SOURCES := daemon_test.cpp storage_contract_test.cpp identity_test.cpp artifact_store_test.cpp storage_config_test.cpp
 
 .DEFAULT_GOAL := daemon
 .PHONY: daemon generate test test-gpu
@@ -40,7 +41,7 @@ daemon: generate
 
 test: generate build/gpu-cuda-driver.o build/gpu-engine-test | build
 	./build/gpu-engine-test
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp daemon_test.cpp storage_contract_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) -ldl -o build/pagebroker-test
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp $(TEST_SOURCES) v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) -ldl -o build/pagebroker-test
 	./build/pagebroker-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/storage_manifest.cpp gpu/storage_manifest_test.cpp -o build/gpu-storage-test
 	./build/gpu-storage-test

@@ -123,10 +123,12 @@ artifact handle and the deterministic commit ID. Commit returns that handle
 as the publication descriptor; restores and metadata reads name the
 descriptor, and PageBroker refuses a descriptor from another store
 (`STORE_MISMATCH`), a publication that is missing (`ARTIFACT_NOT_FOUND`) or
-whose evidence does not match (`ARTIFACT_CORRUPT`). A transaction that
-outlives PageBroker's fixed 2h5m lifetime fails Commit with
-`TRANSACTION_EXPIRED` and is cleaned up. Legacy path-addressed requests are
-unchanged, and content without a store binding keeps using them.
+whose evidence does not match (`ARTIFACT_CORRUPT`). A transaction older than
+PageBroker's fixed 2h5m lifetime is cleaned up on its next request; this
+lifetime is a PageBroker constant, not configuration, so every participating
+component agrees on it without a value to drift out of sync on. Legacy
+path-addressed requests are unchanged, and content without a store binding
+keeps using them.
 
 If a bound checkpoint's Commit reply is lost, the agent records Ready as Unknown
 with reason `CheckpointCommitPending` and probes the durable publication. It
