@@ -31,6 +31,38 @@ escaped as `\,`.
 
 ## Modes
 
+### PageBroker GPU tests
+
+The `pagebroker-gpu` job in `e2e.yaml` builds and runs the C++ GPU tests.
+BuildKit compiles the image in an amd64 CPU pod on the cluster and publishes
+`pagebroker:gpu-tests-<full-commit-SHA>`. A separate Job runs the compiled
+binaries with a CustomStorage-capable driver and one full GPU. The test image
+includes the dependency sources and notices. It removes the CUDA link stubs so
+the tests use the host driver. The tests fail if CustomStorage is unavailable.
+
+Dispatch `e2e.yaml` on the approved `pull-request/<number>` mirror branch with
+`pagebroker_gpu_only=true`. The workflow also runs this job nightly. Ordinary
+manual E2E dispatches keep their existing behavior. No prior artifact build is
+required. The image revision must match the checked-out commit. This is not an
+automatic PR gate.
+
+The job uses a temporary namespace for its CPU builder and GPU workload. It
+deletes that namespace afterward. It installs no Snapshot components and runs
+no CRIU or full agent checkpoint/restore flow. The runner needs permission to
+create the BuildKit Deployment and GPU Job, and to publish the test image.
+
+To run a previously built test image in an existing cluster namespace, use its kubeconfig and set
+`SNAPSHOT_E2E_TEST_NAMESPACE`, then run:
+
+```bash
+uv run --locked --project e2e pytest e2e/tests/test_pagebroker_gpu.py -vv -s
+```
+
+Set `SNAPSHOT_E2E_PAGEBROKER_GPU_IMAGE` to use the same test image from another
+registry. The revision check still applies. The Job requires `RuntimeClass/nvidia`
+and permits `SYS_PTRACE` and an unconfined seccomp profile. It runs
+the real CUDA and NIXL tests and deletes its Job after collecting logs.
+
 ### CI Mode
 
 The GitHub workflow creates a temporary vCluster, installs the Snapshot chart
