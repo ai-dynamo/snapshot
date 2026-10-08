@@ -1,4 +1,4 @@
 /build/
 /pagebroker
-/v1/pagebroker.pb.cc
-/v1/pagebroker.pb.h
+/pagebroker.pb.*
+/v1/pagebroker.pb.*

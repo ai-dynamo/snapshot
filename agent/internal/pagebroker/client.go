@@ -13,6 +13,7 @@ import (
 	"os"
 	"runtime"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
@@ -21,18 +22,20 @@ import (
 
 const (
 	// PageBroker control requests and responses are limited to 64 KiB.
-	maxMessageSize    = 64 << 10
-	messageHeaderSize = 4
-	commitRetryDelay  = 100 * time.Millisecond
-	dialRetryDelay    = 100 * time.Millisecond
-	dialRetryLimit    = 30 * time.Second
+	maxMessageSize        = 64 << 10
+	maxFailureMessageSize = 1024
+	messageHeaderSize     = 4
+	commitRetryDelay      = 100 * time.Millisecond
+	dialRetryDelay        = 100 * time.Millisecond
+	dialRetryLimit        = 30 * time.Second
 )
 
 var (
 	commitRetryLimit = 30 * time.Second
 )
 
-// Client uses the deployment-wide filesystem/POSIX PageBroker plan.
+// Client speaks the local PageBroker protocol. Artifact-addressed operations
+// require backend support; existing filesystem callers can migrate separately.
 type Client struct {
 	ControlSocketPath string
 }
@@ -90,37 +93,42 @@ func imageDirectory(directory string) (string, error) {
 }
 
 func (c Client) Commit(ctx context.Context, transactionID string) error {
-	err := c.commit(ctx, transactionID)
+	_, err := c.commitWithRetry(ctx, transactionID)
+	return err
+}
+
+func (c Client) commitWithRetry(ctx context.Context, transactionID string) (*CommitComplete, error) {
+	result, err := c.commit(ctx, transactionID)
 	if !isTransportError(err) {
-		return err
+		return result, err
 	}
 	return c.retryCommit(ctx, transactionID)
 }
 
-func (c Client) retryCommit(ctx context.Context, transactionID string) error {
+func (c Client) retryCommit(ctx context.Context, transactionID string) (*CommitComplete, error) {
 	retryCtx, cancel := context.WithTimeout(ctx, commitRetryLimit)
 	defer cancel()
 	for {
 		select {
 		case <-retryCtx.Done():
-			return retryCtx.Err()
+			return nil, retryCtx.Err()
 		case <-time.After(commitRetryDelay):
 		}
-		if err := c.commit(retryCtx, transactionID); !isTransportError(err) {
-			return err
+		if result, err := c.commit(retryCtx, transactionID); !isTransportError(err) {
+			return result, err
 		}
 	}
 }
 
-func (c Client) commit(ctx context.Context, transactionID string) error {
+func (c Client) commit(ctx context.Context, transactionID string) (*CommitComplete, error) {
 	response, err := c.request(ctx, transactionID, &Request_Commit{Commit: &CommitRequest{}})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if response.GetCommitComplete() == nil {
-		return fmt.Errorf("unexpected PageBroker commit response")
+		return nil, fmt.Errorf("unexpected PageBroker commit response")
 	}
-	return nil
+	return response.GetCommitComplete(), nil
 }
 
 func (c Client) Abort(ctx context.Context, transactionID string) error {
@@ -159,6 +167,15 @@ func (c Client) dial(ctx context.Context) (net.Conn, error) {
 }
 
 func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command) (*Response, error) {
+	// Check framing before dialing. GPU exchanges still send file descriptors through exchange.
+	requestID := uuid.NewString()
+	request := &Request{RequestId: &requestID, Command: command}
+	if transactionID != "" {
+		request.TransactionId = &transactionID
+	}
+	if proto.Size(request) > maxMessageSize {
+		return nil, errMessageTooLarge
+	}
 	var connection net.Conn
 	var err error
 	if _, startup := command.(*Request_Capabilities); startup {
@@ -208,7 +225,15 @@ func exchange(ctx context.Context, connection *net.UnixConn, transactionID strin
 		return nil, fmt.Errorf("PageBroker response identifiers do not match request")
 	}
 	if failure := response.GetFailure(); failure != nil {
-		return nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
+		// Legacy handlers return filesystem exception text, which can include long
+		// paths and is not guaranteed valid UTF-8. Only the storage-extension codes
+		// promise the smaller, UTF-8 wire bound; legacy and unknown codes retain the
+		// existing frame-size limit and are not UTF-8 checked.
+		if isStorageFailure(failure.GetCode()) &&
+			(len(failure.GetMessage()) > maxFailureMessageSize || !utf8.ValidString(failure.GetMessage())) {
+			return nil, fmt.Errorf("invalid PageBroker failure message")
+		}
+		return nil, &FailureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
 	}
 	return response, nil
 }
