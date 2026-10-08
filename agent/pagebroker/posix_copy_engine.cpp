@@ -79,6 +79,22 @@ class RestorePreviousOnFailure {
   bool cancelled_ = false;
 };
 
+void
+ReplaceDirectory(const Path& from, const Path& to)
+{
+  if (!std::filesystem::exists(to)) {
+    std::filesystem::rename(from, to);
+    return;
+  }
+  const Path previous = PreviousPath(to);
+  std::filesystem::rename(to, previous);
+  RestorePreviousOnFailure restore_previous(previous, to);
+  std::filesystem::rename(from, to);
+  restore_previous.Cancel();
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(previous, cleanup_error);
+}
+
 uintmax_t
 DirectorySize(const Path& path)
 {
@@ -119,6 +135,12 @@ PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destinat
   CopyDirectory(SourcePath(source, storage_root_), destination);
 }
 
+Path
+PosixCopyEngine::DestinationDirectory(const StorageBackend& destination) const
+{
+  return DestinationPath(destination, storage_root_);
+}
+
 void
 PosixCopyEngine::ValidateCheckpointDestination(const StorageBackend& destination) const
 {
@@ -136,26 +158,23 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
 {
   const Path published = DestinationPath(destination, storage_root_);
   const Path partial = PartialPath(published);
-  const Path previous = PreviousPath(published);
   try {
     std::filesystem::create_directories(published.parent_path());
     CopyDirectory(source, partial);
-    if (std::filesystem::exists(published)) {
-      std::filesystem::rename(published, previous);
-      RestorePreviousOnFailure restore_previous(previous, published);
-      std::filesystem::rename(partial, published);
-      restore_previous.Cancel();
-      std::error_code cleanup_error;
-      std::filesystem::remove_all(previous, cleanup_error);
-      return;
-    }
-    std::filesystem::rename(partial, published);
+    ReplaceDirectory(partial, published);
   }
   catch (...) {
     std::error_code cleanup_error;
     std::filesystem::remove_all(partial, cleanup_error);
     throw;
   }
+}
+
+void
+PosixCopyEngine::PromoteCheckpoint(const Path& output, const StorageBackend& destination) const
+{
+  // Direct output is created beside the destination, so promotion cannot cross filesystems.
+  ReplaceDirectory(output, DestinationPath(destination, storage_root_));
 }
 
 void

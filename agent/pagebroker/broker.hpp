@@ -38,12 +38,14 @@ class Broker {
   const TransferEngine& Engine(const IOEngine& engine) const;
   TransactionHandle CreateOrGetTransaction(const std::string& transaction_id);
   TransactionHandle FindTransaction(const std::string& transaction_id);
+  std::error_code CleanupTransactionDirectory(const std::string& id, Transaction& transaction);
   void RetainTerminalTransaction(const std::string& transaction_id);
   void ReapTerminalTransactions();
   bool ReserveStaging(uintmax_t bytes);
   void ReleaseStaging(uintmax_t bytes);
   Response AbortStaging(
       const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error);
+  Response PrepareDirectCheckpoint(const Request& request);
   Response Restore(const Request& request);
   Response DirectRestore(const Request& request);
   Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine);

@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <sys/stat.h>
 #include <fstream>
 #include <optional>
 #include <string>
@@ -365,25 +366,39 @@ TEST_F(BrokerTest, PublishesCheckpoint)
 
 TEST_F(BrokerTest, ReplacesExistingCheckpoint)
 {
-  const fs::path published = root_ / "storage" / "published";
-  const fs::path previous = published.string() + ".pagebroker-previous";
-  fs::create_directories(published);
-  std::ofstream(published / "old") << "old";
-
-  auto prepare = RequestFor("checkpoint");
-  Configure(
-      prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
-      prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), published);
-  const auto output = broker().HandleRequest(prepare);
-  ASSERT_TRUE(output.has_staged_checkpoint_directory());
-  std::ofstream(fs::path(output.staged_checkpoint_directory().image_directory()) / "new") << "new";
-
-  auto commit = RequestFor("checkpoint");
-  commit.mutable_commit();
-  EXPECT_TRUE(broker().HandleRequest(commit).has_commit_complete());
-  EXPECT_FALSE(fs::exists(published / "old"));
-  EXPECT_TRUE(fs::exists(published / "new"));
-  EXPECT_FALSE(fs::exists(previous));
+  for (const bool direct : {false, true}) {
+    SCOPED_TRACE(direct ? "direct" : "staged");
+    const std::string id = direct ? "direct" : "staged";
+    const fs::path published = root_ / "storage" / id;
+    const fs::path previous = published.string() + ".pagebroker-previous";
+    fs::create_directories(published);
+    std::ofstream(published / "old") << "old";
+    auto prepare = RequestFor(id);
+    if (direct) {
+      Configure(prepare.mutable_prepare_direct_checkpoint()->mutable_destination(),
+                prepare.mutable_prepare_direct_checkpoint()->mutable_io_engine(), published);
+    } else {
+      Configure(prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+                prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), published);
+    }
+    const auto output = broker().HandleRequest(prepare);
+    ASSERT_FALSE(output.has_failure()) << output.DebugString();
+    const fs::path directory = direct ? output.direct_checkpoint_directory().image_directory()
+                                      : output.staged_checkpoint_directory().image_directory();
+    std::ofstream(directory / "new") << "new";
+    struct stat before{};
+    ASSERT_EQ(stat((directory / "new").c_str(), &before), 0);
+    auto commit = RequestFor(id);
+    commit.mutable_commit();
+    ASSERT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+    struct stat after{};
+    ASSERT_EQ(stat((published / "new").c_str(), &after), 0);
+    EXPECT_EQ(before.st_dev == after.st_dev && before.st_ino == after.st_ino, direct);
+    EXPECT_FALSE(fs::exists(published / "old"));
+    EXPECT_FALSE(fs::exists(previous));
+    EXPECT_FALSE(fs::exists(directory));
+    EXPECT_FALSE(fs::exists(published.string() + ".pagebroker-partial"));
+  }
 }
 
 TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
@@ -506,6 +521,96 @@ TEST_F(BrokerTest, DirectRestoreExpiresFromPreparationTime)
   commit.mutable_commit();
   EXPECT_EQ(broker().HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
   EXPECT_TRUE(fs::exists(source_ / "image"));
+}
+
+TEST_F(BrokerTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirectory)
+{
+  const auto destination = root_ / "storage" / "nested" / "checkpoint";
+  auto request = RequestFor("direct-save");
+  Configure(request.mutable_prepare_direct_checkpoint()->mutable_destination(),
+            request.mutable_prepare_direct_checkpoint()->mutable_io_engine(), destination);
+  const auto reply = broker().HandleRequest(request);
+  ASSERT_TRUE(reply.has_direct_checkpoint_directory());
+  const fs::path directory(reply.direct_checkpoint_directory().image_directory());
+  EXPECT_EQ(directory.parent_path(), destination.parent_path());
+  EXPECT_FALSE(fs::exists(destination));
+  std::ofstream(directory / "payload") << "GPU and CPU output";
+  request.set_request_id(RequestFor("direct-save").request_id());
+  const auto repeated = broker().HandleRequest(request);
+  ASSERT_TRUE(repeated.has_direct_checkpoint_directory()) << repeated.DebugString();
+  EXPECT_EQ(repeated.direct_checkpoint_directory().image_directory(), directory.string());
+  EXPECT_EQ(repeated.request_id(), request.request_id());
+  EXPECT_TRUE(fs::exists(directory / "payload"));
+  auto changed = request;
+  changed.mutable_prepare_direct_checkpoint()->mutable_destination()->mutable_filesystem()->set_directory(
+      (root_ / "storage" / "other").string());
+  const auto conflict = broker().HandleRequest(changed);
+  ASSERT_TRUE(conflict.has_failure()) << conflict.DebugString();
+  EXPECT_EQ(conflict.failure().code(), Failure::TRANSACTION_CONFLICT);
+  struct stat mode{};
+  ASSERT_EQ(stat(directory.c_str(), &mode), 0);
+  EXPECT_EQ(mode.st_mode & 0777, 0700);
+  auto commit = RequestFor("direct-save");
+  commit.mutable_commit();
+  struct stat payload_before{};
+  ASSERT_EQ(stat((directory / "payload").c_str(), &payload_before), 0);
+  ASSERT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+  struct stat payload_after{};
+  ASSERT_EQ(stat((destination / "payload").c_str(), &payload_after), 0);
+  EXPECT_EQ(payload_before.st_dev, payload_after.st_dev);
+  EXPECT_EQ(payload_before.st_ino, payload_after.st_ino);
+  std::ifstream payload(destination / "payload");
+  std::string contents;
+  std::getline(payload, contents);
+  EXPECT_EQ(contents, "GPU and CPU output");
+  EXPECT_FALSE(fs::exists(directory));
+  EXPECT_FALSE(fs::exists(destination.string() + ".pagebroker-partial"));
+}
+
+TEST_F(BrokerTest, DirectCheckpointRetainsOutputOnFailedReplacementUntilAbort)
+{
+  const auto destination = root_ / "storage" / "checkpoint";
+  const auto previous = fs::path(destination.string() + ".pagebroker-previous");
+  fs::create_directory(destination);
+  std::ofstream(destination / "old") << "old";
+  std::ofstream(previous) << "occupied";
+  auto request = RequestFor("direct-replace");
+  Configure(request.mutable_prepare_direct_checkpoint()->mutable_destination(),
+            request.mutable_prepare_direct_checkpoint()->mutable_io_engine(), destination);
+  const auto reply = broker().HandleRequest(request);
+  ASSERT_TRUE(reply.has_direct_checkpoint_directory());
+  const fs::path directory(reply.direct_checkpoint_directory().image_directory());
+  std::ofstream(directory / "new") << "new";
+  struct stat original{};
+  ASSERT_EQ(stat((directory / "new").c_str(), &original), 0);
+  auto commit = RequestFor("direct-replace");
+  commit.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(commit).failure().code(), Failure::STORAGE_ERROR);
+  EXPECT_TRUE(fs::exists(destination / "old"));
+  EXPECT_TRUE(fs::exists(directory / "new"));
+  EXPECT_TRUE(fs::exists(previous));
+  auto abort = RequestFor("direct-replace");
+  abort.mutable_abort();
+  ASSERT_TRUE(broker().HandleRequest(abort).has_abort_complete());
+  EXPECT_TRUE(fs::exists(destination / "old"));
+  EXPECT_FALSE(fs::exists(directory));
+  EXPECT_TRUE(fs::exists(previous));
+}
+
+TEST_F(BrokerTest, RejectsExistingDirectCheckpointOutput)
+{
+  const auto destination = root_ / "storage" / "checkpoint";
+  const auto directory = fs::path(destination.string() + ".pagebroker-tx-existing");
+  fs::create_directory(directory);
+  std::ofstream(directory / "image") << "existing";
+  auto request = RequestFor("existing");
+  auto* prepare = request.mutable_prepare_direct_checkpoint();
+  Configure(prepare->mutable_destination(), prepare->mutable_io_engine(), destination);
+  const auto result = broker().HandleRequest(request);
+  ASSERT_TRUE(result.has_failure());
+  EXPECT_EQ(result.failure().code(), Failure::TRANSACTION_CONFLICT);
+  EXPECT_EQ(result.failure().message(), "checkpoint output directory already exists");
+  EXPECT_TRUE(fs::exists(directory / "image"));
 }
 
 }  // namespace

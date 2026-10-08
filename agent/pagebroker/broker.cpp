@@ -4,6 +4,8 @@
 #include "broker.hpp"
 
 #include <sys/statvfs.h>
+#include <sys/stat.h>
+#include <cerrno>
 
 #include <filesystem>
 #include <memory>
@@ -102,6 +104,12 @@ TransactionDirectory(const Path& transaction_root, const std::string& transactio
   return transaction_root / transaction_id;
 }
 
+Path
+CheckpointOutputDirectory(const Path& destination, const std::string& transaction_id)
+{
+  return Path(destination.string() + ".pagebroker-tx-" + transaction_id);
+}
+
 }  // namespace
 
 Broker::Broker(Path staging_root, Path storage_root) : staging_root_(fs::weakly_canonical(std::move(staging_root)))
@@ -111,6 +119,24 @@ Broker::Broker(Path staging_root, Path storage_root) : staging_root_(fs::weakly_
   fs::remove_all(staging_root_ / "checkpoint");
   fs::create_directories(staging_root_ / "restore");
   fs::create_directories(staging_root_ / "checkpoint");
+}
+
+std::error_code
+Broker::CleanupTransactionDirectory(const std::string& id, Transaction& transaction)
+{
+  std::error_code error;
+  if (const auto* checkpoint = std::get_if<CheckpointTransactionDescriptor>(&transaction.descriptor())) {
+    fs::remove_all(checkpoint->staging_directory(), error);
+    if (error) {
+      return error;
+    }
+  }
+  fs::remove_all(TransactionDirectory(staging_root_ / "restore", id), error);
+  if (error) {
+    return error;
+  }
+  fs::remove_all(TransactionDirectory(staging_root_ / "checkpoint", id), error);
+  return error;
 }
 
 void
@@ -127,12 +153,9 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
     if (!transaction->expired(now, kLiveTransactionLifetime))
       continue;
 
-    std::error_code restore_error;
-    std::error_code checkpoint_error;
-    fs::remove_all(TransactionDirectory(staging_root_ / "restore", id), restore_error);
-    fs::remove_all(TransactionDirectory(staging_root_ / "checkpoint", id), checkpoint_error);
-    if (restore_error || checkpoint_error)
+    if (CleanupTransactionDirectory(id, *transaction)) {
       continue;
+    }
     transaction->clear_descriptor();
     transaction->set_state(Transaction::State::ABORTED);
 
@@ -256,6 +279,9 @@ Broker::HandleRequest(const Request& request)
       case Request::kDirectRestore:
         response = DirectRestore(request);
         break;
+      case Request::kPrepareDirectCheckpoint:
+        response = PrepareDirectCheckpoint(request);
+        break;
       case Request::kStagedRestore:
         response = Restore(request);
         break;
@@ -369,7 +395,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
   try {
     transaction->set_state(Transaction::State::PREPARING);
     fs::create_directory(staging_directory);
-    transaction->set_descriptor(CheckpointTransactionDescriptor(staging_directory, destination, engine.type()));
+    transaction->set_descriptor(CheckpointTransactionDescriptor(staging_directory, destination, engine.type(), CheckpointOutput::Staged));
     transaction->set_state(Transaction::State::STAGED);
   }
   catch (const std::exception& error) {
@@ -425,7 +451,11 @@ Broker::PublishCheckpoint(
     return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint destination conflicts");
   RejectSymlinks(staging_directory);
   try {
-    engine.PublishCheckpoint(staging_directory, descriptor.destination_storage());
+    if (descriptor.output() == CheckpointOutput::Direct) {
+      engine.PromoteCheckpoint(staging_directory, descriptor.destination_storage());
+    } else {
+      engine.PublishCheckpoint(staging_directory, descriptor.destination_storage());
+    }
     transaction.clear_descriptor();
     transaction.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;
@@ -449,13 +479,54 @@ Broker::Abort(const Request& request)
   if (transaction->state() == Transaction::State::ABORTED)
     return AbortSucceeded(request);
 
-  const Path restore_root = staging_root_ / "restore";
-  const Path checkpoint_root = staging_root_ / "checkpoint";
-  fs::remove_all(TransactionDirectory(restore_root, request.transaction_id()));
-  fs::remove_all(TransactionDirectory(checkpoint_root, request.transaction_id()));
+  if (const auto error = CleanupTransactionDirectory(request.transaction_id(), *transaction)) {
+    return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
+  }
   transaction->clear_descriptor();
   transaction->set_state(Transaction::State::ABORTED);
   return AbortSucceeded(request);
+}
+
+Response
+Broker::PrepareDirectCheckpoint(const Request& request)
+{
+  const auto& input = request.prepare_direct_checkpoint();
+  const auto& storage_engine = Engine(input.io_engine());
+  storage_engine.ValidateCheckpointDestination(input.destination());
+  const auto destination = storage_engine.DestinationDirectory(input.destination());
+  const Path checkpoint_directory = CheckpointOutputDirectory(destination, request.transaction_id());
+  auto transaction = CreateOrGetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction->mutex());
+  if (transaction->state() != Transaction::State::NEW) {
+    const auto* prepared = std::get_if<CheckpointTransactionDescriptor>(&transaction->descriptor());
+    const bool same_destination = prepared && prepared->engine_type() == storage_engine.type() &&
+        storage_engine.DestinationDirectory(prepared->destination_storage()) == destination;
+    if (transaction->state() != Transaction::State::STAGED || !same_destination ||
+        prepared->staging_directory() != checkpoint_directory) {
+      return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction is already prepared");
+    }
+  } else {
+    fs::create_directories(destination.parent_path());
+    if (mkdir(checkpoint_directory.c_str(), S_IRWXU)) {
+      if (errno == EEXIST) {
+        return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
+      }
+      throw std::system_error(errno, std::generic_category(), "create checkpoint directory");
+    }
+    // Only this successful mkdir gives the transaction ownership for cleanup.
+    try {
+      transaction->set_state(Transaction::State::PREPARING);
+      transaction->set_descriptor(CheckpointTransactionDescriptor(
+          checkpoint_directory, input.destination(), storage_engine.type(), CheckpointOutput::Direct));
+      // STAGED means the output directory is ready. Checkpoint data is written next.
+      transaction->set_state(Transaction::State::STAGED);
+    } catch (const std::exception& error) {
+      return AbortStaging(request, *transaction, checkpoint_directory, error);
+    }
+  }
+  auto response = Reply(request);
+  response.mutable_direct_checkpoint_directory()->set_image_directory(checkpoint_directory.string());
+  return response;
 }
 
 }  // namespace snapshot::pagebroker
