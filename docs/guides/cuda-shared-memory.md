@@ -60,7 +60,9 @@ Choose one of the following capture paths.
 ## Capture without SnapshotJob
 
 Set `SNAPSHOT_AGENT_IMAGE` to the digest-pinned image used by the installed
-Snapshot agent. The Deployment installs the libraries and launches the workload.
+Snapshot agent. The Deployment sets the opt-in annotation, installs the libraries,
+and starts the workload under `cuinterpose-launch`. Capture fails early if the
+annotation is enabled but the command does not start with the launcher prefix.
 
 ```bash
 export SNAPSHOT_AGENT_IMAGE=<registry>/snapshot/agent@sha256:<digest>
