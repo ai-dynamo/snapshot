@@ -42,7 +42,8 @@ curl --fail --location \
 
 The program loads the model selected in `capture/qwen3-0.6b.yaml`, runs one
 generation to initialize vLLM, and then calls `pause_generation()` and
-`sleep()`. It writes
+`sleep(level=1)`, followed by `wake_up(tags=["weights"])`. This keeps weights
+on the GPU for capture while leaving KV cache released. It writes
 `ready-for-snapshot` only when the process is safe to checkpoint. In a restore
 container, it waits in standby until Snapshot injects the checkpointed process.
 That process calls `wake_up()` and `resume_generation()`, runs another
@@ -57,6 +58,19 @@ current Snapshot restore bundle requires, and mounts `app.py` at
 `/snapshot-app` from the `vllm-app` ConfigMap created in step 2.
 `HF_HUB_DISABLE_XET=1` prevents the model downloader from leaving an open cache
 log that CRIU cannot reopen after restore.
+
+The capture manifests set `PYTORCH_ALLOC_CONF` to
+`pinned_max_round_threshold_mb:1,pinned_max_cached_size_mb:1`. This avoids
+power-of-two padding and caching for pinned host allocations larger than 1 MiB,
+so CPU weight backups are released after weights wake up. Smaller allocations
+keep the allocator defaults.
+
+These settings affect pinned allocations throughout the process, including
+after restore. They do not release live host KV caches or CPU-offloaded weights.
+Workloads that repeatedly allocate large pinned staging buffers may pay more
+allocation overhead. Qualify throughput and the connector's sleep/restore
+lifecycle separately when adding host KV caching or CPU offload. The DeepSeek
+example keeps Engram weights on the GPU and does not enable a host KV connector.
 
 The source and restore pods must mount the Snapshot control volume at
 `/snapshot-control`.

@@ -23,6 +23,9 @@ spec:
             - python3
             - /snapshot-app/app.py
           env:
+            # Avoid rounding up large pinned backups or retaining them after wake-up.
+            - name: PYTORCH_ALLOC_CONF
+              value: pinned_max_round_threshold_mb:1,pinned_max_cached_size_mb:1
             - name: HF_HUB_DISABLE_XET
               value: "1"
             - name: SNAPSHOT_MODEL
