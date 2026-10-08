@@ -128,3 +128,38 @@ def test_one_entry_covers_every_case_of_a_parametrized_test(pytester, monkeypatc
     )
     run.assert_outcomes(passed=2)
     assert run.ret == pytest.ExitCode.OK
+
+
+def test_dropping_one_parameter_case_fails_the_run(pytester, monkeypatch):
+    """"Every case" has to mean every case, not whichever ones survived.
+
+    Matching the bare function name against the selection cannot see this: the
+    surviving case carries that name too, so the requirement looks satisfied
+    while half of it was deselected.
+    """
+    run = run_inner(
+        pytester,
+        monkeypatch,
+        "-m",
+        "cpu",
+        "-k",
+        "parametrized and one",
+        required="test_required_parametrized",
+    )
+    assert run.ret != pytest.ExitCode.OK
+    run.stderr.fnmatch_lines(["*deselected: *test_required_parametrized?two?*"])
+
+
+def test_a_single_parameter_case_can_be_required_on_its_own(pytester, monkeypatch):
+    """Requiring one case must not demand its siblings."""
+    run = run_inner(
+        pytester,
+        monkeypatch,
+        "-m",
+        "cpu",
+        "-k",
+        "parametrized and one",
+        required="test_required_parametrized[one]",
+    )
+    run.assert_outcomes(passed=1)
+    assert run.ret == pytest.ExitCode.OK

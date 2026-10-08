@@ -143,13 +143,24 @@ jobs:
       # so every image it names has been built.
       - name: Record image provenance
         env:
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
+          # The commit that was built, read from the checkout rather than from
+          # the event: on a pull_request run the default checkout is the merge
+          # of head into base, so the head SHA names a tree this job never
+          # compiled. It is still worth printing, as the thing a reviewer
+          # recognises, but only alongside what was actually built.
+          built="$(git rev-parse HEAD)"
           {
             echo "### Images under test"
             echo
-            echo "Built from commit \`${SOURCE_SHA}\`."
+            if [ "${built}" = "${HEAD_SHA}" ]; then
+              echo "Built from commit \`${built}\`."
+            else
+              echo "Built from commit \`${built}\`, the merge of \`${HEAD_SHA}\` into \`${BASE_REF}\`."
+            fi
             echo
             echo "| Image | Local image ID |"
             echo "| --- | --- |"

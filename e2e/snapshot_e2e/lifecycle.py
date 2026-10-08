@@ -789,9 +789,9 @@ def wait_for_restore_past_the_gate(
 def checkpoint_artifact_manifest(
     config: k8s.E2EConfig, node: str, content_uid: str
 ) -> str:
-    return k8s.exec_payload(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
+    return agent_exec_payload(
+        config,
+        node,
         f"cat {checkpoint_artifact_path(content_uid)}/manifest.yaml",
     )
 
@@ -812,9 +812,9 @@ def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str
     which would test a different source of identity than the agent uses.
     """
     runtime_id = container_id.split("://", 1)[-1]
-    output = k8s.exec_payload(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
+    output = agent_exec_payload(
+        config,
+        node,
         f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
     )
     # exec merges stderr into the stream, and a node without /etc/crictl.yaml
@@ -853,9 +853,9 @@ def visible_gpus(namespace: str, pod: str) -> list[dict[str, str]]:
 def checkpoint_artifact_listing(
     config: k8s.E2EConfig, node: str, content_uid: str
 ) -> str:
-    return k8s.exec_command(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
+    return agent_exec(
+        config,
+        node,
         f"cd {checkpoint_artifact_path(content_uid)} && "
         "find . -maxdepth 1 -type f -print | sort && "
         "tar -tf rootfs-diff.tar | sort",
@@ -868,9 +868,9 @@ def checkpoint_rootfs_file(
     content_uid: str,
     path: str,
 ) -> str:
-    return k8s.exec_command(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
+    return agent_exec(
+        config,
+        node,
         f"cd {checkpoint_artifact_path(content_uid)} && "
         f"tar -xOf rootfs-diff.tar {path}",
     )
@@ -890,9 +890,9 @@ def corrupt_checkpoint_image(
     and an unreadable one are different failures, and the unreadable one is the
     one a half-written or bit-rotted artifact produces.
     """
-    k8s.exec_command(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
+    agent_exec(
+        config,
+        node,
         f"printf 'not-a-criu-image' > "
         f"{checkpoint_artifact_path(content_uid)}/{shlex.quote(image)}",
     )
@@ -910,9 +910,9 @@ def checkpoint_artifact_root(content_uid: str) -> str:
 
 def artifact_root_exists(config: k8s.E2EConfig, node: str, content_uid: str) -> bool:
     marker = "__snapshot_artifact_root_exists__"
-    output = k8s.exec_command(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
+    output = agent_exec(
+        config,
+        node,
         f"test -d {checkpoint_artifact_root(content_uid)} && printf '%s' {marker}",
     )
     return output == marker
@@ -936,9 +936,9 @@ def create_artifact_staging_file(
     node: str,
     content_uid: str,
 ) -> None:
-    k8s.exec_command(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
+    agent_exec(
+        config,
+        node,
         f"mkdir -p {checkpoint_artifact_root(content_uid)}/.tmp && "
         f"printf orphan > {checkpoint_artifact_root(content_uid)}/.tmp/partial",
     )
@@ -955,14 +955,40 @@ def host_monitoring_agents(config: k8s.E2EConfig, node: str) -> str:
     checkpoint and restore; record whether it is present on every run so a
     flaky failure can be correlated with it.
     """
-    agent = checkpoint_agent_pod(config, node)
-    return k8s.exec_command(
-        config.namespace,
-        agent,
+    return agent_exec(
+        config,
+        node,
         "ps -eo pid,ppid,user,comm,args --no-headers 2>/dev/null "
         "| grep -iE 'datadog|dd-agent|system-probe|process-agent|trace-agent|security-agent|dcgm' "
         "| grep -vE 'grep -iE' "
         "|| echo '<no datadog/dcgm processes on host>'",
+    )
+
+
+# The agent pod runs more than one container — the PageBroker sidecar sits
+# beside the agent — and exec against a multi-container pod must name the one
+# to enter, or the API server refuses rather than guessing. Every exec here
+# wants the same one, so it is named once instead of at each call site.
+AGENT_CONTAINER = "agent"
+
+
+def agent_exec(config: k8s.E2EConfig, node: str, command: str) -> str:
+    """Run a command in the agent container of the agent pod on ``node``."""
+    return k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        command,
+        container=AGENT_CONTAINER,
+    )
+
+
+def agent_exec_payload(config: k8s.E2EConfig, node: str, command: str) -> str:
+    """``agent_exec`` for output that is parsed rather than matched."""
+    return k8s.exec_payload(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        command,
+        container=AGENT_CONTAINER,
     )
 
 
@@ -1078,7 +1104,19 @@ def print_snapshot_controller_logs(config: k8s.E2EConfig) -> None:
         return
     for pod in pods[:8]:
         print(f"snapshot pod {pod.metadata.name} phase={pod.status.phase}")
-        print(k8s.pod_logs(config.namespace, pod.metadata.name, tail_lines=50))
+        # Per container, because the agent pod has more than one and a log read
+        # that does not name one fails outright — which is how a dump of the
+        # most interesting pod in the namespace came back empty.
+        for container in pod.spec.containers:
+            print(f"- container {container.name}")
+            print(
+                k8s.pod_logs(
+                    config.namespace,
+                    pod.metadata.name,
+                    tail_lines=50,
+                    container=container.name,
+                )
+            )
 
 
 def cleanup(config: k8s.E2EConfig, run: TestRun) -> None:
@@ -1360,22 +1398,26 @@ def _dump_pod_logs(config: k8s.E2EConfig, name: str) -> None:
 
 
 def _dump_agent_diagnostics(config: k8s.E2EConfig, run: TestRun, source_node: str) -> None:
-    agent = checkpoint_agent_pod(config, source_node)
-    _dump_section("agent logs", lambda: _dump_agent_logs(config, agent, source_node))
-    _dump_section("nvidia-smi", lambda: _dump_nvidia_smi(config, agent, source_node))
+    _dump_section("agent logs", lambda: _dump_agent_logs(config, source_node))
+    _dump_section("nvidia-smi", lambda: _dump_nvidia_smi(config, source_node))
     _dump_section("host monitoring agents", lambda: _dump_host_monitoring(config, source_node))
-    _dump_section("kernel log", lambda: _dump_kernel_log(config, agent, source_node))
-    _dump_section("checkpoint artifact", lambda: _dump_checkpoint_artifact(config, run, agent, source_node))
+    _dump_section("kernel log", lambda: _dump_kernel_log(config, source_node))
+    _dump_section("checkpoint artifact", lambda: _dump_checkpoint_artifact(config, run, source_node))
 
 
-def _dump_agent_logs(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
+def _dump_agent_logs(config: k8s.E2EConfig, source_node: str) -> None:
+    agent = checkpoint_agent_pod(config, source_node)
     print(f"--- agent {agent} on {source_node} (tail 200) ---")
-    print(k8s.pod_logs(config.namespace, agent, tail_lines=200))
+    print(
+        k8s.pod_logs(
+            config.namespace, agent, tail_lines=200, container=AGENT_CONTAINER
+        )
+    )
 
 
-def _dump_nvidia_smi(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
+def _dump_nvidia_smi(config: k8s.E2EConfig, source_node: str) -> None:
     print(f"--- nvidia-smi on {source_node} ---")
-    print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
+    print(agent_exec(config, source_node, "nvidia-smi 2>&1 || true"))
 
 
 def _dump_host_monitoring(config: k8s.E2EConfig, source_node: str) -> None:
@@ -1383,7 +1425,7 @@ def _dump_host_monitoring(config: k8s.E2EConfig, source_node: str) -> None:
     print(host_monitoring_agents(config, source_node))
 
 
-def _dump_kernel_log(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
+def _dump_kernel_log(config: k8s.E2EConfig, source_node: str) -> None:
     # A CRIU crash ("criu swrk failed: signal: segmentation fault") leaves
     # no restore.log behind; the kernel's trap line is then the only
     # record of where it died. The agent is privileged with hostPID, so
@@ -1393,9 +1435,9 @@ def _dump_kernel_log(config: k8s.E2EConfig, agent: str, source_node: str) -> Non
     # killer (not visible here); the two need different investigations.
     print(f"--- kernel log (criu/segfault/oom) on {source_node} ---")
     print(
-        k8s.exec_command(
-            config.namespace,
-            agent,
+        agent_exec(
+            config,
+            source_node,
             "dmesg -T 2>/dev/null "
             "| grep -iE 'criu|segfault|traps|nsrestore|cuda|out of memory|killed process|oom|memory cgroup' "
             "| tail -40 || echo '<dmesg unavailable>'",
@@ -1404,7 +1446,7 @@ def _dump_kernel_log(config: k8s.E2EConfig, agent: str, source_node: str) -> Non
 
 
 def _dump_checkpoint_artifact(
-    config: k8s.E2EConfig, run: TestRun, agent: str, source_node: str
+    config: k8s.E2EConfig, run: TestRun, source_node: str
 ) -> None:
     content_uid = bound_content_uid(config, run.snapshot_name)
     if not content_uid:
@@ -1413,9 +1455,9 @@ def _dump_checkpoint_artifact(
     root = checkpoint_artifact_root(content_uid)
     print(f"--- checkpoint artifact {content_uid} on {source_node} ---")
     print(
-        k8s.exec_command(
-            config.namespace,
-            agent,
+        agent_exec(
+            config,
+            source_node,
             f"ls -la {root}/containers/* 2>&1 | grep -vE ' (core|pagemap|pages|fdinfo|ids|mm|sigacts|fs|tty-info|reg-files|inventory|pstree|files|cgroup|seccomp|timens|utsns|ipcns|netns|mnt|rseq|fanotify|inotify|tls|stats)-?[0-9]*\\.img' 2>&1; "
             # The diff is applied into the placeholder's rootfs while
             # the placeholder and then CRIU run from it. Anything under

@@ -79,18 +79,13 @@ Each stage stands alone. Against a cluster that already runs Snapshot, set
 `KUBECONFIG` and run `pytest -m cpu` on its own; against a clean cluster, run
 the `setup.py` phases below and then the tests.
 
-The check reports as **CPU checkpoint/restore**. It is not required by branch
-protection: the `main` ruleset requires only one approval and a code-owner
-review, so the job informs a reviewer rather than blocking a merge. Making it
-required is a repository-policy decision, and worth taking only once its
-runtime is predictable — most of the job is still image movement, not testing.
-
 `SNAPSHOT_E2E_REQUIRED_TESTS` names the cases the job exists to prove, as a
-comma-separated list of test function names. Any name in it that the run
-deselects or that skips fails the run. Without it, dropping a `cpu` marker
-leaves the check green while it tests no round trip at all, because pytest
-exits 0 for a suite that ran nothing it was asked for. It is unset for local
-runs, where skipping is legitimate.
+comma-separated list of test names. Any name the run deselects, or that skips,
+fails the run; a parametrized function can be named bare, which requires every
+one of its cases, or by case ID to require just that one. Without it, dropping
+a `cpu` marker would leave the check green while it tested no round trip at
+all, because pytest exits 0 for a suite that ran nothing it was asked for. It
+is unset for local runs, where skipping is legitimate.
 
 ### Local Direct Mode
 

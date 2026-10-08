@@ -196,52 +196,19 @@ def test_snapshot_records_the_environment_a_restore_is_checked_against(
             config, source_node, content["metadata"]["uid"]
         )
 
-        node_info = k8s.read_node(source_node).status.node_info
-        host = manifest["host"]
-        assert host["kernelVersion"] == node_info.kernel_version
-        assert host["cpuArch"] == node_info.architecture
+        assert_recorded_environment(
+            config, run, source_node, source_image_id, manifest, content
+        )
 
-        pod = k8s.read_pod(config.namespace, run.source_pod)
-        container = next(c for c in pod.spec.containers if c.name == snap.CONTAINER)
-        limits = (container.resources.limits or {}) if container.resources else {}
-        recorded_pod = manifest["k8s"]
-        assert recorded_pod["image"] == container.image
-        if source_image_id:
-            assert recorded_pod["imageId"] == source_image_id
-        else:
-            # Missing CRI image_id is a supported unknown, not a failed capture.
-            # Verify omission rather than skipping this environment test.
-            assert "imageId" not in recorded_pod
-        assert recorded_pod["memoryLimit"] == limits["memory"]
-        # This pod sets no CPU limit, and an absent value is recorded as absent
-        # rather than invented, which is what makes it refuse nothing later.
-        assert "cpu" not in limits
-        assert "cpuLimit" not in recorded_pod
-
+        # The device half, which only a GPU cluster can prove. The call above
+        # is the contract this shares with the CPU test.
         cuda = manifest["cudaRestore"]
         assert sorted(
             (gpu["uuid"], gpu["productName"]) for gpu in cuda["sourceGpus"]
         ) == sorted((gpu["uuid"], gpu["name"]) for gpu in visible_gpus)
         assert cuda["sourceDriverVersion"] == visible_gpus[0]["driver"]
 
-        published = content["status"]["source"]
-        assert published["node"] == {
-            "name": source_node,
-            "architecture": node_info.architecture,
-            "kernelVersion": node_info.kernel_version,
-        }
-        # Exact equality, because the CPU limit this pod never set must stay
-        # absent here as well as in the manifest.
-        expected_pod = {
-            "image": container.image,
-            "memory": limits["memory"],
-        }
-        if source_image_id:
-            expected_pod["imageDigest"] = (
-                source_image_id.split("://")[-1].rsplit("@", 1)[-1]
-            )
-        assert published["pod"] == expected_pod
-        nvidia = published["devices"]["nvidia"]
+        nvidia = content["status"]["source"]["devices"]["nvidia"]
         assert nvidia["driverVersion"] == visible_gpus[0]["driver"]
         assert sorted(
             instance["productName"] for instance in nvidia["instances"]
@@ -297,45 +264,9 @@ def test_snapshot_records_the_cpu_environment_a_restore_is_checked_against(
             config, source_node, content["metadata"]["uid"]
         )
 
-        node_info = k8s.read_node(source_node).status.node_info
-        host = manifest["host"]
-        assert host["kernelVersion"] == node_info.kernel_version
-        assert host["cpuArch"] == node_info.architecture
-
-        pod = k8s.read_pod(config.namespace, run.source_pod)
-        container = next(c for c in pod.spec.containers if c.name == snap.CONTAINER)
-        limits = (container.resources.limits or {}) if container.resources else {}
-        recorded_pod = manifest["k8s"]
-        assert recorded_pod["image"] == container.image
-        if source_image_id:
-            assert recorded_pod["imageId"] == source_image_id
-        else:
-            # Missing CRI image_id is a supported unknown, not a failed capture.
-            # Verify omission rather than skipping this environment test.
-            assert "imageId" not in recorded_pod
-        assert recorded_pod["memoryLimit"] == limits["memory"]
-        # This pod sets no CPU limit, and an absent value is recorded as absent
-        # rather than invented, which is what makes it refuse nothing later.
-        assert "cpu" not in limits
-        assert "cpuLimit" not in recorded_pod
-
-        published = content["status"]["source"]
-        assert published["node"] == {
-            "name": source_node,
-            "architecture": node_info.architecture,
-            "kernelVersion": node_info.kernel_version,
-        }
-        # Exact equality, because the CPU limit this pod never set must stay
-        # absent here as well as in the manifest.
-        expected_pod = {
-            "image": container.image,
-            "memory": limits["memory"],
-        }
-        if source_image_id:
-            expected_pod["imageDigest"] = (
-                source_image_id.split("://")[-1].rsplit("@", 1)[-1]
-            )
-        assert published["pod"] == expected_pod
+        assert_recorded_environment(
+            config, run, source_node, source_image_id, manifest, content
+        )
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -884,6 +815,63 @@ def snapshot_annotations(pod: object) -> dict[str, str]:
         for key, value in annotations.items()
         if key.startswith(("nvidia.com/restore-", "nvidia.com/snapshot-"))
     }
+
+
+def assert_recorded_environment(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+    source_node: str,
+    source_image_id: str,
+    manifest: dict,
+    content: dict,
+) -> None:
+    """The device-free environment facts, in both the manifest and the content.
+
+    Shared by the CPU and GPU environment tests rather than copied into each:
+    these are assertions about a projection, so a change to it has to be able
+    to fail in one place. The GPU test adds its device assertions on top.
+
+    Every expectation is read from the node and the pod rather than from the
+    manifest, so a projection that renamed or dropped a field is caught instead
+    of being compared against itself.
+    """
+    node_info = k8s.read_node(source_node).status.node_info
+    host = manifest["host"]
+    assert host["kernelVersion"] == node_info.kernel_version
+    assert host["cpuArch"] == node_info.architecture
+
+    pod = k8s.read_pod(config.namespace, run.source_pod)
+    container = next(c for c in pod.spec.containers if c.name == snap.CONTAINER)
+    limits = (container.resources.limits or {}) if container.resources else {}
+    recorded_pod = manifest["k8s"]
+    assert recorded_pod["image"] == container.image
+    if source_image_id:
+        assert recorded_pod["imageId"] == source_image_id
+    else:
+        # Missing CRI image_id is a supported unknown, not a failed capture.
+        # Verify omission rather than skipping this environment test.
+        assert "imageId" not in recorded_pod
+    assert recorded_pod["memoryLimit"] == limits["memory"]
+    # This pod sets no CPU limit, and an absent value is recorded as absent
+    # rather than invented, which is what makes it refuse nothing later.
+    assert "cpu" not in limits
+    assert "cpuLimit" not in recorded_pod
+
+    published = content["status"]["source"]
+    assert published["node"] == {
+        "name": source_node,
+        "architecture": node_info.architecture,
+        "kernelVersion": node_info.kernel_version,
+    }
+    # Exact equality, because the CPU limit this pod never set must stay
+    # absent here as well as in the manifest.
+    expected_pod = {
+        "image": container.image,
+        "memory": limits["memory"],
+    }
+    if source_image_id:
+        expected_pod["imageDigest"] = source_image_id.split("://")[-1].rsplit("@", 1)[-1]
+    assert published["pod"] == expected_pod
 
 
 def assert_podsnapshot_ready(

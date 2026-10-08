@@ -12,12 +12,15 @@ from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
 from snapshot_e2e.workloads import TestRun
 
-# Tests named here must actually run. A case that stops being selected, or
-# starts skipping, is the one regression a green check cannot show: pytest
-# exits 0 having run whatever it found, and exits non-zero only when it
-# collected nothing at all. CI names the cases it is there to prove; local runs
-# leave this unset, where skipping is legitimate.
+# Comma-separated test names that this run must actually execute. Set by CI,
+# unset locally. See e2e/README.md for what it is for.
 REQUIRED_TESTS_ENV = "SNAPSHOT_E2E_REQUIRED_TESTS"
+
+# What each required name matched when collection found it, before anything was
+# deselected. Comparing against that, rather than against the names that
+# survive, is what makes a dropped parameter case visible: the bare function
+# name still matches the cases that remain.
+COLLECTED_MATCHES = pytest.StashKey[dict[str, set[str]]]()
 
 
 def required_test_names() -> set[str]:
@@ -34,28 +37,47 @@ def item_names(item: pytest.Item) -> set[str]:
     return {item.name, getattr(item, "originalname", None) or item.name}
 
 
-# trylast, because deselection by marker and by -k happens in this same hook:
-# running first would see the full collection and find nothing missing.
-@pytest.hookimpl(trylast=True)
+def matches(items: list[pytest.Item], name: str) -> set[str]:
+    return {item.nodeid for item in items if name in item_names(item)}
+
+
+# tryfirst, to run before marker and -k deselection, which happen in this same
+# hook. This records only; the comparison needs the final selection.
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(
     session: pytest.Session,
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Refuse to run at all when a required case was not selected.
-
-    Deselection is checked here rather than at the end because a run that
-    never collects the case has nothing left to report it against.
-    """
     required = required_test_names()
     if not required:
         return
-    selected = {name for item in items for name in item_names(item)}
-    missing = sorted(required - selected)
-    if missing:
+    session.stash[COLLECTED_MATCHES] = {
+        name: matches(items, name) for name in required
+    }
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Refuse to run at all when a required case will not run.
+
+    Checked at the end of collection rather than during a run, because a case
+    that was never selected has nothing left to report a failure against.
+    """
+    collected = session.stash.get(COLLECTED_MATCHES, None)
+    if not collected:
+        return
+    problems = []
+    for name, found in sorted(collected.items()):
+        if not found:
+            problems.append(f"{name} (no such test was collected)")
+            continue
+        dropped = found - matches(session.items, name)
+        if dropped:
+            problems.append(f"{name} (deselected: {', '.join(sorted(dropped))})")
+    if problems:
         raise pytest.UsageError(
             f"{REQUIRED_TESTS_ENV} requires tests that this run did not select: "
-            + ", ".join(missing)
+            + "; ".join(problems)
         )
 
 
