@@ -47,7 +47,7 @@ func testPlugin(t *testing.T, resolver *fakeResolver) (*Plugin, string) {
 }
 
 func restoreSandbox(annotations map[string]string) *api.PodSandbox {
-	return &api.PodSandbox{Name: "restore-worker", Namespace: "inference", Uid: "pod-uid", Annotations: annotations}
+	return &api.PodSandbox{Name: "restore-worker", Namespace: testHostNamespace, Uid: "pod-uid", Annotations: annotations}
 }
 
 func TestCreateContainerScope(t *testing.T) {
@@ -103,7 +103,7 @@ func TestCreateContainerPassesPodIdentityToResolver(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "restore-worker", resolver.pod.Name)
-	assert.Equal(t, "inference", resolver.pod.Namespace)
+	assert.Equal(t, testHostNamespace, resolver.pod.Namespace)
 	assert.Equal(t, "pod-uid", string(resolver.pod.UID))
 	assert.Equal(t, annotations, resolver.pod.Annotations)
 }
@@ -149,4 +149,17 @@ func TestInstallProxyReplacesAnEarlierCopy(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "no temporary file may be left behind")
+}
+
+func TestCreateContainerIgnoresOtherNamespaces(t *testing.T) {
+	resolver := &fakeResolver{err: errors.New("must not be called")}
+	p, _ := testPlugin(t, resolver)
+	sandbox := restoreSandbox(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	sandbox.Namespace = "schwinns-vcluster"
+
+	adjust, _, err := p.CreateContainer(context.Background(), sandbox, &api.Container{Name: "main"})
+
+	require.NoError(t, err)
+	assert.Nil(t, adjust)
+	assert.Zero(t, resolver.calls)
 }

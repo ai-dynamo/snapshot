@@ -44,6 +44,9 @@ const (
 	lookupTimeout = time.Second
 )
 
+// testHostNamespace is the host namespace of the test vCluster. TEST ONLY.
+const testHostNamespace = "sasoolin-vcluster"
+
 // proxyCommand is the proxy as the container sees it: the control directory
 // is mounted at SnapshotControlMountPath.
 var proxyCommand = []string{path.Join(podcontract.SnapshotControlMountPath, podcontract.RestoreProxyBinaryName)}
@@ -108,6 +111,12 @@ func (p *Plugin) Run(ctx context.Context) error {
 // retries it: running the image's own command instead would start the
 // workload from scratch in a container the agent is about to restore into.
 func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+	// TEST ONLY (manual test on a shared cluster, never merged): act only on
+	// Pods from the test vCluster's host namespace. Every other Pod on the
+	// node is left alone, whatever its annotations.
+	if pod.GetNamespace() != testHostNamespace {
+		return nil, nil, nil
+	}
 	if _, ok := pod.GetAnnotations()[podcontract.RestoreFromAnnotation]; !ok {
 		return nil, nil, nil
 	}
