@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
+	"github.com/ai-dynamo/snapshot/api/storage/coordination"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
@@ -45,13 +46,67 @@ func prepareTestArtifactRoot(t *testing.T, uid string) (string, string) {
 
 func testConfig(basePath string) operatortypes.ArtifactCleanupConfig {
 	return operatortypes.ArtifactCleanupConfig{
+		StoreID:  "store-v1-" + fixedHex(),
 		BasePath: basePath, ScanInterval: time.Hour, BatchSize: 10, ListAttempts: 3, Workers: 1, BackendType: backends.NamePVC,
 	}
 }
 
+func TestProcessDeleteContentRequiresConfiguredStore(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		configured string
+		wantMatch  bool
+	}{
+		{name: "matching", configured: "store-v1-" + fixedHex(), wantMatch: true},
+		{name: "different", configured: "store-v1-" + fixedHex()[1:] + "0"},
+		{name: "unconfigured"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base, root := prepareTestArtifactRoot(t, "uid-bound")
+			content := boundTestContent(t, "content", "uid-bound")
+			now := metav1.Now()
+			content.DeletionTimestamp = &now
+			content.Finalizers = []string{"example.com/keep", PodSnapshotContentArtifactCleanupFinalizer}
+			q, _ := newTestQueue(t, base, content)
+			q.config.StoreID = tt.configured
+
+			err := q.processDeleteContent(context.Background(), newDeleteContentKey(content.Name, content.UID))
+			current := &snapshotv1alpha1.PodSnapshotContent{}
+			require.NoError(t, q.client.Get(context.Background(), client.ObjectKeyFromObject(content), current))
+			if tt.wantMatch {
+				require.NoError(t, err)
+				assert.NoDirExists(t, root)
+				assert.Equal(t, []string{"example.com/keep"}, current.Finalizers)
+			} else {
+				require.ErrorIs(t, err, coordination.ErrStoreMismatch)
+				assert.DirExists(t, root)
+				assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+			}
+		})
+	}
+}
+
+func TestProcessDeleteContentDoesNotFinalizeAgainstAnEmptyReplacementStore(t *testing.T) {
+	_, originalRoot := prepareTestArtifactRoot(t, "uid-original")
+	content := boundTestContent(t, "content", "uid-original")
+	now := metav1.Now()
+	content.DeletionTimestamp = &now
+	content.Finalizers = []string{"example.com/keep", PodSnapshotContentArtifactCleanupFinalizer}
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	q.config.StoreID = "store-v1-" + fixedHex()[1:] + "0"
+
+	err := q.processDeleteContent(context.Background(), newDeleteContentKey(content.Name, content.UID))
+	require.ErrorIs(t, err, coordination.ErrStoreMismatch)
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, q.client.Get(context.Background(), client.ObjectKeyFromObject(content), current))
+	assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+	assert.DirExists(t, originalRoot)
+}
+
 func newTestQueue(t *testing.T, basePath string, objects ...client.Object) (*Queue, *record.FakeRecorder) {
 	t.Helper()
-	kubeClient := ctrlfake.NewClientBuilder().WithScheme(maintenanceTestScheme(t)).WithObjects(objects...).Build()
+	kubeClient := ctrlfake.NewClientBuilder().WithScheme(maintenanceTestScheme(t)).
+		WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).WithObjects(objects...).Build()
 	recorder := record.NewFakeRecorder(10)
 	q, err := NewQueue(kubeClient, kubeClient, recorder, testConfig(basePath))
 	require.NoError(t, err)
@@ -212,7 +267,7 @@ func TestProcessSweepDeletesOnFirstAuthoritativeAbsence(t *testing.T) {
 		emptyMetadataPage(list, "10", "")
 		return nil
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC, locker: coordination.NewLocker()}
 	require.NoError(t, q.processSweep(context.Background(), log.Log))
 	_, err := os.Lstat(root)
 	require.True(t, os.IsNotExist(err))
@@ -232,7 +287,7 @@ func TestProcessSweepProtectsUIDOnFinalPage(t *testing.T) {
 		}
 		return nil
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC, locker: coordination.NewLocker()}
 	require.NoError(t, q.processSweep(context.Background(), log.Log))
 	_, err := os.Lstat(root)
 	require.NoError(t, err)
@@ -244,7 +299,7 @@ func TestProcessSweepFailsClosedAfterListAttemptsExhausted(t *testing.T) {
 	reader := &metadataReader{list: func(*metav1.PartialObjectMetadataList, *client.ListOptions) error {
 		return assert.AnError
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC, locker: coordination.NewLocker()}
 	require.Error(t, q.processSweep(context.Background(), log.Log))
 	assert.Equal(t, 3, reader.calls)
 	_, err := os.Lstat(root)
@@ -262,7 +317,7 @@ func TestProcessSweepProcessesBoundedBatch(t *testing.T) {
 		emptyMetadataPage(list, "30", "")
 		return nil
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC, locker: coordination.NewLocker()}
 	require.NoError(t, q.processSweep(context.Background(), log.Log))
 	artifactsRoot, err := artifact.ResolveRoot(base)
 	require.NoError(t, err)
@@ -372,4 +427,59 @@ func TestProcessSweepEnqueuesPendingFinalizersWhenEnumerationFails(t *testing.T)
 	require.False(t, shutdown)
 	defer q.queue.Done(key)
 	assert.Equal(t, newDeleteContentKey("pending", "pending-uid"), key)
+}
+
+func TestProcessDeleteContentSerializesOnSameArtifactKey(t *testing.T) {
+	base, _ := prepareTestArtifactRoot(t, "uid-lock")
+	now := metav1.Now()
+	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
+		Name: "content", UID: types.UID("uid-lock"), ResourceVersion: "1", DeletionTimestamp: &now,
+		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+	}}
+	q, _ := newTestQueue(t, base, content)
+
+	unlock := q.locker.Lock(storeKey(content))
+	done := make(chan error, 1)
+	go func() {
+		done <- q.processDeleteContent(context.Background(), newDeleteContentKey("content", "uid-lock"))
+	}()
+	select {
+	case <-done:
+		unlock()
+		t.Fatal("processDeleteContent proceeded while the artifact lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	require.NoError(t, <-done)
+}
+
+func TestProcessRecoverMetadataNoopOnMissingContent(t *testing.T) {
+	q, _ := newTestQueue(t, t.TempDir())
+	key := newRecoverMetadataKey("gone", "uid-gone", "store-v1-"+fixedHex(), "main")
+	require.NoError(t, q.processRecoverMetadata(context.Background(), key))
+}
+
+func TestProcessRecoverMetadataNoopOnUIDMismatch(t *testing.T) {
+	content := boundTestContent(t, "content", "uid-current")
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	key := newRecoverMetadataKey("content", "uid-stale", content.Spec.Storage.StoreID, "main")
+	require.NoError(t, q.processRecoverMetadata(context.Background(), key))
+}
+
+func TestProcessRecoverMetadataRefusesStoreIDMismatch(t *testing.T) {
+	content := boundTestContent(t, "content", "uid-rebind")
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	key := newRecoverMetadataKey("content", "uid-rebind", "store-v1-"+fixedHex()+"stale", "main")
+
+	err := q.processRecoverMetadata(context.Background(), key)
+	require.ErrorContains(t, err, "no longer bound to store")
+}
+
+func TestProcessRecoverMetadataPropagatesEvidenceDiscoveryError(t *testing.T) {
+	content := boundTestContent(t, "content", "uid-evidence")
+	q, _ := newTestQueue(t, t.TempDir(), content)
+	key := newRecoverMetadataKey("content", "uid-evidence", content.Spec.Storage.StoreID, "main")
+
+	err := q.processRecoverMetadata(context.Background(), key)
+	require.ErrorContains(t, err, "discover publication evidence")
 }

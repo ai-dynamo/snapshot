@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ai-dynamo/snapshot/api/storage/coordination"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	"github.com/go-logr/logr"
@@ -17,6 +18,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+// storeKey returns the coordination.Key this content's maintenance work must
+// serialize under. Legacy content without a store still gets a stable key.
+func storeKey(content *snapshotv1alpha1.PodSnapshotContent) coordination.Key {
+	storeID := ""
+	if content.Spec.Storage != nil {
+		storeID = content.Spec.Storage.StoreID
+	}
+	return coordination.Key{StoreID: storeID, ArtifactUID: string(content.UID)}
+}
 
 // processDeleteContent is idempotent: a content that's already gone, already
 // missing the finalizer, or recreated under the same name with a different
@@ -40,10 +51,12 @@ func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error
 		return nil
 	}
 
-	backend, err := q.backend()
+	backend, err := q.backendForContent(content)
 	if err != nil {
 		return err
 	}
+	unlock := q.locker.Lock(storeKey(content))
+	defer unlock()
 	if err := backend.Delete(ctx, string(content.UID)); err != nil {
 		if errors.Is(err, backends.ErrUnsafeArtifact) {
 			q.recorder.Eventf(content, corev1.EventTypeWarning, ArtifactCleanupBlockedReason,
@@ -55,6 +68,38 @@ func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error
 	before := content.DeepCopy()
 	controllerutil.RemoveFinalizer(content, PodSnapshotContentArtifactCleanupFinalizer)
 	return q.client.Patch(ctx, content, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+}
+
+// processRecoverMetadata is idempotent the same way processDeleteContent is:
+// a content that's already gone or recreated under the same name with a
+// different UID is a completed no-op. A store-ID mismatch against the key
+// is a terminal refusal, not a retry: the content rebound since enqueue, so
+// retrying the same evidence would repair the wrong store.
+func (q *Queue) processRecoverMetadata(ctx context.Context, key WorkItemKey) error {
+	content := &snapshotv1alpha1.PodSnapshotContent{}
+	err := q.client.Get(ctx, apitypes.NamespacedName{Name: key.Name}, content)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get PodSnapshotContent %s: %w", key.Name, err)
+	}
+	if content.UID != key.UID {
+		return nil
+	}
+	if content.Spec.Storage == nil || content.Spec.Storage.StoreID != key.StoreID {
+		return fmt.Errorf("content %s no longer bound to store %q: refusing stale recover-metadata", key.Name, key.StoreID)
+	}
+
+	backend, err := q.backendForContent(content)
+	if err != nil {
+		return err
+	}
+	found, err := backend.Evidence(ctx, string(content.UID))
+	if err != nil {
+		return fmt.Errorf("discover publication evidence for %s: %w", key.Name, err)
+	}
+	return q.RepairPublication(ctx, content, key.ContainerName, found)
 }
 
 // processSweep reschedules pending finalization and removes up to
@@ -78,6 +123,7 @@ func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
 	if enumerationErr != nil {
 		return enumerationErr
 	}
+
 	var sweepErrors []error
 	processed := 0
 	for uid := range candidates {
@@ -88,7 +134,10 @@ func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
 			break
 		}
 		processed++
-		if err := backend.Delete(ctx, uid); err != nil {
+		unlock := q.locker.Lock(coordination.Key{ArtifactUID: uid})
+		err := backend.Delete(ctx, uid)
+		unlock()
+		if err != nil {
 			sweepErrors = append(sweepErrors, err)
 			logger.Error(err, "Unable to reclaim orphan PodSnapshotContent artifact root", "content_uid", uid)
 			continue

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/api/storage/coordination"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
@@ -35,6 +37,8 @@ type Queue struct {
 	registry          BackendRegistry
 	configuredBackend string
 
+	locker *coordination.Locker
+
 	queue workqueue.TypedRateLimitingInterface[WorkItemKey]
 }
 
@@ -55,6 +59,7 @@ func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record
 		recorder:          recorder,
 		config:            cfg,
 		configuredBackend: configuredBackend,
+		locker:            coordination.NewLocker(),
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[WorkItemKey](),
 			workqueue.TypedRateLimitingQueueConfig[WorkItemKey]{Name: "podsnapshotcontent-maintenance"},
@@ -76,6 +81,16 @@ func (q *Queue) backend() (Backend, error) {
 	return backend, nil
 }
 
+// backendForContent prevents a missing artifact on another PVC from counting as completed cleanup.
+func (q *Queue) backendForContent(content *snapshotv1alpha1.PodSnapshotContent) (Backend, error) {
+	if content.Spec.Storage != nil {
+		if err := coordination.RequireStoreMatch(content.Spec.Storage.StoreID, q.config.StoreID); err != nil {
+			return nil, fmt.Errorf("maintenance for content %s: %w", content.Name, err)
+		}
+	}
+	return q.backend()
+}
+
 // EnqueueDeleteContent schedules cleanup for one content. Repeated calls for
 // the same key coalesce while it is queued or being processed.
 func (q *Queue) EnqueueDeleteContent(name string, uid types.UID) {
@@ -85,6 +100,15 @@ func (q *Queue) EnqueueDeleteContent(name string, uid types.UID) {
 // EnqueueSweep schedules an orphan sweep; repeated calls coalesce.
 func (q *Queue) EnqueueSweep() {
 	q.queue.Add(newSweepKey())
+}
+
+// EnqueueRecoverMetadata schedules publication repair for one bound
+// container, e.g. after the reconciler finds a confirmed-but-unrecorded
+// publication. storeID is the content's expected store, carried on the key
+// so the worker can refuse a stale enqueue after a rebind. Repeated calls
+// for the same key coalesce.
+func (q *Queue) EnqueueRecoverMetadata(name string, uid types.UID, storeID, containerName string) {
+	q.queue.Add(newRecoverMetadataKey(name, uid, storeID, containerName))
 }
 
 // Start implements manager.Runnable: an immediate sweep, then one per
@@ -162,6 +186,8 @@ func (q *Queue) process(ctx context.Context, key WorkItemKey, logger logr.Logger
 		return q.processDeleteContent(ctx, key)
 	case ModeSweep:
 		return q.processSweep(ctx, logger)
+	case ModeRecoverMetadata:
+		return q.processRecoverMetadata(ctx, key)
 	default:
 		return fmt.Errorf("unknown maintenance mode %q", key.Mode)
 	}

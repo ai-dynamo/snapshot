@@ -27,6 +27,7 @@ func main() {
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
 	storeID := mustConfigureStoreID()
+	artifactCleanupConfig.StoreID = storeID
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
 		os.Exit(1)
