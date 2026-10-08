@@ -21,6 +21,13 @@ B200 GPUs. The single-GPU [vLLM](vllm.md), [SGLang](sglang.md), and
 
 ## Multi-GPU models
 
+The large models below are mixture-of-experts (MoE) models. They use TEP8:
+tensor parallelism across eight GPUs for attention and expert parallelism across
+the same eight GPUs for MoE layers. vLLM sets `tensor_parallel_size=8` and
+`enable_expert_parallel=true`, SGLang sets both parallel sizes to 8, and
+TensorRT-LLM sets `tensor_parallel_size=8` and `moe_expert_parallel_size=8`.
+The dense Qwen3-0.6B recipes remain single-GPU.
+
 Choose a Deployment or SnapshotJob for capture. Each engine shares one
 `restore/8-gpu.yaml`, `app.py`, and ConfigMap across its models.
 
