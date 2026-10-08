@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "checkpoint.hpp"
+#include "../errors.hpp"
 
 #include <poll.h>
 #include <signal.h>
@@ -65,9 +66,7 @@ CheckpointAPI::CheckpointAPI()
 void
 CheckpointAPI::RequireCustomStorage() const
 {
-  if (!SupportsCustomStorage()) {
-    throw std::runtime_error("driver does not support CustomStorage");
-  }
+  Require(SupportsCustomStorage(), "driver does not support CustomStorage");
 }
 
 void
@@ -146,9 +145,7 @@ Operation::Exited() const
 void
 Operation::CheckTarget() const
 {
-  if (Exited()) {
-    throw std::runtime_error("CUDA target exited");
-  }
+  Require(!Exited(), "CUDA target exited");
 }
 
 void
@@ -190,9 +187,8 @@ Operation::PrepareRestore(std::span<CUcheckpointGpuPair> pairs)
 const CUcheckpointCustomStorageInfo*
 Operation::StorageInfo() const
 {
-  if (!view_ || !view_->handle || (view_->deviceCount && !view_->perDeviceData)) {
-    throw std::runtime_error("invalid CustomStorage view");
-  }
+  Require(view_ && view_->handle && (!view_->deviceCount || view_->perDeviceData),
+          "invalid CustomStorage view");
   return view_;
 }
 

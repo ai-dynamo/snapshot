@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "io_engine.hpp"
+#include "errors.hpp"
 #include "fatal_cleanup.hpp"
 
 #include <nixl.h>
@@ -13,7 +14,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <exception>
 #include <optional>
 #include <stdexcept>
@@ -86,10 +86,8 @@ NixlTransferEngine::~NixlTransferEngine()
   // before releasing requests or buffers.
   try {
     Close();
-  } catch (const std::exception& error) {
-    std::fprintf(stderr, "PageBroker I/O cleanup: %s\n", error.what());
   } catch (...) {
-    std::fprintf(stderr, "PageBroker I/O cleanup: unknown error\n");
+    LogException("PageBroker I/O cleanup", std::current_exception());
   }
   const auto status = impl_->Inject(Fault::BufferRelease) ? NIXL_ERR_BACKEND
       : impl_->agent->deregisterMem(impl_->buffers);
