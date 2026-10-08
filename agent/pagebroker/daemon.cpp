@@ -362,8 +362,19 @@ IsAllowedClient(int connection)
 {
   ucred peer{};
   socklen_t peer_size = sizeof(peer);
-  return getsockopt(connection, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) == 0 &&
-         peer_size == sizeof(peer) && (peer.uid == 0 || peer.uid == geteuid());
+  if (getsockopt(connection, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) < 0) {
+    LogError("get client credentials", {errno, std::generic_category()});
+    return false;
+  }
+  if (peer_size != sizeof(peer)) {
+    std::osyncstream(std::cerr) << "reject client: unexpected credential size=" << peer_size << '\n';
+    return false;
+  }
+  if (peer.uid != 0 && peer.uid != geteuid()) {
+    std::osyncstream(std::cerr) << "reject client: uid=" << peer.uid << " pid=" << peer.pid << '\n';
+    return false;
+  }
+  return true;
 }
 
 class GpuConnections {
