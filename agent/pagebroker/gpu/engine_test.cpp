@@ -147,24 +147,11 @@ TEST_F(ArtifactTest, RollsBackCreatedDirectoriesWithoutRemovingExistingData)
   EXPECT_TRUE(fs::is_directory(gpu_root / "2"));
 }
 
-TEST_F(ArtifactTest, AcceptsWritableDirectoriesForCheckpointAndRestore)
+TEST_F(ArtifactTest, RejectsWritableDirectoryBeforeCreatingGpuData)
 {
-  ASSERT_EQ(fchmod(directory_.get(), S_IRWXU | S_IWGRP | S_IWOTH), 0);
-  const auto gpu_root = root_ / kDataDirectory;
-  fs::create_directory(gpu_root);
-  fs::permissions(gpu_root, fs::perms::all);
-  ASSERT_NO_THROW(Artifact(directory_.get(), Direction::Checkpoint, {1}, {kDevice}));
-
-  const auto participant = gpu_root / "1";
-  fs::permissions(participant, fs::perms::all);
-  const auto filename = storage::DeviceFilename(0);
-  FileDescriptor file(open((participant / filename).c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC,
-                           S_IRUSR | S_IWUSR));
-  ASSERT_GE(file.get(), 0);
-  ASSERT_EQ(ftruncate(file.get(), 4096), 0);
-  std::string error;
-  ASSERT_TRUE(storage::WriteManifest(participant, {{kDevice, 4096, filename}}, &error)) << error;
-  EXPECT_NO_THROW(Artifact(directory_.get(), Direction::Restore, {1}, {kDevice}));
+  ASSERT_EQ(fchmod(directory_.get(), S_IRWXU | S_IWGRP), 0);
+  EXPECT_THROW(Artifact(directory_.get(), Direction::Checkpoint, {1}, {kDevice}), std::invalid_argument);
+  EXPECT_FALSE(fs::exists(root_ / kDataDirectory));
 }
 
 TEST_F(ArtifactTest, DuplicateRetainsDirectoryAfterOriginalCloses)
