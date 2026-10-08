@@ -255,6 +255,8 @@ def base_pod_spec(
     # agent's own pod, not the workload pod — see checkpoint_agent_pod() /
     # checkpoint_artifact_path() in lifecycle.py), a real caller's pod no
     # longer needs to carry this volume at all.
+    if gpu and config.cpu_only:
+        raise ValueError("GPU workloads cannot run in CPU-only E2E mode")
     container: dict[str, Any] = {
         "name": CONTAINER,
         "image": run.image,
@@ -283,7 +285,7 @@ def base_pod_spec(
         # Kubernetes default 30s graceful termination window between tests.
         "terminationGracePeriodSeconds": 1,
         "containers": [container],
-        **workload_scheduling(),
+        **workload_scheduling(cpu_only=config.cpu_only),
         "volumes": volumes,
     }
     if gpu:
@@ -295,7 +297,11 @@ def base_pod_spec(
     return spec
 
 
-def workload_scheduling() -> dict[str, Any]:
+def workload_scheduling(*, cpu_only: bool | None = None) -> dict[str, Any]:
+    if cpu_only is None:
+        cpu_only = k8s.cpu_only_mode()
+    if cpu_only:
+        return {}
     # Keep all workload pods on GPU nodes so the shared RWO checkpoint PVC binds in
     # a zone where both source and restore pods can schedule.
     node_selector = {

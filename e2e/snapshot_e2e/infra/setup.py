@@ -243,6 +243,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def setup_context(args: argparse.Namespace) -> SetupContext:
     """Resolve run-scoped names and kubeconfig paths before any cluster mutation."""
+    if k8s.cpu_only_mode() and args.mode != "direct":
+        raise SetupError("CPU-only E2E requires direct mode")
     workspace = Path(args.workspace).resolve()
     run_id = os.environ.get("GITHUB_RUN_ID", "manual")
     run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
@@ -343,6 +345,8 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
     if not args.snapshot_tag:
         raise SetupError("--snapshot-tag or SNAPSHOT_E2E_SNAPSHOT_TAG is required")
     preflight.load_config(context.target_kubeconfig_value or None, None)
+    if k8s.cpu_only_mode():
+        k8s.require_single_cpu_node()
     ensure_snapshot_release_can_own_cluster_resources(
         args.test_namespace,
         args.snapshot_release,
@@ -353,6 +357,7 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
         name=args.pvc_name,
         size=args.pvc_size,
         storage_class=args.storage_class,
+        access_mode="ReadWriteOnce" if k8s.cpu_only_mode() else "ReadWriteMany",
     )
     install_snapshot_chart(
         kubeconfig=context.target_kubeconfig_value or None,
@@ -828,13 +833,18 @@ def snapshot_chart_fullname(release: str) -> str:
 
 
 def ensure_checkpoint_pvc(
-    namespace: str, name: str, size: str, storage_class: str
+    namespace: str,
+    name: str,
+    size: str,
+    storage_class: str,
+    *,
+    access_mode: str = "ReadWriteMany",
 ) -> None:
     api = client.CoreV1Api()
     body = client.V1PersistentVolumeClaim(
         metadata=client.V1ObjectMeta(name=name, namespace=namespace),
         spec=client.V1PersistentVolumeClaimSpec(
-            access_modes=["ReadWriteMany"],
+            access_modes=[access_mode],
             resources=client.V1ResourceRequirements(requests={"storage": size}),
             storage_class_name=storage_class or None,
         ),
@@ -858,9 +868,9 @@ def ensure_checkpoint_pvc(
         mismatches = []
         if requested != size:
             mismatches.append(f"requested storage={requested}, configured size={size}")
-        if "ReadWriteMany" not in access_modes:
+        if access_mode not in access_modes:
             mismatches.append(
-                f"accessModes={access_modes}, expected to contain ReadWriteMany"
+                f"accessModes={access_modes}, expected to contain {access_mode}"
             )
         if storage_class and actual_storage_class != storage_class:
             mismatches.append(
