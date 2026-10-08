@@ -661,6 +661,42 @@ Every component already holds those values, so no new API field is needed, and
 including the store means a publication is valid only under the store that
 produced it.
 
+```
+commitID = "commit-v1-" + SHA-256( storeID , artifactUID , containerName )
+```
+
+Worked example. Content `psc-7f3a` is created bound to store `store-v1-9c1e…`; its
+UID is the artifact UID and the pod has one container, `main`. Agent, PageBroker
+and maintenance can all compute `commit-v1-4b8d…` before capture starts.
+
+1. The agent sends `prepare_staged_checkpoint` with the target. PageBroker derives
+   the same value and reserves
+   `artifacts/<uid>/containers/main/publications/commit-v1-4b8d…/`.
+2. Capture finishes and the agent sends `commit`. PageBroker uploads the data
+   objects under that path, then writes `index.json` last; the index carries the
+   `commitID` inside it.
+3. The reply is lost. The agent cannot tell whether step 2 finished.
+4. The agent sends `commit` again on the same transaction. PageBroker checks
+   `publications/commit-v1-4b8d…/index.json`. If it exists and matches, PageBroker
+   returns the same `PublishedArtifact` without writing anything; if not, it
+   finishes the upload to that same path. Either way there is one publication.
+
+Recovery uses the same value. Suppose the agent crashed after PageBroker
+published and before status was written, so `psc-7f3a` has a bound store and no
+descriptor for `main`. The reconciler enqueues `recover-metadata`. The worker
+computes `commit-v1-4b8d…` from the content's `storeID`, UID and the container
+name and fetches exactly `publications/commit-v1-4b8d…/index.json`; it never
+lists the folder and picks the newest. Index present with a matching embedded
+`commitID`: write the descriptor into status. Index absent: nothing was
+published. A different `commitID` confirmed under that container: conflict, fail
+closed.
+
+A retried capture is a new content object with a new UID, so its hash and path
+differ and it can neither adopt nor overwrite the old publication. The
+`commitID` is not the transaction ID: the transaction ID is random, per RPC
+session and expires; the `commitID` is deterministic, per publication and
+permanent.
+
 Example publication descriptors; digest values are placeholders:
 
 ```protobuf
