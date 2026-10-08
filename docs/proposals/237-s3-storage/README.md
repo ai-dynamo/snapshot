@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# SNEP-237: S3 checkpoint storage
+# SNEP-237: S3-compatible object storage for checkpoints
 
 <!-- toc -->
 - [Summary](#summary)
@@ -11,18 +11,18 @@ SPDX-License-Identifier: Apache-2.0
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
+  - [Overview and flows](#overview-and-flows)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
   - [API](#api)
     - [Kubernetes API and operator](#kubernetes-api-and-operator)
-    - [Maintenance workqueue](#maintenance-workqueue)
+    - [Maintenance](#maintenance)
     - [Snapshot agent](#snapshot-agent)
     - [PageBroker: internal API](#pagebroker-internal-api)
   - [Security](#security)
   - [Configuration](#configuration)
   - [Storage and lifecycle](#storage-and-lifecycle)
     - [Publication and artifact format](#publication-and-artifact-format)
-    - [Communication and flows](#communication-and-flows)
   - [Performance and Scalability](#performance-and-scalability)
   - [Monitoring](#monitoring)
   - [Dependencies](#dependencies)
@@ -33,7 +33,8 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Summary
 
-Allow Snapshot to save checkpoint artifacts to S3 and restore workloads from them.
+Allow Snapshot to save checkpoint artifacts to S3-compatible object storage and
+restore workloads from them.
 PVC remains the default. Stage 1 uses one store per installation, selected at
 Helm install/upgrade, and a bounded quiescence period before deletion. Stage 2
 adds explicit coordination between active storage operations and maintenance.
@@ -72,10 +73,153 @@ adds its S3 backend. Content is bound to its store before capture and becomes
 Ready only after confirmed publication. Restore validates compatibility and stages
 the complete bundle before CRIU/CUDA execution.
 
-The operator runs maintenance in-process: a `client-go`-style rate-limiting
-workqueue schedules content deletion, scheduled sweeps and metadata recovery onto
-a bounded pool of worker goroutines inside the operator container. Workers access
-PVC or S3 through their own backend adapters.
+The operator runs maintenance in-process: a bounded worker pool handles content
+deletion, periodic sweeps and metadata recovery through per-backend adapters.
+Workers access PVC or S3 directly and never through PageBroker.
+
+### Overview and flows
+
+```mermaid
+flowchart TB
+    API["Kubernetes API<br/>Content / status"]
+    Secret["Credential Secret<br/>Projected by kubelet"]
+    S3["S3-compatible storage"]
+
+    subgraph AgentPod["Agent Pod"]
+        Agent["Snapshot agent"]
+        NodePB["Node PageBroker"]
+        Files["Shared local staging<br/>Manifest and checkpoint files"]
+        Agent <-->|"Prepare / GetArtifactMetadata / Stage<br/>Commit / Abort · Unix socket RPC"| NodePB
+        Agent <-->|"Read/write local files"| Files
+        NodePB <-->|"Stage/verify files"| Files
+    end
+
+    subgraph OperatorPod["Operator Pod"]
+        Operator["Snapshot operator<br/>reconcilers"]
+        Queue["Rate-limiting workqueue"]
+        Workers["Maintenance workers<br/>operator/internal/maintenance"]
+        Operator -->|"Enqueue delete-content / sweep / recover-metadata"| Queue
+        Queue -->|"Dequeue key"| Workers
+        Workers -.->|"Requeue with backoff on error"| Queue
+    end
+
+    Agent <-->|"Watch / update status"| API
+    Operator <-->|"Watch content / finalize"| API
+    Workers -->|"Read ownership / reconcile metadata"| API
+    NodePB <-->|"Authenticated upload/download"| S3
+    Workers <-->|"Inspect / list / delete objects"| S3
+    Secret -.->|"Mounted credential file"| NodePB
+    Secret -.->|"Mounted credential file"| OperatorPod
+```
+
+The sequence diagrams below show each flow's happy path and its main failure
+branch. Details follow in [Design Details](#design-details).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as Snapshot agent
+    participant PB as Node PageBroker
+    participant S3 as S3-compatible store
+    participant API as Kubernetes API
+    Agent->>API: Uncached read of content (store binding, not deleting)
+    Agent->>PB: Prepare(storeID, artifactUID, container)
+    PB->>S3: Preflight destination access
+    PB-->>Agent: Transaction opened (2h05m lifetime)
+    Agent->>Agent: CUDA then CRIU capture into shared staging
+    Agent->>PB: Commit
+    PB->>S3: Upload payload objects
+    PB->>S3: PUT index under publications/<commitID>/
+    PB-->>Agent: PublishedArtifact (handle, format version)
+    Agent->>API: status.storage.artifacts += descriptor; Ready when all containers confirmed
+    alt Commit reply lost or PageBroker restarted
+        Agent->>PB: Commit (same transaction, same commitID)
+        PB-->>Agent: Same PublishedArtifact; publication path is idempotent
+    end
+    alt Transaction expired before index PUT
+        PB-->>Agent: TRANSACTION_EXPIRED; unconfirmed objects left for sweep
+    end
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as Snapshot agent
+    participant PB as Node PageBroker
+    participant S3 as S3-compatible store
+    Agent->>PB: GetArtifactMetadata(handle, storeID)
+    PB->>S3: Fetch and verify index, download manifest
+    PB-->>Agent: manifest_directory (shared volume)
+    Agent->>Agent: Snapshot compatibility checks
+    Agent->>PB: Abort (release metadata directory)
+    Agent->>PB: StagedRestore(handle)
+    PB->>S3: Download all objects, verify digests
+    PB-->>Agent: Staged bundle path
+    Agent->>Agent: Mount staging, CRIU/CUDA restore, unmount
+    Agent->>PB: Commit (release staging)
+    alt Store mismatch, missing or corrupt artifact
+        PB-->>Agent: STORE_MISMATCH / ARTIFACT_NOT_FOUND / ARTIFACT_CORRUPT; restore fails before CRIU
+    end
+    alt Unmount fails
+        Agent->>Agent: Report restore result unchanged, skip Commit
+        PB->>PB: Transaction expiry reclaims staging
+    end
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Rec as Content reconciler
+    participant W as Maintenance worker
+    participant API as Kubernetes API
+    participant S3 as S3-compatible store
+    Rec->>API: Content has deletion timestamp
+    Rec->>W: Enqueue delete-content(storeID, artifactUID)
+    W->>W: Wait until deletion + admission window + 2h05m + skew
+    W->>API: Reread content; still deleting, same UID
+    W->>S3: List and delete artifacts/<artifactUID>/ under the bound store
+    W->>S3: Verify nothing remains
+    W->>API: Remove finalizer
+    alt Too early, partial, denied or unknown result
+        W->>W: Requeue with backoff; finalizer stays
+    end
+    alt Publication landed after cleanup
+        Rec->>W: Periodic sweep
+        W->>S3: List artifacts; artifactUID has no live content
+        W->>S3: Delete as orphan
+    end
+```
+
+**Checkpoint:** agent → prepare/validate destination → CUDA then CRIU/filesystem
+capture into staging → PageBroker derives `commitID` and commits the matching
+publication → agent persists the descriptor and Ready.
+
+**Restore:** agent → GetArtifactMetadata → Snapshot compatibility gates → StagedRestore
+downloads/verifies the full bundle → CRIU/CUDA restore → unmount → Commit cleanup.
+The later executor compatibility gate still runs before process restore.
+
+**Cleanup:** the deletion timestamp blocks new checkpoint and restore admission.
+The reconciler enqueues a `delete-content` key (or a `sweep` key on a periodic
+tick). In Stage 1, the worker waits until the deletion timestamp plus maximum
+admission window, transaction lifetime and clock-skew allowance, then acquires the
+artifact lock, rereads ownership and talks to the backend directly. Confirmed scoped
+deletion lets the same goroutine remove the finalizer; premature, partial or unknown
+deletion is requeued with backoff. Stage 2 replaces the fixed quiescence period with
+explicit active-operation tracking and a generation fence shared by agents,
+PageBroker and maintenance; the coordination location and protocol are a Stage 2
+design decision.
+
+**Recovery:** reconciler enqueues `recover-metadata` on detecting a
+confirmed-but-unrecorded publication → a worker locates the exact expected
+store/artifact/container/`commitID` → repairs missing descriptors without deleting
+data. Conflicts fail closed rather than choosing the newest object.
+
+After all restore consumers finish, unmount staging before Commit cleanup. If
+unmount fails, the agent reports the restore result unchanged, skips `Commit`, and
+leaves the transaction to expire; expiry reclaims staging, and the deferral is
+counted in the cleanup-deferrals metric under Monitoring.
+Once fully staged, restore needs no further S3 reads. Keep cleanup failures
+separate from process success; never rerun a restore to retry cleanup.
 
 ### Limitations, Risks, and Mitigations
 
@@ -84,11 +228,12 @@ PVC or S3 through their own backend adapters.
 - **Credentials or S3 outage:** check destination access before capture and source
   access before restore; bound retries/timeouts. Preflight cannot guarantee later
   access. Access denial never proves that an artifact is missing.
-- **Uncertain publication:** publish the index last, tagged with the deterministic
-  `commitID` derived from store, artifact and container identity; retry lost Commit
-  replies idempotently against that same `commitID`. Recovery derives the expected
-  value and never chooses by object timestamp. Resume uploads only from complete
-  staging; never replay successful or uncertain CUDA/CRIU.
+- **Uncertain publication:** publish the index last under a deterministic
+  `commitID` so a lost Commit reply or a restart retries to the same path and
+  recovery looks for exactly that value, never the newest object; see
+  [Publication and artifact format](#publication-and-artifact-format). Resume
+  uploads only from complete staging; never replay successful or uncertain
+  CUDA/CRIU.
 - **Cleanup races:** existing agent admission checks reject new checkpoint and
   restore operations after the content receives a deletion timestamp. In Stage 1,
   each agent performs an uncached content read and must start its PageBroker
@@ -130,8 +275,35 @@ status:
     artifacts:                           # One descriptor per captured container
       - containerName: main              # Associate the publication with its container
         artifactHandle: <opaque-handle>   # Locate the publication inside its bound store
-        artifactFormatVersion: snapshot.pagebroker/v1  # Select that backend's reader
+        artifactFormatVersion: snapshot.pagebroker/v1  # Layout of the publication in the store, not the checkpoint format
 ```
+
+```go
+// CheckpointStorageBinding is spec.storage; immutable with the rest of spec.
+type CheckpointStorageBinding struct {
+    // +kubebuilder:validation:Pattern=`^store-v1-[0-9a-f]{64}$`
+    StoreID string `json:"storeID"`
+}
+
+// CheckpointStorageStatus is status.storage; one descriptor per confirmed container.
+type CheckpointStorageStatus struct {
+    // +listType=map
+    // +listMapKey=containerName
+    Artifacts []PublishedContainerArtifact `json:"artifacts"`
+}
+
+type PublishedContainerArtifact struct {
+    ContainerName         string `json:"containerName"`
+    ArtifactHandle        string `json:"artifactHandle"`
+    ArtifactFormatVersion string `json:"artifactFormatVersion"`
+}
+```
+
+Both `spec.storage` and `status.storage` are optional pointers so legacy content
+without a binding stays valid. `artifactFormatVersion` versions how PageBroker laid
+the bundle out in the store (a directory on PVC, an index plus data objects on S3);
+PageBroker selects its reader by backend and this value. CRIU and CUDA formats are
+unchanged and are validated by the existing compatibility checks.
 
 The operator sets `spec.storage.storeID` when it creates the `PodSnapshotContent`.
 The whole spec is immutable, so the binding can never be added or changed
@@ -143,6 +315,10 @@ each container's
 maintenance use the same derivation and shared Go/C++ fixtures; no additional
 Kubernetes API field is needed.
 
+A store is the single storage configuration of the installation, defined in Helm
+and rendered into the storage ConfigMap described under
+[Configuration](#configuration). It is not a Kubernetes resource in Stage 1.
+
 Compute `storeID` as `store-v1-` + SHA-256 of a versioned, fixed-field canonical
 storage identity. For S3, encode backend, resolved endpoint, region, bucket,
 normalized prefix and addressing mode. Normalize the endpoint to lowercase scheme
@@ -152,6 +328,14 @@ non-root endpoint paths. Resolve an empty/default endpoint to an explicit provid
 endpoint before hashing. Normalize the prefix by removing leading/trailing slashes.
 For PVC, encode backend, namespace, claim and normalized base path. Credentials and
 access options are excluded.
+
+`storeID` is the identity of the physical location, not only a guard against
+configuration changes. It keys the artifact prefix in the bucket, it is an input to
+`commitID`, and it scopes maintenance so a worker can never delete under a different
+store. A reference to a configuration object cannot replace it: the object can be
+edited to point elsewhere, and the digest is what detects that. When a storage CRD
+introduces multiple stores, content gains a `storeRef` beside `storeID`; the
+reference says where to resolve, the digest says what was resolved.
 
 These fields are raw identity inputs. The S3 store prefix used in artifact keys
 additionally appends installation/store identifiers derived from Helm; those values
@@ -164,78 +348,50 @@ artifact prefixes.
 storage-class selection can bind the same content fields without changing restore
 references. Legacy content without a binding is accepted only in PVC mode.
 
-#### Maintenance workqueue
+#### Maintenance
 
-The operator owns scheduling and retention. The operator manager enqueues a work
-item onto an in-process `client-go` `workqueue.TypedRateLimitingInterface`, and a
-bounded pool of worker goroutines drains it, calling directly into
-`operator/internal/maintenance/`. That package is the existing implementation of
-this design for PVC; the S3 additions and the changes to its current behavior are
-listed at the end of this section.
+The operator owns scheduling and retention. `operator/internal/maintenance/` is the
+existing implementation of this design for PVC; S3 adds a backend and the changes
+listed below.
 
-- **Packaging:** `operator/internal/maintenance/` owns a common cleanup workflow
-  and backend implementations for PVC, then S3 and future stores, called in-process
-  by workers. They access storage directly; maintenance does not call PageBroker.
-- **Work item keys:** a typed key carries mode (`delete-content`, `sweep` or
-  `recover-metadata`) and the expected store ID; deletion also names the content
-  and its artifact UID. The key stays comparable so duplicate enqueues coalesce;
-  the worker resolves store configuration by ID at processing time, and a store-ID
-  mismatch is a terminal refusal. These identify authorized scope, not an
-  arbitrary path.
-  Each deletion covers every container and unfinished attempt for that content.
-- **Enqueue sources:** the content reconciler enqueues `delete-content` on a
-  deletion timestamp, a periodic ticker enqueues `sweep`, and the reconciler
-  enqueues `recover-metadata` when it detects a confirmed-but-unrecorded
-  publication. On operator start (and on gaining leadership), re-list content and
-  re-enqueue outstanding work instead of trusting queue state to have survived.
-- **Retry and backoff:** on a transient error, a worker calls
-  `queue.AddRateLimited(key)`, which re-delivers the same key after an increasing
-  backoff (exponential by default), naturally throttling a workload that keeps
-  failing without a fixed poll interval. On success, the worker calls
-  `queue.Forget(key)` before `queue.Done(key)`. The workqueue coalesces duplicate
-  enqueues of the same key while it is already queued or being processed, so a
-  content object that changes twice in quick succession still yields one work item.
-- **Exhaustion:** cap retries with `queue.NumRequeues(key)`; past the cap, `Forget`
-  the key, surface a storage-specific failure condition on the content, and rely on
-  the next sweep or an explicit re-enqueue (from a subsequent reconcile) rather than
-  requeuing forever.
-- **Results:** deletion is confirmed successful only after the worker itself
-  verifies that the Stage 1 quiescence deadline has elapsed and confirms scoped
-  cleanup against the backend. The deadline is the content deletion timestamp plus
-  the maximum admission window, PageBroker transaction lifetime and clock-skew
-  allowance. The operator removes the finalizer directly, from the same goroutine,
-  once cleanup is confirmed. Denied, partial, premature or unknown cleanup requeues
-  through `AddRateLimited` and keeps the finalizer. A sweep processes bounded
-  batches after fresh ownership checks.
-- **Recovery:** an inspection-only work item may repair missing publication
-  descriptors in content status using optimistic updates. It derives the expected
-  `commitID` from `(storeID, artifactUID, containerName)` and accepts only a
-  confirmed index with that value. Multiple matches or another confirmed
-  `commitID` is a conflict, not a timestamp-selection problem. Preserve terminal
-  failure and reject conflicting results; readiness requires all required
-  publications.
-- **Concurrency:** size the worker pool explicitly with bounded parallel
-  `processNextWorkItem` goroutines. Every maintenance mode acquires a shared keyed
-  lock on `(storeID, artifactUID)` before backend access and holds it through the
-  ownership recheck, storage operation and related status or finalizer update. A
-  sweep resolves one candidate, acquires the same lock and rereads ownership before
-  acting. The mode remains part of the work-item key for retry behavior only;
-  workqueue in-flight tracking does not replace the shared artifact lock.
-- **Shutdown and leadership:** on graceful process shutdown, call
-  `queue.ShutDownWithDrain()` so in-flight workers finish their current item. On
-  unexpected leadership loss, cancel the leader-scoped worker context and shut down
-  without draining. Backend calls accept that context; workers check cancellation
-  before storage mutations and Kubernetes writes, and status/finalizer updates use
-  resource-version preconditions. The new leader rebuilds pending work from cluster
-  state. Backend operations remain idempotent because an already-issued request may
-  finish after cancellation.
+**Roles.** The content reconciler decides *when*: a deletion timestamp enqueues
+`delete-content`, a periodic tick enqueues `sweep`, and a confirmed publication with
+no descriptor in status enqueues `recover-metadata`. A bounded pool of workers
+decides *whether*: it waits out the quiescence bound, rereads ownership, takes the
+artifact lock and then acts. Backends know *how*: they list, inspect and delete
+objects under the store prefix for PVC or S3. Maintenance never calls PageBroker.
 
-Relative to the current `operator/internal/maintenance/` implementation, this
-design adds `recover-metadata` as a third `Mode`, the store ID on `WorkItemKey`
-and the shared `(storeID, artifactUID)` lock, and changes two behaviors: `Queue.Start`
-drains on every shutdown today and must not drain on leadership loss, and a failed
-sweep is deferred to the next scan interval today and must instead requeue with
-backoff.
+**Eligibility.** Per-content deletion is scoped by the content's bound `storeID` and
+its artifact UID, which together name `artifacts/<artifactUID>/` in exactly one
+store; every container and unfinished attempt under it is covered. A sweep lists
+artifact UIDs under the store prefix and keeps only those with no live content.
+`recover-metadata` derives the expected `commitID` and accepts only a confirmed index
+carrying it.
+
+**Safety.** The worker waits until the deletion timestamp plus admission window,
+the 2h05m transaction lifetime and clock-skew allowance before touching storage.
+Any result that is too early, partial, denied or unknown keeps the finalizer and
+requeues with backoff. Nothing is ever selected by object timestamp; a conflicting
+or duplicate publication fails closed and needs explicit repair. A publication that
+lands after cleanup is an orphan the next sweep removes. On operator start or new
+leadership, pending work is rebuilt from cluster state rather than trusted to have
+survived in memory.
+
+**Changes to the current implementation.** `recover-metadata` as a third mode; the
+store ID on the work-item key; a shared lock on `(storeID, artifactUID)` held across
+ownership recheck, storage operation and status or finalizer update; no drain on
+leadership loss, where today `Queue.Start` drains on every shutdown; and failed
+sweeps requeue with backoff, where today they wait for the next scan interval.
+
+**Implementation notes.** Work items are comparable keys of mode, store ID and, for
+deletion, content name and UID, so duplicate enqueues coalesce; configuration is
+resolved by store ID at processing time and a mismatch is a terminal refusal.
+Transient errors requeue through the rate limiter; past the retry cap the key is
+forgotten, a storage-specific condition is set on the content, and the next sweep
+or reconcile re-enqueues. The finalizer is removed from the same goroutine that
+confirmed cleanup. Worker pool size and sweep batch size are explicit. Backend
+calls accept the leader-scoped context and stay idempotent because an issued
+request may finish after cancellation.
 
 Maintenance and PageBroker share the store-ID, artifact format and Stage 1
 transaction/quiescence contracts, with Go/C++ compatibility fixtures. Stage 2 adds
@@ -243,26 +399,28 @@ the cross-component active-operation and generation-fencing contract.
 
 #### Snapshot agent
 
-- Reject new checkpoint and restore admission after `PodSnapshotContent` receives a
-  deletion timestamp; this preserves the existing behavior. Use an uncached API
-  read and start the PageBroker transaction within the configured admission window;
-  if the window expires first, reread the content before proceeding.
-- Pass logical artifact identity and the expected store to checkpoint preparation;
-  all components derive the same `commitID` from those values.
-- Persist committed descriptors in content status; set Ready only after all required
-  containers have confirmed publications. The operator projects content readiness.
-- Obtain S3 metadata through `GetArtifactMetadata`, then run existing Snapshot
-  compatibility checks. Storage checks remain mandatory when compatibility is bypassed.
-- Read `manifest_directory` through the volume shared with node PageBroker.
-  Close each inspection transaction with `Abort` on every exit, including requeues.
-- Restore from verified staging; finish CRIU/CUDA consumers and unmount before cleanup.
-- Derive the restore mode from the backend of the content's bound store, not from
-  the Helm `restoreMode` value. Direct restore mounts a local checkpoint directory
-  and stays PVC-only; S3 always takes the staged path. Log once when the configured
-  mode is overridden.
+What changes for S3, and why:
 
-Extend the concrete Go `pagebroker.Client` used by the agent. Snapshot retains
-Kubernetes authorization, CRIU, canonical manifest creation and process orchestration.
+- **Admission window.** After the existing deletion-timestamp check, the agent
+  must start its PageBroker transaction within a bounded window or reread the
+  content. This is what lets maintenance wait a fixed time instead of tracking
+  every active operation in Stage 1.
+- **Metadata through PageBroker.** The agent has no credentials and no bucket
+  access, so it obtains the manifest through `GetArtifactMetadata` on the shared
+  volume and then runs the existing compatibility checks unchanged. Storage checks
+  stay mandatory even when compatibility is bypassed.
+- **Publication descriptors in status.** The handle returned by `Commit` is the
+  only way to find the publication later, so the agent persists it per container
+  and sets Ready only when every required container is confirmed.
+- **Staged restore only.** Direct restore mounts a local checkpoint directory,
+  which S3 does not have. The agent derives the mode from the bound store's
+  backend: PVC keeps the configured mode, S3 always stages.
+- **Cleanup separate from success.** Unmount before `Commit`; if unmount fails,
+  report the restore result unchanged, skip `Commit` and let transaction expiry
+  reclaim staging. Never rerun a restore to retry cleanup.
+
+Snapshot retains Kubernetes authorization, CRIU, canonical manifest creation and
+process orchestration.
 
 #### PageBroker: internal API
 
@@ -407,7 +565,9 @@ is a separate, mandatory requirement before S3 is enabled.
 ### Configuration
 
 PVC remains the default. `storage.type` already selects the maintenance backend;
-the `s3` block below replaces the reserved `s3.uri` placeholder in the chart:
+the `s3` block below replaces the reserved `s3.uri` placeholder in the chart. Any
+S3-compatible endpoint is supported; other object-storage APIs would be separate
+backends.
 
 ```yaml
 storage:
@@ -425,6 +585,27 @@ storage:
     tls:
       caBundleConfigMapRef: ""   # Optional custom CA
 ```
+
+The chart renders the non-secret part into the storage ConfigMap, which the
+operator and PageBroker decode into the shared `api/storage` configuration:
+
+```go
+type Config struct {
+    Type string `json:"type"` // pvc | s3
+    PVC  *PVC   `json:"pvc,omitempty"`
+    S3   *S3    `json:"s3,omitempty"`
+}
+
+type S3 struct {
+    Bucket         string `json:"bucket"`
+    Prefix         string `json:"prefix"`
+    Region         string `json:"region"`
+    Endpoint       string `json:"endpoint"`
+    AddressingMode string `json:"addressingMode"` // path | virtual-host
+}
+```
+
+Credentials are not part of this struct; they come from the projected Secret file.
 
 - Render non-secret settings into the existing configuration ConfigMap, mounted
   into both node PageBroker and the operator manager.
@@ -461,6 +642,16 @@ with the same identity fields and `commitID`. It never selects by object write t
 Multiple matching indexes or a confirmed different ID is a conflict that requires
 explicit repair.
 
+Why a deterministic `commitID`: a `Commit` reply can be lost, and the agent or
+PageBroker can restart mid-publication. Without a fixed ID a retry would publish a
+second copy, and recovery would have to guess which object is right by timestamp.
+With one, a retry publishes to the same path and is a no-op, and recovery computes
+the expected ID and looks for exactly that. The three inputs are what name one
+publication: one capture attempt (`artifactUID`), one container of it, in one store.
+Every component already holds those values, so no new API field is needed, and
+including the store means a publication is valid only under the store that
+produced it.
+
 Example publication descriptors; digest values are placeholders:
 
 ```protobuf
@@ -480,72 +671,6 @@ artifact_format_version: "snapshot.pagebroker/v1"
 Reader selection uses **backend + version**. PVC keeps its directory representation;
 S3 reconstructs the same logical bundle from index-listed objects at
 `<publication>/data/<relative-file-path>`. CRIU/CUDA retain their producer formats.
-
-#### Communication and flows
-
-```mermaid
-flowchart TB
-    API["Kubernetes API<br/>Content / status"]
-    Secret["Credential Secret<br/>Projected by kubelet"]
-    S3["S3-compatible storage"]
-
-    subgraph AgentPod["Agent Pod"]
-        Agent["Snapshot agent"]
-        NodePB["Node PageBroker"]
-        Files["Shared local staging<br/>Manifest and checkpoint files"]
-        Agent <-->|"Prepare / GetArtifactMetadata / Stage<br/>Commit / Abort · Unix socket RPC"| NodePB
-        Agent <-->|"Read/write local files"| Files
-        NodePB <-->|"Stage/verify files"| Files
-    end
-
-    subgraph OperatorPod["Operator Pod"]
-        Operator["Snapshot operator<br/>reconcilers"]
-        Queue["Rate-limiting workqueue"]
-        Workers["Maintenance workers<br/>operator/internal/maintenance"]
-        Operator -->|"Enqueue delete-content / sweep / recover-metadata"| Queue
-        Queue -->|"Dequeue key"| Workers
-        Workers -.->|"Requeue with backoff on error"| Queue
-    end
-
-    Agent <-->|"Watch / update status"| API
-    Operator <-->|"Watch content / finalize"| API
-    Workers -->|"Read ownership / reconcile metadata"| API
-    NodePB <-->|"Authenticated upload/download"| S3
-    Workers <-->|"Inspect / list / delete objects"| S3
-    Secret -.->|"Mounted credential file"| NodePB
-    Secret -.->|"Mounted credential file"| OperatorPod
-```
-
-**Checkpoint:** agent → prepare/validate destination → CUDA then CRIU/filesystem
-capture into staging → PageBroker derives `commitID` and commits the matching
-publication → agent persists the descriptor and Ready.
-
-**Restore:** agent → GetArtifactMetadata → Snapshot compatibility gates → StagedRestore
-downloads/verifies the full bundle → CRIU/CUDA restore → unmount → Commit cleanup.
-The later executor compatibility gate still runs before process restore.
-
-**Cleanup:** the deletion timestamp blocks new checkpoint and restore admission.
-The reconciler enqueues a `delete-content` key (or a `sweep` key on a periodic
-tick). In Stage 1, the worker waits until the deletion timestamp plus maximum
-admission window, transaction lifetime and clock-skew allowance, then acquires the
-artifact lock, rereads ownership and talks to the backend directly. Confirmed scoped
-deletion lets the same goroutine remove the finalizer; premature, partial or unknown
-deletion is requeued with backoff. Stage 2 replaces the fixed quiescence period with
-explicit active-operation tracking and a generation fence shared by agents,
-PageBroker and maintenance; the coordination location and protocol are a Stage 2
-design decision.
-
-**Recovery:** reconciler enqueues `recover-metadata` on detecting a
-confirmed-but-unrecorded publication → a worker locates the exact expected
-store/artifact/container/`commitID` → repairs missing descriptors without deleting
-data. Conflicts fail closed rather than choosing the newest object.
-
-After all restore consumers finish, unmount staging before Commit cleanup. If
-unmount fails, the agent reports the restore result unchanged, skips `Commit`, and
-leaves the transaction to expire; expiry reclaims staging, and the deferral is
-counted in the cleanup-deferrals metric under Monitoring.
-Once fully staged, restore needs no further S3 reads. Keep cleanup failures
-separate from process success; never rerun a restore to retry cleanup.
 
 ### Performance and Scalability
 
@@ -666,5 +791,11 @@ an emulator or mocked CUDA path alone does not qualify provider/GPU support.
   directly but require conditional-write and consistency guarantees from every
   supported provider. Stage 2 selects one protocol after Stage 1 concurrency and
   failure testing; Stage 1 does not claim either mechanism.
+- **Storage CRD reference as the binding:** a future CRD for multiple stores could
+  carry the binding as an object reference instead of a digest. Rejected for
+  Stage 1 because a reference names a mutable object and cannot prove which
+  location an artifact was written to; the digest can. The two compose later as
+  `storeRef` plus `storeID`, so adopting the digest now does not conflict with
+  that design.
 - **Streaming restore or storage classes now:** useful later, but expand Stage 1
   lifetimes and selection semantics; retain full staging and one bound store.
