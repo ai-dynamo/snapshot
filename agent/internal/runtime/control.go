@@ -32,6 +32,35 @@ func WriteControlSentinel(hostPID int, name string, contents []byte) error {
 	return writeSentinelInDir(dir, name, contents)
 }
 
+// KubeletPodsDir is kubelet's per-Pod directory. The chart mounts it into the
+// agent at the same path.
+const KubeletPodsDir = "/var/lib/kubelet/pods"
+
+// PodControlDir is a container's snapshot-control directory as seen from the
+// host: the container's subPath directory inside the Pod's control emptyDir.
+// Unlike the /host/proc/<pid>/root view, it needs no process in the container,
+// so it works before the container starts and after its process is gone.
+func PodControlDir(podUID, containerName string) (string, error) {
+	for _, part := range []string{podUID, containerName} {
+		if part == "" || part != filepath.Base(part) || part == ".." {
+			return "", fmt.Errorf("invalid control directory part %q", part)
+		}
+	}
+	return filepath.Join(KubeletPodsDir, podUID, "volumes", "kubernetes.io~empty-dir",
+		podcontract.SnapshotControlVolumeName, containerName), nil
+}
+
+// WritePodControlSentinel writes a sentinel through PodControlDir. The
+// directory must already exist: kubelet creates it when it prepares the
+// container's subPath mount.
+func WritePodControlSentinel(podUID, containerName, name string, contents []byte) error {
+	dir, err := PodControlDir(podUID, containerName)
+	if err != nil {
+		return err
+	}
+	return writeSentinelInDir(dir, name, contents)
+}
+
 // ControlSentinelExists reports whether a sentinel exists in the workload
 // container's snapshot-control volume. It returns an error when the container's
 // control mount cannot be inspected, so callers do not mistake an inaccessible

@@ -17,12 +17,20 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/controller"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
+	"github.com/ai-dynamo/snapshot/agent/internal/nri"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
+
+// nriEnabled gates the NRI plugin that makes snapshot-restore-proxy PID 1 in
+// restore containers. Temporary: it stays false until the proxy is validated
+// end to end, and the change that turns the proxy on deletes it. It is not a
+// setting, so there is nothing to remove from the chart later.
+const nriEnabled = false
 
 func main() {
 	runtimeType := flag.String("runtime", cmp.Or(os.Getenv("RUNTIME_TYPE"), snapshotruntime.RuntimeContainerd),
@@ -82,8 +90,20 @@ func main() {
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}
-	if runErr := nodeController.Run(rootCtx); runErr != nil {
-		fatal(agentLog, runErr, "Snapshot node controller exited with error")
+	// Both run until shutdown. If either stops early, the agent exits and the
+	// DaemonSet restarts it.
+	group, groupCtx := errgroup.WithContext(rootCtx)
+	group.Go(func() error {
+		return untilShutdown(rootCtx, "snapshot node controller", nodeController.Run(groupCtx))
+	})
+	if nriEnabled {
+		plugin := nri.NewPlugin(nodeController, rootLog.WithName("nri"))
+		group.Go(func() error {
+			return untilShutdown(rootCtx, "NRI plugin", plugin.Run(groupCtx))
+		})
+	}
+	if runErr := group.Wait(); runErr != nil {
+		fatal(agentLog, runErr, "Snapshot agent exited with error")
 	}
 
 	agentLog.Info("Agent stopped")
@@ -105,6 +125,15 @@ func waitForPageBroker(ctx context.Context, client pagebroker.Client) (*pagebrok
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// untilShutdown turns an early, error-free return into an error, so the
+// errgroup stops the other component instead of running on half an agent.
+func untilShutdown(rootCtx context.Context, name string, err error) error {
+	if err == nil && rootCtx.Err() == nil {
+		return errors.New(name + " stopped unexpectedly")
+	}
+	return err
 }
 
 func fatal(log logr.Logger, err error, msg string, keysAndValues ...interface{}) {

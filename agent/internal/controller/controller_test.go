@@ -126,7 +126,7 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		testr.New(t),
 	)
 	t.Cleanup(w.restoreQueue.ShutDown)
-	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
+	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.writePodControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
 		t.Fatal("default controller operations must be initialized")
 	}
 	if w.compareFn == nil {
@@ -161,19 +161,20 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 			NodeName: testNodeName,
 			Storage:  types.StorageSpec{Type: "pvc", BasePath: t.TempDir()},
 		},
-		clientset:               fake.NewClientset(coreObjects...),
-		client:                  clientBuilder.Build(),
-		runtime:                 &fakeRuntime{},
-		injector:                noopInjector{},
-		restoreFn:               executor.Restore,
-		writeControlSentinelFn:  func(int, string, []byte) error { return nil },
-		controlSentinelExistsFn: func(int, string) (bool, error) { return false, nil },
-		sendSignalFn:            func(logr.Logger, int, syscall.Signal, string) error { return nil },
-		restoreQueue:            workqueue.NewTypedDelayingQueue[client.ObjectKey](),
-		compareFn:               compat.Compare,
-		log:                     testr.New(t),
-		captureQueue:            newTestCaptureQueue(t),
-		stopCh:                  make(chan struct{}),
+		clientset:                 fake.NewClientset(coreObjects...),
+		client:                    clientBuilder.Build(),
+		runtime:                   &fakeRuntime{},
+		injector:                  noopInjector{},
+		restoreFn:                 executor.Restore,
+		writeControlSentinelFn:    func(int, string, []byte) error { return nil },
+		writePodControlSentinelFn: func(string, string, string, []byte) error { return nil },
+		controlSentinelExistsFn:   func(int, string) (bool, error) { return false, nil },
+		sendSignalFn:              func(logr.Logger, int, syscall.Signal, string) error { return nil },
+		restoreQueue:              workqueue.NewTypedDelayingQueue[client.ObjectKey](),
+		compareFn:                 compat.Compare,
+		log:                       testr.New(t),
+		captureQueue:              newTestCaptureQueue(t),
+		stopCh:                    make(chan struct{}),
 	}
 	t.Cleanup(w.restoreQueue.ShutDown)
 	return w
@@ -1713,6 +1714,104 @@ func TestRunRestoreMarksFailureBeforeKillingPlaceholder(t *testing.T) {
 			assert.Equal(t, want, calls)
 		})
 	}
+}
+
+// The restore proxy exits by itself once it sees restore-failed, so the kill
+// can find the placeholder already gone. That is not a second failure.
+func TestRunRestoreIgnoresPlaceholderThatAlreadyExited(t *testing.T) {
+	for name, tc := range map[string]struct {
+		restoreErr  error
+		completeErr error
+		want        string
+	}{
+		"restore error":                {restoreErr: errors.New("criu restore failed"), want: "criu restore failed"},
+		"restore-complete write fails": {completeErr: errors.New("control volume gone"), want: "failed to write restore-complete sentinel: control volume gone"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			w := makeTestController(t, pod)
+			w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+			artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+				return executor.RestoreResult{PlaceholderHostPID: 4242, RestoredPID: 77}, tc.restoreErr
+			}
+			w.writeControlSentinelFn = func(_ int, name string, _ []byte) error {
+				if name == podcontract.RestoreCompleteFile {
+					return tc.completeErr
+				}
+				return nil
+			}
+			w.sendSignalFn = func(_ logr.Logger, pid int, _ syscall.Signal, _ string) error {
+				return fmt.Errorf("failed to signal PID %d: %w", pid, syscall.ESRCH)
+			}
+
+			err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
+
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
+// When the container cannot be resolved, nothing can be killed, so the
+// restore-failed marker goes through the host path of the control volume.
+func TestRunRestoreFailureMarksUnresolvedContainerThroughHostPath(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{} // ResolveContainer fails
+	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+		return executor.RestoreResult{}, errors.New("criu restore failed")
+	}
+	var written []string
+	w.writePodControlSentinelFn = func(podUID, container, name string, _ []byte) error {
+		written = append(written, podUID+"/"+container+"/"+name)
+		return nil
+	}
+	w.writeControlSentinelFn = func(int, string, []byte) error {
+		t.Error("no PID was resolved, so nothing may write through /host/proc")
+		return nil
+	}
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		t.Error("no PID was resolved, so nothing may be killed")
+		return nil
+	}
+
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
+
+	require.Error(t, err)
+	assert.Equal(t, []string{"restore-pod-uid/main/" + podcontract.RestoreFailedFile}, written)
+}
+
+func TestRestoreDestinations(t *testing.T) {
+	t.Run("map annotation needs no API read", func(t *testing.T) {
+		pod := multiRestorePod()
+		w := makeTestController(t, pod) // no PodSnapshot exists
+
+		got, err := w.RestoreDestinations(context.Background(), pod)
+
+		require.NoError(t, err)
+		assert.Equal(t, []string{"engine-0", "engine-1"}, got)
+	})
+
+	t.Run("without a map the destination is the captured container", func(t *testing.T) {
+		pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+		snapshot, content := readySnapshotObjects()
+		w := makeTestController(t, pod, snapshot, content)
+
+		got, err := w.RestoreDestinations(context.Background(), pod)
+
+		require.NoError(t, err)
+		assert.Equal(t, []string{content.Spec.Source.PodRef.Containers[0]}, got)
+	})
+
+	t.Run("without a map a missing PodSnapshot is an error", func(t *testing.T) {
+		pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+		w := makeTestController(t, pod)
+
+		_, err := w.RestoreDestinations(context.Background(), pod)
+
+		require.Error(t, err)
+	})
 }
 
 func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T) {
