@@ -24,6 +24,7 @@ message IOEngine
   oneof kind
   {
     PosixCopyIOEngine posix_copy = 1;
+    NixlIOEngine nixl = 2;
   }
 }
 
@@ -165,3 +166,6 @@ message Response
     Capabilities capabilities = 12;
   }
 }
+
+// Registered-buffer transfers. Directory staging is not implemented for NIXL.
+message NixlIOEngine {}

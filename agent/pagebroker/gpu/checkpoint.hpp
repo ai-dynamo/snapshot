@@ -53,6 +53,7 @@ public:
 private:
   const CUcheckpointCustomStorageInfo* StorageInfo() const;
   bool Exited() const;
+  void WaitForTargetExit() const;
 
   const CheckpointAPI& api_;
   int pid_;

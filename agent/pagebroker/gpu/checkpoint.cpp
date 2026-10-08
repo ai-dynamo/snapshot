@@ -11,6 +11,7 @@
 #include <chrono>
 #include <fstream>
 #include <sstream>
+#include <string_view>
 #include <stdexcept>
 #include <system_error>
 #include <string>
@@ -75,14 +76,30 @@ ValidateTargetDescriptor(int pid, int pidfd)
   if (pid <= 0 || pid == getpid() || pidfd < 0) {
     throw std::invalid_argument("invalid CUDA target PID or descriptor");
   }
-  std::ifstream info("/proc/self/fdinfo/" + std::to_string(pidfd));
+  const auto path = "/proc/self/fdinfo/" + std::to_string(pidfd);
+  std::ifstream info(path);
+  if (!info) {
+    throw std::runtime_error("read GPU target fdinfo: " + path);
+  }
+  constexpr std::string_view kPidPrefix = "Pid:";
   int actual_pid = -1;
+  bool found_pid = false;
   std::string line;
   while (std::getline(info, line)) {
-    if (line.starts_with("Pid:")) {
-      std::istringstream(line.substr(4)) >> actual_pid;
+    if (line.starts_with(kPidPrefix)) {
+      std::istringstream value(line.substr(kPidPrefix.size()));
+      if (!(value >> actual_pid) || !(value >> std::ws).eof()) {
+        throw std::invalid_argument("malformed GPU target fdinfo PID");
+      }
+      found_pid = true;
       break;
     }
+  }
+  if (info.bad()) {
+    throw std::runtime_error("read GPU target fdinfo: " + path);
+  }
+  if (!found_pid) {
+    throw std::invalid_argument("GPU target fdinfo has no PID entry");
   }
   if (actual_pid != pid) {
     throw std::invalid_argument("GPU target descriptor does not match host PID");
@@ -229,13 +246,27 @@ Operation::Abort()
 {
   if (!prepare_started_) {
     if (locked_ && !Exited()) {
-      Unlock();
+      try {
+        Unlock();
+      } catch (const FatalError&) {
+        throw;
+      } catch (const std::runtime_error&) {
+        if (!Exited()) {
+          throw;
+        }
+      }
     }
     return;
   }
   if (syscall(SYS_pidfd_send_signal, pidfd_.get(), SIGKILL, nullptr, 0) && errno != ESRCH) {
     throw std::system_error(errno, std::generic_category(), "kill CUDA target");
   }
+  WaitForTargetExit();
+}
+
+void
+Operation::WaitForTargetExit() const
+{
   pollfd target{pidfd_.get(), POLLIN, 0};
   const auto deadline = std::chrono::steady_clock::now() + kTargetExitTimeout;
   for (;;) {
