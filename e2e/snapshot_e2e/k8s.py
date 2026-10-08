@@ -341,3 +341,31 @@ def daemonset_readiness_detail(daemonset: client.V1DaemonSet) -> str:
 
 def api_error_detail(exc: ApiException) -> str:
     return f"status={exc.status}, reason={exc.reason}, body={exc.body}"
+
+
+def pod_status_writers(pod: client.V1Pod) -> list[str]:
+    writers = []
+    for entry in pod.metadata.managed_fields or []:
+        status = (entry.fields_v1 or {}).get("f:status") or {}
+        fields = sorted(key.removeprefix("f:") for key in status)
+        if not fields:
+            continue
+        conditions = sorted(
+            key.split('"type":"', 1)[-1].rstrip('"}')
+            for key in (status.get("f:conditions") or {})
+            if key.startswith("k:")
+        )
+        writers.append(
+            f"{entry.manager} {entry.operation} subresource={entry.subresource} at={entry.time} "
+            f"status={fields} conditions={conditions}"
+        )
+    return writers
+
+
+def status_sync_errors(namespace: str) -> list[client.CoreV1Event]:
+    return [
+        event
+        for event in list_events(namespace, field_selector={"type": "Warning"})
+        if event.reason == "SyncError"
+    ]
+

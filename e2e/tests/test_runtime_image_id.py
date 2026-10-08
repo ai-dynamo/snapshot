@@ -29,7 +29,7 @@ def test_runtime_image_id_reads_optional_field_once(monkeypatch, image_fields, w
     commands = []
 
     def exec_payload(namespace, pod, command, *, container=None):
-        assert (namespace, pod) == ("test-ns", "agent-pod")
+        assert (namespace, pod, container) == ("test-ns", "agent-pod", "agent")
         commands.append(shlex.split(command))
         return json.dumps({"status": {"id": "container-id", **image_fields}})
 

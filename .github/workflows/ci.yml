@@ -78,12 +78,13 @@ jobs:
           download-from-astral-mirror: "false"
       - run: |
           uv run --locked --project e2e pytest \
-            e2e/tests/test_agent_exec.py \
+            e2e/tests/test_agent_container.py \
             e2e/tests/test_benchmark.py \
             e2e/tests/test_benchmark_outcomes.py \
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
+            e2e/tests/test_pod_status_writers.py \
             e2e/tests/test_required_tests.py \
             e2e/tests/test_runtime_image_id.py \
             e2e/tests/test_setup_helm_overrides.py \
