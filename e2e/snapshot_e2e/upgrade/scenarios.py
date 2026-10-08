@@ -141,9 +141,6 @@ class RestoredPodSurvivesUpgrade(UpgradeScenario):
         take_snapshot(ctx, state, source)
         restored = restore_from_snapshot(ctx, state, gpu=self.gpu)
         state.restored_pod_uid = restored.metadata.uid
-        state.observations = lifecycle.matching_observation_count(
-            ctx.config.namespace, state.run.restore_pod, state.run.source_token, gpu=self.gpu
-        )
 
     def post_upgrade(self, ctx: UpgradeContext, state: ScenarioState) -> None:
         namespace = ctx.config.namespace
@@ -153,8 +150,11 @@ class RestoredPodSurvivesUpgrade(UpgradeScenario):
         assert pod.status.phase == "Running", f"the restored pod is {pod.status.phase}"
         restarts = {status.name: status.restart_count for status in pod.status.container_statuses or []}
         assert not any(restarts.values()), f"the restored pod restarted during the upgrade: {restarts}"
+        # Earlier observations may have accumulated while other scenarios were
+        # preparing. Require fresh progress after the rollout has completed.
+        baseline = lifecycle.matching_observation_count(namespace, run.restore_pod, run.source_token, gpu=self.gpu)
         lifecycle.wait_for_state_observations(
-            namespace, run.restore_pod, run.source_token, gpu=self.gpu, minimum=state.observations + 2
+            namespace, run.restore_pod, run.source_token, gpu=self.gpu, minimum=baseline + 2
         )
 
 

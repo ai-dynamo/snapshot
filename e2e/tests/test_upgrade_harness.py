@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -13,6 +14,7 @@ from snapshot_e2e.upgrade import checks
 from snapshot_e2e.upgrade import configs
 from snapshot_e2e.upgrade import scenarios
 from snapshot_e2e import k8s
+from snapshot_e2e import lifecycle
 from snapshot_e2e import workloads
 from snapshot_e2e.upgrade.context import ScenarioState, Timings, UpgradeContext, UpgradeSettings
 
@@ -314,3 +316,54 @@ def test_failed_restore_needs_a_restarted_agent(env: pytest.MonkeyPatch, config:
     )
 
     assert scenarios.by_name("failed-restore-stays-failed").applies_to(ctx) is applies
+
+
+@pytest.mark.parametrize("makes_progress", [False, True])
+def test_surviving_pod_requires_progress_after_the_upgrade(
+    env: pytest.MonkeyPatch, makes_progress: bool
+) -> None:
+    ctx = UpgradeContext(
+        config=k8s.E2EConfig(namespace="n", release="r", pvc_name="p", kubeconfig=None),
+        settings=UpgradeSettings.from_env(),
+    )
+    state = ScenarioState(
+        run=workloads.TestRun.new("upg-survivor"), observations=10, restored_pod_uid="restored-uid"
+    )
+    pod = client.V1Pod(
+        metadata=client.V1ObjectMeta(uid=state.restored_pod_uid),
+        status=client.V1PodStatus(
+            phase="Running",
+            container_statuses=[
+                client.V1ContainerStatus(name="main", image="test", image_id="test", ready=True, restart_count=0)
+            ],
+        ),
+    )
+    env.setattr(k8s, "read_pod", lambda namespace, name: pod)
+    # The file grew from 10 to 30 while the other pre-upgrade scenarios ran.
+    # Only the second case writes anything after the upgrade.
+    counts = iter([30, 30, 31, 32] if makes_progress else [30])
+    seen = []
+
+    def observations(*args, **kwargs) -> int:
+        value = next(counts, seen[-1] if seen else 30)
+        seen.append(value)
+        return value
+
+    env.setattr(lifecycle, "matching_observation_count", observations)
+    env.setattr(lifecycle, "observations_tail", lambda *args: "no new observations")
+    elapsed = 0.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal elapsed
+        elapsed += 60
+
+    env.setattr(
+        lifecycle, "time", SimpleNamespace(monotonic=lambda: elapsed, sleep=sleep, strftime=lambda fmt: "test")
+    )
+    scenario = scenarios.by_name("restored-pod-survives-upgrade")
+    if makes_progress:
+        scenario.post_upgrade(ctx, state)
+        assert seen[-1] == 32
+    else:
+        with pytest.raises(lifecycle.LifecycleTimeoutError, match="observations for source token"):
+            scenario.post_upgrade(ctx, state)
