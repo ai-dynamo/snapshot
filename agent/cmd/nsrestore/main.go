@@ -154,8 +154,10 @@ func parseCustomStorageOptions(flags *flag.FlagSet, input customStorageFlags) (*
 	}); err != nil {
 		return nil, nil, err
 	}
-	// A pidfd remains valid after namespace entry and after the broker exits.
-	if err := unix.PidfdSendSignal(input.brokerProcessFD, 0, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EPERM) {
+	// Signal 0 validates the descriptor. EINVAL is expected when the broker is
+	// outside our PID namespace. Polling that pidfd still observes its exit.
+	if err := unix.PidfdSendSignal(input.brokerProcessFD, 0, nil, 0); err != nil &&
+		!errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EPERM) && !errors.Is(err, unix.EINVAL) {
 		return nil, nil, fmt.Errorf("invalid PageBroker process descriptor: %w", err)
 	}
 	unix.CloseOnExec(input.brokerProcessFD)

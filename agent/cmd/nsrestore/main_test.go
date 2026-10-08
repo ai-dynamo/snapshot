@@ -8,12 +8,76 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestCustomStorageBrokerOutsidePIDNamespace(t *testing.T) {
+	if os.Getenv("SNAPSHOT_TEST_BROKER_NAMESPACE") == "child" {
+		if err := unix.PidfdSendSignal(3, 0, nil, 0); !errors.Is(err, unix.EINVAL) {
+			t.Fatalf("signal ancestor namespace broker: %v, want EINVAL", err)
+		}
+		input := customStorageFlags{
+			brokerProcessFD: 3, pageBrokerSocketDirectoryFD: 4, hostProcFD: 4,
+			executionFD: 5, cancelFD: 6,
+			pageBrokerSocketName: "broker.sock", pageBrokerTransactionID: "restore",
+			gpuContext: `{"captured_pids":[12],"visible_devices":["GPU-target"]}`,
+		}
+		execution, _, err := parseCustomStorageOptions(customStorageTestFlags(t, "--pagebroker-transaction=restore"), input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer execution.Close()
+		poll := []unix.PollFd{{Fd: 3, Events: unix.POLLIN}}
+		if n, err := unix.Poll(poll, 0); err != nil || n != 0 {
+			t.Fatalf("cannot observe live broker outside namespace: %v, %v", poll, err)
+		}
+		return
+	}
+	pidfd, err := unix.PidfdOpen(os.Getpid(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := os.NewFile(uintptr(pidfd), "broker")
+	defer broker.Close()
+	directory, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	socketFD, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := os.NewFile(uintptr(socketFD), "execution")
+	defer socket.Close()
+	cancelRead, cancelWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelRead.Close()
+	defer cancelWrite.Close()
+	child := exec.Command(os.Args[0], "-test.run=^TestCustomStorageBrokerOutsidePIDNamespace$")
+	child.Env = append(os.Environ(), "SNAPSHOT_TEST_BROKER_NAMESPACE=child")
+	child.ExtraFiles = []*os.File{broker, directory, socket, cancelRead}
+	child.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID,
+		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+	}
+	output, err := child.CombinedOutput()
+	if errors.Is(err, syscall.EPERM) {
+		t.Skip("user/PID namespace creation is unavailable")
+	}
+	if err != nil {
+		t.Fatalf("inherited broker in child PID namespace: %v\n%s", err, output)
+	}
+}
 
 var customStorageFlagNames = []string{
 	"pagebroker-socket-directory-fd",
