@@ -61,53 +61,52 @@ func ControlDirFromEnv() string {
 // how a restarted proxy knows the Pod's one restore is spent.
 func Run(cfg Config) int {
 	log := cfg.Log
-	for _, name := range []string{podcontract.RestoreCompleteFile, podcontract.RestoreFailedFile} {
-		exists, err := fileExists(filepath.Join(cfg.ControlDir, name))
-		if err != nil {
-			log.Error(err, "Cannot inspect control directory")
-			return podcontract.RestoreProxyErrorExitCode
-		}
-		if exists {
-			log.Info("Restore already used by an earlier container; restores are not repeatable", "file", name)
-			return podcontract.RestoreNotRepeatableExitCode
-		}
+	if prior, done, err := checkRestore(cfg.ControlDir); err != nil {
+		log.Error(err, "Cannot inspect control directory")
+		return podcontract.RestoreProxyErrorExitCode
+	} else if done {
+		log.Info("Restore already used by an earlier container; restores are not repeatable", "restore_failed", prior.failed)
+		return podcontract.RestoreNotRepeatableExitCode
 	}
 
 	log.Info("Waiting for restore", "control_dir", cfg.ControlDir)
-	data, sig, err := waitForRestore(cfg)
+	outcome, err := waitForRestore(cfg)
 	if err != nil {
 		log.Error(err, "Failed waiting for restore")
 		return podcontract.RestoreProxyErrorExitCode
 	}
-	if sig != 0 {
+	if outcome.complete == nil {
+		if outcome.failed {
+			// Normally the agent kills this container first. If it could not,
+			// the marker is the only way out.
+			log.Info("Restore failed; this Pod's restore is spent")
+			return podcontract.RestoreNotRepeatableExitCode
+		}
 		// Nothing to forward to yet. The runtime kills anything CRIU left.
-		log.Info("Signal before restore completed; exiting", "signal", sig.String())
-		return 128 + int(sig)
+		log.Info("Signal before restore completed; exiting", "signal", outcome.signal.String())
+		return 128 + int(outcome.signal)
 	}
 
-	complete, err := podcontract.ParseRestoreComplete(data)
+	complete, err := podcontract.ParseRestoreComplete(outcome.complete)
 	if err != nil {
 		log.Error(err, "Invalid restore-complete file")
 		return podcontract.RestoreProxyErrorExitCode
 	}
 	pid := complete.PID
 	log.Info("Restore complete", "pid", pid, "cmdline", readCmdline(cfg.ProcRoot, pid))
+	if outcome.signal != 0 {
+		// It arrived as the restore landed; the workload is running, so it
+		// gets the signal.
+		forwardSignal(log, pid, outcome.signal)
+	}
 
 	waited := make(chan waitResult, 1)
-	go func() { waited <- waitFor(pid) }()
+	go func() { waited <- waitForPid(pid) }()
 	for {
 		select {
 		case s := <-cfg.Signals:
-			sig, ok := s.(syscall.Signal)
-			if !ok {
-				continue
-			}
-			// Logged before sending, so the container log shows every signal
-			// the proxy received, whatever the workload does with it.
-			log.Info("Forwarding signal", "pid", pid, "signal", sig.String())
-			// ESRCH means the process just exited; waitFor reports it.
-			if err := unix.Kill(pid, sig); err != nil && !errors.Is(err, unix.ESRCH) {
-				log.Error(err, "Failed to forward signal", "pid", pid, "signal", sig.String())
+			if sig, ok := s.(syscall.Signal); ok {
+				forwardSignal(log, pid, sig)
 			}
 		case r := <-waited:
 			if r.err != nil {
@@ -121,14 +120,37 @@ func Run(cfg Config) int {
 	}
 }
 
-// waitForRestore returns the contents of RestoreCompleteFile once it exists.
-// It ignores RestoreFailedFile: on a restore error the agent kills this
-// process, so it never gets to choose an exit code. SIGTERM and SIGINT end the
-// wait and are returned; other signals are ignored until there is a process to
-// forward them to.
-func waitForRestore(cfg Config) ([]byte, syscall.Signal, error) {
-	path := filepath.Join(cfg.ControlDir, podcontract.RestoreCompleteFile)
-	changed, stop := watchDir(cfg.ControlDir, cfg.Log)
+// forwardSignal passes sig on to the restored process. It logs before
+// sending, so the container log shows every signal the proxy received,
+// whatever the workload does with it.
+func forwardSignal(log logr.Logger, pid int, sig syscall.Signal) {
+	log.Info("Forwarding signal", "pid", pid, "signal", sig.String())
+	// ESRCH means the process just exited; waitForPid reports it.
+	if err := unix.Kill(pid, sig); err != nil && !errors.Is(err, unix.ESRCH) {
+		log.Error(err, "Failed to forward signal", "pid", pid, "signal", sig.String())
+	}
+}
+
+// restoreOutcome is how the wait for the restore ended.
+type restoreOutcome struct {
+	// complete holds RestoreCompleteFile once it exists.
+	complete []byte
+	// failed means RestoreFailedFile appeared instead.
+	failed bool
+	// signal is a SIGTERM or SIGINT that ended the wait. When complete is
+	// also set, it still has to be forwarded to the restored process.
+	signal syscall.Signal
+}
+
+// waitForRestore waits until RestoreCompleteFile or RestoreFailedFile exists,
+// or SIGTERM or SIGINT arrives. Other signals are ignored until there is a
+// process to forward them to.
+//
+// On a restore error the agent normally writes RestoreFailedFile and kills
+// this container, but it cannot kill it when it fails to find the container,
+// so the marker is honored here too.
+func waitForRestore(cfg Config) (restoreOutcome, error) {
+	changed, stop := watchDirFn(cfg.ControlDir, cfg.Log)
 	defer stop()
 	interval := cfg.PollInterval
 	if interval <= 0 {
@@ -137,26 +159,44 @@ func waitForRestore(cfg Config) ([]byte, syscall.Signal, error) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// The watch is in place before the first read, so a file that appears
+	// The watch is in place before the first check, so a file that appears
 	// in between still produces an event.
 	for {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			return data, 0, nil
-		}
-		if !os.IsNotExist(err) {
-			return nil, 0, err
+		outcome, done, err := checkRestore(cfg.ControlDir)
+		if err != nil || done {
+			return outcome, err
 		}
 		select {
 		case s := <-cfg.Signals:
-			if sig, ok := s.(syscall.Signal); ok && (sig == syscall.SIGTERM || sig == syscall.SIGINT) {
-				return nil, sig, nil
+			sig, ok := s.(syscall.Signal)
+			if !ok || (sig != syscall.SIGTERM && sig != syscall.SIGINT) {
+				continue
 			}
+			// The restore may have landed in the same instant. If it did,
+			// follow the workload and forward the signal instead of exiting.
+			outcome, _, _ := checkRestore(cfg.ControlDir)
+			return restoreOutcome{complete: outcome.complete, signal: sig}, nil
 		case <-changed:
 		case <-ticker.C:
 		}
 	}
 }
+
+// checkRestore reports whether the agent has published a restore result.
+func checkRestore(dir string) (restoreOutcome, bool, error) {
+	data, err := os.ReadFile(filepath.Join(dir, podcontract.RestoreCompleteFile))
+	if err == nil {
+		return restoreOutcome{complete: data}, true, nil
+	}
+	if !os.IsNotExist(err) {
+		return restoreOutcome{}, false, err
+	}
+	failed, err := fileExists(filepath.Join(dir, podcontract.RestoreFailedFile))
+	return restoreOutcome{failed: failed}, failed, err
+}
+
+// watchDirFn is watchDir; tests replace it to take inotify out of a race.
+var watchDirFn = watchDir
 
 // watchDir signals on the returned channel whenever an entry in dir is
 // created or renamed into place, which is how the agent publishes sentinels.
@@ -196,7 +236,7 @@ type waitResult struct {
 	err    error
 }
 
-// waitFor blocks until pid exits and returns its status. As PID 1 the proxy
+// waitForPid blocks until pid exits and returns its status. As PID 1 the proxy
 // inherits orphans from the container's PID namespace, such as background
 // children left by `kubectl exec` or exec probes. Waiting on pid alone would
 // leave them as zombies for the workload's lifetime, slowly using up the Pod's
@@ -204,7 +244,7 @@ type waitResult struct {
 // does. It checks the PID of every child that exits, so the restored process's
 // status is never lost. A pid that is not a child fails at once with ECHILD
 // instead of hanging.
-func waitFor(pid int) waitResult {
+func waitForPid(pid int) waitResult {
 	var status unix.WaitStatus
 	got, err := wait4(pid, &status, unix.WNOHANG)
 	if err != nil {

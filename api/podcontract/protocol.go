@@ -101,9 +101,9 @@ const (
 // Exit codes reserved by the restore proxy. Every other code is the restored
 // workload's own, or 128 plus the signal number that killed it.
 const (
-	// RestoreNotRepeatableExitCode means the proxy found RestoreCompleteFile or
-	// RestoreFailedFile at start: an earlier container already used this Pod's
-	// one restore.
+	// RestoreNotRepeatableExitCode means this Pod's one restore is spent: the
+	// proxy found RestoreCompleteFile or RestoreFailedFile at start, left by an
+	// earlier container, or RestoreFailedFile appeared while it waited.
 	RestoreNotRepeatableExitCode = 112
 
 	// RestoreProxyErrorExitCode means the proxy could not follow the restored

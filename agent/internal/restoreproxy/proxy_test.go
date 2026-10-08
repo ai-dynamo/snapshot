@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -121,15 +122,17 @@ func TestRunWakesOnInotify(t *testing.T) {
 	assert.Equal(t, 0, r.exitCode(t))
 }
 
-func TestRunIgnoresRestoreFailedWhileWaiting(t *testing.T) {
-	r := startProxy(t, 10*time.Millisecond)
+// The agent normally kills the container on a failed restore. When it cannot,
+// restore-failed is the proxy's only way to learn that no restore is coming.
+func TestRunExitsWhenRestoreFailsWhileWaiting(t *testing.T) {
+	r := startProxy(t, time.Hour)
 	r.assertRunning(t)
 
-	require.NoError(t, os.WriteFile(filepath.Join(r.dir, podcontract.RestoreFailedFile), []byte("failed\n"), 0o644))
+	path := filepath.Join(r.dir, podcontract.RestoreFailedFile)
+	require.NoError(t, os.WriteFile(path, []byte("failed\n"), 0o644))
 
-	r.assertRunning(t)
-	r.signals <- syscall.SIGTERM
-	assert.Equal(t, 128+int(syscall.SIGTERM), r.exitCode(t))
+	assert.Equal(t, podcontract.RestoreNotRepeatableExitCode, r.exitCode(t))
+	assert.FileExists(t, path, "the proxy must never delete a control file")
 }
 
 func TestRunSignalBeforeRestore(t *testing.T) {
@@ -170,6 +173,27 @@ func TestRunForwardsSignals(t *testing.T) {
 	})
 }
 
+// A signal and restore-complete can arrive together. If the signal wins the
+// wake-up, the proxy must still follow the restored workload and pass the
+// signal on, not exit and leave the workload running.
+func TestRunForwardsSignalThatRacesRestore(t *testing.T) {
+	// No inotify and an hour-long poll: only the signal can wake the wait, so
+	// it always finds restore-complete already on disk.
+	watchDirFn = func(string, logr.Logger) (<-chan struct{}, func()) { return nil, func() {} }
+	t.Cleanup(func() { watchDirFn = watchDir })
+
+	ready := filepath.Join(t.TempDir(), "ready")
+	pid := startChild(t, `trap 'exit 42' TERM; touch `+ready+`; while :; do sleep 0.05; done`)
+	require.Eventually(t, func() bool { _, err := os.Stat(ready); return err == nil }, 5*time.Second, 10*time.Millisecond)
+	r := startProxy(t, time.Hour)
+	r.assertRunning(t)
+	r.complete(t, pidFile(pid))
+
+	r.signals <- syscall.SIGTERM
+
+	assert.Equal(t, 42, r.exitCode(t), "the proxy must forward the signal, not exit with 143")
+}
+
 func TestRunProxyErrors(t *testing.T) {
 	for name, contents := range map[string]string{
 		"malformed":   "done\n",
@@ -185,11 +209,11 @@ func TestRunProxyErrors(t *testing.T) {
 	}
 }
 
-func TestWaitForCleansUpOtherChildren(t *testing.T) {
+func TestWaitForPidCleansUpOtherChildren(t *testing.T) {
 	other := startChild(t, "exit 3")
 	target := startChild(t, "sleep 0.3; exit 5")
 
-	r := waitFor(target)
+	r := waitForPid(target)
 
 	require.NoError(t, r.err)
 	assert.Equal(t, 5, exitCode(r.status))
