@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -175,7 +177,19 @@ func replyPageBrokerTest(connection net.Conn, request *pagebroker.Request, respo
 	if err != nil {
 		return err
 	}
-	if err := binary.Write(connection, binary.BigEndian, uint32(len(message))); err != nil {
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(message)))
+	if request.GetRequestBrokerPidfd() && (response.GetDirectCheckpointDirectory() != nil || response.GetStagedCheckpointDirectory() != nil ||
+		response.GetDirectRestoreReady() != nil || response.GetStagedRestoreDirectory() != nil) {
+		fd, err := unix.PidfdOpen(os.Getpid(), 0)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(fd)
+		if _, _, err := connection.(*net.UnixConn).WriteMsgUnix(header, unix.UnixRights(fd), nil); err != nil {
+			return err
+		}
+	} else if _, err := connection.Write(header); err != nil {
 		return err
 	}
 	_, err = connection.Write(message)

@@ -37,12 +37,12 @@ type CustomStorageExecution struct {
 	// namespace, so nsrestore can open separate control connections for Abort.
 	SocketDirectory *os.File
 	// Socket carries the restore request and is shared with the parent, which can
-	// shut down the connection and identify the original broker if nsrestore exits.
+	// shut down the connection if nsrestore exits.
 	Socket        *os.File
 	SocketName    string
 	GPUContext    *GpuContext
 	TransactionID string
-	broker        *os.File
+	BrokerProcess *os.File
 	aborted       bool
 	completed     bool
 }
@@ -52,7 +52,7 @@ func (g *CustomStorageExecution) Close() error {
 		return nil
 	}
 	var err error
-	for _, file := range []*os.File{g.SocketDirectory, g.Socket, g.broker} {
+	for _, file := range []*os.File{g.SocketDirectory, g.Socket, g.BrokerProcess} {
 		if file != nil {
 			err = errors.Join(err, file.Close())
 		}
@@ -60,7 +60,7 @@ func (g *CustomStorageExecution) Close() error {
 	return err
 }
 
-func (c Client) OpenCustomStorageExecution(transactionID string, gpuContext *GpuContext) (*CustomStorageExecution, error) {
+func (c Client) openCustomStorageExecution(transactionID string, gpuContext *GpuContext, brokerProcess *os.File) (*CustomStorageExecution, error) {
 	if gpuContext == nil {
 		return nil, fmt.Errorf("CustomStorage execution requires GPU context")
 	}
@@ -79,17 +79,71 @@ func (c Client) OpenCustomStorageExecution(transactionID string, gpuContext *Gpu
 		SocketName:      filepath.Base(c.ControlSocketPath),
 		GPUContext:      gpuContext,
 		TransactionID:   transactionID,
-	}
-	// An unconnected socket has no peer. Require this option before GPU work.
-	if peer, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_PEERPIDFD); !errors.Is(err, unix.ENODATA) {
-		if err == nil {
-			unix.Close(peer)
-			err = errors.New("unconnected socket has a peer")
-		}
-		execution.Close()
-		return nil, fmt.Errorf("PageBroker GPU execution requires SO_PEERPIDFD: %w", err)
+		BrokerProcess:   brokerProcess,
 	}
 	return execution, nil
+}
+
+// PrepareGPUCheckpoint prepares storage and retains the broker that owns the transaction.
+func (c Client) PrepareGPUCheckpoint(ctx context.Context, transactionID, destination string, gpuContext *GpuContext) (string, *CustomStorageExecution, error) {
+	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, &Request_PrepareDirectCheckpoint{
+		PrepareDirectCheckpoint: &PrepareDirectCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	directory, err := imageDirectory(response.GetDirectCheckpointDirectory().GetImageDirectory())
+	if err != nil {
+		execution.Close()
+		return "", nil, err
+	}
+	return directory, execution, nil
+}
+
+// PrepareGPURestore prepares storage and retains the broker before PID namespace entry.
+func (c Client) PrepareGPURestore(ctx context.Context, transactionID, source string, direct bool, gpuContext *GpuContext) (string, *CustomStorageExecution, error) {
+	var command isRequest_Command = &Request_StagedRestore{
+		StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+	}
+	if direct {
+		command = &Request_DirectRestore{DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()}}
+	}
+	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, command)
+	if err != nil {
+		return "", nil, err
+	}
+	if direct {
+		if response.GetDirectRestoreReady() == nil {
+			execution.Close()
+			return "", nil, fmt.Errorf("unexpected PageBroker direct restore response")
+		}
+		return "", execution, nil
+	}
+	directory, err := imageDirectory(response.GetStagedRestoreDirectory().GetImageDirectory())
+	if err != nil {
+		execution.Close()
+		return "", nil, err
+	}
+	return directory, execution, nil
+}
+
+func (c Client) prepareGPUExecution(ctx context.Context, transactionID string, gpuContext *GpuContext, command isRequest_Command) (*Response, *CustomStorageExecution, error) {
+	if gpuContext == nil {
+		return nil, nil, fmt.Errorf("CustomStorage execution requires GPU context")
+	}
+	response, brokerProcess, err := c.requestWithProcess(ctx, transactionID, command)
+	if err != nil {
+		return nil, nil, err
+	}
+	if brokerProcess == nil {
+		return nil, nil, fmt.Errorf("PageBroker preparation response requires a broker pidfd")
+	}
+	execution, err := c.openCustomStorageExecution(transactionID, gpuContext, brokerProcess)
+	if err != nil {
+		brokerProcess.Close()
+		return nil, nil, err
+	}
+	return response, execution, nil
 }
 
 func validateCapturedPIDs(capturedPIDs []int) error {
@@ -133,11 +187,11 @@ func gpuTargets(capturedPIDs, hostPIDs []int) ([]*GpuTarget, error) {
 }
 
 func (g *CustomStorageExecution) targets(capturedPIDs, hostPIDs []int, pidfds []*os.File) ([]*GpuTarget, error) {
-	if g == nil || g.SocketDirectory == nil || g.Socket == nil || g.GPUContext == nil || g.TransactionID == "" || g.SocketName == "" {
+	if g == nil || g.SocketDirectory == nil || g.Socket == nil || g.BrokerProcess == nil || g.GPUContext == nil || g.TransactionID == "" || g.SocketName == "" {
 		return nil, fmt.Errorf("missing PageBroker CustomStorage execution context")
 	}
-	if len(pidfds) != len(hostPIDs) || len(pidfds) > maxPassedFiles {
-		return nil, fmt.Errorf("GPU request requires one pidfd per host PID, at most %d", maxPassedFiles)
+	if len(pidfds) != len(hostPIDs) || len(pidfds) >= maxPassedFiles {
+		return nil, fmt.Errorf("GPU request requires one pidfd per host PID, at most %d", maxPassedFiles-1)
 	}
 	for _, file := range pidfds {
 		if file == nil {
@@ -220,17 +274,14 @@ func (g *CustomStorageExecution) execute(ctx context.Context, command isRequest_
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	var err error
-	g.broker, err = g.peerProcess()
-	if err != nil {
-		return nil, fmt.Errorf("identify PageBroker process: %w", err)
-	}
 	connection, err := net.FileConn(g.Socket)
 	if err != nil {
 		return nil, err
 	}
 	defer connection.Close()
-	response, err := exchange(ctx, connection.(*net.UnixConn), g.TransactionID, command, pidfds...)
+	// The receiver validates its own identity before admitting GPU work.
+	files := append([]*os.File{g.BrokerProcess}, pidfds...)
+	response, err := exchange(ctx, connection.(*net.UnixConn), g.TransactionID, command, files...)
 	if err != nil {
 		_ = g.Abort(ctx)
 		if ctx.Err() != nil {
@@ -254,64 +305,55 @@ func (g *CustomStorageExecution) socketControl(call func(int) error) error {
 	return errors.Join(err, callErr)
 }
 
-func (g *CustomStorageExecution) peerProcess() (*os.File, error) {
-	var fd int
-	err := g.socketControl(func(socket int) error {
-		var err error
-		fd, err = unix.GetsockoptInt(socket, unix.SOL_SOCKET, unix.SO_PEERPIDFD)
-		return err
-	})
-	// This fixed-size SO_PEERPIDFD call uses the socket's stored process identity.
-	// Older kernels report EINVAL after that process is reaped. Newer kernels
-	// report ESRCH or return a pidfd that is already readable.
-	if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ESRCH) {
-		return nil, os.ErrProcessDone
-	}
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), "pagebroker-process"), nil
-}
-
 // Abort retains the execution until PageBroker confirms cleanup or exits.
 // Caller cancellation stops GPU work but does not shorten this cleanup wait.
 func (g *CustomStorageExecution) Abort(ctx context.Context) error {
+	if g.BrokerProcess == nil {
+		return fmt.Errorf("missing retained PageBroker process descriptor")
+	}
 	if g.aborted {
 		return nil
 	}
-	shutdownErr := g.socketControl(func(fd int) error { return unix.Shutdown(fd, unix.SHUT_RDWR) })
+	neverConnected := false
+	shutdownErr := g.socketControl(func(fd int) error {
+		if err := unix.Shutdown(fd, unix.SHUT_RDWR); err != nil {
+			return err
+		}
+		// Inspect after shutdown: a child racing to connect cannot submit work.
+		_, err := unix.Getpeername(fd)
+		neverConnected = errors.Is(err, unix.ENOTCONN)
+		if neverConnected {
+			return nil
+		}
+		return err
+	})
 	log := logr.FromContextOrDiscard(ctx)
 	var nextLog time.Time
 	for {
-		var peerErr error
-		if g.broker == nil {
-			g.broker, peerErr = g.peerProcess()
-		}
-		if errors.Is(peerErr, os.ErrProcessDone) {
+		poll := []unix.PollFd{{Fd: int32(g.BrokerProcess.Fd()), Events: unix.POLLIN}}
+		if _, err := unix.Poll(poll, 0); err == nil && poll[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0 {
 			g.aborted = true
 			return nil
 		}
-		if g.broker != nil {
-			poll := []unix.PollFd{{Fd: int32(g.broker.Fd()), Events: unix.POLLIN}}
-			if _, err := unix.Poll(poll, 0); err == nil && poll[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0 {
-				g.aborted = true
-				return nil
-			}
-		}
 		attempt, cancel := context.WithTimeout(context.WithoutCancel(ctx), gpuControlTimeout)
-		err := (Client{ControlSocketPath: g.socketPath()}).Abort(attempt, g.TransactionID)
+		err := (Client{ControlSocketPath: g.socketPath()}).abort(attempt, g.TransactionID, g.BrokerProcess)
 		cancel()
 		if err == nil {
 			g.aborted = true
 			return nil
 		}
-		// Shutdown also prevents a surviving child from submitting work through
-		// this socket after it connects. ENODATA alone does not establish that.
-		if g.completed || (shutdownErr == nil && errors.Is(peerErr, unix.ENODATA)) {
+		// The pinned receiver can forget a transaction only after GPU work has
+		// drained. A replacement rejects our broker pidfd before checking the ID.
+		var failure failureError
+		if errors.As(err, &failure) && failure.code == Failure_TRANSACTION_NOT_FOUND {
+			g.aborted = true
+			return err
+		}
+		if g.completed || (shutdownErr == nil && neverConnected) {
 			return err
 		}
 		if time.Now().After(nextLog) {
-			log.Error(errors.Join(err, peerErr, shutdownErr), "Waiting for PageBroker GPU cleanup", "transaction", g.TransactionID)
+			log.Error(errors.Join(err, shutdownErr), "Waiting for PageBroker GPU cleanup", "transaction", g.TransactionID)
 			nextLog = time.Now().Add(30 * time.Second)
 		}
 		time.Sleep(time.Second)

@@ -513,12 +513,7 @@ func prepareCheckpoint(ctx context.Context, broker pagebroker.Client, transactio
 		directory, err := broker.PrepareCheckpoint(ctx, transactionID, destination)
 		return directory, nil, err
 	}
-	directory, err := broker.PrepareDirectCheckpoint(ctx, transactionID, destination)
-	if err != nil {
-		return "", nil, err
-	}
-	gpu, err := broker.OpenCustomStorageExecution(transactionID, gpuContext)
-	return directory, gpu, err
+	return broker.PrepareGPUCheckpoint(ctx, transactionID, destination, gpuContext)
 }
 
 func logGPUResult(log logr.Logger, result *pagebroker.GpuComplete) {

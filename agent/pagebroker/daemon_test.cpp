@@ -16,6 +16,7 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <poll.h>
 #include <span>
 #include <csignal>
 
@@ -771,11 +772,38 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
     }
   }
 
-  Response Receive(int connection)
+  Response Receive(int connection, FileDescriptor* broker_process = nullptr)
   {
     uint32_t size = 0;
-    if (recv(connection, &size, sizeof(size), MSG_WAITALL) != static_cast<ssize_t>(sizeof(size))) {
+    alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int))> control{};
+    iovec data{&size, sizeof(size)};
+    msghdr header{};
+    header.msg_iov = &data;
+    header.msg_iovlen = 1;
+    header.msg_control = control.data();
+    header.msg_controllen = control.size();
+    const auto received = recvmsg(connection, &header, MSG_CMSG_CLOEXEC);
+    if (received <= 0) {
       throw std::runtime_error("read test response size");
+    }
+    if (auto* rights = CMSG_FIRSTHDR(&header)) {
+      if (rights->cmsg_level != SOL_SOCKET || rights->cmsg_type != SCM_RIGHTS ||
+          rights->cmsg_len != CMSG_LEN(sizeof(int))) {
+        throw std::runtime_error("invalid response descriptor");
+      }
+      int descriptor;
+      std::memcpy(&descriptor, CMSG_DATA(rights), sizeof(descriptor));
+      FileDescriptor process(descriptor);
+      if (!broker_process) {
+        throw std::runtime_error("unexpected response descriptor");
+      }
+      *broker_process = std::move(process);
+    }
+    if (header.msg_flags & MSG_CTRUNC ||
+        (received < static_cast<ssize_t>(sizeof(size)) &&
+         recv(connection, reinterpret_cast<char*>(&size) + received, sizeof(size) - received, MSG_WAITALL) !=
+             static_cast<ssize_t>(sizeof(size)) - received)) {
+      throw std::runtime_error("truncated response header");
     }
     std::string body(ntohl(size), '\0');
     Response response;
@@ -795,7 +823,12 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
     auto connection = Connect();
     const auto message = request.SerializeAsString();
     const uint32_t size = htonl(message.size());
-    Send(connection.get(), &size, sizeof(size), {files.begin(), files.size()});
+    std::vector<int> descriptors(files);
+    FileDescriptor broker_process(static_cast<int>(syscall(SYS_pidfd_open, server_, 0)));
+    if (request.has_checkpoint_gpu() || request.has_restore_gpu()) {
+      descriptors.insert(descriptors.begin(), broker_process.get());
+    }
+    Send(connection.get(), &size, sizeof(size), descriptors);
     Send(connection.get(), message.data(), message.size());
     return Receive(connection.get());
   }
@@ -825,6 +858,44 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
   fs::path root_;
   fs::path socket_path_;
 };
+
+TEST_F(DaemonTransportTest, PreparationPidfdIsOptInAndRejectsOtherProcess)
+{
+  auto ordinary = RequestFor("ordinary");
+  Configure(ordinary.mutable_prepare_direct_checkpoint()->mutable_destination(),
+            ordinary.mutable_prepare_direct_checkpoint()->mutable_io_engine(), root_ / "storage" / "ordinary");
+  EXPECT_TRUE(Exchange(ordinary).has_direct_checkpoint_directory());
+
+  auto preparation = RequestFor("prepared");
+  preparation.set_request_broker_pidfd(true);
+  Configure(preparation.mutable_prepare_direct_checkpoint()->mutable_destination(),
+            preparation.mutable_prepare_direct_checkpoint()->mutable_io_engine(), root_ / "storage" / "checkpoint");
+  auto connection = Connect();
+  const auto message = preparation.SerializeAsString();
+  const uint32_t size = htonl(message.size());
+  Send(connection.get(), &size, sizeof(size));
+  Send(connection.get(), message.data(), message.size());
+  FileDescriptor broker_process(-1);
+  ASSERT_TRUE(Receive(connection.get(), &broker_process).has_direct_checkpoint_directory());
+  ASSERT_GE(broker_process.get(), 0);
+  EXPECT_NE(fcntl(broker_process.get(), F_GETFD) & FD_CLOEXEC, 0);
+  pollfd original{broker_process.get(), POLLIN, 0};
+  EXPECT_EQ(poll(&original, 1, 0), 0);
+
+  auto abort = RequestFor("prepared");
+  abort.mutable_abort();
+  FileDescriptor other(static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0)));
+  auto rejected = Exchange(abort, {other.get()});
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().message(), "broker process descriptor does not match");
+  EXPECT_TRUE(Exchange(abort, {broker_process.get()}).has_abort_complete());
+
+  ASSERT_EQ(kill(server_, SIGKILL), 0);
+  while (waitpid(server_, nullptr, 0) < 0 && errno == EINTR) {}
+  server_ = -1;
+  EXPECT_EQ(poll(&original, 1, 0), 1);
+  EXPECT_NE(original.revents & POLLIN, 0);
+}
 
 TEST_F(DaemonTransportTest, BindsGpuDescriptorsAndPreservesControlRequests)
 {
@@ -889,7 +960,8 @@ TEST_F(DaemonTransportTest, HandlesFragmentedHeadersAndRejectsLateOrTruncatedRig
   const auto initial_files = OpenFiles();
   FileDescriptor process(static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0)));
   ASSERT_GE(process.get(), 0);
-  const std::array<int, 1> files{process.get()};
+  FileDescriptor broker_process(static_cast<int>(syscall(SYS_pidfd_open, server_, 0)));
+  const std::array<int, 2> files{broker_process.get(), process.get()};
   auto request = RequestFor("fragmented");
   auto* checkpoint = request.mutable_checkpoint_gpu();
   checkpoint->mutable_context()->add_captured_pids(1);
@@ -952,7 +1024,8 @@ TEST_F(DaemonTransportTest, RejectsGpuAdmissionFromAControlHandlerDuringShutdown
   const auto message = request.SerializeAsString();
   const uint32_t size = htonl(message.size());
   auto connection = Connect();
-  const std::array<int, 1> files{process.get()};
+  FileDescriptor broker_process(static_cast<int>(syscall(SYS_pidfd_open, server_, 0)));
+  const std::array<int, 2> files{broker_process.get(), process.get()};
   Send(connection.get(), &size, 1, files);
   ASSERT_TRUE(WaitForPidfd());
   ASSERT_EQ(kill(server_, SIGTERM), 0);

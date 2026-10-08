@@ -4,6 +4,7 @@
 package pagebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -128,7 +129,11 @@ func isTransportError(err error) bool {
 }
 
 func (c Client) Abort(ctx context.Context, transactionID string) error {
-	response, err := c.request(ctx, transactionID, &Request_Abort{Abort: &AbortRequest{}})
+	return c.abort(ctx, transactionID)
+}
+
+func (c Client) abort(ctx context.Context, transactionID string, files ...*os.File) error {
+	response, err := c.request(ctx, transactionID, &Request_Abort{Abort: &AbortRequest{}}, files...)
 	if err != nil {
 		return err
 	}
@@ -138,16 +143,36 @@ func (c Client) Abort(ctx context.Context, transactionID string) error {
 	return nil
 }
 
-func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command) (*Response, error) {
+func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
+	response, brokerProcess, err := c.requestResponse(ctx, transactionID, false, command, files...)
+	if brokerProcess != nil {
+		brokerProcess.Close()
+	}
+	return response, err
+}
+
+func (c Client) requestWithProcess(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
+	return c.requestResponse(ctx, transactionID, true, command, files...)
+}
+
+func (c Client) requestResponse(ctx context.Context, transactionID string, requestBrokerPidfd bool, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
 	if err != nil {
-		return nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
 	}
 	defer connection.Close()
-	return exchange(ctx, connection.(*net.UnixConn), transactionID, command)
+	return exchangeResponse(ctx, connection.(*net.UnixConn), transactionID, requestBrokerPidfd, command, files...)
 }
 
 func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
+	response, brokerProcess, err := exchangeResponse(ctx, connection, transactionID, false, command, files...)
+	if brokerProcess != nil {
+		brokerProcess.Close()
+	}
+	return response, err
+}
+
+func exchangeResponse(ctx context.Context, connection *net.UnixConn, transactionID string, requestBrokerPidfd bool, command isRequest_Command, files ...*os.File) (*Response, *os.File, error) {
 	stopCancel := context.AfterFunc(ctx, func() {
 		_ = connection.CloseWrite()
 		_ = connection.Close()
@@ -155,35 +180,57 @@ func exchange(ctx context.Context, connection *net.UnixConn, transactionID strin
 	defer stopCancel()
 
 	requestID := uuid.NewString()
-	request := &Request{RequestId: &requestID, Command: command}
+	request := &Request{RequestId: &requestID, Command: command, RequestBrokerPidfd: requestBrokerPidfd}
 	if transactionID != "" {
 		request.TransactionId = &transactionID
 	}
 	message, err := proto.Marshal(request)
 	if err != nil {
-		return nil, fmt.Errorf("marshal PageBroker request: %w", err)
+		return nil, nil, fmt.Errorf("marshal PageBroker request: %w", err)
 	}
 	if err := writeRequest(connection, message, files); err != nil {
-		return nil, transportError{cause: fmt.Errorf("write PageBroker request: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("write PageBroker request: %w", err)}
 	}
-	message, err = readMessage(connection)
+	message, receivedFiles, err := readMessageWithFiles(connection)
+	retained := false
+	defer func() {
+		if !retained {
+			for _, fd := range receivedFiles {
+				unix.Close(fd)
+			}
+		}
+	}()
 	if err != nil {
 		if errors.Is(err, errMessageTooLarge) {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, transportError{cause: fmt.Errorf("read PageBroker response: %w", err)}
+		return nil, nil, transportError{cause: fmt.Errorf("read PageBroker response: %w", err)}
 	}
 	response := new(Response)
 	if err := proto.Unmarshal(message, response); err != nil {
-		return nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
+		return nil, nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
 	}
 	if response.GetRequestId() != requestID || response.GetTransactionId() != transactionID {
-		return nil, fmt.Errorf("PageBroker response identifiers do not match request")
+		return nil, nil, fmt.Errorf("PageBroker response identifiers do not match request")
 	}
 	if failure := response.GetFailure(); failure != nil {
-		return nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
+		return nil, nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
 	}
-	return response, nil
+	if len(receivedFiles) > 1 {
+		return nil, nil, fmt.Errorf("unexpected PageBroker response descriptors")
+	}
+	if len(receivedFiles) == 0 {
+		return response, nil, nil
+	}
+	if response.GetDirectCheckpointDirectory() == nil && response.GetStagedCheckpointDirectory() == nil &&
+		response.GetDirectRestoreReady() == nil && response.GetStagedRestoreDirectory() == nil {
+		return nil, nil, fmt.Errorf("broker pidfd is only allowed on preparation responses")
+	}
+	if err := unix.PidfdSendSignal(receivedFiles[0], 0, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EPERM) {
+		return nil, nil, fmt.Errorf("invalid PageBroker process descriptor: %w", err)
+	}
+	retained = true
+	return response, os.NewFile(uintptr(receivedFiles[0]), "pagebroker-process"), nil
 }
 
 type failureError struct {
@@ -274,6 +321,46 @@ func writeMessage(writer io.Writer, message []byte) error {
 		message = message[written:]
 	}
 	return nil
+}
+
+// Rights arrive with the first header bytes. Close every adopted descriptor on error.
+func readMessageWithFiles(connection *net.UnixConn) (message []byte, files []int, err error) {
+	defer func() {
+		if err != nil {
+			for _, fd := range files {
+				_ = unix.Close(fd)
+			}
+			files = nil
+		}
+	}()
+	header := make([]byte, messageHeaderSize)
+	control := make([]byte, unix.CmsgSpace(maxPassedFiles*4))
+	n, controlSize, flags, _, err := connection.ReadMsgUnix(header, control)
+	if err != nil {
+		return nil, nil, err
+	}
+	messages, err := unix.ParseSocketControlMessage(control[:controlSize])
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, message := range messages {
+		rights, parseErr := unix.ParseUnixRights(&message)
+		if parseErr != nil {
+			return nil, files, parseErr
+		}
+		for _, fd := range rights {
+			unix.CloseOnExec(fd)
+		}
+		files = append(files, rights...)
+	}
+	if flags&(unix.MSG_CTRUNC|unix.MSG_TRUNC) != 0 {
+		return nil, files, fmt.Errorf("truncated PageBroker process descriptor response")
+	}
+	if n == 0 {
+		return nil, files, io.ErrUnexpectedEOF
+	}
+	message, err = readMessage(io.MultiReader(bytes.NewReader(header[:n]), connection))
+	return message, files, err
 }
 
 func readMessage(reader io.Reader) ([]byte, error) {

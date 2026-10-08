@@ -954,9 +954,22 @@ func TestFailedRestoreWaitsForAbortBeforeTermination(t *testing.T) {
 	for _, outcome := range []string{"drained", "termination-error"} {
 		t.Run(outcome, func(t *testing.T) {
 			listener := listenPageBroker(t)
-			gpu, err := (pagebroker.Client{ControlSocketPath: listener.Addr().String()}).OpenCustomStorageExecution("failed-restore", &pagebroker.GpuContext{})
+			socketFD, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 			if err != nil {
 				t.Fatal(err)
+			}
+			directory, err := os.Open(filepath.Dir(listener.Addr().String()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			brokerFD, err := unix.PidfdOpen(os.Getpid(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gpu := &pagebroker.CustomStorageExecution{
+				Socket: os.NewFile(uintptr(socketFD), "execution"), SocketDirectory: directory,
+				BrokerProcess: os.NewFile(uintptr(brokerFD), "broker"),
+				SocketName:    filepath.Base(listener.Addr().String()), TransactionID: "failed-restore", GPUContext: &pagebroker.GpuContext{},
 			}
 			defer gpu.Close()
 			// The parent's endpoint was connected by nsrestore before it exited.
@@ -1091,6 +1104,14 @@ func TestCustomStorageFilesReachChild(t *testing.T) {
 				t.Fatalf("inherited %s has wrong type: %v", flag, err)
 			}
 		}
+		brokerFD, err := strconv.Atoi(values["--pagebroker-process-fd"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", brokerFD))
+		if err != nil || !strings.Contains(string(identity), fmt.Sprintf("Pid:\t%d\n", os.Getppid())) {
+			t.Fatalf("inherited broker identity: %s, %v", identity, err)
+		}
 		gpuContext := new(pagebroker.GpuContext)
 		if err := json.Unmarshal([]byte(values["--gpu-context"]), gpuContext); err != nil || len(gpuContext.CapturedPids) != 1 || gpuContext.CapturedPids[0] != 12 {
 			t.Fatalf("inherited GPU context: %v, %v", gpuContext, err)
@@ -1127,8 +1148,15 @@ func TestCustomStorageFilesReachChild(t *testing.T) {
 	}
 	executionSocket := os.NewFile(uintptr(socket), "execution-socket")
 	defer executionSocket.Close()
+	brokerFD, err := unix.PidfdOpen(os.Getpid(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokerProcess := os.NewFile(uintptr(brokerFD), "broker")
+	defer brokerProcess.Close()
 	execution := &pagebroker.CustomStorageExecution{
 		Socket:          executionSocket,
+		BrokerProcess:   brokerProcess,
 		SocketDirectory: openDirectory("--pagebroker-socket-directory-fd"),
 		SocketName:      "broker.sock",
 		GPUContext:      &pagebroker.GpuContext{CapturedPids: []uint32{12}},
