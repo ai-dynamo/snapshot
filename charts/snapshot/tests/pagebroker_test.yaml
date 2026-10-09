@@ -67,6 +67,27 @@ tests:
           path: spec.template.spec.containers[?(@.name == "pagebroker")].args[10]
           value: "8388608"
 
+  - it: enables shared transfer lanes without increasing the staging budget
+    set:
+      pageBroker.transferPooledLanes: 32
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args[11]
+          value: --custom-storage-pooled-lanes
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args[12]
+          value: "32"
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args[6]
+          value: "32"
+
+  - it: rejects a negative pooled lane count
+    set:
+      pageBroker.transferPooledLanes: -1
+    asserts:
+      - failedTemplate:
+          errorPattern: "transferPooledLanes"
+
   - it: supports conventional checkpointing with PageBroker disabled
     set:
       pageBroker.enabled: false

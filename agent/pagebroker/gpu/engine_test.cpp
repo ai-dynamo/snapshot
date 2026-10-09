@@ -171,5 +171,45 @@ TEST_F(ArtifactTest, DuplicateRetainsDirectoryAfterOriginalCloses)
   EXPECT_THROW(FileDescriptor::Duplicate(-1), std::system_error);
 }
 
+TEST_F(ArtifactTest, PreparesRestoreFilesBeforeParticipantsAndReleasesDescriptors)
+{
+  Artifact checkpoint(directory_.get(), Direction::Checkpoint, {1}, {kDevice});
+  const auto participant = root_ / kDataDirectory / "1";
+  const auto extent = participant / storage::DeviceFilename(0);
+  FileDescriptor file(open(extent.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
+  ASSERT_GE(file.get(), 0);
+  ASSERT_EQ(ftruncate(file.get(), 4096), 0);
+  std::string error;
+  ASSERT_TRUE(storage::WriteManifest(participant, {{kDevice, 4096, storage::DeviceFilename(0)}}, &error)) << error;
+  const auto descriptors = [] {
+    return std::distance(fs::directory_iterator("/proc/self/fd"), fs::directory_iterator{});
+  };
+  const auto before = descriptors();
+  {
+    auto preparation = std::make_shared<RestorePreparation>(directory_.get(), 3);
+    // Preparation retains its source even if the caller closes its descriptor.
+    auto source = FileDescriptor::Duplicate(directory_.get());
+    directory_ = FileDescriptor(-1);
+    ASSERT_NO_THROW(Artifact(source.get(), Direction::Restore, {1}, {kDevice}, {}, preparation));
+    EXPECT_GE(descriptors(), before + 4);
+    // A pathname replacement cannot silently select the stale prepared inode.
+    ASSERT_EQ(unlink(extent.c_str()), 0);
+    FileDescriptor replacement(open(extent.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
+    ASSERT_EQ(ftruncate(replacement.get(), 4096), 0);
+    EXPECT_THROW(Artifact(source.get(), Direction::Restore, {1}, {kDevice}, {}, preparation), std::invalid_argument);
+  }
+  EXPECT_EQ(descriptors(), before - 1);
+}
+
+TEST_F(ArtifactTest, PreparationErrorsRemainObservableAndCpuOnlyCleanupIsSafe)
+{
+  EXPECT_NO_THROW(RestorePreparation(directory_.get(), 2));
+  Artifact checkpoint(directory_.get(), Direction::Checkpoint, {1}, {kDevice});
+  auto preparation = std::make_shared<RestorePreparation>(directory_.get(), 2);
+  for (int retry = 0; retry < 2; ++retry) {
+    EXPECT_THROW(Artifact(directory_.get(), Direction::Restore, {1}, {kDevice}, {}, preparation), std::runtime_error);
+  }
+}
+
 } // namespace
 } // namespace snapshot::pagebroker::gpu

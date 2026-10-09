@@ -4,6 +4,9 @@
 
 #include <nvtx3/nvtx3.hpp>
 #include <fcntl.h>
+#include <charconv>
+#include <filesystem>
+#include <future>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
@@ -137,6 +140,7 @@ struct PreparedParticipant {
   uint32_t captured_pid;
   FileDescriptor directory;
   std::vector<storage::GpuDataFile> manifest;
+  std::vector<std::shared_ptr<transfer::TransferFile>> files;
 };
 } // namespace
 
@@ -157,6 +161,78 @@ ValidateParticipants(std::span<const uint32_t> captured_pids, std::span<const Pa
              "invalid or duplicate GPU target");
   }
 }
+
+struct RestorePreparation::State {
+  using Files = std::map<std::pair<uint32_t, std::string>, std::shared_ptr<transfer::TransferFile>>;
+  std::shared_ptr<std::atomic<bool>> cancelled = std::make_shared<std::atomic<bool>>(false);
+  // Declared last so destruction joins before releasing the cancellation token.
+  std::shared_future<Files> pending;
+
+  State(int directory_fd, size_t lanes)
+  {
+    pending = std::async(std::launch::async,
+        [root = FileDescriptor::Duplicate(directory_fd), lanes, cancelled = cancelled] {
+      const nvtx3::scoped_range range{"PageBroker restore file preparation"};
+      Files files;
+      ValidateDirectory(root.get());
+      FileDescriptor gpu_root(openat(root.get(), kDataDirectory, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+      if (gpu_root.get() < 0 && errno == ENOENT) {
+        return files;  // CPU-only checkpoint.
+      }
+      if (gpu_root.get() < 0) {
+        throw std::system_error(errno, std::generic_category(), "open GPU preparation directory");
+      }
+      ValidateDirectory(gpu_root.get());
+      const auto path = "/proc/self/fd/" + std::to_string(gpu_root.get());
+      for (const auto& entry : std::filesystem::directory_iterator(path)) {
+        if (cancelled->load()) return Files{};
+        const auto name = entry.path().filename().string();
+        uint32_t pid = 0;
+        const auto [end, error] = std::from_chars(name.data(), name.data() + name.size(), pid);
+        Validate(error == std::errc{} && end == name.data() + name.size() && pid > 0 &&
+                 pid <= INT_MAX && name == std::to_string(pid), "invalid GPU participant directory");
+        auto directory = OpenDirectory(gpu_root.get(), name.c_str());
+        ValidateDirectory(directory.get());
+        std::vector<storage::GpuDataFile> manifest;
+        std::string message;
+        const auto participant_path = "/proc/self/fd/" + std::to_string(directory.get());
+        if (!storage::ReadManifest(participant_path, &manifest, &message) ||
+            !storage::ValidateExtentFiles(participant_path, manifest, &message)) {
+          throw std::runtime_error(message);
+        }
+        for (const auto& extent : manifest) {
+          if (cancelled->load()) return Files{};
+          FileDescriptor file(openat(directory.get(), extent.filename.c_str(),
+                                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECT));
+          if (file.get() < 0) {
+            throw std::system_error(errno, std::generic_category(), "prepare GPU extent");
+          }
+          files.emplace(std::make_pair(pid, extent.filename),
+                        std::make_shared<transfer::TransferFile>(file.get(), lanes));
+        }
+      }
+      return files;
+    });
+  }
+  ~State() { cancelled->store(true); }
+
+  std::shared_ptr<transfer::TransferFile> Get(uint32_t pid, const storage::GpuDataFile& extent, int directory)
+  {
+    const nvtx3::scoped_range range{"PageBroker restore preparation wait"};
+    const auto file = pending.get().at({pid, extent.filename});
+    struct stat held{}, current{};
+    Validate(fstat(file->fd(), &held) == 0 &&
+             fstatat(directory, extent.filename.c_str(), &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+             S_ISREG(held.st_mode) && held.st_dev == current.st_dev && held.st_ino == current.st_ino &&
+             held.st_size >= 0 && static_cast<uint64_t>(held.st_size) == extent.size,
+             "GPU extent changed after preparation");
+    return file;
+  }
+};
+
+RestorePreparation::RestorePreparation(int directory_fd, size_t lanes)
+    : state_(std::make_unique<State>(directory_fd, lanes)) {}
+RestorePreparation::~RestorePreparation() = default;
 
 struct Artifact::ArtifactState {
   ArtifactState(int directory_fd, Direction direction)
@@ -191,7 +267,7 @@ struct Artifact::ArtifactState {
         ++created;
         auto directory = OpenDirectory(gpu_root.get(), names[index].c_str());
         ValidateDirectory(directory.get());
-        participants.push_back({captured_pids[index], std::move(directory), {}});
+        participants.push_back({captured_pids[index], std::move(directory), {}, {}});
       }
     } catch (...) {
       for (size_t index = 0; index < created; ++index) {
@@ -213,7 +289,7 @@ struct Artifact::ArtifactState {
     for (const auto pid : captured_pids) {
       auto directory = OpenDirectory(gpu_root.get(), std::to_string(pid).c_str());
       ValidateDirectory(directory.get());
-      PreparedParticipant participant{pid, std::move(directory), {}};
+      PreparedParticipant participant{pid, std::move(directory), {}, {}};
       const auto path = "/proc/self/fd/" + std::to_string(participant.directory.get());
       std::string error;
       if (!storage::ReadManifest(path, &participant.manifest, &error) ||
@@ -221,6 +297,9 @@ struct Artifact::ArtifactState {
         throw std::runtime_error(error);
       }
       for (const auto& file : participant.manifest) {
+        if (preparation) {
+          participant.files.push_back(preparation->state_->Get(pid, file, participant.directory.get()));
+        }
         const auto mapped = std::find_if(mapping.begin(), mapping.end(), [&](const auto& pair) {
           return pair.source_uuid == file.source_uuid;
         });
@@ -233,6 +312,7 @@ struct Artifact::ArtifactState {
   }
 
   FileDescriptor root;
+  std::shared_ptr<RestorePreparation> preparation;
   Direction direction;
   std::vector<std::string> visible_devices;
   std::vector<storage::DevicePair> mapping;
@@ -242,9 +322,11 @@ struct Artifact::ArtifactState {
 };
 
 Artifact::Artifact(int directory_fd, Direction direction, std::vector<uint32_t> captured_pids,
-                   std::vector<std::string> visible_devices, std::vector<DeviceMapping> device_map)
+                   std::vector<std::string> visible_devices, std::vector<DeviceMapping> device_map,
+                   std::shared_ptr<RestorePreparation> preparation)
     : state_(std::make_unique<ArtifactState>(directory_fd, direction))
 {
+  state_->preparation = std::move(preparation);
   Validate(direction == Direction::Checkpoint || direction == Direction::Restore, "invalid GPU operation direction");
   Validate(!captured_pids.empty() && !visible_devices.empty(), "GPU artifact requires participants and GPUs");
   std::set<uint32_t> pids;
@@ -290,7 +372,7 @@ Artifact::Artifact(int directory_fd, Direction direction, std::vector<uint32_t> 
 Artifact::~Artifact() = default;
 
 struct GpuEngine::GpuEngineState {
-  explicit GpuEngineState(const EngineOptions& options)
+  explicit GpuEngineState(const EngineOptions& options) : pooled_lanes(options.pooled_lanes)
   {
     Require(!std::getenv("CUDA_CHECKPOINT_JOB_FILE"), "CUDA_CHECKPOINT_JOB_FILE must be unset");
     if (!checkpoint.SupportsCustomStorage()) {
@@ -317,9 +399,18 @@ struct GpuEngine::GpuEngineState {
       Require(!options.max_pinned_bytes || total_bytes <= options.max_pinned_bytes,
               "total pinned allocation exceeds max-pinned-bytes");
     }
-    for (const auto& [id, device] : devices) {
-      (void)id;
-      device->buffers.Initialize(device->context.handle);
+    if (options.pooled_lanes) {
+      std::vector<CUcontext> contexts;
+      for (const auto& [id, device] : devices) {
+        (void)id;
+        contexts.push_back(device->context.handle);
+      }
+      pool = std::make_unique<transfer::TransferPool>(contexts, settings, options.pooled_lanes);
+    } else {
+      for (const auto& [id, device] : devices) {
+        (void)id;
+        device->buffers.Initialize(device->context.handle);
+      }
     }
     available = true;
   }
@@ -346,6 +437,8 @@ struct GpuEngine::GpuEngineState {
 
   driver::CheckpointAPI checkpoint;
   std::map<CUdevice, std::unique_ptr<Device>> devices;
+  std::unique_ptr<transfer::TransferPool> pool;
+  size_t pooled_lanes;
   bool available = false;
   std::mutex targets_mutex;
   std::set<int> active_targets;
@@ -423,7 +516,12 @@ class GpuEngine::Batch {
         if (ftruncate(file.get(), data.size)) {
           throw std::system_error(errno, std::generic_category(), "size GPU data file");
         }
-        transfer.device.buffers.Checkpoint(file.get(), data.devPtr, data.size, data.stream, cancellation_);
+        if (engine_.pool) {
+          engine_.pool->Checkpoint(file.get(), transfer.device.context.handle, data.devPtr,
+                                 data.size, data.stream, cancellation_);
+        } else {
+          transfer.device.buffers.Checkpoint(file.get(), data.devPtr, data.size, data.stream, cancellation_);
+        }
         result_.bytes += data.size;
       }
     }
@@ -435,11 +533,22 @@ class GpuEngine::Batch {
         auto transfer = PrepareTransfer(job);
         const auto& data = transfer.data;
         const auto& name = transfer.name;
+        if (engine_.pool && !prepared_.files.empty()) {
+          engine_.pool->Restore(*prepared_.files.at(job.extent_index), transfer.device.context.handle,
+                                data.devPtr, data.size, data.stream, cancellation_);
+          result_.bytes += data.size;
+          continue;
+        }
         FileDescriptor file(openat(prepared_.directory.get(), name.c_str(), O_CLOEXEC | O_NOFOLLOW | O_DIRECT | O_RDONLY));
         if (file.get() < 0) {
           throw std::system_error(errno, std::generic_category(), "open GPU data file");
         }
-        transfer.device.buffers.Restore(file.get(), data.devPtr, data.size, data.stream, cancellation_);
+        if (engine_.pool) {
+          engine_.pool->Restore(file.get(), transfer.device.context.handle, data.devPtr,
+                                 data.size, data.stream, cancellation_);
+        } else {
+          transfer.device.buffers.Restore(file.get(), data.devPtr, data.size, data.stream, cancellation_);
+        }
         result_.bytes += data.size;
       }
     }
@@ -726,6 +835,13 @@ bool
 GpuEngine::Available() const
 {
   return state_->available;
+}
+
+std::shared_ptr<RestorePreparation>
+GpuEngine::PrepareRestore(int directory_fd)
+{
+  if (!state_->available || !state_->pool) return {};
+  return std::make_shared<RestorePreparation>(directory_fd, state_->pooled_lanes);
 }
 
 std::vector<ParticipantResult>

@@ -19,6 +19,11 @@
           "minimum": 1,
           "maximum": 9223372036854775807
         },
+        "transferPooledLanes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
         "transferChunkBytes": {
           "type": "integer",
           "minimum": 4096,

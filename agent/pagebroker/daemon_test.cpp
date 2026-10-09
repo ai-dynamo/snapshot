@@ -659,13 +659,15 @@ TEST(DaemonOptionsTest, ParsesCustomStorageOptions)
   const std::vector<std::string_view> arguments{
       "socket", "staging", "storage", "--custom-storage-engine", "off",
       "--max-concurrent-requests", "8", "--custom-storage-buffer-count", "2",
-      "--custom-storage-chunk-bytes", "1048576", "--custom-storage-max-pinned-bytes", "0"};
+      "--custom-storage-chunk-bytes", "1048576", "--custom-storage-max-pinned-bytes", "0",
+      "--custom-storage-pooled-lanes", "16"};
   const auto options = ParseDaemonOptions(arguments);
   EXPECT_EQ(options.socket_path, "socket");
   EXPECT_EQ(options.staging_directory, "staging");
   EXPECT_EQ(options.storage_root, "storage");
   EXPECT_EQ(options.max_concurrent_requests, 8);
   EXPECT_EQ(options.gpu.buffer_count, 2);
+  EXPECT_EQ(options.gpu.pooled_lanes, 16);
   EXPECT_EQ(options.gpu.chunk_bytes, 1048576);
   EXPECT_EQ(options.gpu.max_pinned_bytes, 0);
   EXPECT_FALSE(options.enable_gpu);

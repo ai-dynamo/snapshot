@@ -558,7 +558,8 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
   const auto visible_device = gpu::storage::FormatGPUUUID(uuid_bytes);
   constexpr size_t kTestBufferCount = 2;
   constexpr size_t kTestChunkBytes = 1024 * 1024;
-  const gpu::EngineOptions options{kTestBufferCount, kTestChunkBytes, 0};
+  const size_t pooled_lanes = std::getenv("PAGEBROKER_TEST_POOLED_TRANSFERS") ? 2 : 0;
+  const gpu::EngineOptions options{kTestBufferCount, kTestChunkBytes, 0, pooled_lanes};
   gpu::GpuEnginePtr engine = std::make_shared<gpu::GpuEngine>(options);
   ASSERT_TRUE(engine->Available());
   {
