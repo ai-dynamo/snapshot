@@ -89,6 +89,8 @@ tests:
             - "134217728"
             - --custom-storage-max-pinned-bytes
             - "0"
+            - --custom-storage-pooled-lanes
+            - "0"
 
   - it: passes store identity when the artifact backend is explicitly enabled
     template: templates/daemonset.yaml
@@ -108,6 +110,8 @@ tests:
             - --custom-storage-chunk-bytes
             - "134217728"
             - --custom-storage-max-pinned-bytes
+            - "0"
+            - --custom-storage-pooled-lanes
             - "0"
             - --storage-config
             - /etc/snapshot/storage.yaml
@@ -254,6 +258,8 @@ tests:
             - "134217728"
             - --custom-storage-max-pinned-bytes
             - "0"
+            - --custom-storage-pooled-lanes
+            - "0"
 
 
   - it: applies the configured pinned-memory budget to the owning process
@@ -272,6 +278,16 @@ tests:
       - equal:
           path: spec.template.spec.containers[?(@.name == "pagebroker")].args[10]
           value: "8388608"
+
+
+  - it: passes the shared transfer lane count
+    set:
+      pageBroker.transferPooledLanes: 16
+    template: templates/daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args[12]
+          value: "16"
 
 
   - it: defaults the sidecar tag to the chart appVersion like the agent
@@ -439,6 +455,8 @@ tests:
             - --custom-storage-chunk-bytes
             - "134217728"
             - --custom-storage-max-pinned-bytes
+            - "0"
+            - --custom-storage-pooled-lanes
             - "0"
             - --storage-config
             - /etc/snapshot-s3/pagebroker-s3-config.json
