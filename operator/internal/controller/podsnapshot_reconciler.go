@@ -39,6 +39,10 @@ const (
 	// snapshotContentDeleteRequeue is the delay between cascade-delete progress checks.
 	snapshotContentDeleteRequeue = time.Second
 
+	// testCaptureFailureReadyRequeue keeps the test-only failure hook from racing
+	// workload-defined readiness.
+	testCaptureFailureReadyRequeue = time.Second
+
 	// podSnapshotSourcePodNameField indexes PodSnapshots by their namespaced source-pod name.
 	// List calls using this field are also scoped to the pod's namespace.
 	podSnapshotSourcePodNameField = "spec.source.podRef.name"
@@ -303,6 +307,10 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 		return ctrl.Result{}, fmt.Errorf("validate source pod: %w", err)
 	}
 	if annotation := sr.TestFailureAnnotation; annotation != "" && pod.Annotations[annotation] == "true" {
+		target := snap.Spec.Source.PodRef.Containers[0]
+		if !containerReady(pod, target) {
+			return ctrl.Result{RequeueAfter: testCaptureFailureReadyRequeue}, nil
+		}
 		return sr.failPodSnapshot(ctx, snap, "TestCaptureFailure",
 			fmt.Errorf("test-only capture failure requested by source pod annotation %q", annotation))
 	}
@@ -314,6 +322,15 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 		return ctrl.Result{}, err
 	}
 	return sr.bindContent(ctx, snap, content.Name)
+}
+
+func containerReady(pod *corev1.Pod, name string) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == name {
+			return status.Ready
+		}
+	}
+	return false
 }
 
 // verifyContentBacklink errors when a content's complete backref does not point at this PodSnapshot
