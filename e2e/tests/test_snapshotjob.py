@@ -378,11 +378,19 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
             config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, condition_type="Failed", timeout=180
         )
         failed = snap.condition(sj, "Failed")
-        assert failed and failed.get("reason") == "TestCaptureFailure"
+        assert failed and failed.get("reason") == "CaptureFailed"
         captured = snap.condition(sj, "Captured")
         assert captured and captured.get("status") == "False"
         assert snap.condition(sj, "Completed").get("status") != "True"
         assert k8s.read_job(config.namespace, snapshotjob_name) is not None
+        pod_snapshot = snap.get_custom_object(
+            client.CustomObjectsApi(),
+            config.namespace,
+            sj["status"]["podSnapshotName"],
+            snap.PODSNAPSHOTS,
+        )
+        pod_snapshot_failed = snap.condition(pod_snapshot, "Failed")
+        assert pod_snapshot_failed and pod_snapshot_failed.get("reason") == "TestCaptureFailure"
         contents = client.CustomObjectsApi().list_cluster_custom_object(
             snap.GROUP, snap.VERSION, snap.PODSNAPSHOTCONTENTS
         )["items"]

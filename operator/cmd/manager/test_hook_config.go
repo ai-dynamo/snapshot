@@ -5,10 +5,14 @@
 
 package main
 
-import "flag"
+import (
+	"flag"
+	"os"
+)
 
-// bindTestHookFlags registers test-only failures. The chart leaves this empty;
-// CPU conformance tests opt in with an exact source-pod annotation key.
-func bindTestHookFlags(flags *flag.FlagSet) *string {
-	return flags.String("test-fail-capture-source-annotation", "", "test-only source pod annotation requesting PodSnapshot capture failure")
+// bindTestHookFlags reads test-only failures. Production binaries ignore the
+// environment variable, so a chart value cannot add an unsupported CLI flag.
+func bindTestHookFlags(*flag.FlagSet) *string {
+	value := os.Getenv("SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION")
+	return &value
 }
