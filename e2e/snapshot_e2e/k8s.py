@@ -166,6 +166,7 @@ def restart_snapshot_operator(namespace: str, release: str, timeout: int = 180) 
             (status.observed_generation or 0) >= (current.metadata.generation or 0)
             and (status.updated_replicas or 0) >= desired
             and (status.available_replicas or 0) >= desired
+            and (status.replicas or 0) == desired
         ):
             return
         time.sleep(1)
