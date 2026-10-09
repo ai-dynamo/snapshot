@@ -55,12 +55,29 @@ agent and PageBroker start. It leaves larger settings and non-NFS mounts unchang
 An inaccessible NFS setting fails initialization so the requested tuning is not
 silently lost. The default, `0`, does not create this init container.
 
-This helps sequential buffered image reads, including large CRIU ghost files.
-It does not change direct I/O for CPU page images or PageBroker GPU transfers.
-In cold buffered-image tests of an eight-GPU GLM checkpoint, 4 MiB reduced the
-CRIU stage from 9.5–10.4 seconds to 4.6–4.8 seconds compared with 128 KiB.
-Warm cache, image sizes and storage latency affect the benefit. Measure repeated
-end-to-end restores on the intended filesystem before adopting this setting.
+This helps sequential buffered image reads. It does not change direct I/O for
+CPU page images or PageBroker GPU transfers. In the tested eight-GPU GLM
+checkpoint, 16 ghost images contain 547.4 MB of saved NCCL `/dev/shm/nccl-*`
+shared-memory file contents. Ghost files were unlinked but still referenced by
+the processes, so CRIU must recreate their contents. Another 2,239 images total
+only 7.1 MB and describe threads, memory mappings, file descriptors, sockets and
+other process state. These are separate from the 73.3 GB of direct CPU-page data.
+
+CRIU copies ghost files serially with blocking `sendfile` calls. A small client
+read-ahead window limits the NFS requests feeding that copy, even when the
+storage system has ample aggregate bandwidth. An isolated copy of the same
+16 cold ghost images issued 4,224 READ RPCs at 128 KiB read-ahead, versus 576 at
+4 MiB. Mean request payload grew from 126.6 to 928 KiB, and copy time fell from
+3.0–5.5 seconds to 0.44–0.51 seconds. Larger read-ahead does not remove the
+separate cost of opening and reading thousands of small images.
+
+In full restores, 4 MiB reduced the CRIU stage from 9.5–10.4 seconds to 4.6–4.8
+seconds compared with 128 KiB. Both cases started with buffered image contents
+absent from the restoring node's page cache. Metadata and storage-server caches
+were not cold-controlled. Pre-reading these images would warm the client cache
+but move I/O outside the restore timer. See [the experiment](https://github.com/ai-dynamo/snapshot/issues/521)
+for controls and limits. Measure repeated end-to-end restores on the intended
+filesystem before adopting this setting.
 
 Read-ahead belongs to the Linux backing device, so other mounts sharing the same
 NFS filesystem on that node also see the change. This includes other releases
