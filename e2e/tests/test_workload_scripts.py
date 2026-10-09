@@ -95,6 +95,31 @@ def test_no_workload_waits_on_snapshot_complete(gpu: bool) -> None:
 
 
 @pytest.mark.workload
+def test_snapshotjob_helper_readiness_waits_for_helper_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", "snapshot-workload:test")
+    config = k8s.E2EConfig(
+        namespace="snapshot-e2e",
+        release="snapshot",
+        pvc_name="snapshot-pvc",
+        kubeconfig=None,
+    )
+    template = workloads.snapshotjob_helper_pod_template(
+        config=config,
+        run=workloads.TestRun.new("helper-ready"),
+        helper_command="true",
+        wait_for_helper_before_capture=True,
+    )
+
+    assert template["spec"]["containers"][0]["readinessProbe"]["exec"]["command"] == [
+        "test",
+        "-f",
+        f"{workloads.HELPER_SYNC_DIR}/helper-finished",
+    ]
+
+
+@pytest.mark.workload
 def test_snapshotjob_exit_template_never_signals_ready() -> None:
     # The exit templates drive the died-before-capture failure classes; they
     # must terminate without touching the quiesce protocol at all.

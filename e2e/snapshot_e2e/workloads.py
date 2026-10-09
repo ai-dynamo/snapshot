@@ -395,6 +395,10 @@ def snapshotjob_helper_pod_template(
         waits = []
         if wait_for_helper_before_capture:
             waits.append(f"while [ ! -f {HELPER_SYNC_DIR}/helper-finished ]; do sleep 0.1; done")
+            template["spec"]["containers"][0]["readinessProbe"] = {
+                "exec": {"command": ["test", "-f", f"{HELPER_SYNC_DIR}/helper-finished"]},
+                "periodSeconds": 1,
+            }
         if wait_for_capture_release:
             waits.append(f"while [ ! -f {HELPER_SYNC_DIR}/capture-release ]; do sleep 0.1; done")
         template["spec"]["containers"][0]["command"] = [
