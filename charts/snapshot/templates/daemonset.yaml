@@ -80,11 +80,12 @@ spec:
         {{- end }}
       # CUDA checkpoint/restore requires the nvidia container runtime
       runtimeClassName: nvidia
-      {{- if .Values.seccomp.deploy }}
+      {{- if or .Values.seccomp.deploy (gt (int64 .Values.storage.pvc.nfsReadAheadKiB) 0) }}
+      {{- $initImage := .Values.daemonset.initContainer.image | default "busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0" }}
       initContainers:
+        {{- if .Values.seccomp.deploy }}
         # Deploy seccomp profile to host before starting the agent
         # This profile blocks io_uring syscalls that CRIU doesn't support
-        {{- $initImage := .Values.daemonset.initContainer.image | default "busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0" }}
         - name: deploy-seccomp
           image: {{ $initImage }}
           # A digest cannot move, so re-pulling it every start is wasted work;
@@ -107,6 +108,45 @@ spec:
               readOnly: true
             - name: host-seccomp
               mountPath: /host-seccomp
+        {{- end }}
+        {{- if gt (int64 .Values.storage.pvc.nfsReadAheadKiB) 0 }}
+        - name: checkpoint-read-ahead
+          image: {{ $initImage }}
+          imagePullPolicy: {{ .Values.daemonset.initContainer.imagePullPolicy | default (contains "@sha256:" $initImage | ternary "IfNotPresent" "Always") }}
+          {{- with .Values.daemonset.initContainer.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              # Resolve only this mount's NFS backing device, not every host BDI.
+              bdi=$(awk '$5 == "/checkpoints" {
+                device = ""
+                for (i = 7; i <= NF; i++) {
+                  if ($i == "-" && ($(i+1) == "nfs" || $(i+1) == "nfs4")) device = $3
+                }
+              } END { print device }' /proc/self/mountinfo)
+              if [ -z "$bdi" ]; then
+                echo "Checkpoint mount is not NFS; leaving read-ahead unchanged"
+                exit 0
+              fi
+              setting="/sys/class/bdi/$bdi/read_ahead_kb"
+              current=$(cat "$setting")
+              if [ "$current" -lt {{ .Values.storage.pvc.nfsReadAheadKiB | int64 }} ]; then
+                echo {{ .Values.storage.pvc.nfsReadAheadKiB | int64 }} > "$setting"
+              fi
+              echo "Checkpoint NFS read-ahead: $(cat "$setting") KiB ($bdi)"
+          volumeMounts:
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
+        {{- end }}
       {{- end }}
       containers:
         {{- if .Values.pageBroker.enabled }}

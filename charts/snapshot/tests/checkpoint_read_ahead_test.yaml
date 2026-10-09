@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: checkpoint NFS read-ahead
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: adds no tuning init container by default
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 1
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: deploy-seccomp
+
+  - it: leaves init containers absent when both features are disabled
+    set:
+      seccomp.deploy: false
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: tunes only the checkpoint mount before starting the containers
+    set:
+      storage.pvc.nfsReadAheadKiB: 4096
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 2
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: checkpoint-read-ahead
+      - equal:
+          path: spec.template.spec.initContainers[1].securityContext
+          value:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+      - equal:
+          path: spec.template.spec.initContainers[1].volumeMounts
+          value:
+            - name: checkpoints
+              mountPath: /checkpoints
+      - matchRegex:
+          path: spec.template.spec.initContainers[1].command[2]
+          pattern: 'if \[ "\$current" -lt 4096 \]'
+
+  - it: works with an existing PVC without PageBroker or seccomp deployment
+    set:
+      storage.pvc.nfsReadAheadKiB: 8192
+      storage.pvc.create: false
+      seccomp.deploy: false
+      pageBroker.enabled: false
+      daemonset.initContainer.image: busybox:custom
+      daemonset.initContainer.imagePullPolicy: Never
+      daemonset.initContainer.resources.limits.cpu: 1
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 1
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: busybox:custom
+      - equal:
+          path: spec.template.spec.initContainers[0].imagePullPolicy
+          value: Never
+      - equal:
+          path: spec.template.spec.initContainers[0].resources.limits.cpu
+          value: 1
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'if \[ "\$current" -lt 8192 \]'

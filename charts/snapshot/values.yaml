@@ -103,6 +103,10 @@ storage:
     # Fixed PVC mount path inside every snapshot-agent pod. The privileged
     # mount helper independently enforces this source root.
     basePath: /checkpoints
+    # Optional minimum Linux read-ahead for the NFS checkpoint filesystem.
+    # 0 leaves it unchanged. 4096 can help cold buffered CRIU image reads.
+    # This setting is shared by all mounts using the same backing device.
+    nfsReadAheadKiB: 0
 
   # Reserved for future snapshot-owned backends. Unsupported today.
   s3:

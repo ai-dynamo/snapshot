@@ -22,6 +22,7 @@ The chart's `storage.pvc` values control the PVC:
 | `storage.pvc.size` | Requested size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class (empty = cluster default) | `""` |
 | `storage.pvc.basePath` | Mount path inside the agent | `/checkpoints` |
+| `storage.pvc.nfsReadAheadKiB` | Minimum NFS read-ahead in KiB (`0` leaves it unchanged) | `0` |
 
 If the cluster has no default storage class that can provision RWX, set one:
 
@@ -44,6 +45,29 @@ helm install snapshot ... \
 The named claim must support `ReadWriteMany`. Access modes are immutable, so a
 `ReadWriteOnce` claim cannot be converted in place — create a new RWX claim and, if
 the existing checkpoints are needed, copy them over once.
+
+### Buffered CRIU reads on NFS
+
+Set `storage.pvc.nfsReadAheadKiB: 4096` to ensure at least 4 MiB of Linux
+read-ahead for the checkpoint mount. A privileged init container resolves the
+NFS backing device from `/checkpoints` and raises its `read_ahead_kb` before the
+agent and PageBroker start. It leaves larger settings and non-NFS mounts unchanged.
+An inaccessible NFS setting fails initialization so the requested tuning is not
+silently lost. The default, `0`, does not create this init container.
+
+This helps sequential buffered image reads, including large CRIU ghost files.
+It does not change direct I/O for CPU page images or PageBroker GPU transfers.
+In cold buffered-image tests of an eight-GPU GLM checkpoint, 4 MiB reduced the
+CRIU stage from 9.5–10.4 seconds to 4.6–4.8 seconds compared with 128 KiB.
+Warm cache, image sizes and storage latency affect the benefit. Measure repeated
+end-to-end restores on the intended filesystem before adopting this setting.
+
+Read-ahead belongs to the Linux backing device, so other mounts sharing the same
+NFS filesystem on that node also see the change. This includes other releases
+that use that device. Disabling the chart option does not restore the old value.
+An administrator must reset it or remount the filesystem to return to its default.
+The init container uses `daemonset.initContainer` image and resource settings and
+works independently of PageBroker and seccomp profile deployment.
 
 ## Retention
 

@@ -196,6 +196,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |
+| `storage.pvc.nfsReadAheadKiB` | Minimum NFS checkpoint filesystem read-ahead in KiB, applied by a privileged init container; `0` leaves it unchanged | `0` |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
