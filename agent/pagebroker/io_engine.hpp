@@ -25,6 +25,11 @@ class NixlTransferEngine final : public TransferEngine {
 
   void Open(int descriptor, size_t size) override;
   void Submit(size_t slot, io::Operation operation, size_t offset, size_t size) override;
+  // Pooled lanes may have requests for several files in flight. Files remain
+  // registered until their requests drain. The caller owns every descriptor.
+  void RegisterFile(int descriptor, size_t size);
+  void UnregisterFile(int descriptor);
+  void Submit(size_t slot, int descriptor, io::Operation operation, size_t offset, size_t size);
   void Wait(size_t slot) override;
   void Close() override;
 

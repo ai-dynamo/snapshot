@@ -89,6 +89,7 @@ default) or from tmpfs staging. Restore uses the format recorded in the snapshot
 |------------------------------------|--------------------------------------------|---------------------------------------------------|
 | `pageBroker.maxConcurrentRequests` | `16`                                       | Concurrent control request limit.                 |
 | `pageBroker.transferBufferCount`   | `32`                                       | Persistent ring slots per visible GPU.            |
+| `pageBroker.transferPooledLanes`   | `0`                                        | Shared I/O lanes. Zero keeps per-GPU rings.       |
 | `pageBroker.transferChunkBytes`    | `134217728`                                | Bytes per slot before allocation rounding.        |
 | `pageBroker.maxPinnedBytes`        | `0`                                        | Total pinned memory limit. Zero sets no limit.    |
 | `pageBroker.resources`             | 8 CPU / 32Gi request, 32 CPU / 256Gi limit | Resources for the broker and embedded GPU engine. |
