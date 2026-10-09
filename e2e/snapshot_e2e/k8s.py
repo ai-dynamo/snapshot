@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -138,6 +139,43 @@ def read_job(namespace: str, name: str) -> client.V1Job | None:
         if exc.status == 404:
             return None
         raise
+
+
+def restart_snapshot_operator(namespace: str, release: str, timeout: int = 180) -> None:
+    deployments = client.AppsV1Api().list_namespaced_deployment(
+        namespace, label_selector=snapshot_selector(release, "operator")
+    ).items
+    if len(deployments) != 1:
+        names = [deployment.metadata.name for deployment in deployments]
+        raise AssertionError(f"expected one Snapshot operator deployment, found {names}")
+    deployment = deployments[0]
+    name = deployment.metadata.name
+    client.AppsV1Api().patch_namespaced_deployment(
+        name,
+        namespace,
+        {"spec": {"template": {"metadata": {"annotations": {
+            "snapshot-e2e.nvidia.com/restarted-at": str(time.time_ns())
+        }}}}},
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = client.AppsV1Api().read_namespaced_deployment(name, namespace)
+        pods = client.CoreV1Api().list_namespaced_pod(
+            namespace, label_selector=snapshot_selector(release, "operator")
+        ).items
+        desired = current.spec.replicas or 1
+        status = current.status
+        if (
+            (status.observed_generation or 0) >= (current.metadata.generation or 0)
+            and (status.updated_replicas or 0) >= desired
+            and (status.available_replicas or 0) >= desired
+            and (status.replicas or 0) == desired
+            and len(pods) == desired
+            and all(pod.metadata.deletion_timestamp is None for pod in pods)
+        ):
+            return
+        time.sleep(1)
+    raise AssertionError(f"Snapshot operator deployment {namespace}/{name} did not roll out")
 
 
 def create_job(body: dict[str, Any]) -> client.V1Job:
@@ -368,4 +406,3 @@ def status_sync_errors(namespace: str) -> list[client.CoreV1Event]:
         for event in list_events(namespace, field_selector={"type": "Warning"})
         if event.reason == "SyncError"
     ]
-

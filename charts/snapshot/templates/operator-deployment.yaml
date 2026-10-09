@@ -88,6 +88,11 @@ spec:
             # CuInterpose libraries for opted-in workloads.
             - {{ printf "--cuinterpose-image=%s" (include "snapshot.agentImage" .) | quote }}
             - {{ printf "--cuinterpose-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
+          {{- if .Values.operator.testFailCaptureSourceAnnotation }}
+          env:
+            - name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
+              value: {{ .Values.operator.testFailCaptureSourceAnnotation | quote }}
+          {{- end }}
           volumeMounts:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}

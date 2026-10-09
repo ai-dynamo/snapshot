@@ -75,6 +75,11 @@ func TestProcessDeleteContentRemovesRootAndFinalizer(t *testing.T) {
 	current := &snapshotv1alpha1.PodSnapshotContent{}
 	require.NoError(t, q.client.Get(context.Background(), client.ObjectKey{Name: content.Name}, current))
 	assert.Equal(t, []string{"example.com/other"}, current.Finalizers)
+
+	require.NoError(t, q.processDeleteContent(context.Background(), newDeleteContentKey("content", "uid-2")))
+	require.NoError(t, q.client.Get(context.Background(), client.ObjectKey{Name: content.Name}, current))
+	assert.Equal(t, []string{"example.com/other"}, current.Finalizers,
+		"a retried cleanup must be a no-op after its finalizer was removed")
 }
 
 func TestProcessDeleteContentNoopWhenArtifactsRootAbsent(t *testing.T) {

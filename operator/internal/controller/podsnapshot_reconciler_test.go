@@ -152,6 +152,40 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
+func TestSnapshotReconciler_TestFailureWaitsForTargetReady(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	snap.Spec.Source.PodRef.Containers = []string{"main"}
+	pod := scheduledPod()
+	pod.Annotations = map[string]string{"snapshot-e2e.nvidia.com/fail-capture": "true"}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main"}}
+	r := makeSnapshotReconciler(s, snap, pod)
+	r.TestFailureAnnotation = "snapshot-e2e.nvidia.com/fail-capture"
+
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Equal(t, testCaptureFailureReadyRequeue, res.RequeueAfter)
+
+	var contents snapshotv1alpha1.PodSnapshotContentList
+	require.NoError(t, r.List(context.Background(), &contents))
+	assert.Empty(t, contents.Items)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+
+	storedPod := &corev1.Pod{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pod), storedPod))
+	storedPod.Status.ContainerStatuses[0].Ready = true
+	require.NoError(t, r.Status().Update(context.Background(), storedPod))
+
+	reconcileSnapshot(t, r, snap.Name)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, metav1.ConditionTrue, failed.Status)
+	assert.Equal(t, "TestCaptureFailure", failed.Reason)
+}
+
 func TestSnapshotReconciler_BuildPodSnapshotContentCopiesContainersVerbatim(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	r := makeSnapshotReconciler(s)

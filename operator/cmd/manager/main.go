@@ -26,6 +26,7 @@ func main() {
 
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
+	testFailureAnnotation := bindTestHookFlags(flag.CommandLine)
 	flag.Parse()
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
@@ -70,9 +71,10 @@ func main() {
 	}
 
 	podSnapshotReconciler := &controller.PodSnapshotReconciler{
-		Client:             mgr.GetClient(),
-		NonCacheReadClient: mgr.GetAPIReader(),
-		Recorder:           mgr.GetEventRecorderFor("podsnapshot-controller"),
+		Client:                mgr.GetClient(),
+		NonCacheReadClient:    mgr.GetAPIReader(),
+		Recorder:              mgr.GetEventRecorderFor("podsnapshot-controller"),
+		TestFailureAnnotation: *testFailureAnnotation,
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")
