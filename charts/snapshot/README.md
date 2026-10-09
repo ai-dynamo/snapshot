@@ -182,6 +182,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `image.agent.tag` | Agent and PageBroker image tag (empty = chart appVersion) | `""` |
 | `image.pageBroker.repository` | PageBroker sidecar image repository. Always pulled at `image.agent.tag` | `ghcr.io/ai-dynamo/snapshot/pagebroker` |
 | `pageBroker.transferBufferCount` | Persistent transfer slots per visible GPU | `32` |
+| `pageBroker.transferPooledLanes` | Shared CustomStorage I/O lanes, or zero for per-device rings | `0` |
 | `pageBroker.transferChunkBytes` | Bytes per transfer slot | `134217728` |
 | `pageBroker.maxPinnedBytes` | Total pinned memory limit, including allocation rounding. Zero sets no limit | `0` |
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |

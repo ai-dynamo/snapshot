@@ -40,10 +40,23 @@ struct EngineOptions {
   size_t buffer_count = 32;
   size_t chunk_bytes = 128ULL * 1024 * 1024;
   size_t max_pinned_bytes = 0;
+  size_t pooled_lanes = 0;
 };
 struct ParticipantResult {
   uint32_t captured_pid = 0;
   uint64_t bytes = 0;
+};
+
+// Begins checkpoint-specific file preparation without waiting for CRIU. No CUDA
+// state is needed. Destruction joins preparation and releases its descriptors.
+class RestorePreparation {
+ public:
+  RestorePreparation(int directory_fd, size_t lanes);
+  ~RestorePreparation();
+ private:
+  friend class Artifact;
+  struct State;
+  std::unique_ptr<State> state_;
 };
 
 // Construct when GPU execution starts. Retains the artifact directory and
@@ -52,7 +65,8 @@ class Artifact {
  public:
   Artifact(int directory_fd, Direction direction,
            std::vector<uint32_t> captured_pids, std::vector<std::string> visible_devices,
-           std::vector<DeviceMapping> device_map = {});
+           std::vector<DeviceMapping> device_map = {},
+           std::shared_ptr<RestorePreparation> preparation = {});
   ~Artifact();
   Artifact(const Artifact&) = delete;
   Artifact& operator=(const Artifact&) = delete;
@@ -72,6 +86,7 @@ class GpuEngine {
   explicit GpuEngine(EngineOptions options = {});
   ~GpuEngine();
   bool Available() const;
+  std::shared_ptr<RestorePreparation> PrepareRestore(int directory_fd);
   std::vector<ParticipantResult> Checkpoint(Artifact&, const std::vector<Participant>&, Cancellation&);
   std::vector<ParticipantResult> Restore(Artifact&, const std::vector<Participant>&, Cancellation&);
 
