@@ -160,6 +160,9 @@ def restart_snapshot_operator(namespace: str, release: str, timeout: int = 180) 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         current = client.AppsV1Api().read_namespaced_deployment(name, namespace)
+        pods = client.CoreV1Api().list_namespaced_pod(
+            namespace, label_selector=snapshot_selector(release, "operator")
+        ).items
         desired = current.spec.replicas or 1
         status = current.status
         if (
@@ -167,6 +170,8 @@ def restart_snapshot_operator(namespace: str, release: str, timeout: int = 180) 
             and (status.updated_replicas or 0) >= desired
             and (status.available_replicas or 0) >= desired
             and (status.replicas or 0) == desired
+            and len(pods) == desired
+            and all(pod.metadata.deletion_timestamp is None for pod in pods)
         ):
             return
         time.sleep(1)
