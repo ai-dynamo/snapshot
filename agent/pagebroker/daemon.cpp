@@ -656,6 +656,8 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
       options.max_concurrent_requests = ParseSize(option, input, false);
     } else if (option == "--custom-storage-buffer-count") {
       options.gpu.buffer_count = ParseSize(option, input, false);
+    } else if (option == "--custom-storage-pooled-lanes") {
+      options.gpu.pooled_lanes = ParseSize(option, input, true);
     } else if (option == "--custom-storage-chunk-bytes") {
       options.gpu.chunk_bytes = ParseSize(option, input, false);
     } else if (option == "--custom-storage-max-pinned-bytes") {

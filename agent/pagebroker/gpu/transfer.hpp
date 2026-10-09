@@ -6,6 +6,9 @@
 #include <cuda.h>
 #include "cancellation.hpp"
 #include <memory>
+#include <span>
+#include <vector>
+#include "file_descriptor.hpp"
 
 namespace snapshot::pagebroker::cuda {
 struct TransferOptions {
@@ -38,6 +41,39 @@ class TransferBuffers {
                   const Cancellation& cancellation);
   void Restore(int fd, CUdeviceptr device, size_t size, CUstream stream,
                const Cancellation& cancellation);
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+// Independent open descriptions for one immutable restore extent. Can be
+// prepared before CUDA mappings exist. Each lane must use its own description.
+class TransferFile {
+ public:
+  TransferFile(int fd, size_t lanes);
+  int fd() const { return file_.get(); }
+ private:
+  friend class TransferPool;
+  FileDescriptor file_;
+  std::vector<FileDescriptor> lanes_;
+};
+// A bounded pool of I/O workers shared by ready device extents. Lanes assign
+// chunks from the oldest ready extent first, moving on as soon as its chunks are
+// assigned without waiting for its tail to drain. The total slot count remains
+// options.buffer_count * contexts.size(). Calls may run concurrently and return
+// only after their storage requests and DMA have drained. Lanes use private
+// streams after synchronizing the caller stream. Contexts and the pool must
+// outlive all calls. File/stream/token ownership stays with the caller.
+// Checkpoint includes fsync, as with TransferBuffers.
+class TransferPool {
+ public:
+  TransferPool(std::span<const CUcontext> contexts, TransferOptions options, size_t lanes);
+  ~TransferPool();
+  void Restore(const TransferFile& file, CUcontext context, CUdeviceptr device, size_t size,
+               CUstream stream, const Cancellation& cancellation);
+  void Checkpoint(int fd, CUcontext context, CUdeviceptr device, size_t size,
+                  CUstream stream, const Cancellation& cancellation);
+  void Restore(int fd, CUcontext context, CUdeviceptr device, size_t size,
+               CUstream stream, const Cancellation& cancellation);
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

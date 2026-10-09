@@ -62,6 +62,7 @@ build/gpu-engine-test: generate transfer_engine.cpp gpu/engine_test.cpp gpu/engi
 # No checked-in GPU CI job invokes this target.
 test-gpu: build/gpu-checkpoint-test build/gpu-transfer-test
 	timeout 120 ./build/gpu-checkpoint-test
+	PAGEBROKER_TEST_POOLED_TRANSFERS=1 timeout 120 ./build/gpu-checkpoint-test
 	timeout 120 ./build/gpu-transfer-test
 
 build/gpu-checkpoint-test: generate $(GPU_TEST_SOURCES) gpu/checkpoint_test.cpp io_engine.hpp | build

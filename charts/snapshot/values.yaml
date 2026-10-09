@@ -125,6 +125,8 @@ pageBroker:
   # Allocate and register the full ring before accepting GPU work.
   # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
   transferBufferCount: 32
+  # Opt-in shared I/O lanes. Zero keeps per-device rings at the same memory budget.
+  transferPooledLanes: 0
   # 128 MiB per slot. Must be a positive multiple of 4096 bytes.
   transferChunkBytes: 134217728
   # Zero is uncapped. This limit includes CUDA allocation-granularity rounding.

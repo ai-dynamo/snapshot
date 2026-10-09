@@ -57,6 +57,45 @@ TEST(NixlTransfer, ReusesRegisteredBufferThroughTransferEngine)
   }
 }
 
+TEST(NixlTransfer, InterleavesFilesAndRetainsRegistrationUntilDrained)
+{
+  char a[] = "/tmp/pagebroker-nixl-a-XXXXXX";
+  char b[] = "/tmp/pagebroker-nixl-b-XXXXXX";
+  FileDescriptor first(mkstemp(a)), second(mkstemp(b));
+  ASSERT_GE(first.get(), 0);
+  ASSERT_GE(second.get(), 0);
+  ASSERT_EQ(unlink(a), 0);
+  ASSERT_EQ(unlink(b), 0);
+  constexpr size_t size = 4096;
+  alignas(4096) std::array<unsigned char, size> one{}, two{};
+  one.fill(17);
+  two.fill(239);
+  ASSERT_EQ(pwrite(first.get(), one.data(), size, 0), static_cast<ssize_t>(size));
+  ASSERT_EQ(pwrite(second.get(), two.data(), size, 0), static_cast<ssize_t>(size));
+  one.fill(0);
+  two.fill(0);
+  std::array<void*, 2> addresses{one.data(), two.data()};
+  NixlTransferEngine engine(addresses, size);
+  engine.RegisterFile(first.get(), size);
+  engine.RegisterFile(second.get(), size);
+  EXPECT_THROW(engine.RegisterFile(first.get(), size), std::logic_error);
+  engine.Submit(0, second.get(), io::Operation::Read, 0, size);
+  engine.Submit(1, first.get(), io::Operation::Read, 0, size);
+  EXPECT_THROW(engine.UnregisterFile(first.get()), std::logic_error);
+  engine.Wait(1);
+  engine.UnregisterFile(first.get());
+  engine.Wait(0);
+  for (size_t i = 0; i < size; ++i) {
+    ASSERT_EQ(one[i], 239);
+    ASSERT_EQ(two[i], 17);
+  }
+  engine.Close();
+  engine.Open(first.get(), size);
+  engine.Submit(0, io::Operation::Read, 0, size);
+  engine.Close();
+  EXPECT_EQ(one[0], 17);
+}
+
 TEST(NixlTransfer, SubmissionFailuresDrainAndDoNotExhaustTheBackendPool)
 {
   char path[] = "/tmp/pagebroker-nixl-submit-XXXXXX";

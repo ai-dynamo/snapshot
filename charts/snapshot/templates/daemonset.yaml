@@ -134,6 +134,10 @@ spec:
             - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
             - --custom-storage-max-pinned-bytes
             - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
+            {{- if gt (.Values.pageBroker.transferPooledLanes | int64) 0 }}
+            - --custom-storage-pooled-lanes
+            - {{ .Values.pageBroker.transferPooledLanes | int64 | quote }}
+            {{- end }}
             {{- end }}
           securityContext:
             privileged: true
