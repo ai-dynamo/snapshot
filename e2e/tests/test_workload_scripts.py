@@ -95,7 +95,7 @@ def test_no_workload_waits_on_snapshot_complete(gpu: bool) -> None:
 
 
 @pytest.mark.workload
-def test_snapshotjob_helper_readiness_waits_for_helper_completion(
+def test_snapshotjob_helper_waits_before_signalling_capture_readiness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", "snapshot-workload:test")
@@ -112,11 +112,10 @@ def test_snapshotjob_helper_readiness_waits_for_helper_completion(
         wait_for_helper_before_capture=True,
     )
 
-    assert template["spec"]["containers"][0]["readinessProbe"]["exec"]["command"] == [
-        "test",
-        "-f",
-        f"{workloads.HELPER_SYNC_DIR}/helper-finished",
-    ]
+    command = template["spec"]["containers"][0]["command"][2]
+    helper_wait = f"while [ ! -f {workloads.HELPER_SYNC_DIR}/helper-finished ]; do sleep 0.1; done"
+    capture_ready = f"echo ready > {workloads.SOURCE_READY}"
+    assert command.index(helper_wait) < command.index(capture_ready)
 
 
 @pytest.mark.workload
