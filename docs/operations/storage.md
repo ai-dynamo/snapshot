@@ -64,6 +64,25 @@ for pods that do not set `nvidia.com/snapshot-pagebroker: "false"`:
   checkpoint directory read-only for CRIU. It does not copy CPU images into staging.
 - `staged` copies checkpoint files into PageBroker staging before CRIU runs.
 
+### CRIU images on NFS
+
+Before restoring from NFS, the agent prefetches regular non-page CRIU `.img`
+files with up to 32 readers and 1 MiB read buffers. This overlaps small metadata
+reads and fetches ghost-file contents before CRIU copies them serially. Ghost
+images contain files that were unlinked while the checkpointed process still
+referenced them, such as NCCL shared-memory files under `/dev/shm`.
+
+Prefetch skips `pages-*.img`, which contain CPU memory payloads, and does not read
+GPU payloads. Local filesystems are unchanged. Prefetch failures leave CRIU to
+read and validate the images normally. The agent includes prefetch time in
+`criu_prepare` and in the total restore duration.
+
+Each restore uses at most 32 MiB of read buffers plus ordinary reclaimable file cache.
+The cache is shared for the same filesystem files and can remain after restore
+until reclaimed. No private copy is retained, and no node, mount, or backing-device
+read-ahead setting is changed. Size the agent's restore memory budget for
+its non-page images as well as its other restore resources.
+
 ### Diagnose slow GPU restores
 
 The agent's `Restore timing summary` separates CPU restore (`criu_restore`), GPU

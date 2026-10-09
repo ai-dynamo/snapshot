@@ -57,6 +57,11 @@ func ExecuteRestore(
 		return 0, nil, 0, 0, err
 	}
 	prepareStart := time.Now()
+	if err := prefetchRestoreImages(checkpointPath); err != nil {
+		// Prefetch is optional. Let CRIU report any required image that it cannot read.
+		log.Info("CRIU image prefetch incomplete", "error", err)
+	}
+	log.V(1).Info("CRIU image prefetch finished", "duration", time.Since(prepareStart))
 	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath, scratchDir)
 	prepare = time.Since(prepareStart)
 	if err != nil {
