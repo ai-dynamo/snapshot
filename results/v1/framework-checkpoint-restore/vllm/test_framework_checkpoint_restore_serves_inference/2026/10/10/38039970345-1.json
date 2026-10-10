@@ -1,0 +1,39 @@
+{
+  "benchmarkVersion": 1,
+  "environment": {
+    "collectionError": "matrix job produced no valid benchmark artifact"
+  },
+  "error": {
+    "message": "no benchmark artifact was uploaded",
+    "phase": "artifact_collection"
+  },
+  "events": [],
+  "finishedAt": "2026-10-10T09:05:02.166Z",
+  "identity": {
+    "case": "vllm",
+    "runAttempt": 1,
+    "runId": "38039970345",
+    "suite": "framework-checkpoint-restore",
+    "test": "test_framework_checkpoint_restore_serves_inference"
+  },
+  "measurements": [
+    {
+      "displayName": "Full E2E test",
+      "missingReason": "test result artifact unavailable",
+      "name": "test.total.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    }
+  ],
+  "outcome": "infrastructure_failed",
+  "schemaVersion": 1,
+  "source": {
+    "commit": "bc9d2161d2a7f203551e5b7e237defd90b1e9aa1",
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/38039970345",
+    "snapshotTag": null
+  },
+  "startedAt": "2026-10-10T09:05:02.166Z"
+}
