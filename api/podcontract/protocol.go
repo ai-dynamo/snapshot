@@ -99,6 +99,10 @@ const (
 	// destination containers. It waits for RestoreCompleteFile, then follows
 	// the restored process and exits with its status.
 	RestoreProxyBinaryName = "snapshot-restore-proxy"
+
+	// RestoreProxyPath is the proxy as the container sees it, in the control
+	// volume. It is the whole command of a restore destination container.
+	RestoreProxyPath = SnapshotControlMountPath + "/" + RestoreProxyBinaryName
 )
 
 // Exit codes reserved by the restore proxy. Every other code is the restored

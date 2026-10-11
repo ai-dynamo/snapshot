@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"slices"
 	"sync"
 	"time"
@@ -57,10 +56,6 @@ const (
 	vclusterNameAnnotation      = "vcluster.loft.sh/object-name"
 	vclusterUIDAnnotation       = "vcluster.loft.sh/object-uid"
 )
-
-// proxyCommand is the proxy as the container sees it: the control directory
-// is mounted at SnapshotControlMountPath.
-var proxyCommand = []string{path.Join(podcontract.SnapshotControlMountPath, podcontract.RestoreProxyBinaryName)}
 
 // DestinationResolver returns the containers a restore Pod restores into.
 type DestinationResolver interface {
@@ -175,7 +170,7 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	}
 
 	adjust := &api.ContainerAdjustment{}
-	adjust.SetArgs(proxyCommand)
+	adjust.SetArgs([]string{podcontract.RestoreProxyPath})
 	log.Info("Restore proxy is PID 1", "control_dir", dir.Name())
 	return adjust, nil, nil
 }
