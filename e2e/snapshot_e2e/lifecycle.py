@@ -18,10 +18,12 @@ from kubernetes.client import ApiException
 from snapshot_e2e import k8s
 from snapshot_e2e.workloads import CONTAINER
 from snapshot_e2e.workloads import CONTROL_DIR
+from snapshot_e2e.workloads import CUDA_HOLD
+from snapshot_e2e.workloads import EXIT_REQUEST
 from snapshot_e2e.workloads import FILE_TOKEN
 from snapshot_e2e.workloads import OBSERVATIONS
 from snapshot_e2e.workloads import RESTORE_DONE
-from snapshot_e2e.workloads import RESTORE_INITIAL_TOKEN
+from snapshot_e2e.workloads import RESTORE_PROXY
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import multi_restore_pod
@@ -39,6 +41,8 @@ PROGRESS_INTERVAL_SECONDS = 30
 TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 AGENT_CHECKPOINT_DIR = "/checkpoints"
 AGENT_CONTAINER = "agent"
+# /proc in the restored container. Tests point it elsewhere.
+PROC_ROOT = "/proc"
 
 
 class LifecycleTimeoutError(AssertionError, TimeoutError):
@@ -198,6 +202,26 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
         return k8s.pod_readiness_detail(pod)
 
     return wait_for(f"pod {namespace}/{name} Ready", ready, timeout, detail=detail)
+
+
+def wait_for_container_exit(
+    namespace: str, name: str, container: str = CONTAINER, timeout: int = 120
+) -> int:
+    """Wait for a container to end, and return its exit code."""
+
+    def exited() -> int | None:
+        pod = k8s.read_pod(namespace, name)
+        for status in pod.status.container_statuses or []:
+            if status.name == container and status.state and status.state.terminated:
+                return status.state.terminated.exit_code
+        return None
+
+    return wait_for(
+        f"container {container} of pod {namespace}/{name} to exit",
+        exited,
+        timeout,
+        poll_interval=2,
+    )
 
 
 def file_present(namespace: str, pod: str, path: str) -> bool:
@@ -999,16 +1023,32 @@ def assert_restored_state(
     checkpoint_observations: int,
     gpu: bool,
     container: str | None = None,
+    proxy: bool = True,
 ) -> str:
+    """Check the restored workload's state, inside the restored container.
+
+    With proxy, also check that the restore proxy is PID 1, and that
+    restore-complete names the restored workload. Agents from before the
+    proxy, in upgrade tests, restore without it.
+    """
     expected_gpu = source_token if gpu else "disabled"
+    # The restored process: the CUDA program, or the CPU loop, whose script
+    # names the observations file.
+    restored_command = CUDA_HOLD if gpu else OBSERVATIONS
     success_marker = "__snapshot_restored_state_verified__"
+    proxy_checks = f"""
+    test "$(tr -d '\\0' < {PROC_ROOT}/1/cmdline)" = {RESTORE_PROXY}
+    restored_pid="$(sed -n 's/^pid=//p' {RESTORE_DONE})"
+    test -n "$restored_pid"
+    tr '\\0' ' ' < "{PROC_ROOT}/$restored_pid/cmdline" | grep -qF {shlex.quote(restored_command)}
+    """
     command = f"""
     set -euo pipefail
     source_token={shlex.quote(source_token)}
     restore_token={shlex.quote(restore_token)}
     expected_gpu={shlex.quote(expected_gpu)}
     test -f {RESTORE_DONE}
-    test "$(cat {RESTORE_INITIAL_TOKEN})" = "$restore_token"
+    {proxy_checks if proxy else ""}
     test "$(cat {FILE_TOKEN})" = "$source_token"
     grep -F "cpu=$source_token" {OBSERVATIONS}
     grep -F "file=$source_token" {OBSERVATIONS}

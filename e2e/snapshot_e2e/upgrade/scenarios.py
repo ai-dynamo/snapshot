@@ -101,6 +101,8 @@ def restore_from_snapshot(
         restore_token=run.restore_token,
         checkpoint_observations=state.observations,
         gpu=gpu,
+        # The restoring agent may predate the restore proxy.
+        proxy=False,
     )
     return pod
 

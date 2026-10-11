@@ -26,6 +26,8 @@ ENV = (
     "SNAPSHOT_E2E_UPGRADE_CONFIG",
     "SNAPSHOT_E2E_UPGRADE_PROFILE",
     "SNAPSHOT_E2E_UPGRADE_SCENARIOS",
+    "SNAPSHOT_E2E_MODE",
+    "SNAPSHOT_E2E_HOST_NAMESPACE",
 )
 
 
@@ -243,6 +245,22 @@ def test_upgrade_reapplies_the_install_helm_overrides(env: pytest.MonkeyPatch) -
     configs.get("full").apply(UpgradeContext(config=config, settings=UpgradeSettings.from_env()))
 
     assert calls[0]["helm_overrides"] == ["image.agent.pullPolicy=IfNotPresent", "runtime.storageDir=/var/lib/k3s"]
+
+
+def test_upgrade_keeps_the_vcluster_to_its_own_pods(env: pytest.MonkeyPatch) -> None:
+    env.setenv("SNAPSHOT_E2E_MODE", "vcluster")
+    env.setenv("SNAPSHOT_E2E_HOST_NAMESPACE", "snapshot-e2e-upg")
+    env.setenv("SNAPSHOT_E2E_HELM_SET", "image.agent.pullPolicy=IfNotPresent")
+    calls = []
+    env.setattr(configs.setup, "install_snapshot_chart", lambda **kwargs: calls.append(kwargs))
+    config = k8s.E2EConfig(namespace="snapshot-e2e", release="snapshot", pvc_name="snapshot-pvc", kubeconfig=None)
+
+    configs.get("full").apply(UpgradeContext(config=config, settings=UpgradeSettings.from_env()))
+
+    assert calls[0]["helm_overrides"] == [
+        "daemonset.nriHostNamespace=snapshot-e2e-upg",
+        "image.agent.pullPolicy=IfNotPresent",
+    ]
 
 
 TO = "v0.0.0-g1a2b3c4d"
