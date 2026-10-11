@@ -64,6 +64,45 @@ for pods that do not set `nvidia.com/snapshot-pagebroker: "false"`:
   checkpoint directory read-only for CRIU. It does not copy CPU images into staging.
 - `staged` copies checkpoint files into PageBroker staging before CRIU runs.
 
+### Shared GPU transfer lanes
+
+Set `pageBroker.transferPooledLanes: N` (or the PageBroker daemon option
+`--custom-storage-pooled-lanes N`) to enable a shared pool of
+CustomStorage I/O workers. The default, `0`, keeps the per-device transfer rings.
+A positive value must not exceed the total staging-slot count. The pinned-memory
+budget remains `transferBufferCount * transferChunkBytes * visible GPU count`.
+The pool divides those slots among its lanes, so increasing the lane count does
+not increase staging memory. A ready rank can use idle capacity from other GPUs.
+Lanes assign chunks from the oldest ready extent first. Once its chunks are
+assigned, lanes can begin the next extent while earlier I/O and copies finish.
+They do not reserve capacity for ranks that are not ready or wait for an entire
+rank to finish before assigning the next rank's chunks. CUDA event waits block
+the worker rather than spin while a copy is pending.
+
+Pinned buffers, GPU contexts, streams, events, NIXL agents and I/O queues initialize before
+PageBroker accepts requests. For direct restores, the pool also prepares the
+checkpoint's GPU file handles asynchronously while CPU restore starts. Each lane
+gets an independent open file description, avoiding shared NFS open-context
+contention. The restore transaction owns the prepared handles until commit or
+abort. The CUDA stage checks file identity and size before using them. Process
+mappings and destination GPU addresses are prepared after CRIU restores the
+processes.
+
+Choose the lane count using repeated last-rank completion measurements at a fixed
+staging budget. Available CPU, storage bandwidth and host NUMA placement all
+matter. Extra lanes can add contention or hit the container's CPU quota without
+improving completion time.
+
+For the tested eight-B200 GLM-5.3-NVFP4 checkpoint on VAST NFS, use
+`transferPooledLanes: 16` with `transferBufferCount: 32`,
+`transferChunkBytes: 134217728` and a 32-CPU PageBroker limit. This gives 256
+credits and 32 GiB of staging across eight GPUs. At fixed storage and read-ahead
+settings, four restores per arm reduced median agent time from 28.535 to 25.418
+seconds and CUDA time from 20.422 to 17.477 seconds. Treat this as a qualified
+starting point for that workload, not a universal optimum. If storage can feed
+data faster than one GPU can copy it, concentrating credits may instead limit
+throughput. Unequal extents and concurrent restores also need separate validation.
+
 ### Diagnose slow GPU restores
 
 The agent's `Restore timing summary` separates CPU restore (`criu_restore`), GPU

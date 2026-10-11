@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <exception>
 #include <optional>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -45,6 +46,7 @@ struct NixlTransferEngine::Impl {
 
   struct Request {
     nixlXferReqH* handle = nullptr;
+    int descriptor = -1;
     nixl_status_t status = NIXL_SUCCESS;
     Clock::time_point deadline;
     std::optional<nvtx3::unique_range> range;
@@ -53,7 +55,7 @@ struct NixlTransferEngine::Impl {
   std::string name;
   std::unique_ptr<nixlAgent> agent;
   nixl_reg_dlist_t buffers{DRAM_SEG};
-  nixl_reg_dlist_t file{FILE_SEG};
+  std::map<int, size_t> files;
   std::vector<void*> addresses;
   std::vector<Request> requests;
   int descriptor = -1;
@@ -70,6 +72,10 @@ NixlTransferEngine::NixlTransferEngine(std::span<void* const> buffers, size_t ca
   impl.agent = std::make_unique<nixlAgent>(impl.name, config);
   nixl_b_params_t parameters;
   parameters["use_aio"] = "true";
+  // Each staging slot has at most one single-descriptor I/O request. Reserve
+  // that concurrency instead of the backend's default queue for every lane.
+  // The backend rounds small queues up to its supported minimum.
+  parameters["kernel_queue_size"] = std::to_string(buffers.size());
   nixlBackendH* backend = nullptr;
   CheckNixl(impl.agent->createBackend("POSIX", parameters, backend), "create POSIX backend");
   impl.addresses.assign(buffers.begin(), buffers.end());
@@ -102,28 +108,74 @@ void NixlTransferEngine::Open(int descriptor, size_t size)
   if (impl.descriptor != -1) {
     throw std::logic_error("NIXL file already open");
   }
-  impl.file.clear();
-  impl.file.addDesc(nixlBlobDesc(0, size, descriptor));
-  CheckNixl(impl.agent->registerMem(impl.file), "register file");
+  RegisterFile(descriptor, size);
   impl.descriptor = descriptor;
+}
+
+void NixlTransferEngine::RegisterFile(int descriptor, size_t size)
+{
+  auto& impl = *impl_;
+  if (impl.files.contains(descriptor)) {
+    throw std::logic_error("NIXL file already registered");
+  }
+  nixl_reg_dlist_t file{FILE_SEG};
+  file.addDesc(nixlBlobDesc(0, size, descriptor));
+  // Allocate bookkeeping before registration so allocation failure cannot leak it.
+  impl.files.emplace(descriptor, size);
+  try {
+    CheckNixl(impl.agent->registerMem(file), "register file");
+  } catch (...) {
+    impl.files.erase(descriptor);
+    throw;
+  }
+}
+
+void NixlTransferEngine::UnregisterFile(int descriptor)
+{
+  auto& impl = *impl_;
+  for (const auto& request : impl.requests) {
+    if (request.handle && request.descriptor == descriptor) {
+      throw std::logic_error("NIXL file still has requests");
+    }
+  }
+  nixl_reg_dlist_t file{FILE_SEG};
+  file.addDesc(nixlBlobDesc(0, impl.files.at(descriptor), descriptor));
+  const auto released = impl.Inject(Fault::FileRelease) ? NIXL_ERR_BACKEND
+      : impl.agent->deregisterMem(file);
+  if (released != NIXL_SUCCESS) {
+    ReportFatalCleanup("NIXL file deregistration failed");
+  }
+  impl.files.erase(descriptor);
 }
 
 void NixlTransferEngine::Submit(size_t slot, io::Operation operation, size_t offset, size_t size)
 {
+  Submit(slot, impl_->descriptor, operation, offset, size);
+}
+
+void NixlTransferEngine::Submit(size_t slot, int descriptor, io::Operation operation, size_t offset, size_t size)
+{
   auto& impl = *impl_;
   auto& request = impl.requests.at(slot);
-  if (request.handle || impl.descriptor == -1) {
+  if (request.handle || !impl.files.contains(descriptor)) {
     throw std::logic_error("NIXL slot or file is not ready");
   }
   nixl_xfer_dlist_t local(DRAM_SEG);
   nixl_xfer_dlist_t remote(FILE_SEG);
   local.addDesc(nixlBlobDesc(reinterpret_cast<uintptr_t>(impl.addresses.at(slot)), size, 0));
-  remote.addDesc(nixlBlobDesc(offset, size, impl.descriptor));
+  remote.addDesc(nixlBlobDesc(offset, size, descriptor));
+  request.descriptor = descriptor;
   request.deadline = Clock::now() + kRequestTimeout;
   request.range.emplace(operation == io::Operation::Write ? "PageBroker storage write" : "PageBroker storage read");
-  CheckNixl(impl.agent->createXferReq(operation == io::Operation::Write ? NIXL_WRITE : NIXL_READ,
-                                    local, remote, impl.name, request.handle), "create request");
-  request.status = impl.agent->postXferReq(request.handle);
+  {
+    const nvtx3::scoped_range create{"PageBroker storage request creation"};
+    CheckNixl(impl.agent->createXferReq(operation == io::Operation::Write ? NIXL_WRITE : NIXL_READ,
+                                      local, remote, impl.name, request.handle), "create request");
+  }
+  {
+    const nvtx3::scoped_range post{"PageBroker storage submission"};
+    request.status = impl.agent->postXferReq(request.handle);
+  }
   if (impl.Inject(Fault::DrainTimeout) && (request.status == NIXL_SUCCESS || request.status == NIXL_IN_PROG)) {
     request.status = NIXL_IN_PROG;
     request.deadline = Clock::now();
@@ -177,14 +229,10 @@ void NixlTransferEngine::Close()
       }
     }
   }
-  if (impl.descriptor != -1) {
-    const auto released = impl.Inject(Fault::FileRelease) ? NIXL_ERR_BACKEND
-        : impl.agent->deregisterMem(impl.file);
-    if (released != NIXL_SUCCESS) {
-      ReportFatalCleanup("NIXL file deregistration failed");
-    }
-    impl.descriptor = -1;
+  while (!impl.files.empty()) {
+    UnregisterFile(impl.files.begin()->first);
   }
+  impl.descriptor = -1;
   // Ordinary I/O failure does not prevent releasing every request and file.
   if (failure) {
     std::rethrow_exception(failure);

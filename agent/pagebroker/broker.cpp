@@ -206,7 +206,7 @@ CreateGpuArtifact(const Transaction& transaction, const GpuRequest& request)
       throw std::invalid_argument("GPU restore requires a restore transaction");
     }
     return std::make_unique<gpu::Artifact>(restore->source_fd(), request.direction,
-        request.captured_pids, request.visible_devices, request.device_map);
+        request.captured_pids, request.visible_devices, request.device_map, restore->preparation());
   }
   const auto* checkpoint = std::get_if<CheckpointTransactionDescriptor>(&transaction.descriptor());
   if (!checkpoint) {
@@ -505,8 +505,9 @@ Broker::DirectRestore(const Request& request)
   std::lock_guard lock(transaction->mutex());
   if (transaction->state() != Transaction::State::NEW)
     return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
+  auto preparation = gpu_engine_ ? gpu_engine_->PrepareRestore(source.get()) : nullptr;
   transaction->set_state(Transaction::State::PREPARING);
-  transaction->set_descriptor(RestoreTransactionDescriptor({}, std::move(source)));
+  transaction->set_descriptor(RestoreTransactionDescriptor({}, std::move(source), std::move(preparation)));
   transaction->set_state(Transaction::State::STAGED);
   auto response = Reply(request);
   response.mutable_direct_restore_ready();
