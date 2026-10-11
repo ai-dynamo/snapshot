@@ -111,19 +111,19 @@ func (w *NodeController) preflightCompatibility(
 		return nil
 	}
 
-	manifest, err := types.ReadManifest(artifact.Path)
+	manifest, manifestLocation, err := w.preflightManifest(ctx, artifact)
 	if err != nil {
 		// An unreadable manifest is not an incompatibility. The restore path
 		// reads it again and reports the real error from there, so refusing here
 		// would relabel a broken artifact as an incompatible one.
 		log.Info("Skipping restore compatibility gate; checkpoint manifest is unreadable",
-			"artifact_path", artifact.Path,
+			"artifact_path", manifestLocation,
 			"error", err.Error(),
 		)
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning,
 			restoreCompatUncheckedReason,
 			fmt.Sprintf("Restore compatibility not checked for container %s: checkpoint manifest at %s is unreadable: %v",
-				artifact.SourceContainerName, artifact.Path, err),
+				artifact.SourceContainerName, manifestLocation, err),
 		)
 		return nil
 	}
@@ -140,6 +140,24 @@ func (w *NodeController) preflightCompatibility(
 		}
 	}
 	return nil
+}
+
+// preflightManifest reads the checkpoint manifest this gate compares against,
+// branching on how the artifact resolves: a local path for legacy content, or
+// a PageBroker metadata fetch (the same one the restore path itself uses) for
+// bound content. The second return value names where it looked, for the
+// unreadable-manifest log and event.
+func (w *NodeController) preflightManifest(ctx context.Context, artifact *restoreArtifact) (*types.CheckpointManifest, string, error) {
+	if artifact.PublishedArtifact != nil {
+		location := artifact.PublishedArtifact.GetArtifactHandle()
+		if w.fetchManifestFn == nil {
+			return nil, location, fmt.Errorf("no manifest fetcher configured for bound restore")
+		}
+		manifest, err := w.fetchManifestFn(ctx, artifact.PublishedArtifact)
+		return manifest, location, err
+	}
+	manifest, err := types.ReadManifest(artifact.Path)
+	return manifest, artifact.Path, err
 }
 
 // preflightTargetEnvironment describes what this node and this pod offer a
