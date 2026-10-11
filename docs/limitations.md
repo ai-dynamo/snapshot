@@ -13,6 +13,15 @@ roadmap.
   calls (e.g. Datadog GPU monitoring) — CUDA calls may fail or hang after
   restore, with undefined results. Disable such interception for workloads
   that will be snapshotted.
+- NRI must be enabled in the container runtime on every node that restores.
+  The node agent uses it to make its restore proxy PID 1 in restore
+  containers; without it, restores fail.
+- A Pod gets one restore. If a restored container starts again, for example
+  under `restartPolicy: Always` after the restored process exits, it ends in
+  `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in
+  the same Pod is on the roadmap.
+- One Snapshot installation per node. Several installations whose clusters
+  share nodes, such as vCluster tenants, are not supported.
 
 Multi-GPU and Arm support are on the roadmap.
 

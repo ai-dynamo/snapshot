@@ -50,6 +50,27 @@ commit-level history for each release is on its
   `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one
   more release before removal in v0.3.0+.
+- Restore semantics: Snapshot replaces the command of every restore destination
+  container with its restore proxy, `/snapshot-control/snapshot-restore-proxy`.
+  The proxy is the container's PID 1: it waits for the restore, forwards
+  signals to the restored process, and exits with its exit code, so the
+  container ends when the restored workload does. The node agent sets the
+  command through NRI when the container is created, and fails the restore if
+  the proxy is not PID 1. Requires action on upgrade: NRI must be enabled in the
+  container runtime on every node that restores. There is no switch to turn
+  this off. Restore Pods keep the source's command, which never runs, and are
+  expected to use `restartPolicy: Never`: a restored container that starts
+  again ends in `CrashLoopBackOff`. The agent mounts the runtime's NRI socket
+  directory, `/var/run/nri`, and the new chart value `daemonset.nriHostNamespace`
+  limits it to one host namespace, for tests on nodes shared with other
+  clusters.
+
+### Deprecated
+
+- `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore
+  containers no longer run their own command, so nothing needs to stay inert.
+  Snapshot never injected it. The `DYN_SNAPSHOT_RESTORE_STANDBY` alias is still
+  removed in the next release.
 
 ## [0.1.0] - 2026-09-06
 
