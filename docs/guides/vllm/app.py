@@ -118,9 +118,9 @@ async def main() -> None:
 
     while True:
         if CONTROL_DIR.joinpath("restore-complete").exists():
-            # The restored process keeps the source container's stdout, which
-            # is gone; a failure here would otherwise be invisible. Record it
-            # in the control directory next to the success sentinel.
+            # The restore connects this process's output to the restore
+            # container's log. Also record a failure in the control directory,
+            # next to the success sentinel, where tools can read it.
             try:
                 progress = CONTROL_DIR.joinpath("vllm-restore-progress")
                 await engine.wake_up()
