@@ -34,8 +34,11 @@ SPDX-License-Identifier: Apache-2.0
   - [Capture](#capture)
   - [Restore](#restore)
   - [API](#api)
-    - [Delivery and activation](#delivery-and-activation)
-    - [Participants and native CUDA state](#participants-and-native-cuda-state)
+    - [Kubernetes opt-in](#kubernetes-opt-in)
+    - [Source Pod shaping](#source-pod-shaping)
+    - [Launcher CLI](#launcher-cli)
+    - [Coordinator CLI](#coordinator-cli)
+    - [Capture requirements](#capture-requirements)
   - [Failure behavior](#failure-behavior)
   - [Checkpoint files and compatibility](#checkpoint-files-and-compatibility)
   - [Performance and Scalability](#performance-and-scalability)
@@ -709,7 +712,9 @@ A process can create one resource and import another, so the coordinator applies
 
 ### API
 
-The source Pod opts in through an annotation on an ordinary Pod or a SnapshotJob Pod template:
+#### Kubernetes opt-in
+
+Set this annotation on an ordinary Pod or a SnapshotJob Pod template:
 
 ```yaml
 metadata:
@@ -717,53 +722,92 @@ metadata:
     nvidia.com/cuda-shared-memory-support: "enabled"
 ```
 
-There are no new CRDs or CRD fields.
-After trimming whitespace, the accepted values are the case-sensitive strings `enabled` and `disabled`.
-An absent annotation does not request the feature.
-Admission validation for SnapshotJobs rejects other values through CEL, and the agent also validates the annotation on ordinary Pods.
-Removing the annotation cannot unload a shim from an already-running process.
+- `enabled` requests CuInterpose support.
+  `disabled` or an absent annotation does not request it.
+- Values are case-sensitive after trimming whitespace.
+  SnapshotJob admission and the agent's ordinary-Pod validation reject other values.
+- Removing the annotation does not unload the shim from a running process.
 
-#### Delivery and activation
+This proposal adds no CRDs or CRD fields.
 
-The shim must be loaded before the application creates CUDA allocations so it can record their full lifetime.
-For a SnapshotJob source, the operator copies the frontend, core, and static launcher from the configured image into an `emptyDir`, mounted read-only at `/tmp/snapshot-cuda`.
-It prefixes the target container's explicit `command` with the launcher and leaves `args` and `env` unchanged.
+#### Source Pod shaping
 
-The launcher prepends the frontend library path to the resolved value of `LD_PRELOAD`, then executes the original command.
-It preserves the existing preload value, the boundaries between arguments, and any non-UTF-8 environment values.
-It starts no shell and leaves no launcher process running as the workload's parent.
-Environment values retain the normal precedence among the image, `envFrom`, and Pod settings.
+The shim must load before the application creates CUDA allocations so it can record their full lifetime.
+For an opted-in SnapshotJob, the operator adds an installer and a shared volume to the source Pod, then prefixes the target container's explicit `command` with the launcher.
 
-Ordinary Pods must arrange the same library and launcher delivery before the workload starts.
-Before capture, the agent requires their target container command to begin with the expected launcher and library arguments.
+```mermaid
+flowchart LR
+    O["SnapshotJob operator"]
+    subgraph P["Source Pod"]
+        I["snapshot-cuda-install<br/>Init container from configured image"]
+        V["snapshot-cuda<br/>emptyDir: launcher and both libraries"]
+        T["Target container<br/>Application started through launcher"]
+        I -->|"copies files through writable mount"| V
+        T -->|"read-only mount at /tmp/snapshot-cuda"| V
+    end
+    O -->|"adds installer"| I
+    O -->|"prefixes command"| T
+```
 
-The agent rejects capture of an opted-in target without the launcher prefix before waiting for readiness or modifying the source workload.
-It also rejects writable mounts used to deliver the libraries because CRIU reapplies the source mount flags when restoring the library bind mounts.
-For SnapshotJobs, the operator rejects missing commands and collisions with installer names or mount paths before creating the source Job.
+- The operator preserves the target container's `args` and `env`.
+- The target must have an explicit, nonempty `command`.
+  The operator rejects collisions with reserved installer names or mount paths before creating the source Job.
+- Ordinary Pods must provide the same launcher prefix, libraries, and read-only mount before the workload starts.
+- The agent rejects an opted-in target without the expected launcher prefix before waiting for readiness or modifying the workload.
+  Library delivery mounts must be read-only because CRIU reapplies their source mount flags during restore.
+
+#### Launcher CLI
+
+```text
+cuinterpose-launch --library PATH -- COMMAND [ARG...]
+```
+
+`PATH` identifies the frontend library, with `libcuinterpose_core.so` in the same directory.
+The launcher verifies both libraries against its build's hashes, prepends `PATH` to the resolved `LD_PRELOAD`, and replaces itself with `COMMAND` using `exec`.
+It preserves existing preload entries, argument boundaries, and the resolved environment without invoking a shell.
+
+Snapshot requires this prefix in the target container's `command`:
+
+```yaml
+command: ["/tmp/snapshot-cuda/cuinterpose-launch", "--library", "/tmp/snapshot-cuda/libcuinterpose.so", "--", "<original-command>"]
+```
+
+#### Coordinator CLI
+
+The agent invokes the coordinator with an explicit participant list:
+
+```text
+cuinterpose-coordinator (--inspect | --prepare | --restore)
+    --socket-dir DIR --process PID [--process PID ...]
+    [--checkpoint-dir DIR]
+```
+
+| Argument | Contract |
+| --- | --- |
+| `--inspect` | Read and validate resource records without changing process state. |
+| `--prepare` | Save shared allocation contents in host carriers, release tracked shared resources, and write `cuinterpose.state`. |
+| `--restore` | Reconstruct shared resources and validate them against the checkpoint records. |
+| `--socket-dir DIR` | Required directory containing participant control sockets. |
+| `--process PID` | Required namespace PID of a participant. Repeat for every participant. The coordinator does not discover additional processes. |
+| `--checkpoint-dir DIR` | Required for `--prepare` and `--restore`, and rejected with `--inspect`. |
+
+Select exactly one operation.
+The [capture](#capture) and [restore](#restore) sequences define when the agent invokes each operation relative to the CUDA Driver and CRIU.
+
+#### Capture requirements
+
+Snapshot captures every CUDA process, while the coordinator operates only on processes that have initialized CuInterpose's core.
+
+- If any CUDA process has the shim loaded, every discovered CUDA participant must have the frontend loaded, even if the annotation has been removed.
+- Both library files must be available and consistent across participants, including processes with only the frontend loaded.
+  The agent verifies file identity against process mappings before hashing and rejects missing, deleted, replaced, or inconsistent libraries.
+- Library files must remain unchanged throughout capture.
+
+Snapshot stages, validates, and restores native CUDA helper jobfiles when present.
+An absent jobfile is permitted when there are coordinator participants.
+Otherwise, the helper's native multi-GPU jobfile requirement still applies.
 
 Deployment examples and build or test commands are maintained separately in [PR #456](https://github.com/ai-dynamo/snapshot/pull/456).
-
-#### Participants and native CUDA state
-
-Snapshot must capture all CUDA processes, while the coordinator operates on the processes that have initialized CuInterpose's core.
-Processes with only the frontend loaded still participate in native CUDA capture and restore.
-
-If the agent finds a shim in any CUDA process, it requires the frontend in every discovered CUDA participant, even if the opt-in annotation has been removed.
-A process with the core mapped but no frontend fails this check.
-
-To establish library identity, the agent opens each library file and matches its device and inode to the process's mapping before hashing its contents.
-The agent rejects the workload during preflight if any required library is missing, deleted, replaced, or inconsistent with the others.
-Even a process with only the frontend loaded must have a regular core library file available for hashing.
-The files must remain unchanged throughout capture.
-
-The coordinator accepts `--inspect`, `--prepare`, or `--restore`, a `--socket-dir`, and repeated `--process` namespace PIDs supplied by the agent.
-The coordinator also requires `--checkpoint-dir` when preparing a checkpoint or reconstructing resources after restore.
-It uses the supplied process list rather than discovering which processes belong to the group.
-
-The native CUDA helper can use jobfiles that describe its checkpoint work.
-Snapshot continues to stage, validate, and restore these files when present.
-If any processes participate in coordinator operations, Snapshot permits an absent jobfile but still validates one that exists.
-With no coordinator participants, the helper's native multi-GPU jobfile requirement still applies.
 
 ### Failure behavior
 
@@ -883,22 +927,23 @@ Workload security contexts remain unchanged.
 
 ### Configuration
 
-The operator needs an image containing the shim libraries and launcher to install them in new source Jobs.
-Helm supplies this through `--cuinterpose-image` and `--cuinterpose-image-pull-policy`, which the operator validates at startup.
-The image is pulled using the workload Pod's or ServiceAccount's credentials.
-The installer requests and is limited to `100m` CPU and `64Mi` memory, preserving the Guaranteed QoS class when the rest of the Pod meets its requirements.
+- `--cuinterpose-image` and `--cuinterpose-image-pull-policy` configure the operator's installer image and pull policy.
+  Helm supplies these flags, and the operator validates them at startup.
+- The installer uses the workload Pod's or ServiceAccount's image-pull credentials.
+- Installer resource requests and limits are both `100m` CPU and `64Mi` memory, preserving Guaranteed QoS when the rest of the Pod meets its requirements.
+- `CUINTERPOSE_SOCKET_DIR` overrides the shim's control socket directory, which defaults to `/tmp`.
+  This override supports test isolation.
+- `SNAPSHOT_CONTROL_TIMEOUT_SECONDS` sets the internal control timeout, defaulting to 10 seconds.
+- `SNAPSHOT_CARRIER_TIMEOUT_SECONDS` sets the internal carrier save/load timeout, defaulting to 3600 seconds.
 
-The shim normally creates its control socket in `/tmp`.
-`CUINTERPOSE_SOCKET_DIR` overrides that path for test isolation.
-Internal process settings are `SNAPSHOT_CONTROL_TIMEOUT_SECONDS` (default 10 seconds) and `SNAPSHOT_CARRIER_TIMEOUT_SECONDS` (default 3600 seconds for save/load).
-Each process reads its own environment.
+Each process reads these environment settings from its own environment.
 
 ### Dependencies
 
-The supported platform is Linux/amd64 with compatible GPUs and drivers providing the VMM and multicast APIs the workload uses.
-The preload libraries require glibc 2.34 or newer.
-When an application uses a CUDA runtime library, looking up driver entry points through that library requires CUDA Runtime 12.0 or newer.
-Existing Snapshot and CRIU compatibility and privilege requirements still apply.
+- Linux/amd64 with compatible GPUs and drivers providing the VMM and multicast APIs the workload uses.
+- glibc 2.34 or newer for the preload libraries.
+- CUDA Runtime 12.0 or newer when an application looks up driver entry points through a CUDA runtime library.
+- Existing Snapshot and CRIU compatibility and privilege requirements.
 
 The [interception appendix](#interception-and-loader-contract) describes the requirements for forking, linker namespaces, runtime-library visibility, and library loading.
 Build requirements and running instructions belong to the operational documentation in [PR #456](https://github.com/ai-dynamo/snapshot/pull/456).
