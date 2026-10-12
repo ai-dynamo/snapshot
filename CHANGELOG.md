@@ -57,13 +57,12 @@ commit-level history for each release is on its
   container ends when the restored workload does. The node agent sets the
   command through NRI when the container is created, and fails the restore if
   the proxy is not PID 1. Requires action on upgrade: NRI must be enabled in the
-  container runtime on every node that restores. There is no switch to turn
-  this off. Restore Pods keep the source's command, which never runs, and are
-  expected to use `restartPolicy: Never`: a restored container that starts
-  again ends in `CrashLoopBackOff`. The agent mounts the runtime's NRI socket
-  directory, `/var/run/nri`, and the new chart value `daemonset.nriHostNamespace`
-  limits it to one host namespace, for tests on nodes shared with other
-  clusters.
+  container runtime on every node that restores. Restore Pods keep the source's
+  command, which never runs, and are expected to use `restartPolicy: Never`: a
+  restored container that starts again ends in `CrashLoopBackOff`. The agent
+  mounts the runtime's NRI socket directory, `/var/run/nri`, and the new chart
+  value `daemonset.nriHostNamespace` limits it to one host namespace, for tests
+  on nodes shared with other clusters.
 
 ### Deprecated
 

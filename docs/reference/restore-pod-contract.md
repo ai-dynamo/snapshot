@@ -168,8 +168,16 @@ the longest restore you expect.
 
 Restore Pods are expected to use `restartPolicy: Never`. A Pod gets one restore:
 a container that starts again in the same Pod finds that restore already used,
-and its proxy exits with code 112 (`RestoreNotRepeatableExitCode`). With
-`restartPolicy: Always` or `OnFailure`, as in a Deployment, the container then
-ends in `CrashLoopBackOff` once the restored workload exits. Delete the Pod to
-restore again. Exit code 113 (`RestoreProxyErrorExitCode`) means the proxy could
-not follow the restored process. Every other exit code is the workload's own.
+and its proxy exits with code 112. With `restartPolicy: Always` or `OnFailure`,
+as in a Deployment, the container then ends in `CrashLoopBackOff` once the
+restored workload exits. Delete the Pod to restore again.
+
+The proxy reserves two exit codes:
+
+- 112 (`RestoreNotRepeatableExitCode`): the Pod's one restore is used up. The
+  restore failed, or an earlier container in the Pod already used it.
+- 113 (`RestoreProxyErrorExitCode`): the proxy could not follow the restored
+  process.
+
+Every other exit code is the restored workload's own, or 128 plus the number of
+the signal that ended it.
