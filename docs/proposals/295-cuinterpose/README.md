@@ -54,6 +54,10 @@ SPDX-License-Identifier: Apache-2.0
 - [Alternatives](#alternatives)
 - [Appendix](#appendix)
   - [Interception and loader contract](#interception-and-loader-contract)
+    - [Keeping backend symbols local](#keeping-backend-symbols-local)
+    - [Intercepting symbol lookups](#intercepting-symbol-lookups)
+    - [Preserving CUDA's API selection](#preserving-cudas-api-selection)
+    - [Loading and compatibility requirements](#loading-and-compatibility-requirements)
     - [Intercepted API reference](#intercepted-api-reference)
   - [Handle and state formats](#handle-and-state-formats)
     - [Decoded state example](#decoded-state-example)
@@ -973,23 +977,76 @@ The remaining review work is separated into [recipes](https://github.com/ai-dyna
 
 ### Interception and loader contract
 
-Applications can call CUDA symbols directly or obtain function pointers at runtime, so the frontend must intercept both paths.
-It wraps direct calls and the supported lookup APIs: `dlsym`, `cuGetProcAddress*`, and the CUDA runtime's `cudaGetDriverEntryPoint*`.
-When an application requests a function address, the frontend calls the real resolver first and replaces the returned function only if the lookup succeeded for a supported API.
-The returned symbol determines which calling convention the wrapper must use.
-For `dlsym`, the frontend substitutes wrappers only for lookups through an explicit library handle.
-It forwards `RTLD_DEFAULT` and `RTLD_NEXT` lookups unchanged, preserving the caller's search scope.
+CuInterpose must observe allocation and sharing calls regardless of how the application reaches CUDA.
+Preloading wrappers covers ordinary calls to CUDA symbols, but an application can also obtain function pointers through `dlsym`, `cuGetProcAddress*`, or `cudaGetDriverEntryPoint*` and call those pointers directly.
+The [frontend](../../../agent/cmd/cuinterpose/frontend/frontend.c) intercepts these lookup APIs so supported calls still reach the same wrappers.
 
-If the frontend cannot wrap that result, it reports a missing symbol using a `NULL` pointer and the API's "symbol not found" status.
-For the `cuGetProcAddress` form without a status argument, it returns `CUDA_ERROR_NOT_FOUND`.
+#### Keeping backend symbols local
 
-The frontend loads `libcuinterpose_core.so` from its own directory when a CUDA call or lookup first needs it.
-Resolving a function address does not start the process runtime.
-The runtime starts after a successful `cuInit`, and intercepted memory operations require a runtime owned by the calling process.
+Preloading the entire implementation would expose its exported symbols to the application's global symbol lookup scope.
+Instead, `LD_PRELOAD` loads only `libcuinterpose.so`, whose export list contains the CUDA wrappers and lookup functions it interposes.
 
-The frontend and core communicate through a private C ABI and retain the CUDA libraries for the process lifetime.
-Initialization must remain safe when CUDA is called from a library constructor, which may hold the dynamic loader's lock.
-The implementation therefore resolves driver functions and prepares workers before acquiring its runtime installation lock.
+The frontend loads the Rust core with `dlopen("$ORIGIN/libcuinterpose_core.so", RTLD_LAZY | RTLD_LOCAL)`.
+`$ORIGIN` locates the core beside the frontend, and `RTLD_LOCAL` keeps the core's symbols out of the global lookup scope.
+The frontend obtains a private function table through `cuinterpose_core_init` and uses it to call the core without publishing its entry points globally.
+
+The core also needs to call CUDA without re-entering the wrappers.
+It obtains real driver addresses through the frontend's resolver and caches them for subsequent calls.
+The frontend retains the CUDA libraries so application calls to `dlclose` cannot invalidate those cached addresses.
+
+#### Intercepting symbol lookups
+
+Because the frontend defines `dlsym`, it needs another way to obtain glibc's original function without recursively calling itself.
+It uses `dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.34")`, which requests the versioned symbol after the frontend in the loader's search order, and caches the returned function pointer.
+The frontend uses `dlvsym` internally but does not interpose application calls to it.
+
+For an explicit CUDA library handle, the frontend first calls glibc's `dlsym` and checks that the result belongs to `libcuda` or `libcudart` in the base linker namespace.
+It substitutes a frontend wrapper when the requested symbol is intercepted.
+Other lookups retain their original results.
+For example, after obtaining glibc's resolver:
+
+```mermaid
+sequenceDiagram
+    participant A as Application
+    participant F as Frontend
+    participant G as glibc
+    A->>F: dlsym(cuda_library, "cuMemCreate")
+    F->>G: Real dlsym(cuda_library, "cuMemCreate")
+    G-->>F: CUDA function address
+    F->>F: Verify CUDA provider and select wrapper
+    F-->>A: Frontend cuMemCreate address
+    A->>F: Call returned function pointer
+    Note over F: Wrapper dispatches to the private core function table
+```
+
+`RTLD_DEFAULT` and `RTLD_NEXT` require different handling because glibc determines their search scope from the caller's return address.
+An ordinary forwarding call would make the frontend appear to be the caller and could change which symbol glibc selects.
+The frontend therefore uses a guaranteed tail call to preserve the application's return address and returns glibc's result unchanged.
+Normal `RTLD_DEFAULT` lookup already finds the preloaded wrappers.
+
+#### Preserving CUDA's API selection
+
+CUDA's function-address APIs can choose an entry point based on the requested API version and flags.
+The frontend therefore calls the real `cuGetProcAddress*` or `cudaGetDriverEntryPoint*` first, then matches the returned symbol to a wrapper with the same calling convention.
+For example, a query for `cuMemAlloc` can select `cuMemAlloc_v2`, while a literal `dlsym` lookup of the historical `cuMemAlloc` symbol must retain its original ABI.
+
+For an intercepted API, if the returned entry point has no matching wrapper, the frontend clears the output pointer and reports the query API's missing-symbol result.
+This prevents the caller from receiving a function that would bypass tracking or use the wrong calling convention.
+Queries for APIs outside the interception set retain CUDA's result.
+
+#### Loading and compatibility requirements
+
+CUDA calls can occur inside library constructors while glibc holds its loader lock.
+To avoid deadlocks, the frontend performs loader calls without holding shim locks or waiting for another thread to finish its first lookup.
+Loading the core registers the private function tables but starts no workers.
+The process runtime starts only after an intercepted `cuInit` succeeds.
+
+- CUDA runtime entry-point lookup requires CUDA Runtime 12.0 or newer because CUDA 11 uses an incompatible query signature.
+  The frontend checks `cudaRuntimeGetVersion` in the library providing the query function before calling it.
+- One CUDA runtime library per process is supported.
+  It must be globally visible or discovered through an intercepted lookup using its explicit library handle.
+- Application calls to `dlvsym`, separate linker namespaces, and `RTLD_DEEPBIND` can bypass the frontend.
+  Arbitrary chains of other `dlsym` interposers are unsupported.
 
 #### Intercepted API reference
 
@@ -1007,24 +1064,6 @@ The implementation therefore resolves driver functions and prepares workers befo
 | `cuMulticastCreate`, `cuMulticastAddDevice`, `cuMulticastBindMem*`, `cuMulticastBindAddr*`, `cuMulticastUnbind` | Tracks multicast objects, device membership, bindings, and their reconstruction. |
 
 Property-only queries such as `cuMemGetAllocationGranularity` and `cuMulticastGetGranularity` go directly to CUDA.
-
-When a CUDA function-address query returns a modern malloc, free, or address-range alias, the frontend uses the wrapper for that alias.
-It does not apply those wrappers to historical 32-bit ELF entry points.
-
-CUDA Runtime 11 is unsupported.
-Before asking a CUDA runtime library for a driver entry point, the frontend resolves `cudaRuntimeGetVersion` in that same library and requires version 12.0 or newer.
-If the version is older, the version function is missing, or the version query fails, the frontend returns `cudaErrorInitializationError`.
-It does so without calling the lookup function or accessing the caller's output and status pointers.
-This also avoids reading the absent fourth argument of CUDA 11's three-argument API.
-The same version guard applies to the `ByVersion` and per-thread variants.
-
-One CUDA runtime library per process is supported.
-The library must be globally visible or already retained by the frontend through an intercepted library-handle lookup before a runtime wrapper tries to resolve it.
-The shim does not support multiple CUDA runtime libraries or a library confined to `RTLD_LOCAL` that the frontend has not discovered.
-
-Explicit `dlvsym` calls and CUDA libraries loaded in separate linker namespaces bypass this interception.
-The frontend also does not support arbitrary chains of other `dlsym` interposers.
-A library opened with `RTLD_DEEPBIND` that links a CUDA library directly resolves its direct calls and `RTLD_DEFAULT` lookups to that library, bypassing the preloaded wrappers.
 
 ### Handle and state formats
 
