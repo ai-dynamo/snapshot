@@ -714,7 +714,13 @@ A process can create one resource and import another, so the coordinator applies
 
 #### Kubernetes opt-in
 
-Set this annotation on an ordinary Pod or a SnapshotJob Pod template:
+CuInterpose opt-in belongs to the source Pod, including when that Pod is captured through a PodSnapshot.
+
+- With SnapshotJob, set the annotation in `spec.podTemplate.metadata.annotations`.
+- With a Pod you deploy yourself, set it in that Pod's `metadata.annotations`.
+
+The annotation is ignored for CuInterpose activation when placed on `PodSnapshot.metadata.annotations`.
+It is not copied to the source Pod.
 
 ```yaml
 metadata:
@@ -727,13 +733,24 @@ metadata:
 - Values are case-sensitive after trimming whitespace.
   SnapshotJob admission and the agent's ordinary-Pod validation reject other values.
 - Removing the annotation does not unload the shim from a running process.
+- Adding the annotation to an already-running Pod does not load the shim.
+  An opted-in Pod that was not started through the launcher fails capture preflight.
 
 This proposal adds no CRDs or CRD fields.
 
 #### Source Pod shaping
 
 The shim must load before the application creates CUDA allocations so it can record their full lifetime.
-For an opted-in SnapshotJob, the operator adds an installer and a shared volume to the source Pod, then prefixes the target container's explicit `command` with the launcher.
+Users who deploy their own Pod must prepare its target container before startup, then create a PodSnapshot referring to that Pod.
+SnapshotJob automates this preparation from the annotated Pod template and the selected target container's explicit application `command`:
+
+| Preparation | User-created Pod | SnapshotJob |
+| --- | --- | --- |
+| Deliver the shim | Supply `cuinterpose-launch`, `libcuinterpose.so`, and `libcuinterpose_core.so` from a matching build before the application starts. | Adds an init container that copies the three files from the configured installer image into an `emptyDir`. |
+| Mount the files | Mount the delivery volume read-only at `/tmp/snapshot-cuda` in the target container. | Adds the volume and read-only target mount. |
+| Start the application | Prefix the target container's `command` with the [launcher arguments](#launcher-cli). | Prepends that prefix to the supplied application `command`, preserving `args` and `env`. |
+
+The resulting SnapshotJob source Pod has these components:
 
 ```mermaid
 flowchart LR
@@ -749,12 +766,9 @@ flowchart LR
     O -->|"prefixes command"| T
 ```
 
-- The operator preserves the target container's `args` and `env`.
-- The target must have an explicit, nonempty `command`.
-  The operator rejects collisions with reserved installer names or mount paths before creating the source Job.
-- Ordinary Pods must provide the same launcher prefix, libraries, and read-only mount before the workload starts.
-- The agent rejects an opted-in target without the expected launcher prefix before waiting for readiness or modifying the workload.
-  Library delivery mounts must be read-only because CRIU reapplies their source mount flags during restore.
+The operator rejects a missing application `command` or collisions with reserved installer names or mount paths before creating the source Job.
+For either workflow, the agent rejects an opted-in target without the expected launcher prefix before waiting for readiness or modifying the workload.
+Library delivery mounts must be read-only because CRIU reapplies their source mount flags during restore.
 
 #### Launcher CLI
 
