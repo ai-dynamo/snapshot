@@ -130,7 +130,6 @@ The main operational constraints are:
 | Risk or constraint | Contract |
 | --- | --- |
 | Incomplete participant group | All required sharing processes must be captured and restored together. |
-| Allocations outside the carrier path | Allocations not marked shared remain subject to native CUDA checkpoint limitations. Large allocations with peer-GPU access are a gap in the current selection rule. See [What is saved](#what-is-saved). |
 | Failure during preparation or reconstruction | The attempt is unusable. Terminate the affected workload rather than retrying a lost reply or resuming partial state. |
 | Memory overhead | Preserving shared data requires additional host memory, and adapting allocations can increase GPU memory use. See [Performance and Scalability](#performance-and-scalability). |
 | Artifact mismatch | Restore requires matching CuInterpose libraries. See [Checkpoint files and compatibility](#checkpoint-files-and-compatibility). |
@@ -530,10 +529,6 @@ If the selected holder retains only a mapping, it calls `cuMemRetainAllocationHa
 | Shared tracked DEVICE or HOST_NUMA backing | One full copy in the selected holder's carrier |
 | Tracked allocation bound into a multicast object | One copy in a host carrier, with no additional copy for the multicast object |
 
-Enabling peer-GPU access through `cuMemSetAccess` or the adapted `cuCtxEnablePeerAccess` does not mark an allocation shared.
-Large allocations with that access can require reconstruction even without an IPC export or multicast binding, so the current carrier selection does not cover every allocation that native CUDA checkpointing cannot restore.
-Covering this case with carriers requires broader allocation tracking and selection, followed by native checkpoint and restore validation.
-
 #### Copying and lifetime
 
 To copy GPU memory, the carrier code groups DEVICE allocations by CUDA context and device.
@@ -652,7 +647,7 @@ The ordering follows the resource dependencies: remove multicast before its memb
 The shim must finish preparation before Snapshot locks CUDA because copying memory and removing shared resources require working CUDA calls.
 
 Virtual handles, allocation references, mapping records, and carrier addresses remain in process memory for CRIU to capture.
-Allocations not marked shared remain in place for native CUDA checkpointing, subject to the limitations described under [What is saved](#what-is-saved).
+Allocations not marked shared remain in place for native CUDA checkpointing.
 If no process has initialized the core, the agent skips coordinator operations but still performs native CUDA capture and library identity checks.
 
 ### Restore
@@ -973,7 +968,7 @@ Tests should verify the contracts at each boundary:
 - GPU tests verify private and shared memory contents, original addresses, and access permissions.
   They cover importers that outlive the creator's references, full allocation contents behind partial mappings, multicast and graph replay, HOST_NUMA, peer access, and context teardown.
   They also verify that checkpoint is refused while any handle or mapping for an allocation imported from outside the group remains.
-  Coverage must include large `cuMemCreate` and adapted `cuMemAlloc_v2` allocations with peer-GPU access that were never exported or bound to multicast.
+  Coverage must include large `cuMemCreate` and adapted `cuMemAlloc_v2` allocations accessed by multiple GPUs within one process, without export or multicast binding.
 - Graph tests must replay graphs captured before checkpoint against the restored shared memory and verify their results, without recapturing or updating the graphs after restore.
 - Agent, operator, and Helm tests cover library delivery, preservation of commands and environment values, library identity checks, participant selection, execution in target namespaces, and cancellation.
   They verify that preflight failures leave the source workload unchanged and preparation failures terminate it.
