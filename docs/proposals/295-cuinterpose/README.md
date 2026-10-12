@@ -33,9 +33,6 @@ SPDX-License-Identifier: Apache-2.0
     - [HOST_NUMA allocations](#host_numa-allocations)
   - [Capture](#capture)
   - [Restore](#restore)
-  - [Process runtime and concurrency](#process-runtime-and-concurrency)
-    - [State and driver calls](#state-and-driver-calls)
-    - [Process ownership](#process-ownership)
   - [API](#api)
     - [Delivery and activation](#delivery-and-activation)
     - [Participants and native CUDA state](#participants-and-native-cuda-state)
@@ -130,6 +127,7 @@ The main operational constraints are:
 | Risk or constraint | Contract |
 | --- | --- |
 | Incomplete participant group | All required sharing processes must be captured and restored together. |
+| Fork and exec | Children forked before the parent's `cuInit` may initialize CUDA independently. Children forked after initialization must `exec` or exit before using CUDA or being checkpointed. Forking during initialization is unsupported. |
 | Failure during preparation or reconstruction | The attempt is unusable. Terminate the affected workload rather than retrying a lost reply or resuming partial state. |
 | Memory overhead | Preserving shared data requires additional host memory, and adapting allocations can increase GPU memory use. See [Performance and Scalability](#performance-and-scalability). |
 | Artifact mismatch | Restore requires matching CuInterpose libraries. See [Checkpoint files and compatibility](#checkpoint-files-and-compatibility). |
@@ -708,52 +706,6 @@ These barriers explain why multicast restore needs more phases than teardown.
 During teardown, participants can remove their existing references concurrently in one phase.
 During reconstruction, importers must wait for creators to make the new objects available, and memory binding must wait for every device to join.
 A process can create one resource and import another, so the coordinator applies these dependencies per resource rather than dividing processes into separate creator and importer groups.
-
-### Process runtime and concurrency
-
-During restore, a process may need an allocation FD from a peer that is still reconstructing its own resources.
-Each shim therefore uses separate workers for peer communication and lifecycle operations.
-The peer worker accepts connections and serves cached export FDs without taking the allocation-state mutex or calling CUDA.
-It queues lifecycle requests to the control worker, which processes them sequentially and enters the relevant CUDA context.
-
-The shims open connections to peers as needed instead of maintaining connections between every pair of processes.
-The control worker's queue has a fixed capacity and rejects requests when it is full.
-
-Loading the backend makes its functions available through the private C ABI, but does not start its runtime services.
-A successful intercepted `cuInit` installs the tracking state, control socket, and two worker threads.
-This separation keeps symbol lookup from starting CUDA process services.
-The [loader appendix](#interception-and-loader-contract) explains the ABI and the initialization constraints in detail.
-
-#### State and driver calls
-
-Handles and mappings can retain an allocation independently, so the core records both in a registry of allocations and multicast objects.
-Converted malloc and IPC allocations also need reservation records for requested sizes and IPC open counts.
-Retaining an allocation through an existing mapping returns its recorded application handle and adds a handle reference, even if the application previously released that handle.
-
-Tracking records must reflect completed CUDA operations before they can be checkpointed.
-The shim protects updates with a state mutex, but releases it during blocking multicast calls, IPC synchronization, and context teardown so other operations can make progress.
-The `unlocked_driver_calls` counter tracks these operations, including time spent waiting for multicast binding locks, until their results have been recorded.
-A process can enter checkpoint mode only when this counter is zero, so no such operation can later return and change the captured records.
-
-Calls that bind or unbind multicast memory use a per-object mutex so the order of driver mutations matches the order recorded by the shim.
-Another thread can still add a device to the multicast object while a binding call waits.
-This lock does not retain the CUDA object or its context, so the application must prevent destruction while either is in use.
-
-The peer service holds the export-cache lock through each FD send.
-Before removing cached exports during teardown, the shim acquires that same lock to wait for any active send to finish.
-Socket timeouts limit how long a send can stall, though a slow peer can delay changes to the cache until the send finishes.
-
-#### Process ownership
-
-A forked child inherits the parent's tracking state and locks, so it must not use the parent's initialized runtime.
-The shim checks the calling PID before taking any mutex.
-A child forked before CUDA initialization can initialize independently.
-After CUDA initialization, a child created by `fork` must call `exec` or exit.
-Forking during initialization, or retaining a child of an initialized process through checkpoint, is unsupported.
-
-When its socket path already exists, the runtime removes it during installation only if it is an owned socket and a nonblocking connection attempt immediately returns `ECONNREFUSED`.
-The runtime rechecks the path's identity before removing it and retries binding once.
-It leaves the path unchanged for live listeners, full queues, non-socket files, symlinks, or ambiguous errors.
 
 ### API
 
