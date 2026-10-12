@@ -106,7 +106,6 @@ On restore, it reestablishes shared memory at the original addresses before the 
 
 Snapshot continues to use native CUDA checkpointing for GPU state and CRIU for process memory and other process state.
 CuInterpose supplies the tracking and reconstruction needed for shared memory to work with those existing mechanisms.
-The design below explains the supported memory models, component responsibilities, and capture and restore protocols.
 
 ### Workload contract
 
@@ -211,7 +210,6 @@ flowchart LR
 
 Reconstructing multicast therefore requires more than importing a single allocation.
 The object, its imports, device attachments, bindings, mappings, and permissions must be recreated in dependency order.
-The multicast object does not hold an additional copy of its members' contents.
 
 The [CUDA multicast API](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__MULTICAST.html) describes creation, device attachment, binding, and mapping of these objects.
 
@@ -357,12 +355,10 @@ sequenceDiagram
 
 The shim cannot know at allocation time whether the application will later export the pointer, so it converts every supported synchronous malloc call.
 Allocations that are never shared still use native CUDA checkpointing to preserve their contents.
-They incur VMM allocation costs but do not require host carriers.
 
 #### IPC and mapping lifetime
 
 `cuIpcGetMemHandle` returns a virtual handle in CUDA's fixed 64-byte IPC value.
-Unlike the virtual shareable FD, this value is not a file descriptor.
 An importer uses its allocation reference to obtain a real FD through the peer service and map the backing.
 
 The following sequence shows a successful export and first import.
@@ -393,7 +389,6 @@ The adapter rejects attempts to free an imported IPC pointer through `cuMemFree_
 
 Destroying a context, resetting a primary context, or releasing its final reference also removes the converted malloc and IPC mappings it owns.
 The shim preserves those mappings if context teardown fails or the primary context still has references.
-Allocations created explicitly through VMM remain allocated after context teardown, though the shim clears the context it cached for operations on them.
 
 #### Peer access and isolation
 
@@ -404,16 +399,11 @@ Disabling access to a peer context stops the shim from granting the current GPU 
 Existing mappings keep the device permissions already granted.
 This design assumes cooperating processes, typically one process per GPU.
 VMM permissions apply to devices, so separate CUDA contexts and disabling peer access do not provide strict access isolation for converted mappings.
-Explicit application-managed VMM mappings retain their own access policy.
 
 #### Planned deprecation
 
 Once the driver fix for legacy IPC with CustomStorage is available, the intent is to deprecate this adapter and let the driver handle the legacy allocation and memory-IPC calls natively.
 Before retiring the adapter, we must validate native cross-GPU IPC checkpoint and restore on the supported driver versions, including replay of CUDA graphs captured before checkpoint.
-The current implementation does not automatically bypass the adapter based on driver version.
-
-This deprecation concerns the legacy allocation and IPC conversion, including the VMM rounding costs it introduces.
-It does not retire the tracking and reconstruction of allocations created directly through VMM or of multicast resources.
 
 ### Host carriers
 
@@ -426,6 +416,7 @@ The carrier therefore preserves the allocation's contents without requiring the 
 
 #### What is saved
 
+The shim marks an allocation as shared after a successful tracked export, import, or binding into a tracked multicast object.
 Each selected holder saves the full backing of its assigned shared allocations, including regions outside its own application mappings.
 Saving only the holder's mapped ranges could omit bytes mapped by another process.
 Other holders do not save additional copies of the same allocation.
@@ -437,10 +428,6 @@ If the selected holder retains only a mapping, it obtains a temporary driver han
 | Tracked allocation or converted malloc never shared | Native CUDA checkpointing, with mappings and handles left intact |
 | Shared tracked DEVICE or HOST_NUMA backing | One full copy in the selected holder's carrier |
 | Tracked allocation bound into a multicast object | One copy in a host carrier, with no additional copy for the multicast object |
-
-An allocation is exportable when its properties permit sharing.
-The shim marks it as shared after a successful tracked export, import, or binding into a tracked multicast object.
-An allocation does not require a host carrier merely because its properties allow it to be exported.
 
 #### Copying and lifetime
 
@@ -681,7 +668,6 @@ The native CUDA helper can use jobfiles that describe its checkpoint work.
 Snapshot continues to stage, validate, and restore these files when present.
 If any processes participate in coordinator operations, Snapshot permits an absent jobfile but still validates one that exists.
 With no coordinator participants, the helper's native multi-GPU jobfile requirement still applies.
-The launcher does not enable jobfile creation.
 
 ### Failure behavior
 
@@ -727,7 +713,6 @@ Checkpoints captured without CuInterpose omit the `cuinterpose` entry.
 
 To publish the state file, the coordinator sorts the records, writes and syncs a private temporary file, installs it without replacing an existing destination, and syncs the containing directory.
 A failure at any of these steps causes the coordinator to report that checkpoint preparation failed.
-In particular, finding a state file after a directory-sync failure does not establish that preparation completed successfully.
 
 CRIU preserves namespace PIDs, virtual handles, allocation IDs, and shim state.
 During restore, the coordinator requires the same participant PID set and compares the reconstructed records with the captured records.
@@ -740,7 +725,6 @@ The coordinator must still understand the shim's protocol.
 
 Restoring an existing checkpoint therefore requires the original library contents.
 A workload that needs upgraded shim libraries must create a new checkpoint.
-Changes to the agent that leave the shim libraries unchanged do not invalidate this identity check.
 Automatically archiving the libraries with the checkpoint remains follow-up work.
 
 ### Performance and Scalability
@@ -750,7 +734,6 @@ Automatically archiving the libraries with the checkpoint remains follow-up work
 Each synchronous malloc call handled by the adapter receives its own VMM allocation.
 The shim queries `cuMemGetAllocationGranularity` and rounds the backing size up to that minimum.
 For example, on a device with a 2 MiB minimum, a 64 KiB request consumes 2 MiB of backing.
-CuInterpose does not combine requests into a larger pool or suballocate them from existing backing, and it does not hard-code the 2 MiB value.
 
 The rounding applies to underlying CUDA allocations rather than individual tensors.
 Framework allocators, such as [PyTorch's caching allocator](https://github.com/pytorch/pytorch/blob/main/c10/cuda/CUDACachingAllocator.cpp), can serve many small tensors from larger cached allocations.
@@ -762,7 +745,7 @@ The effect still depends on the engine and its allocation pattern.
 
 Applications that make many small direct CUDA allocations can waste substantial memory under this policy.
 Frequent allocation and free operations also incur VMM setup costs, and even modest rounding can matter near the device-memory limit.
-Caching device attributes and the results of granularity queries reduces setup work but does not reduce the size of the backing allocation.
+Caching device attributes and the results of granularity queries reduces setup work.
 Converted allocations incur these costs even if they are never shared.
 
 #### Host memory and transfer cost
@@ -797,7 +780,7 @@ Host carriers put shared workload data in CRIU images.
 They require the same storage access controls as other process memory.
 This design adds no encryption.
 The shim and coordinator check format versions, limit messages and state files to 32 MiB, apply timeouts, and bound the control queue.
-These checks limit the effects of malformed input and unresponsive peers but do not make untrusted workload images safe.
+These checks limit the effects of malformed input and unresponsive peers.
 
 The installer drops capabilities, disallows privilege escalation, and uses a read-only root filesystem.
 It uses the Pod's positive `runAsUser` when specified, otherwise UID 65532, with `runAsNonRoot: true`.
@@ -815,7 +798,6 @@ The shim normally creates its control socket in `/tmp`.
 `CUINTERPOSE_SOCKET_DIR` overrides that path for test isolation.
 Internal process settings are `SNAPSHOT_CONTROL_TIMEOUT_SECONDS` (default 10 seconds) and `SNAPSHOT_CARRIER_TIMEOUT_SECONDS` (default 3600 seconds for save/load).
 Each process reads its own environment.
-These are not new CRD fields.
 
 ### Dependencies
 
@@ -848,12 +830,9 @@ Tests should verify the contracts at each boundary:
 - Agent, operator, and Helm tests cover library delivery, preservation of commands and environment values, library identity checks, participant selection, execution in target namespaces, and cancellation.
   They verify that preflight failures leave the source workload unchanged and preparation failures terminate it.
 - End-to-end tests capture a multi-process workload, restore it on a compatible different node, and verify computation and sharing after application release.
-  Coordinator-only tests do not cover native CUDA and CRIU orchestration.
 
 [#338](https://github.com/ai-dynamo/snapshot/pull/338) adds tests that exercise the built components together.
 [#294](https://github.com/ai-dynamo/snapshot/issues/294) tracks the opt-in cross-node suite.
-This proposal defines the required behavior and coverage.
-Running instructions belong to #456, and execution results belong with the tests and qualification reports.
 
 ### Graduation Criteria
 
@@ -916,7 +895,7 @@ It makes the completed table available without calling the dynamic loader inside
 
 Backend driver calls, including context and cleanup operations, then use the cached function pointers.
 Missing optional symbols cause errors only when an operation needs them.
-The CUDA libraries remain loaded for the process lifetime, and the backend does not use cudarc's loader or buffer and context wrappers.
+The CUDA libraries remain loaded for the process lifetime.
 
 Loading the backend and starting its runtime are separate operations:
 
@@ -930,7 +909,6 @@ There is no frontend-wide loading lock.
 The backend still needs an installation lock to ensure that only one set of runtime resources is installed.
 A `OnceLock` publishes the completed runtime.
 Its initializer never performs startup operations that could acquire the dynamic loader's lock.
-Obtaining the ABI table alone does not mean runtime services are ready.
 
 #### Backend runtime installation
 
@@ -985,11 +963,6 @@ Forking during initialization, or retaining a child of an initialized process th
 
 The Rust workspace uses `panic = "abort"` in debug and release builds.
 A panic in any shim thread, including background workers, terminates the process without stack unwinding or destructor cleanup.
-No catch-and-abort wrapper is needed at the C ABI.
-
-Cargo unit tests still unwind the stack after a panic, so their panic behavior does not establish how the shipped libraries behave.
-The shim cannot safely continue after a panic that may have interrupted a state-changing operation.
-Invalid application pointers, foreign C++ exceptions, and allocator aborts are also not recoverable through this mechanism.
 
 #### Intercepted API reference
 
@@ -1021,12 +994,10 @@ The same version guard applies to the `ByVersion` and per-thread variants.
 One CUDA runtime library per process is supported.
 The library must be globally visible or already retained by the frontend through an intercepted library-handle lookup before a runtime wrapper tries to resolve it.
 The shim does not support multiple CUDA runtime libraries or a library confined to `RTLD_LOCAL` that the frontend has not discovered.
-It does not select a runtime library based on which application module made the call.
 
 Explicit `dlvsym` calls and CUDA libraries loaded in separate linker namespaces bypass this interception.
 The frontend also does not support arbitrary chains of other `dlsym` interposers.
 A library opened with `RTLD_DEEPBIND` that links a CUDA library directly resolves its direct calls and `RTLD_DEFAULT` lookups to that library, bypassing the preloaded wrappers.
-
 
 ### Handle and state formats
 
@@ -1132,7 +1103,6 @@ multicast_binding:
 The offset nested under `source` identifies a location within the member allocation.
 The outer `offset` field identifies the location where that memory is bound within the multicast object.
 Separate `multicast`, `multicast_device`, and `multicast_mapping` records describe the object, attached devices, and virtual mappings.
-This binding alone is not a complete multicast checkpoint.
 
 ### Further reading
 
