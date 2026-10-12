@@ -719,9 +719,8 @@ func (w *NodeController) resolveBoundRestoreArtifact(
 				ContentUID:          target.ContentUID,
 				SourceContainerName: target.SourceContainerName,
 				PublishedArtifact: &pagebroker.PublishedArtifact{
-					StoreId:               content.Spec.Storage.StoreID,
-					ArtifactHandle:        published.ArtifactHandle,
-					ArtifactFormatVersion: published.ArtifactFormatVersion,
+					StoreId:        content.Spec.Storage.StoreID,
+					ArtifactHandle: published.ArtifactHandle,
 				},
 			}, nil
 		}

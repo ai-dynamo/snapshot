@@ -17,9 +17,6 @@ func TestFilesystemArtifactMatchesTheStoreLayout(t *testing.T) {
 	if artifact.GetArtifactHandle() != "artifacts/11111111-1111-4111-8111-111111111111/containers/main" {
 		t.Fatalf("handle = %q", artifact.GetArtifactHandle())
 	}
-	if artifact.GetArtifactFormatVersion() != "snapshot.pagebroker/v1" {
-		t.Fatalf("version = %q", artifact.GetArtifactFormatVersion())
-	}
 	if err := validatePublishedArtifact(artifact); err != nil {
 		t.Fatal(err)
 	}
