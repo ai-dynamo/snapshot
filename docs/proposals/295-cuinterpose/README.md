@@ -959,17 +959,9 @@ The remaining review work is separated into [recipes](https://github.com/ai-dyna
 
 ## Alternatives
 
-- **Checkpoint processes independently:** restoring each process's initial bytes alone does not preserve shared allocations or multicast relationships.
-- **Intercept legacy IPC only at export:** by the time the shim sees an export request, the allocation's pointer may already be in use.
-  Creating VMM backing when the application allocates memory lets the adapter reconstruct it without changing that pointer.
-- **Keep native memory IPC for converted malloc:** using native IPC would retain the driver's separate ownership rules and the CustomStorage compatibility problem.
-  Implementing sharing through VMM lets the shim use the same reconstruction mechanism for these allocations.
-- **Add storage inside the shim:** having the shim persist allocation contents directly would introduce another storage interface.
-  Host carriers use CRIU's existing process-memory capture instead.
-- **Track per-object checkpoint progress and retry:** if a reply is lost or ambiguous, the coordinator cannot establish whether the requested mutation completed safely.
-  The current design abandons failed attempts.
-- **Rewrite Pod preload environment:** rewriting `LD_PRELOAD` in the Pod specification would require reproducing the rules for resolving environment values.
-  The static launcher receives the resolved environment and requires an explicit workload command.
+- [NCCL checkpoint shim and hooks](https://github.com/NVIDIA/nccl/tree/master/contrib/nccl_checkpoint) handle NCCL resources but do not cover memory shared through other libraries or application code.
+- In-workload `checkpoint_prepare` / `checkpoint_restore` hooks, as in [vLLM](https://github.com/vllm-project/vllm/pull/46877) and [FlashInfer](https://github.com/flashinfer-ai/flashinfer/issues/3791), require explicit integration for each supported communication backend and are not transparent to the workload.
+- [`cuda-checkpoint --launch-job`](https://github.com/NVIDIA/cuda-checkpoint#610-features) supports legacy `cuIpcGetMemHandle` sharing, but does not cover generic shared VMM unicast or multicast mappings or shared HOST_NUMA allocations.
 
 ## Appendix
 
