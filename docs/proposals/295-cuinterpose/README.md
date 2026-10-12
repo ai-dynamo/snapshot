@@ -430,7 +430,7 @@ The allocation sequence shows how one application call becomes VMM operations in
 sequenceDiagram
     participant A as Application
     participant S as Process shim
-    participant D as CUDA driver
+    participant D as CUDA Driver
     A->>S: cuMemAlloc_v2(requested size)
     Note over S: Determine granularity and rounded backing size
     S->>D: cuMemCreate(rounded size, POSIX exportable)
@@ -602,7 +602,7 @@ sequenceDiagram
     participant A as Snapshot agent
     participant C as Coordinator
     participant S as Workload processes / shims
-    participant N as Native CUDA checkpointing
+    participant D as CUDA Driver
     participant R as CRIU
     A->>C: Inspect participant group
     C->>S: INSPECT
@@ -621,8 +621,9 @@ sequenceDiagram
     S-->>C: Shared unicast resources removed
     C->>C: Publish cuinterpose.state
     C-->>A: Preparation complete
-    A->>N: Lock and checkpoint native CUDA state
-    N-->>A: Native CUDA capture complete
+    A->>D: cuCheckpointProcessLock
+    A->>D: cuCheckpointProcessCheckpoint
+    D-->>A: Checkpoint complete
     A->>R: Capture process tree
     Note over S,R: CRIU saves shim records and host-carrier bytes
     R-->>A: Process capture complete
@@ -665,14 +666,15 @@ sequenceDiagram
     participant A as Snapshot agent
     participant C as Coordinator
     participant S as Workload processes / shims
-    participant N as Native CUDA checkpointing
+    participant D as CUDA Driver
     participant R as CRIU
     A->>A: Verify library identity and prepare mounts
     A->>R: Restore process tree
     Note over S,R: Restore shim records, sockets, and host carriers
     R-->>A: Processes restored, application still waiting
-    A->>N: Restore native CUDA state and unlock
-    N-->>A: CUDA available for reconstruction
+    A->>D: cuCheckpointProcessRestore
+    A->>D: cuCheckpointProcessUnlock
+    D-->>A: CUDA available for reconstruction
     A->>C: Reconstruct participant group
     C->>S: INSPECT
     S-->>C: Restored resource records
