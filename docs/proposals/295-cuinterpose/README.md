@@ -121,6 +121,10 @@ Applications remain responsible for synchronization and resource lifetime throug
 
 ### Limitations, Risks, and Mitigations
 
+This proposal covers memory sharing through CUDA legacy memory IPC and VMM APIs between processes in one container on a single node.
+We plan to extend the proposal to [Multi-Node NVLink (MNNVL)](https://docs.nvidia.com/multi-node-nvlink-systems/mnnvl-user-guide/overview.html) to support memory sharing across nodes.
+That extension is outside the current scope.
+
 The main operational constraints are:
 
 | Risk or constraint | Contract |
