@@ -13,12 +13,12 @@ SPDX-License-Identifier: Apache-2.0
 - [Proposal](#proposal)
   - [Workload contract](#workload-contract)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
+- [Background](#background)
+  - [Unicast mappings](#unicast-mappings)
+  - [Multicast mappings](#multicast-mappings)
+  - [Preserving CUDA graphs](#preserving-cuda-graphs)
 - [Design Details](#design-details)
   - [Components](#components)
-  - [CUDA memory and mappings](#cuda-memory-and-mappings)
-    - [Unicast mappings](#unicast-mappings)
-    - [Multicast mappings](#multicast-mappings)
-    - [Preserving CUDA graphs](#preserving-cuda-graphs)
   - [Interposing VMM sharing](#interposing-vmm-sharing)
     - [Creator and checkpoint holder](#creator-and-checkpoint-holder)
     - [Multicast tracking](#multicast-tracking)
@@ -134,41 +134,7 @@ The main operational constraints are:
 | Memory overhead | Preserving shared data requires additional host memory, and adapting allocations can increase GPU memory use. See [Performance and Scalability](#performance-and-scalability). |
 | Artifact mismatch | Restore requires matching CuInterpose libraries. See [Checkpoint files and compatibility](#checkpoint-files-and-compatibility). |
 
-## Design Details
-
-### Components
-
-Shared memory spans several processes, but its CUDA handles and mappings belong to individual processes.
-CuInterpose therefore loads a shim library in each CUDA process and uses a coordinator to order checkpoint and restore across the group.
-
-The shim has a C frontend that intercepts selected CUDA calls and a Rust core that tracks and reconstructs resources.
-The coordinator sends requests to those cores, which execute CUDA calls and memory copies inside their own processes.
-
-```mermaid
-flowchart TB
-    Agent["Snapshot agent"] -->|"launches"| Coord["Coordinator"]
-    subgraph Container["Checkpointed container"]
-        Coord
-        subgraph A["CUDA process A"]
-            App["Application"] --> Front["C frontend"]
-            Front --> Core["Rust core"]
-        end
-        Peer["Shim in CUDA process B"]
-        Coord -->|"control requests"| Core
-        Coord -->|"control requests"| Peer
-        Core <-->|"peer FD exchange"| Peer
-    end
-```
-
-`libcuinterpose.so` intercepts CUDA calls and resolves the real driver functions.
-`libcuinterpose_core.so` owns tracking state, driver resources, and host carriers.
-Each core listens on `/tmp/cuinterpose-<namespace-pid>.sock` for both coordinator commands and peer requests for export descriptors.
-
-The Snapshot agent discovers participants and launches a coordinator in the target container's namespaces for each inspection, preparation, or reconstruction operation.
-The agent also orders native CUDA operations and CRIU, then signals that the application may resume after restore.
-The coordinator exits when its requested operation finishes.
-
-### CUDA memory and mappings
+## Background
 
 Restoring shared memory requires recovering its contents at the addresses each process already uses.
 CUDA virtual memory management (VMM) separates memory allocations from address reservations, allowing CuInterpose to recreate the memory while preserving application pointers.
@@ -182,7 +148,7 @@ An application pointer (`CUdeviceptr`) identifies a virtual address, while the a
 Several mappings can refer to the same allocation, and a process can call `cuMemRelease` while a mapping continues to retain the allocation.
 CuInterpose tracks these relationships separately so that restoring a pointer also restores the memory it refers to.
 
-#### Unicast mappings
+### Unicast mappings
 
 A unicast mapping refers to one backing allocation.
 When processes share that allocation, writes through one process's mapping must remain visible through the others.
@@ -225,7 +191,7 @@ cuMemMap(address_b, bytes, 0, imported, 0);
 Both `allocation` and `imported` are process-local `CUmemGenericAllocationHandle` values that refer to the same backing.
 The exported and received file descriptors are `int` values used to share that allocation between processes.
 
-#### Multicast mappings
+### Multicast mappings
 
 Multicast lets a GPU operation access corresponding memory ranges across a team of devices.
 Handles for member allocations and multicast objects share the C type `CUmemGenericAllocationHandle`, but identify different resources.
@@ -274,7 +240,7 @@ for (int i = 0; i < 2; ++i) {
 A subsequent `cuMemMap` uses `member[i]` for a unicast view of that GPU's memory or `group` for a multicast view of the bound regions.
 CuInterpose tracks the member handles and their contents separately from the group handle and its bindings.
 
-#### Preserving CUDA graphs
+### Preserving CUDA graphs
 
 CUDA graphs are crucial for performance in inference workloads, and it is important to preserve the captured CUDA graphs, as recapturing them is costly.
 Graphs retain the virtual memory addresses (specific to a particular CUDA context) referenced in kernels, so it is important to replay the existing graphs after restore without recapturing them or updating their memory references.
@@ -288,6 +254,40 @@ These operations rely on the [VMM reservation and mapping model](https://docs.nv
 
 cuCheckpoint remains responsible for graph objects (`CUgraph`) and executable graph state (`CUgraphExec`).
 CuInterpose reconstructs the shared memory those graphs reference before the application can replay them.
+
+## Design Details
+
+### Components
+
+Shared memory spans several processes, but its CUDA handles and mappings belong to individual processes.
+CuInterpose therefore loads a shim library in each CUDA process and uses a coordinator to order checkpoint and restore across the group.
+
+The shim has a C frontend that intercepts selected CUDA calls and a Rust core that tracks and reconstructs resources.
+The coordinator sends requests to those cores, which execute CUDA calls and memory copies inside their own processes.
+
+```mermaid
+flowchart TB
+    Agent["Snapshot agent"] -->|"launches"| Coord["Coordinator"]
+    subgraph Container["Checkpointed container"]
+        Coord
+        subgraph A["CUDA process A"]
+            App["Application"] --> Front["C frontend"]
+            Front --> Core["Rust core"]
+        end
+        Peer["Shim in CUDA process B"]
+        Coord -->|"control requests"| Core
+        Coord -->|"control requests"| Peer
+        Core <-->|"peer FD exchange"| Peer
+    end
+```
+
+`libcuinterpose.so` intercepts CUDA calls and resolves the real driver functions.
+`libcuinterpose_core.so` owns tracking state, driver resources, and host carriers.
+Each core listens on `/tmp/cuinterpose-<namespace-pid>.sock` for both coordinator commands and peer requests for export descriptors.
+
+The Snapshot agent discovers participants and launches a coordinator in the target container's namespaces for each inspection, preparation, or reconstruction operation.
+The agent also orders native CUDA operations and CRIU, then signals that the application may resume after restore.
+The coordinator exits when its requested operation finishes.
 
 ### Interposing VMM sharing
 
