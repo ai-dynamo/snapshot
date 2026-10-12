@@ -948,7 +948,13 @@ Validation must cover these architectural contracts:
 
 ### Graduation Criteria
 
-Qualification requires the GPU and cross-node tests above to pass, including replay of existing CUDA graphs and communication through restored shared memory.
+CuInterpose is available as an opt-in Beta within the workload contract defined above.
+Graduation to GA requires:
+
+- Qualify real single-node, multi-GPU inference workloads in vLLM, SGLang, and TensorRT-LLM across supported GPU and driver configurations.
+  Capture each workload on one node and restore it on another compatible node, verifying inference results, shared-memory communication, and replay of existing CUDA graphs.
+- Maintain automated regression coverage for supported allocation types, compatibility checks, and checkpoint and restore failures.
+- Publish support requirements and deployment documentation for both SnapshotJob and user-created Pods.
 
 ## Implementation History
 
