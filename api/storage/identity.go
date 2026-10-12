@@ -73,27 +73,25 @@ func (p PVC) NormalizedBasePath() (string, error) {
 	return path.Clean(base), nil
 }
 
-// CommitID identifies one container publication of one capture attempt. The
-// artifact UID is the owning PodSnapshotContent UID, not its reusable name or an
-// RPC transaction ID. Retries/restarts derive the same ID; new content gets a new
-// UID. The v1 preimage uses the same framing as StoreID, with fields:
-// "snapshot.commit/v1", storeID, artifactUID, containerName.
-func CommitID(storeID, artifactUID, containerName string) (string, error) {
+// ValidateArtifactIdentity checks the three fields that name one container
+// publication: the bound store ID, the owning PodSnapshotContent UID (not its
+// reusable name or an RPC transaction ID) and the container name.
+func ValidateArtifactIdentity(storeID, artifactUID, containerName string) error {
 	if !storeIDPattern.MatchString(storeID) {
-		return "", fmt.Errorf("store ID must be store-v1- followed by 64 lowercase hexadecimal characters")
+		return fmt.Errorf("store ID must be store-v1- followed by 64 lowercase hexadecimal characters")
 	}
 	// Kubernetes UIDs are opaque. Bound the encoding without assuming UUID syntax.
 	if artifactUID == "" || len(artifactUID) > 256 || !utf8.ValidString(artifactUID) ||
 		strings.ContainsAny(artifactUID, `/\`) || strings.ContainsFunc(artifactUID, func(r rune) bool {
 		return unicode.IsSpace(r) || unicode.IsControl(r)
 	}) {
-		return "", fmt.Errorf("artifact UID must be nonempty, at most 256 bytes, " +
+		return fmt.Errorf("artifact UID must be nonempty, at most 256 bytes, " +
 			"without whitespace, control characters or path separators")
 	}
 	if errs := validation.IsDNS1123Label(containerName); len(errs) != 0 {
-		return "", fmt.Errorf("container name: %s", strings.Join(errs, "; "))
+		return fmt.Errorf("container name: %s", strings.Join(errs, "; "))
 	}
-	return "commit-v1-" + hashFields("snapshot.commit/v1", storeID, artifactUID, containerName), nil
+	return nil
 }
 
 func hashFields(fields ...string) string {

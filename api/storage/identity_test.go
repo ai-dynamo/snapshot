@@ -28,20 +28,12 @@ func TestSharedIdentityVectors(t *testing.T) {
 			CanonicalHex string
 			StoreID      string
 		}
-		Commits []struct {
-			Name          string
-			StoreID       string
-			ArtifactUID   string
-			ContainerName string
-			CanonicalHex  string
-			CommitID      string
-		}
 	}
 	if err := json.Unmarshal(data, &vectors); err != nil {
 		t.Fatal(err)
 	}
-	if len(vectors.Stores) == 0 || len(vectors.Commits) == 0 {
-		t.Fatal("both store and commit vectors are required")
+	if len(vectors.Stores) == 0 {
+		t.Fatal("store vectors are required")
 	}
 	for _, v := range vectors.Stores {
 		t.Run("store/"+v.Name, func(t *testing.T) {
@@ -51,17 +43,6 @@ func TestSharedIdentityVectors(t *testing.T) {
 				got, err := v.PVC.StoreID()
 				if err != nil || got != v.StoreID {
 					t.Fatalf("StoreID() = %q, %v; want %q", got, err, v.StoreID)
-				}
-			}
-		})
-	}
-	for _, v := range vectors.Commits {
-		t.Run("commit/"+v.Name, func(t *testing.T) {
-			assertCanonicalDigest(t, v.CanonicalHex, "commit-v1-", v.CommitID)
-			for range 2 {
-				got, err := storage.CommitID(v.StoreID, v.ArtifactUID, v.ContainerName)
-				if err != nil || got != v.CommitID {
-					t.Fatalf("CommitID() = %q, %v; want %q", got, err, v.CommitID)
 				}
 			}
 		})
@@ -128,7 +109,7 @@ func TestNormalizedPVCBasePath(t *testing.T) {
 	}
 }
 
-func TestCommitIDRejectsInvalidIdentity(t *testing.T) {
+func TestValidateArtifactIdentityRejectsInvalidIdentity(t *testing.T) {
 	validStore := "store-v1-" + strings.Repeat("a", 64)
 	for _, tc := range []struct{ name, store, uid, container string }{
 		{"empty store", "", "uid", "main"},
@@ -147,13 +128,12 @@ func TestCommitIDRejectsInvalidIdentity(t *testing.T) {
 		{"long container", validStore, "uid", strings.Repeat("a", 64)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			id, err := storage.CommitID(tc.store, tc.uid, tc.container)
-			if err == nil || id != "" {
-				t.Fatalf("CommitID() = %q, %v; want empty ID and error", id, err)
+			if err := storage.ValidateArtifactIdentity(tc.store, tc.uid, tc.container); err == nil {
+				t.Fatal("ValidateArtifactIdentity() = nil; want error")
 			}
 		})
 	}
-	if _, err := storage.CommitID(validStore, "opaque-kubernetes-uid", "main"); err != nil {
+	if err := storage.ValidateArtifactIdentity(validStore, "opaque-kubernetes-uid", "main"); err != nil {
 		t.Fatalf("UIDs need not use UUID syntax: %v", err)
 	}
 }
