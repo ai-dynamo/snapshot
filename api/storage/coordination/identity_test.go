@@ -19,30 +19,14 @@ func validStoreID(t *testing.T) string {
 	return id
 }
 
-func TestValidateBindingDerivesDeterministicCommitID(t *testing.T) {
-	storeID := validStoreID(t)
-	a, err := ValidateBinding(storeID, "content-uid", "main")
-	if err != nil {
+func TestValidateBindingAcceptsWellFormedInput(t *testing.T) {
+	if err := ValidateBinding(validStoreID(t), "content-uid", "main"); err != nil {
 		t.Fatalf("ValidateBinding() error = %v", err)
-	}
-	b, err := ValidateBinding(storeID, "content-uid", "main")
-	if err != nil {
-		t.Fatalf("ValidateBinding() error = %v", err)
-	}
-	if a != b {
-		t.Fatalf("ValidateBinding() not deterministic: %q != %q", a, b)
-	}
-	c, err := ValidateBinding(storeID, "other-content-uid", "main")
-	if err != nil {
-		t.Fatalf("ValidateBinding() error = %v", err)
-	}
-	if a == c {
-		t.Fatal("ValidateBinding() produced the same commitID for different artifact UIDs")
 	}
 }
 
 func TestValidateBindingRejectsMalformedInput(t *testing.T) {
-	if _, err := ValidateBinding("not-a-store-id", "content-uid", "main"); err == nil {
+	if err := ValidateBinding("not-a-store-id", "content-uid", "main"); err == nil {
 		t.Fatal("ValidateBinding() accepted a malformed store ID")
 	}
 }

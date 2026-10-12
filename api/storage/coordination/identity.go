@@ -12,14 +12,12 @@ import (
 // ErrStoreMismatch means the bound store differs from the store a request names.
 var ErrStoreMismatch = fmt.Errorf("storage binding does not match the configured store")
 
-// ValidateBinding checks identity well-formedness and derives the
-// deterministic commitID. No storage or Kubernetes lookup.
-func ValidateBinding(storeID, artifactUID, containerName string) (commitID string, err error) {
-	commitID, err = storage.CommitID(storeID, artifactUID, containerName)
-	if err != nil {
-		return "", fmt.Errorf("invalid storage binding: %w", err)
+// ValidateBinding checks identity well-formedness. No storage or Kubernetes lookup.
+func ValidateBinding(storeID, artifactUID, containerName string) error {
+	if err := storage.ValidateArtifactIdentity(storeID, artifactUID, containerName); err != nil {
+		return fmt.Errorf("invalid storage binding: %w", err)
 	}
-	return commitID, nil
+	return nil
 }
 
 // RequireStoreMatch refuses a request naming a different store than the one
