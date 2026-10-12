@@ -50,7 +50,6 @@ SPDX-License-Identifier: Apache-2.0
   - [Monitoring](#monitoring)
   - [Test Plan](#test-plan)
   - [Graduation Criteria](#graduation-criteria)
-- [Implementation History](#implementation-history)
 - [Alternatives](#alternatives)
 - [Appendix](#appendix)
   - [Interception and loader contract](#interception-and-loader-contract)
@@ -822,8 +821,6 @@ Snapshot stages, validates, and restores native CUDA helper jobfiles when presen
 An absent jobfile is permitted when there are coordinator participants.
 Otherwise, the helper's native multi-GPU jobfile requirement still applies.
 
-Deployment examples and build or test commands are maintained separately in [PR #456](https://github.com/ai-dynamo/snapshot/pull/456).
-
 ### Configuration
 
 - `--cuinterpose-image` and `--cuinterpose-image-pull-policy` configure the operator's installer image and pull policy.
@@ -927,7 +924,6 @@ Workloads that make many small direct allocations can still waste substantial me
 - Existing Snapshot and CRIU compatibility and privilege requirements.
 
 The [interception appendix](#interception-and-loader-contract) describes the requirements for linker namespaces, runtime-library visibility, and library loading.
-Build requirements and running instructions belong to the operational documentation in [PR #456](https://github.com/ai-dynamo/snapshot/pull/456).
 
 ### Monitoring
 
@@ -947,9 +943,6 @@ Validation must cover these architectural contracts:
   Corrupt state, missing participants, and lost replies must not allow an incomplete restore to resume.
 - An end-to-end test restores the complete process group on another compatible node and verifies computation and sharing.
 
-[#338](https://github.com/ai-dynamo/snapshot/pull/338) covers assembled tests and CI.
-[#294](https://github.com/ai-dynamo/snapshot/issues/294) tracks cross-node testing.
-
 ### Graduation Criteria
 
 CuInterpose is available as an opt-in Beta within the workload contract defined above.
@@ -960,17 +953,10 @@ Graduation to GA requires:
 - Maintain automated regression coverage for supported allocation types, compatibility checks, and checkpoint and restore failures.
 - Publish support requirements and deployment documentation for both SnapshotJob and user-created Pods.
 
-## Implementation History
-
-The eleven implementation PRs through [#336](https://github.com/ai-dynamo/snapshot/pull/336) merged on October 7, 2026.
-They cover the frontend, protocol, process runtime, VMM and IPC tracking, carriers, multicast, coordinator, packaging, and Snapshot integration.
-
-The remaining review work is separated into [recipes](https://github.com/ai-dynamo/snapshot/pull/456), [this documentation](https://github.com/ai-dynamo/snapshot/pull/337), and [assembled tests and CI](https://github.com/ai-dynamo/snapshot/pull/338).
-
 ## Alternatives
 
 - [NCCL checkpoint shim and hooks](https://github.com/NVIDIA/nccl/tree/master/contrib/nccl_checkpoint) handle NCCL resources but do not cover memory shared through other libraries or application code.
-- In-workload `checkpoint_prepare` / `checkpoint_restore` hooks, as in [vLLM](https://github.com/vllm-project/vllm/pull/46877) and [FlashInfer](https://github.com/flashinfer-ai/flashinfer/issues/3791), require explicit integration for each supported communication backend and are not transparent to the workload.
+- In-workload `checkpoint_prepare` / `checkpoint_restore` hooks, as in [vLLM](https://docs.vllm.ai/en/latest/api/vllm/distributed/parallel_state/#vllm.distributed.parallel_state.checkpoint_prepare_distributed_state) and [FlashInfer](https://docs.flashinfer.ai/generated/flashinfer.comm.MoeAlltoAll.checkpoint_prepare.html), require explicit integration for each supported communication backend and are not transparent to the workload.
 - [`cuda-checkpoint --launch-job`](https://github.com/NVIDIA/cuda-checkpoint#610-features) supports legacy `cuIpcGetMemHandle` sharing, but does not cover generic shared VMM unicast or multicast mappings or shared HOST_NUMA allocations.
 
 ## Appendix
@@ -1171,6 +1157,7 @@ Separate `multicast`, `multicast_device`, and `multicast_mapping` records descri
 
 ### Further reading
 
-- [Developer, workload, and running documentation in PR #456](https://github.com/ai-dynamo/snapshot/pull/456)
-- [Native test coverage and CI in PR #338](https://github.com/ai-dynamo/snapshot/pull/338)
+- [Building Snapshot from source](../../development/build-from-source.md)
+- [Checkpointing with PodSnapshot and SnapshotJob](../../guides/checkpoint.md)
+- [Workload contract](../../reference/workload-contract.md)
 - [Restore Pod contract](../../reference/restore-pod-contract.md)
