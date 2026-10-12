@@ -194,6 +194,34 @@ flowchart LR
 For example, A may map an allocation at `0x700000000000` and B at `0x710000000000`.
 Restore must preserve both addresses and reconnect them to one recreated allocation.
 
+The following sketch shows how the two processes obtain handles to the same backing.
+Here `memory_props` is a `CUmemAllocationProp` for pinned, POSIX-exportable device memory, and `bytes` satisfies the allocation's granularity requirement.
+The processes have reserved their respective addresses with `cuMemAddressReserve`.
+The application helpers `send_fd` and `receive_fd` transfer a file descriptor through a Unix socket using `SCM_RIGHTS`.
+The sketch omits context setup, access permissions, error handling, and cleanup.
+
+```cpp
+// Process A: create, map, and export the allocation.
+CUmemGenericAllocationHandle allocation;
+cuMemCreate(&allocation, bytes, &memory_props, 0);
+cuMemMap(address_a, bytes, 0, allocation, 0);
+int exported_fd;
+cuMemExportToShareableHandle(
+    &exported_fd, allocation, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
+send_fd(exported_fd);
+
+// Process B: receive the descriptor, import the allocation, and map it.
+int received_fd = receive_fd();
+CUmemGenericAllocationHandle imported;
+cuMemImportFromShareableHandle(
+    &imported, reinterpret_cast<void *>(static_cast<intptr_t>(received_fd)),
+    CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+cuMemMap(address_b, bytes, 0, imported, 0);
+```
+
+Both `allocation` and `imported` are process-local `CUmemGenericAllocationHandle` values that refer to the same backing.
+The exported and received file descriptors are `int` values used to share that allocation between processes.
+
 #### Multicast mappings
 
 Multicast lets a GPU operation access corresponding memory ranges across a team of devices.
