@@ -22,7 +22,6 @@ SPDX-License-Identifier: Apache-2.0
   - [Interposing VMM sharing](#interposing-vmm-sharing)
     - [Creator and checkpoint holder](#creator-and-checkpoint-holder)
     - [Multicast tracking](#multicast-tracking)
-    - [Supported sharing configurations](#supported-sharing-configurations)
   - [Adapting legacy allocation and IPC APIs](#adapting-legacy-allocation-and-ipc-apis)
     - [Why allocation must be intercepted before export](#why-allocation-must-be-intercepted-before-export)
     - [IPC and mapping lifetime](#ipc-and-mapping-lifetime)
@@ -324,6 +323,10 @@ The [appendix](#handle-and-state-formats) specifies the handle encodings.
 A reply to a unicast export request includes the full backing size and the CUDA location where the creator allocated it.
 The importer queries `cuMemGetAllocationPropertiesFromHandle` and records its own handles and mappings.
 
+Tracked sharing uses only `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR`, with pinned DEVICE or HOST_NUMA backing for unicast allocations.
+Multicast objects must also enable POSIX export.
+Imports from processes without CuInterpose must be released, together with their mappings, before checkpoint because the shim cannot reconstruct those external sharing relationships.
+
 #### Creator and checkpoint holder
 
 Several processes may retain the same allocation, but saving its contents in every process would duplicate the checkpoint data.
@@ -393,17 +396,6 @@ CuInterpose adds these checkpoint requirements to CUDA's multicast model:
 - Device attachment with `cuMulticastAddDevice` and memory binding must occur **in the same process**.
 - The **original creator must retain the tracked multicast object and remain in the checkpoint group** to recreate it.
 - At capture, **every declared device must be attached and have a recorded binding**.
-
-#### Supported sharing configurations
-
-Tracked VMM allocations and multicast objects must use `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR` for sharing.
-Unicast allocations may use pinned memory at CUDA's `DEVICE` or `HOST_NUMA` locations, meaning GPU memory or host memory associated with a NUMA node.
-
-FABRIC handles, combinations of exportable handle types, and multicast objects without POSIX export support are outside this design.
-
-The shim rejects requests to create allocations with unsupported sharing properties or import non-POSIX handles before acquiring CUDA resources.
-It permits raw POSIX imports from processes without the shim, but cannot reconstruct those external sharing relationships.
-Every handle and mapping for such an import must therefore be released before checkpoint.
 
 ### Adapting legacy allocation and IPC APIs
 
@@ -545,34 +537,44 @@ After restore, the carrier is released only after the successful load reply has 
 
 #### HOST_NUMA allocations
 
-A HOST_NUMA allocation is created with `cuMemCreate`, specifying `CU_MEM_LOCATION_TYPE_HOST_NUMA` and the NUMA node ID in `CUmemAllocationProp.location`.
-Its backing resides in host memory but is still managed through CUDA VMM, so its contents must be copied into a carrier before the backing is released.
+A HOST_NUMA allocation is created with [`cuMemCreate`](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__VA.html), specifying `CU_MEM_LOCATION_TYPE_HOST_NUMA` and the NUMA node ID in `CUmemAllocationProp.location`.
+This selects the host memory's placement, independently of which CPUs run the processes that map it.
+The backing is still managed through CUDA VMM, so its contents must be copied into a carrier before it is released.
 
-The application's mappings may cover only part of the allocation or lack CPU access.
-The selected holder therefore uses `cuMemAddressReserve`, `cuMemMap`, and `cuMemSetAccess` to create a temporary CPU-accessible mapping of the full backing.
+In this example, process A runs on CPUs on NUMA node 0 and process B runs on CPUs on NUMA node 1.
+Both processes map two shared allocations, one on each NUMA node.
+Process A is the selected holder for both allocations and saves their contents in its carrier.
 
 ```mermaid
 flowchart TB
-    subgraph Holder["Selected holder process"]
-        A["Application mapping"]
-        T["Temporary CPU-accessible mapping"]
-        C["Anonymous host carrier"]
+    subgraph Holder["Process A · CPUs on NUMA node 0"]
+        A["Application mappings"]
+        C["Host carrier<br/>Contents of allocations X and Y"]
     end
-    B["Peer process mapping"]
-    H["Shared HOST_NUMA backing<br/>NUMA node N"]
+    B["Process B · CPUs on NUMA node 1<br/>Application mappings"]
+    X["Shared allocation X<br/>Backing on NUMA node 0"]
+    Y["Shared allocation Y<br/>Backing on NUMA node 1"]
     R["CRIU process image"]
-    A -->|maps| H
-    B -->|maps| H
-    T -->|maps full allocation| H
-    T <-->|CPU copy| C
+    A -->|maps| X
+    A -->|maps| Y
+    B -->|maps| X
+    B -->|maps| Y
+    X <-->|CPU copy| C
+    Y <-->|CPU copy| C
     C <-->|capture / restore| R
 ```
 
-During capture, the CPU copies the full allocation through the temporary mapping into the carrier.
-During restore, `cuMemCreate` recreates the backing at its recorded NUMA location, and the CPU copies the carrier's contents back before the processes reconnect their original mappings.
+The application's mappings may cover only part of an allocation or lack CPU access.
+For each allocation, the holder uses `cuMemAddressReserve`, `cuMemMap`, and `cuMemSetAccess` to create a temporary CPU-accessible mapping of the full backing for the copy shown above.
+The carrier stores the bytes, while the allocation records retain each backing's NUMA node ID.
+The shim preserves the creator's node ID during sharing because `cuMemGetAllocationPropertiesFromHandle` reports node zero for imported handles.
 
-The shim records the creator's NUMA node during sharing because `cuMemGetAllocationPropertiesFromHandle` reports node zero for imported handles.
-If the recorded CUDA context is gone, HOST_NUMA operations use a primary context on CUDA device zero while retaining the recorded host NUMA placement.
+During restore, `cuMemCreate` recreates X on node 0 and Y on node 1, then the holder copies their contents back from the carrier.
+Both processes reconnect their original mappings to those recreated allocations.
+
+When restoring on another host, these are the recorded numeric node IDs on the destination host.
+CuInterpose does not remap NUMA node IDs or compare CPU/GPU locality between hosts.
+The destination must support allocations on those IDs, and preserving the original locality requires compatible NUMA topology and process placement.
 
 ### Capture
 
