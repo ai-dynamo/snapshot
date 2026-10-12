@@ -968,7 +968,6 @@ Tests should verify the contracts at each boundary:
 - GPU tests verify private and shared memory contents, original addresses, and access permissions.
   They cover importers that outlive the creator's references, full allocation contents behind partial mappings, multicast and graph replay, HOST_NUMA, peer access, and context teardown.
   They also verify that checkpoint is refused while any handle or mapping for an allocation imported from outside the group remains.
-  Coverage must include large `cuMemCreate` and adapted `cuMemAlloc_v2` allocations accessed by multiple GPUs within one process, without export or multicast binding.
 - Graph tests must replay graphs captured before checkpoint against the restored shared memory and verify their results, without recapturing or updating the graphs after restore.
 - Agent, operator, and Helm tests cover library delivery, preservation of commands and environment values, library identity checks, participant selection, execution in target namespaces, and cancellation.
   They verify that preflight failures leave the source workload unchanged and preparation failures terminate it.
