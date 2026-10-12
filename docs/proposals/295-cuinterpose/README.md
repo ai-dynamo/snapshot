@@ -167,12 +167,13 @@ The coordinator exits when its requested operation finishes.
 CUDA virtual memory management (VMM) separates memory allocation from the addresses used to access it.
 CuInterpose uses this distinction to preserve application pointers while reconstructing shared resources.
 
-An allocation owns a region of GPU or host memory.
+`cuMemCreate` allocates GPU or host memory and returns a `CUmemGenericAllocationHandle`.
 This memory is the allocation's *backing*.
-A mapping connects a virtual address range in a process to some or all of that backing, with permissions specifying which devices may access it.
+`cuMemAddressReserve` reserves a virtual address range, and `cuMemMap` connects that range to some or all of the backing.
+`cuMemSetAccess` sets which devices may access the mapping.
 
-An application pointer identifies a virtual address, while a CUDA allocation handle identifies the underlying resource.
-Several mappings can refer to the same allocation, and a process can release its handle while a mapping continues to retain the allocation.
+An application pointer (`CUdeviceptr`) identifies a virtual address, while the allocation handle identifies the underlying resource.
+Several mappings can refer to the same allocation, and a process can call `cuMemRelease` while a mapping continues to retain the allocation.
 CuInterpose tracks these relationships separately so that restoring a pointer also restores the memory it refers to.
 
 #### Unicast mappings
@@ -192,7 +193,8 @@ The new driver handles and export FDs need not have their old values.
 
 #### Multicast mappings
 
-A multicast mapping refers to an object that binds memory ranges from a team of devices.
+A multicast mapping refers to an object created by `cuMulticastCreate`, also represented by a `CUmemGenericAllocationHandle`.
+The object binds memory ranges from a team of devices.
 The member allocations contain the bytes.
 The multicast object records which devices participate and which memory ranges multicast operations access on each device.
 
@@ -227,7 +229,7 @@ During reconstruction, it uses `cuMemMap` and `cuMemSetAccess` to restore backin
 The same address requirement applies to multicast mappings.
 These operations rely on the [VMM reservation and mapping model](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/virtual-memory-management.html).
 
-Native CUDA checkpointing remains responsible for graph objects and executable graph state.
+Native CUDA checkpointing remains responsible for graph objects (`CUgraph`) and executable graph state (`CUgraphExec`).
 CuInterpose reconstructs the shared memory those graphs reference before the application can replay them.
 Graph execution must remain stopped throughout preparation and reconstruction, including while CUDA is unlocked for the shim's driver calls.
 
@@ -236,7 +238,7 @@ Graph execution must remain stopped throughout preparation and reconstruction, i
 CuInterpose gives shared resources identities that remain valid across restore, even when CUDA creates new handles for them.
 The sharing protocol uses these identities to reconnect processes to the same resource.
 
-Tracked VMM allocations and multicast objects must use the POSIX file-descriptor handle type.
+Tracked VMM allocations and multicast objects must use `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR` for sharing.
 Unicast allocations may use pinned memory at CUDA's `DEVICE` or `HOST_NUMA` locations, meaning GPU memory or host memory associated with a NUMA node.
 FABRIC handles, combinations of exportable handle types, and multicast objects without POSIX export support are outside this design.
 
@@ -246,12 +248,12 @@ Every handle and mapping for such an import must therefore be released before ch
 
 The shim gives each tracked allocation a random 128-bit ID and pairs it with the creator's PID in the container's PID namespace.
 This allocation reference remains stable across checkpoint and restore.
-The application receives a virtual allocation handle, which the shim translates to the process's current CUDA driver handle.
+The application receives a virtual allocation handle (`CUmemGenericAllocationHandle`), which the shim translates to the process's current driver allocation handle.
 Recreating a driver resource therefore does not require changing the handle stored in application memory.
 
-For POSIX export, the shim retains a real CUDA export file descriptor and returns a descriptor for a small memory-backed file containing the allocation reference.
+For `cuMemExportToShareableHandle`, the shim retains a real CUDA export file descriptor and returns a descriptor for a small memory-backed file containing the allocation reference.
 This *virtual shareable FD* passes through the application's existing IPC mechanism.
-When the receiving application imports it, the receiving shim reads the reference and requests the real CUDA descriptor from the creator's socket.
+When the receiving application calls `cuMemImportFromShareableHandle`, its shim reads the reference and requests the real CUDA descriptor from the creator's socket.
 
 ```mermaid
 sequenceDiagram
@@ -271,7 +273,7 @@ sequenceDiagram
 ```
 
 A reply to a unicast export request includes the full backing size and the CUDA location where the creator allocated it.
-The importer obtains allocation properties from CUDA and records its own handles and mappings.
+The importer queries `cuMemGetAllocationPropertiesFromHandle` and records its own handles and mappings.
 For HOST_NUMA imports, the shim also records the creator's NUMA node because CUDA reports node zero for imported handles.
 Exporting an imported allocation again preserves its original allocation reference.
 
@@ -301,12 +303,12 @@ Once an allocation has been shared, closing its export descriptor does not make 
 The shim records multicast creation properties, device attachments, bindings, and mappings.
 Binding a tracked allocation into multicast marks that allocation shared, even if the application never exported a unicast FD.
 
-`BindMem` identifies the member memory by an allocation handle, so the shim records the allocation reference and offset within it.
-`BindAddr` identifies memory by an address, so the shim records that address and its tracked allocation when one exists.
+`cuMulticastBindMem` identifies the member memory by an allocation handle, so the shim records the allocation reference and offset within it.
+`cuMulticastBindAddr` identifies memory by an address, so the shim records that address and its tracked allocation when one exists.
 If the address refers to memory outside this tracking model, native CUDA checkpointing remains responsible for preserving the memory.
-Removing a binding does not change a previously shared tracked allocation back to private.
+Removing a binding with `cuMulticastUnbind` does not change a previously shared tracked allocation back to private.
 
-Each participant must add and bind its device in the same process.
+Each participant must call `cuMulticastAddDevice` and bind that device's memory in the same process.
 Device ordinals are local to that process, so two participants can each use device zero.
 When validating a binding, the coordinator checks for the device attachment in that same participant.
 
@@ -358,7 +360,7 @@ Allocations that are never shared still use native CUDA checkpointing to preserv
 
 #### IPC and mapping lifetime
 
-`cuIpcGetMemHandle` returns a virtual handle in CUDA's fixed 64-byte IPC value.
+`cuIpcGetMemHandle` returns a shim-generated `CUipcMemHandle`, CUDA's fixed 64-byte IPC value.
 An importer uses its allocation reference to obtain a real FD through the peer service and map the backing.
 
 The following sequence shows a successful export and first import.
@@ -381,21 +383,22 @@ sequenceDiagram
     SB-->>B: Pointer to the same backing
 ```
 
-Opening the same allocation again in the context that owns the import returns the same address and increments its open count.
+Opening the same allocation again in the CUDA context (`CUcontext`) that owns the import returns the same address and increments its open count.
 Calling `cuIpcCloseMemHandle` removes the imported mapping only when that count reaches zero.
-An allocation created by `cuMemAlloc_v2` instead uses `cuMemFree_v2`, which synchronizes its owning context before removing the mapping.
+An allocation created by `cuMemAlloc_v2` instead uses `cuMemFree_v2`, which calls `cuCtxSynchronize` on its owning context before removing the mapping.
 If synchronization fails, the mapping is preserved.
 The adapter rejects attempts to free an imported IPC pointer through `cuMemFree_v2`.
 
-Destroying a context, resetting a primary context, or releasing its final reference also removes the converted malloc and IPC mappings it owns.
+Destroying a context with `cuCtxDestroy` also removes the converted malloc and IPC mappings it owns.
+The same applies when `cuDevicePrimaryCtxReset` resets a primary context or `cuDevicePrimaryCtxRelease` releases its final reference.
 The shim preserves those mappings if context teardown fails or the primary context still has references.
 
 #### Peer access and isolation
 
-The shim grants the allocating GPU access to each converted malloc mapping and the importing GPU access to each IPC mapping.
+The shim uses `cuMemSetAccess` to grant the allocating GPU access to each converted malloc mapping and the importing GPU access to each IPC mapping.
 When a call to `cuCtxEnablePeerAccess` succeeds, the shim also grants the current GPU access to existing and future converted mappings owned by the peer context.
 
-Disabling access to a peer context stops the shim from granting the current GPU access to future mappings owned by that context.
+Disabling peer access with `cuCtxDisablePeerAccess` stops the shim from granting the current GPU access to future mappings owned by that context.
 Existing mappings keep the device permissions already granted.
 This design assumes cooperating processes, typically one process per GPU.
 VMM permissions apply to devices, so separate CUDA contexts and disabling peer access do not provide strict access isolation for converted mappings.
@@ -420,7 +423,7 @@ The shim marks an allocation as shared after a successful tracked export, import
 Each selected holder saves the full backing of its assigned shared allocations, including regions outside its own application mappings.
 Saving only the holder's mapped ranges could omit bytes mapped by another process.
 Other holders do not save additional copies of the same allocation.
-If the selected holder retains only a mapping, it obtains a temporary driver handle for the transfer.
+If the selected holder retains only a mapping, it calls `cuMemRetainAllocationHandle` to obtain a temporary allocation handle for the transfer.
 
 | Allocation state | Content preservation |
 | --- | --- |
@@ -432,12 +435,13 @@ If the selected holder retains only a mapping, it obtains a temporary driver han
 #### Copying and lifetime
 
 The carrier code groups DEVICE allocations by CUDA context and device.
-It maps their backing into temporary consecutive address ranges and copies their contents using one CUDA stream per group.
+It maps their backing into temporary consecutive address ranges and copies their contents using one CUDA stream (`CUstream`) per group.
+Transfers use `cuMemcpyDtoHAsync_v2` for capture and `cuMemcpyHtoDAsync_v2` for restore.
 For HOST_NUMA allocations, it copies the contents on the CPU through temporary VMM mappings that the host can access.
 These temporary mappings leave the application's mappings and permissions unchanged.
 
-The shim registers the carrier's host memory as pinned memory while saving or loading allocation contents.
-The CUDA context used for registration stays alive until the copies finish and the memory is unregistered.
+The shim pins the carrier's host memory with `cuMemHostRegister_v2` while saving or loading allocation contents.
+The CUDA context used for registration stays alive until the copies finish and `cuMemHostUnregister` unregisters the memory.
 Between transfers, the carrier is ordinary anonymous memory that CRIU can capture.
 
 If an allocation's recorded CUDA context has been destroyed, the carrier code uses a primary context on the recorded device for DEVICE memory.
@@ -1018,7 +1022,7 @@ The reply from the exporting peer identifies the resource type.
 During an ordinary import, the shim sends the request to the creator identified by its namespace PID.
 During restore, it can send the request to the selected holder while retaining the creator's identity in the allocation reference.
 
-The virtual memory-IPC handle occupies CUDA's fixed 64-byte value:
+The virtual memory-IPC handle occupies a 64-byte `CUipcMemHandle`:
 
 | Field | Bytes |
 | --- | --- |
