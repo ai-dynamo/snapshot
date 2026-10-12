@@ -197,8 +197,8 @@ Restore must preserve both addresses and reconnect them to one recreated allocat
 #### Multicast mappings
 
 Multicast lets a GPU operation access corresponding memory ranges across a team of devices.
-A multicast mapping refers to an object created by `cuMulticastCreate`, represented by a `CUmemGenericAllocationHandle`.
-That object binds the member allocations containing the data and records the participating devices.
+Handles for member allocations and multicast objects share the C type `CUmemGenericAllocationHandle`, but identify different resources.
+`cuMemCreate` returns a handle to memory backing, while `cuMulticastCreate` returns a handle to the object that groups the devices and binds their memory ranges.
 
 A multicast store writes to the corresponding locations in all bound members.
 A multicast load-reduce reads those locations and combines their values.
@@ -218,6 +218,30 @@ Reconstructing multicast therefore requires more than importing a single allocat
 The object, its imports, device attachments, bindings, mappings, and permissions must be recreated in dependency order.
 
 The [CUDA multicast API](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__MULTICAST.html) describes creation, device attachment, binding, and mapping of these objects.
+
+A small setup example makes the distinction concrete: one process uses two compatible GPUs, each contributing an equal-sized memory region at multicast offset zero.
+Here `group_props` is a `CUmulticastObjectProp` with `numDevices = 2`, `size = bytes`, and POSIX export enabled.
+`memory_props` is a `CUmemAllocationProp` for pinned, POSIX-exportable device memory, and `bytes` satisfies both VMM and multicast granularity requirements.
+The sketch assumes initialized CUDA contexts and omits error handling and cleanup.
+
+```cpp
+CUmemGenericAllocationHandle group, member[2];
+cuCtxSetCurrent(contexts[0]);
+cuMulticastCreate(&group, &group_props);
+
+for (int i = 0; i < 2; ++i)
+    cuMulticastAddDevice(group, devices[i]);
+
+for (int i = 0; i < 2; ++i) {
+    cuCtxSetCurrent(contexts[i]);
+    memory_props.location.id = devices[i];
+    cuMemCreate(&member[i], bytes, &memory_props, 0);
+    cuMulticastBindMem(group, 0, member[i], 0, bytes, 0);
+}
+```
+
+A subsequent `cuMemMap` uses `member[i]` for a unicast view of that GPU's memory or `group` for a multicast view of the bound regions.
+CuInterpose tracks the member handles and their contents separately from the group handle and its bindings.
 
 #### Preserving CUDA graphs
 
