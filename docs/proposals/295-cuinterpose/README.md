@@ -87,16 +87,10 @@ recreated. Native CUDA checkpointing can refuse workloads that retain shared
 VMM or multicast resources, so CuInterpose removes those resources before native
 capture and reconstructs them after native restore.
 
-Legacy memory IPC presents a related compatibility problem. CUDA CustomStorage
-allows native checkpointing to hand memory to an external storage implementation.
-In the cross-GPU legacy-IPC case that motivated this design, its export operation
-used the importing GPU's ownership even though the allocation belonged to another
-GPU. That mismatch prevented the allocation from being exported correctly.
-
-CuInterpose avoids that native legacy-IPC export path by implementing supported
-allocation and IPC calls with VMM resources that it can track and reconstruct.
-This is the reason for adapting both allocation and sharing APIs. It is not a
-claim that all CUDA versions or all uses of legacy IPC have the same failure.
+Workloads also share allocations through legacy CUDA memory IPC, which presents
+additional compatibility constraints with native checkpointing. Supporting these
+workloads should not require applications to replace their existing allocation
+and sharing APIs.
 
 ### Goals
 
@@ -381,11 +375,19 @@ zero. An attachment in one participant cannot satisfy a binding in another.
 ### Adapting legacy allocation and IPC APIs
 
 Applications that use `cuMemAlloc_v2` and `cuIpc*MemHandle` do not explicitly
-create VMM allocations or exchange POSIX descriptors. The memory-IPC adapter
-implements these calls using the tracked VMM allocations and peer exchange
-described above. Applications retain the malloc and IPC interfaces, while the
-shim avoids native memory-IPC calls and the CustomStorage export problem
-described in [Motivation](#motivation).
+create VMM allocations or exchange POSIX descriptors. Supporting these interfaces
+requires handling both the allocation and its later export or import.
+
+CUDA CustomStorage allows native checkpointing to hand memory to an external
+storage implementation. In the cross-GPU legacy-IPC case that motivated this
+design, the CustomStorage export operation used the importing GPU's ownership
+even though the allocation belonged to another GPU. That mismatch prevented the
+allocation from being exported correctly.
+
+The memory-IPC adapter avoids that native legacy-IPC export path by implementing
+the supported allocation and IPC calls with tracked VMM allocations and the peer
+exchange described above. Applications retain their malloc and IPC interfaces,
+while CuInterpose can save and reconstruct the underlying shared memory.
 
 #### Why allocation must be intercepted before export
 
