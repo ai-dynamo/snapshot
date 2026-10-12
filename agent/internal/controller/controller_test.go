@@ -1561,6 +1561,7 @@ func TestProcessCaptureQueueItemRequeuesOnError(t *testing.T) {
 	w.client = ctrlfake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(content, pod).
 		WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).Build()
+	require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, content)))
 
 	w.captureQueue.Add(content.Name)
 	got, _ := w.captureQueue.Get()

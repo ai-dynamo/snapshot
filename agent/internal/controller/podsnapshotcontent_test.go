@@ -152,21 +152,22 @@ func contentScheme(t *testing.T) *runtime.Scheme {
 func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Object) *NodeController {
 	t.Helper()
 	s := contentScheme(t)
-	idx := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
-	for _, o := range objs {
-		if sc, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {
-			require.NoError(t, idx.Add(mustUnstructured(t, sc)))
-		}
-	}
 	w := &NodeController{
 		config:    &snapshottypes.AgentConfig{NodeName: "node-a", Storage: snapshottypes.StorageSpec{Type: "pvc", BasePath: t.TempDir()}},
 		clientset: k8sfake.NewClientset(),
 		client: crfake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
 			WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).Build(),
-		runtime:        &fakeRuntime{},
-		log:            logr.Discard(),
-		contentIndexer: idx,
-		captureQueue:   newTestCaptureQueue(t),
+		runtime:      &fakeRuntime{},
+		log:          logr.Discard(),
+		captureQueue: newTestCaptureQueue(t),
+	}
+	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
+	for _, o := range objs {
+		if _, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {
+			stored := &snapshotv1alpha1.PodSnapshotContent{}
+			require.NoError(t, w.client.Get(context.Background(), client.ObjectKeyFromObject(o), stored))
+			require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, stored)))
+		}
 	}
 	w.checkpointFn = fc.fn
 	return w
@@ -1056,6 +1057,7 @@ func TestReconcileCapture_IndexErrorReturned(t *testing.T) {
 	// Indexer without podRefIndex registered → ByIndex returns an error; reconcile surfaces it
 	// so the queue retries, and writes no status.
 	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, content)))
 
 	require.Error(t, w.reconcileCapture(context.Background(), content.Name))
 

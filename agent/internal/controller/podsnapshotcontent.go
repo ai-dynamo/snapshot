@@ -77,12 +77,12 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	logger := logr.FromContextOrDiscard(ctx).WithValues("content", name)
 	ctx = logr.NewContext(ctx, logger)
 
-	content := &snapshotv1alpha1.PodSnapshotContent{}
-	if err := w.client.Get(ctx, client.ObjectKey{Name: name}, content); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("get PodSnapshotContent %q: %w", name, err)
+	content, err := w.cachedContent(name)
+	if err != nil {
+		return err
+	}
+	if content == nil {
+		return nil
 	}
 
 	if content.Spec.Source.NodeName != w.config.NodeName {
@@ -220,6 +220,23 @@ func (w *NodeController) recoverCommittedArtifact(
 		return false, nil
 	}
 	return true, w.markCheckpointReadyWithSource(ctx, content, checkpointSourceFromManifest(manifest), containerName, published)
+}
+
+// cachedContent returns the PodSnapshotContent as last observed by the content informer, or nil
+// when the cache does not hold it.
+func (w *NodeController) cachedContent(name string) (*snapshotv1alpha1.PodSnapshotContent, error) {
+	obj, exists, err := w.contentIndexer.GetByKey(name)
+	if err != nil {
+		return nil, fmt.Errorf("look up PodSnapshotContent %q in the informer cache: %w", name, err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	content, ok := contentFromInformerObj(obj)
+	if !ok {
+		return nil, fmt.Errorf("PodSnapshotContent %q in the informer cache has an unexpected type %T", name, obj)
+	}
+	return content, nil
 }
 
 func (w *NodeController) captureOwnerForPod(pod *corev1.Pod) (string, error) {
