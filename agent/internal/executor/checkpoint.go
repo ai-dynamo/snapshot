@@ -95,7 +95,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	var target *pagebroker.ArtifactTarget
 	var finalDir string
 	if bound {
-		if _, err := coordination.ValidateBinding(req.StoreID, req.ContentUID, req.ContainerName); err != nil {
+		if err := coordination.ValidateBinding(req.StoreID, req.ContentUID, req.ContainerName); err != nil {
 			return nil, fmt.Errorf("validate storage binding: %w", err)
 		}
 		target = &pagebroker.ArtifactTarget{
