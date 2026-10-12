@@ -26,6 +26,7 @@ SPDX-License-Identifier: Apache-2.0
     - [Why allocation must be intercepted before export](#why-allocation-must-be-intercepted-before-export)
     - [IPC and mapping lifetime](#ipc-and-mapping-lifetime)
     - [Peer access and isolation](#peer-access-and-isolation)
+    - [Planned deprecation](#planned-deprecation)
   - [Host carriers](#host-carriers)
     - [What is saved](#what-is-saved)
     - [Copying and lifetime](#copying-and-lifetime)
@@ -322,6 +323,7 @@ That mismatch prevented the allocation from being exported correctly.
 
 The memory-IPC adapter avoids that native legacy-IPC export path by implementing the supported allocation and IPC calls with tracked VMM allocations and the peer exchange described above.
 Applications retain their malloc and IPC interfaces, while CuInterpose can save and reconstruct the underlying shared memory.
+This adapter is a temporary compatibility workaround whose planned deprecation is tied to the driver fix for legacy IPC with CustomStorage.
 
 This adapter supports synchronous device allocation and memory IPC.
 It does not cover event IPC, memory-pool IPC, or managed, async, and pitched allocation families.
@@ -336,6 +338,23 @@ The shim therefore creates POSIX-capable VMM backing at the initial synchronous 
 It reserves and maps an address, rounds the backing size to CUDA's required granularity, and records the requested size separately.
 The application continues to use the returned pointer.
 
+The allocation sequence shows how one application call becomes VMM operations inside the shim:
+
+```mermaid
+sequenceDiagram
+    participant A as Application
+    participant S as Process shim
+    participant D as CUDA driver
+    A->>S: cuMemAlloc_v2(requested size)
+    Note over S: Determine granularity and rounded backing size
+    S->>D: cuMemCreate(rounded size, POSIX exportable)
+    D-->>S: Allocation handle
+    S->>D: cuMemAddressReserve, cuMemMap, cuMemSetAccess
+    D-->>S: Accessible virtual address range
+    Note over S: Record identity, requested size, and backing extent
+    S-->>A: Application pointer
+```
+
 The shim cannot know at allocation time whether the application will later export the pointer, so it converts every supported synchronous malloc call.
 Allocations that are never shared still use native CUDA checkpointing to preserve their contents.
 They incur VMM allocation costs but do not require host carriers.
@@ -345,6 +364,26 @@ They incur VMM allocation costs but do not require host carriers.
 `cuIpcGetMemHandle` returns a virtual handle in CUDA's fixed 64-byte IPC value.
 Unlike the virtual shareable FD, this value is not a file descriptor.
 An importer uses its allocation reference to obtain a real FD through the peer service and map the backing.
+
+The following sequence shows a successful export and first import.
+The applications exchange the opaque IPC value, while only the shims exchange the real CUDA file descriptor:
+
+```mermaid
+sequenceDiagram
+    participant A as Application A
+    participant SA as Shim A
+    participant B as Application B
+    participant SB as Shim B
+    A->>SA: cuIpcGetMemHandle(pointer)
+    Note over SA: Export VMM backing and cache its real CUDA FD
+    SA-->>A: Virtual 64-byte IPC handle
+    A->>B: Send handle through application IPC
+    B->>SB: cuIpcOpenMemHandle(handle)
+    SB->>SA: Request backing by allocation reference
+    SA-->>SB: Real CUDA FD via SCM_RIGHTS
+    Note over SB: Import VMM backing, map it, and set access
+    SB-->>B: Pointer to the same backing
+```
 
 Repeated opens of the same allocation in the supported owning context return the same address and increment an open count.
 The final `cuIpcCloseMemHandle` removes the imported mapping.
@@ -365,6 +404,15 @@ Peer disable stops future grants but preserves permissions already added to exis
 This design assumes cooperating processes, typically one process per GPU.
 Context boundaries and peer disable do not provide strict access isolation for converted mappings.
 Explicit application-managed VMM mappings retain their own access policy.
+
+#### Planned deprecation
+
+Once the driver fix for legacy IPC with CustomStorage is available, the intent is to deprecate this adapter and let the driver handle the legacy allocation and memory-IPC calls natively.
+Retirement requires validating native cross-GPU IPC checkpoint and restore on the supported driver versions, including replay of CUDA graphs captured before checkpoint.
+The current implementation does not automatically bypass the adapter based on driver version.
+
+This deprecation concerns the legacy allocation and IPC conversion, including the VMM rounding costs it introduces.
+It does not retire the tracking and reconstruction of allocations created directly through VMM or of multicast resources.
 
 ### Host carriers
 
