@@ -196,7 +196,7 @@ pub fn cuMemSetAccess(
         .collect();
     unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
     for (start, access) in updates {
-        state.mappings.get_mut(&start).unwrap().access = access;
+        state.set_mapping_access(start, access);
     }
     Ok(())
 }

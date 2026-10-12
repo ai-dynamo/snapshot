@@ -82,6 +82,28 @@ pub(crate) fn access_metadata(
     metadata
 }
 impl ProcessState {
+    /// Publish permissions only after the driver has accepted the access update.
+    pub(crate) fn set_mapping_access(&mut self, address: u64, access: Vec<CUmemAccessDesc>) {
+        let mapping = self.mappings.get_mut(&address).unwrap();
+        if let Some(allocation) = self
+            .memblocks
+            .get_mut(&mapping.id)
+            .and_then(Memblock::unicast_mut)
+            && allocation.properties.location.type_
+                == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+            && access.iter().any(|entry| {
+                entry.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+                    && entry.location.id != allocation.properties.location.id
+                    && entry.flags != CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_NONE
+            })
+        {
+            // Peer mappings can use backing that native CUDA cannot restore even
+            // without an export. Keep using the carrier after access is revoked.
+            allocation.shared = true;
+        }
+        mapping.access = access;
+    }
+
     pub(crate) fn adopt_unicast(&mut self, mut allocation: Allocation) -> Result<u64> {
         let id = allocation.reference.id;
         let handle = self.mint_virtual_allocation_handle(id)?;
