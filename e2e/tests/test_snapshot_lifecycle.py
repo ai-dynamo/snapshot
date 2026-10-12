@@ -431,8 +431,13 @@ def test_restored_workload_logs_and_exit_reach_kubernetes(
             config.namespace, run.restore_pod, f"echo 7 > {snap.EXIT_REQUEST}"
         )
         assert snap.wait_for_container_exit(config.namespace, run.restore_pod) == 7
-        pod = k8s.read_pod(config.namespace, run.restore_pod)
-        assert pod.status.phase == "Failed"
+        # kubelet sets the Pod's phase after it finishes tearing the Pod down,
+        # a little after the container's own status shows the exit.
+        def failed() -> object | None:
+            pod = k8s.read_pod(config.namespace, run.restore_pod)
+            return pod if pod.status.phase == "Failed" else None
+
+        pod = snap.wait_for(f"pod {run.restore_pod} to fail", failed, timeout=60, poll_interval=2)
         assert pod.status.container_statuses[0].restart_count == 0
     except Exception:
         snap.debug_dump(config, run)
