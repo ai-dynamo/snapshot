@@ -13,9 +13,11 @@ roadmap.
   calls (e.g. Datadog GPU monitoring) — CUDA calls may fail or hang after
   restore, with undefined results. Disable such interception for workloads
   that will be snapshotted.
-- NRI must be enabled in the container runtime on every node that restores.
-  The node agent uses it to make its restore proxy PID 1 in restore
-  containers; without it, restores fail.
+- Every node that restores needs a container runtime with NRI v0.10 or newer,
+  enabled: containerd 2.2 or newer. The node agent uses NRI to make its restore
+  proxy PID 1 in restore containers. Older runtimes drop that change silently,
+  and without NRI it never happens; either way, restores fail. The agent logs
+  an error when it registers with a runtime that is too old.
 - A Pod gets one restore. If a restored container starts again, for example
   under `restartPolicy: Always` after the restored process exits, it ends in
   `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in

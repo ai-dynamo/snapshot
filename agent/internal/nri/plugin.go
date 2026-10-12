@@ -20,6 +20,7 @@ import (
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
 	"github.com/go-logr/logr"
+	"golang.org/x/mod/semver"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
@@ -40,6 +41,11 @@ const (
 
 	// ProxyBinaryPath is where the agent image ships the proxy.
 	ProxyBinaryPath = nsmount.SnapshotBinSrc + "/" + podcontract.RestoreProxyBinaryName
+
+	// argsNRIVersion is the first NRI version whose runtimes apply a
+	// container's args adjustment, containerd 2.2 and later. Older runtimes
+	// accept it and drop it silently.
+	argsNRIVersion = "v0.10.0"
 
 	// lookupTimeout bounds the API read for Pods without a container map. It
 	// runs inside the runtime's CreateContainer call. NRI gives that whole call
@@ -72,6 +78,8 @@ type Plugin struct {
 	openControlDir func(podUID, containerName string) (*os.File, error)
 	proxyPath      string
 	socketPath     string
+	// runtimeNRIVersion is the stub's, set in Run.
+	runtimeNRIVersion func() string
 }
 
 // NewPlugin returns a plugin that resolves destinations through resolver. If
@@ -109,6 +117,8 @@ func (p *Plugin) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create NRI plugin: %w", err)
 	}
+	// Configure, called during Start, reads the runtime's NRI version.
+	p.runtimeNRIVersion = s.RuntimeNRIVersion
 	if err := s.Start(ctx); err != nil {
 		return fmt.Errorf("NRI plugin could not register with the container runtime; "+
 			"restores need NRI, so the agent stops. Enable NRI in the runtime, or keep the agent off this node: %w", err)
@@ -126,6 +136,30 @@ func (p *Plugin) Run(ctx context.Context) error {
 		}
 		return errors.New("NRI connection to the container runtime closed")
 	}
+}
+
+// Configure is called when the plugin registers. It reports a runtime too old
+// to apply the restore proxy command. The plugin keeps running: checkpoints
+// work there, and the agent fails each restore with the reason.
+func (p *Plugin) Configure(_ context.Context, _, runtime, version string) (api.EventMask, error) {
+	nriVersion := ""
+	if p.runtimeNRIVersion != nil {
+		nriVersion = p.runtimeNRIVersion()
+	}
+	log := p.log.WithValues("runtime", runtime+"/"+version, "nri_version", nriVersion)
+	if dropsArgs(nriVersion) {
+		log.Error(nil, "The container runtime ignores the restore proxy command, so restores on this node fail; use containerd 2.2 or newer",
+			"required_nri_version", argsNRIVersion)
+	} else {
+		log.Info("Registered with the container runtime")
+	}
+	return 0, nil
+}
+
+// dropsArgs reports whether a runtime with this NRI version drops a
+// container's args adjustment. An unknown version is not reported.
+func dropsArgs(nriVersion string) bool {
+	return semver.IsValid(nriVersion) && semver.Compare(nriVersion, argsNRIVersion) < 0
 }
 
 // CreateContainer shapes restore destination containers and leaves every

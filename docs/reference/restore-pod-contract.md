@@ -146,8 +146,8 @@ requested profile with a conflicting profile.
 Snapshot replaces the command of every destination container with its restore
 proxy, `/snapshot-control/snapshot-restore-proxy`. The Pod object is not
 changed: the node agent's NRI plugin sets the process arguments when the
-container is created, so NRI must be enabled in the container runtime. The
-proxy is the container's PID 1. It waits for the restore, then follows the
+container is created. That needs NRI v0.10 or newer, enabled in the container
+runtime: containerd 2.2 or newer. The proxy is the container's PID 1. It waits for the restore, then follows the
 restored process: it forwards signals to it, and exits with its exit code, so
 the container ends when the restored workload does. If the proxy is not PID 1,
 the agent fails the restore. Keep the source's command in restore Pods; it never

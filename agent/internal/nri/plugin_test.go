@@ -232,3 +232,26 @@ func TestRunFailsWithoutNRI(t *testing.T) {
 	assert.Contains(t, err.Error(), "could not register with the container runtime")
 	assert.NoError(t, ctx.Err(), "fails at once, without waiting")
 }
+
+func TestDropsArgs(t *testing.T) {
+	for version, want := range map[string]bool{
+		"v0.8.0":  true, // containerd 2.0 and 2.1
+		"v0.9.1":  true,
+		"v0.10.0": false, // containerd 2.2
+		"v0.11.0": false,
+		"":        false, // unknown: not reported
+		"unknown": false,
+	} {
+		assert.Equal(t, want, dropsArgs(version), version)
+	}
+}
+
+func TestConfigureKeepsTheDefaultEvents(t *testing.T) {
+	p, _ := testPlugin(t, &fakeResolver{})
+	p.runtimeNRIVersion = func() string { return "v0.8.0" }
+
+	events, err := p.Configure(context.Background(), "", "containerd", "v2.1.5")
+
+	require.NoError(t, err)
+	assert.Zero(t, events, "zero keeps the events the plugin implements")
+}

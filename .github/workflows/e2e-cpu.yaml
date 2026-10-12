@@ -62,7 +62,7 @@ env:
   PYTHONUNBUFFERED: "1"
   UV_LINK_MODE: copy
   K3D_VERSION: v5.8.3
-  KUBECTL_VERSION: v1.32.13
+  KUBECTL_VERSION: v1.34.12
   # The k3d-managed registry hack/k3d-cpu-e2e.sh creates. localhost is the one
   # name Docker and BuildKit treat as plain-HTTP without further configuration;
   # the cluster is given a mirror that maps it to the registry's container.
