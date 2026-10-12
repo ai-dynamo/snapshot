@@ -515,14 +515,17 @@ A holder may map only part of an allocation, while other processes use the remai
 It therefore saves the full backing of each assigned allocation so the checkpoint includes every process's data.
 Each shared allocation is saved once.
 
+For `cuMemCreate`, [`CUmemAllocationProp.requestedHandleTypes`](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/structCUmemAllocationProp__v1.html) controls exportability.
+Setting it to `0` creates a nonexportable allocation, while `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR` enables POSIX file descriptor export.
+
 The shim marks an allocation as shared after a successful tracked export, import, or binding into a tracked multicast object.
 It keeps that classification after export descriptors are closed or `cuMulticastUnbind` removes bindings.
 If the selected holder retains only a mapping, it calls `cuMemRetainAllocationHandle` to obtain a temporary allocation handle for the transfer.
 
 | Allocation state | Content preservation |
 | --- | --- |
-| Native, nonexportable VMM | Native CUDA checkpointing |
-| Tracked allocation or converted malloc never shared | Native CUDA checkpointing, with mappings and handles left intact |
+| Nonexportable `cuMemCreate` allocation | Native CUDA checkpointing |
+| POSIX-exportable `cuMemCreate` or adapted `cuMemAlloc_v2` allocation never marked shared | Native CUDA checkpointing, with mappings and handles left intact |
 | Shared tracked DEVICE or HOST_NUMA backing | One full copy in the selected holder's carrier |
 | Tracked allocation bound into a multicast object | One copy in a host carrier, with no additional copy for the multicast object |
 
