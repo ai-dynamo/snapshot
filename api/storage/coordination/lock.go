@@ -5,8 +5,8 @@ package coordination
 
 import "sync"
 
-// Key identifies one (store, artifact) pair that delete, sweep and
-// metadata-recovery work must serialize on.
+// Key identifies one (store, artifact) pair that delete and sweep work must
+// serialize on.
 type Key struct {
 	StoreID     string
 	ArtifactUID string

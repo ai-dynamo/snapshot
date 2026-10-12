@@ -453,33 +453,24 @@ func TestProcessDeleteContentSerializesOnSameArtifactKey(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
-func TestProcessRecoverMetadataNoopOnMissingContent(t *testing.T) {
-	q, _ := newTestQueue(t, t.TempDir())
-	key := newRecoverMetadataKey("gone", "uid-gone", "store-v1-"+fixedHex(), "main")
-	require.NoError(t, q.processRecoverMetadata(context.Background(), key))
+func boundTestContent(t *testing.T, name, uid string) *snapshotv1alpha1.PodSnapshotContent {
+	t.Helper()
+	return &snapshotv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(uid), ResourceVersion: "1"},
+		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
+			Storage: &snapshotv1alpha1.CheckpointStorageBinding{
+				StoreID: "store-v1-" + fixedHex(),
+			},
+		},
+	}
 }
 
-func TestProcessRecoverMetadataNoopOnUIDMismatch(t *testing.T) {
-	content := boundTestContent(t, "content", "uid-current")
-	q, _ := newTestQueue(t, t.TempDir(), content)
-	key := newRecoverMetadataKey("content", "uid-stale", content.Spec.Storage.StoreID, "main")
-	require.NoError(t, q.processRecoverMetadata(context.Background(), key))
-}
-
-func TestProcessRecoverMetadataRefusesStoreIDMismatch(t *testing.T) {
-	content := boundTestContent(t, "content", "uid-rebind")
-	q, _ := newTestQueue(t, t.TempDir(), content)
-	key := newRecoverMetadataKey("content", "uid-rebind", "store-v1-"+fixedHex()+"stale", "main")
-
-	err := q.processRecoverMetadata(context.Background(), key)
-	require.ErrorContains(t, err, "no longer bound to store")
-}
-
-func TestProcessRecoverMetadataPropagatesEvidenceDiscoveryError(t *testing.T) {
-	content := boundTestContent(t, "content", "uid-evidence")
-	q, _ := newTestQueue(t, t.TempDir(), content)
-	key := newRecoverMetadataKey("content", "uid-evidence", content.Spec.Storage.StoreID, "main")
-
-	err := q.processRecoverMetadata(context.Background(), key)
-	require.ErrorContains(t, err, "discover publication evidence")
+// fixedHex returns a syntactically valid 64-hex-character store ID suffix.
+func fixedHex() string {
+	const hex = "0123456789abcdef"
+	out := make([]byte, 64)
+	for i := range out {
+		out[i] = hex[i%len(hex)]
+	}
+	return string(out)
 }

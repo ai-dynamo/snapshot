@@ -17,34 +17,27 @@ const ArtifactCleanupBlockedReason = "ArtifactCleanupBlocked"
 type Mode string
 
 const (
-	ModeDeleteContent   Mode = "delete-content"
-	ModeSweep           Mode = "sweep"
-	ModeRecoverMetadata Mode = "recover-metadata"
+	ModeDeleteContent Mode = "delete-content"
+	ModeSweep         Mode = "sweep"
 )
 
 // Enqueuer is the subset of Queue used to schedule work, so callers (and
 // their tests) don't depend on the workqueue implementation directly.
 type Enqueuer interface {
 	EnqueueDeleteContent(name string, uid types.UID)
-	EnqueueRecoverMetadata(name string, uid types.UID, storeID, containerName string)
 }
 
 // WorkItemKey identifies one unit of maintenance work; it is comparable so
 // the workqueue deduplicates repeated enqueues.
 //
-// Name/UID matter only for ModeDeleteContent and ModeRecoverMetadata: the
-// worker re-reads the object and compares UID, so a content deleted and
-// recreated under the same name never matches a stale key. ModeSweep
-// carries no identity, so duplicate sweep triggers coalesce into one key.
-// StoreID/ContainerName narrow ModeRecoverMetadata to the exact publication
-// a worker resolves store configuration for at processing time; a store-ID
-// mismatch there is a terminal refusal, not a retry.
+// Name/UID matter only for ModeDeleteContent: the worker re-reads the object
+// and compares UID, so a content deleted and recreated under the same name
+// never matches a stale key. ModeSweep carries no identity, so duplicate
+// sweep triggers coalesce into one key.
 type WorkItemKey struct {
-	Mode          Mode
-	Name          string
-	UID           types.UID
-	StoreID       string
-	ContainerName string
+	Mode Mode
+	Name string
+	UID  types.UID
 }
 
 func newDeleteContentKey(name string, uid types.UID) WorkItemKey {
@@ -53,8 +46,4 @@ func newDeleteContentKey(name string, uid types.UID) WorkItemKey {
 
 func newSweepKey() WorkItemKey {
 	return WorkItemKey{Mode: ModeSweep}
-}
-
-func newRecoverMetadataKey(name string, uid types.UID, storeID, containerName string) WorkItemKey {
-	return WorkItemKey{Mode: ModeRecoverMetadata, Name: name, UID: uid, StoreID: storeID, ContainerName: containerName}
 }

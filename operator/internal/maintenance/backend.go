@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-dynamo/snapshot/api/storage/coordination"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
@@ -20,10 +19,6 @@ type Backend interface {
 	// Delete is a no-op when contentUID has nothing to remove.
 	Delete(ctx context.Context, contentUID string) error
 	Candidates(ctx context.Context, logger logr.Logger) (map[string]struct{}, error)
-	// Evidence discovers published-publication evidence for one artifact, for
-	// RepairPublication to match against a content's expected commitID.
-	// Discovery is backend-specific: it is not the coordination contract's job.
-	Evidence(ctx context.Context, artifactUID string) ([]coordination.Evidence, error)
 }
 
 // BackendRegistry looks up a Backend by Name(), case-insensitively.
