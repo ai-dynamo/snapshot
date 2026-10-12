@@ -471,19 +471,50 @@ A missing or unresponsive socket is an error, not a reason to omit that process.
 The read-only `INSPECT` operation validates creators, holders, mapping ranges,
 permissions, and multicast membership without changing process state. Because
 resources can still change after inspection, preparation validates the records
-again after each participant has entered checkpoint mode:
+again after each participant has entered checkpoint mode.
 
-1. `BEGIN_CHECKPOINT` visits participants sequentially, requires an active
-   process with no outstanding driver calls that temporarily released the state
-   lock, and prevents tracked mutations while returning the process's records.
-2. The coordinator validates the frozen group and selects checkpoint holders.
-3. `PREPARE_MULTICAST` drops exports, unmaps, unbinds, and releases multicast
-   resources.
-4. `SAVE_ALLOCATIONS` copies shared backing into the selected holders' carriers.
-5. `PREPARE_UNICAST` drains peer export sends, drops shared exports, unmaps,
-   and releases shared driver handles.
-6. The coordinator publishes `cuinterpose.state`. Snapshot then runs native
-   CUDA lock/checkpoint and CRIU capture.
+The sequence below shows a successful capture. Process shims share one lifeline
+to keep the group interactions readable. The coordinator lifeline represents
+separate invocations for inspection and preparation, and the agent lifeline
+includes its namespace helpers.
+
+```mermaid
+sequenceDiagram
+    participant A as Snapshot agent
+    participant C as Coordinator
+    participant S as Workload processes / shims
+    participant N as Native CUDA checkpointing
+    participant R as CRIU
+    A->>C: Inspect participant group
+    C->>S: INSPECT
+    S-->>C: Allocation and mapping records
+    C-->>A: Group passes preflight
+    Note over A,S: Application finishes outstanding work and prevents new work
+    A->>C: Prepare participant group
+    C->>S: BEGIN_CHECKPOINT, one process at a time
+    S-->>C: Frozen resource records
+    C->>C: Validate group and select holders
+    C->>S: PREPARE_MULTICAST
+    S-->>C: Multicast resources removed
+    C->>S: SAVE_ALLOCATIONS
+    S-->>C: Shared bytes saved in host carriers
+    C->>S: PREPARE_UNICAST
+    S-->>C: Shared unicast resources removed
+    C->>C: Publish cuinterpose.state
+    C-->>A: Preparation complete
+    A->>N: Lock and checkpoint native CUDA state
+    N-->>A: Native CUDA capture complete
+    A->>R: Capture process tree
+    Note over S,R: CRIU saves shim records and host-carrier bytes
+    R-->>A: Process capture complete
+```
+
+`BEGIN_CHECKPOINT` requires an active process with no outstanding driver calls
+that temporarily released the state lock. It prevents tracked mutations before
+returning the process's records. `PREPARE_MULTICAST` removes exports, mappings,
+bindings, and multicast handles. After the carriers hold the shared bytes,
+`PREPARE_UNICAST` waits for peer export sends to finish, removes shared exports
+and mappings, and releases shared driver handles.
 
 After sequential checkpoint entry, the coordinator dispatches each mutating
 phase concurrently to all participants and waits for every reply before starting
@@ -509,17 +540,45 @@ and restores the required library mounts. Shim socket paths are excluded from
 rootfs archives because CRIU restores the live socket bindings with the process
 tree. CRIU also restores namespace PIDs, shim records, and host carriers.
 
-Reconstruction proceeds in this order:
+The restore sequence begins with those process resources and ends only after
+the reconstructed sharing relationships have been verified. Application threads
+continue waiting while the restored shims handle coordinator requests.
 
-1. Restore native CUDA state and unlock CUDA so the shims can call the driver.
-2. Inspect the restored shims and validate the saved participant set and records.
-3. `LOAD_ALLOCATIONS` recreates backing in selected holders, copies carrier
-   contents back, and restores their mappings, permissions, and export FDs.
-4. `RESTORE_UNICAST` reconnects other holders to that backing at their original
-   addresses.
-5. Rebuild multicast objects, device membership, bindings, and mappings.
-6. Compare a fresh inspection with the captured records. Only after success
-   does Snapshot release the application's restore-complete wait.
+```mermaid
+sequenceDiagram
+    participant A as Snapshot agent
+    participant C as Coordinator
+    participant S as Workload processes / shims
+    participant N as Native CUDA checkpointing
+    participant R as CRIU
+    A->>A: Verify library identity and prepare mounts
+    A->>R: Restore process tree
+    Note over S,R: Restore shim records, sockets, and host carriers
+    R-->>A: Processes restored, application still waiting
+    A->>N: Restore native CUDA state and unlock
+    N-->>A: CUDA available for reconstruction
+    A->>C: Reconstruct participant group
+    C->>S: INSPECT
+    S-->>C: Restored resource records
+    C->>C: Validate against saved participant set and records
+    C->>S: LOAD_ALLOCATIONS
+    S-->>C: Holders recreate backing and copy carrier bytes back
+    C->>S: RESTORE_UNICAST
+    S-->>C: Other holders reconnect their mappings
+    C->>S: Reconstruct multicast in four group phases
+    S-->>C: Objects, devices, bindings, and mappings restored
+    C->>S: INSPECT
+    S-->>C: Reconstructed resource records
+    C->>C: Compare with captured records
+    C-->>A: Reconstruction verified
+    A->>S: Signal restore-complete to the application
+```
+
+`LOAD_ALLOCATIONS` recreates backing in the selected holders, copies carrier
+contents into it, and restores their mappings, permissions, and export FDs.
+`RESTORE_UNICAST` reconnects the other holders to that same backing at their
+original addresses. Each reconstruction phase runs across the group and must
+receive every participant's reply before the next phase begins.
 
 Unlocking CUDA allows the shim to call the driver during reconstruction. It does
 not mean the application may resume: application threads must continue waiting
