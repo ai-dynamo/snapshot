@@ -750,20 +750,18 @@ SnapshotJob automates this preparation from the annotated Pod template and the s
 | Mount the files | Mount the delivery volume read-only at `/tmp/snapshot-cuda` in the target container. | Adds the volume and read-only target mount. |
 | Start the application | Prefix the target container's `command` with the [launcher arguments](#launcher-cli). | Prepends that prefix to the supplied application `command`, preserving `args` and `env`. |
 
-The resulting SnapshotJob source Pod has these components:
+In the source Pod, the installer fills the shared volume before the target container starts.
+Both containers mount that volume at `/tmp/snapshot-cuda`, with different access modes:
 
 ```mermaid
-flowchart LR
-    O["SnapshotJob operator"]
-    subgraph P["Source Pod"]
-        I["snapshot-cuda-install<br/>Init container from configured image"]
-        V["snapshot-cuda<br/>emptyDir: launcher and both libraries"]
-        T["Target container<br/>Application started through launcher"]
-        I -->|"copies files through writable mount"| V
-        T -->|"read-only mount at /tmp/snapshot-cuda"| V
+flowchart TB
+    subgraph P["Source Pod created by SnapshotJob"]
+        I["Added init container<br/>Copies files from the installer image"]
+        T["Target container<br/>Updated command: cuinterpose-launch … -- application<br/>Original args and env preserved"]
+        V[("Added shared emptyDir<br/>cuinterpose-launch<br/>libcuinterpose.so<br/>libcuinterpose_core.so")]
+        I -->|"Read-write mount"| V
+        T -->|"Read-only mount"| V
     end
-    O -->|"adds installer"| I
-    O -->|"prefixes command"| T
 ```
 
 The operator rejects a missing application `command` or collisions with reserved installer names or mount paths before creating the source Job.
