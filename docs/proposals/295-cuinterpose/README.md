@@ -206,10 +206,12 @@ These addresses require the appropriate multicast instructions, rather than ordi
 See the [PTX multimem instructions](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-multimem-ld-reduce-multimem-st-multimem-red).
 
 ```mermaid
-flowchart LR
+flowchart TB
+    UA["Unicast mapping on GPU A"] --> A["Member backing on GPU A"]
     M["Multicast mapping"] --> O["Multicast object"]
-    O --> A["Member backing on GPU A"]
-    O --> B["Member backing on GPU B"]
+    UB["Unicast mapping on GPU B"] --> B["Member backing on GPU B"]
+    O -->|binds a range| A
+    O -->|binds a range| B
 ```
 
 Reconstructing multicast therefore requires more than importing a single allocation.
@@ -280,28 +282,28 @@ Existing imports can remain valid after the creator releases its own handles and
 The coordinator prefers the creator if it still has a handle or mapping.
 Otherwise it selects the holder with the **lowest namespace PID** among processes that still retain the allocation.
 Each recorded holder must have a local handle or mapping, and the creator process must still belong to the group.
-For a multicast object, the original creator must remain responsible for recreating it.
 
 New imports contact the creator, so it must retain a handle or mapping from which it can export the backing.
 Keeping only a virtual shareable FD is insufficient: the file records allocation identity but does not itself retain CUDA memory.
 
 #### Multicast tracking
 
-Importing a multicast object gives a process a local handle, but reconstructing it also requires knowing its devices and member memory.
-The shim therefore tracks device attachments, bindings, and mappings alongside the descriptor exchange.
-Because CUDA cannot query the object's creation properties after import, the exporting shim includes them in its reply.
+A restored multicast mapping must still access the corresponding memory range on every device in its team.
+This requires preserving both the member allocations' contents and the bindings that associate them with the multicast object.
+
+CuInterpose preserves tracked member allocations through the same allocation records and host carriers used for unicast.
+It additionally records the multicast object's creation properties, device membership, bindings, and virtual mappings so it can reconstruct those relationships around the restored memory.
 
 `cuMulticastBindMem` identifies the member memory by an allocation handle, so the shim records the allocation reference and offset within it.
 `cuMulticastBindAddr` identifies memory by an address, so the shim records that address and its tracked allocation when one exists.
 If the address refers to memory outside this tracking model, native CUDA checkpointing remains responsible for preserving the memory.
 
-Each participant must call `cuMulticastAddDevice` and bind that device's memory in the same process.
-Device ordinals are local to that process, so two participants can each use device zero.
-When validating a binding, the coordinator checks for the device attachment in that same participant.
+During capture, the shim removes multicast mappings with `cuMemUnmap` and bindings with `cuMulticastUnbind`, then releases the object handle with `cuMemRelease`.
+It retains the records needed to rebuild the object after its member allocations have been restored.
 
-Unicast restore reconnects mappings to one backing allocation.
-For multicast, the creator first recreates the shared object with `cuMulticastCreate`, and peers import it through `cuMemImportFromShareableHandle`.
-Every device must then be attached with `cuMulticastAddDevice` before either process restores its bindings with `cuMulticastBindMem` or `cuMulticastBindAddr`.
+During restore, the creator recreates the object with `cuMulticastCreate`, and peers import it through `cuMemImportFromShareableHandle`.
+CUDA requires every device to be attached with `cuMulticastAddDevice` before binding or mapping the multicast object.
+The shim follows that ordering when restoring bindings with `cuMulticastBindMem` or `cuMulticastBindAddr`.
 Each shim restores its virtual mappings and permissions with `cuMemMap` and `cuMemSetAccess`.
 
 The example below starts after both member allocations have been recreated:
@@ -333,6 +335,12 @@ sequenceDiagram
         B-->>C: Ready
     end
 ```
+
+CuInterpose adds these checkpoint requirements to CUDA's multicast model:
+
+- Device attachment with `cuMulticastAddDevice` and memory binding must occur **in the same process**.
+- The **original creator must retain the tracked multicast object and remain in the checkpoint group** to recreate it.
+- At capture, **every declared device must be attached and have a recorded binding**.
 
 #### Supported sharing configurations
 
