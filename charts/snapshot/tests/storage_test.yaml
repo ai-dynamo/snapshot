@@ -17,7 +17,6 @@ tests:
       - equal:
           path: data["storage.yaml"]
           value: |
-            type: "pvc"
             pvc:
               namespace: "storage-ns"
               claimName: "snapshot-pvc"

@@ -17,8 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
-const pvcStorageYAML = `type: pvc
-pvc:
+const pvcStorageYAML = `pvc:
   namespace: snapshot
   claimName: snapshot-pvc
   basePath: /
@@ -96,11 +95,11 @@ func TestConfiguredStoreID(t *testing.T) {
 	}{
 		{"PVC identity", pvcStorageYAML, ""},
 		{"normalized root", strings.Replace(pvcStorageYAML, "basePath: /", "basePath: ///./", 1), ""},
-		{"missing backend", "pvc: {}", "storage type must be pvc"},
-		{"S3 not enabled", "type: s3", "storage type must be pvc"},
-		{"missing identity", "type: pvc", "PVC storage identity is required"},
-		{"null identity", "type: pvc\npvc: null", "PVC storage identity is required"},
-		{"empty identity", "type: pvc\npvc: {}", "PVC namespace"},
+		{"missing backend", "{}", "PVC storage identity is required"},
+		{"S3 not enabled", "s3:\n  bucket: b\n", "decode storage configuration"},
+		{"type discriminator", "type: pvc\n" + pvcStorageYAML, "decode storage configuration"},
+		{"null identity", "pvc: null", "PVC storage identity is required"},
+		{"empty identity", "pvc: {}", "PVC namespace"},
 		{"missing namespace", strings.Replace(pvcStorageYAML, "  namespace: snapshot\n", "", 1), "PVC namespace"},
 		{"missing claim", strings.Replace(pvcStorageYAML, "  claimName: snapshot-pvc\n", "", 1), "PVC claim name"},
 		{"missing root", strings.Replace(pvcStorageYAML, "  basePath: /\n", "", 1), "PVC base path"},
@@ -108,7 +107,7 @@ func TestConfiguredStoreID(t *testing.T) {
 		{"traversal", strings.Replace(pvcStorageYAML, "basePath: /", "basePath: /a/..", 1), "parent traversal"},
 		{"unknown field", pvcStorageYAML + "unknown: value\n", "decode storage configuration"},
 		{"misspelled claim", strings.Replace(pvcStorageYAML, "claimName:", "claim:", 1), "decode storage configuration"},
-		{"duplicate key", pvcStorageYAML + "type: pvc\n", "decode storage configuration"},
+		{"duplicate key", pvcStorageYAML + "pvc: {}\n", "decode storage configuration"},
 		{"malformed YAML", "[", "decode storage configuration"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -44,14 +44,10 @@ func configuredStoreID(configPath string) (string, error) {
 		return "", fmt.Errorf("read storage configuration: %w", err)
 	}
 	var cfg struct {
-		Type string       `json:"type"`
-		PVC  *storage.PVC `json:"pvc"`
+		PVC *storage.PVC `json:"pvc"`
 	}
 	if err := yaml.UnmarshalStrict(data, &cfg); err != nil {
 		return "", fmt.Errorf("decode storage configuration: %w", err)
-	}
-	if cfg.Type != "pvc" {
-		return "", fmt.Errorf("storage type must be pvc; other backends are not supported yet")
 	}
 	if cfg.PVC == nil {
 		return "", fmt.Errorf("PVC storage identity is required")
