@@ -18,6 +18,7 @@ SPDX-License-Identifier: Apache-2.0
   - [CUDA memory and mappings](#cuda-memory-and-mappings)
     - [Unicast mappings](#unicast-mappings)
     - [Multicast mappings](#multicast-mappings)
+    - [Preserving CUDA graphs](#preserving-cuda-graphs)
   - [Interposing VMM sharing](#interposing-vmm-sharing)
     - [Creator and checkpoint holder](#creator-and-checkpoint-holder)
     - [Multicast tracking](#multicast-tracking)
@@ -101,6 +102,8 @@ claim that all CUDA versions or all uses of legacy IPC have the same failure.
 
 - Preserve allocation identity, contents, virtual addresses, access permissions,
   and supported unicast and multicast relationships.
+- Preserve existing CUDA graphs so they can replay after restore without graph
+  recapture or changes to the pointers recorded in their nodes.
 - Save one content copy per shared tracked allocation, while leaving
   never-shared allocations on the native CUDA checkpoint path.
 - Validate the participant group before teardown and verify reconstructed
@@ -269,6 +272,30 @@ payload that needs another copy of every member's bytes.
 
 The [CUDA multicast API](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__MULTICAST.html)
 describes creation, device attachment, binding, and mapping of these objects.
+
+#### Preserving CUDA graphs
+
+Preserving virtual addresses is essential for CUDA graphs as well as application
+pointers. Graph nodes retain the memory addresses supplied when the graph was
+captured or constructed. Restoring the bytes at different addresses would leave
+those nodes referring to the old locations. The goal is to replay the existing
+graphs after restore without recapturing them or updating their memory
+references. See NVIDIA's [CUDA graph memory constraints](https://docs.nvidia.com/dl-cuda-graph/latest/cuda-graph-basics/constraints.html).
+
+VMM separates virtual-address reservations from physical backing, which lets
+CuInterpose remove shared resources without discarding their application address
+ranges. During checkpoint preparation, it uses `cuMemUnmap` and `cuMemRelease`
+to remove mappings and release backing references, while retaining the address
+reservations. During reconstruction, it uses `cuMemMap` and `cuMemSetAccess` to
+restore backing and permissions at the original addresses. The same address
+requirement applies to multicast mappings. These operations rely on the
+[VMM reservation and mapping model](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/virtual-memory-management.html).
+
+Native CUDA checkpointing remains responsible for graph objects and executable
+graph state. CuInterpose reconstructs the shared memory those graphs reference
+before the application can replay them. Graph execution must remain stopped
+throughout preparation and reconstruction, including while CUDA is unlocked for
+the shim's driver calls.
 
 ### Interposing VMM sharing
 
@@ -923,6 +950,9 @@ Tests should verify the contracts at each boundary:
   importers surviving creator reference release, full backing behind partial
   mappings, multicast and graph replay, HOST_NUMA, peer access, context teardown,
   and foreign-import refusal until all references are released.
+- Graph tests must replay graphs captured before checkpoint against the restored
+  shared memory and verify their results, without recapturing or updating the
+  graphs after restore.
 - Agent, operator, and Helm tests cover delivery, command/environment preservation,
   library identity, participant subsets, namespace execution, cancellation, and
   the boundary between safe preflight refusal and source termination.
