@@ -31,6 +31,7 @@ SPDX-License-Identifier: Apache-2.0
   - [Host carriers](#host-carriers)
     - [What is saved](#what-is-saved)
     - [Copying and lifetime](#copying-and-lifetime)
+    - [HOST_NUMA allocations](#host_numa-allocations)
   - [Capture](#capture)
   - [Restore](#restore)
   - [Process runtime and concurrency](#process-runtime-and-concurrency)
@@ -277,7 +278,7 @@ The *creator* is the process that originally allocated it.
 Existing imports can remain valid after the creator releases its own handles and mappings, so another holder may need to preserve the allocation.
 
 The coordinator prefers the creator if it still has a handle or mapping.
-Otherwise it selects the holder with the lowest namespace PID among processes that still retain the allocation.
+Otherwise it selects the holder with the **lowest namespace PID** among processes that still retain the allocation.
 Each recorded holder must have a local handle or mapping, and the creator process must still belong to the group.
 For a multicast object, the original creator must remain responsible for recreating it.
 
@@ -298,11 +299,45 @@ Each participant must call `cuMulticastAddDevice` and bind that device's memory 
 Device ordinals are local to that process, so two participants can each use device zero.
 When validating a binding, the coordinator checks for the device attachment in that same participant.
 
+Unicast restore reconnects mappings to one backing allocation.
+For multicast, the creator first recreates the shared object with `cuMulticastCreate`, and peers import it through `cuMemImportFromShareableHandle`.
+Every device must then be attached with `cuMulticastAddDevice` before either process restores its bindings with `cuMulticastBindMem` or `cuMulticastBindAddr`.
+Each shim restores its virtual mappings and permissions with `cuMemMap` and `cuMemSetAccess`.
+
+The example below starts after both member allocations have been recreated:
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant A as Shim A / GPU A
+    participant B as Shim B / GPU B
+    C->>A: Recreate object with cuMulticastCreate
+    A-->>C: Object and export FD ready
+    C->>B: Import with cuMemImportFromShareableHandle
+    B->>A: Request object FD
+    A-->>B: Real CUDA FD
+    B-->>C: Local object handle ready
+    par Attach devices
+        C->>A: cuMulticastAddDevice(GPU A)
+        A-->>C: Attached
+    and
+        C->>B: cuMulticastAddDevice(GPU B)
+        B-->>C: Attached
+    end
+    Note over C,B: All devices attached before binding
+    par Restore bindings and mappings
+        C->>A: Bind member A, restore mapping and access
+        A-->>C: Ready
+    and
+        C->>B: Bind member B, restore mapping and access
+        B-->>C: Ready
+    end
+```
+
 #### Supported sharing configurations
 
 Tracked VMM allocations and multicast objects must use `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR` for sharing.
 Unicast allocations may use pinned memory at CUDA's `DEVICE` or `HOST_NUMA` locations, meaning GPU memory or host memory associated with a NUMA node.
-For HOST_NUMA imports, the shim also records the creator's NUMA node because CUDA reports node zero for imported handles.
 
 FABRIC handles, combinations of exportable handle types, and multicast objects without POSIX export support are outside this design.
 
@@ -440,15 +475,44 @@ If the selected holder retains only a mapping, it calls `cuMemRetainAllocationHa
 To copy GPU memory, the carrier code groups DEVICE allocations by CUDA context and device.
 It maps their backing into temporary consecutive address ranges and copies their contents using one CUDA stream (`CUstream`) per group.
 Transfers use `cuMemcpyDtoHAsync_v2` for capture and `cuMemcpyHtoDAsync_v2` for restore.
-For HOST_NUMA allocations, it copies the contents on the CPU through temporary VMM mappings that the host can access.
 
 Asynchronous CUDA copies require pinned host memory, so the shim registers the carrier with `cuMemHostRegister_v2` during transfers.
 The CUDA context used for registration stays alive until the copies finish and `cuMemHostUnregister` unregisters the memory.
 Between transfers, the carrier is ordinary anonymous memory that CRIU can capture.
 
 If an allocation's recorded CUDA context has been destroyed, the carrier code uses a primary context on the recorded device for DEVICE memory.
-For HOST_NUMA memory, it uses a context on CUDA device zero to perform the required driver operations, while preserving the allocation's recorded host NUMA placement.
 After restore, the carrier is released only after the successful load reply has been sent to the coordinator.
+
+#### HOST_NUMA allocations
+
+A HOST_NUMA allocation is created with `cuMemCreate`, specifying `CU_MEM_LOCATION_TYPE_HOST_NUMA` and the NUMA node ID in `CUmemAllocationProp.location`.
+Its backing resides in host memory but is still managed through CUDA VMM, so its contents must be copied into a carrier before the backing is released.
+
+The application's mappings may cover only part of the allocation or lack CPU access.
+The selected holder therefore uses `cuMemAddressReserve`, `cuMemMap`, and `cuMemSetAccess` to create a temporary CPU-accessible mapping of the full backing.
+
+```mermaid
+flowchart TB
+    subgraph Holder["Selected holder process"]
+        A["Application mapping"]
+        T["Temporary CPU-accessible mapping"]
+        C["Anonymous host carrier"]
+    end
+    B["Peer process mapping"]
+    H["Shared HOST_NUMA backing<br/>NUMA node N"]
+    R["CRIU process image"]
+    A -->|maps| H
+    B -->|maps| H
+    T -->|maps full allocation| H
+    T <-->|CPU copy| C
+    C <-->|capture / restore| R
+```
+
+During capture, the CPU copies the full allocation through the temporary mapping into the carrier.
+During restore, `cuMemCreate` recreates the backing at its recorded NUMA location, and the CPU copies the carrier's contents back before the processes reconnect their original mappings.
+
+The shim records the creator's NUMA node during sharing because `cuMemGetAllocationPropertiesFromHandle` reports node zero for imported handles.
+If the recorded CUDA context is gone, HOST_NUMA operations use a primary context on CUDA device zero while retaining the recorded host NUMA placement.
 
 ### Capture
 
