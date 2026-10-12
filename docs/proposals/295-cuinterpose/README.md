@@ -39,13 +39,13 @@ SPDX-License-Identifier: Apache-2.0
     - [Launcher CLI](#launcher-cli)
     - [Coordinator CLI](#coordinator-cli)
     - [Capture requirements](#capture-requirements)
+  - [Configuration](#configuration)
   - [Failure behavior](#failure-behavior)
   - [Checkpoint files and compatibility](#checkpoint-files-and-compatibility)
   - [Performance and Scalability](#performance-and-scalability)
     - [Allocation granularity](#allocation-granularity)
     - [Host memory and transfer cost](#host-memory-and-transfer-cost)
   - [Security](#security)
-  - [Configuration](#configuration)
   - [Dependencies](#dependencies)
   - [Monitoring](#monitoring)
   - [Test Plan](#test-plan)
@@ -54,7 +54,6 @@ SPDX-License-Identifier: Apache-2.0
 - [Alternatives](#alternatives)
 - [Appendix](#appendix)
   - [Interception and loader contract](#interception-and-loader-contract)
-    - [Backend runtime installation](#backend-runtime-installation)
     - [Intercepted API reference](#intercepted-api-reference)
   - [Handle and state formats](#handle-and-state-formats)
     - [Decoded state example](#decoded-state-example)
@@ -821,6 +820,19 @@ Otherwise, the helper's native multi-GPU jobfile requirement still applies.
 
 Deployment examples and build or test commands are maintained separately in [PR #456](https://github.com/ai-dynamo/snapshot/pull/456).
 
+### Configuration
+
+- `--cuinterpose-image` and `--cuinterpose-image-pull-policy` configure the operator's installer image and pull policy.
+  Helm supplies these flags, and the operator validates them at startup.
+- The installer uses the workload Pod's or ServiceAccount's image-pull credentials.
+- Installer resource requests and limits are both `100m` CPU and `64Mi` memory, preserving Guaranteed QoS when the rest of the Pod meets its requirements.
+- `CUINTERPOSE_SOCKET_DIR` overrides the shim's control socket directory, which defaults to `/tmp`.
+  This override supports test isolation.
+- `SNAPSHOT_CONTROL_TIMEOUT_SECONDS` sets the internal control timeout, defaulting to 10 seconds.
+- `SNAPSHOT_CARRIER_TIMEOUT_SECONDS` sets the internal carrier save/load timeout, defaulting to 3600 seconds.
+
+Each process reads these environment settings from its own environment.
+
 ### Failure behavior
 
 A failed checkpoint or restore operation can leave processes with only some of their shared resources reconstructed or removed.
@@ -863,92 +875,45 @@ Exactly the two named library records and `pids` are required when `cuinterpose`
 If `cuinterpose.pids` is explicitly empty, restore needs no coordinator state file but still requires both matching libraries.
 Checkpoints captured without CuInterpose omit the `cuinterpose` entry.
 
-To publish the state file, the coordinator sorts the records, writes and syncs a private temporary file, installs it without replacing an existing destination, and syncs the containing directory.
-A failure at any of these steps causes the coordinator to report that checkpoint preparation failed.
+The coordinator reports successful preparation only after durably publishing `cuinterpose.state` without replacing an existing file.
+On restore, it requires the captured participant PID set and verifies that reconstructed resource records match the checkpoint.
 
-CRIU preserves namespace PIDs, virtual handles, allocation IDs, and shim state.
-During restore, the coordinator requires the same participant PID set and compares the reconstructed records with the captured records.
-The private ABI, protocol/state envelope, virtual shareable handle, and virtual IPC handle formats are version 1.
+CRIU restores the shim's in-memory state, so both libraries must be available at their original paths with the SHA-256 hashes recorded in the manifest.
+`SkipCompatCheck` does not bypass this requirement.
+Upgrading either library requires a new checkpoint, and the libraries are not currently archived with it.
 
-CRIU restores the shim's in-memory state, so the frontend and core must match the libraries that created that state.
-Both libraries must be supplied at their original paths with identical SHA-256 hashes.
-`SkipCompatCheck` does not bypass this check.
-The library identity check excludes the launcher and coordinator executables because they are absent from the checkpointed workload.
-The coordinator must still understand the shim's protocol.
-
-Restoring an existing checkpoint therefore requires the original library contents.
-A workload that needs upgraded shim libraries must create a new checkpoint.
-Automatically archiving the libraries with the checkpoint remains follow-up work.
+The launcher and coordinator are not part of the checkpointed workload and need not match those hashes.
+The coordinator must support the checkpoint's state format and the restored shim's protocol.
 
 ### Performance and Scalability
 
 #### Allocation granularity
 
-Adapting synchronous malloc to VMM can increase memory use because VMM allocations must satisfy a minimum size granularity.
-Each malloc call receives its own allocation, rounded up to the minimum returned by `cuMemGetAllocationGranularity`.
-For example, on a device with a 2 MiB minimum, a 64 KiB request consumes 2 MiB of backing.
+Each adapted `cuMemAlloc_v2` call receives VMM backing rounded up to the minimum returned by `cuMemGetAllocationGranularity`.
+With a 2 MiB minimum, a 64 KiB request consumes 2 MiB of backing, even if the allocation is never shared.
 
-The rounding applies to underlying CUDA allocations rather than individual tensors.
-Framework allocators, such as [PyTorch's caching allocator](https://github.com/pytorch/pytorch/blob/main/c10/cuda/CUDACachingAllocator.cpp), can serve many small tensors from larger cached allocations.
-In that case the shim rounds each larger allocation once, and the framework can reuse it without repeating VMM setup during inference.
-
-Inference workloads also tend to retain large model and cache allocations, for which rounding adds a smaller fraction of the total size.
-Together with framework pooling, this explains why granularity overhead has not been prominent in our inference use.
-The effect still depends on the engine and its allocation pattern.
-
-Applications that make many small direct CUDA allocations can waste substantial memory under this policy.
-Frequent allocation and free operations also incur VMM setup costs, and even modest rounding can matter near the device-memory limit.
-Caching device attributes and the results of granularity queries reduces setup work.
-Converted allocations incur these costs even if they are never shared.
+This rounding applies to CUDA allocations, not individual tensors.
+Framework allocators can serve small tensors from larger pooled allocations, while inference workloads commonly retain large model and cache allocations.
+These patterns explain why rounding overhead has not been prominent in our inference use.
+Workloads that make many small direct allocations can still waste substantial memory and incur repeated VMM setup costs.
 
 #### Host memory and transfer cost
 
-Preserving shared data in host carriers requires an additional host-memory copy and space for that copy in the checkpoint.
-Each holder's carrier is sized to the sum of the full shared allocations assigned to it, without a fixed size cap.
-Temporary mappings, host-memory registration, and CRIU reads and writes add further work to the transfer.
-
-During restore, CRIU must recover the host pages and the shim must copy their contents into recreated backing before the application can resume.
-A large shared cache left allocated at capture can therefore dominate carrier size.
-Saving one copy per allocation avoids multiplying this cost by its number of importers.
-
-The coordinator starts one concurrent exchange per participant for each mutating phase.
-Limiting those exchanges to a smaller worker pool could deadlock a CUDA collective if an active participant waits for one that has not started.
-This concurrency requires resources proportional to the participant count.
-Metadata size and the requirement for a fixed, cooperating group also limit scale.
+- Each shared allocation requires one full copy in a host carrier, regardless of how many processes map it.
+  Large shared caches therefore increase both host-memory use and checkpoint size.
+- Restore must recover the carrier pages and copy their contents into recreated backing before the application resumes.
+- Coordination requires every participant to complete each phase before the group advances.
+  Participants enter a phase concurrently because multicast operations may wait for other group members.
+  Coordination resources and metadata grow with the participant group and its tracked resources.
 
 ### Security
 
-The control interface can export allocation FDs and modify a process's CUDA resources, so access is restricted through filesystem credentials and container mount isolation.
-Each control socket has permissions `0600` and lives in the target container's writable `/tmp`.
-The design assumes cooperating workload processes and trusts the node's root user and privileged Snapshot agents.
-
-The coordinator enters the target mount, UTS, IPC, network, and PID namespaces, but not its user or cgroup namespace.
-Before entering those namespaces, the agent opens file descriptors for the trusted executable and checkpoint directory.
-Keeping a mount-namespace descriptor open prevents that namespace from disappearing while the helper uses it.
-If the operation is cancelled, the agent kills the helper's process group, including forked descendants, and limits how long it waits for output pipes to close.
-
-Host carriers put shared workload data in CRIU images.
-They require the same storage access controls as other process memory.
-This design adds no encryption.
-The shim and coordinator check format versions, limit messages and state files to 32 MiB, apply timeouts, and bound the control queue.
-These checks limit the effects of malformed input and unresponsive peers.
-
-The installer drops capabilities, disallows privilege escalation, and uses a read-only root filesystem.
-It uses the Pod's positive `runAsUser` when specified, otherwise UID 65532, with `runAsNonRoot: true`.
-Workload security contexts remain unchanged.
-
-### Configuration
-
-- `--cuinterpose-image` and `--cuinterpose-image-pull-policy` configure the operator's installer image and pull policy.
-  Helm supplies these flags, and the operator validates them at startup.
-- The installer uses the workload Pod's or ServiceAccount's image-pull credentials.
-- Installer resource requests and limits are both `100m` CPU and `64Mi` memory, preserving Guaranteed QoS when the rest of the Pod meets its requirements.
-- `CUINTERPOSE_SOCKET_DIR` overrides the shim's control socket directory, which defaults to `/tmp`.
-  This override supports test isolation.
-- `SNAPSHOT_CONTROL_TIMEOUT_SECONDS` sets the internal control timeout, defaulting to 10 seconds.
-- `SNAPSHOT_CARRIER_TIMEOUT_SECONDS` sets the internal carrier save/load timeout, defaulting to 3600 seconds.
-
-Each process reads these environment settings from its own environment.
+- Control sockets can export allocation FDs and modify CUDA resources.
+  They use `0600` permissions within the target container, and the design assumes cooperating processes and trusted privileged Snapshot agents.
+- Host carriers place shared allocation contents in CRIU images.
+  Checkpoint storage must protect these contents like other process memory.
+- The installer runs without root privileges, drops capabilities, and uses a read-only root filesystem.
+  It leaves workload security contexts unchanged.
 
 ### Dependencies
 
@@ -957,40 +922,33 @@ Each process reads these environment settings from its own environment.
 - CUDA Runtime 12.0 or newer when an application looks up driver entry points through a CUDA runtime library.
 - Existing Snapshot and CRIU compatibility and privilege requirements.
 
-The [interception appendix](#interception-and-loader-contract) describes the requirements for forking, linker namespaces, runtime-library visibility, and library loading.
+The [interception appendix](#interception-and-loader-contract) describes the requirements for linker namespaces, runtime-library visibility, and library loading.
 Build requirements and running instructions belong to the operational documentation in [PR #456](https://github.com/ai-dynamo/snapshot/pull/456).
 
 ### Monitoring
 
-Coordinator errors identify the participant endpoint and operation when that information is available, and the agent includes them in its existing checkpoint and restore error reporting.
-Transfer byte counts are validated against expected allocation sizes to detect incomplete saves or loads.
-The design introduces no dedicated metrics, phase-report API, or dashboard.
+The agent reports coordinator failures through Snapshot's existing checkpoint and restore errors, including the participant and operation when available.
+This proposal adds no dedicated metrics.
 
 ### Test Plan
 
-Tests should verify the contracts at each boundary:
+Validation must cover these architectural contracts:
 
-- Protocol and ABI tests check format versions, structure layouts, message framing, allocation identity, and file-descriptor transfer.
-  Frontend tests with a real driver check function resolution, initialization, ownership of the runtime by its process, and behavior after `fork` or `exec`.
-- Coordinator tests verify that inspection leaves resources unchanged, then check group validation after checkpoint entry, holder selection, and barriers between concurrent phases.
-  They also cover missing or lost replies, failure to publish the state file, and rejection of corrupt or mismatched restore records.
-- GPU tests verify private and shared memory contents, original addresses, and access permissions.
-  They cover importers that outlive the creator's references, full allocation contents behind partial mappings, multicast and graph replay, HOST_NUMA, peer access, and context teardown.
-  They also verify that checkpoint is refused while any handle or mapping for an allocation imported from outside the group remains.
-- Graph tests must replay graphs captured before checkpoint against the restored shared memory and verify their results, without recapturing or updating the graphs after restore.
-- Agent, operator, and Helm tests cover library delivery, preservation of commands and environment values, library identity checks, participant selection, execution in target namespaces, and cancellation.
-  They verify that preflight failures leave the source workload unchanged and preparation failures terminate it.
-- End-to-end tests capture a multi-process workload, restore it on a compatible different node, and verify computation and sharing after application release.
+- Capture and restore preserve contents, original addresses, and sharing for unicast, multicast, HOST_NUMA, and adapted legacy IPC allocations.
+  Include partial mappings and importers that outlive the creator's references.
+  Refuse checkpoint while the group retains allocations imported from outside it.
+- CUDA graphs captured before checkpoint replay correctly after restore without recapture or pointer updates.
+- Both SnapshotJob and user-created Pods load the shim correctly, preserve application arguments and environment, and enforce library compatibility.
+- Inspection leaves the workload unchanged, while failures after preparation begins terminate the attempt.
+  Corrupt state, missing participants, and lost replies must not allow an incomplete restore to resume.
+- An end-to-end test restores the complete process group on another compatible node and verifies computation and sharing.
 
-[#338](https://github.com/ai-dynamo/snapshot/pull/338) adds tests that exercise the built components together.
-[#294](https://github.com/ai-dynamo/snapshot/issues/294) tracks the opt-in cross-node suite.
+[#338](https://github.com/ai-dynamo/snapshot/pull/338) covers assembled tests and CI.
+[#294](https://github.com/ai-dynamo/snapshot/issues/294) tracks cross-node testing.
 
 ### Graduation Criteria
 
-Qualification must establish that the components work together through a complete capture and restore.
-It requires running the selected physical-GPU tests and restoring a workload on another compatible node, then verifying computation and sharing.
-Missing prerequisites must be reported rather than silently skipping cases.
-No beta/GA designation or release date is proposed.
+Qualification requires the GPU and cross-node tests above to pass, including replay of existing CUDA graphs and communication through restored shared memory.
 
 ## Implementation History
 
@@ -1021,101 +979,19 @@ Applications can call CUDA symbols directly or obtain function pointers at runti
 It wraps direct calls and the supported lookup APIs: `dlsym`, `cuGetProcAddress*`, and the CUDA runtime's `cudaGetDriverEntryPoint*`.
 When an application requests a function address, the frontend calls the real resolver first and replaces the returned function only if the lookup succeeded for a supported API.
 The returned symbol determines which calling convention the wrapper must use.
+For `dlsym`, the frontend substitutes wrappers only for lookups through an explicit library handle.
+It forwards `RTLD_DEFAULT` and `RTLD_NEXT` lookups unchanged, preserving the caller's search scope.
 
 If the frontend cannot wrap that result, it reports a missing symbol using a `NULL` pointer and the API's "symbol not found" status.
 For the `cuGetProcAddress` form without a status argument, it returns `CUDA_ERROR_NOT_FOUND`.
 
-The frontend obtains glibc's real `dlsym` with `dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.34")`.
-It caches the pointer without making one caller wait for another caller to initialize it.
-This matters because `dlvsym` takes glibc's loader lock, which `dlopen` holds while running library constructors.
-A constructor that waited for another thread's lookup could deadlock with that thread waiting for the loader lock.
+The frontend loads `libcuinterpose_core.so` from its own directory when a CUDA call or lookup first needs it.
+Resolving a function address does not start the process runtime.
+The runtime starts after a successful `cuInit`, and intercepted memory operations require a runtime owned by the calling process.
 
-glibc chooses the `RTLD_DEFAULT` and `RTLD_NEXT` search scope from its caller's return address.
-The frontend forwards these lookups as a tail call using GCC's `musttail`, preserving the original caller's search scope and returning the result unchanged.
-Only lookups with an explicit library handle are resolved by the frontend and may return wrappers.
-
-On the first CUDA call or lookup that needs the backend, the frontend loads `$ORIGIN/libcuinterpose_core.so` with `RTLD_LAZY | RTLD_LOCAL`.
-glibc resolves `$ORIGIN` to the directory from which the frontend was loaded, so changing the working directory later does not change where it finds the backend.
-The frontend's linker export list exposes only the intended CUDA and resolver functions, and `-Bsymbolic-functions` keeps its internal function references local.
-
-The private C ABI consists of `FrontendAbi` and `BackendAbi` function tables.
-Cbindgen generates their declarations, while NVIDIA's `cuda.h` supplies the C CUDA types and cudarc supplies the corresponding Rust definitions.
-The ABI does not pass Rust objects or transfer responsibility for managing their lifetimes between the libraries.
-
-While preparing the runtime, the backend resolves its driver function table through the frontend before acquiring the installation or process-state mutex.
-It makes the completed table available without calling the dynamic loader inside a `OnceLock` initializer.
-
-Backend driver calls, including context and cleanup operations, then use the cached function pointers.
-Missing optional symbols cause errors only when an operation needs them.
-The CUDA libraries remain loaded for the process lifetime.
-
-Loading the backend and starting its runtime are separate operations:
-
-| Operation | Concurrency and lifetime |
-| --- | --- |
-| ABI registration (`cuinterpose_core_init`) | Copies the frontend table and returns an immutable backend table. All registrations, including concurrent calls, must supply the same resolver. Registration starts no workers and makes no callbacks into the frontend. |
-| Frontend publication | Concurrent callers may each call `dlopen` for the backend. glibc serializes the library's construction. The frontend atomically retains one library reference for the process lifetime and closes redundant references. If a constructor reenters initialization on the same thread, that call returns `CUDA_ERROR_NOT_INITIALIZED` without preventing a later attempt from succeeding. |
-| Runtime startup | After an intercepted `cuInit` succeeds, the shim calls `ensure_cuinterpose_initialized`. Concurrent initializers may prepare candidate resources, but only one runtime, control socket, and worker pair are installed. Concurrent callers reuse the installed runtime. Reentering preparation on the same thread returns `CUDA_ERROR_NOT_INITIALIZED` without preventing a later attempt from succeeding. |
-
-There is no frontend-wide loading lock.
-The backend still needs an installation lock to ensure that only one set of runtime resources is installed.
-A `OnceLock` publishes the completed runtime.
-Its initializer never performs startup operations that could acquire the dynamic loader's lock.
-
-#### Backend runtime installation
-
-Thread creation can register Rust thread-local destructors with glibc's loader.
-A CUDA caller running in a library constructor already holds the loader lock, so it must not wait for an installer that needs that lock to create workers.
-The runtime therefore prepares candidate workers before acquiring the installation mutex.
-
-1. Prepare tracking state and channels for this caller's candidate runtime without holding the installation mutex.
-2. Spawn worker threads that wait for requests on those channels.
-3. Acquire the installation mutex and check whether another caller has already installed a healthy runtime or recorded an initialization failure.
-4. If no runtime exists, bind and configure its listener, activate it, and make the runtime state available to callers.
-5. Release the mutex before discarding unused candidate resources or performing cleanup.
-
-The thread installing the runtime does not wait for a worker to report that it has been scheduled.
-Successful thread creation is sufficient to establish readiness.
-
-Only the thread installing the selected runtime binds the process's control socket.
-It activates the peer worker by passing the listener through a nonblocking channel operation.
-The peer worker holds the only channel sender that can enqueue requests for the control worker.
-Discarding an unused candidate closes its channels, causing both workers to exit without the caller joining them.
-The installer releases the installation mutex before cleaning up resources, unlinking paths, writing logs, or destroying unused candidates.
-Each concurrent caller can temporarily have two candidate workers, but only one worker pair remains installed.
-
-Callers check for a recorded initialization failure before using the installed runtime state.
-If a caller fails to prepare its candidate resources but another caller has already installed a healthy runtime, it can use that runtime.
-It never waits for another caller's unfinished candidate.
-Otherwise, a preparation or installation error remains recorded and later calls cannot restart initialization.
-
-Intercepted memory calls require an initialized runtime owned by the calling PID.
-They do not initialize it themselves.
-The frontend can still resolve function addresses before the process runtime is ready.
-
-The installation code that holds the mutex must avoid operations that can enter the dynamic loader.
-This assumption is checked against the pinned Rust standard library and the supported Linux/glibc workload images.
-Rust's standard library ships in the core, but glibc and the dynamic loader come from the workload image, so a pinned builder alone does not establish compatibility:
-
-- The backend resolves ELF procedure linkage table (PLT) entries eagerly, avoiding a loader lookup on the first function call while holding the mutex.
-- The preparation guard initializes the backend's thread-local storage before the runtime is installed.
-  That storage has no destructors, and neither Rust's futex mutexes nor its thread-local panic counter register destructors with the loader.
-- The channel used to activate the peer worker is preallocated with capacity for one message.
-  Its `try_send` call does not initialize the thread state used for blocking sends.
-  Waking the worker uses thread-local state without destructors and futex-based thread notification.
-  The receiving thread initializes its channel context before taking the lock used to register wakeups.
-- Binding and listening on the socket, enabling nonblocking mode, and setting its permissions make no callbacks into the frontend and perform no formatting or logging.
-  This assumption excludes other allocator or libc interposers that could call the dynamic loader.
-
-Re-audit this path when upgrading Rust and repeat cold-start and loader-contention checks for the workload image.
-The preload libraries require glibc symbols from version 2.34 or newer, but satisfying that ABI requirement does not establish compatibility with every newer loader implementation.
-
-Because resolving function addresses starts no workers and creates no control socket, a process can fork before CUDA initialization and let each child initialize independently.
-After CUDA initialization, children must exec or exit rather than reuse or restart the inherited shim.
-Forking during initialization, or retaining a child of an initialized process through checkpoint, is unsupported.
-
-The Rust workspace uses `panic = "abort"` in debug and release builds.
-A panic in any shim thread, including background workers, terminates the process without stack unwinding or destructor cleanup.
+The frontend and core communicate through a private C ABI and retain the CUDA libraries for the process lifetime.
+Initialization must remain safe when CUDA is called from a library constructor, which may hold the dynamic loader's lock.
+The implementation therefore resolves driver functions and prepares workers before acquiring its runtime installation lock.
 
 #### Intercepted API reference
 
