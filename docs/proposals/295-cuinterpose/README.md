@@ -66,31 +66,25 @@ Tracking issue: [#295](https://github.com/ai-dynamo/snapshot/issues/295).
 CuInterpose enables Snapshot to checkpoint CUDA memory shared by processes in
 one container and restore those processes together on a compatible node. It
 preserves each process's application pointers, the memory contents, and the
-sharing relationships between processes. The supported mechanisms are CUDA
-virtual memory management (VMM) allocations shared through POSIX file
-descriptors, synchronous allocation and memory IPC APIs, and CUDA multicast
-objects.
+sharing relationships between processes, so existing CUDA graphs can replay
+after restore without recapture. Applications retain their supported CUDA
+allocation and sharing APIs.
 
 ## Motivation
 
 GPU workloads often share memory between processes, for example when inference
-workers exchange data across GPUs. Two processes can map the same CUDA
-allocation at different virtual addresses. A correct restore must reconnect
-both mappings to one allocation. Restoring an independent copy for each process
-would preserve the initial contents, but subsequent writes through one mapping
-would no longer be visible through the other.
+workers exchange data across GPUs. A correct checkpoint must preserve both the
+data and the relationships between the processes using it. Restoring a separate
+copy for each process would break subsequent communication through shared memory.
 
-CUDA multicast adds another relationship: one virtual address range refers to
-memory on several GPUs. Restoring its member allocations is insufficient unless
-the multicast object, participating devices, and memory bindings are also
-recreated. Native CUDA checkpointing can refuse workloads that retain shared
-VMM or multicast resources, so CuInterpose removes those resources before native
-capture and reconstructs them after native restore.
+Inference workloads also use CUDA graphs to reduce CPU overhead when submitting
+recurring GPU operations. Those graphs refer to memory at specific addresses, so a
+restore must preserve those addresses as well as the data. Requiring graph
+recapture would add work before the restored application could resume serving.
 
-Workloads also share allocations through legacy CUDA memory IPC, which presents
-additional compatibility constraints with native checkpointing. Supporting these
-workloads should not require applications to replace their existing allocation
-and sharing APIs.
+Native CUDA checkpointing has compatibility limits for some shared-memory
+resources and legacy memory IPC. CuInterpose addresses those limits while
+preserving the application's existing allocation and sharing interfaces.
 
 ### Goals
 
@@ -98,10 +92,9 @@ and sharing APIs.
   and supported unicast and multicast relationships.
 - Preserve existing CUDA graphs so they can replay after restore without graph
   recapture or changes to the pointers recorded in their nodes.
-- Save one content copy per shared tracked allocation, while leaving
-  never-shared allocations on the native CUDA checkpoint path.
-- Validate the participant group before teardown and verify reconstructed
-  records before releasing the application.
+- Avoid saving duplicate copies of memory shared by several processes.
+- Detect unsupported sharing configurations before capture and verify
+  restoration before allowing the application to resume.
 - Define activation, synchronization, lifetime, and compatibility contracts
   that callers can rely on.
 
@@ -109,79 +102,57 @@ and sharing APIs.
 
 - Cross-Pod coordination or live sharing between nodes. Cross-node restore
   moves the captured group together to a compatible destination.
-- Changing native CUDA checkpointing or adding a storage interface to the shim.
+- Replacing native CUDA checkpointing, CRIU, or Snapshot's storage interfaces.
 - Automatically draining GPU work, changing the participant group during
   capture, or retrying and rolling back a failed lifecycle operation.
-- General support for every CUDA allocation or IPC API. In particular, the
-  legacy adapter does not cover event IPC, memory-pool IPC, foreign native
-  memory-IPC handles, or managed, async, and pitched allocation families.
-- Strict context isolation for malloc and IPC mappings converted to VMM.
+- General support for every CUDA allocation or IPC API.
+- Providing isolation between mutually untrusted sharing participants.
 
 ## Proposal
 
-Each participating CUDA process loads a shim, a library that intercepts selected
-CUDA calls and records their effects. A short-lived coordinator validates the
-participating processes and orders their checkpoint and restore operations.
-Snapshot combines this coordination with native CUDA checkpointing for GPU state
-and CRIU for process memory and other process state:
+CuInterpose is enabled when the source workload starts. It records supported
+memory allocations and sharing operations while the application runs, then
+coordinates their preservation across the participating processes. On restore,
+it reestablishes shared memory at the original addresses before the application
+resumes.
 
-1. Record allocation identity and sharing while the application runs.
-2. Select one process that still holds a handle or mapping for each shared
-   allocation, and have it save that allocation's bytes in host memory.
-3. Remove shared CUDA resources, then capture native CUDA state and process
-   memory. CRIU captures the saved host bytes.
-4. Restore process and native CUDA state, recreate the shared allocations, and
-   reconnect each process's mappings to them.
-5. Verify that the reconstructed allocations, mappings, and multicast
-   relationships match the captured records before the application resumes.
-
-The host buffers in step 2 are called *host carriers*. CRIU preserves their
-contents while the shared CUDA resources are absent. Allocations that were
-never shared stay allocated and are saved and restored by native CUDA
-checkpointing.
+Snapshot continues to use native CUDA checkpointing for GPU state and CRIU for
+process memory and other process state. CuInterpose supplies the tracking and
+reconstruction needed for shared memory to work with those existing mechanisms.
+The design below explains the supported memory models, component responsibilities,
+and capture and restore protocols.
 
 ### Workload contract
 
 Before capture, the application must finish outstanding CUDA calls and GPU work,
 stop CPU writes to shared host allocations, and prevent new work from starting.
-It must keep that state until restore completes. The shim records resources and
-rejects intercepted memory operations during checkpoint, but it cannot pause
-application threads or detect every GPU operation and CPU writer.
+It must keep that state until restore completes. CuInterpose does not pause
+application threads or finish their outstanding work on their behalf.
 
-Every process that shares these resources must load the shim and belong to the
-same fixed checkpoint group. The group must include the original creator of each
-allocation, even if another process holds its only remaining handle or mapping.
-Applications must also synchronize object and context destruction with all calls
-that use them. The shim's tracking locks do not extend CUDA object lifetimes.
+Every process participating in the supported sharing relationships must enable
+CuInterpose and remain in the same fixed checkpoint group. Applications remain
+responsible for synchronization and resource lifetime throughout that group's
+execution.
 
 ### Limitations, Risks, and Mitigations
 
-Tracked VMM allocations and multicast objects must use the POSIX file-descriptor
-handle type. Unicast allocations may use pinned memory at CUDA's `DEVICE` or
-`HOST_NUMA` locations, meaning GPU memory or host memory associated with a NUMA
-node. FABRIC handles, combinations of exportable handle types, and multicast
-objects without POSIX export support are outside this design.
-
-The shim rejects unsupported exportable creation requests and non-POSIX imports
-before acquiring CUDA resources. It permits raw POSIX imports from processes
-without the shim, but cannot reconstruct those external sharing relationships.
-Every handle and mapping for such an import must therefore be released before
-checkpoint. The legacy IPC adapter rejects native memory-IPC handles produced
-outside the shim.
+Support is limited to the memory and sharing mechanisms described in the design.
+Applications must satisfy the participant and synchronization requirements before
+capture. The main operational constraints are:
 
 | Risk or constraint | Contract |
 | --- | --- |
-| Concurrent application work | The application must finish outstanding work and prevent new work until restore completes. Checkpoint entry blocks tracked mutations but does not stop the application itself. |
-| Incomplete participant group | Preflight requires creators, surviving holders, and complete multicast membership. |
+| Incomplete participant group | All required sharing processes must be captured and restored together. |
 | Failure during preparation or reconstruction | The attempt is unusable. Terminate the affected workload rather than retrying a lost reply or resuming partial state. |
-| Memory overhead | Budget full shared backing in host carriers and VMM rounding for converted malloc allocations. See [Performance and Scalability](#performance-and-scalability). |
-| Artifact mismatch | Restore requires the captured frontend and core library hashes. A protocol version alone does not establish compatibility. |
+| Memory overhead | Preserving shared data requires additional host memory, and adapting allocations can increase GPU memory use. See [Performance and Scalability](#performance-and-scalability). |
+| Artifact mismatch | Restore requires matching CuInterpose libraries. See [Checkpoint files and compatibility](#checkpoint-files-and-compatibility). |
 
 ## Design Details
 
 ### Components
 
-The shim has two components inside each CUDA process: a C frontend that
+The shim is a library that intercepts selected CUDA calls and records their
+effects. It has two components inside each CUDA process: a C frontend that
 intercepts calls and a Rust core that tracks and reconstructs resources. The
 coordinator runs as a separate process and sends control requests to those cores.
 CUDA calls and memory copies execute inside the participating processes.
@@ -214,6 +185,10 @@ that the application may resume after restore. The coordinator exits when its
 requested operation finishes.
 
 ### CUDA memory and mappings
+
+CUDA virtual memory management (VMM) separates memory allocation from the
+addresses used to access it. CuInterpose uses this distinction to preserve
+application pointers while reconstructing shared resources.
 
 An allocation owns a region of GPU or host memory. This memory is the allocation's
 *backing*. A mapping connects a virtual address range in a process to some or all
@@ -292,6 +267,22 @@ throughout preparation and reconstruction, including while CUDA is unlocked for
 the shim's driver calls.
 
 ### Interposing VMM sharing
+
+CuInterpose gives shared resources identities that remain valid across restore,
+even when CUDA creates new handles for them. The sharing protocol uses these
+identities to reconnect processes to the same resource.
+
+Tracked VMM allocations and multicast objects must use the POSIX file-descriptor
+handle type. Unicast allocations may use pinned memory at CUDA's `DEVICE` or
+`HOST_NUMA` locations, meaning GPU memory or host memory associated with a NUMA
+node. FABRIC handles, combinations of exportable handle types, and multicast
+objects without POSIX export support are outside this design.
+
+The shim rejects unsupported exportable creation requests and non-POSIX imports
+before acquiring CUDA resources. It permits raw POSIX imports from processes
+without the shim, but cannot reconstruct those external sharing relationships.
+Every handle and mapping for such an import must therefore be released before
+checkpoint.
 
 The shim gives each tracked allocation a random 128-bit ID and pairs it with the
 creator's PID in the container's PID namespace. This allocation reference remains
@@ -388,6 +379,10 @@ The memory-IPC adapter avoids that native legacy-IPC export path by implementing
 the supported allocation and IPC calls with tracked VMM allocations and the peer
 exchange described above. Applications retain their malloc and IPC interfaces,
 while CuInterpose can save and reconstruct the underlying shared memory.
+
+This adapter supports synchronous device allocation and memory IPC. It does not
+cover event IPC, memory-pool IPC, or managed, async, and pitched allocation
+families. It also rejects native memory-IPC handles produced outside the shim.
 
 #### Why allocation must be intercepted before export
 
