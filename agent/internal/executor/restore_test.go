@@ -1579,9 +1579,8 @@ func TestWithin(t *testing.T) {
 
 func TestRestoreBoundFetchesMetadataAndStagesPublishedArtifact(t *testing.T) {
 	publishedArtifact := &pagebroker.PublishedArtifact{
-		StoreId:               "store-v1-" + strings.Repeat("a", 64),
-		ArtifactHandle:        "artifacts/content/containers/main",
-		ArtifactFormatVersion: "snapshot.pagebroker/v1",
+		StoreId:        "store-v1-" + strings.Repeat("a", 64),
+		ArtifactHandle: "artifacts/content/containers/main",
 	}
 	manifestDir := t.TempDir()
 	manifest := &types.CheckpointManifest{Artifact: types.ArtifactManifest{ContentUID: "content", ContainerName: "main"}}

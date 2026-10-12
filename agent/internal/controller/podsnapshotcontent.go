@@ -474,9 +474,8 @@ func (w *NodeController) setSnapshotContentSucceeded(
 			content.Status.Storage = &snapshotv1alpha1.CheckpointStorageStatus{}
 		}
 		recorded := snapshotv1alpha1.PublishedContainerArtifact{
-			ContainerName:         containerName,
-			ArtifactHandle:        publishedArtifact.GetArtifactHandle(),
-			ArtifactFormatVersion: publishedArtifact.GetArtifactFormatVersion(),
+			ContainerName:  containerName,
+			ArtifactHandle: publishedArtifact.GetArtifactHandle(),
 		}
 		replaced := false
 		for i, existing := range content.Status.Storage.Artifacts {

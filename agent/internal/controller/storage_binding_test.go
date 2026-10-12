@@ -27,8 +27,8 @@ func TestResolveBoundRestoreArtifactFindsPublishedContainer(t *testing.T) {
 	content := boundWorkOrder("content", "node-a", "x")
 	content.Status.Storage = &snapshotv1alpha1.CheckpointStorageStatus{
 		Artifacts: []snapshotv1alpha1.PublishedContainerArtifact{
-			{ContainerName: "other", ArtifactHandle: "handle-other", ArtifactFormatVersion: "v1"},
-			{ContainerName: "main", ArtifactHandle: "artifacts/content/containers/main", ArtifactFormatVersion: "snapshot.pagebroker/v1"},
+			{ContainerName: "other", ArtifactHandle: "handle-other"},
+			{ContainerName: "main", ArtifactHandle: "artifacts/content/containers/main"},
 		},
 	}
 	w := &NodeController{}
@@ -39,7 +39,6 @@ func TestResolveBoundRestoreArtifactFindsPublishedContainer(t *testing.T) {
 	require.NotNil(t, artifact.PublishedArtifact)
 	assert.Equal(t, testStoreID, artifact.PublishedArtifact.StoreId)
 	assert.Equal(t, "artifacts/content/containers/main", artifact.PublishedArtifact.ArtifactHandle)
-	assert.Equal(t, "snapshot.pagebroker/v1", artifact.PublishedArtifact.ArtifactFormatVersion)
 	assert.Equal(t, "content-uid", artifact.ContentUID)
 	assert.Equal(t, "main", artifact.SourceContainerName)
 	assert.Equal(t, "snap", artifact.SnapshotName)
@@ -49,7 +48,7 @@ func TestResolveBoundRestoreArtifactPendingWhenNotYetPublished(t *testing.T) {
 	withOtherContainer := boundWorkOrder("content", "node-a", "x")
 	withOtherContainer.Status.Storage = &snapshotv1alpha1.CheckpointStorageStatus{
 		Artifacts: []snapshotv1alpha1.PublishedContainerArtifact{
-			{ContainerName: "other", ArtifactHandle: "h", ArtifactFormatVersion: "v1"},
+			{ContainerName: "other", ArtifactHandle: "h"},
 		},
 	}
 	for _, tc := range []struct {
@@ -75,7 +74,7 @@ func TestResolveRestoreArtifactRoutesBoundContentToStatusLookup(t *testing.T) {
 	content := boundWorkOrder("content", "node-a", "x")
 	content.Status.Storage = &snapshotv1alpha1.CheckpointStorageStatus{
 		Artifacts: []snapshotv1alpha1.PublishedContainerArtifact{
-			{ContainerName: "main", ArtifactHandle: "h", ArtifactFormatVersion: "v1"},
+			{ContainerName: "main", ArtifactHandle: "h"},
 		},
 	}
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
@@ -93,9 +92,8 @@ func TestSetSnapshotContentSucceededPersistsPublishedArtifact(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 
 	published := &pagebroker.PublishedArtifact{
-		StoreId:               testStoreID,
-		ArtifactHandle:        "artifacts/content/containers/main",
-		ArtifactFormatVersion: "snapshot.pagebroker/v1",
+		StoreId:        testStoreID,
+		ArtifactHandle: "artifacts/content/containers/main",
 	}
 	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, nil, "main", published))
 
@@ -104,7 +102,6 @@ func TestSetSnapshotContentSucceededPersistsPublishedArtifact(t *testing.T) {
 	require.Len(t, current.Status.Storage.Artifacts, 1)
 	assert.Equal(t, "main", current.Status.Storage.Artifacts[0].ContainerName)
 	assert.Equal(t, "artifacts/content/containers/main", current.Status.Storage.Artifacts[0].ArtifactHandle)
-	assert.Equal(t, "snapshot.pagebroker/v1", current.Status.Storage.Artifacts[0].ArtifactFormatVersion)
 }
 
 func TestSetSnapshotContentSucceededReplacesExistingArtifactForSameContainer(t *testing.T) {
@@ -112,15 +109,14 @@ func TestSetSnapshotContentSucceededReplacesExistingArtifactForSameContainer(t *
 	content.ResourceVersion = "1"
 	content.Status.Storage = &snapshotv1alpha1.CheckpointStorageStatus{
 		Artifacts: []snapshotv1alpha1.PublishedContainerArtifact{
-			{ContainerName: "main", ArtifactHandle: "stale-handle", ArtifactFormatVersion: "v0"},
+			{ContainerName: "main", ArtifactHandle: "stale-handle"},
 		},
 	}
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 
 	published := &pagebroker.PublishedArtifact{
-		StoreId:               testStoreID,
-		ArtifactHandle:        "artifacts/content/containers/main/v2",
-		ArtifactFormatVersion: "snapshot.pagebroker/v1",
+		StoreId:        testStoreID,
+		ArtifactHandle: "artifacts/content/containers/main/v2",
 	}
 	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, nil, "main", published))
 
@@ -135,9 +131,8 @@ func TestMarkCheckpointReadySkipsFilesystemSourceReadWhenBound(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 
 	published := &pagebroker.PublishedArtifact{
-		StoreId:               testStoreID,
-		ArtifactHandle:        "artifacts/content/containers/main",
-		ArtifactFormatVersion: "snapshot.pagebroker/v1",
+		StoreId:        testStoreID,
+		ArtifactHandle: "artifacts/content/containers/main",
 	}
 	// t.TempDir() has no manifest; bound content must not try to read one.
 	err := w.markCheckpointReady(context.Background(), content, t.TempDir(), "main", published)
