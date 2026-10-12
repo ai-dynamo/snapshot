@@ -22,6 +22,7 @@ SPDX-License-Identifier: Apache-2.0
   - [Interposing VMM sharing](#interposing-vmm-sharing)
     - [Creator and checkpoint holder](#creator-and-checkpoint-holder)
     - [Multicast tracking](#multicast-tracking)
+    - [Supported sharing configurations](#supported-sharing-configurations)
   - [Adapting legacy allocation and IPC APIs](#adapting-legacy-allocation-and-ipc-apis)
     - [Why allocation must be intercepted before export](#why-allocation-must-be-intercepted-before-export)
     - [IPC and mapping lifetime](#ipc-and-mapping-lifetime)
@@ -235,23 +236,14 @@ Graph execution must remain stopped throughout preparation and reconstruction, i
 
 ### Interposing VMM sharing
 
-CuInterpose gives shared resources identities that remain valid across restore, even when CUDA creates new handles for them.
-The sharing protocol uses these identities to reconnect processes to the same resource.
+To share VMM memory through a POSIX file descriptor, an application calls `cuMemExportToShareableHandle` to obtain a file descriptor and passes it to another process.
+That process calls `cuMemImportFromShareableHandle` to obtain a local allocation handle, then maps the same backing with `cuMemMap`.
 
-Tracked VMM allocations and multicast objects must use `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR` for sharing.
-Unicast allocations may use pinned memory at CUDA's `DEVICE` or `HOST_NUMA` locations, meaning GPU memory or host memory associated with a NUMA node.
-FABRIC handles, combinations of exportable handle types, and multicast objects without POSIX export support are outside this design.
-
-The shim rejects requests to create allocations with unsupported sharing properties or import non-POSIX handles before acquiring CUDA resources.
-It permits raw POSIX imports from processes without the shim, but cannot reconstruct those external sharing relationships.
-Every handle and mapping for such an import must therefore be released before checkpoint.
-
-The shim gives each tracked allocation a random 128-bit ID and pairs it with the creator's PID in the container's PID namespace.
-This allocation reference remains stable across checkpoint and restore.
+CuInterpose intercepts this exchange so it can identify the shared allocation and reconnect its users after restore.
 The application receives a virtual allocation handle (`CUmemGenericAllocationHandle`), which the shim translates to the process's current driver allocation handle.
 Recreating a driver resource therefore does not require changing the handle stored in application memory.
 
-For `cuMemExportToShareableHandle`, the shim retains a real CUDA export file descriptor and returns a descriptor for a small memory-backed file containing the allocation reference.
+On export, the shim retains the real CUDA file descriptor and returns a descriptor for a small memory-backed file containing a stable allocation reference.
 This *virtual shareable FD* passes through the application's existing IPC mechanism.
 When the receiving application calls `cuMemImportFromShareableHandle`, its shim reads the reference and requests the real CUDA descriptor from the creator's socket.
 
@@ -272,15 +264,13 @@ sequenceDiagram
     SB-->>B: Virtual allocation handle
 ```
 
+The shim gives each tracked allocation a random 128-bit ID and pairs it with the creator's PID in the container's PID namespace.
+This allocation reference remains stable across checkpoint and restore.
+Exporting an imported allocation again preserves this reference.
+The [appendix](#handle-and-state-formats) specifies the handle encodings.
+
 A reply to a unicast export request includes the full backing size and the CUDA location where the creator allocated it.
 The importer queries `cuMemGetAllocationPropertiesFromHandle` and records its own handles and mappings.
-For HOST_NUMA imports, the shim also records the creator's NUMA node because CUDA reports node zero for imported handles.
-Exporting an imported allocation again preserves its original allocation reference.
-
-Multicast uses the same descriptor exchange to import an object, but importing the object does not reconstruct its device membership or memory bindings.
-The export reply carries the object's creation properties, which CUDA cannot query after import.
-The shim preserves those properties together with the additional multicast records described below.
-The [appendix](#handle-and-state-formats) specifies both handle encodings.
 
 #### Creator and checkpoint holder
 
@@ -300,7 +290,9 @@ Once an allocation has been shared, closing its export descriptor does not make 
 
 #### Multicast tracking
 
-The shim records multicast creation properties, device attachments, bindings, and mappings.
+Multicast uses the same descriptor exchange to import an object.
+The shim also records the device attachments, memory bindings, and mappings needed to reconstruct it.
+The export reply carries the object's creation properties, which CUDA cannot query after import.
 Binding a tracked allocation into multicast marks that allocation shared, even if the application never exported a unicast FD.
 
 `cuMulticastBindMem` identifies the member memory by an allocation handle, so the shim records the allocation reference and offset within it.
@@ -311,6 +303,18 @@ Removing a binding with `cuMulticastUnbind` does not change a previously shared 
 Each participant must call `cuMulticastAddDevice` and bind that device's memory in the same process.
 Device ordinals are local to that process, so two participants can each use device zero.
 When validating a binding, the coordinator checks for the device attachment in that same participant.
+
+#### Supported sharing configurations
+
+Tracked VMM allocations and multicast objects must use `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR` for sharing.
+Unicast allocations may use pinned memory at CUDA's `DEVICE` or `HOST_NUMA` locations, meaning GPU memory or host memory associated with a NUMA node.
+For HOST_NUMA imports, the shim also records the creator's NUMA node because CUDA reports node zero for imported handles.
+
+FABRIC handles, combinations of exportable handle types, and multicast objects without POSIX export support are outside this design.
+
+The shim rejects requests to create allocations with unsupported sharing properties or import non-POSIX handles before acquiring CUDA resources.
+It permits raw POSIX imports from processes without the shim, but cannot reconstruct those external sharing relationships.
+Every handle and mapping for such an import must therefore be released before checkpoint.
 
 ### Adapting legacy allocation and IPC APIs
 
@@ -324,10 +328,6 @@ That mismatch prevented the allocation from being exported correctly.
 The memory-IPC adapter avoids that native legacy-IPC export path by implementing the supported allocation and IPC calls with tracked VMM allocations and the peer exchange described above.
 Applications retain their malloc and IPC interfaces, while CuInterpose can save and reconstruct the underlying shared memory.
 This adapter is a temporary compatibility workaround whose planned deprecation is tied to the driver fix for legacy IPC with CustomStorage.
-
-This adapter supports synchronous device allocation and memory IPC.
-It does not cover event IPC, memory-pool IPC, or managed, async, and pitched allocation families.
-It also rejects native memory-IPC handles produced outside the shim.
 
 #### Why allocation must be intercepted before export
 
@@ -393,6 +393,10 @@ Destroying a context with `cuCtxDestroy` also removes the converted malloc and I
 The same applies when `cuDevicePrimaryCtxReset` resets a primary context or `cuDevicePrimaryCtxRelease` releases its final reference.
 The shim preserves those mappings if context teardown fails or the primary context still has references.
 
+This adapter supports synchronous device allocation and memory IPC.
+It does not cover event IPC, memory-pool IPC, or managed, async, and pitched allocation families.
+It also rejects native memory-IPC handles produced outside the shim.
+
 #### Peer access and isolation
 
 The shim uses `cuMemSetAccess` to grant the allocating GPU access to each converted malloc mapping and the importing GPU access to each IPC mapping.
@@ -450,13 +454,8 @@ After restore, the carrier is released only after the successful load reply has 
 
 ### Capture
 
-The agent first discovers the CUDA processes and checks which shim libraries each process has mapped.
-It verifies that every required process has loaded the frontend and that the library contents match across the group.
-Processes with a mapped core library take part in coordinator operations, and each must expose a healthy control socket.
-A missing or unresponsive socket is an error, not a reason to omit that process.
-
-The read-only `INSPECT` operation validates creators, holders, mapping ranges, permissions, and multicast membership without changing process state.
-Because resources can still change after inspection, the coordinator validates the records again after each participant has entered checkpoint mode.
+Capture saves shared allocation contents in host carriers and removes the shared CUDA resources before native CUDA checkpointing runs.
+CRIU then captures the processes, including their carriers and tracking records.
 
 The sequence below shows a successful capture.
 Process shims share one lifeline to keep the group interactions readable.
@@ -493,6 +492,14 @@ sequenceDiagram
     R-->>A: Process capture complete
 ```
 
+The agent first discovers the CUDA processes and checks which shim libraries each process has mapped.
+It verifies that every required process has loaded the frontend and that the library contents match across the group.
+Processes with a mapped core library take part in coordinator operations, and each must expose a healthy control socket.
+A missing or unresponsive socket is an error, not a reason to omit that process.
+
+The read-only `INSPECT` operation validates creators, holders, mapping ranges, permissions, and multicast membership without changing process state.
+Because resources can still change after inspection, the coordinator validates the records again after each participant has entered checkpoint mode.
+
 `BEGIN_CHECKPOINT` requires an active process with no outstanding driver calls that temporarily released the state lock.
 It prevents changes to tracked resources before returning the process's records.
 `PREPARE_MULTICAST` removes exports, mappings, bindings, and multicast handles.
@@ -513,11 +520,8 @@ If no process has initialized the core, the agent skips coordinator operations b
 
 ### Restore
 
-Before starting CRIU restore, the agent verifies the captured library identities and restores the required library mounts.
-Shim socket paths are excluded from rootfs archives because CRIU restores the live socket bindings with the process tree.
-CRIU also restores namespace PIDs, shim records, and host carriers.
-
-The restore sequence begins with those process resources and ends only after the reconstructed sharing relationships have been verified.
+Restore first recovers the processes through CRIU and their native CUDA state through CUDA checkpointing.
+The restored shims then recreate shared backing and reconnect the original mappings before the application resumes.
 Application threads continue waiting while the restored shims handle coordinator requests.
 
 ```mermaid
@@ -550,6 +554,10 @@ sequenceDiagram
     A->>S: Signal restore-complete to the application
 ```
 
+Before starting CRIU restore, the agent verifies the captured library identities and restores the required library mounts.
+Shim socket paths are excluded from rootfs archives because CRIU restores the live socket bindings with the process tree.
+CRIU also restores namespace PIDs, shim records, and host carriers.
+
 `LOAD_ALLOCATIONS` recreates backing in the selected holders, copies carrier contents into it, and restores their mappings, permissions, and export FDs.
 `RESTORE_UNICAST` reconnects the other holders to that same backing at their original addresses.
 For each reconstruction phase, the coordinator sends requests across the group and waits for every participant's reply before advancing.
@@ -574,17 +582,17 @@ A process can create one resource and import another, so the coordinator applies
 
 ### Process runtime and concurrency
 
+Each process uses two workers so it can serve allocation imports while processing checkpoint or restore requests.
+The peer worker accepts connections and serves cached export FDs without taking the allocation-state mutex or calling CUDA.
+It queues lifecycle requests to the control worker, which processes them sequentially and enters the relevant CUDA context.
+
+The shims open connections to peers as needed instead of maintaining connections between every pair of processes.
+The control worker's queue has a fixed capacity and rejects requests when it is full.
+
 Loading the backend makes its functions available through the private C ABI, but does not start its runtime services.
 A successful intercepted `cuInit` installs the tracking state, control socket, and two worker threads.
 This separation keeps symbol lookup from starting CUDA process services.
 The [loader appendix](#interception-and-loader-contract) explains the ABI and the initialization constraints in detail.
-
-The peer worker accepts connections and serves cached export FDs without taking the allocation-state mutex or calling CUDA.
-It queues lifecycle requests to the control worker, which processes them sequentially and enters the relevant CUDA context.
-The control worker's queue has a fixed capacity and rejects requests when it is full.
-
-This separation matters during restore: an importer must be able to obtain an FD while the exporting process's control worker is busy with another resource.
-The shims open connections to peers as needed instead of maintaining connections between every pair of processes.
 
 #### State and driver calls
 
@@ -619,7 +627,6 @@ It leaves the path unchanged for live listeners, full queues, non-socket files, 
 
 ### API
 
-There are no new CRDs or CRD fields.
 The source Pod opts in through an annotation on an ordinary Pod or a SnapshotJob Pod template:
 
 ```yaml
@@ -628,6 +635,7 @@ metadata:
     nvidia.com/cuda-shared-memory-support: "enabled"
 ```
 
+There are no new CRDs or CRD fields.
 After trimming whitespace, the accepted values are the case-sensitive strings `enabled` and `disabled`.
 An absent annotation does not request the feature.
 Admission validation for SnapshotJobs rejects other values through CEL, and the agent also validates the annotation on ordinary Pods.
