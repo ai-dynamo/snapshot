@@ -109,12 +109,6 @@ func TestContentStorageAdmission(t *testing.T) {
 		{"long-handle", true, func(s *snapshotv1.CheckpointStorageStatus) {
 			s.Artifacts[0].ArtifactHandle = strings.Repeat("a", 4097)
 		}, false},
-		{"empty-format", true, func(s *snapshotv1.CheckpointStorageStatus) {
-			s.Artifacts[0].ArtifactFormatVersion = ""
-		}, false},
-		{"future-format", true, func(s *snapshotv1.CheckpointStorageStatus) {
-			s.Artifacts[0].ArtifactFormatVersion = "future.backend/v2"
-		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			verifyStorageStatus(t, ctx, cl, tc.name, tc.bound, storeID, tc.change, tc.valid)
@@ -146,7 +140,7 @@ func verifyStorageStatus(t *testing.T, ctx context.Context, cl client.Client, na
 	content := newStorageContent(name, bound, storeID)
 	require.NoError(t, cl.Create(ctx, content))
 	content.Status.Storage = &snapshotv1.CheckpointStorageStatus{Artifacts: []snapshotv1.PublishedContainerArtifact{{
-		ContainerName: "main", ArtifactHandle: "opaque-handle", ArtifactFormatVersion: "snapshot.pagebroker/v1",
+		ContainerName: "main", ArtifactHandle: "opaque-handle",
 	}}}
 	if change != nil {
 		change(content.Status.Storage)

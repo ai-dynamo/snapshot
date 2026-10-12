@@ -17,7 +17,7 @@ func TestContentStorageSerializationAndDeepCopy(t *testing.T) {
 		},
 		Status: PodSnapshotContentStatus{
 			Storage: &CheckpointStorageStatus{Artifacts: []PublishedContainerArtifact{{
-				ContainerName: "main", ArtifactHandle: "opaque-handle", ArtifactFormatVersion: "snapshot.pagebroker/v1",
+				ContainerName: "main", ArtifactHandle: "opaque-handle",
 			}}},
 		},
 	}

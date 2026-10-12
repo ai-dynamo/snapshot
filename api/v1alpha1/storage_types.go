@@ -28,7 +28,7 @@ type CheckpointStorageStatus struct {
 
 // PublishedContainerArtifact is the persisted part of PageBroker's
 // PublishedArtifact, associated with a captured container. Readers pass the
-// handle and version back unchanged; they must not construct filesystem paths.
+// handle back unchanged; they must not construct filesystem paths.
 type PublishedContainerArtifact struct {
 	// ContainerName selects the captured container within the content.
 	// +kubebuilder:validation:Required
@@ -43,12 +43,4 @@ type PublishedContainerArtifact struct {
 	// +kubebuilder:validation:MaxLength=4096
 	// +kubebuilder:validation:Pattern=`\S`
 	ArtifactHandle string `json:"artifactHandle"`
-
-	// ArtifactFormatVersion selects the reader together with the store backend.
-	// Unknown nonempty versions remain recordable; readers report unsupported ones.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=128
-	// +kubebuilder:validation:Pattern=`\S`
-	ArtifactFormatVersion string `json:"artifactFormatVersion"`
 }

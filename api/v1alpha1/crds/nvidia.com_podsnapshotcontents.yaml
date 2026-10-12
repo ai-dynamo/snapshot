@@ -303,16 +303,8 @@ spec:
                       description: |-
                         PublishedContainerArtifact is the persisted part of PageBroker's
                         PublishedArtifact, associated with a captured container. Readers pass the
-                        handle and version back unchanged; they must not construct filesystem paths.
+                        handle back unchanged; they must not construct filesystem paths.
                       properties:
-                        artifactFormatVersion:
-                          description: |-
-                            ArtifactFormatVersion selects the reader together with the store backend.
-                            Unknown nonempty versions remain recordable; readers report unsupported ones.
-                          maxLength: 128
-                          minLength: 1
-                          pattern: \S
-                          type: string
                         artifactHandle:
                           description: ArtifactHandle is an opaque locator within
                             the bound store.
@@ -328,7 +320,6 @@ spec:
                           pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                       required:
-                      - artifactFormatVersion
                       - artifactHandle
                       - containerName
                       type: object

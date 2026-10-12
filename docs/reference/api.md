@@ -70,7 +70,6 @@ when it binds a `PodSnapshot`; callers never create it.
 | `storage.artifacts`                             | []PublishedContainerArtifact | Optional confirmed publications, keyed by `containerName`. Requires `spec.storage`; container names must be captured targets. Does not replace Ready/Failed conditions.                                                                    |
 | `storage.artifacts[].containerName`             | string                       | Required container name; entries must be unique.                                                                                                                                                                                           |
 | `storage.artifacts[].artifactHandle`            | string                       | Required opaque publication locator within the bound store, up to 4096 characters. Callers must not interpret it as a filesystem path.                                                                                                     |
-| `storage.artifacts[].artifactFormatVersion`     | string                       | Required backend reader version, up to 128 characters. Readers decide which versions they support.                                                                                                                                         |
 
 The storage fields are groundwork for artifact-addressed checkpoint/restore.
 Existing filesystem producers leave them absent. Neither field carries PVC/S3
