@@ -80,12 +80,21 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         *size > 0,
                         "participant {namespace_pid}: invalid allocation extent for {allocation:?}"
                     );
+                    // Creators may be nonexportable. CUDA reports no handle types on imports.
+                    let known_handle_types = *handle_types == 0
+                        || *handle_types
+                            == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+                                .0;
                     if allocation.creator_pid == *namespace_pid {
-                        ensure!(*handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
-                            "participant {namespace_pid}: invalid allocation creator {allocation:?}: handle_types={handle_types}");
+                        ensure!(
+                            known_handle_types,
+                            "participant {namespace_pid}: invalid allocation creator {allocation:?}: handle_types={handle_types}"
+                        );
                     } else {
-                        ensure!(*shared && (*handle_types == 0 || *handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0),
-                            "participant {namespace_pid}: invalid imported allocation {allocation:?}");
+                        ensure!(
+                            *shared && known_handle_types,
+                            "participant {namespace_pid}: invalid imported allocation {allocation:?}"
+                        );
                     }
                     let known =
                         allocations
@@ -435,5 +444,42 @@ mod tests {
                 assert_eq!(summary[0].reference, allocation);
             }
         }
+    }
+
+    #[test]
+    fn creators_may_be_nonexportable() {
+        let allocation = AllocationReference {
+            creator_pid: 1,
+            id: [1; 16],
+        };
+        let record = |handle_types| Record::Allocation {
+            allocation,
+            size: 4096,
+            shared: false,
+            peer_access_granted: true,
+            allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32,
+            handle_types,
+            location: MemoryLocation {
+                location_type: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE as u32,
+                id: 0,
+            },
+            virtual_allocation_handle_count: 1,
+        };
+        for handle_types in [
+            0,
+            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
+        ] {
+            let summary = validate(&BTreeMap::from([(1, vec![record(handle_types)])])).unwrap();
+            assert!(summary[0].uses_host_carrier());
+        }
+        assert!(
+            validate(&BTreeMap::from([(
+                1,
+                vec![record(
+                    CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0
+                )]
+            )]))
+            .is_err()
+        );
     }
 }

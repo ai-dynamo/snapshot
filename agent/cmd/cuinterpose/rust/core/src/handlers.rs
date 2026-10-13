@@ -41,14 +41,17 @@ pub fn cuMemCreate(
     if supported {
         vmm::validate_properties(&properties)?;
     }
+    // Another GPU in this process can map nonexportable backing, and native CUDA can
+    // fail to restore that mapping. Track the backing the carrier can reconstruct.
+    let tracked = supported || vmm::validate_properties(&properties).is_ok();
     let mut state = active()?;
-    let reference = if supported {
+    let reference = if tracked {
         Some(state.new_reference()?)
     } else {
         None
     };
-    let context = if supported { driver::context()? } else { 0 };
-    let home_device = if supported {
+    let context = if tracked { driver::context()? } else { 0 };
+    let home_device = if tracked {
         vmm::home_device(&properties, context)?
     } else {
         None
