@@ -157,8 +157,22 @@ PVCArtifactStore::PublishCheckpoint(
   const Path published = ValidateTarget(target);
   const std::string handle = published.lexically_relative(storage_root_).generic_string();
   const Path partial = PartialPath(published);
+  const Path containers = published.parent_path();
+  std::error_code error;
+  fs::create_directories(containers, error);
+  if (error)
+    throw ArtifactError(
+        Failure::STORAGE_ERROR, "publish artifact checkpoint: create " + containers.string() + ": " + error.message());
+  // The partial is created exclusively: one that already exists belongs to a
+  // concurrent publication of this target and is left alone.
+  const bool created = fs::create_directory(partial, error);
+  if (error)
+    throw ArtifactError(
+        Failure::STORAGE_ERROR, "publish artifact checkpoint: create " + partial.string() + ": " + error.message());
+  if (!created)
+    throw ArtifactError(
+        Failure::TRANSACTION_CONFLICT, "artifact publication already in progress at " + partial.string());
   try {
-    fs::create_directories(published.parent_path());
     // staging_directory (tmpfs) and published (the PVC) are different
     // filesystems: a rename across them would fail with EXDEV. Copy into
     // partial first; only the final rename, entirely within the PVC, provides
@@ -166,8 +180,21 @@ PVCArtifactStore::PublishCheckpoint(
     // does not consume it.
     fs::copy(staging_directory, partial, fs::copy_options::recursive);
     SyncTree(partial);
-    fs::rename(partial, published);
-    SyncPath(published.parent_path(), O_DIRECTORY);
+    fs::rename(partial, published, error);
+    if (error == std::errc::file_exists || error == std::errc::directory_not_empty)
+      throw ArtifactError(Failure::TRANSACTION_CONFLICT, "artifact is already published at " + handle);
+    if (error)
+      throw std::system_error(error, "rename " + partial.string());
+    // The rename is durable once containers/ is synced; the directories
+    // create_directories may have added above it need their parents synced too.
+    SyncPath(containers, O_DIRECTORY);
+    SyncPath(containers.parent_path(), O_DIRECTORY);
+    SyncPath(storage_root_ / "artifacts", O_DIRECTORY);
+  }
+  catch (const ArtifactError&) {
+    std::error_code cleanup_error;
+    fs::remove_all(partial, cleanup_error);
+    throw;
   }
   catch (const std::exception& error) {
     std::error_code cleanup_error;
