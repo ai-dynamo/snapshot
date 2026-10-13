@@ -462,6 +462,7 @@ mod tests {
                 },
                 shared,
                 peer_access_granted: false,
+                home_device: Some(0),
                 context: 0,
             })
             .unwrap();

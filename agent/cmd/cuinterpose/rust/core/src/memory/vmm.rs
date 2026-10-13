@@ -36,6 +36,8 @@ pub struct Allocation {
     /// Another GPU received access to this backing. Native CUDA can fail to restore
     /// such backing even without an export, so this is never cleared.
     pub peer_access_granted: bool,
+    /// Access from any other GPU is peer access. `None` treats every GPU as a peer.
+    pub home_device: Option<i32>,
     pub context: usize,
 }
 
@@ -53,6 +55,20 @@ pub(crate) fn context_device(properties: &CUmemAllocationProp) -> i32 {
     } else {
         0
     }
+}
+
+/// Device memory belongs to its GPU, and host memory to the GPU whose context created
+/// it. Host memory created without a current context has no home GPU.
+pub(crate) fn home_device(properties: &CUmemAllocationProp, context: usize) -> Result<Option<i32>> {
+    if properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE {
+        return Ok(Some(properties.location.id));
+    }
+    if context == 0 {
+        return Ok(None);
+    }
+    let mut device = 0;
+    unsafe { crate::driver::cuCtxGetDevice(&mut device) }?;
+    Ok(Some(device))
 }
 
 // This code never dereferences the opaque Win32 pointer on Linux, and driver access and
@@ -99,11 +115,9 @@ impl ProcessState {
             .memblocks
             .get_mut(&mapping.id)
             .and_then(Memblock::unicast_mut)
-            && allocation.properties.location.type_
-                == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
             && access.iter().any(|entry| {
                 entry.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
-                    && entry.location.id != allocation.properties.location.id
+                    && Some(entry.location.id) != allocation.home_device
                     && entry.flags != CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_NONE
             })
         {
@@ -227,19 +241,62 @@ mod tests {
     }
 
     #[test]
-    fn only_peer_device_access_selects_the_host_carrier() {
+    fn only_peer_access_selects_the_host_carrier() {
         use CUmemAccess_flags::*;
+        use CUmemLocationType::*;
         let owner = device_access(0, CU_MEM_ACCESS_FLAGS_PROT_READWRITE);
         let peer = device_access(1, CU_MEM_ACCESS_FLAGS_PROT_READWRITE);
         let peer_none = device_access(1, CU_MEM_ACCESS_FLAGS_PROT_NONE);
-        for (case, updates, peer_access_granted) in [
-            ("owner only", vec![vec![owner]], false),
-            ("peer access", vec![vec![owner, peer]], true),
-            ("PROT_NONE only", vec![vec![owner, peer_none]], false),
+        for (case, location, home_device, updates, peer_access_granted) in [
+            (
+                "owner only",
+                CU_MEM_LOCATION_TYPE_DEVICE,
+                Some(0),
+                vec![vec![owner]],
+                false,
+            ),
+            (
+                "peer access",
+                CU_MEM_LOCATION_TYPE_DEVICE,
+                Some(0),
+                vec![vec![owner, peer]],
+                true,
+            ),
+            (
+                "PROT_NONE only",
+                CU_MEM_LOCATION_TYPE_DEVICE,
+                Some(0),
+                vec![vec![owner, peer_none]],
+                false,
+            ),
             // cuMemSetAccess drops revoked locations before publishing the mapping.
             (
                 "grant then revoke",
+                CU_MEM_LOCATION_TYPE_DEVICE,
+                Some(0),
                 vec![vec![owner, peer], vec![owner]],
+                true,
+            ),
+            // Host NUMA node 1 is not GPU 1. Host memory belongs to its creating GPU.
+            (
+                "host, creating GPU only",
+                CU_MEM_LOCATION_TYPE_HOST_NUMA,
+                Some(0),
+                vec![vec![owner]],
+                false,
+            ),
+            (
+                "host, another GPU",
+                CU_MEM_LOCATION_TYPE_HOST_NUMA,
+                Some(0),
+                vec![vec![owner, peer]],
+                true,
+            ),
+            (
+                "host, no creating GPU",
+                CU_MEM_LOCATION_TYPE_HOST_NUMA,
+                None,
+                vec![vec![owner]],
                 true,
             ),
         ] {
@@ -254,13 +311,18 @@ mod tests {
                     properties: CUmemAllocationProp {
                         type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
                         location: CUmemLocation {
-                            type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
-                            id: 0,
+                            type_: location,
+                            id: if location == CU_MEM_LOCATION_TYPE_HOST_NUMA {
+                                1
+                            } else {
+                                0
+                            },
                         },
                         ..unsafe { std::mem::zeroed() }
                     },
                     shared: false,
                     peer_access_granted: false,
+                    home_device,
                     context: 0,
                 })
                 .unwrap();

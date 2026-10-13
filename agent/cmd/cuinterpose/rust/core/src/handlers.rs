@@ -48,6 +48,11 @@ pub fn cuMemCreate(
         None
     };
     let context = if supported { driver::context()? } else { 0 };
+    let home_device = if supported {
+        vmm::home_device(&properties, context)?
+    } else {
+        None
+    };
     let mut driver = 0;
     let create = crate::driver::symbols::cuMemCreate()?;
     crate::driver::result(unsafe { create(&mut driver, size, &properties, flags) })?;
@@ -61,6 +66,7 @@ pub fn cuMemCreate(
             properties,
             shared: false,
             peer_access_granted: false,
+            home_device,
             context,
         })),
         None => driver,
@@ -437,6 +443,7 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
         properties,
         shared: false,
         peer_access_granted: false,
+        home_device: Some(device),
         context,
     }));
     let opens = 0;
