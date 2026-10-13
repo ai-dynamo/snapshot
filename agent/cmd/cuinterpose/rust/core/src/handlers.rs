@@ -33,17 +33,7 @@ pub fn cuMemCreate(
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *prop };
-    let supported = properties.requestedHandleTypes
-        == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
-    if !supported && properties.requestedHandleTypes.0 != 0 {
-        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
-    }
-    if supported {
-        vmm::validate_properties(&properties)?;
-    }
-    // Another GPU in this process can map nonexportable backing, and native CUDA can
-    // fail to restore that mapping. Track the backing the carrier can reconstruct.
-    let tracked = supported || vmm::validate_properties(&properties).is_ok();
+    let tracked = vmm::tracked(&properties)?;
     let mut state = active()?;
     let reference = if tracked {
         Some(state.new_reference()?)

@@ -86,8 +86,9 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
                                 .0;
                     if allocation.creator_pid == *namespace_pid {
+                        // Only exportable backing can be shared.
                         ensure!(
-                            known_handle_types,
+                            known_handle_types && (*handle_types != 0 || !*shared),
                             "participant {namespace_pid}: invalid allocation creator {allocation:?}: handle_types={handle_types}"
                         );
                     } else {
@@ -452,10 +453,10 @@ mod tests {
             creator_pid: 1,
             id: [1; 16],
         };
-        let record = |handle_types| Record::Allocation {
+        let record = |handle_types, shared| Record::Allocation {
             allocation,
             size: 4096,
-            shared: false,
+            shared,
             peer_access_granted: true,
             allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32,
             handle_types,
@@ -469,17 +470,18 @@ mod tests {
             0,
             CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
         ] {
-            let summary = validate(&BTreeMap::from([(1, vec![record(handle_types)])])).unwrap();
+            let summary =
+                validate(&BTreeMap::from([(1, vec![record(handle_types, false)])])).unwrap();
             assert!(summary[0].uses_host_carrier());
         }
-        assert!(
-            validate(&BTreeMap::from([(
-                1,
-                vec![record(
-                    CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0
-                )]
-            )]))
-            .is_err()
-        );
+        for (handle_types, shared) in [
+            (0, true),
+            (
+                CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0,
+                false,
+            ),
+        ] {
+            assert!(validate(&BTreeMap::from([(1, vec![record(handle_types, shared)])])).is_err());
+        }
     }
 }
