@@ -246,12 +246,25 @@ func TestDropsArgs(t *testing.T) {
 	}
 }
 
-func TestConfigureKeepsTheDefaultEvents(t *testing.T) {
-	p, _ := testPlugin(t, &fakeResolver{})
-	p.runtimeNRIVersion = func() string { return "v0.8.0" }
+func TestConfigure(t *testing.T) {
+	t.Run("a runtime that applies args keeps the default events", func(t *testing.T) {
+		p, _ := testPlugin(t, &fakeResolver{})
+		p.runtimeNRIVersion = func() string { return "v0.11.0" }
 
-	events, err := p.Configure(context.Background(), "", "containerd", "v2.1.5")
+		events, err := p.Configure(context.Background(), "", "containerd", "v2.2.1")
 
-	require.NoError(t, err)
-	assert.Zero(t, events, "zero keeps the events the plugin implements")
+		require.NoError(t, err)
+		assert.Zero(t, events, "zero keeps the events the plugin implements")
+	})
+
+	// Registration fails, and the agent stops, as without NRI.
+	t.Run("a runtime that drops args is refused", func(t *testing.T) {
+		p, _ := testPlugin(t, &fakeResolver{})
+		p.runtimeNRIVersion = func() string { return "v0.8.0" }
+
+		_, err := p.Configure(context.Background(), "", "containerd", "v2.1.5")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "containerd 2.2 or newer")
+	})
 }

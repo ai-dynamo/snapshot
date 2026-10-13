@@ -52,19 +52,20 @@ commit-level history for each release is on its
   more release before removal in v0.3.0+.
 - Restore semantics: Snapshot replaces the command of every restore destination
   container with its restore proxy, `/snapshot-control/snapshot-restore-proxy`.
-  The proxy is the container's PID 1: it waits for the restore, forwards
-  signals to the restored process, and exits with its exit code, so the
-  container ends when the restored workload does. The node agent sets the
-  command through NRI when the container is created, and fails the restore if
-  the proxy is not PID 1. Requires action on upgrade: every node that restores
-  needs NRI v0.10 or newer, enabled in the container runtime: containerd 2.2 or
-  newer. Older runtimes drop the command silently, and the agent logs an error
-  when it registers with one. Restore Pods keep the source's command, which
-  never runs, and are expected to use `restartPolicy: Never`: a restored
-  container that starts again ends in `CrashLoopBackOff`. The agent mounts the
-  runtime's NRI socket directory, `/var/run/nri`, and the new chart value
-  `daemonset.nriHostNamespace` limits it to one host namespace, for tests on
-  nodes shared with other clusters.
+  The proxy is the container's PID 1: it waits for the restore, forwards signals
+  to the restored process, and exits with its exit code, so the container ends
+  when the restored workload does. The node agent sets the command through NRI
+  when the container is created, and fails the restore if the proxy is not
+  PID 1. Requires action on upgrade: every node that restores needs NRI v0.10 or
+  newer, enabled in the container runtime: containerd 2.2 or newer. On a node
+  without it, or with an older runtime, which drops the command silently, the
+  agent exits with an error and keeps restarting; keep it off such nodes with
+  `daemonset.nodeSelector`. Restore Pods keep the source's command, which never
+  runs, and are expected to use `restartPolicy: Never`: a restored container
+  that starts again ends in `CrashLoopBackOff`. The agent mounts the runtime's
+  NRI socket directory, `/var/run/nri`, and the new chart value
+  `daemonset.nriHostNamespace` limits it to one host namespace, for clusters
+  that share nodes, such as vCluster tenants: each installation sets its own.
 
 ### Deprecated
 

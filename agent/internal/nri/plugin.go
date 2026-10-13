@@ -138,21 +138,19 @@ func (p *Plugin) Run(ctx context.Context) error {
 	}
 }
 
-// Configure is called when the plugin registers. It reports a runtime too old
-// to apply the restore proxy command. The plugin keeps running: checkpoints
-// work there, and the agent fails each restore with the reason.
+// Configure is called when the plugin registers. It refuses a runtime too old
+// to apply the restore proxy command, which fails the registration and stops
+// the agent, as a runtime without NRI does: no restore could work there.
 func (p *Plugin) Configure(_ context.Context, _, runtime, version string) (api.EventMask, error) {
 	nriVersion := ""
 	if p.runtimeNRIVersion != nil {
 		nriVersion = p.runtimeNRIVersion()
 	}
-	log := p.log.WithValues("runtime", runtime+"/"+version, "nri_version", nriVersion)
 	if dropsArgs(nriVersion) {
-		log.Error(nil, "The container runtime ignores the restore proxy command, so restores on this node fail; use containerd 2.2 or newer",
-			"required_nri_version", argsNRIVersion)
-	} else {
-		log.Info("Registered with the container runtime")
+		return 0, fmt.Errorf("container runtime %s/%s has NRI %s, which ignores the restore proxy command; "+
+			"restores need NRI %s or newer (containerd 2.2 or newer)", runtime, version, nriVersion, argsNRIVersion)
 	}
+	p.log.Info("Registered with the container runtime", "runtime", runtime+"/"+version, "nri_version", nriVersion)
 	return 0, nil
 }
 

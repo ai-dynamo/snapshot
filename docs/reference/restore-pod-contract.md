@@ -147,11 +147,19 @@ Snapshot replaces the command of every destination container with its restore
 proxy, `/snapshot-control/snapshot-restore-proxy`. The Pod object is not
 changed: the node agent's NRI plugin sets the process arguments when the
 container is created. That needs NRI v0.10 or newer, enabled in the container
-runtime: containerd 2.2 or newer. The proxy is the container's PID 1. It waits for the restore, then follows the
-restored process: it forwards signals to it, and exits with its exit code, so
-the container ends when the restored workload does. If the proxy is not PID 1,
-the agent fails the restore. Keep the source's command in restore Pods; it never
-runs. Other containers in the Pod, such as sidecars, are left alone.
+runtime: containerd 2.2 or newer. The proxy is the container's PID 1. It waits
+for the restore, then follows the restored process: it forwards signals to it,
+and exits with its exit code, so the container ends when the restored workload
+does. If the proxy is not PID 1, the agent fails the restore. Keep the source's
+command in restore Pods; it never runs. Other containers in the Pod, such as
+sidecars, are left alone.
+
+The plugin decides which containers get the proxy when each container is
+created. Without `restore-container-map`, it reads the PodSnapshot that
+`restore-from` names, for the captured container's name. Create the restore Pod
+after that PodSnapshot exists; it does not have to be Ready yet. Until it
+exists, container creation fails, and kubelet retries with a backoff of up to 5
+minutes.
 
 Restore Pods no longer need a standby entrypoint. `SNAPSHOT_RESTORE_STANDBY`
 (`RestoreStandbyModeEnv`) and its `DYN_SNAPSHOT_RESTORE_STANDBY` alias are
