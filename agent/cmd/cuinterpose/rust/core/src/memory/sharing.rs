@@ -358,6 +358,7 @@ pub(crate) fn import_reference(
         size,
         properties,
         shared: true,
+        peer_access_granted: false,
         context,
     }));
     Ok((state, handle))

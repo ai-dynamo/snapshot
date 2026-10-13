@@ -31,8 +31,18 @@ pub struct Allocation {
     pub driver: Option<u64>,
     pub size: usize,
     pub properties: CUmemAllocationProp,
+    /// Another process exports or imports this backing.
     pub shared: bool,
+    /// Another GPU received access to this backing. Native CUDA can fail to restore
+    /// such backing even without an export, so this is never cleared.
+    pub peer_access_granted: bool,
     pub context: usize,
+}
+
+impl Allocation {
+    pub(crate) fn uses_host_carrier(&self) -> bool {
+        self.shared || self.peer_access_granted
+    }
 }
 
 /// A host NUMA node ID describes memory placement and cannot serve as a CUDA device
@@ -97,9 +107,7 @@ impl ProcessState {
                     && entry.flags != CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_NONE
             })
         {
-            // Peer mappings can use backing that native CUDA cannot restore even
-            // without an export. Keep using the carrier after access is revoked.
-            allocation.shared = true;
+            allocation.peer_access_granted = true;
         }
         mapping.access = access;
     }
@@ -207,6 +215,98 @@ impl Mapping {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn device_access(id: i32, flags: CUmemAccess_flags) -> CUmemAccessDesc {
+        CUmemAccessDesc {
+            location: CUmemLocation {
+                type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+                id,
+            },
+            flags,
+        }
+    }
+
+    #[test]
+    fn only_peer_device_access_selects_the_host_carrier() {
+        use CUmemAccess_flags::*;
+        let owner = device_access(0, CU_MEM_ACCESS_FLAGS_PROT_READWRITE);
+        let peer = device_access(1, CU_MEM_ACCESS_FLAGS_PROT_READWRITE);
+        let peer_none = device_access(1, CU_MEM_ACCESS_FLAGS_PROT_NONE);
+        for (case, updates, peer_access_granted) in [
+            ("owner only", vec![vec![owner]], false),
+            ("peer access", vec![vec![owner, peer]], true),
+            ("PROT_NONE only", vec![vec![owner, peer_none]], false),
+            // cuMemSetAccess drops revoked locations before publishing the mapping.
+            (
+                "grant then revoke",
+                vec![vec![owner, peer], vec![owner]],
+                true,
+            ),
+        ] {
+            let mut state = ProcessState::new(41);
+            let reference = state.new_reference().unwrap();
+            let handle = state
+                .adopt_unicast(Allocation {
+                    reference,
+                    refcounts: Default::default(),
+                    driver: None,
+                    size: 4096,
+                    properties: CUmemAllocationProp {
+                        type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
+                        location: CUmemLocation {
+                            type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+                            id: 0,
+                        },
+                        ..unsafe { std::mem::zeroed() }
+                    },
+                    shared: false,
+                    peer_access_granted: false,
+                    context: 0,
+                })
+                .unwrap();
+            state.mappings.insert(
+                4096,
+                Mapping {
+                    id: reference.id,
+                    handle: VirtualAllocationHandle::from_raw(handle).unwrap(),
+                    address: 4096,
+                    size: 4096,
+                    offset: 0,
+                    access: Vec::new(),
+                    flags: 0,
+                },
+            );
+            for access in &updates {
+                state.set_mapping_access(4096, access.clone());
+            }
+
+            let allocation = state.memblocks[&reference.id].unicast().unwrap();
+            assert!(!allocation.shared, "{case}");
+            assert_eq!(
+                allocation.peer_access_granted, peer_access_granted,
+                "{case}"
+            );
+            assert_eq!(
+                allocation.uses_host_carrier(),
+                peer_access_granted,
+                "{case}"
+            );
+            assert_eq!(
+                access_metadata(&state.mappings[&4096].access),
+                access_metadata(updates.last().unwrap()),
+                "{case}"
+            );
+            let records = state.inspect().unwrap();
+            assert!(
+                records.iter().any(|record| matches!(
+                    record,
+                    cuinterpose_protocol::Record::Allocation { shared: false, peer_access_granted: granted, .. }
+                        if *granted == peer_access_granted
+                )),
+                "{case}"
+            );
+        }
+    }
 
     #[test]
     fn access_updates_replace_permissions_per_location() {

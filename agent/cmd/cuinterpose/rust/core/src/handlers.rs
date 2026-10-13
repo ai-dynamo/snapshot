@@ -60,6 +60,7 @@ pub fn cuMemCreate(
             size,
             properties,
             shared: false,
+            peer_access_granted: false,
             context,
         })),
         None => driver,
@@ -435,6 +436,7 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
         size: extent,
         properties,
         shared: false,
+        peer_access_granted: false,
         context,
     }));
     let opens = 0;
