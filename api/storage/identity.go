@@ -25,6 +25,14 @@ const PVCRoot = "/"
 
 var storeIDPattern = regexp.MustCompile(`^store-v1-[0-9a-f]{64}$`)
 
+// Config is the resolved storage configuration the chart renders into
+// storage.yaml for the operator and PageBroker. Exactly one backend block is
+// populated and selects the backend; Helm's storage.type only chooses which
+// block to render. S3 joins as a second block when that backend lands.
+type Config struct {
+	PVC *PVC `json:"pvc,omitempty" yaml:"pvc,omitempty"`
+}
+
 // PVC identifies a logical store inside a namespaced PVC. BasePath is absolute
 // within the claim, not the mount path in a consuming container. A claim name
 // identifies a configured location, not a particular PVC/PV incarnation.

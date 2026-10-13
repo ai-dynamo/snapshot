@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
 
+	"github.com/ai-dynamo/snapshot/api/storage"
 	snapshotv1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/api/v1alpha1/crds"
 )
@@ -38,7 +39,8 @@ func TestContentStorageAdmission(t *testing.T) {
 	cl, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
 	ctx := t.Context()
-	const storeID = "store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	storeID, err := storage.PVC{Namespace: "snapshot", ClaimName: "snapshot-pvc", BasePath: storage.PVCRoot}.StoreID()
+	require.NoError(t, err)
 
 	for _, bound := range []bool{false, true} {
 		name := "legacy"

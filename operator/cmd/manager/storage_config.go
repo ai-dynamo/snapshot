@@ -43,9 +43,7 @@ func configuredStoreID(configPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read storage configuration: %w", err)
 	}
-	var cfg struct {
-		PVC *storage.PVC `json:"pvc"`
-	}
+	var cfg storage.Config
 	if err := yaml.UnmarshalStrict(data, &cfg); err != nil {
 		return "", fmt.Errorf("decode storage configuration: %w", err)
 	}

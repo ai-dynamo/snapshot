@@ -31,7 +31,9 @@ The chart's `storage.pvc` values control the PVC:
 
 The claim is always in the Helm release namespace. The chart resolves these
 values into `storage.yaml` in the existing configuration ConfigMap, mounted at
-`/etc/snapshot/storage.yaml` in PageBroker and the operator manager. The agent
+`/etc/snapshot/storage.yaml` in PageBroker and the operator manager. The file
+carries one backend block and that populated block selects the backend; Helm's
+`storage.type` only chooses which block to render. The agent
 receives only its existing `config.yaml`; its configuration has no PVC identity
 block. Provisioning settings (`create`, `size`, `storageClass`) do not identify
 the artifact store.
