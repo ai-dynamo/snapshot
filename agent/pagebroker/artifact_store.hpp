@@ -60,7 +60,9 @@ class PVCArtifactStore {
   // path for target and fills *out with the resulting descriptor.
   // staging_directory is copied, not consumed: the caller removes it
   // afterward. Re-runs ValidateTarget, so an occupied path still fails with
-  // ArtifactError(TRANSACTION_CONFLICT) at Commit and is left untouched.
+  // ArtifactError(TRANSACTION_CONFLICT) at Commit and is left untouched. The
+  // partial is created exclusively and the final rename never replaces, so a
+  // concurrent publication of the same target fails closed as well.
   void PublishCheckpoint(const Path& staging_directory, const ArtifactTarget& target, PublishedArtifact* out) const;
 
   // Resolves and verifies a previously published artifact: store match,

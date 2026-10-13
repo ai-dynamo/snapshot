@@ -32,8 +32,6 @@ ResolveStoreID(const std::string& storage_config_path)
   catch (const std::exception& error) {
     throw std::invalid_argument("parse storage config " + storage_config_path + ": " + error.what());
   }
-  if (config.type != "pvc")
-    throw std::invalid_argument("storage config type " + config.type + " has no artifact-addressed backend");
   try {
     return snapshot::pagebroker::ComputeStoreID(config.pvc_namespace, config.pvc_claim_name, config.pvc_base_path);
   }
