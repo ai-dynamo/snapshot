@@ -444,7 +444,7 @@ sequenceDiagram
 ```
 
 The shim cannot know at allocation time whether the application will later export the pointer, so it converts every supported synchronous malloc call.
-The current implementation leaves allocations that are never marked shared to native CUDA checkpointing.
+The current implementation leaves allocations that are never shared and never accessed by another GPU to native CUDA checkpointing.
 
 #### IPC and mapping lifetime
 
@@ -523,13 +523,19 @@ Setting it to `0` creates a nonexportable allocation, while `CU_MEM_HANDLE_TYPE_
 
 The shim marks an allocation as shared after a successful tracked export, import, or binding into a tracked multicast object.
 It keeps that classification after export descriptors are closed or `cuMulticastUnbind` removes bindings.
+
+Native CUDA checkpointing can also fail to restore an allocation that another GPU in the same process maps, even if the allocation was never exported.
+The shim therefore also uses a host carrier once a successful access update grants a GPU other than the allocation's home GPU access.
+The home GPU is the backing's GPU for device memory, or the GPU that created host NUMA memory.
+This selection is kept after the access is revoked.
+
 If the selected holder retains only a mapping, it calls `cuMemRetainAllocationHandle` to obtain a temporary allocation handle for the transfer.
 
 | Allocation state | Current preservation path |
 | --- | --- |
-| Nonexportable `cuMemCreate` allocation | Left to native CUDA checkpointing |
-| POSIX-exportable `cuMemCreate` or adapted `cuMemAlloc_v2` allocation never marked shared | Left to native CUDA checkpointing, with mappings and handles left intact |
-| Shared tracked DEVICE or HOST_NUMA backing | One full copy in the selected holder's carrier |
+| Nonexportable `cuMemCreate` allocation whose properties a carrier cannot reconstruct | Left to native CUDA checkpointing |
+| Tracked `cuMemCreate` or adapted `cuMemAlloc_v2` allocation never shared or accessed by another GPU | Left to native CUDA checkpointing, with mappings and handles left intact |
+| Tracked DEVICE or HOST_NUMA backing that is shared or accessed by another GPU | One full copy in the selected holder's carrier |
 | Tracked allocation bound into a multicast object | One copy in a host carrier, with no additional copy for the multicast object |
 
 #### Copying and lifetime
@@ -588,7 +594,7 @@ The destination must support allocations on those IDs, and preserving the origin
 
 ### Capture
 
-Capture saves shared allocation contents in host carriers and removes the shared CUDA resources before native CUDA checkpointing runs.
+Capture saves the contents of shared and peer-accessed allocations in host carriers and removes their CUDA resources before native CUDA checkpointing runs.
 CRIU then captures the processes, including their carriers and tracking records.
 
 The sequence below shows a successful capture.
@@ -650,7 +656,7 @@ The ordering follows the resource dependencies: remove multicast before its memb
 The shim must finish preparation before Snapshot locks CUDA because copying memory and removing shared resources require working CUDA calls.
 
 Virtual handles, allocation references, mapping records, and carrier addresses remain in process memory for CRIU to capture.
-Allocations not marked shared remain in place for native CUDA checkpointing.
+Allocations that are neither shared nor accessed by another GPU remain in place for native CUDA checkpointing.
 If no process has initialized the core, the agent skips coordinator operations but still performs native CUDA capture and library identity checks.
 
 ### Restore
@@ -799,7 +805,7 @@ cuinterpose-coordinator (--inspect | --prepare | --restore)
 | Argument | Contract |
 | --- | --- |
 | `--inspect` | Read and validate resource records without changing process state. |
-| `--prepare` | Save shared allocation contents in host carriers, release tracked shared resources, and write `cuinterpose.state`. |
+| `--prepare` | Save shared and peer-accessed allocation contents in host carriers, release their CUDA resources, and write `cuinterpose.state`. |
 | `--restore` | Reconstruct shared resources and validate them against the checkpoint records. |
 | `--socket-dir DIR` | Required directory containing participant control sockets. |
 | `--process PID` | Required namespace PID of a participant. Repeat for every participant. The coordinator does not discover additional processes. |
@@ -1040,7 +1046,7 @@ The process runtime starts only after an intercepted `cuInit` succeeds.
 | --- | --- |
 | `cuInit` | Initializes the shim alongside CUDA. |
 | `cuMemCreate`, `cuMemRelease`, `cuMemRetainAllocationHandle` | Tracks supported VMM allocations and translates application-visible virtual allocation handles to the CUDA driver handle. |
-| `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess` | Records address ranges, allocation offsets, and access permissions. |
+| `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess` | Records address ranges, allocation offsets, and access permissions. Access from another GPU selects the host carrier. |
 | `cuMemGetAllocationPropertiesFromHandle` | Resolves virtual handles and preserves application-visible allocation properties. |
 | `cuMemExportToShareableHandle`, `cuMemImportFromShareableHandle` | Replaces raw export FDs with virtual shareable handles and imports the creator's real allocation through a peer request. |
 | `cuMemAlloc_v2`, `cuMemFree_v2`, `cuMemGetAddressRange_v2` | Implements synchronous device malloc with VMM backing, frees it, and reports the application's requested range. |
