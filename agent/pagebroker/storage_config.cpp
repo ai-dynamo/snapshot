@@ -48,6 +48,8 @@ StorageConfig
 ParseStorageConfig(const std::string& yaml_text)
 {
   StorageConfig config;
+  bool has_pvc = false;
+  bool has_s3 = false;
   bool in_pvc_block = false;
   int pvc_indent = -1;
 
@@ -73,16 +75,17 @@ ParseStorageConfig(const std::string& yaml_text)
     const std::string rest = Trim(trimmed.substr(colon + 1));
 
     if (!in_pvc_block && indent == 0) {
-      if (key == "type") {
-        config.type = Unquote(rest);
-      } else if (key == "pvc") {
+      if (key == "pvc") {
         if (!rest.empty())
           throw std::runtime_error("storage.yaml: 'pvc' must introduce a nested block, not an inline value");
+        has_pvc = true;
         in_pvc_block = true;
         pvc_indent = indent;
+      } else if (key == "s3") {
+        has_s3 = true;
       }
-      // Unknown top-level keys (e.g. a future backend's own block) are
-      // ignored: this parser only extracts what PageBroker's PVC store needs.
+      // Other top-level keys are ignored: this parser only extracts what
+      // PageBroker's PVC store needs.
       continue;
     }
 
@@ -99,11 +102,15 @@ ParseStorageConfig(const std::string& yaml_text)
     // ignore it the same way unknown top-level keys are ignored.
   }
 
-  if (config.type.empty())
-    throw std::runtime_error("storage.yaml: missing required 'type'");
-  if (config.type == "pvc" &&
-      (config.pvc_namespace.empty() || config.pvc_claim_name.empty() || config.pvc_base_path.empty()))
-    throw std::runtime_error("storage.yaml: type is 'pvc' but pvc.namespace/claimName/basePath is incomplete");
+  // The populated backend block selects the backend; there is no type key.
+  if (has_pvc && has_s3)
+    throw std::runtime_error("storage.yaml: exactly one backend block is required, found 'pvc' and 's3'");
+  if (has_s3)
+    throw std::runtime_error("storage.yaml: 's3' has no artifact-addressed backend");
+  if (!has_pvc)
+    throw std::runtime_error("storage.yaml: missing backend block (expected 'pvc')");
+  if (config.pvc_namespace.empty() || config.pvc_claim_name.empty() || config.pvc_base_path.empty())
+    throw std::runtime_error("storage.yaml: pvc.namespace/claimName/basePath is incomplete");
   return config;
 }
 

@@ -11,13 +11,11 @@ using snapshot::pagebroker::ParseStorageConfig;
 TEST(StorageConfig, ParsesTheChartsExactShape)
 {
   const std::string yaml =
-      "type: \"pvc\"\n"
       "pvc:\n"
       "  namespace: \"snapshot\"\n"
       "  claimName: \"snapshot-pvc\"\n"
       "  basePath: \"/\"\n";
   const auto config = ParseStorageConfig(yaml);
-  EXPECT_EQ(config.type, "pvc");
   EXPECT_EQ(config.pvc_namespace, "snapshot");
   EXPECT_EQ(config.pvc_claim_name, "snapshot-pvc");
   EXPECT_EQ(config.pvc_base_path, "/");
@@ -26,26 +24,41 @@ TEST(StorageConfig, ParsesTheChartsExactShape)
 TEST(StorageConfig, IgnoresUnknownTopLevelKeys)
 {
   const std::string yaml =
-      "type: \"pvc\"\n"
+      "pvc:\n"
+      "  namespace: \"snapshot\"\n"
+      "  claimName: \"snapshot-pvc\"\n"
+      "  basePath: \"/\"\n"
+      "extra:\n"
+      "  key: \"ignored\"\n";
+  const auto config = ParseStorageConfig(yaml);
+  EXPECT_EQ(config.pvc_claim_name, "snapshot-pvc");
+}
+
+TEST(StorageConfig, RejectsAMissingBackendBlock)
+{
+  EXPECT_THROW(ParseStorageConfig("extra:\n  key: \"value\"\n"), std::runtime_error);
+}
+
+TEST(StorageConfig, RejectsTwoBackendBlocks)
+{
+  const std::string yaml =
       "pvc:\n"
       "  namespace: \"snapshot\"\n"
       "  claimName: \"snapshot-pvc\"\n"
       "  basePath: \"/\"\n"
       "s3:\n"
-      "  bucket: \"ignored-until-09-a\"\n";
-  const auto config = ParseStorageConfig(yaml);
-  EXPECT_EQ(config.pvc_claim_name, "snapshot-pvc");
+      "  bucket: \"checkpoints\"\n";
+  EXPECT_THROW(ParseStorageConfig(yaml), std::runtime_error);
 }
 
-TEST(StorageConfig, RejectsMissingType)
+TEST(StorageConfig, RejectsAnS3OnlyConfig)
 {
-  EXPECT_THROW(ParseStorageConfig("pvc:\n  namespace: \"snapshot\"\n"), std::runtime_error);
+  EXPECT_THROW(ParseStorageConfig("s3:\n  bucket: \"checkpoints\"\n"), std::runtime_error);
 }
 
 TEST(StorageConfig, RejectsIncompletePvcBlock)
 {
   const std::string yaml =
-      "type: \"pvc\"\n"
       "pvc:\n"
       "  namespace: \"snapshot\"\n";
   EXPECT_THROW(ParseStorageConfig(yaml), std::runtime_error);
