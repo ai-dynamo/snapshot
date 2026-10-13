@@ -100,7 +100,7 @@ impl ProcessState {
                 }
             }
             unsafe { driver::cuMemSetAccess(address, extent, access.as_ptr(), access.len()) }?;
-            self.mappings.get_mut(&address).unwrap().access = access;
+            self.set_mapping_access(address, access);
             self.malloc_regions.insert(
                 address,
                 MallocRegion {
@@ -217,7 +217,7 @@ pub fn cuCtxEnablePeerAccess(peer: CUcontext, flags: u32) -> Result<()> {
         }
     }
     for update in updates {
-        state.mappings.get_mut(&update.address).unwrap().access = update.access;
+        state.set_mapping_access(update.address, update.access);
     }
     state
         .malloc_peers

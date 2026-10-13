@@ -145,7 +145,7 @@ fn command_all(
         .map(|peer| {
             allocations
                 .iter()
-                .filter(|a| a.shared && a.owner_pid == peer.namespace_pid)
+                .filter(|a| a.uses_host_carrier() && a.owner_pid == peer.namespace_pid)
                 .try_fold(0u64, |sum, a| {
                     sum.checked_add(a.size).context("allocation size overflow")
                 })
@@ -165,7 +165,7 @@ fn command_all(
             let owners = if operation == Operation::SaveAllocations {
                 allocations
                     .iter()
-                    .filter(|a| a.shared && a.holders.contains(&peer.namespace_pid))
+                    .filter(|a| a.uses_host_carrier() && a.holders.contains(&peer.namespace_pid))
                     .map(|a| AllocationOwner {
                         allocation: a.reference,
                         owner_pid: a.owner_pid,

@@ -14,9 +14,17 @@ pub struct AllocationSummary {
     pub reference: AllocationReference,
     pub size: u64,
     pub shared: bool,
+    /// Any holder granted another GPU access.
+    pub peer_access_granted: bool,
     pub owner_pid: NamespacePid,
     pub holders: BTreeSet<NamespacePid>,
     location: MemoryLocation,
+}
+
+impl AllocationSummary {
+    pub fn uses_host_carrier(&self) -> bool {
+        self.shared || self.peer_access_granted
+    }
 }
 struct Multicast {
     reference: AllocationReference,
@@ -47,6 +55,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                 Record::Allocation {
                     allocation,
                     shared,
+                    peer_access_granted,
                     size,
                     allocation_type,
                     handle_types,
@@ -85,6 +94,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                                 reference: *allocation,
                                 size: *size,
                                 shared: *shared,
+                                peer_access_granted: false,
                                 owner_pid: *namespace_pid,
                                 holders: BTreeSet::new(),
                                 location: *location,
@@ -100,6 +110,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                                 || known.location.id == location.id),
                         "participant {namespace_pid}: inconsistent allocation metadata for {allocation:?}"
                     );
+                    // Each holder grants peer access through its own mappings.
+                    known.peer_access_granted |= *peer_access_granted;
                     ensure!(
                         known.holders.insert(*namespace_pid),
                         "participant {namespace_pid}: duplicate allocation record for {allocation:?}"
@@ -401,6 +413,7 @@ mod tests {
                 allocation,
                 size: 4096,
                 shared: true,
+                peer_access_granted: false,
                 allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32,
                 handle_types: CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
                 location: MemoryLocation {
