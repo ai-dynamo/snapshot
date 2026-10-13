@@ -1172,6 +1172,9 @@ class ArtifactBrokerTest : public ::testing::Test {
     root_ = fs::temp_directory_path() / "pagebroker-artifact-daemon-tests" /
             ::testing::UnitTest::GetInstance()->current_test_info()->name();
     fs::remove_all(root_);
+    // The storage root is the mounted claim in production; the store refuses
+    // to treat a missing one as an empty store.
+    fs::create_directories(root_ / "storage");
     broker_.emplace(root_ / "tmpfs", root_ / "storage", nullptr, kConfiguredStoreID);
   }
 
@@ -1194,28 +1197,58 @@ class ArtifactBrokerTest : public ::testing::Test {
     return target;
   }
 
-  // Runs a full checkpoint through staging and Commit; returns the published
-  // descriptor. Writes manifest.yaml plus one payload file into staging
-  // before Commit, as the agent would. Each call is a distinct transaction
-  // (a fresh transaction_id, as Snapshot always assigns) even when uid and
-  // container repeat, e.g. to simulate republishing the same target.
-  PublishedArtifact PublishCheckpoint(const std::string& uid, const std::string& container)
+  // Stages a checkpoint for target and writes manifest.yaml, one payload file
+  // and, when given, a GPU payload into staging, as the agent and the GPU
+  // engine would; returns the transaction ID to Commit. Each call is a
+  // distinct transaction (a fresh transaction_id, as Snapshot always assigns)
+  // even when uid and container repeat.
+  std::string StageCheckpoint(
+      const std::string& uid, const std::string& container, const std::string& payload = "criu image bytes",
+      const std::string& gpu_payload = "")
   {
     const std::string transaction_id = "checkpoint-" + uid + "-" + std::to_string(++request_number_);
     auto prepare = RequestFor(transaction_id);
     *prepare.mutable_prepare_staged_checkpoint()->mutable_target() = Target(uid, container);
     const auto staged = broker().HandleRequest(prepare);
-    EXPECT_TRUE(staged.has_staged_checkpoint_directory());
+    EXPECT_TRUE(staged.has_staged_checkpoint_directory()) << staged.DebugString();
     const fs::path staging_directory(staged.staged_checkpoint_directory().image_directory());
     std::ofstream(staging_directory / "manifest.yaml") << "artifact:\n  contentUID: " << uid << "\n";
-    std::ofstream(staging_directory / "pages-1.img") << "criu image bytes";
+    std::ofstream(staging_directory / "pages-1.img") << payload;
+    if (!gpu_payload.empty()) {
+      fs::create_directory(staging_directory / gpu::kDataDirectory);
+      std::ofstream(staging_directory / gpu::kDataDirectory / "payload") << gpu_payload;
+    }
+    return transaction_id;
+  }
 
+  Response Commit(const std::string& transaction_id)
+  {
     auto commit = RequestFor(transaction_id);
     commit.mutable_commit();
-    const auto committed = broker().HandleRequest(commit);
-    EXPECT_TRUE(committed.has_commit_complete());
+    return broker().HandleRequest(commit);
+  }
+
+  // Runs a full checkpoint through staging and Commit; returns the published
+  // descriptor.
+  PublishedArtifact PublishCheckpoint(
+      const std::string& uid, const std::string& container, const std::string& payload = "criu image bytes",
+      const std::string& gpu_payload = "")
+  {
+    const auto committed = Commit(StageCheckpoint(uid, container, payload, gpu_payload));
+    EXPECT_TRUE(committed.has_commit_complete()) << committed.DebugString();
     EXPECT_TRUE(committed.commit_complete().has_published_artifact());
     return committed.commit_complete().published_artifact();
+  }
+
+  std::string RestoredPayload(const PublishedArtifact& artifact, const std::string& transaction_id)
+  {
+    auto restore = RequestFor(transaction_id);
+    *restore.mutable_staged_restore()->mutable_artifact() = artifact;
+    const auto staged = broker().HandleRequest(restore);
+    EXPECT_TRUE(staged.has_staged_restore_directory()) << staged.DebugString();
+    std::string payload;
+    std::ifstream(fs::path(staged.staged_restore_directory().image_directory()) / "pages-1.img") >> payload;
+    return payload;
   }
 
   Broker& broker() { return *broker_; }
@@ -1231,15 +1264,13 @@ TEST_F(ArtifactBrokerTest, CheckpointsAndCommitsAnArtifactAddressedTarget)
   EXPECT_EQ(published.store_id(), kConfiguredStoreID);
   EXPECT_EQ(published.artifact_handle(), "artifacts/uid-1/containers/main");
   EXPECT_TRUE(fs::exists(root_ / "storage/artifacts/uid-1/containers/main/manifest.yaml"));
-  EXPECT_TRUE(fs::exists(root_ / "storage/artifacts/uid-1/containers/main/publication.json"));
 }
 
 TEST_F(ArtifactBrokerTest, RestoresFromAPublishedDescriptor)
 {
-  const auto published = PublishCheckpoint("uid-2", "main");
+  const auto published = PublishCheckpoint("uid-2", "main", "criu image bytes", "GPU memory");
   const auto gpu_directory = root_ / "storage/artifacts/uid-2/containers/main" / gpu::kDataDirectory;
-  fs::create_directory(gpu_directory);
-  std::ofstream(gpu_directory / "payload") << "GPU memory";
+  ASSERT_TRUE(fs::exists(gpu_directory / "payload"));
 
   auto restore = RequestFor("restore-uid-2");
   *restore.mutable_staged_restore()->mutable_artifact() = published;
@@ -1286,7 +1317,6 @@ TEST_F(ArtifactBrokerTest, RefusesADescriptorFromAnotherStore)
   auto* artifact = restore.mutable_staged_restore()->mutable_artifact();
   artifact->set_store_id("store-v1-" + std::string(64, 'a'));
   artifact->set_artifact_handle("artifacts/uid-4/containers/main");
-  artifact->set_artifact_format_version("snapshot.pagebroker/v1");
   const auto rejected = broker().HandleRequest(restore);
   ASSERT_TRUE(rejected.has_failure());
   EXPECT_EQ(rejected.failure().code(), Failure::STORE_MISMATCH);
@@ -1298,18 +1328,88 @@ TEST_F(ArtifactBrokerTest, RefusesRestoringAnUnpublishedArtifact)
   auto* artifact = restore.mutable_staged_restore()->mutable_artifact();
   artifact->set_store_id(kConfiguredStoreID);
   artifact->set_artifact_handle("artifacts/never-published/containers/main");
-  artifact->set_artifact_format_version("snapshot.pagebroker/v1");
   const auto rejected = broker().HandleRequest(restore);
   ASSERT_TRUE(rejected.has_failure());
   EXPECT_EQ(rejected.failure().code(), Failure::ARTIFACT_NOT_FOUND);
 }
 
-TEST_F(ArtifactBrokerTest, RepublishingReplacesThePreviousArtifactAtomically)
+// Prepare refuses an occupied target outright (see
+// RefusesPreparingAnAlreadyPublishedTarget); this covers the window where the
+// publication appears between a transaction's Prepare and its Commit.
+TEST_F(ArtifactBrokerTest, RefusesASecondPublicationOfTheSameTarget)
 {
-  const auto first = PublishCheckpoint("uid-5", "main");
-  const auto second = PublishCheckpoint("uid-5", "main");
-  EXPECT_EQ(first.artifact_handle(), second.artifact_handle());
-  EXPECT_FALSE(fs::exists(root_ / "storage/artifacts/uid-5/containers/main.pagebroker-previous"));
+  const auto late = StageCheckpoint("uid-5", "main", "second");
+  const auto first = PublishCheckpoint("uid-5", "main", "first");
+  const auto rejected = Commit(late);
+  ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
+  EXPECT_EQ(rejected.failure().code(), Failure::TRANSACTION_CONFLICT);
+  EXPECT_FALSE(fs::exists(root_ / "storage/artifacts/uid-5/containers/main.pagebroker-partial"));
+  EXPECT_EQ(RestoredPayload(first, "restore-uid-5"), "first");
+}
+
+TEST_F(ArtifactBrokerTest, RefusesPreparingAnAlreadyPublishedTarget)
+{
+  PublishCheckpoint("uid-8", "main");
+
+  auto prepare = RequestFor("late-attempt");
+  *prepare.mutable_prepare_staged_checkpoint()->mutable_target() = Target("uid-8", "main");
+  const auto rejected = broker().HandleRequest(prepare);
+  ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
+  EXPECT_EQ(rejected.failure().code(), Failure::TRANSACTION_CONFLICT);
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs/checkpoint/late-attempt"));
+  EXPECT_EQ(Commit("late-attempt").failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}
+
+TEST_F(ArtifactBrokerTest, RefusesAnEngineTheStoreCannotServe)
+{
+  auto prepare = RequestFor("nixl-checkpoint");
+  *prepare.mutable_prepare_staged_checkpoint()->mutable_target() = Target("uid-9", "main");
+  prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine()->mutable_nixl();
+  const auto rejected = broker().HandleRequest(prepare);
+  ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
+  EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
+
+  auto explicit_posix = RequestFor("posix-checkpoint");
+  *explicit_posix.mutable_prepare_staged_checkpoint()->mutable_target() = Target("uid-9", "main");
+  explicit_posix.mutable_prepare_staged_checkpoint()->mutable_io_engine()->mutable_posix_copy();
+  EXPECT_TRUE(broker().HandleRequest(explicit_posix).has_staged_checkpoint_directory());
+
+  const auto published = PublishCheckpoint("uid-10", "main");
+  auto restore = RequestFor("nixl-restore");
+  *restore.mutable_staged_restore()->mutable_artifact() = published;
+  restore.mutable_staged_restore()->mutable_io_engine()->mutable_nixl();
+  const auto rejected_restore = broker().HandleRequest(restore);
+  ASSERT_TRUE(rejected_restore.has_failure()) << rejected_restore.DebugString();
+  EXPECT_EQ(rejected_restore.failure().code(), Failure::INVALID_REQUEST);
+}
+
+TEST_F(ArtifactBrokerTest, RetriedCommitReplaysThePublishedDescriptor)
+{
+  const auto transaction_id = StageCheckpoint("uid-7", "main", "once");
+  const auto first = Commit(transaction_id);
+  ASSERT_TRUE(first.commit_complete().has_published_artifact()) << first.DebugString();
+  const auto retried = Commit(transaction_id);
+  ASSERT_TRUE(retried.commit_complete().has_published_artifact()) << retried.DebugString();
+  const auto& published = first.commit_complete().published_artifact();
+  const auto& replayed = retried.commit_complete().published_artifact();
+  EXPECT_EQ(replayed.store_id(), published.store_id());
+  EXPECT_EQ(replayed.artifact_handle(), published.artifact_handle());
+  EXPECT_EQ(RestoredPayload(published, "restore-uid-7"), "once");
+}
+
+TEST_F(ArtifactBrokerTest, RefusesADirectPrepareOnAnArtifactAddressedTransaction)
+{
+  auto prepare = RequestFor("mixed");
+  *prepare.mutable_prepare_staged_checkpoint()->mutable_target() = Target("uid-6", "main");
+  ASSERT_TRUE(broker().HandleRequest(prepare).has_staged_checkpoint_directory());
+
+  auto direct = RequestFor("mixed");
+  Configure(
+      direct.mutable_prepare_direct_checkpoint()->mutable_destination(),
+      direct.mutable_prepare_direct_checkpoint()->mutable_io_engine(), root_ / "storage" / "direct");
+  const auto rejected = broker().HandleRequest(direct);
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().code(), Failure::TRANSACTION_CONFLICT);
 }
 
 }  // namespace

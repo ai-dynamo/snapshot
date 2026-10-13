@@ -3,15 +3,16 @@
 
 #include "artifact_store.hpp"
 
-#include <google/protobuf/struct.pb.h>
-#include <google/protobuf/util/json_util.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <sstream>
-#include <utility>
+#include <system_error>
+#include <vector>
 
+#include "file_descriptor.hpp"
 #include "identity.hpp"
 #include "posix_copy_engine.hpp"
 
@@ -19,7 +20,7 @@ namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
 
-constexpr char kPublicationFile[] = "publication.json";
+constexpr char kManifestFile[] = "manifest.yaml";
 
 bool
 IsSafePathComponent(const std::string& value)
@@ -36,36 +37,6 @@ PartialPath(const Path& destination)
   return partial;
 }
 
-Path
-PreviousPath(const Path& destination)
-{
-  Path previous = destination;
-  previous += ".pagebroker-previous";
-  return previous;
-}
-
-class RestorePreviousOnFailure {
- public:
-  RestorePreviousOnFailure(const Path& previous, const Path& published) : previous_(previous), published_(published)
-  {
-  }
-
-  ~RestorePreviousOnFailure()
-  {
-    if (!cancelled_) {
-      std::error_code error;
-      fs::rename(previous_, published_, error);
-    }
-  }
-
-  void Cancel() { cancelled_ = true; }
-
- private:
-  const Path& previous_;
-  const Path& published_;
-  bool cancelled_ = false;
-};
-
 void
 RejectSymlinks(const Path& directory)
 {
@@ -75,59 +46,45 @@ RejectSymlinks(const Path& directory)
   }
 }
 
-void
-WritePublication(const Path& path, const PublishedArtifact& artifact, const std::string& commit_id)
+// status-based probes report "not there" through the error code as well as
+// the returned type; only other errors mean the store could not be consulted.
+bool
+Absent(const std::error_code& error)
 {
-  google::protobuf::Struct document;
-  auto& fields = *document.mutable_fields();
-  fields["storeId"].set_string_value(artifact.store_id());
-  fields["artifactHandle"].set_string_value(artifact.artifact_handle());
-  fields["artifactFormatVersion"].set_string_value(artifact.artifact_format_version());
-  fields["commitId"].set_string_value(commit_id);
-
-  std::string json;
-  google::protobuf::util::JsonPrintOptions options;
-  options.add_whitespace = true;
-  const auto status = google::protobuf::util::MessageToJsonString(document, &json, options);
-  if (!status.ok())
-    throw ArtifactError(Failure::STORAGE_ERROR, "encode publication evidence: " + status.ToString());
-
-  std::ofstream file(path, std::ios::trunc);
-  if (!file.is_open())
-    throw ArtifactError(Failure::STORAGE_ERROR, "write publication evidence: open " + path.string() + " failed");
-  file << json;
-  if (!file.good())
-    throw ArtifactError(Failure::STORAGE_ERROR, "write publication evidence: write " + path.string() + " failed");
+  return error == std::errc::no_such_file_or_directory || error == std::errc::not_a_directory;
 }
 
-struct Publication {
-  std::string store_id;
-  std::string artifact_handle;
-  std::string artifact_format_version;
-  std::string commit_id;
-};
-
-Publication
-ReadPublication(const Path& path)
+// A probe that fails for any reason other than "not there" says nothing about
+// whether the publication exists: denied access stays denied, anything else
+// is the store being unavailable.
+[[noreturn]] void
+ThrowStorageProbeError(const std::error_code& error, const std::string& what)
 {
-  std::ifstream file(path);
-  if (!file.is_open())
-    throw ArtifactError(Failure::ARTIFACT_NOT_FOUND, "publication evidence not found at " + path.string());
-  const std::string json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  if (error == std::errc::permission_denied)
+    throw ArtifactError(Failure::ACCESS_DENIED, what + ": " + error.message());
+  throw ArtifactError(Failure::STORAGE_UNAVAILABLE, what + ": " + error.message());
+}
 
-  google::protobuf::Struct document;
-  const auto status = google::protobuf::util::JsonStringToMessage(json, &document);
-  if (!status.ok())
-    throw ArtifactError(Failure::ARTIFACT_CORRUPT, "publication evidence is not valid JSON: " + status.ToString());
+void
+SyncPath(const Path& path, int flags)
+{
+  FileDescriptor fd(open(path.c_str(), flags | O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+  if (fd.get() < 0)
+    throw std::system_error(errno, std::generic_category(), "open " + path.string() + " for fsync");
+  if (fsync(fd.get()) != 0)
+    throw std::system_error(errno, std::generic_category(), "fsync " + path.string());
+}
 
-  const auto& fields = document.fields();
-  for (const char* key : {"storeId", "artifactHandle", "artifactFormatVersion", "commitId"}) {
-    if (!fields.contains(key) || fields.at(key).kind_case() != google::protobuf::Value::kStringValue)
-      throw ArtifactError(Failure::ARTIFACT_CORRUPT, std::string("publication evidence missing field ") + key);
+void
+SyncTree(const Path& directory)
+{
+  for (const auto& entry : fs::recursive_directory_iterator(directory)) {
+    if (entry.is_directory())
+      SyncPath(entry.path(), O_DIRECTORY);
+    else if (entry.is_regular_file())
+      SyncPath(entry.path(), 0);
   }
-  return Publication{
-      fields.at("storeId").string_value(), fields.at("artifactHandle").string_value(),
-      fields.at("artifactFormatVersion").string_value(), fields.at("commitId").string_value()};
+  SyncPath(directory, O_DIRECTORY);
 }
 
 }  // namespace
@@ -135,6 +92,21 @@ ReadPublication(const Path& path)
 PVCArtifactStore::PVCArtifactStore(std::string store_id, Path storage_root)
     : store_id_(std::move(store_id)), storage_root_(fs::weakly_canonical(std::move(storage_root)))
 {
+}
+
+void
+PVCArtifactStore::RequireStorageRoot() const
+{
+  std::error_code error;
+  const bool is_directory = fs::is_directory(storage_root_, error);
+  if (error && !Absent(error))
+    ThrowStorageProbeError(error, "probe artifact store root " + storage_root_.string());
+  if (!is_directory)
+    throw ArtifactError(
+        Failure::STORAGE_UNAVAILABLE, "artifact store root " + storage_root_.string() + " is not a directory");
+  fs::directory_iterator(storage_root_, error);
+  if (error)
+    ThrowStorageProbeError(error, "open artifact store root " + storage_root_.string());
 }
 
 Path
@@ -147,7 +119,35 @@ PVCArtifactStore::ValidateTarget(const ArtifactTarget& target) const
   const auto& identity = target.artifact();
   if (!IsSafePathComponent(identity.artifact_uid()) || !IsSafePathComponent(identity.container_name()))
     throw ArtifactError(Failure::INVALID_REQUEST, "artifact target has an invalid artifact UID or container name");
-  return storage_root_ / "artifacts" / identity.artifact_uid() / "containers" / identity.container_name();
+  try {
+    ValidateArtifactIdentity(store_id_, identity.artifact_uid(), identity.container_name());
+  }
+  catch (const std::invalid_argument& error) {
+    throw ArtifactError(Failure::INVALID_REQUEST, std::string("artifact target: ") + error.what());
+  }
+
+  RequireStorageRoot();
+  const Path published =
+      storage_root_ / "artifacts" / identity.artifact_uid() / "containers" / identity.container_name();
+  const std::string handle = published.lexically_relative(storage_root_).generic_string();
+  // The fixed path holds exactly one publication per content and container.
+  // A new capture attempt gets a new content UID, so an occupied path is never
+  // this attempt's legitimate destination: refuse it before any capture runs,
+  // since CRIU terminates the source and a late refusal would strand it.
+  std::error_code error;
+  const bool published_exists = fs::exists(published, error);
+  if (error)
+    ThrowStorageProbeError(error, "probe publication at " + handle);
+  if (published_exists)
+    throw ArtifactError(Failure::TRANSACTION_CONFLICT, "artifact is already published at " + handle);
+  const Path partial = PartialPath(published);
+  const bool partial_exists = fs::exists(partial, error);
+  if (error)
+    ThrowStorageProbeError(error, "probe " + partial.string());
+  if (partial_exists)
+    throw ArtifactError(
+        Failure::TRANSACTION_CONFLICT, "artifact publication already in progress at " + partial.string());
+  return published;
 }
 
 void
@@ -155,43 +155,28 @@ PVCArtifactStore::PublishCheckpoint(
     const Path& staging_directory, const ArtifactTarget& target, PublishedArtifact* out) const
 {
   const Path published = ValidateTarget(target);
-  const std::string commit_id =
-      ComputeCommitID(store_id_, target.artifact().artifact_uid(), target.artifact().container_name());
   const std::string handle = published.lexically_relative(storage_root_).generic_string();
-
-  PublishedArtifact artifact;
-  artifact.set_store_id(store_id_);
-  artifact.set_artifact_handle(handle);
-  artifact.set_artifact_format_version(kFilesystemFormatVersion);
-  WritePublication(staging_directory / kPublicationFile, artifact, commit_id);
-
   const Path partial = PartialPath(published);
-  const Path previous = PreviousPath(published);
   try {
     fs::create_directories(published.parent_path());
     // staging_directory (tmpfs) and published (the PVC) are different
     // filesystems: a rename across them would fail with EXDEV. Copy into
-    // partial first; only the partial/previous/published shuffle below,
-    // entirely within the PVC, uses rename for its atomicity. The caller
-    // removes staging_directory afterward — this does not consume it.
+    // partial first; only the final rename, entirely within the PVC, provides
+    // the atomicity. The caller removes staging_directory afterward — this
+    // does not consume it.
     fs::copy(staging_directory, partial, fs::copy_options::recursive);
-    if (fs::exists(published)) {
-      fs::rename(published, previous);
-      RestorePreviousOnFailure restore_previous(previous, published);
-      fs::rename(partial, published);
-      restore_previous.Cancel();
-      std::error_code cleanup_error;
-      fs::remove_all(previous, cleanup_error);
-    } else {
-      fs::rename(partial, published);
-    }
+    SyncTree(partial);
+    fs::rename(partial, published);
+    SyncPath(published.parent_path(), O_DIRECTORY);
   }
   catch (const std::exception& error) {
     std::error_code cleanup_error;
     fs::remove_all(partial, cleanup_error);
     throw ArtifactError(Failure::STORAGE_ERROR, std::string("publish artifact checkpoint: ") + error.what());
   }
-  *out = std::move(artifact);
+  out->Clear();
+  out->set_store_id(store_id_);
+  out->set_artifact_handle(handle);
 }
 
 RestorePlan
@@ -203,33 +188,46 @@ PVCArtifactStore::ResolveRestorePlan(const PublishedArtifact& artifact) const
                                       store_id_);
 
   // The handle is a relative path this store itself produced (see
-  // PublishCheckpoint); it must stay within storage_root_ with no symlink
-  // component, the same containment rule PosixCopyEngine applies to a
-  // caller-supplied legacy filesystem path.
-  const Path requested(artifact.artifact_handle());
-  const Path container_directory = storage_root_ / requested;
-  const Path normalized = container_directory.lexically_normal();
-  const Path relative = normalized.lexically_relative(storage_root_);
-  if (requested.is_absolute() || relative.empty() || relative == "." || relative.native().starts_with("..") ||
-      normalized != container_directory)
+  // PublishCheckpoint): exactly artifacts/<uid>/containers/<name>, which keeps
+  // it within storage_root_, with no symlink component, the same containment
+  // rule PosixCopyEngine applies to a caller-supplied legacy filesystem path.
+  const std::string& handle = artifact.artifact_handle();
+  std::vector<std::string> parts;
+  std::istringstream segments(handle);
+  for (std::string part; std::getline(segments, part, '/');) parts.push_back(part);
+  if (parts.size() != 4 || parts[0] != "artifacts" || parts[2] != "containers" || !IsSafePathComponent(parts[1]) ||
+      !IsSafePathComponent(parts[3]))
     throw ArtifactError(Failure::ARTIFACT_CORRUPT, "published artifact handle is not a valid locator");
+  try {
+    ValidateArtifactIdentity(store_id_, parts[1], parts[3]);
+  }
+  catch (const std::invalid_argument&) {
+    throw ArtifactError(Failure::ARTIFACT_CORRUPT, "published artifact handle names an invalid artifact identity");
+  }
+  const Path container_directory = storage_root_ / "artifacts" / parts[1] / "containers" / parts[3];
 
+  RequireStorageRoot();
+  std::error_code error;
   Path component = storage_root_;
-  for (const auto& part : relative) {
+  for (const auto& part : parts) {
     component /= part;
-    if (fs::is_symlink(component))
+    const bool is_symlink = fs::is_symlink(component, error);
+    if (error && !Absent(error))
+      ThrowStorageProbeError(error, "probe " + component.string());
+    if (is_symlink)
       throw ArtifactError(Failure::ARTIFACT_CORRUPT, "published artifact handle contains a symlink");
   }
 
-  if (!fs::is_directory(container_directory))
-    throw ArtifactError(Failure::ARTIFACT_NOT_FOUND, "no publication at " + artifact.artifact_handle());
-
-  const Publication publication = ReadPublication(container_directory / kPublicationFile);
-  if (publication.artifact_format_version != kFilesystemFormatVersion)
-    throw ArtifactError(
-        Failure::UNSUPPORTED_ARTIFACT, "publication format " + publication.artifact_format_version + " is not supported");
-  if (publication.store_id != store_id_ || publication.artifact_handle != artifact.artifact_handle())
-    throw ArtifactError(Failure::ARTIFACT_CORRUPT, "publication evidence does not match its own location");
+  const bool is_directory = fs::is_directory(container_directory, error);
+  if (error && !Absent(error))
+    ThrowStorageProbeError(error, "probe publication at " + handle);
+  if (!is_directory)
+    throw ArtifactError(Failure::ARTIFACT_NOT_FOUND, "no publication at " + handle);
+  const bool has_manifest = fs::is_regular_file(container_directory / kManifestFile, error);
+  if (error && !Absent(error))
+    ThrowStorageProbeError(error, "probe manifest at " + handle);
+  if (!has_manifest)
+    throw ArtifactError(Failure::ARTIFACT_CORRUPT, "publication at " + handle + " is missing manifest.yaml");
 
   return RestorePlan{container_directory};
 }
@@ -237,12 +235,11 @@ PVCArtifactStore::ResolveRestorePlan(const PublishedArtifact& artifact) const
 void
 PVCArtifactStore::StageMetadata(const RestorePlan& plan, const Path& destination) const
 {
-  const Path manifest = plan.container_directory / "manifest.yaml";
-  if (!fs::is_regular_file(manifest))
-    throw ArtifactError(Failure::ARTIFACT_CORRUPT, "publication is missing manifest.yaml");
   fs::create_directories(destination);
   std::error_code error;
-  fs::copy_file(manifest, destination / "manifest.yaml", fs::copy_options::overwrite_existing, error);
+  fs::copy_file(
+      plan.container_directory / kManifestFile, destination / kManifestFile, fs::copy_options::overwrite_existing,
+      error);
   if (error)
     throw ArtifactError(Failure::STORAGE_ERROR, "stage artifact metadata: " + error.message());
 }

@@ -7,11 +7,13 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <variant>
 #include <string>
 #include <vector>
 
 #include "checkpoint_transaction_descriptor.hpp"
+#include "pagebroker_types.hpp"
 #include "restore_transaction_descriptor.hpp"
 #include "gpu/engine.hpp"
 
@@ -45,6 +47,9 @@ class Transaction {
   using GpuOperationPtr = std::shared_ptr<GpuOperation>;
   // Protected by mutex(), except the atomic cancellation token.
   GpuOperationPtr gpu_operation;
+  // Set by an artifact-addressed checkpoint Commit so a retried Commit on the
+  // same transaction replays the same descriptor without publishing again.
+  std::optional<PublishedArtifact> published_artifact;
 
   // Callers hold mutex() while accessing transaction state.
   std::mutex& mutex();
