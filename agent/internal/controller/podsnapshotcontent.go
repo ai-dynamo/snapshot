@@ -239,7 +239,7 @@ func (w *NodeController) runCheckpoint(
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
 	// would discard a usable checkpoint and, being terminal, block recovery from ever promoting it.
 	if err := w.checkpointFn(dumpCtx, params); err != nil {
-		logger.Error(err, "Checkpoint failed")
+		logWithStep(logger, err).Error(err, "Checkpoint failed")
 		if patchErr := w.setSnapshotContentFailed(ctx, content, "CheckpointFailed", err); patchErr != nil {
 			return fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, patchErr)
 		}

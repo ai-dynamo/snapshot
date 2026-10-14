@@ -89,11 +89,11 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
 	if err != nil {
-		return fmt.Errorf("resolve checkpoint artifact path: %w", err)
+		return failStep(StepResolveCheckpointPath, err)
 	}
 	state, gpuDeviceMapDuration, err := inspect(ctx, rt, log, req)
 	if err != nil {
-		return err
+		return failStep(StepInspectSource, err)
 	}
 	usePageBrokerGPU := cfg.CustomStorageAvailable && len(state.CUDAHostPIDs) > 0
 	transactionID := uuid.NewString()
@@ -119,34 +119,34 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if usePageBrokerGPU {
 		executionContext, err = pagebroker.NewGPUContext(state.CUDANSPIDs, cuda.GPUUUIDs(state.GPUs), "")
 		if err != nil {
-			return err
+			return failStep(StepBuildGPUContext, err)
 		}
 	}
 	preparationAttempted = true
 	tmpDir, gpu, err := prepareCheckpoint(ctx, broker, transactionID, finalDir, executionContext)
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
-		return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+		return failStep(StepPrepareCheckpoint, err)
 	}
 
 	state.CuInterpose, err = inspectCuInterpose(ctx, state, req.CuInterposeRequested)
 	if err != nil {
-		return err
+		return failStep(StepInspectCuInterpose, err)
 	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 && !usePageBrokerGPU {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir)
 		if err != nil {
-			return err
+			return failStep(StepStageCUDAJobFile, err)
 		}
 		if err := cuda.CheckJobFile(cudaJobFile, len(state.GPUs.Devices), state.CuInterpose.UsesCoordinator()); err != nil {
-			return err
+			return failStep(StepStageCUDAJobFile, err)
 		}
 	}
 
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, usePageBrokerGPU)
 	if err != nil {
-		return err
+		return failStep(StepConfigureCheckpoint, err)
 	}
 
 	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
@@ -156,7 +156,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	switchStart := time.Now()
 	if err := broker.Commit(ctx, transactionID); err != nil {
-		return fmt.Errorf("commit PageBroker checkpoint: %w", err)
+		return failStep(StepCommitCheckpoint, err)
 	}
 	committed = true
 	switchDuration := time.Since(switchStart)
@@ -397,13 +397,13 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	// GPU capture must finish before CRIU and filesystem capture.
 	gpuDuration, err := captureGPU(ctx, data, state, checkpointDir, cudaJobFile, log, gpu)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepCheckpointGPU, err)
 	}
 	timings.CUDACheckpointDuration = gpuDuration
 
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepDumpCRIU, err)
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 

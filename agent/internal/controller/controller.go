@@ -737,7 +737,7 @@ type restoreVerdict struct {
 // in the current pass has returned.
 func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, results []restoreResult) bool {
 	tally := tallyRestoreResults(results)
-	verdict := tally.verdict(artifact.SnapshotName)
+	verdict := tally.verdict(artifact.SnapshotName, pod.Spec.NodeName)
 	if len(tally.pending) != 0 {
 		// The pass is not over, so a write that fails is reported and dropped
 		// rather than retried: the next pass publishes again.
@@ -776,9 +776,27 @@ func tallyRestoreResults(results []restoreResult) restoreTally {
 	return tally
 }
 
+// logWithStep adds the failing step as a structured key when the error names one.
+func logWithStep(log logr.Logger, err error) logr.Logger {
+	if step := executor.StepOf(err); step != "" {
+		return log.WithValues("step", string(step))
+	}
+	return log
+}
+
+// agentLogsHint points a failed restore's condition at the one place holding
+// the full detail: this node's agent log.
+func agentLogsHint(nodeName string) string {
+	if nodeName == "" {
+		return ""
+	}
+	return fmt.Sprintf(". See the snapshot agent logs on node %s", nodeName)
+}
+
 // verdict concludes one pass, still in progress or terminal, from the counts
-// alone.
-func (t restoreTally) verdict(snapshotName string) restoreVerdict {
+// alone. nodeName, when known, is appended to failure messages as a pointer to
+// the agent logs.
+func (t restoreTally) verdict(snapshotName, nodeName string) restoreVerdict {
 	switch {
 	case len(t.pending) != 0:
 		return restoreVerdict{
@@ -800,7 +818,7 @@ func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonPartiallySucceeded,
 			message: fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; not restored: %s",
-				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, "; ")),
+				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, "; ")) + agentLogsHint(nodeName),
 		}
 	case len(t.failed) == 0:
 		return restoreVerdict{
@@ -813,14 +831,14 @@ func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonFailed,
 			message: fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s: %s",
-				len(t.failed), len(t.incompatible), snapshotName, strings.Join(t.failureReasons, "; ")),
+				len(t.failed), len(t.incompatible), snapshotName, strings.Join(t.failureReasons, "; ")) + agentLogsHint(nodeName),
 		}
 	default:
 		return restoreVerdict{
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonFailed,
 			message: fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s",
-				len(t.failed), snapshotName, strings.Join(t.failureReasons, "; ")),
+				len(t.failed), snapshotName, strings.Join(t.failureReasons, "; ")) + agentLogsHint(nodeName),
 		}
 	}
 }
@@ -877,7 +895,7 @@ func (w *NodeController) restoreDestination(
 		}
 		result.state = restoreResultFailed
 		result.reason = err.Error()
-		log.Error(err, "Restore controller worker failed")
+		logWithStep(log, err).Error(err, "Restore controller worker failed")
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 		return result
 	}
@@ -969,7 +987,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if !errors.As(err, &cleanupErr) {
 			return op.failRestore(ctx, err)
 		}
-		op.log.Error(cleanupErr, "Restore completed with cleanup errors")
+		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
 	return op.completeRestore(ctx, restored)
@@ -1041,7 +1059,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 
 func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) error {
 	w := op.controller
-	op.log.Error(restoreErr, "External restore failed")
+	logWithStep(op.log, restoreErr).Error(restoreErr, "External restore failed")
 	// Re-resolve because restore may fail before discovering the placeholder PID.
 	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
 	if err != nil {
