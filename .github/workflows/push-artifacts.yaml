@@ -168,45 +168,33 @@ jobs:
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # --provenance/--sbom attach SLSA provenance and an SPDX SBOM as OCI
-      # attestations. --metadata-file reports the pushed digest, which is what we
+      # attestations. The action reports the pushed digest, which is what we
       # sign: a tag can be repointed afterwards, a digest cannot.
       - name: Build and push image
         id: build
-        env:
-          IMAGE: ${{ matrix.image }}
-          BUILD_ARGS: ${{ matrix.build_args }}
-          TAGS: ${{ needs.version.outputs.tags }}
+        uses: ./.github/actions/build-image
+        with:
+          image: ${{ matrix.image }}
+          registry: ${{ env.REGISTRY }}
+          tags: ${{ needs.version.outputs.tags }}
           # The branch whose cache this run owns, falling back to main on a
           # tag. release.yaml calls this workflow on a `release: published`
           # event, where ref_name is the tag rather than a branch.
-          CACHE_BRANCH: ${{ github.event.workflow_run.head_branch || (github.ref_type == 'tag' && 'main' || github.ref_name) }}
+          cache_branch: ${{ github.event.workflow_run.head_branch || (github.ref_type == 'tag' && 'main' || github.ref_name) }}
           # And a release reads without writing: a tag never recurs, so a
           # cache published under one is a cache no later build ever names.
-          CACHE_MODE: ${{ github.ref_type == 'tag' && 'read' || 'write' }}
-        run: |
-          set -euo pipefail
-          # Assigned, not inlined into the argument: a command substitution
-          # that fails inside a simple command does not trip `set -e`, so an
-          # inline call would drop --cache-to and still publish the image,
-          # leaving every later build cold with nothing in the log to say why.
-          cache_flags="$(hack/ci-cache-flags.sh "${CACHE_MODE}" "${IMAGE}" "${CACHE_BRANCH}")"
-          make "docker-build-${IMAGE}" \
-            REGISTRY="${REGISTRY}" \
-            TAGS="${TAGS}" \
-            DOCKER_BUILD_ARGS="--push ${BUILD_ARGS} \
-              --provenance=mode=max \
-              --sbom=true \
-              --metadata-file=buildx.json \
-              ${cache_flags}"
-          DIGEST="$(jq -er '."containerimage.digest"' buildx.json)"
-          echo "${DIGEST}" > "digest-${IMAGE}.txt"
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          cache_mode: ${{ github.ref_type == 'tag' && 'read' || 'write' }}
+          cache_ref_prefix: ${{ env.CACHE_REF_PREFIX }}
+          build_args: ${{ matrix.build_args }} --provenance=mode=max --sbom=true
 
       - name: Sign image
         env:
           IMAGE: ${{ matrix.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: cosign sign --yes "${REGISTRY}/${IMAGE}@${DIGEST}"
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${REGISTRY}/${IMAGE}@${DIGEST}"
+          echo "${DIGEST}" > "digest-${IMAGE}.txt"
 
       # Matrix legs share one set of job outputs, last leg winning, so digests
       # travel as files. The release job needs the digest captured here.
