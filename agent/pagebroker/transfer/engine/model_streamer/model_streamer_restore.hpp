@@ -12,6 +12,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -30,6 +31,7 @@ struct ModelStreamerSessionOptions {
   std::string access_key_id;
   std::string secret_access_key;
   std::string session_token;
+  std::optional<std::string> filesystem_strategy;
 };
 
 // Materializes restore plans through Model Streamer while one event loop

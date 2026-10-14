@@ -61,7 +61,9 @@ make -C agent/pagebroker test daemon \
 
 PageBroker submits CPU destinations and needs no CUDA driver. The filesystem
 strategy defaults to the library's ordered
-`io_uring_direct,libaio_direct,sync_buffered` preference list. Use `RUNAI_STREAMER_FS_STRATEGY` before starting PageBroker to select an explicit
+`io_uring_direct,libaio_direct,sync_buffered` preference list. Use the optional
+[`--model-streamer-config` JSON file](../../agent/pagebroker/MODEL_STREAMER.md)
+or `RUNAI_STREAMER_FS_STRATEGY` before starting PageBroker to select an explicit
 list such as `io_uring_buffered,sync_buffered`.
 
 Native sessions admit at most eight submissions and target 10 GB of submitted
