@@ -8,7 +8,7 @@ use crate::sys::{
     CUmemAllocationHandleType, CUmemAllocationProp, CUmemGenericAllocationHandle, CUmemLocation,
     CUmemLocationType,
 };
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::os::fd::{FromRawFd, OwnedFd};
 
 /// Calls a CUDA entry point and panics with its name and status unless it succeeds.
@@ -251,6 +251,35 @@ pub fn mark_shared(handle: CUmemGenericAllocationHandle) {
     drop(export_fd(handle));
 }
 
+/// Properties of a two-GPU POSIX-shareable multicast object of one minimum granule.
+pub fn multicast_properties() -> sys::CUmulticastObjectProp {
+    let mut properties = sys::CUmulticastObjectProp {
+        numDevices: 2,
+        size: 0,
+        handleTypes: u64::from(POSIX_FD.0),
+        flags: 0,
+    };
+    let minimum = sys::CUmulticastGranularity_flags::CU_MULTICAST_GRANULARITY_MINIMUM;
+    cu!(cuMulticastGetGranularity(
+        &mut properties.size,
+        &properties,
+        minimum
+    ));
+    properties
+}
+
+/// A two-GPU POSIX-shareable multicast object of one minimum granule, with `devices`
+/// added. Returns the handle and its size.
+pub fn multicast_group(devices: &[i32]) -> (CUmemGenericAllocationHandle, usize) {
+    let properties = multicast_properties();
+    let mut group = 0;
+    cu!(cuMulticastCreate(&mut group, &properties));
+    for &device in devices {
+        cu!(cuMulticastAddDevice(group, device));
+    }
+    (group, properties.size)
+}
+
 pub fn write_bytes(address: CUdeviceptr, data: &[u8]) {
     cu!(cuMemcpyHtoD_v2(address, data.as_ptr().cast(), data.len()));
 }
@@ -264,4 +293,99 @@ pub fn read_bytes(address: CUdeviceptr, size: usize) -> Vec<u8> {
 pub fn assert_bytes(address: CUdeviceptr, expected: &[u8], stage: &str) {
     let actual = read_bytes(address, expected.len());
     assert_eq!(actual, expected, "{stage}");
+}
+
+pub fn read_u32(address: CUdeviceptr) -> u32 {
+    u32::from_le_bytes(read_bytes(address, 4).try_into().unwrap())
+}
+
+// HOST_NUMA mappings grant access only to the CPU, so these bypass driver copies.
+
+/// # Safety
+/// `data.len()` bytes at `address` must be mapped with CPU write access.
+pub unsafe fn write_host(address: CUdeviceptr, data: &[u8]) {
+    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len()) };
+}
+
+/// # Safety
+/// `size` bytes at `address` must be mapped with CPU read access.
+pub unsafe fn read_host(address: CUdeviceptr, size: usize) -> Vec<u8> {
+    unsafe { std::slice::from_raw_parts(address as *const u8, size) }.to_vec()
+}
+
+/// Runs a one-thread kernel that takes only 64-bit pointer parameters.
+pub fn launch(ptx: &CStr, entry: &CStr, pointers: &[CUdeviceptr]) {
+    let mut module = std::ptr::null_mut();
+    cu!(cuModuleLoadData(&mut module, ptx.as_ptr().cast()));
+    let mut kernel = std::ptr::null_mut();
+    cu!(cuModuleGetFunction(&mut kernel, module, entry.as_ptr()));
+    let mut values = pointers.to_vec();
+    let mut parameters: Vec<*mut c_void> = values
+        .iter_mut()
+        .map(|value| (value as *mut CUdeviceptr).cast())
+        .collect();
+    let stream = std::ptr::null_mut();
+    cu!(cuLaunchKernel(
+        kernel,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        stream,
+        parameters.as_mut_ptr(),
+        std::ptr::null_mut()
+    ));
+    cu!(cuCtxSynchronize());
+    cu!(cuModuleUnload(module));
+}
+
+const INCREMENT: &CStr = c"
+.version 7.0
+.target sm_75
+.address_size 64
+.visible .entry increment(.param .u64 address) {
+    .reg .u64 pointer;
+    .reg .u32 value;
+    ld.param.u64 pointer, [address];
+    ld.global.u32 value, [pointer];
+    add.u32 value, value, 1;
+    st.global.u32 [pointer], value;
+    ret;
+}
+";
+
+/// Increments a u32 from a kernel in the current context.
+///
+/// A kernel dereferences the pointer directly, whereas a driver copy can take another path
+/// and succeed even when this GPU cannot access the memory.
+pub fn increment(address: CUdeviceptr) {
+    launch(INCREMENT, c"increment", &[address]);
+}
+
+// Ordinary loads from a multicast address are undefined, so read through multimem.
+const MULTIMEM_SUM: &CStr = c"
+.version 8.1
+.target sm_90
+.address_size 64
+.visible .entry multimem_sum(.param .u64 source, .param .u64 destination) {
+    .reg .b64 %source, %destination;
+    .reg .b32 %value;
+    ld.param.u64 %source, [source];
+    ld.param.u64 %destination, [destination];
+    multimem.ld_reduce.acquire.sys.global.add.u32 %value, [%source];
+    st.global.u32 [%destination], %value;
+    ret;
+}
+";
+
+/// The sum over every bound member of the u32 at a multicast address.
+pub fn multimem_sum(address: CUdeviceptr) -> u32 {
+    let output = malloc(4);
+    launch(MULTIMEM_SUM, c"multimem_sum", &[address, output]);
+    let sum = read_u32(output);
+    cu!(cuMemFree_v2(output));
+    sum
 }

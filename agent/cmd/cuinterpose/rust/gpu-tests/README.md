@@ -24,6 +24,12 @@ From `agent/cmd/cuinterpose`:
 make test-gpu
 ```
 
+On hardware without CUDA multicast or POSIX-shareable HOST_NUMA VMM, skip those tests:
+
+```sh
+make test-gpu TEST_ARGS="--skip multicast --skip host_numa"
+```
+
 A host without Rust can run a prebuilt binary. `make gpu-tests` writes the artifacts and
 `build/cuinterpose-gpu-tests`, which tests the artifacts beside it, from one build. Copy
 `build/` to the GPU host and run `build/cuinterpose-gpu-tests --test-threads=1`.
@@ -48,3 +54,10 @@ the agent.
 | `access_replay` | Access updates and their replay after reconstruction |
 | `context_teardown` | Context destruction and primary-context reset or release |
 | `foreign_imports` | Imports from processes without the frontend |
+| `creator_released_backing` | Shared backing whose creator released every reference |
+| `host_numa_backing` | Creator-owned HOST_NUMA backing with CPU aliases |
+| `legacy_ipc` | Legacy IPC handles opened by another process |
+| `malloc_peer_access` | Peer access grants on converted mallocs |
+| `multicast_restore` | Multicast bindings, including nonzero offsets, through a native checkpoint |
+| `multicast_bind_ordering` | Multicast bind and unbind ordering |
+| `multicast_sharing` | A multicast object shared by processes that each bind one GPU |
