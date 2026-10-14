@@ -1,0 +1,538 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "storage_manifest.hpp"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <charconv>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <limits>
+#include <sstream>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+
+namespace snapshot::pagebroker::gpu::storage {
+namespace {
+
+constexpr size_t kMaximumDeviceCount = 1024;
+constexpr size_t kMaximumManifestSize = 256 * 1024;
+
+class FileDescriptor {
+public:
+  explicit FileDescriptor(int fd = -1) : fd_(fd) {}
+  FileDescriptor(const FileDescriptor &) = delete;
+  FileDescriptor &operator=(const FileDescriptor &) = delete;
+
+  ~FileDescriptor() {
+    if (fd_ >= 0) {
+      (void)close(fd_);
+    }
+  }
+
+  int get() const { return fd_; }
+
+  bool Close() {
+    if (fd_ < 0) {
+      return true;
+    }
+    const int fd = fd_;
+    fd_ = -1;
+    return close(fd) == 0;
+  }
+
+private:
+  int fd_;
+};
+
+template <typename T>
+bool ParseUnsigned(std::string_view value, T *parsed) {
+  if (value.empty() || parsed == nullptr) {
+    return false;
+  }
+  T result = 0;
+  const auto [end, parse_error] =
+      std::from_chars(value.data(), value.data() + value.size(), result, 10);
+  if (parse_error != std::errc{} || end != value.data() + value.size()) {
+    return false;
+  }
+  *parsed = result;
+  return true;
+}
+
+bool NormalizeExtent(const GpuDataFile &extent, size_t index,
+                     GpuDataFile *normalized, std::string *error) {
+  if (!CanonicalizeGPUUUID(extent.source_uuid, &normalized->source_uuid)) {
+    *error = "invalid source GPU UUID in GPU manifest";
+    return false;
+  }
+  if (extent.size == 0) {
+    *error = "zero-sized extent in GPU manifest";
+    return false;
+  }
+  normalized->size = extent.size;
+  normalized->filename = extent.filename;
+  if (normalized->filename != DeviceFilename(index)) {
+    *error = "invalid deterministic extent filename in GPU manifest";
+    return false;
+  }
+  return true;
+}
+
+bool NormalizeManifest(const std::vector<GpuDataFile> &extents,
+                       std::vector<GpuDataFile> *normalized,
+                       std::string *error) {
+  if (extents.size() > kMaximumDeviceCount) {
+    *error = "GPU manifest has too many device extents";
+    return false;
+  }
+  normalized->clear();
+  normalized->reserve(extents.size());
+  std::unordered_set<std::string> source_uuids;
+  for (size_t index = 0; index < extents.size(); ++index) {
+    GpuDataFile extent;
+    if (!NormalizeExtent(extents[index], index, &extent, error)) {
+      return false;
+    }
+    if (!source_uuids.insert(extent.source_uuid).second) {
+      *error = "duplicate source GPU UUID in GPU manifest";
+      return false;
+    }
+    normalized->push_back(std::move(extent));
+  }
+  return true;
+}
+
+bool WriteAll(int fd, const std::string &contents) {
+  size_t offset = 0;
+  while (offset < contents.size()) {
+    const ssize_t written =
+        write(fd, contents.data() + offset, contents.size() - offset);
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
+    if (written <= 0) {
+      return false;
+    }
+    offset += static_cast<size_t>(written);
+  }
+  return true;
+}
+
+bool ReadManifestContents(const std::filesystem::path &manifest_path,
+                          std::string *contents, std::string *error) {
+  FileDescriptor fd(
+      open(manifest_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+  if (fd.get() < 0) {
+    *error = "open GPU manifest: " + std::string(std::strerror(errno));
+    return false;
+  }
+
+  struct stat manifest_stat {};
+  if (fstat(fd.get(), &manifest_stat) != 0 ||
+      !S_ISREG(manifest_stat.st_mode) || manifest_stat.st_size < 0 ||
+      static_cast<uintmax_t>(manifest_stat.st_size) > kMaximumManifestSize) {
+    *error = "GPU manifest is not a bounded regular file";
+    return false;
+  }
+
+  contents->assign(static_cast<size_t>(manifest_stat.st_size), '\0');
+  size_t offset = 0;
+  while (offset < contents->size()) {
+    const ssize_t bytes =
+        read(fd.get(), contents->data() + offset, contents->size() - offset);
+    if (bytes < 0 && errno == EINTR) {
+      continue;
+    }
+    if (bytes <= 0) {
+      *error = "read GPU manifest: " +
+               std::string(bytes == 0 ? "unexpected end of file"
+                                      : std::strerror(errno));
+      return false;
+    }
+    offset += static_cast<size_t>(bytes);
+  }
+
+  char trailing = '\0';
+  ssize_t bytes = -1;
+  do {
+    bytes = read(fd.get(), &trailing, sizeof(trailing));
+  } while (bytes < 0 && errno == EINTR);
+  if (bytes != 0) {
+    *error = bytes < 0 ? "read GPU manifest: " +
+                             std::string(std::strerror(errno))
+                       : "GPU manifest changed while being read";
+    return false;
+  }
+  return true;
+}
+
+bool ParseVersionHeader(std::istringstream &input, std::string *error) {
+  std::string key;
+  std::string version_text;
+  unsigned int version = 0;
+  if (!(input >> key >> version_text) || key != "version" ||
+      !ParseUnsigned(version_text, &version)) {
+    *error = "invalid GPU manifest version header";
+    return false;
+  }
+  if (version != 4) {
+    *error = "unsupported GPU manifest version";
+    return false;
+  }
+  return true;
+}
+
+bool ParseDeviceEntry(std::istringstream &input, size_t expected_index,
+                      GpuDataFile *extent, std::string *error) {
+  std::string key;
+  std::string index_text;
+  std::string size_text;
+  size_t index = 0;
+  if (!(input >> key >> index_text >> extent->source_uuid >> size_text >>
+        extent->filename) ||
+      key != "device" || !ParseUnsigned(index_text, &index) ||
+      index != expected_index || !ParseUnsigned(size_text, &extent->size)) {
+    *error = "invalid GPU manifest device entry";
+    return false;
+  }
+
+  std::string canonical;
+  if (!CanonicalizeGPUUUID(extent->source_uuid, &canonical) ||
+      canonical != extent->source_uuid) {
+    *error = "GPU manifest source GPU UUID is not canonical";
+    return false;
+  }
+  return true;
+}
+
+} // namespace
+
+bool ParseGPUUUID(std::string_view value,
+                  std::array<unsigned char, 16> *bytes_out) {
+  if (bytes_out == nullptr) {
+    return false;
+  }
+  if (value.size() == 40) {
+    if (!value.starts_with("GPU-")) {
+      return false;
+    }
+    value.remove_prefix(4);
+  }
+  if (value.size() != 36 || value[8] != '-' || value[13] != '-' ||
+      value[18] != '-' || value[23] != '-') {
+    return false;
+  }
+
+  size_t input_index = 0;
+  for (size_t byte_index = 0; byte_index < bytes_out->size(); ++byte_index) {
+    if (input_index == 8 || input_index == 13 || input_index == 18 ||
+        input_index == 23) {
+      ++input_index;
+    }
+    unsigned int byte = 0;
+    const char *begin = value.data() + input_index;
+    const auto [end, parse_error] =
+        std::from_chars(begin, begin + 2, byte, 16);
+    if (parse_error != std::errc{} || end != begin + 2 || byte > 0xff) {
+      return false;
+    }
+    (*bytes_out)[byte_index] = static_cast<unsigned char>(byte);
+    input_index += 2;
+  }
+  return input_index == value.size();
+}
+
+std::string FormatGPUUUID(const std::array<unsigned char, 16> &bytes) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string result = "GPU-";
+  result.reserve(40);
+  for (size_t index = 0; index < bytes.size(); ++index) {
+    if (index == 4 || index == 6 || index == 8 || index == 10) {
+      result.push_back('-');
+    }
+    result.push_back(kHex[bytes[index] >> 4]);
+    result.push_back(kHex[bytes[index] & 0x0f]);
+  }
+  return result;
+}
+
+bool CanonicalizeGPUUUID(std::string_view value, std::string *canonical_out) {
+  if (canonical_out == nullptr) {
+    return false;
+  }
+  std::array<unsigned char, 16> bytes{};
+  if (!ParseGPUUUID(value, &bytes)) {
+    return false;
+  }
+  *canonical_out = FormatGPUUUID(bytes);
+  return true;
+}
+
+std::string DeviceFilename(size_t index) {
+  char filename[32];
+  std::snprintf(filename, sizeof(filename), "device-%04zu.bin", index);
+  return filename;
+}
+
+bool BuildCheckpointManifest(const std::vector<GpuDataRegion> &devices,
+                             std::vector<GpuDataFile> *extents,
+                             std::string *error) {
+  if (extents == nullptr || error == nullptr) {
+    return false;
+  }
+  if (devices.size() > kMaximumDeviceCount) {
+    *error = "CUDA returned too many custom storage devices";
+    return false;
+  }
+
+  extents->clear();
+  extents->reserve(devices.size());
+  std::unordered_set<std::string> source_uuids;
+  for (size_t index = 0; index < devices.size(); ++index) {
+    std::string source_uuid;
+    if (!CanonicalizeGPUUUID(devices[index].uuid, &source_uuid)) {
+      *error = "CUDA returned an invalid source GPU UUID";
+      return false;
+    }
+    if (!source_uuids.insert(source_uuid).second) {
+      *error = "CUDA returned duplicate source GPU UUIDs";
+      return false;
+    }
+    if (devices[index].size == 0) {
+      *error = "CUDA returned a zero-sized custom storage extent";
+      return false;
+    }
+    extents->push_back({std::move(source_uuid), devices[index].size,
+                        DeviceFilename(index)});
+  }
+  return true;
+}
+
+bool BuildTransferJobs(const std::vector<GpuDataFile> &extents,
+                       const std::vector<GpuDataRegion> &devices,
+                       const std::vector<DevicePair> &device_pairs,
+                       std::vector<TransferJob> *jobs, std::string *error) {
+  if (jobs == nullptr || error == nullptr) {
+    return false;
+  }
+
+  std::vector<GpuDataFile> normalized_extents;
+  if (!NormalizeManifest(extents, &normalized_extents, error)) {
+    return false;
+  }
+
+  std::unordered_map<std::string, size_t> extent_by_source;
+  for (size_t index = 0; index < normalized_extents.size(); ++index) {
+    extent_by_source.emplace(normalized_extents[index].source_uuid, index);
+  }
+
+  std::unordered_map<std::string, std::string> source_to_destination;
+  std::unordered_map<std::string, std::string> destination_to_source;
+  for (const auto &pair : device_pairs) {
+    std::string source;
+    std::string destination;
+    if (!CanonicalizeGPUUUID(pair.source_uuid, &source) ||
+        !CanonicalizeGPUUUID(pair.destination_uuid, &destination)) {
+      *error = "invalid GPU UUID in CUDA device map";
+      return false;
+    }
+    if (!source_to_destination.emplace(source, destination).second) {
+      *error = "duplicate source GPU UUID in CUDA device map";
+      return false;
+    }
+    if (!destination_to_source.emplace(destination, source).second) {
+      *error = "ambiguous destination GPU UUID in CUDA device map";
+      return false;
+    }
+  }
+
+  jobs->clear();
+  jobs->reserve(devices.size());
+  std::unordered_set<std::string> destination_uuids;
+  std::unordered_set<size_t> consumed_extents;
+  for (size_t device_index = 0; device_index < devices.size(); ++device_index) {
+    std::string destination;
+    if (!CanonicalizeGPUUUID(devices[device_index].uuid, &destination)) {
+      *error = "CUDA returned an invalid destination GPU UUID";
+      return false;
+    }
+    if (!destination_uuids.insert(destination).second) {
+      *error = "CUDA returned duplicate destination GPU UUIDs";
+      return false;
+    }
+    if (devices[device_index].size == 0) {
+      *error = "CUDA returned a zero-sized custom storage extent";
+      return false;
+    }
+
+    std::string source = destination;
+    if (!device_pairs.empty()) {
+      const auto source_it = destination_to_source.find(destination);
+      if (source_it == destination_to_source.end()) {
+        *error = "destination GPU UUID is missing from the CUDA device map";
+        return false;
+      }
+      source = source_it->second;
+    }
+
+    const auto extent_it = extent_by_source.find(source);
+    if (extent_it == extent_by_source.end()) {
+      *error = "no saved extent matches the source GPU UUID";
+      return false;
+    }
+    const size_t extent_index = extent_it->second;
+    if (!consumed_extents.insert(extent_index).second) {
+      *error = "saved source GPU extent was matched more than once";
+      return false;
+    }
+    if (normalized_extents[extent_index].size != devices[device_index].size) {
+      *error = "saved extent size does not match the source GPU UUID";
+      return false;
+    }
+    jobs->push_back({device_index, extent_index});
+  }
+
+  if (consumed_extents.size() != normalized_extents.size()) {
+    *error = "one or more saved GPU extents were not consumed";
+    return false;
+  }
+  return true;
+}
+
+bool WriteManifest(const std::filesystem::path &directory,
+                   const std::vector<GpuDataFile> &extents,
+                   std::string *error) {
+  if (error == nullptr) {
+    return false;
+  }
+  std::vector<GpuDataFile> normalized;
+  if (!NormalizeManifest(extents, &normalized, error)) {
+    return false;
+  }
+
+  const auto manifest_path = directory / kManifestName;
+  std::ostringstream serialized;
+  serialized << "version 4\n";
+  serialized << "device_count " << normalized.size() << "\n";
+  for (size_t index = 0; index < normalized.size(); ++index) {
+    serialized << "device " << index << " " << normalized[index].source_uuid
+               << " " << normalized[index].size << " "
+               << normalized[index].filename << "\n";
+  }
+
+  // The participant directory is new and private. The caller publishes the
+  // enclosing checkpoint only after every participant has completed.
+  FileDescriptor fd(open(manifest_path.c_str(),
+                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
+  if (fd.get() < 0) {
+    *error = "create GPU storage manifest: " +
+             std::string(std::strerror(errno));
+    return false;
+  }
+  if (!WriteAll(fd.get(), serialized.str()) || fsync(fd.get()) != 0 ||
+      !fd.Close()) {
+    const int write_error = errno == 0 ? EIO : errno;
+    *error = "write GPU storage manifest: " +
+             std::string(std::strerror(write_error));
+    return false;
+  }
+  FileDescriptor directory_fd(
+      open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+  if (directory_fd.get() < 0) {
+    const int open_error = errno == 0 ? EIO : errno;
+    *error = "open GPU directory for fsync: " +
+             std::string(std::strerror(open_error));
+    return false;
+  }
+  if (fsync(directory_fd.get()) != 0 || !directory_fd.Close()) {
+    const int sync_error = errno == 0 ? EIO : errno;
+    *error =
+        "fsync GPU directory: " + std::string(std::strerror(sync_error));
+    return false;
+  }
+  return true;
+}
+
+bool ReadManifest(const std::filesystem::path &directory,
+                  std::vector<GpuDataFile> *extents, std::string *error) {
+  if (extents == nullptr || error == nullptr) {
+    return false;
+  }
+  const auto manifest_path = directory / kManifestName;
+  std::string contents;
+  if (!ReadManifestContents(manifest_path, &contents, error)) {
+    return false;
+  }
+
+  std::istringstream input(contents);
+  if (!ParseVersionHeader(input, error)) {
+    return false;
+  }
+
+  std::string key;
+  std::string device_count_text;
+  size_t device_count = 0;
+  if (!(input >> key >> device_count_text) || key != "device_count" ||
+      !ParseUnsigned(device_count_text, &device_count) ||
+      device_count > kMaximumDeviceCount) {
+    *error = "invalid GPU manifest device count";
+    return false;
+  }
+
+  std::vector<GpuDataFile> parsed;
+  parsed.reserve(device_count);
+  for (size_t expected_index = 0; expected_index < device_count;
+       ++expected_index) {
+    GpuDataFile extent;
+    if (!ParseDeviceEntry(input, expected_index, &extent, error)) {
+      return false;
+    }
+    parsed.push_back(std::move(extent));
+  }
+  std::string trailing;
+  if (input >> trailing) {
+    *error = "unexpected GPU manifest data";
+    return false;
+  }
+
+  std::vector<GpuDataFile> normalized;
+  if (!NormalizeManifest(parsed, &normalized, error)) {
+    return false;
+  }
+  *extents = std::move(normalized);
+  return true;
+}
+
+bool ValidateExtentFiles(const std::filesystem::path &directory,
+                         const std::vector<GpuDataFile> &extents,
+                         std::string *error) {
+  if (error == nullptr) {
+    return false;
+  }
+  std::vector<GpuDataFile> normalized;
+  if (!NormalizeManifest(extents, &normalized, error)) {
+    return false;
+  }
+  for (const auto &extent : normalized) {
+    struct stat extent_stat{};
+    const auto path = directory / extent.filename;
+    if (lstat(path.c_str(), &extent_stat) != 0 ||
+        !S_ISREG(extent_stat.st_mode) || extent_stat.st_size < 0 ||
+        static_cast<size_t>(extent_stat.st_size) != extent.size) {
+      *error = "extent file is missing, invalid, or has the wrong size";
+      return false;
+    }
+  }
+  return true;
+}
+
+} // namespace snapshot::pagebroker::gpu::storage

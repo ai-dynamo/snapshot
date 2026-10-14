@@ -23,25 +23,21 @@ how maintainers are added or retired.
 
 ## Current maintainers
 
-The maintainers below are the code owners for the whole repository, as recorded
-in [`.github/CODEOWNERS`](.github/CODEOWNERS). Every pull request requires
-review from at least one of them.
+Maintainers are recorded as GitHub teams, referenced from
+[`.github/CODEOWNERS`](.github/CODEOWNERS). The teams are the source of truth
+for membership, so this file links to them instead of duplicating the names.
 
-- [@shmuel-runai](https://github.com/shmuel-runai)
-- [@shayasoolin](https://github.com/shayasoolin)
-- [@danbar2](https://github.com/danbar2)
-- [@Ronkahn21](https://github.com/Ronkahn21)
-- [@oleg-kushniriov](https://github.com/oleg-kushniriov)
-- [@yoedgin](https://github.com/yoedgin)
-- [@dfeigin-nv](https://github.com/dfeigin-nv)
-- [@galletas1712](https://github.com/galletas1712)
-- [@julienmancuso](https://github.com/julienmancuso)
-- [@Hutm](https://github.com/Hutm)
-- [@hhzhang16](https://github.com/hhzhang16)
+- [@ai-dynamo/snapshot-codeowners](https://github.com/orgs/ai-dynamo/teams/snapshot-codeowners)
+  — code and configuration
+- [@ai-dynamo/snapshot-docs-codeowners](https://github.com/orgs/ai-dynamo/teams/snapshot-docs-codeowners)
+  — `docs/` and every Markdown file
 
-Ownership is currently repository-wide rather than split per component. As the
-project grows, `.github/CODEOWNERS` and this table should be narrowed to name
-owners for `agent/`, `operator/`, `api/`, `charts/`, and `docs/` individually.
+Every pull request requires review from at least one member of the team that
+owns the paths it touches.
+
+Ownership beyond documentation is repository-wide rather than split per
+component. As the project grows, `.github/CODEOWNERS` should be narrowed to name
+owners for `agent/`, `operator/`, `api/`, and `charts/` individually.
 
 ## Contacting maintainers
 

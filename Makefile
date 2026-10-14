@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 include hack/tools.mk
 
 .DEFAULT_GOAL := check
@@ -17,14 +20,15 @@ DOCKER_BUILD_ARGS ?=
 # committed package baseline would describe a different image than we build on.
 AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfile)
 
-# The agent is x86_64-only (cuda-checkpoint ships no other arch) and the package
+# The agent supports x86_64 only and the package
 # baseline is captured for this platform, so pin it rather than inheriting
 # whatever the buildx builder defaults to.
 AGENT_PLATFORM ?= linux/amd64
 
-.PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
-        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator capture-base-packages verify-base-packages \
-        linux-build linux-test pagebroker-check-generated
+.PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
+        capture-base-packages verify-base-packages \
+        linux-build linux-test pagebroker-check-generated cpu-e2e
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
@@ -68,6 +72,21 @@ add-license-headers: $(ADDLICENSE)
 
 verify-license-headers: $(ADDLICENSE)
 	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt -check $(LICENSE_IGNORES) . .github/workflows
+	@# addlicense picks its comment style from the file extension, so it silently
+	@# skips extensionless Makefiles and .mk files rather than failing on them.
+	@# Without this they drift uncovered, which is how six of them lost headers.
+	@missing=$$(find . -path ./.git -prune -o \( -name Makefile -o -name '*.mk' \) -print \
+	  | while read -r f; do \
+	      head -2 "$$f" | grep -q 'SPDX-License-Identifier' || echo "  $$f"; \
+	    done); \
+	if [ -n "$$missing" ]; then \
+	  echo "ERROR: missing SPDX license header:"; echo "$$missing"; \
+	  echo "Add the two-line header from hack/boilerplate.addlicense.txt"; \
+	  exit 1; \
+	fi
+	@# addlicense checks only that a header is present, not its shape, so a
+	@# folded SPDX-License-Identifier passes it. Check the shape separately.
+	@sh hack/verify-spdx-format.sh
 
 # Ordered before generate: afterwards it would compare freshly repaired copies.
 verify-crds:
@@ -77,7 +96,7 @@ verify-crds:
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run
 # after the mutating stages and before the clean-tree assert.
-check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint
+check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint verify-toc
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
@@ -94,6 +113,15 @@ helm-lint: $(HELM)
 pagebroker-check-generated:
 	$(MAKE) -C agent pagebroker-check-generated
 
+# Refresh or check the generated tables of contents in Snapshot Enhancement
+# Proposals (SNEPs). Keeping this separate makes authoring proposals convenient while
+# ensuring CI catches a stale TOC.
+update-toc: $(MDTOC)
+	@sh hack/update-toc.sh
+
+verify-toc: $(MDTOC)
+	@sh hack/verify-toc.sh
+
 # Run build/test inside a Linux container (local dev only; CI runs on Linux natively).
 linux-build:
 	docker run --rm \
@@ -101,7 +129,9 @@ linux-build:
 	  -e HOME=/tmp -e GOCACHE=/tmp/go-build \
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
-	  make -C agent build
+	  make -C agent go-build
+	# buildx uses the host Docker connection, which is not passed into the Go container.
+	$(MAKE) -C agent cuinterpose-build
 
 linux-test:
 	docker run --rm \
@@ -110,6 +140,12 @@ linux-test:
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
 	  make -C agent test
+	$(MAKE) -C agent cuinterpose-test
+
+# Build, spin up a k3d cluster, install Snapshot, and run the CPU e2e suite.
+# Needs a linux/amd64 Docker daemon; CI runs the same sequence in e2e-cpu.yaml.
+cpu-e2e:
+	@bash hack/cpu-e2e.sh
 
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
 # changes; verify-base-packages fails the agent build if you forget.
@@ -139,3 +175,7 @@ docker-build-agent: verify-base-packages
 docker-build-operator:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/operator:$(t)) .
+
+docker-build-pagebroker:
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/pagebroker/Dockerfile \
+	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker:$(t)) agent/pagebroker/

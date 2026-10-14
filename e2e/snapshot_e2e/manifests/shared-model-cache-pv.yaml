@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Static binding (empty storageClassName, matched by name to the PVC's
+# volumeName) so no provisioner is involved; Retain so deleting the claim can
+# never touch the export. metadata.name and spec.nfs are filled in from
+# SharedModelCache by shared_model_cache_volume().
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: PLACEHOLDER
+spec:
+  capacity:
+    storage: 1024Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  # Sized and mounted like a typical CI model share: read-mostly, many
+  # readers, large sequential reads of safetensors.
+  mountOptions:
+    - vers=4
+    - minorversion=1
+    - sec=sys
+    - nconnect=4
+    - rsize=1048576
+    - wsize=1048576
+    - hard
+  nfs:
+    server: PLACEHOLDER
+    path: PLACEHOLDER

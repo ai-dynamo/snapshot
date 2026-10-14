@@ -5,8 +5,20 @@ bin/
 # macOS
 .DS_Store
 
+# Python bytecode and tool caches (e2e package, hack/ scripts, guide programs)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
 # E2E Python workspace
 e2e/.venv/
-e2e/__pycache__/
-e2e/**/*.py[cod]
-e2e/.pytest_cache/
+
+# Benchmark dashboard dependencies, builds, and browser-test output
+dashboard/node_modules/
+dashboard/dist/
+dashboard/playwright-report/
+dashboard/test-results/
+
+# Benchmarks Python workspace
+benchmarks/.venv/
+benchmarks/results/

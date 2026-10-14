@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/controller"
+	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
 )
 
 // version is overridable at build time via -ldflags "-X main.version=<tag>".
@@ -24,9 +26,14 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
+	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
 	flag.Parse()
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
+		os.Exit(1)
+	}
+	if err := cuInterposeConfig.Validate(); err != nil {
+		ctrl.Log.Error(err, "invalid cuinterpose configuration")
 		os.Exit(1)
 	}
 
@@ -73,20 +80,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := controller.SetupSnapshotContentReconciler(mgr, artifactCleanupConfig.BasePath); err != nil {
+	maintenanceQueue, err := maintenance.NewQueue(
+		context.Background(),
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetEventRecorderFor("podsnapshotcontent-artifact-cleanup"),
+		*artifactCleanupConfig,
+	)
+	if err != nil {
+		ctrl.Log.Error(err, "unable to construct maintenance workqueue")
+		os.Exit(1)
+	}
+	if err := mgr.Add(maintenanceQueue); err != nil {
+		ctrl.Log.Error(err, "unable to set up maintenance workqueue")
+		os.Exit(1)
+	}
+
+	if err := controller.SetupSnapshotContentReconciler(mgr, maintenanceQueue); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshotContent artifact cleanup controller")
 		os.Exit(1)
 	}
 
-	if err := controller.AddArtifactOrphanScanner(mgr, *artifactCleanupConfig); err != nil {
-		ctrl.Log.Error(err, "unable to set up artifact orphan scanner")
-		os.Exit(1)
-	}
-
 	snapshotJobReconciler := &controller.SnapshotJobReconciler{
-		Client:             mgr.GetClient(),
-		NonCacheReadClient: mgr.GetAPIReader(),
-		Recorder:           mgr.GetEventRecorderFor("snapshotjob-controller"),
+		Client:               mgr.GetClient(),
+		NonCacheReadClient:   mgr.GetAPIReader(),
+		Recorder:             mgr.GetEventRecorderFor("snapshotjob-controller"),
+		CuInterposeContainer: *cuInterposeConfig,
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")

@@ -19,8 +19,8 @@ func TestRunActionInheritsJobFileEnvironment(t *testing.T) {
 	installFakeCUDAHelper(t, "printf '%s' \"$CUDA_CHECKPOINT_JOB_FILE\" > \""+trace+"\"\n")
 	t.Setenv(JobFileEnv, podcontract.CUDAJobFilePath)
 
-	if err := runAction(context.Background(), 11, actionRestore, "", cudaCheckpointHelperBinary, logr.Discard()); err != nil {
-		t.Fatalf("runAction() error = %v", err)
+	if err := restoreProcess(context.Background(), 11, "", cudaCheckpointHelperBinary, logr.Discard()); err != nil {
+		t.Fatalf("restoreProcess() error = %v", err)
 	}
 	content, err := os.ReadFile(trace)
 	if err != nil {

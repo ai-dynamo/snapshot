@@ -71,6 +71,11 @@ type PodSnapshotContentStatus struct {
 	// Standard types are Ready and Failed.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Source publishes what the checkpoint was captured on, written when the
+	// capture goes Ready.
+	// +optional
+	Source *CheckpointSource `json:"source,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -27,7 +27,7 @@ func TestStageJobFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	helperJobFile, err := StageJobFile(sourceRoot, checkpointDir, 2)
+	helperJobFile, err := StageJobFile(sourceRoot, checkpointDir)
 	if err != nil {
 		t.Fatalf("StageJobFile() error = %v", err)
 	}
@@ -61,7 +61,7 @@ func TestStageJobFileRejectsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := StageJobFile(sourceRoot, checkpointDir, 1)
+	_, err := StageJobFile(sourceRoot, checkpointDir)
 	if err == nil {
 		t.Fatal("expected symlink source to be rejected")
 	}
@@ -96,16 +96,32 @@ func TestRefreshJobFileArtifactCapturesPostCheckpointState(t *testing.T) {
 	}
 }
 
-func TestStageJobFileRequiresLaunchJobStateForMultiGPU(t *testing.T) {
-	sourceRoot := t.TempDir()
-
-	jobFile, err := StageJobFile(sourceRoot, t.TempDir(), 1)
+func TestStageJobFileMissing(t *testing.T) {
+	jobFile, err := StageJobFile(t.TempDir(), t.TempDir())
 	if err != nil || jobFile != "" {
-		t.Fatalf("legacy single-GPU StageJobFile() = %q, %v", jobFile, err)
+		t.Fatalf("StageJobFile() = %q, %v", jobFile, err)
 	}
-	_, err = StageJobFile(sourceRoot, t.TempDir(), 2)
-	if err == nil || !strings.Contains(err.Error(), "source must be launched under cuda-checkpoint --launch-job") {
-		t.Fatalf("expected missing multi-GPU launch-job error, got %v", err)
+}
+
+func TestCheckJobFile(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		jobFile         string
+		gpuCount        int
+		usesCoordinator bool
+		wantError       bool
+	}{
+		{name: "single GPU", gpuCount: 1},
+		{name: "multi-GPU native", gpuCount: 2, wantError: true},
+		{name: "multi-GPU native with file", jobFile: "job", gpuCount: 2},
+		{name: "multi-GPU coordinator", gpuCount: 2, usesCoordinator: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckJobFile(tc.jobFile, tc.gpuCount, tc.usesCoordinator)
+			if tc.wantError != (err != nil) {
+				t.Fatalf("CheckJobFile() = %v, want error %v", err, tc.wantError)
+			}
+		})
 	}
 }
 

@@ -29,6 +29,18 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.crdUpgrade.enabled }}
       initContainers:
         # Failing here is intentional: it stops the manager rather than let it
@@ -71,6 +83,12 @@ spec:
             - {{ printf "--artifact-cleanup-scan-interval=%v" .Values.operator.artifactCleanup.scanInterval | quote }}
             - {{ printf "--artifact-cleanup-batch-size=%v" .Values.operator.artifactCleanup.batchSize | quote }}
             - {{ printf "--artifact-cleanup-list-attempts=%v" .Values.operator.artifactCleanup.listAttempts | quote }}
+            - {{ printf "--artifact-cleanup-workers=%v" .Values.operator.artifactCleanup.workers | quote }}
+            - {{ printf "--artifact-cleanup-backend-type=%v" .Values.storage.type | quote }}
+            - {{ printf "--artifact-cleanup-task-timeout=%v" .Values.operator.artifactCleanup.taskTimeout | quote }}
+            # CuInterpose libraries for opted-in workloads.
+            - {{ printf "--cuinterpose-image=%s" (include "snapshot.agentImage" .) | quote }}
+            - {{ printf "--cuinterpose-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
           volumeMounts:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}

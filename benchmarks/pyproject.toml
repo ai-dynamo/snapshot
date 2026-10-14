@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "snapshot-benchmarks"
+version = "0.0.0"
+description = "Reproduces Snapshot's published cold-start vs. restore benchmarks"
+requires-python = ">=3.12"
+dependencies = [
+  "snapshot-e2e",
+  "kubernetes>=32.0.1,<33.0.0",
+  "PyYAML>=6.0.2,<7",
+]
+
+[tool.uv.sources]
+snapshot-e2e = { path = "../e2e" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

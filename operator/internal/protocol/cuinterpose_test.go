@@ -1,0 +1,171 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package protocol
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
+
+	"github.com/ai-dynamo/snapshot/api/podcontract"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
+)
+
+func cuInterposeTemplate() *corev1.PodTemplateSpec {
+	return &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "worker", Command: []string{"python3", "-m", "worker"}, Args: []string{"--rank", "0"}},
+			{Name: "helper"},
+		}},
+	}
+}
+
+func testCuInterposeInstaller() operatortypes.CuInterposeContainerConfiguration {
+	return operatortypes.CuInterposeContainerConfiguration{Image: "registry.example/snapshot-agent:v1", PullPolicy: corev1.PullNever}
+}
+
+func TestShapeCuInterposeCapture(t *testing.T) {
+	template := cuInterposeTemplate()
+	template.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "LD_PRELOAD", Value: "/opt/first.so:/opt/second.so"},
+		{Name: "FROM_SECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "workload-env"}, Key: "value",
+		}}},
+	}
+	template.Spec.Containers[0].EnvFrom = []corev1.EnvFromSource{
+		{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "config"}}},
+		{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "secret"}}},
+	}
+	template.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "existing"}}
+	before := template.DeepCopy()
+	require.NoError(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()))
+
+	worker := template.Spec.Containers[0]
+	assert.Equal(t, append(podcontract.CuInterposeLauncherPrefix(), before.Spec.Containers[0].Command...), worker.Command)
+	require.NoError(t, podcontract.ValidateCuInterposeLauncher(&worker))
+	assert.Equal(t, before.Spec.Containers[0].Args, worker.Args)
+	assert.Equal(t, before.Spec.Containers[0].Env, worker.Env)
+	assert.Equal(t, before.Spec.Containers[0].EnvFrom, worker.EnvFrom)
+	assert.Equal(t, before.Spec.Containers[1], template.Spec.Containers[1])
+	assert.Equal(t, before.Spec.ImagePullSecrets, template.Spec.ImagePullSecrets)
+	assert.Equal(t, []corev1.VolumeMount{{Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: true}}, worker.VolumeMounts)
+	require.Len(t, template.Spec.Volumes, 1)
+	assert.Equal(t, cuInterposeVolumeName, template.Spec.Volumes[0].Name)
+	assert.NotNil(t, template.Spec.Volumes[0].EmptyDir)
+	require.Len(t, template.Spec.InitContainers, 1)
+	installer := template.Spec.InitContainers[0]
+	assert.Equal(t, testCuInterposeInstaller().Image, installer.Image)
+	assert.Equal(t, corev1.PullNever, installer.ImagePullPolicy)
+	assert.Equal(t, []string{"/bin/cp"}, installer.Command)
+	assert.Equal(t, []string{
+		"--preserve=mode", "--",
+		"/usr/local/lib/snapshot/libcuinterpose.so", "/usr/local/lib/snapshot/libcuinterpose_core.so",
+		"/usr/local/bin/cuinterpose-launch", podcontract.CuInterposeMountPath + "/",
+	}, installer.Args)
+	assert.Equal(t, []corev1.VolumeMount{{
+		Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: false,
+	}}, installer.VolumeMounts)
+	assert.Equal(t, corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("64Mi"),
+	}, installer.Resources.Requests)
+	assert.Equal(t, installer.Resources.Requests, installer.Resources.Limits)
+
+	// Add delivery only once. Reject an existing injection even if it is identical.
+	injected := template.DeepCopy()
+	require.ErrorContains(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()), "reserved")
+	assert.Equal(t, injected, template)
+}
+
+func TestShapeCuInterposeCaptureRejectsWithoutMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*corev1.PodTemplateSpec)
+		want   string
+	}{
+		{"missing target", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Name = "other" }, "not found"},
+		{"missing command", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Command = nil }, "requires container.command"},
+		{"empty command", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Command = []string{""} }, "requires container.command"},
+		{"reserved volume", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Volumes = []corev1.Volume{{Name: cuInterposeVolumeName}}
+		}, "volume name"},
+		{"reserved init name", func(p *corev1.PodTemplateSpec) {
+			p.Spec.InitContainers = []corev1.Container{{Name: cuInterposeInitContainerName}}
+		}, "container name"},
+		{"reserved regular name", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Containers[1].Name = cuInterposeInitContainerName
+		}, "container name"},
+		{"mount path", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "other", MountPath: podcontract.CuInterposeMountPath + "/"}}
+		}, "conflicts"},
+		{"nested mount path", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "other", MountPath: podcontract.CuInterposeLibraryPath}}
+		}, "conflicts"},
+		{"normalized mount path", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "other", MountPath: "/tmp/x/../snapshot-cuda"}}
+		}, "conflicts"},
+		{"normalized nested mount path", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "other", MountPath: "/tmp/x/../snapshot-cuda/libcuinterpose.so"}}
+		}, "conflicts"},
+		{"mount name", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: cuInterposeVolumeName, MountPath: "/other"}}
+		}, "conflicts"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			template := cuInterposeTemplate()
+			tc.change(template)
+			before := template.DeepCopy()
+			require.ErrorContains(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()), tc.want)
+			assert.Equal(t, before, template)
+		})
+	}
+}
+
+func TestShapeCuInterposeCapturePreservesParentMount(t *testing.T) {
+	template := cuInterposeTemplate()
+	template.Spec.Volumes = []corev1.Volume{{
+		Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}}
+	template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}}
+	before := template.DeepCopy()
+
+	require.NoError(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()))
+	assert.Equal(t, append(before.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: true,
+	}), template.Spec.Containers[0].VolumeMounts)
+	require.Len(t, template.Spec.Volumes, 2)
+	assert.Equal(t, before.Spec.Volumes[0], template.Spec.Volumes[0])
+}
+
+func TestCuInterposeInstallerSecurityContext(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		security *corev1.PodSecurityContext
+		wantUID  int64
+	}{
+		{name: "default", wantUID: 65532},
+		{name: "nonroot without UID", security: &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)}, wantUID: 65532},
+		{name: "nonroot UID", security: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](1000)}, wantUID: 1000},
+		{name: "root workload", security: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](0)}, wantUID: 65532},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			template := cuInterposeTemplate()
+			template.Spec.SecurityContext = tc.security
+			template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{RunAsUser: ptr.To[int64](2000)}
+			before := template.DeepCopy()
+			require.NoError(t, ShapeCuInterposeCapture(template, "worker", testCuInterposeInstaller()))
+			assert.Equal(t, &corev1.SecurityContext{
+				RunAsUser: ptr.To(tc.wantUID), RunAsNonRoot: ptr.To(true),
+				AllowPrivilegeEscalation: ptr.To(false), ReadOnlyRootFilesystem: ptr.To(true),
+				Capabilities:   &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			}, template.Spec.InitContainers[0].SecurityContext)
+			assert.Equal(t, before.Spec.SecurityContext, template.Spec.SecurityContext)
+			assert.Equal(t, before.Spec.Containers[0].SecurityContext, template.Spec.Containers[0].SecurityContext)
+		})
+	}
+}

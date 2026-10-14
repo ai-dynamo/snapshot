@@ -6,6 +6,7 @@ package logging
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,17 +50,71 @@ func LogProcessDiagnostics(procRoot string, pid int, restoreLogPath string, log 
 
 // LogRestoreErrors finds the CRIU restore.log and logs key lines from it.
 func LogRestoreErrors(checkpointPath, workDir string, log logr.Logger) {
-	// Try workdir first, then checkpoint dir
+	if logPath := findRestoreLog(checkpointPath, workDir); logPath != "" {
+		logRestoreLog(logPath, log)
+	}
+}
+
+// LastRestoreError returns the last error CRIU logged in restore.log, or "" when
+// there is none. CRIU's RPC response carries the first error it logged instead,
+// which is often an earlier, non-fatal one.
+func LastRestoreError(checkpointPath, workDir string) string {
+	logPath := findRestoreLog(checkpointPath, workDir)
+	if logPath == "" {
+		return ""
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return ""
+	}
+	return lastCRIUError(string(data))
+}
+
+// criuFollowOnError matches errors CRIU logs after the failure that caused
+// them: the restore summary and the exit of a task that hit the real error.
+var criuFollowOnError = regexp.MustCompile(`^(Restoring FAILED\.|\d+ exited, status=\d+|\d+ killed by signal \d+: .*)$`)
+
+// lastCRIUError returns the message of the last "Error (file:line): msg" line,
+// skipping follow-on errors unless nothing else was logged.
+func lastCRIUError(content string) string {
+	lines := strings.Split(content, "\n")
+	fallback := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		_, rest, found := strings.Cut(lines[i], "Error (")
+		if !found {
+			continue
+		}
+		_, msg, found := strings.Cut(rest, "): ")
+		if !found {
+			continue
+		}
+		msg = strings.TrimSpace(msg)
+		if msg == "" {
+			continue
+		}
+		if !criuFollowOnError.MatchString(msg) {
+			return msg
+		}
+		if fallback == "" && msg != "Restoring FAILED." {
+			fallback = msg
+		}
+	}
+	return fallback
+}
+
+// findRestoreLog returns the CRIU restore.log path, trying the work dir first
+// and then the checkpoint dir, or "" when neither has one.
+func findRestoreLog(checkpointPath, workDir string) string {
 	for _, dir := range []string{workDir, checkpointPath} {
 		if dir == "" {
 			continue
 		}
 		logPath := filepath.Join(dir, "restore.log")
 		if _, err := os.Stat(logPath); err == nil {
-			logRestoreLog(logPath, log)
-			return
+			return logPath
 		}
 	}
+	return ""
 }
 
 // logRestoreLog extracts key lines and tail from a CRIU restore log file.

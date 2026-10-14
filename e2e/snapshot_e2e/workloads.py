@@ -68,6 +68,7 @@ def source_pod(
     run: TestRun,
     gpu: bool,
     annotations: dict[str, str] | None = None,
+    memory_limit: str | None = None,
 ) -> dict[str, Any]:
     metadata = {
         "name": run.source_pod,
@@ -75,7 +76,7 @@ def source_pod(
         "labels": run.labels,
         "annotations": annotations or {},
     }
-    spec = base_pod_spec(config, run, source_command(run.image, gpu), gpu)
+    spec = base_pod_spec(config, run, source_command(run.image, gpu), gpu, memory_limit)
     spec["containers"][0]["env"] = [
         {"name": SOURCE_TOKEN_ENV, "value": run.source_token},
     ]
@@ -132,11 +133,12 @@ def restore_pod(
     gpu: bool,
     source_node: str | None = None,
     snapshot_name: str | None = None,
+    memory_limit: str | None = None,
 ) -> dict[str, Any]:
     # snapshot_name defaults to the lifecycle flow's test-created PodSnapshot
     # (run.snapshot_name); a SnapshotJob-produced PodSnapshot is named after
     # the SnapshotJob instead, so those tests pass it explicitly.
-    spec = base_pod_spec(config, run, restore_command(run.image, gpu), gpu)
+    spec = base_pod_spec(config, run, restore_command(run.image, gpu), gpu, memory_limit)
     spec["securityContext"] = {
         "seccompProfile": {
             "type": "Localhost",
@@ -238,6 +240,7 @@ def base_pod_spec(
     run: TestRun,
     command: str,
     gpu: bool,
+    memory_limit: str | None = None,
     *,
     control_volume: bool = True,
     checkpoint_pvc: bool = True,
@@ -286,6 +289,9 @@ def base_pod_spec(
     if gpu:
         spec["runtimeClassName"] = "nvidia"
         container["resources"] = {"limits": {"nvidia.com/gpu": "1"}}
+    if memory_limit:
+        limits = container.setdefault("resources", {}).setdefault("limits", {})
+        limits["memory"] = memory_limit
     return spec
 
 
@@ -295,9 +301,10 @@ def workload_scheduling() -> dict[str, Any]:
     node_selector = {
         "nvidia.com/gpu.present": "true",
     }
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        # Dynamo CI has MIG-capable and non-MIG GPU pools. Match preflight there,
-        # while allowing local clusters that do not expose this label.
+    if os.environ.get("SNAPSHOT_E2E_AVOID_MIG") == "true":
+        # Opt-in for clusters that serve both MIG-capable and non-MIG GPU pools,
+        # where preflight also pins the non-MIG pool. Clusters that do not expose
+        # the label leave this unset, so the selector stays satisfiable.
         node_selector["nvidia.com/mig.config"] = "all-disabled"
 
     return {

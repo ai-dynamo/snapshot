@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Default model sweep -- the 7 models published in
+# docs/development/benchmarks.md, in the same order.
+#
+# `reported_weights_bytes` is informational only (decimal GB, from the
+# published doc's Weights column), never authoritative -- the benchmark
+# measures the actual checkpoint artifact size itself (`checkpoint_artifact_bytes`
+# in each run's JSON output).
+#
+# `env` overrides `VLLM_MAX_MODEL_LEN` / `VLLM_GPU_MEMORY_UTILIZATION` (see
+# docs/guides/vllm/deployment.yaml, which defaults to 2048 / 0.30, sized for a
+# small single-GPU deployment). The larger models below need larger values to
+# fit -- tune these for your own GPU's VRAM.
+#
+# Values below are sized against a single B200 (~180GiB). Left `VLLM_MAX_MODEL_LEN`
+# at the guide's own default (2048) everywhere -- raising it only increases
+# KV-cache memory demand, working against the problem `VLLM_GPU_MEMORY_UTILIZATION`
+# is fixing here. Qwen3 0.6B/8B/14B are left unset: their weights already fit
+# comfortably under the 0.30 default with room for KV cache. Models at or above
+# ~65GiB of weights do not fit under 0.30 (weights alone exceed 0.30 * 180GiB)
+# and need a bump -- confirmed by a real `ValueError: No available memory for
+# the cache blocks` failure on Qwen3 32B before this was set. Qwen2.5 72B in
+# particular is tight (bf16 weights ~145GiB against ~180GiB total) -- if it
+# still fails to fit, it may need `tensor_parallel_size` > 1 rather than a
+# higher utilization value.
+#
+# For the two non-Qwen3 rows, confirm the exact Hugging Face repo before
+# treating a mismatch against the published numbers as meaningful -- FP8 and
+# MXFP4 checkpoints of these models exist under more than one repo, and the
+# published benchmark's exact source repo is not recorded in this file.
+
+models:
+  - label: "Qwen3 0.6B"
+    hf_id_or_path: "Qwen/Qwen3-0.6B"
+    reported_weights_bytes: 1500000000
+    env: {}
+
+  - label: "Qwen3 8B"
+    hf_id_or_path: "Qwen/Qwen3-8B"
+    reported_weights_bytes: 16400000000
+    env: {}
+
+  - label: "Qwen3 14B"
+    hf_id_or_path: "Qwen/Qwen3-14B"
+    reported_weights_bytes: 29500000000
+    env: {}
+
+  - label: "GPT-OSS 120B"
+    hf_id_or_path: "openai/gpt-oss-120b"
+    reported_weights_bytes: 65300000000
+    env:
+      VLLM_GPU_MEMORY_UTILIZATION: "0.75"
+
+  - label: "Qwen3 32B"
+    hf_id_or_path: "Qwen/Qwen3-32B"
+    reported_weights_bytes: 65500000000
+    env:
+      VLLM_GPU_MEMORY_UTILIZATION: "0.75"
+
+  - label: "Llama 3.3 70B FP8"
+    hf_id_or_path: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+    reported_weights_bytes: 72700000000
+    env:
+      VLLM_GPU_MEMORY_UTILIZATION: "0.80"
+
+  - label: "Qwen2.5 72B"
+    hf_id_or_path: "Qwen/Qwen2.5-72B-Instruct"
+    reported_weights_bytes: 145400000000
+    env:
+      VLLM_GPU_MEMORY_UTILIZATION: "0.92"

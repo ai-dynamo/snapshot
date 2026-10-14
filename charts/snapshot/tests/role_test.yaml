@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: snapshot agent permissions
+templates:
+  - templates/role.yaml
+tests:
+  - it: lets the agent publish a refused restore on the pod status
+    documentSelector:
+      path: metadata.name
+      value: RELEASE-NAME-snapshot-agent
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["pods/status"]
+            verbs: ["patch"]

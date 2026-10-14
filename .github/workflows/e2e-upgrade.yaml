@@ -1,0 +1,257 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: E2E Upgrade Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      upgrade_from:
+        description: >-
+          Versions to upgrade from, comma-separated: release tags (v0.1.0) or
+          main commit hashes. Leave empty for the newest patch release of each
+          of the last UPGRADE_FROM_MINOR_VERSIONS minor versions.
+        required: false
+        type: string
+      snapshot_tag:
+        description: >-
+          Version to upgrade to. Leave empty for the checked-out commit, whose
+          dev tag must already be published in GHCR.
+        required: false
+        type: string
+      upgrade_config:
+        description: >-
+          How the upgrade is performed. "default" runs the profile's configs:
+          the nightly configs for basic, the weekly configs for all.
+        required: false
+        type: choice
+        default: default
+        options:
+          - default
+          - full
+          - reset-then-reuse-values
+          - operator-first
+          - agent-first
+      upgrade_profile:
+        description: Scenario set to run.
+        required: false
+        type: choice
+        default: basic
+        options:
+          - basic
+          - all
+      upgrade_scenarios:
+        description: >-
+          Comma-separated scenario names to run instead of the profile. Leave
+          empty to use the profile.
+        required: false
+        type: string
+  schedule:
+    # Nightly: basic scenarios, full config. Pairs with no relevant changes since
+    # their last pass are skipped.
+    - cron: "0 8 * * *"
+    # Weekly: every scenario and config, no skipping.
+    - cron: "0 13 * * 6"
+
+concurrency:
+  group: snapshot-e2e-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  UPGRADE_FROM_MINOR_VERSIONS: "3"
+  UPGRADE_WEEKLY_CRON: "0 13 * * 6"
+  UPGRADE_NIGHTLY_PROFILE: basic
+  UPGRADE_NIGHTLY_CONFIGS: full
+  UPGRADE_WEEKLY_PROFILE: all
+  UPGRADE_WEEKLY_CONFIGS: full,reset-then-reuse-values,operator-first,agent-first
+
+jobs:
+  upgrade-gate:
+    name: Select upgrade pairs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    outputs:
+      to_tag: ${{ steps.to.outputs.tag }}
+      pairs: ${{ steps.gate.outputs.pairs }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Choose profile and configs
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_PROFILE: ${{ inputs.upgrade_profile }}
+          INPUT_CONFIG: ${{ inputs.upgrade_config }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "schedule" && "${SCHEDULE}" == "${UPGRADE_WEEKLY_CRON}" ]]; then
+            profile="${UPGRADE_WEEKLY_PROFILE}" configs="${UPGRADE_WEEKLY_CONFIGS}" always=true
+          elif [[ "${EVENT_NAME}" == "schedule" ]]; then
+            profile="${UPGRADE_NIGHTLY_PROFILE}" configs="${UPGRADE_NIGHTLY_CONFIGS}" always=false
+          else
+            profile="${INPUT_PROFILE:-basic}" always=true
+            if [[ -n "${INPUT_CONFIG}" && "${INPUT_CONFIG}" != "default" ]]; then
+              configs="${INPUT_CONFIG}"
+            elif [[ "${profile}" == "${UPGRADE_WEEKLY_PROFILE}" ]]; then
+              configs="${UPGRADE_WEEKLY_CONFIGS}"
+            else
+              configs="${UPGRADE_NIGHTLY_CONFIGS}"
+            fi
+          fi
+          {
+            echo "profile=${profile}"
+            echo "configs=${configs}"
+            echo "always=${always}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "profile=${profile} configs=${configs} always=${always}"
+
+      - name: Resolve version to upgrade to
+        id: to
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${SNAPSHOT_TAG}" ]]; then
+            tag="${SNAPSHOT_TAG}"
+          else
+            python3 hack/resolve-snapshot-image-tag.py
+            tag="v0.0.0-g$(git rev-parse --short=8 HEAD)"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "Upgrading to ${tag}"
+
+      - name: Resolve versions to upgrade from
+        id: from
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPGRADE_FROM: ${{ inputs.upgrade_from }}
+          TO_TAG: ${{ steps.to.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${UPGRADE_FROM}" ]]; then
+            versions="$(python3 hack/resolve-snapshot-image-tag.py --from "${UPGRADE_FROM}" --to "${TO_TAG}")"
+          else
+            versions="$(python3 hack/resolve-snapshot-image-tag.py --from-minor-versions "${UPGRADE_FROM_MINOR_VERSIONS}" --to "${TO_TAG}")"
+          fi
+          echo "versions=${versions}" >> "${GITHUB_OUTPUT}"
+
+      - name: Select pairs to run
+        id: gate
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSIONS: ${{ steps.from.outputs.versions }}
+          CONFIGS: ${{ steps.mode.outputs.configs }}
+          PROFILE: ${{ steps.mode.outputs.profile }}
+          ALWAYS: ${{ steps.mode.outputs.always }}
+        run: |
+          set -euo pipefail
+          always=()
+          if [[ "${ALWAYS}" == "true" ]]; then
+            always=(--always)
+          fi
+          python3 hack/upgrade-e2e-gate.py \
+            --versions "${VERSIONS}" --configs "${CONFIGS}" --profile "${PROFILE}" "${always[@]}"
+
+  upgrade:
+    name: upgrade (${{ matrix.profile }}, ${{ matrix.from }}, ${{ matrix.config }})
+    needs: upgrade-gate
+    if: ${{ needs.upgrade-gate.outputs.pairs != '' && needs.upgrade-gate.outputs.pairs != '[]' }}
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: ${{ matrix.profile == 'all' && 155 || 105 }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(needs.upgrade-gate.outputs.pairs) }}
+    env:
+      HOST_NAMESPACE: snapshot-e2e-upg-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
+      VCLUSTER_NAME: snapshot-e2e-upg-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
+      TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-upg-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
+      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-upg-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
+      SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
+      SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+      SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
+      SNAPSHOT_E2E_PVC_SIZE: 2Gi
+      SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
+      SNAPSHOT_E2E_MODE: vcluster
+      SNAPSHOT_E2E_AVOID_MIG: "true"
+      SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
+      SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
+      SNAPSHOT_E2E_HELM_TIMEOUT: 6m
+      SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
+      SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
+      SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ needs.upgrade-gate.outputs.to_tag }}
+      SNAPSHOT_E2E_UPGRADE_FROM_TAG: ${{ matrix.from }}
+      UPGRADE_FROM_CHART_VERSION: ${{ matrix.chart_version }}
+      SNAPSHOT_E2E_UPGRADE_CONFIG: ${{ matrix.config }}
+      SNAPSHOT_E2E_UPGRADE_PROFILE: ${{ matrix.profile }}
+      SNAPSHOT_E2E_UPGRADE_SCENARIOS: ${{ inputs.upgrade_scenarios }}
+      PYTHONUNBUFFERED: "1"
+      UV_LINK_MODE: copy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Capture host kubeconfig
+        id: host
+        run: |
+          echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create vCluster target
+        timeout-minutes: 30
+        uses: ./.github/actions/e2e-vcluster-up
+
+      - name: Install the version to upgrade from
+        timeout-minutes: 8
+        env:
+          SNAPSHOT_E2E_CHART_REF: oci://ghcr.io/ai-dynamo/snapshot/snapshot
+        run: |
+          set -euo pipefail
+          SNAPSHOT_E2E_SNAPSHOT_TAG="${SNAPSHOT_E2E_UPGRADE_FROM_TAG}" \
+          SNAPSHOT_E2E_CHART_VERSION="${UPGRADE_FROM_CHART_VERSION}" \
+            uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+              --phase snapshot-install
+
+      - name: Wait for Snapshot components
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-ready
+
+      - name: Export vCluster target
+        timeout-minutes: 6
+        uses: ./.github/actions/e2e-vcluster-export
+
+      - name: Run upgrade tests
+        timeout-minutes: ${{ matrix.profile == 'all' && 90 || 45 }}
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e pytest e2e/tests/test_upgrade.py -m upgrade -vv -s --durations=0
+
+      - name: Cleanup e2e vCluster
+        if: ${{ always() }}
+        uses: ./.github/actions/e2e-vcluster-down
+        with:
+          host_kubeconfig: ${{ steps.host.outputs.kubeconfig }}

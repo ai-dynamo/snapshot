@@ -83,7 +83,7 @@ infrastructure:
 
 Before installing Snapshot, make sure the following are in place:
 
-- A Kubernetes cluster with NVIDIA GPU nodes
+- A Kubernetes cluster with NVIDIA GPU nodes running Linux kernel 5.13 or newer
 - containerd or CRI-O as the container runtime
 - [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with CUDA driver 580 or newer and MIG disabled
 - A `ReadWriteMany` (RWX) storage class
@@ -156,15 +156,19 @@ Multi-GPU and Arm support are on the roadmap.
 
 ## Documentation
 
+The full documentation set lives in [`docs/`](docs/) — guides, reference, and
+operations, indexed below.
+
 **Get started**
 
-- [Usage guides](docs/guides/README.md) — build a snapshot-ready image per inference framework, then checkpoint and restore.
+- [Usage guides](docs/guides/README.md) — make a workload snapshot-ready per inference framework, then checkpoint and restore.
 
 **Reference**
 
 - [API](docs/reference/api.md) — `PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, and the `restore-from` annotation.
 - [Architecture](docs/reference/architecture.md) — operator and node-agent design, and the checkpoint/restore internals.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
+- [Workload contract](docs/reference/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
 - [Restore Pod contract](docs/reference/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
 
 **Operations**
@@ -182,6 +186,7 @@ Multi-GPU and Arm support are on the roadmap.
 **More**
 
 - [Limitations & known issues](docs/limitations.md) — current limitations and what's on the roadmap.
+- [Snapshot Enhancement Proposals](docs/proposals/README.md) — the design process for significant Snapshot changes.
 
 ## Adopters
 
@@ -204,6 +209,16 @@ releases are cut. AI coding agents should also read [AGENTS.md](AGENTS.md).
 ## Security
 
 To report a security vulnerability, follow the process in [SECURITY.md](SECURITY.md).
+
+## Community
+
+- **[Discussions](https://github.com/ai-dynamo/snapshot/discussions)** — questions, ideas, and open-ended design conversations.
+- **[Issues](https://github.com/ai-dynamo/snapshot/issues)** — bugs and feature requests. Every change starts as an issue; see [CONTRIBUTING.md](CONTRIBUTING.md).
+- **[Changelog](CHANGELOG.md)** — what changed in each release.
+- **Security** — never in a public issue; follow [SECURITY.md](SECURITY.md).
+
+Questions and design discussions belong in Discussions rather than an issue.
+Issues are for work the project intends to do.
 
 ## Feedback
 

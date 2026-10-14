@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 REPO_HACK_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../hack)
 include $(REPO_HACK_DIR)/tools.mk
 
@@ -10,7 +13,7 @@ CHART_CRD_DIR := ../charts/snapshot/crds
 
 generate: $(CONTROLLER_GEN)
 	$(CONTROLLER_GEN) object:headerFile=../hack/boilerplate.go.txt paths=./...
-	$(CONTROLLER_GEN) crd paths=./... output:crd:artifacts:config=./v1alpha1/crds
+	$(CONTROLLER_GEN) crd:generateEmbeddedObjectMeta=true paths=./... output:crd:artifacts:config=./v1alpha1/crds
 	rm -f $(CHART_CRD_DIR)/*.yaml
 	cp v1alpha1/crds/*.yaml $(CHART_CRD_DIR)/
 

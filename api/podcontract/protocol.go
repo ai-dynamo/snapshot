@@ -5,6 +5,7 @@ package podcontract
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -21,6 +22,12 @@ const (
 	// comma-separated list of source=destination pairs. When absent, restore
 	// uses the captured container name as the destination.
 	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
+
+	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
+	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
+
+	// CuInterposeAnnotation enables the CUDA interposer for checkpoint targets.
+	CuInterposeAnnotation = "nvidia.com/cuda-shared-memory-support"
 
 	// DefaultSeccompLocalhostProfile is the kubelet-local profile installed by
 	// the Snapshot Helm chart to block io_uring for CRIU.
@@ -73,9 +80,83 @@ const (
 	LegacyRestoreStandbyModeEnv = "DYN_SNAPSHOT_RESTORE_STANDBY"
 
 	// RestoreCompleteFile is written by the Snapshot agent when restore has
-	// completed and the workload may resume.
+	// completed and the workload may resume. Its contents are key=value lines
+	// built by FormatRestoreComplete; workloads that only gate on the file's
+	// existence may ignore them.
 	RestoreCompleteFile = "restore-complete"
+
+	// RestoreFailedFile is written by the Snapshot agent before it kills a
+	// destination container whose restore failed. The failing container never
+	// acts on it; a later container in the same Pod reads it as proof that the
+	// Pod's one restore was already used.
+	RestoreFailedFile = "restore-failed"
+
+	// RestoreCompletePIDKey names the restored process's PID, relative to the
+	// destination container's PID namespace, in RestoreCompleteFile.
+	RestoreCompletePIDKey = "pid"
+
+	// RestoreProxyBinaryName is the PID 1 process Snapshot runs in restore
+	// destination containers. It waits for RestoreCompleteFile, then follows
+	// the restored process and exits with its status.
+	RestoreProxyBinaryName = "snapshot-restore-proxy"
 )
+
+// Exit codes reserved by the restore proxy. Every other code is the restored
+// workload's own, or 128 plus the signal number that killed it.
+const (
+	// RestoreNotRepeatableExitCode means this Pod's one restore is spent: the
+	// proxy found RestoreCompleteFile or RestoreFailedFile at start, left by an
+	// earlier container, or RestoreFailedFile appeared while it waited.
+	RestoreNotRepeatableExitCode = 112
+
+	// RestoreProxyErrorExitCode means the proxy could not follow the restored
+	// process, for example because RestoreCompleteFile was malformed or the
+	// restored PID was not its child.
+	RestoreProxyErrorExitCode = 113
+)
+
+// RestoreComplete is the content of RestoreCompleteFile.
+type RestoreComplete struct {
+	// PID is the restored process, relative to the destination container's
+	// PID namespace.
+	PID int
+}
+
+// FormatRestoreComplete renders the content of RestoreCompleteFile.
+func FormatRestoreComplete(rc RestoreComplete) []byte {
+	return []byte(RestoreCompletePIDKey + "=" + strconv.Itoa(rc.PID) + "\n")
+}
+
+// ParseRestoreComplete reads the content of RestoreCompleteFile. Unknown keys
+// are ignored so the agent can add fields without breaking older readers.
+func ParseRestoreComplete(data []byte) (RestoreComplete, error) {
+	var rc RestoreComplete
+	for line := range strings.Lines(string(data)) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return RestoreComplete{}, fmt.Errorf("invalid %s line %q: expected key=value", RestoreCompleteFile, line)
+		}
+		if key != RestoreCompletePIDKey {
+			continue
+		}
+		if rc.PID != 0 {
+			return RestoreComplete{}, fmt.Errorf("duplicate %s key %q", RestoreCompleteFile, key)
+		}
+		pid, err := strconv.Atoi(value)
+		if err != nil || pid <= 0 {
+			return RestoreComplete{}, fmt.Errorf("invalid %s %s %q", RestoreCompleteFile, key, value)
+		}
+		rc.PID = pid
+	}
+	if rc.PID == 0 {
+		return RestoreComplete{}, fmt.Errorf("%s has no %s", RestoreCompleteFile, RestoreCompletePIDKey)
+	}
+	return rc, nil
+}
 
 // ContainerMapping maps the one captured source container to a restore
 // destination in the target Pod.
@@ -165,4 +246,10 @@ func ValidateContainerMappings(mappings []ContainerMapping, capturedSource strin
 		destinations[destination] = struct{}{}
 	}
 	return nil
+}
+
+// SkipCompatCheckFromAnnotations reports whether compatibility checks are disabled.
+func SkipCompatCheckFromAnnotations(annotations map[string]string) bool {
+	skip, err := strconv.ParseBool(strings.TrimSpace(annotations[SkipCompatCheckAnnotation]))
+	return err == nil && skip
 }

@@ -5,6 +5,8 @@ package types
 
 import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
 // MountInfo holds parsed mount information from /proc/pid/mountinfo.
@@ -12,6 +14,7 @@ type MountInfo struct {
 	MountPoint string
 	FSType     string
 	VFSOptions string // superblock options (e.g. "upperdir=...")
+	ReadOnly   bool   // per-mount "ro" option, which CRIU reapplies on restore
 
 	// IsOCIManaged is true when the mount destination matches an OCI spec entry
 	// (including /run/ ↔ /var/run/ aliasing). Set by ClassifyMounts.
@@ -21,6 +24,7 @@ type MountInfo struct {
 // CheckpointContainerSnapshot holds runtime container state collected during checkpoint inspection.
 type CheckpointContainerSnapshot struct {
 	PID            int
+	ImageID        string
 	RootFS         string
 	UpperDir       string
 	OCISpec        *specs.Spec
@@ -30,13 +34,20 @@ type CheckpointContainerSnapshot struct {
 	HostCgroupPath string   // host filesystem path for CRIU's --freeze-cgroup
 	CUDAHostPIDs   []int    // host-visible PIDs used for checkpoint-side CUDA actions
 	CUDANSPIDs     []int    // namespace-relative PIDs stored in the checkpoint manifest
-	GPUUUIDs       []string // source GPU UUIDs from kubelet PodResources API
+	GPUDevicePaths map[string]string
+	CuInterpose    *CuInterposeManifest
+
+	// GPUs holds the GPUs the checkpointed container could see, in allocation
+	// order, with the model and driver version where they could be read.
+	GPUs compat.GPUInfo
 }
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
 type RestoreContainerSnapshot struct {
-	PlaceholderPID int
-	TargetRoot     string
-	CgroupRoot     string
-	CUDADeviceMap  string
+	TargetGPUUUIDs  []string
+	PlaceholderPID  int
+	TargetRoot      string
+	CgroupRoot      string
+	CUDADeviceMap   string
+	GPUMountAliases map[string]string
 }

@@ -5,13 +5,10 @@ package cuda
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -31,19 +28,19 @@ const (
 var cudaCheckpointHelperBinary = DefaultHelperBinaryPath
 
 func lock(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionLock, "", DefaultHelperBinaryPath, log)
+	return runAction(ctx, pid, actionLock, "", DefaultHelperBinaryPath, true, log)
 }
 
 func checkpoint(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionCheckpoint, "", DefaultHelperBinaryPath, log)
+	return runAction(ctx, pid, actionCheckpoint, "", DefaultHelperBinaryPath, true, log)
 }
 
 func restoreProcess(ctx context.Context, pid int, deviceMap, helperBinaryPath string, log logr.Logger) error {
-	return runAction(ctx, pid, actionRestore, deviceMap, helperBinaryPath, log)
+	return runAction(ctx, pid, actionRestore, deviceMap, helperBinaryPath, false, log)
 }
 
 func unlock(ctx context.Context, pid int, helperBinaryPath string, log logr.Logger) error {
-	return runAction(ctx, pid, actionUnlock, "", helperBinaryPath, log)
+	return runAction(ctx, pid, actionUnlock, "", helperBinaryPath, false, log)
 }
 
 func getState(ctx context.Context, pid int, helperBinaryPath string) (string, error) {
@@ -59,17 +56,18 @@ func getState(ctx context.Context, pid int, helperBinaryPath string) (string, er
 	return state, nil
 }
 
-func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath string, log logr.Logger) error {
+func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath string, ownProcessGroup bool, log logr.Logger) error {
 	args := []string{"--action", action, "--pid", strconv.Itoa(pid)}
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
 	cmd := exec.CommandContext(ctx, helperBinaryPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
+	// The agent runs lock and checkpoint directly, so they get their own process group
+	// and cancellation also kills their children. Restore and unlock run inside nsrestore
+	// and stay in its group, so the agent's kill of that group reaches them.
+	if ownProcessGroup {
+		snapshotruntime.SetProcessGroupCancellation(cmd, helperWaitDelay)
 	}
-	cmd.WaitDelay = helperWaitDelay
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
 		OutermostPID:  pid,
@@ -108,11 +106,4 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 		"output", out,
 	)
 	return nil
-}
-
-func normalizeProcessGroupKillError(err error) error {
-	if errors.Is(err, syscall.ESRCH) {
-		return os.ErrProcessDone
-	}
-	return err
 }

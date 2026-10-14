@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -44,139 +45,16 @@ type CheckpointParams struct {
 	HostPath string
 	// StartedAt marks when the controller observed the work order, for timing.
 	StartedAt time.Time
+	// CuInterposeRequested is the source Pod's explicit opt-in, already preflighted.
+	CuInterposeRequested bool
 }
 
-// reconcilePodSnapshotContent is the pre-bind gate for a PodSnapshotContent work order. It validates the
-// source pod (existence and provenance) and, when the pod is valid, promotes it by adding
-// CaptureEligibleLabel — it never runs the capture flow itself. The source-pod informer (keyed on that
-// label) then drives the capture path. Driven by the content informer (Add/Update) and its 10s resync;
-// the resync is the backstop that eventually writes a terminal failure for a work order whose source
-// pod is gone.
-func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name string) {
-	logger := logr.FromContextOrDiscard(ctx).WithValues("content", name)
-
-	content := &snapshotv1alpha1.PodSnapshotContent{}
-	if err := w.client.Get(ctx, client.ObjectKey{Name: name}, content); err != nil {
-		if apierrors.IsNotFound(err) {
-			return
-		}
-		logger.Error(err, "Failed to get PodSnapshotContent")
-		return
-	}
-
-	if content.Spec.Source.NodeName != w.config.NodeName {
-		return
-	}
-	if !content.DeletionTimestamp.IsZero() {
-		return
-	}
-	if isContentTerminal(content) {
-		return
-	}
-
-	pod := &corev1.Pod{}
-	key := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: content.Spec.Source.PodRef.Name}
-	if err := w.client.Get(ctx, key, pod); err != nil {
-		if apierrors.IsNotFound(err) {
-			// The operator creates the PodSnapshotContent only after the source pod exists, and this
-			// is a linearizable (quorum) Get, so NotFound means the pod was deleted, not a creation
-			// race. The dump kills the source, so deletion can also trail a successful capture
-			// (Job cleanup, eviction): only a gone pod with neither an in-flight capture nor a
-			// committed artifact fails the work order terminally.
-			if !w.deferToCommittedCapture(ctx, content) {
-				w.failContentFromGate(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", key.String()))
-			}
-			return
-		}
-		logger.Error(err, "Failed to get source pod", "pod", key.String())
-		return
-	}
-	if reason, msg := classifySourcePodIdentity(content, pod); reason != "" {
-		w.failContentFromGate(ctx, content, reason, errors.New(msg))
-		return
-	}
-	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
-		// The dump terminates the source process, so a terminal pod may mean a
-		// capture just succeeded. Only a dead source with neither an in-flight
-		// capture nor a committed artifact is a failure.
-		if !w.deferToCommittedCapture(ctx, content) {
-			w.failContentFromGate(ctx, content, reason, errors.New(msg))
-		}
-		return
-	}
-
-	// The source-pod informer keys on CaptureEligibleLabel, so this patch is the hand-off that drives
-	// the capture path — the gate never calls reconcileSourcePod directly.
-	if err := w.labelCaptureEligible(ctx, pod); err != nil {
-		logger.Error(err, "Failed to mark source pod capture-eligible", "pod", pod.Name)
-	}
-}
-
-// deferToCommittedCapture reports whether a dead or deleted source pod is explained by a capture
-// that already succeeded or is still in flight: a capture goroutine owning the in-flight guard or
-// the shared Lease owns the outcome, and a committed artifact only needs its Ready write, which is
-// performed here. A false return means none exist and the caller owns the failure.
-func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) bool {
-	// The UID keys the artifact path and the in-flight guard; empty must not
-	// alias onto a shared path (same invariant as MissingContentUID).
-	contentUID := string(content.UID)
-	if contentUID == "" {
-		return false
-	}
-	containerName, err := singleTargetContainer(content)
-	if err != nil {
-		return false
-	}
-	if w.checkpointInFlight(contentUID + "/" + containerName) {
-		return true
-	}
-	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
-	if err == nil && artifactPresent(path, contentUID, containerName) {
-		if err := w.markCheckpointReady(ctx, content); err != nil {
-			// Not terminal, so the content informer resync retries the recovery.
-			logr.FromContextOrDiscard(ctx).Error(err, "Failed to recover committed artifact to Ready", "content", content.Name)
-		}
-		return true
-	}
-	return w.captureLeaseHeldElsewhere(ctx, content, contentUID, containerName)
-}
-
-// captureLeaseHeldElsewhere reports whether another agent instance holds an unexpired capture
-// Lease for this work order. The in-flight guard is process-local, so overlapping agent
-// instances (e.g. a surge rollout) arbitrate through the Lease: a foreign unexpired holder may
-// be between killing the source and committing the artifact, and no liveness-derived terminal
-// failure may be written under it. Lease expiry keeps a genuinely dead capture bounded.
-func (w *NodeController) captureLeaseHeldElsewhere(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, contentUID, containerName string) bool {
-	key := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(contentUID, containerName)}
-	lease, err := w.clientset.CoordinationV1().Leases(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return false
-		}
-		// Fail toward waiting: an unreadable Lease must not let a sticky
-		// failure race an in-flight capture; the informer resync retries.
-		logr.FromContextOrDiscard(ctx).Error(err, "Failed to read checkpoint lease", "lease", key.String())
-		return true
-	}
-	return !checkpointLeaseExpired(lease, time.Now()) &&
-		lease.Spec.HolderIdentity != nil &&
-		*lease.Spec.HolderIdentity != w.holderID
-}
-
-// failContentFromGate records a terminal failure from the pre-bind gate, which has no workqueue
-// to surface errors to: a failed status write is logged and left to the informer resync.
-func (w *NodeController) failContentFromGate(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, reason string, cause error) {
-	if err := w.setSnapshotContentFailed(ctx, content, reason, cause); err != nil {
-		logr.FromContextOrDiscard(ctx).Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
-	}
-}
-
-// singleTargetContainer returns the one capture-target container from the work order. The CRD
-// enforces exactly one (PodReference.Containers MinItems=1/MaxItems=1) and the runtime dumps a
-// single container this phase; the count is asserted here so a violated invariant becomes a
-// terminal InvalidTargetContainer status rather than an out-of-bounds panic in the node agent.
-func singleTargetContainer(content *snapshotv1alpha1.PodSnapshotContent) (string, error) {
-	containers := content.Spec.Source.PodRef.Containers
+// singleTargetContainer returns the one capture-target container a source podRef names, from a
+// PodSnapshot or its PodSnapshotContent. The CRD enforces exactly one (PodReference.Containers
+// MinItems=1/MaxItems=1) and the runtime dumps a single container this phase; the count is
+// asserted here so a violated invariant becomes a terminal InvalidTargetContainer status rather
+// than an out-of-bounds panic in the node agent.
+func singleTargetContainer(containers []string) (string, error) {
 	if len(containers) != 1 {
 		return "", fmt.Errorf("source podRef must reference exactly one container, got %d", len(containers))
 	}
@@ -186,21 +64,13 @@ func singleTargetContainer(content *snapshotv1alpha1.PodSnapshotContent) (string
 	return containers[0], nil
 }
 
-// reconcileSourcePod is the single capture path. It is driven by source-pod informer events for pods
-// the gate promoted with CaptureEligibleLabel. It selects the oldest active work order for
-// the pod and drives the unstick + dump. Capture parameters come from the source pod, which is the
-// single source of truth; it never mutates spec and writes status via Status().Patch only. The
-// triggering content event (if any) may name a different work order than the one chosen here — the
-// event is only a trigger; chooseActiveContent picks the oldest active PodSnapshotContent for the pod.
-func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod) error {
-	objs, err := w.contentIndexer.ByIndex(podRefIndex, pod.Namespace+"/"+pod.Name)
-	if err != nil {
-		return fmt.Errorf("look up PodSnapshotContent by source pod %s/%s: %w", pod.Namespace, pod.Name, err)
-	}
-	name := chooseActiveContent(objs)
-	if name == "" {
-		return nil
-	}
+// reconcileCapture drives one PodSnapshotContent work order end to end: validate the source pod,
+// promote it with CaptureEligibleLabel, run the dump inline. Every trigger for this work order
+// shares one queue key, which is what lets validation and the dump live in one function: neither
+// can observe the other half-done, so no terminal failure lands under a running capture.
+//
+// It never mutates spec and writes status via Status().Patch only.
+func (w *NodeController) reconcileCapture(ctx context.Context, name string) error {
 	logger := logr.FromContextOrDiscard(ctx).WithValues("content", name)
 	ctx = logr.NewContext(ctx, logger)
 
@@ -211,36 +81,49 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		}
 		return fmt.Errorf("get PodSnapshotContent %q: %w", name, err)
 	}
-	if isContentTerminal(content) {
+
+	if content.Spec.Source.NodeName != w.config.NodeName {
 		return nil
 	}
 	if !content.DeletionTimestamp.IsZero() {
 		return nil
 	}
+	if isContentTerminal(content) {
+		return nil
+	}
 
+	// The immutable content UID and container own the artifact path. A recreated content object
+	// receives a new UID and cannot adopt a stale path from the deleted object.
 	contentUID := string(content.UID)
 	if contentUID == "" {
 		return w.setSnapshotContentFailed(ctx, content, "MissingContentUID",
 			fmt.Errorf("PodSnapshotContent %q has no UID", content.Name))
 	}
-	containerName, err := singleTargetContainer(content)
+	containerName, err := singleTargetContainer(content.Spec.Source.PodRef.Containers)
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidTargetContainer", err)
 	}
-	artifactKey := contentUID + "/" + containerName
-
-	// The immutable content UID and container own the artifact, in-flight guard,
-	// and lease. A recreated content object receives a new UID and cannot adopt a
-	// stale path from the deleted object.
-	if !w.tryAcquire(artifactKey) {
-		return nil
+	artifactPath, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
+	if err != nil {
+		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
 	}
-	releaseInFlight := true
-	defer func() {
-		if releaseInFlight {
-			w.release(artifactKey)
+
+	pod := &corev1.Pod{}
+	podKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: content.Spec.Source.PodRef.Name}
+	if err := w.client.Get(ctx, podKey, pod); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get source pod %s: %w", podKey.String(), err)
 		}
-	}()
+		// The operator creates the PodSnapshotContent only after the source pod exists, and this
+		// is a linearizable (quorum) Get, so NotFound means the pod was deleted, not a creation
+		// race. The dump kills the source, so deletion can also trail a successful capture
+		// (Job cleanup, eviction): only a gone pod without a committed artifact fails the work
+		// order terminally.
+		if artifactPresent(artifactPath, contentUID, containerName) {
+			return w.markCheckpointReady(ctx, content, artifactPath)
+		}
+		return w.setSnapshotContentFailed(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", podKey.String()))
+	}
 
 	if reason, msg := classifySourcePodIdentity(content, pod); reason != "" {
 		err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg))
@@ -252,31 +135,43 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	// dead pod with a committed artifact is a success awaiting its Ready write — the write that
 	// publishes the checkpoint for restore. The artifact dir exists only after the executor's
 	// atomic rename.
-	artifactPath, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
-	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
-	}
 	if artifactPresent(artifactPath, contentUID, containerName) {
-		return w.markCheckpointReady(ctx, content)
+		return w.markCheckpointReady(ctx, content, artifactPath)
 	}
 
-	// The in-flight guard held above is process-local; overlapping agent instances arbitrate
-	// through the shared capture Lease. A foreign unexpired holder may be between killing the
-	// source and committing the artifact — exactly the state the exit and liveness checks below
-	// would misread as a failure — so any such terminal write defers to the Lease first.
-	livenessReason, livenessMsg := classifySourcePodLiveness(pod)
-	if failedCheckpointContainer(pod) != nil || livenessReason != "" {
-		if w.captureLeaseHeldElsewhere(ctx, content, contentUID, containerName) {
-			return nil
-		}
+	// Several work orders can name one pod, and everything below draws conclusions from live pod
+	// state — including a sweep that SIGKILLs its containers. Only the owner may. A non-owner
+	// reading the source mid-dump would kill the container the owner is dumping, so it waits:
+	// ownership passes when the owner goes terminal.
+	chosen, err := w.captureOwnerForPod(pod)
+	if err != nil {
+		return err
 	}
-	if w.failCheckpointOnContainerExit(ctx, content, pod) {
+	if chosen != content.Name {
+		logger.V(1).Info("Another work order owns this source pod", "pod", pod.Name, "owner", chosen)
 		return nil
 	}
-	if livenessReason != "" {
-		err := w.setSnapshotContentFailed(ctx, content, livenessReason, errors.New(livenessMsg))
+
+	if handled, err := w.failCheckpointOnContainerExit(ctx, content, pod); handled {
+		return err
+	}
+	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
+		err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg))
 		w.removeCaptureEligibleLabel(ctx, pod)
 		return err
+	}
+
+	// Check the opt-in before labeling the source and waiting for readiness, so a misconfigured
+	// Pod fails without waiting for its workload to become ready.
+	cuInterposeRequested, err := preflightCuInterpose(pod, containerName)
+	if err != nil {
+		return w.setSnapshotContentFailed(ctx, content, "CuInterposeMisconfigured", err)
+	}
+
+	// The source-pod informer keys on this label, so the patch is what makes pod status changes
+	// reach the queue instead of waiting for the resync. Failing it strands the work order.
+	if err := w.labelCaptureEligible(ctx, pod); err != nil {
+		return fmt.Errorf("mark source pod %s capture-eligible: %w", podKey.String(), err)
 	}
 
 	if !isContainerReady(pod, containerName) {
@@ -293,99 +188,65 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
-	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(contentUID, containerName)}
-	acquired, err := w.acquireLease(ctx, leaseKey)
-	if err != nil {
-		return fmt.Errorf("acquire checkpoint lease %s: %w", leaseKey.String(), err)
-	}
-	if !acquired {
-		return nil
-	}
-
-	releaseInFlight = false
-	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, contentUID, artifactPath, leaseKey, artifactKey)
-	return nil
+	return w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, cuInterposeRequested, contentUID, artifactPath)
 }
 
-// runCheckpoint executes the dump under a renewed lease, then writes the Ready status. The dump
-// terminates the target process, so there is no post-Ready release step. The container ID, host
-// PID, and resolved locations are pre-resolved by the reconciler so the dump does not re-resolve
-// them.
+func (w *NodeController) captureOwnerForPod(pod *corev1.Pod) (string, error) {
+	objs, err := w.contentIndexer.ByIndex(podRefIndex, pod.Namespace+"/"+pod.Name)
+	if err != nil {
+		return "", fmt.Errorf("look up PodSnapshotContent by source pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+	return chooseActiveContent(objs), nil
+}
+
+// runCheckpoint executes the dump, then writes the terminal status. It runs inline on the queue
+// item rather than a goroutine of its own, which is what keeps the key claimed for the whole dump.
+// The dump terminates the target, so there is no release step.
+//
+// A returned error means the outcome was not recorded and the queue should retry; a recorded
+// failure returns nil, because retrying a terminal work order achieves nothing.
 func (w *NodeController) runCheckpoint(
 	ctx context.Context,
 	content *snapshotv1alpha1.PodSnapshotContent,
 	pod *corev1.Pod,
 	containerName, containerID string,
 	containerPID int,
+	cuInterposeRequested bool,
 	contentUID string,
 	artifactPath string,
-	leaseKey client.ObjectKey,
-	inFlightKey string,
-) {
+) error {
 	logger := logr.FromContextOrDiscard(ctx)
-	defer w.release(inFlightKey)
 
-	defer func() {
-		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Status writes below keep the outer ctx, so a dump that fails on the deadline still records it.
+	dumpCtx := ctx
+	if timeout := w.config.Checkpoint.CheckpointTimeout(); timeout > 0 {
+		var cancel context.CancelFunc
+		dumpCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
-		if err := w.releaseLease(releaseCtx, leaseKey); err != nil {
-			logger.Error(err, "Failed to release checkpoint lease", "lease", leaseKey.String())
-		}
-	}()
-
-	leaseCtx, stopLease := context.WithCancelCause(ctx)
-	defer stopLease(nil)
-	go w.renewLease(leaseCtx, leaseKey, stopLease)
+	}
 
 	params := CheckpointParams{
-		Pod:           pod,
-		ContainerName: containerName,
-		ContainerID:   containerID,
-		ContainerPID:  containerPID,
-		ContentUID:    contentUID,
-		HostPath:      artifactPath,
-		StartedAt:     time.Now(),
+		Pod:                  pod,
+		ContainerName:        containerName,
+		ContainerID:          containerID,
+		ContainerPID:         containerPID,
+		ContentUID:           contentUID,
+		HostPath:             artifactPath,
+		StartedAt:            time.Now(),
+		CuInterposeRequested: cuInterposeRequested,
 	}
-	if err := w.checkpointFn(leaseCtx, params); err != nil {
-		if cause := context.Cause(leaseCtx); cause != nil && !errors.Is(cause, context.Canceled) {
-			err = fmt.Errorf("%w; %v", err, cause)
-		}
+	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
+	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
+	// would discard a usable checkpoint and, being terminal, block recovery from ever promoting it.
+	if err := w.checkpointFn(dumpCtx, params); err != nil {
 		logger.Error(err, "Checkpoint failed")
 		if patchErr := w.setSnapshotContentFailed(ctx, content, "CheckpointFailed", err); patchErr != nil {
-			logger.Error(patchErr, "Failed to write PodSnapshotContent failed status", "content", content.Name)
+			return fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, patchErr)
 		}
-		return
+		return nil
 	}
 
-	// CRIU dump is not context-aware, so checkpointFn can return nil after the lease
-	// was lost. A stale holder must not mark Ready: another holder may already be
-	// writing the same artifact. A clean context.Canceled (outer ctx shutdown) is not
-	// a lease failure.
-	if cause := context.Cause(leaseCtx); cause != nil && !errors.Is(cause, context.Canceled) {
-		logger.Error(cause, "Lease cancelled during checkpoint")
-		if patchErr := w.setSnapshotContentFailed(ctx, content, "LeaseCancelled", cause); patchErr != nil {
-			logger.Error(patchErr, "Failed to write PodSnapshotContent failed status", "content", content.Name)
-			// Another holder may already have marked Ready and be about to release.
-			// Killing here would terminate a successfully checkpointed workload.
-			if apierrors.IsConflict(patchErr) {
-				current := &snapshotv1alpha1.PodSnapshotContent{}
-				if getErr := w.client.Get(ctx, client.ObjectKey{Name: content.Name}, current); getErr != nil {
-					logger.Error(getErr, "Failed to re-read PodSnapshotContent after LeaseCancelled conflict", "content", content.Name)
-				} else if isContentReady(current) {
-					return
-				}
-			}
-		}
-		if killErr := w.killCheckpointProcess(logger, containerPID, "checkpoint lease cancelled"); killErr != nil {
-			logger.Error(killErr, "Failed to kill target after lease cancellation", "content", content.Name)
-		}
-		return
-	}
-
-	if err := w.markCheckpointReady(ctx, content); err != nil {
-		logger.Error(err, "Failed to finalize checkpoint Ready status", "content", content.Name)
-		return
-	}
+	return w.markCheckpointReady(ctx, content, artifactPath)
 }
 
 // classifySourcePodIdentity reports whether the live pod is the work order's pinned source
@@ -413,14 +274,15 @@ func classifySourcePodLiveness(pod *corev1.Pod) (string, string) {
 	return "", ""
 }
 
-// failCheckpointOnContainerExit fails the work order and force-terminates the source pod's
-// still-running containers when any checkpoint container has terminated non-zero. It returns
-// true when a failure was handled and the caller must stop. Init containers
+// failCheckpointOnContainerExit fails the work order and force-terminates the pod's still-running
+// containers when any checkpoint container has terminated non-zero. The bool says the caller must
+// stop; the error is the status write's, so one that did not land is retried. Only call this for a
+// pod this work order owns — the sweep kills every running container in it. Init containers
 // (pod.Status.InitContainerStatuses) are intentionally out of scope.
-func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) bool {
+func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (bool, error) {
 	failed := failedCheckpointContainer(pod)
 	if failed == nil {
-		return false
+		return false, nil
 	}
 
 	term := failed.State.Terminated
@@ -433,9 +295,9 @@ func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, cont
 	emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning, "CheckpointFailed", message)
 	w.killRunningContainers(ctx, logger, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
 	if err := w.setSnapshotContentFailed(ctx, content, "CheckpointContainerFailed", errors.New(message)); err != nil {
-		logr.FromContextOrDiscard(ctx).Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
+		return true, fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, err)
 	}
-	return true
+	return true, nil
 }
 
 // failedCheckpointContainer returns the first checkpoint container that terminated non-zero, or
@@ -448,6 +310,21 @@ func failedCheckpointContainer(pod *corev1.Pod) *corev1.ContainerStatus {
 		}
 	}
 	return nil
+}
+
+// preflightCuInterpose reads the explicit opt-in. An opted-in target must also start
+// under the launcher, which SnapshotJob adds and ordinary Pods must add themselves.
+func preflightCuInterpose(pod *corev1.Pod, target string) (bool, error) {
+	requested, err := podcontract.ParseCuInterposeAnnotation(pod.Annotations)
+	if err != nil || !requested {
+		return false, err
+	}
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == target {
+			return true, podcontract.ValidateCuInterposeLauncher(&pod.Spec.Containers[i])
+		}
+	}
+	return false, fmt.Errorf("cuinterpose target container %q not found", target)
 }
 
 // killRunningContainers SIGKILLs every still-running container in the pod, resolving each
@@ -512,9 +389,14 @@ func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *co
 	}
 }
 
-// setSnapshotContentSucceeded patches status with the Ready condition. Uses optimistic locking so
-// a concurrent terminal Failed write wins and this patch is rejected rather than overwriting it.
-func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) error {
+// setSnapshotContentSucceeded patches status with the Ready condition and the source values the
+// capture recorded. Uses optimistic locking so a concurrent terminal Failed write wins and this
+// patch is rejected rather than overwriting it.
+func (w *NodeController) setSnapshotContentSucceeded(
+	ctx context.Context,
+	content *snapshotv1alpha1.PodSnapshotContent,
+	source *snapshotv1alpha1.CheckpointSource,
+) error {
 	patch := client.MergeFromWithOptions(content.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
@@ -522,6 +404,9 @@ func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, conten
 		Reason:  "Captured",
 		Message: "Checkpoint captured and verified",
 	})
+	if source != nil {
+		content.Status.Source = source
+	}
 	return w.client.Status().Patch(ctx, content, patch)
 }
 
@@ -535,11 +420,26 @@ const readyStatusConflictLimit = 8
 // Ready-patch conflict, re-read and retry until Ready lands or a terminal state is observed: an
 // already-Failed work order is sticky and wins; Ready already set means another holder finished
 // the write.
-func (w *NodeController) markCheckpointReady(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) error {
+//
+// The Ready write also publishes what the capture ran on, read from the artifact's manifest once
+// rather than per retry. An unreadable manifest costs those values, never the capture: Ready is
+// written regardless, because the artifact is already committed.
+func (w *NodeController) markCheckpointReady(
+	ctx context.Context,
+	content *snapshotv1alpha1.PodSnapshotContent,
+	artifactPath string,
+) error {
 	logger := logr.FromContextOrDiscard(ctx)
+	source, err := checkpointSourceAtPath(artifactPath)
+	if err != nil {
+		logger.Error(err, "Failed to read the captured source; marking Ready without it",
+			"content", content.Name,
+			"artifactPath", artifactPath,
+		)
+	}
 	ready := content
 	for attempt := 0; attempt < readyStatusConflictLimit; attempt++ {
-		if err := w.setSnapshotContentSucceeded(ctx, ready); err != nil {
+		if err := w.setSnapshotContentSucceeded(ctx, ready, source); err != nil {
 			if !apierrors.IsConflict(err) {
 				logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 				return err
@@ -585,16 +485,17 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	log := logr.FromContextOrDiscard(ctx)
 
 	req := executor.CheckpointRequest{
-		ContainerID:         params.ContainerID,
-		ContainerName:       params.ContainerName,
-		ContentUID:          params.ContentUID,
-		StartedAt:           params.StartedAt,
-		NodeName:            w.config.NodeName,
-		PodName:             params.Pod.Name,
-		PodNamespace:        params.Pod.Namespace,
-		PodIP:               params.Pod.Status.PodIP,
-		Clientset:           w.clientset,
-		PageBrokerRequested: params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		ContainerID:          params.ContainerID,
+		ContainerName:        params.ContainerName,
+		ContentUID:           params.ContentUID,
+		StartedAt:            params.StartedAt,
+		NodeName:             w.config.NodeName,
+		PodName:              params.Pod.Name,
+		PodNamespace:         params.Pod.Namespace,
+		PodIP:                params.Pod.Status.PodIP,
+		Pod:                  podEnvironment(params.Pod, params.ContainerName),
+		Clientset:            w.clientset,
+		CuInterposeRequested: params.CuInterposeRequested,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
 		if executor.CheckpointNeedsSourceKill(err) {

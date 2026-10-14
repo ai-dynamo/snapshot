@@ -1,0 +1,85 @@
+{
+  "comparisonKey": "{\"benchmarkVersion\":1,\"case\":\"vllm\",\"custom\":{\"replicas\":1},\"datadogGpuMonitoringMode\":\"disable\",\"frameworkImage\":\"registry.example/vllm@sha256:0123456789abcdef\",\"imageCache\":{\"restore\":true,\"source\":true},\"model\":\"Qwen/Qwen3-0.6B\",\"modelCacheMode\":\"shared-nfs\",\"restoreGpuModels\":[\"NVIDIA A100-SXM4-80GB\"],\"schemaVersion\":1,\"sourceGpuModels\":[\"NVIDIA A100-SXM4-80GB\"],\"storage\":{\"accessModes\":[\"ReadWriteMany\"],\"capacity\":\"64Gi\",\"provisioner\":\"file.csi.azure.com\",\"requestedSize\":\"64Gi\",\"storageClass\":\"azurefile-csi\",\"type\":\"Standard_LRS\",\"volumeMode\":\"Filesystem\"},\"suite\":\"framework-checkpoint-restore\",\"test\":\"test_framework\"}",
+  "result": {
+    "schemaVersion": 1,
+    "benchmarkVersion": 1,
+    "identity": {
+      "suite": "framework-checkpoint-restore",
+      "case": "vllm",
+      "test": "test_framework",
+      "runId": "777",
+      "runAttempt": 1
+    },
+    "outcome": "passed",
+    "startedAt": "2026-08-25T01:02:03.000Z",
+    "finishedAt": "2026-08-25T01:02:15.500Z",
+    "source": {
+      "commit": "0123456789abcdef",
+      "ref": "refs/heads/main",
+      "event": "schedule",
+      "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/777",
+      "snapshotTag": "v0.0.0-test"
+    },
+    "environment": {
+      "model": "Qwen/Qwen3-0.6B",
+      "frameworkImage": "registry.example/vllm:v1",
+      "storageClass": "azurefile-csi",
+      "modelCacheMode": "shared-nfs",
+      "datadogGpuMonitoringMode": "disable",
+      "sourceGpus": [
+        {
+          "model": "NVIDIA A100-SXM4-80GB",
+          "uuid": "GPU-source",
+          "driverVersion": "595.58.03"
+        }
+      ],
+      "restoreGpus": [
+        {
+          "model": "NVIDIA A100-SXM4-80GB",
+          "uuid": "GPU-restore",
+          "driverVersion": "595.58.03"
+        }
+      ],
+      "storage": {
+        "storageClass": "azurefile-csi",
+        "type": "Standard_LRS",
+        "provisioner": "file.csi.azure.com",
+        "requestedSize": "64Gi",
+        "capacity": "64Gi",
+        "accessModes": [
+          "ReadWriteMany"
+        ],
+        "volumeMode": "Filesystem"
+      },
+      "imagePulls": {
+        "source": {
+          "cacheHit": true
+        },
+        "restore": {
+          "cacheHit": true
+        }
+      },
+      "frameworkImageDigest": "registry.example/vllm@sha256:0123456789abcdef",
+      "comparisonDimensions": {
+        "replicas": 1
+      }
+    },
+    "measurements": [
+      {
+        "name": "checkpoint.duration",
+        "displayName": "Checkpoint",
+        "unit": "seconds",
+        "value": 12.5,
+        "status": "complete"
+      }
+    ],
+    "events": [
+      {
+        "name": "test.started",
+        "offsetSeconds": 0,
+        "timestamp": "2026-08-25T01:02:03.000Z"
+      }
+    ],
+    "error": null
+  }
+}

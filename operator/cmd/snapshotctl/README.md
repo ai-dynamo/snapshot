@@ -53,7 +53,7 @@ accept a Kubernetes `Pod` manifest, not a Deployment or Job manifest.
 That pod manifest must:
 
 - describe the worker pod you want to checkpoint or restore
-- use the placeholder image for checkpoint-aware flows
+- use the workload's regular image; the node agent supplies the restore tooling
 - match the runtime-relevant worker settings you care about preserving
 - provide an inert, long-running entrypoint for each restore destination
 

@@ -6,13 +6,119 @@ package runtime
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
+	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
+
+// testBundle lays out a bundle with the real directory structure, a shim in
+// place of the ELF loader, and the host tar as the bundled tar. The shim drops
+// the loader's own flags and execs the rest, so tests exercise the argv
+// restoreTarCmd actually builds against a real extraction, without needing to
+// ship a glibc.
+func testBundle(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	libcDir := filepath.Join(dir, nsmount.BundleLibcDir)
+	if err := os.MkdirAll(libcDir, 0o755); err != nil {
+		t.Fatalf("create bundle libc dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, nsmount.BundleLibDir), 0o755); err != nil {
+		t.Fatalf("create bundle lib dir: %v", err)
+	}
+
+	shim := "#!/bin/sh\n[ \"$1\" = \"--library-path\" ] && shift 2\nexec \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(libcDir, nsmount.BundleLoader), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write loader shim: %v", err)
+	}
+
+	hostTar, err := exec.LookPath("tar")
+	if err != nil {
+		t.Skipf("tar not available: %v", err)
+	}
+	if err := os.Symlink(hostTar, filepath.Join(dir, nsmount.BundleTar)); err != nil {
+		t.Fatalf("link bundle tar: %v", err)
+	}
+	return dir
+}
+
+func TestRestoreTarCmd(t *testing.T) {
+	t.Run("invokes the bundled tar through the bundled loader", func(t *testing.T) {
+		cmd, err := restoreTarCmd("/tmp/snapshot-binaries", "-xf", "/tmp/diff.tar")
+		if err != nil {
+			t.Fatalf("restoreTarCmd: %v", err)
+		}
+
+		wantLoader := "/tmp/snapshot-binaries/libc/ld-linux-x86-64.so.2"
+		if cmd.Path != wantLoader {
+			t.Fatalf("exec path = %q, want the bundled loader %q", cmd.Path, wantLoader)
+		}
+		want := []string{
+			wantLoader,
+			"--library-path", "/tmp/snapshot-binaries/libc:/tmp/snapshot-binaries/lib",
+			"/tmp/snapshot-binaries/tar",
+			"-xf", "/tmp/diff.tar",
+		}
+		if !slices.Equal(cmd.Args, want) {
+			t.Fatalf("argv = %q, want %q", cmd.Args, want)
+		}
+	})
+
+	t.Run("bundle libc precedes bundle lib on the library path", func(t *testing.T) {
+		// lib/ holds the agent's non-glibc closure; libc/ must win so the
+		// loader and libc stay the matched pair glibc requires.
+		cmd, err := restoreTarCmd("/bundle")
+		if err != nil {
+			t.Fatalf("restoreTarCmd: %v", err)
+		}
+		i := slices.Index(cmd.Args, "--library-path")
+		if i < 0 || i+1 >= len(cmd.Args) {
+			t.Fatalf("no --library-path in argv %q", cmd.Args)
+		}
+		if got, want := cmd.Args[i+1], "/bundle/libc:/bundle/lib"; got != want {
+			t.Fatalf("library path = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a non-absolute bundle dir is rejected", func(t *testing.T) {
+		// Falling back to a PATH lookup here would find the placeholder's own
+		// tar, which is the failure the bundled loader exists to prevent.
+		for _, bundleDir := range []string{"", "snapshot-binaries", "./rel"} {
+			if _, err := restoreTarCmd(bundleDir, "--version"); err == nil {
+				t.Fatalf("restoreTarCmd(%q) should fail", bundleDir)
+			}
+		}
+	})
+}
+
+func TestCaptureTarArgs(t *testing.T) {
+	args := captureTarArgs("/upper", "/out.tar", types.OverlaySettings{Exclusions: []string{"/var/log"}}, []string{"/data"})
+
+	// Load-bearing, not cosmetic — see captureTarArgs.
+	if !slices.Contains(args, "--xattrs-exclude=trusted.*") {
+		t.Fatalf("args %q must exclude the trusted.* xattr namespace", args)
+	}
+	if !slices.Contains(args, "--xattrs") {
+		t.Fatalf("args %q must archive xattrs", args)
+	}
+	for _, want := range []string{"--exclude=./var/log", "--exclude=./data"} {
+		if !slices.Contains(args, want) {
+			t.Fatalf("args %q missing %q", args, want)
+		}
+	}
+	if got, want := args[len(args)-5:], []string{"-C", "/upper", "-cf", "/out.tar", "."}; !slices.Equal(got, want) {
+		t.Fatalf("trailing args = %q, want %q", got, want)
+	}
+}
 
 func TestBuildExclusions(t *testing.T) {
 	tests := []struct {
@@ -179,7 +285,7 @@ func TestCaptureRootfsDiff(t *testing.T) {
 		}
 
 		targetRoot := t.TempDir()
-		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 		data, err := os.ReadFile(filepath.Join(targetRoot, "generated.txt"))
@@ -213,7 +319,7 @@ func TestCaptureRootfsDiff(t *testing.T) {
 
 func TestApplyRootfsDiff(t *testing.T) {
 	t.Run("missing archive is no-op", func(t *testing.T) {
-		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), testBundle(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 	})
@@ -223,7 +329,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), nil, 0644); err != nil {
 			t.Fatalf("write empty rootfs diff: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testBundle(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 	})
@@ -233,7 +339,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("not a tar archive"), 0644); err != nil {
 			t.Fatalf("write invalid rootfs diff: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err == nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testBundle(t), testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should fail for invalid non-empty archive")
 		}
 	})
@@ -246,7 +352,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 			t.Fatalf("create temp file: %v", err)
 		}
 		f.Close()
-		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), testr.New(t)); err == nil {
+		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), testBundle(t), testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should propagate non-ENOENT stat error")
 		}
 	})
@@ -265,7 +371,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("glob staged copies: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testBundle(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 		after, err := filepath.Glob(filepath.Join(os.TempDir(), rootfsDiffFilename+".*.tmp"))
@@ -440,4 +546,65 @@ func TestApplyDeletedFiles(t *testing.T) {
 			t.Fatalf("ApplyDeletedFiles: %v", err)
 		}
 	})
+}
+
+// capNetRawXattr is a VFS_CAP_REVISION_2 vfs_cap_data blob granting
+// CAP_NET_RAW as permitted+effective: magic_etc, then two {permitted,
+// inheritable} u32 pairs, little-endian. The kernel validates this on write,
+// so it cannot be an arbitrary value.
+var capNetRawXattr = []byte{
+	0x01, 0x00, 0x00, 0x02, // VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE
+	0x00, 0x20, 0x00, 0x00, // data[0].permitted   = 1 << CAP_NET_RAW(13)
+	0x00, 0x00, 0x00, 0x00, // data[0].inheritable
+	0x00, 0x00, 0x00, 0x00, // data[1].permitted
+	0x00, 0x00, 0x00, 0x00, // data[1].inheritable
+}
+
+// TestRootfsDiffPreservesCapabilities covers the extract-side xattr mask:
+// tar archives security.capability but restores only user.* unless the mask is
+// widened, so a workload binary would come back stripped of its capabilities.
+func TestRootfsDiffPreservesCapabilities(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("setting security.capability requires root")
+	}
+
+	upperDir := t.TempDir()
+	checkpointDir := t.TempDir()
+	targetRoot := t.TempDir()
+
+	binary := filepath.Join(upperDir, "prog")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatalf("write upperdir file: %v", err)
+	}
+	if err := unix.Lsetxattr(binary, "security.capability", capNetRawXattr, 0); err != nil {
+		t.Skipf("filesystem refused security.capability: %v", err)
+	}
+	if err := unix.Lsetxattr(binary, "user.snapshot.cached", []byte("yes"), 0); err != nil {
+		t.Fatalf("set user xattr: %v", err)
+	}
+
+	if _, err := CaptureRootfsDiff(upperDir, checkpointDir, types.OverlaySettings{}, nil); err != nil {
+		t.Fatalf("CaptureRootfsDiff: %v", err)
+	}
+	if err := ApplyRootfsDiff(checkpointDir, targetRoot, testBundle(t), testr.New(t)); err != nil {
+		t.Fatalf("ApplyRootfsDiff: %v", err)
+	}
+
+	restored := filepath.Join(targetRoot, "prog")
+	for _, tc := range []struct {
+		name string
+		want []byte
+	}{
+		{"security.capability", capNetRawXattr},
+		{"user.snapshot.cached", []byte("yes")},
+	} {
+		got := make([]byte, 64)
+		n, err := unix.Lgetxattr(restored, tc.name, got)
+		if err != nil {
+			t.Fatalf("restored file lost %s: %v", tc.name, err)
+		}
+		if !slices.Equal(got[:n], tc.want) {
+			t.Fatalf("%s = %v, want %v", tc.name, got[:n], tc.want)
+		}
+	}
 }

@@ -32,8 +32,8 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: tensorrt-llm-snapshot:replace-me
-          imagePullPolicy: Always
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          imagePullPolicy: IfNotPresent
           # Inert placeholder: the agent restores the checkpointed process into
           # this container, so app.py must not run here.
           command:
@@ -70,6 +70,12 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            # The checkpointed process's mount namespace includes this
+            # mount (from the source Pod); restore recreates it here too,
+            # even though this placeholder's own command never reads it.
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
       volumes:
         - name: snapshot-control
           emptyDir: {}
@@ -77,3 +83,6 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        - name: app
+          configMap:
+            name: tensorrt-llm-app

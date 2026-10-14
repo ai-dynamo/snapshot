@@ -49,6 +49,8 @@ const (
 	RestoreReasonFailed = "RestoreFailed"
 	// RestoreReasonPartiallySucceeded marks a terminal mixed destination outcome.
 	RestoreReasonPartiallySucceeded = "RestorePartiallySucceeded"
+	// RestoreReasonIncompatible marks a restore refused before CRIU.
+	RestoreReasonIncompatible = "RestoreIncompatible"
 )
 
 // ClassifyRestoreOutcome returns the public restore outcome represented by Pod
@@ -66,7 +68,7 @@ func ClassifyRestoreOutcome(conditions []corev1.PodCondition) RestoreOutcome {
 			return RestoreOutcomeUnknown
 		}
 		switch condition.Reason {
-		case RestoreReasonFailed:
+		case RestoreReasonFailed, RestoreReasonIncompatible:
 			return RestoreOutcomeFailed
 		case RestoreReasonPartiallySucceeded:
 			return RestoreOutcomePartiallySucceeded

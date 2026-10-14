@@ -1,29 +1,25 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#include <charconv>
 #include <iostream>
+#include <stdexcept>
 #include <string_view>
+#include <vector>
 
 #include "daemon.hpp"
-
-namespace {
-bool
-ParseMaxConcurrentRequests(std::string_view value, size_t& max_concurrent_requests)
-{
-  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), max_concurrent_requests);
-  return error == std::errc{} && end == value.data() + value.size() && max_concurrent_requests > 0;
-}
-}  // namespace
 
 int
 main(int argc, char** argv)
 {
-  size_t max_concurrent_requests;
-  if (argc != 6 || std::string_view(argv[4]) != "--max-concurrent-requests" ||
-      !ParseMaxConcurrentRequests(argv[5], max_concurrent_requests)) {
-    std::cerr << "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests\n";
+  try {
+    const std::vector<std::string_view> arguments(argv + 1, argv + argc);
+    return static_cast<int>(RunDaemon(ParseDaemonOptions(arguments)));
+  } catch (const std::invalid_argument& error) {
+    std::cerr << "usage: pagebroker socket_path staging_directory storage_root "
+                 "[--max-concurrent-requests count] [--custom-storage-engine on|off] "
+                 "[--custom-storage-buffer-count count] [--custom-storage-chunk-bytes bytes] "
+                 "[--custom-storage-max-pinned-bytes bytes]\n"
+              << "pagebroker: " << error.what() << '\n';
     return static_cast<int>(ExitCode::INVALID_ARGUMENTS);
   }
-  return static_cast<int>(RunDaemon(argv[1], argv[2], argv[3], max_concurrent_requests));
 }

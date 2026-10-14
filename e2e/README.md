@@ -16,6 +16,19 @@ Set `SNAPSHOT_E2E_STORAGE_CLASS` when the cluster default cannot provision RWX
 claims. The AKS workflow uses `azurefile-csi`; local runs default to the
 cluster's default storage class.
 
+Set `SNAPSHOT_E2E_AVOID_MIG=true` on clusters that serve both MIG-capable
+and non-MIG GPU pools, so workload pods pin the non-MIG pool the way host
+preflight does. Clusters with one GPU pool do not expose
+`nvidia.com/mig.config` at all, and selecting on a label the nodes lack leaves
+every workload pod unschedulable — so this stays off by default.
+
+Pass `--helm-set KEY=VALUE` to `setup.py` (repeatable, or
+`SNAPSHOT_E2E_HELM_SET` with one assignment per line) to override chart values
+the installer does not set itself, such as image repositories for images that
+were built locally rather than published. Assignments reach `helm --set`
+unchanged and follow its syntax, so a literal comma in a value has to be
+escaped as `\,`.
+
 ## Modes
 
 ### CI Mode
@@ -25,6 +38,54 @@ there, runs the environment check, then runs the snapshot lifecycle tests.
 
 The workflow resolves the latest published Snapshot operator/agent image tag and
 passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
+
+### CPU Mode (k3d)
+
+`e2e-cpu.yaml` runs on pull requests that touch the images, chart, CRDs, or
+harness, where no GPU cluster is available. It builds the operator and agent
+images from the pull request, creates a k3d cluster, imports the images into it,
+installs the chart through the same `setup.py` phases the GPU workflow uses, and
+runs `pytest -m cpu`.
+
+k3d has no GPU, so `hack/k3d-cpu-e2e.sh cluster-up` fakes the three things the
+chart and test helpers inherited from the GPU environment, each safe only
+because the cluster has a single node:
+
+| Faked | Why it is needed |
+| --- | --- |
+| Node label `nvidia.com/gpu.present=true` | the agent DaemonSet and workload pods both select GPU nodes |
+| `RuntimeClass/nvidia` on the `runc` handler | the agent pod defaults to `runtimeClassName: nvidia` |
+| hostPath `PersistentVolume` declared `ReadWriteMany` | the installer requires an RWX checkpoint claim, and k3d's local-path provisioner is RWO |
+
+The script stops there. It does not install Snapshot and does not create the
+checkpoint claim — `setup.py` does both, the same way it does for a GPU cluster.
+What the script does contribute is `hack/k3d-cpu-e2e.sh helm-set`, which prints
+the chart values this cluster needs (k3s keeps containerd outside the
+conventional paths, and a single node has to fit the workload pods) in the
+newline-separated form `SNAPSHOT_E2E_HELM_SET` accepts.
+
+`make cpu-e2e` runs the whole sequence on a linux/amd64 Docker host — build,
+cluster, install, tests — and deletes the cluster afterwards:
+
+```bash
+make cpu-e2e                                     # the whole thing
+SNAPSHOT_E2E_KEEP_CLUSTER=true make cpu-e2e      # leave the cluster up to debug
+SNAPSHOT_E2E_SKIP_BUILD=true bash hack/cpu-e2e.sh -m cpu -k restores
+```
+
+The agent is linux/amd64 only, so this does not work on an Apple Silicon Mac.
+
+Each stage stands alone. Against a cluster that already runs Snapshot, set
+`KUBECONFIG` and run `pytest -m cpu` on its own; against a clean cluster, run
+the `setup.py` phases below and then the tests.
+
+`SNAPSHOT_E2E_REQUIRED_TESTS` names the cases the job exists to prove, as a
+comma-separated list of test names. Any name the run deselects, or that skips,
+fails the run; a parametrized function can be named bare, which requires every
+one of its cases, or by case ID to require just that one. Without it, dropping
+a `cpu` marker would leave the check green while it tested no round trip at
+all, because pytest exits 0 for a suite that ran nothing it was asked for. It
+is unset for local runs, where skipping is legitimate.
 
 ### Local Direct Mode
 
@@ -120,6 +181,129 @@ kubectl delete namespace "$SNAPSHOT_E2E_HOST_NAMESPACE" --ignore-not-found
 rm -f "$SNAPSHOT_E2E_TARGET_KUBECONFIG"
 ```
 
+## Installing a Published Version
+
+`snapshot-install` installs the local `./charts/snapshot` by default. To install
+a published release or main build instead, point it at the chart in GHCR:
+
+```bash
+export SNAPSHOT_E2E_SNAPSHOT_TAG=v0.1.0
+export SNAPSHOT_E2E_CHART_REF=oci://ghcr.io/ai-dynamo/snapshot/snapshot
+export SNAPSHOT_E2E_CHART_VERSION=0.1.0
+
+uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-install
+```
+
+The chart version is the image tag without the leading `v`. Main builds use
+`v0.0.0-g<sha8>` images and chart version `0.0.0-g<sha8>`.
+
+`hack/resolve-snapshot-image-tag.py` resolves which versions to upgrade from
+and checks that their operator and agent images and chart are published. It
+prints a JSON list of `{tag, chart_version}` and drops the version under test:
+
+```bash
+# Latest release
+python3 hack/resolve-snapshot-image-tag.py --from ""
+# Newest patch release of each of the last 3 minor versions
+python3 hack/resolve-snapshot-image-tag.py --from-minor-versions 3
+# Specific release tags and main commits
+python3 hack/resolve-snapshot-image-tag.py --from v0.1.0,1a2b3c4d
+```
+
+Only main and release-branch commits are published, so a feature-branch commit
+cannot be used. Set `GH_TOKEN` to avoid GitHub API rate limits.
+
+## Upgrade Tests
+
+`tests/test_upgrade.py` checks that state created on an older Snapshot version
+survives an upgrade. Install the older version from GHCR first, then run the
+test. The test performs the upgrade itself, to the chart in this checkout.
+
+`SNAPSHOT_E2E_SNAPSHOT_TAG` names the version being installed, so it is the old
+version for `snapshot-install` and the new version for the test:
+
+```bash
+export SNAPSHOT_E2E_UPGRADE_FROM_TAG=v0.1.0
+export UPGRADE_TO_TAG=<published-main-tag>
+
+# 1. Install the old version from GHCR
+SNAPSHOT_E2E_SNAPSHOT_TAG="$SNAPSHOT_E2E_UPGRADE_FROM_TAG" \
+SNAPSHOT_E2E_CHART_REF=oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+SNAPSHOT_E2E_CHART_VERSION="${SNAPSHOT_E2E_UPGRADE_FROM_TAG#v}" \
+  uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-install
+SNAPSHOT_E2E_SNAPSHOT_TAG="$SNAPSHOT_E2E_UPGRADE_FROM_TAG" \
+  uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-ready
+
+# 2. Create state, upgrade to the new version, and validate
+SNAPSHOT_E2E_SNAPSHOT_TAG="$UPGRADE_TO_TAG" \
+  uv run --project e2e pytest e2e/tests/test_upgrade.py -m upgrade -vv -s
+```
+
+A run has three phases:
+
+1. **PreUpgrade:** each selected scenario creates its state on the old version,
+   such as a source pod and a ready `PodSnapshot`.
+2. **Upgrade:** `helm upgrade` to the new version using the local chart.
+   `test_upgrade_completed` checks the release is deployed, the operator and
+   agent run the new images with no restarts or panics, pagebroker runs next
+   to every upgraded agent exactly when the new chart deploys it, the CRD
+   installer succeeded, and the served CRDs match `api/v1alpha1/crds`.
+3. **PostUpgrade:** `test_global_invariants` checks every pre-upgrade snapshot
+   is still Ready and still has its artifacts on the PVC. Then each scenario
+   validates its own state in `test_post_upgrade[<scenario>]`.
+
+Optional settings:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SNAPSHOT_E2E_UPGRADE_PROFILE` | `basic` | `basic` runs the core scenarios; `all` runs every scenario |
+| `SNAPSHOT_E2E_UPGRADE_SCENARIOS` | empty | Comma-separated scenario names; overrides the profile |
+| `SNAPSHOT_E2E_UPGRADE_CONFIG` | `full` | How the upgrade is performed, see below |
+
+Upgrade configs:
+
+| Config | What it does |
+| --- | --- |
+| `full` | `helm upgrade` with the same values the install used |
+| `reset-then-reuse-values` | `helm upgrade --reset-then-reuse-values` with only the image tags set: keeps the old install's values and takes new defaults from the chart. This is the documented upgrade command for users who don't pass their values again |
+| `operator-first` | Sets the agent DaemonSet to `OnDelete`, then upgrades: the new operator runs against the old agents, as in a rollout where the operator finishes first |
+| `agent-first` | Pauses the operator Deployment, then upgrades: the new agents run against the old operator, and the CRDs stay at the old version |
+
+Each phase's duration is printed at the end, and appended to
+`GITHUB_STEP_SUMMARY` in CI.
+
+### Upgrade runs in CI
+
+The **E2E Upgrade Tests** workflow (`.github/workflows/e2e-upgrade.yaml`) runs
+this test once per pair of version to upgrade from, upgrade config, and scenario
+profile. Each pair gets its own vCluster, installs the old version from GHCR,
+and upgrades to the version under test.
+
+The versions to upgrade from are the newest patch release of each of the last
+`UPGRADE_FROM_MINOR_VERSIONS` (3) minor versions, prereleases excluded. With
+fewer minor versions, the newest patch release of each existing minor version
+is tested.
+
+| Trigger | Profile | Configs | Skipping |
+| --- | --- | --- | --- |
+| Nightly (`0 8 * * *`) | `basic` | `full` | A pair is skipped when nothing under `agent`, `operator`, `api`, `charts`, `e2e`, the workflow, its actions, or the gate and resolver scripts changed since its last pass on `main` |
+| Weekly (`0 13 * * 6`) | `all` | every config | None |
+| Manual | `upgrade_profile` input | `upgrade_config` input; `default` uses the profile's configs | None |
+
+The workflow-level `env` block holds these settings. `hack/upgrade-e2e-gate.py`
+decides which pairs run and lists every decision in the job summary. If it
+cannot read the run history from the GitHub API, every pair runs.
+Only scheduled runs count toward the nightly skip rule; manual runs can test
+a different target image or a reduced scenario set under the same job name.
+
+Manual runs accept `upgrade_from` as a comma-separated list of release tags or
+main commit hashes, and `snapshot_tag` for a version to upgrade to other than
+the checked-out commit.
+
+To add a scenario, subclass `UpgradeScenario` in
+`snapshot_e2e/upgrade/scenarios.py`. Implement `pre_upgrade` and `post_upgrade`,
+and register it in `SCENARIOS` with the profiles it belongs to.
+
 ## Restore Verification
 
 The success tests prove restore with explicit source and restore state tokens.
@@ -134,3 +318,260 @@ the test verifies that the restored process and files report the source token,
 not the restore token. The worker also appends periodic observations to
 `/tmp/e2e-state/observations.log`; the observation count is only a liveness
 check that the restored process continues running after restore.
+
+## Framework Tests
+
+`tests/test_frameworks.py` checkpoints and restores each framework guide
+workload (`vllm`, `sglang`, `tensorrt-llm`) with the guide's own program and
+manifests: source pod Ready (`ready-for-snapshot`, written only after a
+pre-capture generation) → `PodSnapshot` → restore pod pinned to the source node
+→ `nvidia.com/Restored=RestoreSucceeded` → `<framework>-restore-ready` →
+`POST /generate` answers → the placeholder never loaded a model itself.
+
+```bash
+# one framework (CI runs one per matrix job); omit the variable for all three
+SNAPSHOT_E2E_FRAMEWORK=vllm \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+
+# test a different image instead of the guide's own pinned image
+SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapshot:dev \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+```
+
+Model weights come from one of two places:
+
+- **Shared model cache** (CI): set `SNAPSHOT_E2E_MODEL_CACHE_SERVER` and
+  `SNAPSHOT_E2E_MODEL_CACHE_PATH` to an NFS export holding a Hugging Face cache
+  in `HF_HOME` layout (`hub/models--<org>--<model>/...`). The test creates a
+  static `PersistentVolume`/`PersistentVolumeClaim` (`SNAPSHOT_E2E_MODEL_CACHE_PVC`,
+  default `model-cache`), mounts it at `/models` on every framework container,
+  sets `HF_HOME=/models` and `HF_HUB_OFFLINE=1`, and drops the guide's download
+  init container. In vCluster mode the setup enables `sync.toHost.persistentVolumes`
+  so the NFS mount options reach the node. The model must already be in the cache.
+- **Guide download** (default without the variables): the guide's own plumbing
+  runs unchanged. SGLang's init container downloads into its PVC, which the test
+  creates from the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS`
+  when set) and leaves in place; vLLM and TensorRT-LLM download in-process.
+  This needs working DNS and egress from the pods. A partial or stale SGLang
+  cache (for example after a killed run) is reset by deleting that PVC; the
+  next run recreates and refills it.
+
+`tests/test_framework_manifests.py` pins the guide manifests, and the cache
+rewrite, to the restore-pod contract without a cluster.
+
+### Framework benchmark results
+
+Every selected framework test prints a benchmark summary and writes one
+versioned JSON result. CI uploads the JSON as a 30-day artifact even when the
+functional test fails. Set `SNAPSHOT_E2E_BENCHMARK_DIR` to choose the local
+output directory; without it, results go under the system temporary directory.
+
+The required durations use these stable boundaries:
+
+- `checkpoint.duration`: immediately before the `PodSnapshot` create request
+  until both `PodSnapshot` and its bound `PodSnapshotContent` report Ready.
+- `restore.to_traffic.duration`: the Snapshot agent's timestamp for the
+  `RestoreRequested` event until the framework writes its restore-ready
+  sentinel, which happens after its API is listening and its first
+  post-restore generation completes.
+- `restore.pod_create_to_traffic.duration`: immediately before restore pod
+  creation until the same traffic-ready sentinel. This secondary measurement
+  includes scheduling and target discovery.
+- `test.total.duration` (`Full E2E test` in the console): entry into the test
+  body through restored inference verification and the no-cold-start
+  assertion. Failure diagnostics, fixture cleanup, and post-test benchmark
+  metadata collection are excluded.
+
+The same result separates system work from test-observation overhead with the
+agent's structured durations. `checkpoint.agent.duration` and
+`restore.agent.duration` are the agent totals; every reported agent phase is
+also emitted as `<operation>.<phase>.duration`, including
+`checkpoint.criu_dump.duration` and `restore.criu_restore.duration`.
+`restore.agent_complete_to_traffic.duration` shows framework wake-up time after
+the agent completes. Restore success and the traffic sentinel are watched in
+one one-second polling loop. The sentinel check execs into the restore pod, so
+it starts only after the `nvidia.com/Restored` condition reports
+`RestoreSucceeded`: the agent restores the checkpointed process tree with its
+original PIDs, and an exec session in that PID namespace during the restore
+could collide with one of them. The one-second poll bounds the delay this adds.
+
+`source.image_pull.duration` and `restore.image_pull.duration` come from the
+kubelet's `Pulled` events. The companion `*_including_wait.duration` includes
+kubelet queueing. A content-addressed image already present on the node is
+recorded as a zero-second cache hit in `environment.imagePulls`, rather than as
+a network pull.
+
+Most durations use the test runner's monotonic clock. The restore start is
+backdated once from the Kubernetes event timestamp to remove event-observation
+delay, and the agent-to-traffic gap compares the agent log timestamp with the
+observed traffic-ready timestamp. Both cross the boundary between the cluster's
+clock and the runner's clock. The agent stamps its events with a microsecond
+`eventTime`, and the `restore.requested` event in the result records
+`observationDelaySeconds`, the signed gap between the agent's timestamp and the
+runner's observation; a negative value means the cluster clock is ahead of the
+runner, and the console summary warns when the gap is negative or larger than
+a few seconds. The result also keeps the underlying events, test outcome,
+source revision, framework image tag and resolved digest, model, cache mode,
+and storage metadata (CSI provisioner, storage class, requested size, bound
+capacity, access modes, and volume mode). Source and restore GPU model and
+driver are recorded separately because restore may receive a different
+physical GPU; whether it did is kept as `gpuAffinity` and `nodeAffinity`
+(`same`, `different`, or `unknown`) rather than as GPU UUIDs or node names,
+which are stable infrastructure identifiers and never enter a published
+result: the test registers the node and agent pod names it learns with the
+recorder, which replaces them with `<source-node>`, `<restore-node>`, and
+`<agent-pod>` in the durable `error.message` and in every recorded collection
+error (the full text still goes to the job log). The node's
+`nvidia.com/gpu.product` label is recorded too and stands
+in for the model when `nvidia-smi` is unavailable. Missing
+boundaries remain explicit incomplete measurements and are never serialized as
+zero.
+
+Outcomes are `passed`, `failed`, `timed_out`, `skipped`, and
+`infrastructure_failed`. A lifecycle wait that exhausts its budget, or a pytest
+run interrupted by the workflow's timeout, is `timed_out`; other assertion
+failures are `failed`; a run that never produced a pytest call report is
+`infrastructure_failed`. The durable `error.message` holds only the final
+exception line. Full tracebacks stay in the pytest log and the short-lived
+diagnostics artifact because results are retained outside the cluster.
+
+`snapshot_e2e.benchmark.BenchmarkSession` is intentionally independent of the
+framework schema: another E2E suite can name its own case, events, and duration
+measurements while producing the same result envelope.
+
+### Benchmark history and comparison
+
+After the matrix finishes, one CPU-only job downloads all selected framework
+results and compares every completed measurement with the previous compatible
+successful run and the median of the previous seven. The comparison, including
+GPU, storage, image-cache state, commit, outcome, and workflow links, is written
+to the GitHub Actions step summary and uploaded as another 30-day artifact.
+Failed and timed-out results remain visible but do not contribute values to a
+baseline. A missing or invalid matrix artifact becomes an explicit
+`infrastructure_failed` result instead of disappearing from history. The
+aggregation reads the artifacts of every attempt of the workflow run and keeps
+the newest attempt per framework, so "Re-run failed jobs" does not turn the
+frameworks that already passed into missing artifacts. A synthesized result
+takes its Snapshot tag from a sibling framework result of the same run when the
+aggregation job itself does not know it.
+
+Only the scheduled workflow on `main` can publish. Pull-request mirror,
+ordinary branch, and manually dispatched runs use a separate read-only job and
+cannot mutate durable history. Both jobs check the history branch out through
+the `.github/actions/fetch-benchmark-history` composite action, which uses the
+job's own token so it works for private repositories and GitHub Enterprise
+hosts. The publisher serializes updates, commits all frameworks from one
+workflow in one commit, and bootstraps the data-only orphan branch
+`e2e-benchmark-history` on its first successful invocation.
+
+After a pull-request mirror or manual run completes, the trusted dashboard
+workflow validates its comparison artifact and publishes a 14-day preview.
+Pull requests use the stable path `/previews/pr-<number>/`; other manual runs
+use `/previews/run-<workflow-run-id>/`. Each preview combines that run with a
+read-only copy of nightly history. Generated preview indexes are isolated on
+the `e2e-benchmark-previews` branch and never enter `e2e-benchmark-history`.
+The dashboard deployment summary links to the resulting Pages URL.
+
+#### Viewing a pull request's benchmark preview
+
+1. Get an `E2E Framework Tests` run against your PR. This does not happen
+   automatically: first dispatch `push-artifacts.yaml` (Actions tab,
+   `workflow_dispatch`) on your PR's source branch to build its own
+   operator/agent/pagebroker images, then dispatch
+   `.github/workflows/e2e-frameworks.yaml` (`workflow_dispatch`, `ref`: your
+   PR's `pull-request/<number>` mirror branch, created by `copy-pr-bot`) with
+   `snapshot_tag` set to the tag `push-artifacts.yaml` just built. Dispatching
+   against the `pull-request/<number>` branch (not your source branch) is what
+   keys the benchmark preview to your PR.
+2. Wait for it to finish, then open the **E2E Benchmark Dashboard** workflow
+   run it triggers (`.github/workflows/e2e-benchmark-pages.yaml`, via
+   `workflow_run`) -- filter the Actions tab to that workflow and your PR's
+   commit if it's not the latest run.
+3. Open that run's `deploy` job and read its summary (or the `url` shown for
+   the `github-pages` environment): that's the Pages URL for
+   `/previews/pr-<number>/`.
+4. The preview page overlays your PR's results on the read-only nightly
+   history baseline -- a "Temporary preview" banner at the top says how many
+   results are yours versus durable history, and links back to the source
+   workflow run. It's the same dashboard as the durable one, so the
+   Measurements/Cases filters, stage breakdown charts, and run-details
+   dialog all work the same way; nothing here mutates `e2e-benchmark-history`,
+   and the preview expires after 14 days.
+
+This needs GitHub Pages enabled once for the repository (**Settings → Pages →
+Build and deployment → Source → GitHub Actions**) and the `E2E Benchmark
+Dashboard` workflow to already exist on `main` -- `workflow_run` triggers are
+evaluated from the default branch's copy of the workflow file, not the PR's,
+so a preview pipeline added in the same PR it's meant to preview won't fire
+until that PR merges.
+
+Raw results are the source of truth. They are stored under:
+
+```text
+results/v1/<suite>/<case>/<test>/<year>/<month>/<day>/<run-id>-<attempt>.json
+```
+
+Derived monthly indexes live at `index/v1/<year>-<month>.ndjson`; the small
+`index/manifest.json` lists chunks newest-first. Every index line carries the
+raw path, the result, and a `comparisonKey`: the canonical JSON of the
+comparison dimensions below, so readers group compatible results by that
+string instead of re-deriving the rules. Identity is the GitHub run ID,
+attempt, suite, case, and test, so publishing the same attempt again recognizes
+the immutable record instead of duplicating it.
+
+Compatible baselines have the same suite, case, test, schema and benchmark
+versions, measurement unit, GPU models, framework image (the resolved digest
+when the test recorded one, otherwise the tag), model, storage configuration,
+model-cache mode, image-cache state, and GPU-monitoring mode. GPU UUID, node,
+Snapshot commit, and Snapshot image tag stay diagnostic: they do not split the
+baseline. Future suites can add stable suite-specific values under
+`environment.comparisonDimensions`.
+
+The monthly indexes and manifest can be reconstructed from a checked-out
+history branch without modifying any raw result:
+
+```bash
+PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history rebuild \
+  --history-dir /path/to/e2e-benchmark-history
+```
+
+After inspecting the diff, commit and push the rebuilt `index/` directory. If
+the history branch is lost, restore the raw `results/` tree from a backup or
+retained workflow artifacts and run the same rebuild command; indexes alone
+cannot reconstruct the raw records.
+
+### Benchmark dashboard
+
+The static dashboard source lives under `dashboard/`. It graphs the latest 90
+days by default, exposes suite, case, GPU, outcome, channel, and measurement
+filters, and compares completed points with the previous compatible run and
+seven-run median. Failed and timed-out measurements remain visible as explicit
+gaps instead of zero values.
+
+The `E2E Benchmark Dashboard` workflow builds the TypeScript application from
+`main` and combines it with the data-only `e2e-benchmark-history` branch plus
+any unexpired pre-merge previews. A completed framework run triggers a new
+Pages deployment without merging generated benchmark data into `main`. See
+[`dashboard/README.md`](../dashboard/README.md) for local development and the
+one-time GitHub Pages configuration.
+
+## Framework Images
+
+The framework e2e workloads are the programs and manifests under
+`manifests/frameworks/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`), owned
+by the e2e suite -- these are not the `docs/guides/` examples, which still
+document a build-and-push image flow and are updated separately. Each
+framework runs the upstream image unmodified -- the exact image reference is
+`spec.template.spec.containers[0].image` in that framework's own
+`deployment.yaml` -- with `app.py` mounted from a ConfigMap (`kubectl create
+configmap <framework>-app --from-file=app.py -n
+"${SNAPSHOT_E2E_TEST_NAMESPACE:-snapshot-e2e}"`) rather than baked into a
+Snapshot-built image. There is nothing under `manifests/frameworks/<framework>/`
+for Snapshot to build, push, or keep available; `frameworks.framework_image()`
+reads the image straight from that `deployment.yaml`, and
+`framework_workloads.app_configmap()` builds the ConfigMap from the same
+`app.py`.
+
+Point `SNAPSHOT_E2E_FRAMEWORK_IMAGE` at a different image to test an
+unpublished change (a fork of `vllm/vllm-openai`, for example) without
+editing `deployment.yaml`.

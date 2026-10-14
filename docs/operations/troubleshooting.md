@@ -13,8 +13,9 @@ kubectl get podsnapshot <name> -n <ns>
 kubectl logs daemonset/snapshot-agent -n <ns> --all-containers
 ```
 
-A common cause is a replica manifest that uses the raw runtime image instead of a
-[snapshot-ready image](../guides/README.md), or that omits mounts or secrets the
+A common cause is a replica manifest that does not follow the [framework
+guides](../guides/README.md) -- missing the control volume, seccomp profile,
+or readiness gate Snapshot relies on -- or that omits mounts or secrets the
 replica needs to start.
 
 ## Restore cannot find or mount checkpoint storage

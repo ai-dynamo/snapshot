@@ -5,9 +5,55 @@ suite: snapshot agent configuration validation
 templates:
   - templates/configmap.yaml
 tests:
+  - it: configures always-on PageBroker without a helper or capture-format setting
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'restoreMode: "direct"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'controlSocketPath: "/pagebroker/control/pagebroker.sock"'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "cudaCheckpoint|enableChecksumDigest|transferBufferCount|storageMode"
+
   - it: rejects a caller-selected checkpoint mount path
     set:
       storage.pvc.basePath: /other
     asserts:
       - failedTemplate:
           errorPattern: "storage.pvc.basePath is fixed at /checkpoints"
+
+  - it: keeps the restore compatibility gate on by default
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "skipCompatCheck: false"
+
+  - it: renders the node-wide compatibility gate opt-out
+    set:
+      config.restore.skipCompatCheck: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "skipCompatCheck: true"
+
+  - it: configures direct restore independently of CRIU I/O
+    set:
+      pageBroker.restoreMode: direct
+      config.criu.imageIoMode: writeback
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'restoreMode: "direct"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'imageIoMode: "writeback"'
+
+  - it: allows opting into staged restore
+    set:
+      pageBroker.restoreMode: staged
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'restoreMode: "staged"'

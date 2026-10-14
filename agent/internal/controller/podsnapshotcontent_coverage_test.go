@@ -46,35 +46,14 @@ func makeNodeControllerWithInterceptor(t *testing.T, fc *fakeCheckpointer, funcs
 			WithInterceptorFuncs(funcs).Build(),
 		runtime:        &fakeRuntime{},
 		log:            logr.Discard(),
-		holderID:       "snapshot-agent/test",
-		inFlight:       make(map[string]struct{}),
 		contentIndexer: idx,
+		captureQueue:   newTestCaptureQueue(t),
 	}
 	w.checkpointFn = fc.fn
 	return w
 }
 
-func TestReconcilePodSnapshotContent_ContentGetErrorReturns(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	pod := makeSourcePod()
-	funcs := interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok {
-				return errors.New("apiserver unavailable")
-			}
-			return c.Get(ctx, key, obj, opts...)
-		},
-	}
-	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
-
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
-
-	// The gate could not read the work order, so it must not have promoted the pod.
-	_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
-	assert.False(t, labeled)
-}
-
-func TestReconcilePodSnapshotContent_SourcePodGetErrorReturns(t *testing.T) {
+func TestReconcileCapture_SourcePodGetErrorReturns(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod()
 	funcs := interceptor.Funcs{
@@ -87,13 +66,13 @@ func TestReconcilePodSnapshotContent_SourcePodGetErrorReturns(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.Error(t, w.reconcileCapture(context.Background(), content.Name))
 
-	// A transient pod-Get error must be retried, not written as a terminal failure.
+	// A transient pod-Get error must be requeued, not written as a terminal failure.
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
-func TestReconcilePodSnapshotContent_LabelErrorLeavesPodUnlabeled(t *testing.T) {
+func TestReconcileCapture_LabelErrorLeavesPodUnlabeled(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod()
 	funcs := interceptor.Funcs{
@@ -101,19 +80,22 @@ func TestReconcilePodSnapshotContent_LabelErrorLeavesPodUnlabeled(t *testing.T) 
 			return errors.New("patch rejected")
 		},
 	}
-	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
+	fc := &fakeCheckpointer{}
+	w := makeNodeControllerWithInterceptor(t, fc, funcs, content, pod)
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	// The label is how pod events reach the queue, so a failed promotion is requeued rather than
+	// left for the resync — but it is not a failure of the work order.
+	require.Error(t, w.reconcileCapture(context.Background(), content.Name))
 
-	// Validation passed but the promotion patch failed: logged best-effort, pod stays unlabeled.
 	_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
 	assert.False(t, labeled)
+	assert.False(t, fc.wasCalled())
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
-func TestReconcileSourcePod_ContentGetErrorReturns(t *testing.T) {
+func TestReconcileCapture_ContentGetErrorReturns(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod()
-	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
 	fc := &fakeCheckpointer{}
 	funcs := interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -125,9 +107,11 @@ func TestReconcileSourcePod_ContentGetErrorReturns(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, fc, funcs, content, pod)
 
-	require.Error(t, w.reconcileSourcePod(context.Background(), pod))
+	require.Error(t, w.reconcileCapture(context.Background(), content.Name))
 
-	assert.False(t, fc.called, "a content Get error must abort before the dump")
+	assert.False(t, fc.wasCalled(), "a content Get error must abort before the dump")
+	_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
+	assert.False(t, labeled)
 }
 
 func TestLabelCaptureEligible_AlreadyLabeledNoOp(t *testing.T) {
@@ -197,7 +181,7 @@ func TestSetSnapshotContentSucceeded_StatusPatchErrorReturnsError(t *testing.T) 
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	err := w.setSnapshotContentSucceeded(context.Background(), content)
+	err := w.setSnapshotContentSucceeded(context.Background(), content, nil)
 
 	require.Error(t, err)
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
@@ -212,11 +196,23 @@ func TestSetSnapshotContentSucceeded_ConflictReturnsError(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	err := w.setSnapshotContentSucceeded(context.Background(), content)
+	err := w.setSnapshotContentSucceeded(context.Background(), content, nil)
 
 	require.Error(t, err)
 	assert.True(t, apierrors.IsConflict(err))
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+// An unreadable manifest publishes nothing, and nothing must not erase the
+// ones an earlier Ready write already published.
+func TestSetSnapshotContentSucceeded_NoSourceLeavesAPublishedOneAlone(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	content.Status.Source = recordedSource()
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, interceptor.Funcs{}, content)
+
+	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, nil))
+
+	assert.Equal(t, recordedSource(), getContent(t, w, content.Name).Status.Source)
 }
 
 func TestRunCheckpoint_ReadyPatchErrorLeavesNotReady(t *testing.T) {
@@ -228,12 +224,12 @@ func TestRunCheckpoint_ReadyPatchErrorLeavesNotReady(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 	pod := &corev1.Pod{}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
 	artifactPath := w.config.Storage.BasePath
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "x", artifactPath, leaseKey, "x")
+	// A Ready write that never landed is retryable: the queue redelivers and the artifact resume
+	// path picks it back up.
+	require.Error(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, false, "x", artifactPath))
 
-	// The artifact resume path retries the Ready write later; nothing is written now.
 	assert.Nil(t, meta.FindStatusCondition(
 		getContent(t, w, content.Name).Status.Conditions,
 		snapshotv1alpha1.PodSnapshotConditionReady,
@@ -267,14 +263,40 @@ func TestMarkCheckpointReady_FailedBeforeReadyIsSticky(t *testing.T) {
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 
-	err := w.markCheckpointReady(context.Background(), stale)
+	err := w.markCheckpointReady(context.Background(), stale, "")
 
 	require.NoError(t, err, "a sticky Failed condition is an accepted outcome, not a retryable error")
 	got := getContent(t, w, stored.Name)
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Nil(t, got.Status.Source, "a work order that failed never captured anything to publish")
 	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, failed)
 	assert.Equal(t, "SourcePodGone", failed.Reason)
+}
+
+// The manifest is read once, before the retry loop, so a Ready write that only
+// lands on a later attempt still carries the source.
+func TestMarkCheckpointReady_PublishesAfterAReadyConflict(t *testing.T) {
+	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	conflicts := 0
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if conflicts == 0 {
+				conflicts++
+				return conflictErr()
+			}
+			return c.Status().Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
+	path := committedArtifact(t, w, string(stored.UID))
+
+	require.NoError(t, w.markCheckpointReady(context.Background(), stored, path))
+
+	assert.Equal(t, 1, conflicts, "the first Ready write has to be the rejected one")
+	got := getContent(t, w, stored.Name)
+	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Equal(t, recordedSource(), got.Status.Source)
 }
 
 func TestRunCheckpoint_FailedBeforeReadyDoesNotKill(t *testing.T) {
@@ -288,11 +310,10 @@ func TestRunCheckpoint_FailedBeforeReadyDoesNotKill(t *testing.T) {
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := &corev1.Pod{}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
 	artifactPath := w.config.Storage.BasePath
 	_, target := startKillableTarget(t)
 
-	w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", target.Process.Pid, "x", artifactPath, leaseKey, "x")
+	require.NoError(t, w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", target.Process.Pid, false, "x", artifactPath))
 
 	// The dump itself terminates the source; a raced Failed condition must not
 	// trigger an extra kill of an unrelated PID.
@@ -315,7 +336,7 @@ func TestMarkCheckpointReady_AlreadyReadyNoOp(t *testing.T) {
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 
-	err := w.markCheckpointReady(context.Background(), stale)
+	err := w.markCheckpointReady(context.Background(), stale, "")
 
 	require.NoError(t, err, "another holder's Ready write is success, not a conflict to escalate")
 }
@@ -351,7 +372,7 @@ func TestMarkCheckpointReady_SecondConflictObservesFailed(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
 
-	err := w.markCheckpointReady(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"))
+	err := w.markCheckpointReady(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), "")
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, readyPatches, "Failed must be observed on the second Ready conflict")

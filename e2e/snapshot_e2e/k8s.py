@@ -56,12 +56,29 @@ def read_pvc(namespace: str, name: str) -> client.V1PersistentVolumeClaim:
     return client.CoreV1Api().read_namespaced_persistent_volume_claim(name, namespace)
 
 
+def read_storage_class(name: str) -> client.V1StorageClass:
+    return client.StorageV1Api().read_storage_class(name)
+
+
 def read_crd(name: str) -> client.V1CustomResourceDefinition:
     return client.ApiextensionsV1Api().read_custom_resource_definition(name)
 
 
-def list_events(namespace: str) -> list[client.CoreV1Event]:
-    return client.CoreV1Api().list_namespaced_event(namespace).items
+def read_node(name: str) -> client.V1Node:
+    return client.CoreV1Api().read_node(name)
+
+
+def list_events(
+    namespace: str,
+    *,
+    field_selector: dict[str, str] | None = None,
+) -> list[client.CoreV1Event]:
+    kwargs: dict[str, Any] = {}
+    if field_selector:
+        kwargs["field_selector"] = ",".join(
+            f"{key}={value}" for key, value in sorted(field_selector.items())
+        )
+    return client.CoreV1Api().list_namespaced_event(namespace, **kwargs).items
 
 
 def create_pod(body: dict[str, Any]) -> client.V1Pod:
@@ -69,6 +86,25 @@ def create_pod(body: dict[str, Any]) -> client.V1Pod:
         namespace=body["metadata"]["namespace"],
         body=body,
     )
+
+
+def apply_configmap(namespace: str, body: dict[str, Any]) -> client.V1ConfigMap:
+    """Create the ConfigMap, replacing it in place if it already exists.
+
+    A prior run in the same namespace (a local re-run, a retried CI job) can
+    leave a stale ConfigMap with the same name; replace rather than error, so
+    the test always deploys against the current app.py.
+    """
+    api = client.CoreV1Api()
+    name = body["metadata"]["name"]
+    try:
+        return api.create_namespaced_config_map(namespace=namespace, body=body)
+    except ApiException as exc:
+        if exc.status != 409:
+            raise
+        existing = api.read_namespaced_config_map(name=name, namespace=namespace)
+        body["metadata"]["resourceVersion"] = existing.metadata.resource_version
+        return api.replace_namespaced_config_map(name=name, namespace=namespace, body=body)
 
 
 def read_pod(namespace: str, name: str) -> client.V1Pod:
@@ -135,12 +171,19 @@ def delete_pod(namespace: str, name: str) -> bool:
         raise
 
 
-def pod_logs(namespace: str, name: str, *, tail_lines: int = 120) -> str:
+def pod_logs(
+    namespace: str,
+    name: str,
+    *,
+    tail_lines: int = 120,
+    container: str | None = None,
+) -> str:
     try:
         return client.CoreV1Api().read_namespaced_pod_log(
             name=name,
             namespace=namespace,
             tail_lines=tail_lines,
+            container=container,
             _preload_content=True,
         )
     except ApiException as exc:
@@ -165,6 +208,31 @@ def exec_command(
         stdout=True,
         tty=False,
     )
+
+
+PAYLOAD_MARKER = "e2e-payload-follows"
+
+
+def exec_payload(
+    namespace: str,
+    pod: str,
+    command: str,
+    *,
+    container: str | None = None,
+) -> str:
+    """Exec output with whatever the login shell printed first dropped.
+
+    exec_command merges stderr into the stream, so a container whose profile
+    writes anything breaks every caller that parses the result rather than
+    matching a substring in it.
+    """
+    output = exec_command(
+        namespace, pod, f"echo {PAYLOAD_MARKER}; {command}", container=container
+    )
+    _, marker, payload = output.partition(PAYLOAD_MARKER)
+    if not marker:
+        raise AssertionError(f"exec output carried no payload marker: {output!r}")
+    return payload.lstrip("\n")
 
 
 def snapshot_custom_resource_api_is_accessible(namespace: str) -> None:
@@ -273,3 +341,31 @@ def daemonset_readiness_detail(daemonset: client.V1DaemonSet) -> str:
 
 def api_error_detail(exc: ApiException) -> str:
     return f"status={exc.status}, reason={exc.reason}, body={exc.body}"
+
+
+def pod_status_writers(pod: client.V1Pod) -> list[str]:
+    writers = []
+    for entry in pod.metadata.managed_fields or []:
+        status = (entry.fields_v1 or {}).get("f:status") or {}
+        fields = sorted(key.removeprefix("f:") for key in status)
+        if not fields:
+            continue
+        conditions = sorted(
+            key.split('"type":"', 1)[-1].rstrip('"}')
+            for key in (status.get("f:conditions") or {})
+            if key.startswith("k:")
+        )
+        writers.append(
+            f"{entry.manager} {entry.operation} subresource={entry.subresource} at={entry.time} "
+            f"status={fields} conditions={conditions}"
+        )
+    return writers
+
+
+def status_sync_errors(namespace: str) -> list[client.CoreV1Event]:
+    return [
+        event
+        for event in list_events(namespace, field_selector={"type": "Warning"})
+        if event.reason == "SyncError"
+    ]
+

@@ -119,6 +119,7 @@ type SnapshotJobSpec struct {
 	// command, GPU resources, sidecars, DRA claims, shared memory — is the
 	// caller's responsibility.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.annotations) || !('nvidia.com/cuda-shared-memory-support' in self.metadata.annotations) || self.metadata.annotations['nvidia.com/cuda-shared-memory-support'].trim() in ['enabled', 'disabled']",message="annotation nvidia.com/cuda-shared-memory-support must be enabled or disabled"
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
 
 	// ActiveDeadlineSeconds bounds the total time allowed for pod scheduling,

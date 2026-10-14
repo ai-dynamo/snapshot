@@ -72,6 +72,13 @@ Name of the operator service account.
 {{- end }}
 
 {{/*
+Use the same agent image for the DaemonSet and cuinterpose installer.
+*/}}
+{{- define "snapshot.agentImage" -}}
+{{- printf "%s:%s" .Values.image.agent.repository (.Values.image.agent.tag | default .Chart.AppVersion) -}}
+{{- end }}
+
+{{/*
 Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 */}}
 {{- define "snapshot.validateRuntime" -}}
@@ -113,3 +120,11 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 
 {{- define "snapshot.pageBrokerControlPath" -}}/pagebroker/control{{- end -}}
 {{- define "snapshot.pageBrokerStagingPath" -}}/pagebroker/staging{{- end -}}
+
+{{/* Driver access shared by the agent and PageBroker. */}}
+{{- define "snapshot.nvidiaEnvironment" -}}
+- name: NVIDIA_VISIBLE_DEVICES
+  value: all
+- name: NVIDIA_DRIVER_CAPABILITIES
+  value: compute,utility
+{{- end -}}

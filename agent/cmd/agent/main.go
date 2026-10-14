@@ -9,17 +9,28 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"flag"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/controller"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
+	"github.com/ai-dynamo/snapshot/agent/internal/nri"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
+
+// nriEnabled gates the NRI plugin that makes snapshot-restore-proxy PID 1 in
+// restore containers. Temporary: it stays false until the proxy is validated
+// end to end, and the change that turns the proxy on deletes it. It is not a
+// setting, so there is nothing to remove from the chart later.
+const nriEnabled = false
 
 func main() {
 	runtimeType := flag.String("runtime", cmp.Or(os.Getenv("RUNTIME_TYPE"), snapshotruntime.RuntimeContainerd),
@@ -38,6 +49,13 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		fatal(agentLog, err, "Invalid configuration")
 	}
+	// A host value that cannot be read is unknown, never fatal: the node keeps
+	// capturing and restoring, and the checks that need it do not apply.
+	if kernelVersion, err := snapshotruntime.ReadKernelVersion(snapshotruntime.HostProcPath); err != nil {
+		agentLog.Error(err, "Failed to read the host kernel version; checkpoints taken here will not record it")
+	} else {
+		cfg.HostKernelVersion = kernelVersion
+	}
 
 	rt, err := snapshotruntime.New(*runtimeType, *runtimeSocket)
 	if err != nil {
@@ -52,6 +70,13 @@ func main() {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithTimeout(rootCtx, pageBrokerStartupTimeout)
+	capabilities, err := waitForPageBroker(ctx, pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath})
+	cancel()
+	if err != nil {
+		fatal(agentLog, err, "Failed to read PageBroker capabilities")
+	}
+	cfg.CustomStorageAvailable = capabilities.CustomStorageAvailable
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
@@ -63,11 +88,50 @@ func main() {
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}
-	if runErr := nodeController.Run(rootCtx); runErr != nil {
-		fatal(agentLog, runErr, "Snapshot node controller exited with error")
+	// Both run until shutdown. If either stops early, the agent exits and the
+	// DaemonSet restarts it.
+	group, groupCtx := errgroup.WithContext(rootCtx)
+	group.Go(func() error {
+		return untilShutdown(rootCtx, "snapshot node controller", nodeController.Run(groupCtx))
+	})
+	if nriEnabled {
+		plugin := nri.NewPlugin(nodeController, rootLog.WithName("nri"), os.Getenv(nri.HostNamespaceEnv))
+		group.Go(func() error {
+			return untilShutdown(rootCtx, "NRI plugin", plugin.Run(groupCtx))
+		})
+	}
+	if runErr := group.Wait(); runErr != nil {
+		fatal(agentLog, runErr, "Snapshot agent exited with error")
 	}
 
 	agentLog.Info("Agent stopped")
+}
+
+// The sidecar allocates its GPU transfer rings before it creates the control socket.
+const pageBrokerStartupTimeout = 5 * time.Minute
+
+// waitForPageBroker retries while the sidecar is not yet listening.
+func waitForPageBroker(ctx context.Context, client pagebroker.Client) (*pagebroker.Capabilities, error) {
+	for {
+		capabilities, err := client.Capabilities(ctx)
+		if err == nil || !(errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)) {
+			return capabilities, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// untilShutdown turns an early, error-free return into an error, so the
+// errgroup stops the other component instead of running on half an agent.
+func untilShutdown(rootCtx context.Context, name string, err error) error {
+	if err == nil && rootCtx.Err() == nil {
+		return errors.New(name + " stopped unexpectedly")
+	}
+	return err
 }
 
 func fatal(log logr.Logger, err error, msg string, keysAndValues ...interface{}) {

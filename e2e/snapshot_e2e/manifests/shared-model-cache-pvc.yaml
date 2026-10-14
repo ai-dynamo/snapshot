@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Binds by name to shared-model-cache-pv.yaml (spec.volumeName). All fields
+# are filled in from SharedModelCache by shared_model_cache_volume().
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: PLACEHOLDER
+  namespace: PLACEHOLDER
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: PLACEHOLDER
+  resources:
+    requests:
+      storage: 1024Gi

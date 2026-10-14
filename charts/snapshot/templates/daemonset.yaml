@@ -1,4 +1,7 @@
 {{- include "snapshot.validateRuntime" . -}}
+{{- if hasKey .Values.image.pageBroker "tag" -}}
+{{- fail "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images" -}}
+{{- end -}}
 {{- $socket := include "snapshot.runtimeSocket" . -}}
 {{- $socketDir := $socket | dir -}}
 {{- $storageDir := include "snapshot.runtimeStorageDir" . -}}
@@ -28,22 +31,21 @@ spec:
         {{- with .Values.daemonset.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.openshift.enabled .Values.daemonset.podAnnotations }}
       annotations:
+        kubectl.kubernetes.io/default-container: agent
         {{- if .Values.openshift.enabled }}
         # Pin this DS to the built-in "privileged" SCC even if a higher-priority
         # custom SCC is added later. See openshift/enhancements custom-scc-preemption-prevention.
         # User-supplied podAnnotations cannot override this key.
         openshift.io/required-scc: privileged
-        {{- with omit .Values.daemonset.podAnnotations "openshift.io/required-scc" }}
+        {{- with omit (.Values.daemonset.podAnnotations | default dict) "openshift.io/required-scc" "kubectl.kubernetes.io/default-container" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- else }}
-        {{- with .Values.daemonset.podAnnotations }}
+        {{- with omit (.Values.daemonset.podAnnotations | default dict) "kubectl.kubernetes.io/default-container" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}
-      {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.serviceAccountName" . }}
       hostPID: true
@@ -75,8 +77,11 @@ spec:
         {{- with .Values.daemonset.affinity }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      # CUDA checkpoint/restore requires the nvidia container runtime
-      runtimeClassName: nvidia
+      {{- with .Values.daemonset.runtimeClassName }}
+      # CUDA checkpoint/restore requires the nvidia container runtime. Left out
+      # when empty, for nodes where that runtime is containerd's default.
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
       {{- if .Values.seccomp.deploy }}
       initContainers:
         # Deploy seccomp profile to host before starting the agent
@@ -106,36 +111,8 @@ spec:
               mountPath: /host-seccomp
       {{- end }}
       containers:
-        {{- if .Values.pageBroker.enabled }}
-        - name: pagebroker
-          image: "{{ .Values.pageBroker.image.repository }}:{{ .Values.pageBroker.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.pageBroker.image.pullPolicy }}
-          command:
-          {{- with .Values.pageBroker.command }}
-            {{- toYaml . | nindent 12 }}
-          {{- else }}
-            - /usr/local/bin/pagebroker
-          {{- end }}
-          args:
-            {{- with .Values.pageBroker.args }}
-            {{- toYaml . | nindent 12 }}
-            {{- else }}
-            - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
-            - {{ $pageBrokerStagingPath | quote }}
-            - {{ .Values.storage.pvc.basePath | quote }}
-            - --max-concurrent-requests
-            - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
-            {{- end }}
-          resources:
-            {{- toYaml .Values.pageBroker.resources | nindent 12 }}
-          volumeMounts:
-            - name: pagebroker
-              mountPath: /pagebroker
-            - name: checkpoints
-              mountPath: {{ .Values.storage.pvc.basePath }}
-        {{- end }}
         - name: agent
-          image: "{{ .Values.image.agent.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
+          image: {{ include "snapshot.agentImage" . | quote }}
           imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
           args:
             - "--runtime"
@@ -152,15 +129,19 @@ spec:
                   fieldPath: spec.nodeName
             - name: SNAPSHOT_LOG_LEVEL
               value: {{ .Values.daemonset.snapshotLogLevel | quote }}
+            {{- with .Values.daemonset.nriHostNamespace }}
+            - name: SNAPSHOT_NRI_HOST_NAMESPACE
+              value: {{ . | quote }}
+            {{- end }}
+            # Conventional CUDA queries need the host driver libraries.
+            {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
           volumeMounts:
             # Mount configuration ConfigMap
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
-            {{- if .Values.pageBroker.enabled }}
             - name: pagebroker
               mountPath: /pagebroker
-            {{- end }}
             {{- if eq .Values.storage.type "pvc" }}
             # Every agent owns direct access to the shared checkpoint store.
             - name: checkpoints
@@ -174,6 +155,10 @@ spec:
             - name: kubelet-pods
               mountPath: /var/lib/kubelet/pods
               readOnly: true
+            # NRI socket directory, for the plugin that makes the restore
+            # proxy PID 1 in restore containers.
+            - name: nri
+              mountPath: /var/run/nri
             # Per-container storage: agent reads overlay upperdirs from here
             # to capture the rootfs diff at checkpoint time.
             - name: runtime-storage
@@ -202,16 +187,48 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
+        - name: pagebroker
+          image: "{{ .Values.image.pageBroker.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pageBroker.pullPolicy }}
+          # CustomStorage operates on the workload's CUDA processes and device mappings.
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+            {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
+          args:
+            - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
+            - {{ $pageBrokerStagingPath | quote }}
+            - {{ .Values.storage.pvc.basePath | quote }}
+            - --max-concurrent-requests
+            - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
+            - --custom-storage-buffer-count
+            - {{ .Values.pageBroker.transferBufferCount | int64 | quote }}
+            - --custom-storage-chunk-bytes
+            - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
+            - --custom-storage-max-pinned-bytes
+            - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
+          resources:
+            {{- toYaml .Values.pageBroker.resources | nindent 12 }}
+          volumeMounts:
+            - name: pagebroker
+              mountPath: /pagebroker
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
       volumes:
         # Configuration ConfigMap
         - name: config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
-        {{- if .Values.pageBroker.enabled }}
         - name: pagebroker
           emptyDir:
             medium: Memory
-        {{- end }}
+            # Falls back even when pageBroker.staging is explicitly null (e.g.
+            # helm upgrade --reuse-values from a release predating this key):
+            # an absent sizeLimit is an unbounded memory-backed volume, not a
+            # safe default.
+            sizeLimit: {{ (.Values.pageBroker.staging | default dict).sizeLimit | default "64Gi" | quote }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles
@@ -240,6 +257,14 @@ spec:
           hostPath:
             path: /var/lib/kubelet/pods
             type: Directory
+        # NRI socket directory. A directory, not the socket itself: a
+        # socket-typed hostPath would keep the Pod from starting at all, and
+        # hide the reason. On a node without NRI the agent starts, cannot
+        # register its NRI plugin, and exits with an error saying so.
+        - name: nri
+          hostPath:
+            path: /var/run/nri
+            type: DirectoryOrCreate
         # Per-container storage (overlay upperdirs for rootfs-diff capture).
         - name: runtime-storage
           hostPath:

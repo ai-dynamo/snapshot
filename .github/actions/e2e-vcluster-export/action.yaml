@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Export e2e vCluster target
+description: >-
+  Point the rest of the job at the vCluster from the setup result file written
+  by the snapshot-ready phase, then print the target's nodes, pods, and PVC.
+
+runs:
+  using: composite
+  steps:
+    - name: Export vCluster kubeconfig
+      shell: bash
+      run: |
+        set -euo pipefail
+        uv run --locked --project e2e python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        result = json.loads(Path(os.environ["SNAPSHOT_E2E_RESULT_FILE"]).read_text())
+
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+            env.write(f"KUBECONFIG={result['target_kubeconfig']}\n")
+            env.write(f"SNAPSHOT_E2E_HOST_NAMESPACE={result.get('host_namespace', '')}\n")
+            env.write(f"SNAPSHOT_E2E_VCLUSTER_NAME={result.get('vcluster_name', '')}\n")
+            env.write(f"SNAPSHOT_E2E_TEST_NAMESPACE={result['test_namespace']}\n")
+            env.write(f"SNAPSHOT_E2E_TARGET_KUBECONFIG={result['target_kubeconfig']}\n")
+            env.write(f"SNAPSHOT_E2E_SNAPSHOT_RELEASE={result['snapshot_release']}\n")
+            env.write(f"SNAPSHOT_E2E_PVC_NAME={result['pvc_name']}\n")
+
+        print(f"Target kubeconfig: {result['target_kubeconfig']}")
+        PY
+
+    - name: Inspect vCluster target
+      shell: bash
+      run: |
+        set -euo pipefail
+        kubectl get nodes -o wide
+        kubectl get runtimeclass
+        kubectl get pods -n "${TEST_NAMESPACE}" -o wide
+        kubectl get pvc -n "${TEST_NAMESPACE}" -o wide

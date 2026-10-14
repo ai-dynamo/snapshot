@@ -5,11 +5,13 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	internalapi "k8s.io/cri-api/pkg/apis"
 )
 
 // k8sNamespace is containerd's conventional namespace for kubelet-managed
@@ -18,6 +20,7 @@ const k8sNamespace = "k8s.io"
 
 type ContainerdRuntime struct {
 	client *containerd.Client
+	cri    internalapi.RuntimeService
 }
 
 func NewContainerdRuntime(socket string) (*ContainerdRuntime, error) {
@@ -25,11 +28,35 @@ func NewContainerdRuntime(socket string) (*ContainerdRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial containerd at %s: %w", socket, err)
 	}
-	return &ContainerdRuntime{client: client}, nil
+	cri, err := newRemoteRuntimeService(socket)
+	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("failed to dial containerd CRI at %s: %w", socket, err)
+	}
+	return &ContainerdRuntime{client: client, cri: cri}, nil
 }
 
 func (r *ContainerdRuntime) Close() error {
-	return r.client.Close()
+	return errors.Join(r.cri.Close(context.Background()), r.client.Close())
+}
+
+func (r *ContainerdRuntime) ResolveContainerImageID(ctx context.Context, containerID string) (string, error) {
+	return resolveContainerImageID(ctx, r.cri, containerID)
+}
+
+func (r *ContainerdRuntime) ResolveContainerPodUID(ctx context.Context, containerID string) (string, error) {
+	return resolveContainerPodUID(ctx, r.cri, containerID)
+}
+
+func (r *ContainerdRuntime) TerminateContainer(ctx context.Context, containerID string) error {
+	id, err := containerIDForRuntime(containerID, "containerd://")
+	if err != nil {
+		return fmt.Errorf("invalid containerd container ID %q: %w", containerID, err)
+	}
+	if err := stopContainerIfPresent(ctx, r.cri, id); err != nil {
+		return fmt.Errorf("failed to terminate container %s: %w", containerID, err)
+	}
+	return nil
 }
 
 func (r *ContainerdRuntime) ResolveContainer(ctx context.Context, containerID string) (int, *specs.Spec, error) {

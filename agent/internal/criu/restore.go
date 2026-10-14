@@ -4,15 +4,20 @@
 package criu
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	criulib "github.com/checkpoint-restore/go-criu/v8"
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
@@ -27,6 +32,8 @@ const (
 	placeholderFDDir             = "/proc/1/fd"
 	restoreScratchTempDirPattern = "criu-restore-*"
 )
+
+var physicalNVIDIADeviceName = regexp.MustCompile(`^nvidia[0-9]+$`)
 
 // ExecuteRestore opens the image/work directory FDs, configures inherited
 // resources, and calls go-criu Restore. Returns the namespace-relative PID.
@@ -121,7 +128,14 @@ func ExecuteRestore(
 		restore = time.Since(restoreStart)
 		log.Error(err, "go-criu Restore returned error")
 		logging.LogRestoreErrors(imageDirPath, settings.WorkDir, log)
+		// Read before cleanup: without a work dir the log lives in the image dir.
+		lastErr := logging.LastRestoreError(imageDirPath, settings.WorkDir)
 		cleanupAfterError()
+		if lastErr != "" {
+			// The RPC error carries CRIU's first logged error, which can be an
+			// earlier non-fatal one; the last one names what stopped restore.
+			return 0, nil, prepare, restore, fmt.Errorf("CRIU restore failed: %s", lastErr)
+		}
 		return 0, nil, prepare, restore, fmt.Errorf("CRIU restore failed: %w", err)
 	}
 	restore = time.Since(restoreStart)
@@ -193,6 +207,254 @@ func buildRestoreExtMounts(m *types.CheckpointManifest) ([]*criurpc.ExtMountMap,
 		restoreMap[val] = val
 	}
 	return toExtMountMaps(restoreMap), nil
+}
+
+// GPUDeviceMounts keeps the allocated devices pinned across CRIU's mount replay.
+type GPUDeviceMounts struct {
+	devices    map[string]*os.File
+	aliases    []gpuMountAlias
+	restoredNS map[uint64]bool
+}
+
+type gpuMountAlias struct {
+	path    string
+	created bool
+}
+
+// Close releases the pinned devices and, unless committed, unwinds the aliases.
+func (m *GPUDeviceMounts) Close(committed bool) error {
+	var errs []error
+	if !committed {
+		// Unwind completed setup steps in reverse order, including partial
+		// failures. Detach aliases before removing their mountpoint files.
+		for _, alias := range slices.Backward(m.aliases) {
+			if err := unix.Unmount(alias.path, unix.MNT_DETACH); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if alias.created {
+				errs = append(errs, os.Remove(alias.path))
+			}
+		}
+	}
+	m.aliases = nil
+	for _, f := range m.devices {
+		errs = append(errs, f.Close())
+	}
+	m.devices = nil
+	m.restoredNS = nil
+	return errors.Join(errs...)
+}
+
+// PrepareGPUDeviceMounts applies the inspected physical mount aliases.
+// Pin every destination before modifying paths: mappings can overlap or cycle.
+func PrepareGPUDeviceMounts(aliases map[string]string, log logr.Logger) (_ *GPUDeviceMounts, retErr error) {
+	m := &GPUDeviceMounts{devices: make(map[string]*os.File)}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, m.Close(false))
+		}
+	}()
+	for path, target := range aliases {
+		if !isPhysicalNVIDIADevicePath(path) || !isPhysicalNVIDIADevicePath(target) {
+			return nil, fmt.Errorf("invalid GPU mount alias %q -> %q", path, target)
+		}
+		if m.devices[target] != nil {
+			return nil, fmt.Errorf("duplicate destination GPU path %s", target)
+		}
+		f, err := os.OpenFile(target, unix.O_PATH|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, fmt.Errorf("pin destination device %s: %w", target, err)
+		}
+		m.devices[target] = f
+		info, err := f.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("stat destination GPU path %s: %w", target, err)
+		}
+		if info.Mode()&os.ModeCharDevice == 0 {
+			return nil, fmt.Errorf("destination GPU path %s is not a character device", target)
+		}
+	}
+	for path, target := range aliases {
+		created := false
+		if info, err := os.Lstat(path); os.IsNotExist(err) {
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if err != nil {
+				return nil, err
+			}
+			_ = f.Close()
+			created = true
+		} else if err != nil {
+			return nil, err
+		} else if info.Mode()&os.ModeCharDevice == 0 {
+			return nil, fmt.Errorf("checkpoint GPU path %s is not a character device", path)
+		}
+		source := fmt.Sprintf("/proc/self/fd/%d", m.devices[target].Fd())
+		if err := unix.Mount(source, path, "", unix.MS_BIND, ""); err != nil {
+			if created {
+				err = errors.Join(err, os.Remove(path))
+			}
+			return nil, err
+		}
+		m.aliases = append(m.aliases, gpuMountAlias{path: path, created: created})
+		log.Info("Aliased GPU device mount", "checkpoint_device", path, "restore_device", target)
+	}
+	return m, nil
+}
+
+// RestoreNativePaths puts allocated devices at their native paths before CUDA
+// restore. CRIU replays checkpoint mounts, which can hide destination-only paths
+// under a new /dev. Native paths also take precedence over temporary aliases in
+// overlapping mappings once CRIU has consumed those aliases.
+func (m *GPUDeviceMounts) RestoreNativePaths(pid int) error {
+	if len(m.devices) == 0 {
+		return nil
+	}
+	ns, err := os.Open(fmt.Sprintf("/proc/%d/ns/mnt", pid))
+	if err != nil {
+		return err
+	}
+	defer ns.Close()
+	var nsStat unix.Stat_t
+	if err := unix.Fstat(int(ns.Fd()), &nsStat); err != nil {
+		return err
+	}
+	// CUDA processes can share a mount namespace. Install each set of mounts once.
+	if m.restoredNS[nsStat.Ino] {
+		return nil
+	}
+	root, err := os.Open(fmt.Sprintf("/proc/%d/root", pid))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	devFD, err := unix.Openat(int(root.Fd()), "dev", unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open restored /dev for pid %d: %w", pid, err)
+	}
+	defer unix.Close(devFD)
+
+	// Detached mounts can cross namespaces; ordinary bind mounts from the
+	// placeholder namespace cannot. Clone from the pins, never the aliased paths.
+	mounts := make(map[string]int)
+	defer func() {
+		for _, fd := range mounts {
+			_ = unix.Close(fd)
+		}
+	}()
+	for path, f := range m.devices {
+		fd, err := unix.OpenTree(int(f.Fd()), "", unix.AT_EMPTY_PATH|unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC)
+		if err != nil {
+			return fmt.Errorf("clone GPU mount %s: %w", path, err)
+		}
+		mounts[path] = fd
+	}
+	done := make(chan error, 1)
+	go func() {
+		// Mount-namespace setns requires private filesystem state. Do not unlock:
+		// Go terminates this thread on return rather than reusing its namespace.
+		runtime.LockOSThread()
+		if err := unix.Unshare(unix.CLONE_FS); err != nil {
+			done <- err
+			return
+		}
+		if err := unix.Setns(int(ns.Fd()), unix.CLONE_NEWNS); err != nil {
+			done <- err
+			return
+		}
+		for path, fd := range mounts {
+			if err := installGPUDeviceMount(devFD, filepath.Base(path), fd); err != nil {
+				done <- fmt.Errorf("restore native GPU path %s for pid %d: %w", path, pid, err)
+				return
+			}
+		}
+		done <- nil
+	}()
+	if err := <-done; err != nil {
+		return err
+	}
+	if m.restoredNS == nil {
+		m.restoredNS = make(map[uint64]bool)
+	}
+	m.restoredNS[nsStat.Ino] = true
+	return nil
+}
+
+func installGPUDeviceMount(devFD int, name string, mountFD int) error {
+	if err := unix.Mknodat(devFD, name, unix.S_IFREG|0o600, 0); err != nil && !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+	targetFD, err := unix.Openat(devFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(targetFD)
+	var st unix.Stat_t
+	if err := unix.Fstat(targetFD, &st); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG && st.Mode&unix.S_IFMT != unix.S_IFCHR {
+		return fmt.Errorf("GPU mountpoint is not a regular file or character device")
+	}
+	return unix.MoveMount(mountFD, "", targetFD, "", unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH)
+}
+
+// GPUMountAliases derives the path mapping once for compatibility inspection and
+// mount preparation. Checkpoints without UUID/path metadata keep their old behavior.
+func GPUMountAliases(m *types.CheckpointManifest, deviceMap string, targets map[string]string) (map[string]string, error) {
+	if len(m.CUDA.DevicePaths) == 0 {
+		return nil, nil
+	}
+	mapping := map[string]string{}
+	for _, uuid := range m.CUDA.SourceGPUUUIDs {
+		mapping[uuid] = uuid
+	}
+	if deviceMap != "" {
+		for _, pair := range strings.Split(deviceMap, ",") {
+			source, target, ok := strings.Cut(pair, "=")
+			_, knownSource := mapping[source]
+			if !ok || !knownSource || target == "" {
+				return nil, fmt.Errorf("invalid CUDA device mapping %q", pair)
+			}
+			mapping[source] = target
+		}
+	}
+	aliases := map[string]string{}
+	seenSource := map[string]bool{}
+	seenTarget := map[string]bool{}
+	for sourceUUID, sourcePath := range m.CUDA.DevicePaths {
+		if !isPhysicalNVIDIADevicePath(sourcePath) {
+			return nil, fmt.Errorf("invalid source GPU device path %q", sourcePath)
+		}
+		targetPath := targets[mapping[sourceUUID]]
+		if !isPhysicalNVIDIADevicePath(targetPath) {
+			return nil, fmt.Errorf("missing destination device path for source GPU %s", sourceUUID)
+		}
+		if seenSource[sourcePath] || seenTarget[targetPath] {
+			return nil, fmt.Errorf("GPU mount mapping is not one-to-one at %s", sourcePath)
+		}
+		seenSource[sourcePath], seenTarget[targetPath] = true, true
+		if _, external := m.CRIUDump.ExtMnt[sourcePath]; external && sourcePath != targetPath {
+			aliases[sourcePath] = targetPath
+		}
+	}
+	for path := range m.CRIUDump.ExtMnt {
+		if !isPhysicalNVIDIADevicePath(path) {
+			continue
+		}
+		found := false
+		for _, sourcePath := range m.CUDA.DevicePaths {
+			found = found || sourcePath == path
+		}
+		if !found {
+			return nil, fmt.Errorf("checkpoint GPU mount %s has no UUID metadata", path)
+		}
+	}
+	return aliases, nil
+}
+
+func isPhysicalNVIDIADevicePath(path string) bool {
+	return path == filepath.Clean(path) && filepath.Dir(path) == "/dev" && physicalNVIDIADeviceName.MatchString(filepath.Base(path))
 }
 
 func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*os.File {

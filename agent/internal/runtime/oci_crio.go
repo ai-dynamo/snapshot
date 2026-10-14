@@ -7,17 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	internalapi "k8s.io/cri-api/pkg/apis"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
-	remote "k8s.io/cri-client/pkg"
-)
-
-const (
-	crioConnectTimeout = 2 * time.Second
-	crioCallTimeout    = 10 * time.Second
 )
 
 // CRIORuntime resolves container identity via the CRI-O CRI gRPC socket.
@@ -26,20 +19,38 @@ type CRIORuntime struct {
 }
 
 func NewCRIORuntime(socket string) (*CRIORuntime, error) {
-	// context.Background()+false: signature added in cri-client v0.36.2 (CVE pin); re-check on Dynamo sync.
-	svc, err := remote.NewRemoteRuntimeService(context.Background(), socket, crioConnectTimeout, nil, false)
+	svc, err := newRemoteRuntimeService(socket)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial CRI-O at %s: %w", socket, err)
 	}
 	return &CRIORuntime{svc: svc}, nil
 }
 
-// Close is a no-op: k8s.io/cri-client's RuntimeService interface doesn't
-// expose one. The gRPC connection is released at process exit.
-func (r *CRIORuntime) Close() error { return nil }
+func (r *CRIORuntime) Close() error {
+	return r.svc.Close(context.Background())
+}
+
+func (r *CRIORuntime) ResolveContainerImageID(ctx context.Context, containerID string) (string, error) {
+	return resolveContainerImageID(ctx, r.svc, containerID)
+}
+
+func (r *CRIORuntime) ResolveContainerPodUID(ctx context.Context, containerID string) (string, error) {
+	return resolveContainerPodUID(ctx, r.svc, containerID)
+}
+
+func (r *CRIORuntime) TerminateContainer(ctx context.Context, containerID string) error {
+	id, err := containerIDForRuntime(containerID, "cri-o://", "crio://")
+	if err != nil {
+		return fmt.Errorf("invalid CRI-O container ID %q: %w", containerID, err)
+	}
+	if err := stopContainerIfPresent(ctx, r.svc, id); err != nil {
+		return fmt.Errorf("failed to terminate container %s: %w", containerID, err)
+	}
+	return nil
+}
 
 func (r *CRIORuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
-	ctx, cancel := context.WithTimeout(ctx, crioCallTimeout)
+	ctx, cancel := context.WithTimeout(ctx, criCallTimeout)
 	defer cancel()
 
 	resp, err := r.svc.ContainerStatus(ctx, id, true)
@@ -56,7 +67,7 @@ func (r *CRIORuntime) ResolveContainerByPod(ctx context.Context, podName, podNam
 	if err != nil {
 		return 0, nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, crioCallTimeout)
+	ctx, cancel := context.WithTimeout(ctx, criCallTimeout)
 	defer cancel()
 
 	statusResp, err := r.svc.ContainerStatus(ctx, running.GetId(), true)
@@ -77,7 +88,7 @@ func (r *CRIORuntime) ResolveContainerIDByPod(ctx context.Context, podName, podN
 // findRunningContainerByPod picks the first RUNNING container matching the pod
 // + container-name label filter; errors if none qualify.
 func (r *CRIORuntime) findRunningContainerByPod(ctx context.Context, podName, podNamespace, containerName string) (*runtimeapi.Container, error) {
-	ctx, cancel := context.WithTimeout(ctx, crioCallTimeout)
+	ctx, cancel := context.WithTimeout(ctx, criCallTimeout)
 	defer cancel()
 
 	filter := &runtimeapi.ContainerFilter{

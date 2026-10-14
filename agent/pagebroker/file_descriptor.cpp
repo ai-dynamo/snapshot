@@ -4,6 +4,9 @@
 #include "file_descriptor.hpp"
 
 #include <unistd.h>
+#include <fcntl.h>
+#include <cerrno>
+#include <system_error>
 
 #include <utility>
 
@@ -32,4 +35,14 @@ int
 FileDescriptor::get() const
 {
   return value_;
+}
+
+FileDescriptor
+FileDescriptor::Duplicate(int value)
+{
+  FileDescriptor copy(fcntl(value, F_DUPFD_CLOEXEC, 0));
+  if (copy.get() < 0) {
+    throw std::system_error(errno, std::generic_category(), "duplicate file descriptor");
+  }
+  return copy;
 }

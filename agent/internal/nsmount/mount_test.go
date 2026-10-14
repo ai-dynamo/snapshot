@@ -7,6 +7,7 @@ package nsmount
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -80,7 +81,10 @@ func TestExecMounterMountErrorWrapped(t *testing.T) {
 		t.Fatal(openErr)
 	}
 	defer nsFd.Close()
-	_, err := newMounterForTest(t, bin).MountCheckpoint(context.Background(), nsFd, "/checkpoints/abc/versions/1")
+	ref, err := newMounterForTest(t, bin).MountCheckpoint(context.Background(), nsFd, "/checkpoints/abc/versions/1")
+	if ref != nil {
+		t.Fatal("failed mount returned a non-nil reference")
+	}
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -88,6 +92,78 @@ func TestExecMounterMountErrorWrapped(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}
+	}
+}
+
+func TestCuInterposeMountUnmountArgs(t *testing.T) {
+	for _, created := range []bool{false, true} {
+		t.Run(fmt.Sprint(created), func(t *testing.T) {
+			logFile := filepath.Join(t.TempDir(), "args.log")
+			script := `printf '%s\n' "$*" >> ` + logFile
+			if created {
+				script += "\necho created_dst=1"
+			}
+			m := newMounterForTest(t, writeFakeBinary(t, script))
+			nsFd, err := os.Open("/proc/self/ns/mnt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer nsFd.Close()
+			handle, err := m.MountCuInterpose(context.Background(), nsFd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := handle.Unmount(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"mount-snapshot-cuda-fd 3", "unmount-snapshot-cuda-fd 3"}
+			if created {
+				want[1] += " created"
+			}
+			if got := readLines(t, logFile); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("helper commands = %v, want %v", got, want)
+			}
+			if _, err := nsFd.Stat(); err != nil {
+				t.Fatalf("unmount closed the caller's namespace: %v", err)
+			}
+		})
+	}
+}
+
+func TestCuInterposeMountRelease(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "args.log")
+	m := newWithMounter(newMounterForTest(t, writeFakeBinary(t, `printf '%s\n' "$*" >> `+logFile)), logr.Discard())
+	bundle, err := m.MountBundle(context.Background(), os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bundle.Unmount(context.Background()) })
+	shim, err := m.MountCuInterpose(context.Background(), bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := shim.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := shim.NsFd().Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("released namespace fd is still open: %v", err)
+	}
+	if err := shim.Release(); err != nil {
+		t.Fatalf("repeated Release() = %v", err)
+	}
+	if err := shim.Unmount(context.Background()); err != nil {
+		t.Fatalf("Unmount() after Release() = %v", err)
+	}
+	if _, err := bundle.NsFd().Stat(); err != nil {
+		t.Fatalf("release closed the bundle's namespace fd: %v", err)
+	}
+	if err := bundle.Unmount(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mount-bundle-fd 3", "mount-snapshot-cuda-fd 3", "unmount-bundle-fd 3"}
+	if got := readLines(t, logFile); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("helper commands = %v, want %v", got, want)
 	}
 }
 
@@ -191,10 +267,15 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 	for _, args := range [][]string{
 		{"mount-fd", "3", "/etc", "/tmp/checkpoint"},
 		{"mount-bundle-fd", "3", "/etc"},
+		{"mount-snapshot-cuda-fd", "3", "/etc"},
 		{"unmount-checkpoint-fd", "3", "unexpected"},
 	} {
-		if output, err := exec.Command(binary, args...).CombinedOutput(); err == nil {
+		output, err := exec.Command(binary, args...).CombinedOutput()
+		if err == nil {
 			t.Fatalf("helper accepted %v: %s", args, output)
+		}
+		if strings.Contains(string(output), "open_tree") || strings.Contains(string(output), "setns") {
+			t.Fatalf("helper reached mount syscall for invalid arguments %v: %s", args, output)
 		}
 	}
 }
