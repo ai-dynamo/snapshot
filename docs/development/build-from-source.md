@@ -42,7 +42,7 @@ the same checkout: they speak an internal protocol and the chart pulls both at
 The PageBroker Dockerfile downloads the Linux x86_64 C++ SDK from
 [Model Streamer 0.17.0](https://github.com/dsx-ai-factory/model-streamer/releases/tag/0.17.0)
 and verifies its committed SHA-256 checksum before extracting the headers and
-core library. Image builds need no separate SDK preparation, Model Streamer
+core and S3 libraries. Image builds need no separate SDK preparation, Model Streamer
 compilation, or Python wheel installation. The image includes the matching
 license, release metadata, and corresponding source archives. The agent image
 build does not depend on the SDK.
@@ -69,6 +69,11 @@ bytes; one larger file runs alone. Admission closes on the first completed
 submission. All destinations remain mapped until the session ends, then pending
 work starts a new session. Terminal failures stop native access before releasing
 any affected restore; ordinary completed storage errors fail their own restore.
+
+The pinned S3 plugin tears down clients process-wide. PageBroker therefore
+admits one native session per process across restore coordinators, while reads
+within that session remain concurrent. Waiting coordinators poll cancellation
+and deadlines until the previous session has fully drained.
 
 ## 3. Push the images
 
@@ -108,3 +113,13 @@ Common `make` targets from the repo root:
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
+
+### Native S3 read verification
+
+Build the `s3-test` Docker target; it downloads the pinned SDK. Install
+`agent/pagebroker/tests/requirements.txt` in a virtual environment, then run
+`agent/pagebroker/tests/s3_integration.py --image local/pagebroker:s3-test`.
+Add `--tls` to verify the temporary CA and rejection of untrusted TLS. The
+fixture uses disposable local Moto storage and fake credentials. Payloads are
+read by the native Model Streamer plugin and checked against the restore plan's
+SHA-256 digests before final permissions are applied.
