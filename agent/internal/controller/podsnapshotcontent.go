@@ -309,7 +309,7 @@ func (w *NodeController) markCheckpointFailed(
 	reason string,
 	cause error,
 ) error {
-	logr.FromContextOrDiscard(ctx).Error(cause, "Checkpoint failed")
+	logWithStep(logr.FromContextOrDiscard(ctx), cause).Error(cause, "Checkpoint failed")
 	if patchErr := w.setSnapshotContentFailed(ctx, content, reason, cause); patchErr != nil {
 		return fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, patchErr)
 	}
