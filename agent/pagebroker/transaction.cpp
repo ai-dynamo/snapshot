@@ -5,6 +5,8 @@
 
 #include <utility>
 
+#include "transfer/filesystem/filesystem_storage.hpp"
+
 namespace snapshot::pagebroker {
 std::mutex&
 Transaction::mutex()
@@ -44,13 +46,32 @@ Transaction::set_descriptor(Descriptor descriptor)
 void
 Transaction::clear_descriptor()
 {
+  // Failed cleanup must remain retryable, including without admission limits.
+  if (HasPendingCleanup())
+    return;
   descriptor_ = std::monostate();
+}
+
+bool
+Transaction::HasPendingCleanup() const
+{
+  return !transfer_directory_.empty() || (resources_ && !released_);
+}
+
+bool
+Transaction::CanRetainTerminal() const
+{
+  if (terminal_retained_)
+    return false;
+  if (state_ != State::COMMITTED && state_ != State::ABORTED)
+    return false;
+  return !HasPendingCleanup();
 }
 
 bool
 Transaction::retain_terminal()
 {
-  if (terminal_retained_ || (state_ != State::COMMITTED && state_ != State::ABORTED))
+  if (!CanRetainTerminal())
     return false;
   terminal_retained_ = true;
   return true;
@@ -59,7 +80,137 @@ Transaction::retain_terminal()
 bool
 Transaction::expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const
 {
+  if (deadline_ != TransferControl::Clock::time_point::max())
+    return state_ != State::COMMITTED && state_ != State::ABORTED && (transfer_expired_ || now >= deadline_);
   return (state_ == State::STAGED || state_ == State::ABORTING) && now - staging_started_at_ >= lifetime;
+}
+
+Transaction::~Transaction()
+{
+  ReleaseReservation();
+  if (resources_ && publication_) {
+    std::lock_guard lock(resources_->mutex);
+    resources_->destinations.erase(publication_->artifact.artifact_handle());
+  }
+}
+
+void
+Transaction::PrepareTransfer(std::shared_ptr<TransactionResources> resources, Kind kind,
+    const Path& directory, const PublishedArtifact* artifact, std::chrono::steady_clock::duration lifetime)
+{
+  kind_ = kind;
+  transfer_directory_ = directory;
+  deadline_ = TransferControl::Clock::now() + (resources ? resources->lifetime : lifetime);
+  if (!resources)
+    return;
+  if (kind == Kind::CHECKPOINT && artifact)
+    publication_ = CheckpointPublication{*artifact, {}, false};
+  std::lock_guard lock(resources->mutex);
+  if (resources->active >= resources->transaction_limit || resources->reserved >= resources->byte_limit)
+    throw TransferError(Failure::INSUFFICIENT_STORAGE, "staging admission limit reached");
+  if (publication_ && !resources->destinations.insert(publication_->artifact.artifact_handle()).second)
+    throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint ID is already owned by a transaction");
+  resources_ = std::move(resources);
+  ++resources_->active;
+  reserved_ = kind == Kind::CHECKPOINT ? 1 : 0;
+  resources_->reserved += reserved_;
+}
+
+void
+Transaction::OwnDirectory(const Path& directory)
+{
+  transfer_directory_ = directory;
+}
+
+void
+Transaction::Reserve(uintmax_t bytes)
+{
+  if (!resources_)
+    return;
+  std::lock_guard lock(resources_->mutex);
+  if (bytes <= reserved_)
+    return;
+  const auto additional = bytes - reserved_;
+  if (additional > resources_->byte_limit - resources_->reserved)
+    throw TransferError(Failure::INSUFFICIENT_STORAGE, "checkpoint exceeds staging budget");
+  resources_->reserved += additional;
+  reserved_ = bytes;
+}
+
+void
+Transaction::ReleaseReservation() noexcept
+{
+  if (!resources_ || released_)
+    return;
+  if (publication_)
+    std::string().swap(publication_->pending_index);
+  std::lock_guard lock(resources_->mutex);
+  resources_->reserved -= reserved_;
+  --resources_->active;
+  reserved_ = 0;
+  released_ = true;
+}
+
+void
+Transaction::CancelTransfer()
+{
+  cancellation_.request_stop();
+}
+
+void
+Transaction::RemoveStaging(const Path& directory)
+{
+  if (!directory.empty()) {
+    if (directory == transfer_directory_)
+      filesystem_storage::RemoveStaging(directory);
+    else
+      std::filesystem::remove_all(directory);
+  }
+  if (directory == transfer_directory_) {
+    ReleaseReservation();
+    transfer_directory_.clear();
+    if (state_ == State::COMMITTED || state_ == State::ABORTED)
+      clear_descriptor();
+  }
+}
+
+void
+Transaction::RemoveStaging(const Path& directory, std::error_code& error)
+{
+  try {
+    RemoveStaging(directory);
+    error.clear();
+  }
+  catch (const std::filesystem::filesystem_error& failure) {
+    error = failure.code();
+  }
+}
+
+void
+Transaction::CleanupTransfer()
+{
+  if (HasPendingCleanup())
+    RemoveStaging(transfer_directory_);
+}
+
+void
+Transaction::CleanupTransfer(std::error_code& error)
+{
+  error.clear();
+  if (HasPendingCleanup())
+    RemoveStaging(transfer_directory_, error);
+}
+
+bool
+Transaction::ExpireTransfer(std::chrono::steady_clock::time_point now)
+{
+  if (!expired(now, std::chrono::seconds{7500}))
+    return false;
+  transfer_expired_ = true;
+  CancelTransfer();
+  // Block new work while cleanup retries or GPU work drains.
+  set_state(State::ABORTING);
+  return true;
 }
 
 }  // namespace snapshot::pagebroker

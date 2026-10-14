@@ -4,25 +4,24 @@
 #pragma once
 
 #include "pagebroker_types.hpp"
-#include "transfer_engine.hpp"
+#include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
-enum class CheckpointOutput { Staged, Direct };
 class CheckpointTransactionDescriptor {
  public:
   CheckpointTransactionDescriptor(
       Path staging_directory, StorageBackend destination_storage, IoEngine engine_type,
-      CheckpointOutput output);
+      TransferMode output);
 
   const Path& staging_directory() const;
   const StorageBackend& destination_storage() const;
   IoEngine engine_type() const;
-  CheckpointOutput output() const { return output_; }
+  TransferMode output() const { return output_; }
 
  private:
   Path staging_directory_;
   StorageBackend destination_storage_;
   IoEngine engine_type_;
-  CheckpointOutput output_;
+  TransferMode output_;
 };
 }  // namespace snapshot::pagebroker
