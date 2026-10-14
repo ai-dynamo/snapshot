@@ -139,7 +139,20 @@ def _setup(args: argparse.Namespace) -> tuple[BenchmarkConfig, Any]:
     return cfg, ENGINES[args.engine]
 
 
+def _reject_keep_with_repeats(args: argparse.Namespace) -> int | None:
+    """A kept pod still holds its GPU, so the next repeat cannot schedule."""
+    if getattr(args, "keep", False) and getattr(args, "repeats", 1) > 1:
+        print(
+            "error: --keep cannot be combined with --repeats greater than 1",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    if rejected := _reject_keep_with_repeats(args):
+        return rejected
     cfg, engine = _setup(args)
     models = {m.label: m for m in _load_models(Path(args.models))}
     if args.model_label not in models:
@@ -176,6 +189,8 @@ def _run_one(
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:
+    if rejected := _reject_keep_with_repeats(args):
+        return rejected
     cfg, engine = _setup(args)
     models = _load_models(Path(args.models))
 
