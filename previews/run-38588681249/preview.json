@@ -1,0 +1,18 @@
+{
+  "combinedRecordCount": 84,
+  "expiresAt": "2026-10-28T15:40:09.173Z",
+  "formatVersion": 1,
+  "generatedAt": "2026-10-14T15:40:09.173Z",
+  "historyRecordCount": 81,
+  "key": "run-38588681249",
+  "previewRecordCount": 3,
+  "source": {
+    "branch": "feat/arm64-multiarch",
+    "commit": "9acd9c90a000cf67680ec2e19713aa36c112dcb2",
+    "event": "workflow_dispatch",
+    "pullRequest": null,
+    "runAttempt": 1,
+    "runId": "38588681249",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/38588681249"
+  }
+}
