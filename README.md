@@ -156,7 +156,7 @@ Multi-GPU and Arm support are on the roadmap.
 
 ## Known Issues
 
-### `mntnsCompatMode` is applied at dump time, not restore time
+### `mntnsCompatMode` is persisted at capture time and applied at restore time
 
 `config.criu.mntnsCompatMode` reads as a restore-side option — it maps to a CRIU
 restore RPC field — but it takes effect **at capture**. The value in force when a
@@ -189,14 +189,23 @@ propagation/sharing group recorded at dump time against the restore mount
 namespace — a separate mechanism from external-mount handling, and dependent on
 the host's mount-propagation setup.
 
-**Workaround:** set `config.criu.mntnsCompatMode=true` **before** capturing the
+**Workaround:** set `config.criu.mntnsCompatMode: true` **before** capturing the
 checkpoint you intend to restore, then re-capture. Per the note above, enabling
 it after the capture cannot fix an existing artifact.
 
+Add it to the values file you already install the release with, so the upgrade
+keeps the rest of your settings:
+
+```yaml
+config:
+  criu:
+    mntnsCompatMode: true
+```
+
 ```bash
-helm upgrade --install snapshot ./charts/snapshot \
+helm upgrade snapshot ./charts/snapshot \
   --namespace "${NAMESPACE}" \
-  --set config.criu.mntnsCompatMode=true
+  --values <your-values-file>
 ```
 
 ## Documentation
