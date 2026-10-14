@@ -24,6 +24,23 @@ pub(crate) fn validate_properties(properties: &CUmemAllocationProp) -> Result<()
     Ok(())
 }
 
+/// Whether cuMemCreate tracks the backing. Another GPU in this process can map
+/// nonexportable backing, and native CUDA can fail to restore that mapping, so track
+/// every backing the carrier can reconstruct. POSIX is the only supported export.
+pub(crate) fn tracked(properties: &CUmemAllocationProp) -> Result<bool> {
+    let reconstructible = validate_properties(properties).is_ok();
+    if properties.requestedHandleTypes.0 == 0 {
+        return Ok(reconstructible);
+    }
+    if reconstructible
+        && properties.requestedHandleTypes
+            == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+    {
+        return Ok(true);
+    }
+    Err(CUDA_ERROR_NOT_SUPPORTED.into())
+}
+
 #[derive(Clone)]
 pub struct Allocation {
     pub reference: AllocationReference,
@@ -367,6 +384,53 @@ mod tests {
                 )),
                 "{case}"
             );
+        }
+    }
+
+    #[test]
+    fn create_tracks_reconstructible_backing() {
+        use CUmemLocationType::*;
+        let none = CUmemAllocationHandleType_enum(0);
+        let posix = CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+        let fabric = CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC;
+        // None means cuMemCreate fails with CUDA_ERROR_NOT_SUPPORTED.
+        for (case, handle_types, location, tracks) in [
+            ("POSIX", posix, CU_MEM_LOCATION_TYPE_DEVICE, Some(true)),
+            ("POSIX, host", posix, CU_MEM_LOCATION_TYPE_HOST, None),
+            (
+                "nonexportable",
+                none,
+                CU_MEM_LOCATION_TYPE_DEVICE,
+                Some(true),
+            ),
+            (
+                "nonexportable, host NUMA",
+                none,
+                CU_MEM_LOCATION_TYPE_HOST_NUMA,
+                Some(true),
+            ),
+            (
+                "nonexportable, host",
+                none,
+                CU_MEM_LOCATION_TYPE_HOST,
+                Some(false),
+            ),
+            ("fabric", fabric, CU_MEM_LOCATION_TYPE_DEVICE, None),
+        ] {
+            let properties = CUmemAllocationProp {
+                type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
+                requestedHandleTypes: handle_types,
+                location: CUmemLocation {
+                    type_: location,
+                    id: 0,
+                },
+                ..unsafe { std::mem::zeroed() }
+            };
+            match (tracked(&properties), tracks) {
+                (Ok(actual), Some(expected)) => assert_eq!(actual, expected, "{case}"),
+                (Err(crate::error::Error::Cuda(CUDA_ERROR_NOT_SUPPORTED)), None) => {}
+                (actual, _) => panic!("{case}: {actual:?}"),
+            }
         }
     }
 
