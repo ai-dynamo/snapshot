@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
 
 // nsrestoreOutput reads nsrestore's result from stdout and, when the run
@@ -17,17 +19,17 @@ import (
 // rather than a bare exit status. nsenter's own line is preferred as the
 // detail because it is what explains a launch that never reached nsrestore.
 type nsrestoreOutput struct {
-	processOutput
+	snapshotruntime.ProcessOutput
 }
 
 func newNSRestoreOutput(mirror io.Writer) *nsrestoreOutput {
-	return &nsrestoreOutput{processOutput: newProcessOutput(mirror, "nsenter:", "panic:", "fatal error:")}
+	return &nsrestoreOutput{ProcessOutput: snapshotruntime.NewProcessOutput(mirror, "nsenter:", "panic:", "fatal error:")}
 }
 
 func (o *nsrestoreOutput) result() (*RestoreInNamespaceResult, error) {
 	var result RestoreInNamespaceResult
-	if err := json.Unmarshal(o.stdout.Bytes(), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, o.stdout.String())
+	if err := json.Unmarshal(o.Stdout(), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, o.Stdout())
 	}
 	if result.RestoredPID <= 0 {
 		return nil, fmt.Errorf("nsrestore returned invalid PID %d", result.RestoredPID)
@@ -40,13 +42,13 @@ func (o *nsrestoreOutput) result() (*RestoreInNamespaceResult, error) {
 // the placeholder, so they are named as such with nsenter's own message.
 func (o *nsrestoreOutput) failure(runErr, ctxErr error) error {
 	var result RestoreInNamespaceResult
-	if err := json.Unmarshal(o.stdout.Bytes(), &result); err == nil && result.Error != "" {
+	if err := json.Unmarshal(o.Stdout(), &result); err == nil && result.Error != "" {
 		return errors.New(result.Error)
 	}
-	detail := o.detail()
+	detail := o.Detail()
 	var exitErr *exec.ExitError
 	if !errors.As(runErr, &exitErr) {
-		return withDetail(fmt.Errorf("launch nsrestore: %w", runErr), detail)
+		return snapshotruntime.WithDetail(fmt.Errorf("launch nsrestore: %w", runErr), detail)
 	}
 	switch code := exitErr.ExitCode(); code {
 	case -1:
@@ -54,12 +56,12 @@ func (o *nsrestoreOutput) failure(runErr, ctxErr error) error {
 		if errors.Is(ctxErr, context.DeadlineExceeded) {
 			cause += " after the restore timeout expired"
 		}
-		return withDetail(errors.New(cause), detail)
+		return snapshotruntime.WithDetail(errors.New(cause), detail)
 	case 126:
-		return withDetail(errors.New("nsenter could not start nsrestore inside the placeholder (exit 126, not executable)"), detail)
+		return snapshotruntime.WithDetail(errors.New("nsenter could not start nsrestore inside the placeholder (exit 126, not executable)"), detail)
 	case 127:
-		return withDetail(errors.New("nsenter could not start nsrestore inside the placeholder (exit 127, executable not found)"), detail)
+		return snapshotruntime.WithDetail(errors.New("nsenter could not start nsrestore inside the placeholder (exit 127, executable not found)"), detail)
 	default:
-		return withDetail(fmt.Errorf("nsrestore exited with status %d without reporting a cause", code), detail)
+		return snapshotruntime.WithDetail(fmt.Errorf("nsrestore exited with status %d without reporting a cause", code), detail)
 	}
 }

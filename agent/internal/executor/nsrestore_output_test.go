@@ -25,8 +25,9 @@ func exitStatusError(t *testing.T, script string) error {
 func nsrestoreOutputOf(t *testing.T, stdout, stderr string) *nsrestoreOutput {
 	t.Helper()
 	output := newNSRestoreOutput(io.Discard)
-	output.stdout.WriteString(stdout)
-	if _, err := output.stderr.Write([]byte(stderr)); err != nil {
+	cmd := exec.Command("sh", "-c", `printf '%s' "$1"; printf '%s' "$2" >&2`, "sh", stdout, stderr)
+	output.Attach(cmd)
+	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
 	return output

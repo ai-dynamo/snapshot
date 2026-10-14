@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package executor
+package runtime
 
 import (
 	"bytes"
@@ -16,33 +16,42 @@ const (
 	processDetailBytes     = 512
 )
 
-// processOutput holds what a child process wrote: all of stdout and a
+// ProcessOutput holds what a child process wrote: all of stdout and a
 // bounded tail of stderr, with stderr also mirrored to another writer so
-// the agent log keeps the full stream. detail reduces what was kept to one
+// the agent log keeps the full stream. Detail reduces what was kept to one
 // line fit for a condition message.
-type processOutput struct {
+type ProcessOutput struct {
 	stdout        bytes.Buffer
 	stderr        tailBuffer
 	mirror        io.Writer
 	causePrefixes []string
 }
 
-// newProcessOutput mirrors stderr to mirror. A stderr line starting with one
+// NewProcessOutput mirrors stderr to mirror. A stderr line starting with one
 // of causePrefixes is preferred as the detail over the last line written.
-func newProcessOutput(mirror io.Writer, causePrefixes ...string) processOutput {
-	return processOutput{
+func NewProcessOutput(mirror io.Writer, causePrefixes ...string) ProcessOutput {
+	return ProcessOutput{
 		stderr:        tailBuffer{limit: processStderrTailBytes},
 		mirror:        mirror,
 		causePrefixes: causePrefixes,
 	}
 }
 
-func (o *processOutput) attach(cmd *exec.Cmd) {
+// Attach points cmd's stdout and stderr at this collector.
+func (o *ProcessOutput) Attach(cmd *exec.Cmd) {
 	cmd.Stdout = &o.stdout
 	cmd.Stderr = io.MultiWriter(o.mirror, &o.stderr)
 }
 
-func (o *processOutput) detail() string {
+// Stdout returns everything the process wrote to stdout.
+func (o *ProcessOutput) Stdout() []byte { return o.stdout.Bytes() }
+
+// Stderr returns the kept tail of what the process wrote to stderr.
+func (o *ProcessOutput) Stderr() []byte { return o.stderr.Bytes() }
+
+// Detail is the one line that best explains a failed run: the preferred or
+// last stderr line, then any stdout, each cut to a bounded length.
+func (o *ProcessOutput) Detail() string {
 	var parts []string
 	if line := o.stderrSummary(); line != "" {
 		parts = append(parts, line)
@@ -53,7 +62,7 @@ func (o *processOutput) detail() string {
 	return strings.Join(parts, "; ")
 }
 
-func (o *processOutput) stderrSummary() string {
+func (o *ProcessOutput) stderrSummary() string {
 	last := ""
 	for _, line := range strings.Split(string(o.stderr.Bytes()), "\n") {
 		line = strings.TrimSpace(line)
@@ -70,7 +79,8 @@ func (o *processOutput) stderrSummary() string {
 	return truncateDetail(last)
 }
 
-func withDetail(err error, detail string) error {
+// WithDetail appends detail to err's message when there is one.
+func WithDetail(err error, detail string) error {
 	if detail == "" {
 		return err
 	}
