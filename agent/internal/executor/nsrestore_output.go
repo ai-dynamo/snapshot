@@ -4,39 +4,24 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os/exec"
-	"strings"
 )
 
-const (
-	nsrestoreStderrTailBytes = 4096
-	nsrestoreDetailBytes     = 512
-)
-
-// nsrestoreOutput holds what nsrestore wrote while it ran: stdout, which
-// carries its JSON result, and a bounded tail of stderr, which is also
-// mirrored to the agent's own stderr. A failed run becomes an error that
-// names the cause, so restore status and events say what stopped rather
-// than a bare exit status.
+// nsrestoreOutput reads nsrestore's result from stdout and, when the run
+// fails, names the cause so restore status and events say what stopped
+// rather than a bare exit status. nsenter's own line is preferred as the
+// detail because it is what explains a launch that never reached nsrestore.
 type nsrestoreOutput struct {
-	stdout bytes.Buffer
-	stderr tailBuffer
-	mirror io.Writer
+	processOutput
 }
 
 func newNSRestoreOutput(mirror io.Writer) *nsrestoreOutput {
-	return &nsrestoreOutput{stderr: tailBuffer{limit: nsrestoreStderrTailBytes}, mirror: mirror}
-}
-
-func (o *nsrestoreOutput) attach(cmd *exec.Cmd) {
-	cmd.Stdout = &o.stdout
-	cmd.Stderr = io.MultiWriter(o.mirror, &o.stderr)
+	return &nsrestoreOutput{processOutput: newProcessOutput(mirror, "nsenter:", "panic:", "fatal error:")}
 }
 
 func (o *nsrestoreOutput) result() (*RestoreInNamespaceResult, error) {
@@ -78,58 +63,3 @@ func (o *nsrestoreOutput) failure(runErr, ctxErr error) error {
 		return withDetail(fmt.Errorf("nsrestore exited with status %d without reporting a cause", code), detail)
 	}
 }
-
-func (o *nsrestoreOutput) detail() string {
-	var parts []string
-	if line := stderrSummary(o.stderr.Bytes()); line != "" {
-		parts = append(parts, line)
-	}
-	if out := strings.TrimSpace(o.stdout.String()); out != "" {
-		parts = append(parts, "stdout: "+truncateDetail(out))
-	}
-	return strings.Join(parts, "; ")
-}
-
-func withDetail(err error, detail string) error {
-	if detail == "" {
-		return err
-	}
-	return fmt.Errorf("%w: %s", err, detail)
-}
-
-func stderrSummary(stderr []byte) string {
-	last := ""
-	for _, line := range strings.Split(string(stderr), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "nsenter:") || strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") {
-			return truncateDetail(line)
-		}
-		last = line
-	}
-	return truncateDetail(last)
-}
-
-func truncateDetail(s string) string {
-	if len(s) <= nsrestoreDetailBytes {
-		return s
-	}
-	return s[:nsrestoreDetailBytes] + "..."
-}
-
-type tailBuffer struct {
-	limit int
-	data  []byte
-}
-
-func (b *tailBuffer) Write(p []byte) (int, error) {
-	b.data = append(b.data, p...)
-	if len(b.data) > b.limit {
-		b.data = append([]byte(nil), b.data[len(b.data)-b.limit:]...)
-	}
-	return len(p), nil
-}
-
-func (b *tailBuffer) Bytes() []byte { return b.data }
