@@ -54,6 +54,23 @@ func GetOverlayUpperDir(pid int) (string, error) {
 	return "", fmt.Errorf("overlay upperdir not found for pid %d", pid)
 }
 
+// CheckUpperDirReadable reports an error unless the agent can list upperDir. Capture
+// reads the upperdir only after CRIU has dumped the source, so checking it while the
+// source is still running turns the most common cause of a failed rootfs diff, a
+// container storage directory the agent does not mount (runtime.storageDir), into a
+// failure that leaves the workload untouched.
+func CheckUpperDirReadable(upperDir string) error {
+	dir, err := os.Open(upperDir)
+	if err != nil {
+		return fmt.Errorf("overlay upperdir is not readable by the agent (check runtime.storageDir): %w", err)
+	}
+	defer dir.Close()
+	if _, err := dir.Readdirnames(1); err != nil && err != io.EOF {
+		return fmt.Errorf("overlay upperdir %s is not listable by the agent (check runtime.storageDir): %w", upperDir, err)
+	}
+	return nil
+}
+
 // CaptureRootfsDiff captures the overlay upperdir to a tar file.
 //
 // The archive is written to a temporary file first and renamed atomically on
@@ -310,12 +327,22 @@ func ApplyDeletedFiles(checkpointPath, targetRoot string, log logr.Logger) error
 	return nil
 }
 
+// walkUpperDir is filepath.Walk, replaceable in tests to inject walk errors.
+var walkUpperDir = filepath.Walk
+
 // findWhiteoutFiles finds overlay whiteout files in the upperdir.
+//
+// An entry that vanishes between being listed and being stat'd is skipped: it can no
+// longer be a whiteout to record. Every other error, and a missing upperdir itself,
+// is returned.
 func findWhiteoutFiles(upperDir string) ([]string, error) {
 	var whiteouts []string
 
-	err := filepath.Walk(upperDir, func(path string, info os.FileInfo, err error) error {
+	err := walkUpperDir(upperDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if os.IsNotExist(err) && path != upperDir {
+				return nil
+			}
 			return err
 		}
 

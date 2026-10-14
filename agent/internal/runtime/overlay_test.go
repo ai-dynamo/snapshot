@@ -253,6 +253,62 @@ func TestFindWhiteoutFiles(t *testing.T) {
 	}
 }
 
+func TestFindWhiteoutFilesSkipsAVanishedEntryButNotAMissingUpperDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".wh.kept"), nil, 0644); err != nil {
+		t.Fatalf("write whiteout: %v", err)
+	}
+	rootInfo, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatalf("lstat upperdir: %v", err)
+	}
+	keptInfo, err := os.Lstat(filepath.Join(dir, ".wh.kept"))
+	if err != nil {
+		t.Fatalf("lstat whiteout: %v", err)
+	}
+	saved := walkUpperDir
+	t.Cleanup(func() { walkUpperDir = saved })
+	// The vanished entry comes first, so a walk that stops on it records nothing.
+	walkUpperDir = func(root string, fn filepath.WalkFunc) error {
+		if err := fn(root, rootInfo, nil); err != nil {
+			return err
+		}
+		if err := fn(filepath.Join(root, "vanished"), nil, os.ErrNotExist); err != nil {
+			return err
+		}
+		return fn(filepath.Join(root, ".wh.kept"), keptInfo, nil)
+	}
+
+	got, err := findWhiteoutFiles(dir)
+	if err != nil {
+		t.Fatalf("findWhiteoutFiles: %v", err)
+	}
+	if !slices.Equal(got, []string{"kept"}) {
+		t.Fatalf("got %v, want [kept]", got)
+	}
+
+	walkUpperDir = saved
+	if _, err := findWhiteoutFiles(filepath.Join(dir, "missing-upperdir")); err == nil {
+		t.Fatal("findWhiteoutFiles on a missing upperdir returned no error")
+	}
+}
+
+func TestCheckUpperDirReadable(t *testing.T) {
+	populated := t.TempDir()
+	if err := os.WriteFile(filepath.Join(populated, "generated.txt"), nil, 0644); err != nil {
+		t.Fatalf("write upperdir file: %v", err)
+	}
+	if err := CheckUpperDirReadable(populated); err != nil {
+		t.Errorf("populated upperdir: %v", err)
+	}
+	if err := CheckUpperDirReadable(t.TempDir()); err != nil {
+		t.Errorf("empty upperdir: %v", err)
+	}
+	if err := CheckUpperDirReadable(filepath.Join(t.TempDir(), "unmounted")); err == nil {
+		t.Error("an upperdir the agent cannot see returned no error")
+	}
+}
+
 func TestCaptureRootfsDiff(t *testing.T) {
 	t.Run("writes valid archive atomically", func(t *testing.T) {
 		upperDir := t.TempDir()

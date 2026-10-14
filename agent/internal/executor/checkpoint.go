@@ -218,6 +218,9 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get overlay upperdir: %w", err)
 	}
+	if err := snapshotruntime.CheckUpperDirReadable(upperDir); err != nil {
+		return nil, 0, err
+	}
 
 	mountInfo, err := snapshotruntime.ReadMountInfo(pid)
 	if err != nil {
