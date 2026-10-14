@@ -14,6 +14,14 @@ on:
           published for all three images in GHCR, otherwise the run fails.
         required: false
         type: string
+  # Called by e2e-pr.yaml on copy-pr-bot mirror branches, after the CPU suite
+  # passes, with the tag of the images it built from the mirrored commit.
+  workflow_call:
+    inputs:
+      snapshot_tag:
+        description: Operator/agent/pagebroker image tag to install.
+        required: false
+        type: string
   schedule:
     # 23:00 Pacific Standard Time.
     - cron: "0 7 * * *"
