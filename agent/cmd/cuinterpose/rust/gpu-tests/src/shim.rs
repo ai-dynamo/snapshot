@@ -4,7 +4,7 @@
 //! The packaged artifacts under test, the control endpoint, and the coordinator.
 
 use crate::process::{self, Child, socket_dir, work_dir};
-use crate::{core_abi, cu, loader, sys};
+use crate::{core_abi, cu, cuda, loader, sys};
 use cuinterpose_protocol::{Manifest, Record, Reply, Request, Response, socket_path};
 use std::env;
 use std::ffi::{CStr, c_int};
@@ -71,6 +71,40 @@ pub(crate) fn require_test_environment() {
         cu!(cuDeviceCanAccessPeer(&mut capable, device, peer));
         assert!(capable != 0, "GPU {device} needs peer access to GPU {peer}");
     }
+}
+
+/// Requires CUDA multicast on both GPUs. Scenario processes skip the check, so a test can
+/// call this after dispatching its roles.
+pub fn require_multicast() {
+    if process::role().is_some() {
+        return;
+    }
+    require_test_environment();
+    let attribute = sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED;
+    for device in 0..2 {
+        assert!(
+            cuda::device_attribute(attribute, device) != 0,
+            "GPU {device} does not support CUDA multicast"
+        );
+    }
+}
+
+/// Requires POSIX-shareable HOST_NUMA VMM. Scenario processes skip the check.
+pub fn require_host_numa() {
+    if process::role().is_some() {
+        return;
+    }
+    require_test_environment();
+    let properties = cuda::allocation_properties(0, true);
+    let mut handle = 0;
+    let status =
+        unsafe { sys::cuMemCreate(&mut handle, cuda::granularity(&properties), &properties, 0) };
+    assert_eq!(
+        status,
+        sys::CUresult::CUDA_SUCCESS,
+        "requires POSIX-shareable HOST_NUMA VMM"
+    );
+    cu!(cuMemRelease(handle));
 }
 
 /// Sends one control request to `pid` and returns its result.

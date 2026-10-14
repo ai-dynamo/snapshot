@@ -32,6 +32,18 @@ pub fn cuinit_constructor() -> PathBuf {
     )
 }
 
+/// A library preloaded after the frontend whose `fail_grant(n)` makes the shim's nth
+/// following cuMemSetAccess grant fail after it applies.
+pub fn fail_grant() -> PathBuf {
+    let source = include_str!("../fixtures/fail_grant.c");
+    build(
+        "fail_grant.c",
+        source,
+        "fail_grant.so",
+        &["-shared", "-fPIC", "-ldl"],
+    )
+}
+
 /// A plugin that looks up symbols from its private dependency. Returns the plugin and
 /// the dependency.
 pub fn scope_plugin() -> (PathBuf, PathBuf) {
