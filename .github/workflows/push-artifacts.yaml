@@ -135,7 +135,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     # Sized for the agent: CRIU from source on a CUDA base, plus an SBOM scan.
     timeout-minutes: 75
     strategy:
@@ -147,20 +147,6 @@ jobs:
           - image: agent
             # Dockerfile exits 1 on other arches
             build_args: --platform=linux/amd64
-          # Temporary: native arm64 builds, tagged <tag>-arm64, for validating
-          # Snapshot on arm64 clusters.
-          - image: operator
-            runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            suffix: -arm64
-          - image: pagebroker
-            runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            suffix: -arm64
-          - image: agent
-            runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            suffix: -arm64
     steps:
       # Check out the exact commit that passed CI, not whatever is at HEAD now.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -189,8 +175,6 @@ jobs:
         env:
           IMAGE: ${{ matrix.image }}
           BUILD_ARGS: ${{ matrix.build_args }}
-          PLATFORM: ${{ matrix.platform || 'linux/amd64' }}
-          SUFFIX: ${{ matrix.suffix }}
           TAGS: ${{ needs.version.outputs.tags }}
           # The branch whose cache this run owns, falling back to main on a
           # tag. release.yaml calls this workflow on a `release: published`
@@ -201,18 +185,13 @@ jobs:
           CACHE_MODE: ${{ github.ref_type == 'tag' && 'read' || 'write' }}
         run: |
           set -euo pipefail
-          if [ -n "${SUFFIX}" ]; then
-            TAGS="$(printf '%s ' ${TAGS} | sed "s/ /${SUFFIX} /g")"
-            BUILD_ARGS="--platform=${PLATFORM}"
-          fi
           # Assigned, not inlined into the argument: a command substitution
           # that fails inside a simple command does not trip `set -e`, so an
           # inline call would drop --cache-to and still publish the image,
           # leaving every later build cold with nothing in the log to say why.
-          cache_flags="$(hack/ci-cache-flags.sh "${CACHE_MODE}" "${IMAGE}${SUFFIX}" "${CACHE_BRANCH}")"
+          cache_flags="$(hack/ci-cache-flags.sh "${CACHE_MODE}" "${IMAGE}" "${CACHE_BRANCH}")"
           make "docker-build-${IMAGE}" \
             REGISTRY="${REGISTRY}" \
-            AGENT_PLATFORM="${PLATFORM}" \
             TAGS="${TAGS}" \
             DOCKER_BUILD_ARGS="--push ${BUILD_ARGS} \
               --provenance=mode=max \
@@ -220,7 +199,7 @@ jobs:
               --metadata-file=buildx.json \
               ${cache_flags}"
           DIGEST="$(jq -er '."containerimage.digest"' buildx.json)"
-          echo "${DIGEST}" > "digest-${IMAGE}${SUFFIX}.txt"
+          echo "${DIGEST}" > "digest-${IMAGE}.txt"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Sign image
@@ -234,8 +213,8 @@ jobs:
       - name: Publish digest for the release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: digest-${{ matrix.image }}${{ matrix.suffix }}
-          path: digest-${{ matrix.image }}${{ matrix.suffix }}.txt
+          name: digest-${{ matrix.image }}
+          path: digest-${{ matrix.image }}.txt
           retention-days: 1
           if-no-files-found: error
 
