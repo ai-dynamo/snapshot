@@ -37,12 +37,12 @@ func CommandInNamespaces(ctx context.Context, pid int, mountNS *os.File, rootPat
 	}
 	binary, err := os.Open(binaryPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("agent binary: %w", err)
 	}
 	root, err := os.Open(rootPath)
 	if err != nil {
 		binary.Close()
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("container root: %w", err)
 	}
 	closeFiles := func() {
 		binary.Close()
