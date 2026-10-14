@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package executor
+package runtime
 
 import (
 	"bytes"
@@ -12,9 +12,9 @@ import (
 	"testing"
 )
 
-func processOutputOf(t *testing.T, stdout, stderr string, causePrefixes ...string) *processOutput {
+func processOutputOf(t *testing.T, stdout, stderr string, causePrefixes ...string) *ProcessOutput {
 	t.Helper()
-	output := newProcessOutput(io.Discard, causePrefixes...)
+	output := NewProcessOutput(io.Discard, causePrefixes...)
 	output.stdout.WriteString(stdout)
 	if _, err := output.stderr.Write([]byte(stderr)); err != nil {
 		t.Fatal(err)
@@ -42,8 +42,8 @@ func TestProcessOutputDetail(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := processOutputOf(t, tt.stdout, tt.stderr, tt.prefixes...).detail(); got != tt.want {
-				t.Fatalf("detail() = %q, want %q", got, tt.want)
+			if got := processOutputOf(t, tt.stdout, tt.stderr, tt.prefixes...).Detail(); got != tt.want {
+				t.Fatalf("Detail() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -51,30 +51,30 @@ func TestProcessOutputDetail(t *testing.T) {
 
 func TestWithDetail(t *testing.T) {
 	cause := errors.New("boom")
-	if err := withDetail(cause, ""); err != cause {
-		t.Fatalf("withDetail(empty) = %v, want the error unchanged", err)
+	if err := WithDetail(cause, ""); err != cause {
+		t.Fatalf("WithDetail(empty) = %v, want the error unchanged", err)
 	}
-	err := withDetail(cause, "more")
+	err := WithDetail(cause, "more")
 	if !errors.Is(err, cause) || err.Error() != "boom: more" {
-		t.Fatalf("withDetail = %v", err)
+		t.Fatalf("WithDetail = %v", err)
 	}
 }
 
 func TestProcessOutputMirrorsStderr(t *testing.T) {
 	var mirror bytes.Buffer
-	output := newProcessOutput(&mirror)
+	output := NewProcessOutput(&mirror)
 	cmd := exec.Command("sh", "-c", "echo result; echo to-stderr >&2")
-	output.attach(cmd)
+	output.Attach(cmd)
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
 	if got := mirror.String(); got != "to-stderr\n" {
 		t.Fatalf("mirror = %q", got)
 	}
-	if got := string(output.stderr.Bytes()); got != "to-stderr\n" {
+	if got := string(output.Stderr()); got != "to-stderr\n" {
 		t.Fatalf("stderr tail = %q", got)
 	}
-	if got := output.stdout.String(); got != "result\n" {
+	if got := string(output.Stdout()); got != "result\n" {
 		t.Fatalf("stdout = %q", got)
 	}
 }

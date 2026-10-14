@@ -635,7 +635,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	output := newNSRestoreOutput(os.Stderr)
-	output.attach(cmd)
+	output.Attach(cmd)
 	if err := cmd.Run(); err != nil {
 		return nil, output.failure(err, ctx.Err())
 	}
