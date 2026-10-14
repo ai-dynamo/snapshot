@@ -135,9 +135,11 @@ func ExecuteDump(
 		}
 	}()
 	dumpErr := criuClient.Dump(criuOpts, nil)
+	// The sampler's last directory walk happens after the RPC. Reading the
+	// clock first keeps that walk out of the reported dump duration.
+	criuDumpDuration := time.Since(criuDumpStart)
 	growth := stopGrowth()
 	stopGrowth = nil
-	criuDumpDuration := time.Since(criuDumpStart)
 	if dumpErr != nil {
 		dumpLogPath := filepath.Join(checkpointDir, dumpLogFilename)
 		log.Error(dumpErr, "CRIU dump failed",
