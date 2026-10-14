@@ -72,7 +72,10 @@ func (c Client) PrepareGPUArtifactCheckpoint(ctx context.Context, transactionID 
 		return "", nil, err
 	}
 	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, &Request_PrepareStagedCheckpoint{
-		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Target: target, IoEngine: engine},
+		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{
+			Selector: &PrepareStagedCheckpointRequest_Target{Target: target},
+			IoEngine: engine,
+		},
 	})
 	if err != nil {
 		return "", nil, err
@@ -92,7 +95,10 @@ func (c Client) PrepareGPUStagedArtifactRestore(ctx context.Context, transaction
 		return "", nil, err
 	}
 	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, &Request_StagedRestore{
-		StagedRestore: &StagedRestoreRequest{Artifact: artifact, IoEngine: engine},
+		StagedRestore: &StagedRestoreRequest{
+			Selector: &StagedRestoreRequest_Artifact{Artifact: artifact},
+			IoEngine: engine,
+		},
 	})
 	if err != nil {
 		return "", nil, err
