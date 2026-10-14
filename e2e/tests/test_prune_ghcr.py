@@ -50,7 +50,8 @@ def _version(vid: int, digest: str, *, tags: list[str], age_days: int) -> dict:
 
 
 def _sweep(prune, monkeypatch, versions, *, keep_days, children=None,
-           child_digests=None, dry_run=False):
+           child_digests=None, dry_run=False, pr_keep_days=None,
+           pr_dry_run=None, package="snapshot/cache"):
     """Run prune_package with the network stubbed. Returns the digests deleted.
 
     ``children`` maps a digest to what a tagged index references. Pass
@@ -78,7 +79,8 @@ def _sweep(prune, monkeypatch, versions, *, keep_days, children=None,
     monkeypatch.setattr(prune.urllib.request, "urlopen", fake_urlopen)
 
     untagged, count = prune.prune_package(
-        "ai-dynamo", "snapshot/cache", "token", keep_days, dry_run
+        "ai-dynamo", package, "token", keep_days, dry_run,
+        pr_keep_days=pr_keep_days, pr_dry_run=pr_dry_run,
     )
     return untagged, count, deleted
 
@@ -160,8 +162,9 @@ def _default_sweep(prune, monkeypatch):
     """What the defaults sweep, as {package: keep_days}."""
     calls: dict[str, int] = {}
 
-    def record(_org, package, _token, keep_days, _dry_run):
+    def record(_org, package, _token, keep_days, _dry_run, **kwargs):
         calls[package] = keep_days
+        calls[f"{package}:pr"] = kwargs.get("pr_keep_days")
         return (0, 0)
 
     monkeypatch.setattr(prune.sys, "argv", ["prune-ghcr.py"])
@@ -188,3 +191,113 @@ def test_the_cache_and_the_images_keep_different_clocks(prune, monkeypatch):
     swept = _default_sweep(prune, monkeypatch)
     assert swept["snapshot/cache"] == 7
     assert swept["snapshot/operator"] == 90
+
+
+# Pull request images: tagged, so the untagged sweep above never reaches them.
+
+PR_TAG = "v0.0.0-pull-request-42-g1a2b3c4d"
+
+
+def _pr_sweep(prune, monkeypatch, versions, **kwargs):
+    kwargs.setdefault("keep_days", 90)
+    kwargs.setdefault("pr_keep_days", 7)
+    return _sweep(prune, monkeypatch, versions, package="snapshot/agent", **kwargs)
+
+
+def test_an_expired_pull_request_image_is_deleted(prune, monkeypatch):
+    versions = [
+        _version(1, "sha256:main", tags=["v0.0.0-g0badf00d"], age_days=8),
+        _version(2, "sha256:pr", tags=[PR_TAG], age_days=8),
+    ]
+    _, count, deleted = _pr_sweep(prune, monkeypatch, versions)
+    assert (count, deleted) == (1, ["sha256:pr"])
+
+
+def test_a_recent_pull_request_image_is_kept(prune, monkeypatch):
+    """A week covers a rerun of the run that built it."""
+    versions = [_version(1, "sha256:pr", tags=[PR_TAG], age_days=3)]
+    assert _pr_sweep(prune, monkeypatch, versions)[2] == []
+
+
+@pytest.mark.parametrize("other", [
+    "v0.0.0-g0badf00d",
+    "v0.1.0",
+    "latest",
+    "v0.0.0-pull-request-42-g1a2b3c4d-extra",
+    "v0.0.0-anants-branch-g1a2b3c4d",
+])
+def test_an_image_with_any_other_tag_is_kept(prune, monkeypatch, other):
+    """Only a version whose every tag is a pull request tag can expire."""
+    versions = [_version(1, "sha256:shared", tags=[PR_TAG, other], age_days=400)]
+    assert _pr_sweep(prune, monkeypatch, versions)[2] == []
+
+
+def test_an_expired_image_takes_its_children_with_it(prune, monkeypatch):
+    """Left behind, they would wait out the 90-day untagged clock as orphans."""
+    versions = [
+        _version(1, "sha256:pr", tags=[PR_TAG], age_days=8),
+        _version(2, "sha256:pr-amd64", tags=[], age_days=8),
+        _version(3, "sha256:pr-attestation", tags=[], age_days=8),
+    ]
+    _, count, deleted = _pr_sweep(
+        prune, monkeypatch, versions,
+        children={"sha256:pr": ["sha256:pr-amd64", "sha256:pr-attestation"]},
+    )
+    assert count == 3
+    assert deleted[0] == "sha256:pr", "the index goes before what it references"
+    assert set(deleted) == {"sha256:pr", "sha256:pr-amd64", "sha256:pr-attestation"}
+
+
+def test_a_child_a_kept_image_references_is_kept(prune, monkeypatch):
+    versions = [
+        _version(1, "sha256:main", tags=["v0.0.0-g0badf00d"], age_days=8),
+        _version(2, "sha256:pr", tags=[PR_TAG], age_days=8),
+        _version(3, "sha256:shared", tags=[], age_days=8),
+    ]
+    _, _, deleted = _pr_sweep(
+        prune, monkeypatch, versions,
+        children={"sha256:main": ["sha256:shared"], "sha256:pr": ["sha256:shared"]},
+    )
+    assert deleted == ["sha256:pr"]
+
+
+def test_an_unresolvable_expired_image_blocks_every_deletion(prune, monkeypatch):
+    """Its children cannot be told apart from anyone else's, so nothing goes."""
+    versions = [
+        _version(1, "sha256:pr", tags=[PR_TAG], age_days=8),
+        _version(2, "sha256:orphan", tags=[], age_days=400),
+    ]
+
+    def boom(*_args):
+        raise RuntimeError("502 from ghcr.io")
+
+    _, count, deleted = _pr_sweep(prune, monkeypatch, versions, child_digests=boom)
+    assert (count, deleted) == (0, [])
+
+
+def test_pull_request_expiry_has_its_own_dry_run(prune, monkeypatch):
+    """Live expiry must not turn the untagged sweep live, nor the reverse."""
+    versions = [
+        _version(1, "sha256:pr", tags=[PR_TAG], age_days=8),
+        _version(2, "sha256:orphan", tags=[], age_days=400),
+    ]
+    _, count, deleted = _pr_sweep(
+        prune, monkeypatch, versions, dry_run=True, pr_dry_run=False
+    )
+    assert (count, deleted) == (2, ["sha256:pr"])
+
+    _, count, deleted = _pr_sweep(
+        prune, monkeypatch, versions, dry_run=False, pr_dry_run=True
+    )
+    assert (count, deleted) == (2, ["sha256:orphan"])
+
+
+def test_pull_request_expiry_is_off_unless_asked_for(prune, monkeypatch):
+    versions = [_version(1, "sha256:pr", tags=[PR_TAG], age_days=400)]
+    assert _sweep(prune, monkeypatch, versions, keep_days=7)[2] == []
+
+
+def test_the_images_and_not_the_cache_are_swept_for_pull_requests(prune, monkeypatch):
+    swept = _default_sweep(prune, monkeypatch)
+    assert swept["snapshot/agent:pr"] == 7
+    assert swept["snapshot/cache:pr"] is None
