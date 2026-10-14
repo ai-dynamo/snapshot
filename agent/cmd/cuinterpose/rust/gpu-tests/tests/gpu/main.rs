@@ -18,4 +18,5 @@ mod malloc_peer_access;
 mod multicast_bind_ordering;
 mod multicast_restore;
 mod multicast_sharing;
+mod peer_carriers;
 mod symbol_resolution;
