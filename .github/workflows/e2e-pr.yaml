@@ -1,0 +1,177 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# End-to-end tests for pull requests, run on their copy-pr-bot mirror branch
+# (pull-request/<number>, see .github/copy-pr-bot.yaml). The GPU runners admit
+# push events but not pull_request, so both suites run from the mirror push: the
+# CPU suite first, and the GPU suite only once it has passed for the same commit.
+#
+# The GPU suite installs images built here from the mirrored commit, never
+# main's, so a pass means the pull request's own operator, agent, and
+# pagebroker were tested. hack/prune-ghcr.py expires those images.
+
+name: PR E2E
+
+on:
+  push:
+    # No paths filter here: a workflow it skips reports no check at all, and a
+    # required check that never reports blocks the merge. The changes job below
+    # decides instead, and PR E2E passes explicitly when nothing was needed.
+    branches:
+      - "pull-request/[0-9]+"
+
+concurrency:
+  # Distinct from the groups the called workflows declare: a caller and a callee
+  # sharing one group wait on each other forever.
+  group: snapshot-e2e-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  changes:
+    name: Detect e2e changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No base: on a push to a branch other than the default one, the filter
+      # compares against the merge-base with the default branch. That is the
+      # whole pull request, where the previous mirror push would be only its
+      # latest commit -- a docs-only follow-up would then skip a code change.
+      - name: Filter paths
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            e2e:
+              - "agent/**"
+              - "api/**"
+              - "charts/snapshot/**"
+              - "e2e/**"
+              - "operator/**"
+              - "go.work"
+              - "go.work.sum"
+              - "**/go.mod"
+              - "**/go.sum"
+              - "Makefile"
+              - "hack/tools.mk"
+              # A named build context of the agent image, so it changes that image.
+              - "hack/compliance/**"
+              - "hack/k3d-cpu-e2e.sh"
+              - "hack/verify-bundle-glibc.sh"
+              - "hack/ci-cache-flags.sh"
+              - "hack/ci-phase.sh"
+              - "hack/ci-phase-summary.sh"
+              - ".github/actions/**"
+              - ".github/workflows/e2e-pr.yaml"
+              - ".github/workflows/e2e-cpu.yaml"
+              - ".github/workflows/e2e.yaml"
+
+  cpu:
+    name: CPU
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    uses: ./.github/workflows/e2e-cpu.yaml
+    permissions:
+      contents: read
+      packages: read
+
+  # Built alongside the CPU suite rather than after it: the GPU suite waits for
+  # both, so this costs no wall-clock time when CPU passes.
+  images:
+    name: Build ${{ matrix.image }} image
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    runs-on: ubuntu-latest
+    # Sized for the agent: CRIU from source on a CUDA base.
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      # Publishes the images the GPU suite installs. The layer cache is only
+      # read: the code here is the pull request's.
+      packages: write
+    strategy:
+      matrix:
+        image: [operator, agent, pagebroker]
+    outputs:
+      # Matrix legs share one set of job outputs, last leg winning. Every leg
+      # computes the same tag, so whichever wins is the right one.
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The tag push-artifacts.yaml gives a build of the pull-request/<number>
+      # branch, so hack/resolve-snapshot-image-tag.py reads it as this commit's
+      # own. It never matches the plain v0.0.0-g<sha8> tags the nightly suites
+      # resolve, and hack/prune-ghcr.py expires it by this shape.
+      - name: Compute image tag
+        id: tag
+        run: |
+          set -euo pipefail
+          echo "tag=v0.0.0-pull-request-${GITHUB_REF_NAME#pull-request/}-g${GITHUB_SHA:0:8}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push image
+        uses: ./.github/actions/build-image
+        with:
+          image: ${{ matrix.image }}
+          tags: ${{ steps.tag.outputs.tag }}
+          cache_mode: read
+          # A mirror branch has no cache of its own; main's is the warmest.
+          cache_branch: main
+
+  gpu:
+    name: GPU
+    needs: [cpu, images]
+    uses: ./.github/workflows/e2e.yaml
+    with:
+      snapshot_tag: ${{ needs.images.outputs.tag }}
+    permissions:
+      contents: read
+      packages: read
+
+  # The one check to require. always(), never !cancelled(): a skipped required
+  # check counts as passing, so this job must run -- and fail -- when the run is
+  # cancelled or a job it depends on did not succeed.
+  pr-e2e:
+    name: PR E2E
+    needs: [changes, cpu, images, gpu]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Exactly two shapes pass: e2e was needed and every suite succeeded, or it
+      # was not needed and every suite was skipped for that reason.
+      - name: Require every needed suite to pass
+        env:
+          E2E: ${{ needs.changes.outputs.e2e }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -e --arg e2e "${E2E}" '
+            .changes.result == "success" and
+            ([.cpu, .images, .gpu] | if $e2e == "true"
+               then all(.result == "success")
+               else all(.result == "skipped") end)
+          ' <<< "${RESULTS}"
