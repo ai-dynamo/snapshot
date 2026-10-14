@@ -3,21 +3,20 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# SNEP-295: Checkpoint and restore of shared CUDA memory
+# CuInterpose: checkpoint and restore of shared CUDA memory
 
 <!-- toc -->
-- [Summary](#summary)
 - [Motivation](#motivation)
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
-- [Proposal](#proposal)
+- [Overview](#overview)
   - [Workload contract](#workload-contract)
-  - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
+  - [Limitations](#limitations)
 - [Background](#background)
   - [Unicast mappings](#unicast-mappings)
   - [Multicast mappings](#multicast-mappings)
   - [Preserving CUDA graphs](#preserving-cuda-graphs)
-- [Design Details](#design-details)
+- [Design](#design)
   - [Components](#components)
   - [Interposing VMM sharing](#interposing-vmm-sharing)
     - [Creator and checkpoint holder](#creator-and-checkpoint-holder)
@@ -48,8 +47,6 @@ SPDX-License-Identifier: Apache-2.0
   - [Security](#security)
   - [Dependencies](#dependencies)
   - [Monitoring](#monitoring)
-  - [Test Plan](#test-plan)
-  - [Graduation Criteria](#graduation-criteria)
 - [Alternatives](#alternatives)
 - [Appendix](#appendix)
   - [Interception and loader contract](#interception-and-loader-contract)
@@ -62,10 +59,6 @@ SPDX-License-Identifier: Apache-2.0
     - [Decoded state example](#decoded-state-example)
   - [Further reading](#further-reading)
 <!-- /toc -->
-
-Tracking issue: [#295](https://github.com/ai-dynamo/snapshot/issues/295).
-
-## Summary
 
 CuInterpose enables Snapshot to checkpoint CUDA memory shared by processes in one container and restore those processes together on a compatible node.
 It preserves each process's application pointers, the memory contents, and the sharing relationships between processes, so existing CUDA graphs can replay after restore without recapture.
@@ -101,7 +94,7 @@ CuInterpose addresses those limits while preserving the application's existing a
 - General support for every CUDA allocation or IPC API.
 - Providing isolation between mutually untrusted sharing participants.
 
-## Proposal
+## Overview
 
 CuInterpose is enabled when the source workload starts.
 It records supported memory allocations and sharing operations while the application runs, then coordinates their preservation across the participating processes.
@@ -121,11 +114,12 @@ The application may resume only after reconstruction has been verified.
 Every process participating in the supported sharing relationships must enable CuInterpose and remain in the same fixed checkpoint group.
 Applications remain responsible for synchronization and resource lifetime throughout that group's execution.
 
-### Limitations, Risks, and Mitigations
+CuInterpose is available as an opt-in Beta within this workload contract.
 
-This proposal covers memory sharing through CUDA legacy memory IPC and VMM APIs between processes in one container on a single node.
-We plan to extend the proposal to [Multi-Node NVLink (MNNVL)](https://docs.nvidia.com/multi-node-nvlink-systems/mnnvl-user-guide/overview.html) to support memory sharing across nodes.
-That extension is outside the current scope.
+### Limitations
+
+CuInterpose supports memory sharing through CUDA legacy memory IPC and VMM APIs between processes in one container on a single node.
+Memory sharing across nodes through [Multi-Node NVLink (MNNVL)](https://docs.nvidia.com/multi-node-nvlink-systems/mnnvl-user-guide/overview.html) is not yet supported.
 
 The main operational constraints are:
 
@@ -258,7 +252,7 @@ These operations rely on the [VMM reservation and mapping model](https://docs.nv
 cuCheckpoint remains responsible for graph objects (`CUgraph`) and executable graph state (`CUgraphExec`).
 CuInterpose reconstructs the shared memory those graphs reference before the application can replay them.
 
-## Design Details
+## Design
 
 ### Components
 
@@ -744,7 +738,7 @@ metadata:
 - Adding the annotation to an already-running Pod does not load the shim.
   An opted-in Pod that was not started through the launcher fails capture preflight.
 
-This proposal adds no CRDs or CRD fields.
+CuInterpose adds no CRDs or CRD fields.
 
 #### Source Pod shaping
 
@@ -934,30 +928,7 @@ The [interception appendix](#interception-and-loader-contract) describes the req
 ### Monitoring
 
 The agent reports coordinator failures through Snapshot's existing checkpoint and restore errors, including the participant and operation when available.
-This proposal adds no dedicated metrics.
-
-### Test Plan
-
-Validation must cover these architectural contracts:
-
-- Capture and restore preserve contents, original addresses, and sharing for unicast, multicast, HOST_NUMA, and adapted legacy IPC allocations.
-  Include partial mappings and importers that outlive the creator's references.
-  Refuse checkpoint while the group retains allocations imported from outside it.
-- CUDA graphs captured before checkpoint replay correctly after restore without recapture or pointer updates.
-- Both SnapshotJob and user-created Pods load the shim correctly, preserve application arguments and environment, and enforce library compatibility.
-- Inspection leaves the workload unchanged, while failures after preparation begins terminate the attempt.
-  Corrupt state, missing participants, and lost replies must not allow an incomplete restore to resume.
-- An end-to-end test restores the complete process group on another compatible node and verifies computation and sharing.
-
-### Graduation Criteria
-
-CuInterpose is available as an opt-in Beta within the workload contract defined above.
-Graduation to GA requires:
-
-- Qualify real single-node, multi-GPU inference workloads in vLLM, SGLang, and TensorRT-LLM across supported GPU and driver configurations.
-  Capture each workload on one node and restore it on another compatible node, verifying inference results, shared-memory communication, and replay of existing CUDA graphs.
-- Maintain automated regression coverage for supported allocation types, compatibility checks, and checkpoint and restore failures.
-- Publish support requirements and deployment documentation for both SnapshotJob and user-created Pods.
+CuInterpose adds no dedicated metrics.
 
 ## Alternatives
 
@@ -971,7 +942,7 @@ Graduation to GA requires:
 
 CuInterpose must observe allocation and sharing calls regardless of how the application reaches CUDA.
 Preloading wrappers covers ordinary calls to CUDA symbols, but an application can also obtain function pointers through `dlsym`, `cuGetProcAddress*`, or `cudaGetDriverEntryPoint*` and call those pointers directly.
-The [frontend](../../../agent/cmd/cuinterpose/frontend/frontend.c) intercepts these lookup APIs so supported calls still reach the same wrappers.
+The [frontend](../../agent/cmd/cuinterpose/frontend/frontend.c) intercepts these lookup APIs so supported calls still reach the same wrappers.
 
 #### Keeping backend symbols local
 
@@ -1163,7 +1134,7 @@ Separate `multicast`, `multicast_device`, and `multicast_mapping` records descri
 
 ### Further reading
 
-- [Building Snapshot from source](../../development/build-from-source.md)
-- [Checkpointing with PodSnapshot and SnapshotJob](../../guides/checkpoint.md)
-- [Workload contract](../../reference/workload-contract.md)
-- [Restore Pod contract](../../reference/restore-pod-contract.md)
+- [Building Snapshot from source](../development/build-from-source.md)
+- [Checkpointing with PodSnapshot and SnapshotJob](../guides/checkpoint.md)
+- [Workload contract](workload-contract.md)
+- [Restore Pod contract](restore-pod-contract.md)
