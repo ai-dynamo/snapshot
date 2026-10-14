@@ -3,6 +3,7 @@
 
 #include <sys/syscall.h>
 #include "daemon.hpp"
+#include <set>
 #include "errors.hpp"
 #include "fatal_cleanup.hpp"
 
@@ -51,6 +52,31 @@ using snapshot::pagebroker::Request;
 using snapshot::pagebroker::Response;
 
 namespace {
+void
+SetNativeS3Variable(const char* name, const char* value, const char* error = "configure native S3 session")
+{
+  if (setenv(name, value, 1) != 0)
+    throw std::runtime_error(error);
+}
+
+void
+ConfigureNativeS3Environment(const snapshot::pagebroker::S3Config& config)
+{
+  const auto& connection = config.transfer.connection;
+  const auto& limits = config.transfer.upload_limits;
+  SetNativeS3Variable("RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING", connection.use_virtual_addressing ? "1" : "0");
+  SetNativeS3Variable("AWS_EC2_METADATA_DISABLED", "true");
+  SetNativeS3Variable("RUNAI_STREAMER_S3_MAX_RETRIES", "3");
+  SetNativeS3Variable("RUNAI_STREAMER_S3_TIMEOUT", "0");
+  SetNativeS3Variable("RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS", std::to_string(limits.request_timeout.count()).c_str());
+  // Reader buffering is independent of the CRT uploader memory budget.
+  SetNativeS3Variable("RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB", "128");
+  SetNativeS3Variable("RUNAI_STREAMER_CHUNK_BYTESIZE", std::to_string(std::min<std::uint64_t>(16 * 1024 * 1024, limits.part_size)).c_str());
+  SetNativeS3Variable("RUNAI_STREAMER_S3_MAX_CONNECTIONS", "4");
+  // An explicit empty value prevents fallback to an unrelated SDK profile CA.
+  SetNativeS3Variable("AWS_CA_BUNDLE", connection.ca_file.c_str(), "configure native S3 CA");
+}
+
 constexpr uint32_t kMaxMessageSize = 64 << 10;  // 64 KB
 constexpr size_t kMaxPassedFiles = 253;  // Linux SCM_RIGHTS per-message limit.
 constexpr timeval kConnectionTimeout{30, 0};
@@ -723,6 +749,8 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
       throw std::invalid_argument("missing value for " + std::string(option));
     }
     const auto input = arguments[index];
+    if (input.empty())
+      throw std::invalid_argument("empty value for " + std::string(option));
     if (option == "--custom-storage-engine") {
       if (input != "on" && input != "off") {
         throw std::invalid_argument("invalid value for --custom-storage-engine: " + std::string(input));
@@ -744,6 +772,8 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
       options.gpu.chunk_bytes = ParseSize(option, input, false);
     } else if (option == "--custom-storage-max-pinned-bytes") {
       options.gpu.max_pinned_bytes = ParseSize(option, input, true);
+    } else if (option == "--storage-config") {
+      options.storage_config = input;
     } else {
       throw std::invalid_argument("unknown option: " + std::string(option));
     }
@@ -756,6 +786,20 @@ RunDaemon(const DaemonOptions& options)
 {
   shutting_down.store(false, std::memory_order_relaxed);
   snapshot::pagebroker::FatalCleanupShutdown cleanup_shutdown(shutting_down);
+  // Resolve the entire configuration before exposing a socket or creating
+  // worker threads. Cached native settings cannot be changed per operation.
+  using namespace snapshot::pagebroker;
+  std::optional<S3Config> config;
+  if (!options.storage_config.empty()) {
+    config = ReadS3Config(options.storage_config);
+    if (config->active_transactions >= options.max_concurrent_requests)
+      throw std::invalid_argument("S3 transaction admission must leave a connection available for Abort");
+  }
+  if (config) {
+    config->transfer.connection = ResolveS3Credentials(std::move(config->transfer.connection));
+    ConfigureNativeS3Environment(*config);
+  }
+
   if (!RaiseFileDescriptorLimit())
     return ExitCode::FAILURE;
   if (BrokerPidfd() < 0)
@@ -785,7 +829,7 @@ RunDaemon(const DaemonOptions& options)
     return Fail("protect control socket", {errno, std::generic_category()});
   }
   try {
-    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine), options.transaction_lifetime);
+    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine), std::move(config), options.transaction_lifetime);
     Serve(listener, broker, options.max_concurrent_requests);
   } catch (const std::exception& failure) {
     std::cerr << "PageBroker: " << failure.what() << '\n';

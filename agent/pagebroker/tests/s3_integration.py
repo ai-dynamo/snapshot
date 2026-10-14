@@ -70,7 +70,7 @@ class FaultService:
                 self.peak_parts = max(self.peak_parts, self.active_parts)
         try:
             if scenario in ("wait", "release"):
-                target = "roundtrip/" + key.split("/")[2] + "/data"
+                target = "roundtrip/" + key.split("/", 2)[2] + "/data"
                 with self.changed:
                     if scenario == "wait":
                         if not self.changed.wait_for(lambda: target in self.first_parts, timeout=10):
@@ -92,9 +92,10 @@ class FaultService:
                 return self.error(start_response)
             if scenario == "retry" and operation == "put" and attempt <= 2:
                 return self.error(start_response)
-            if scenario in ("denied", "concurrent-failure") and operation == "put":
+            if operation == "put" and (scenario in ("denied", "concurrent-failure")
+                                       or (scenario == "bounded" and key.endswith("/data/bad"))):
                 return self.error(start_response, "AccessDenied", "403 Forbidden")
-            if scenario == "engine-partial" and operation == "put" and key.endswith("/bad"):
+            if scenario == "engine-partial" and operation == "put" and key.endswith("/" + "a" * 64 + "/data/last"):
                 return self.error(start_response, "AccessDenied", "403 Forbidden")
             if scenario in ("part-failure", "abort-failure", "verify-failure") and operation == "part" and query["partNumber"] != ["1"]:
                 with self.changed:
@@ -153,7 +154,8 @@ class FaultService:
                 return self.error(start_response)
             if scenario in ("lost-put", "lost-metadata-put") and operation == "put":
                 return self.error(start_response)
-            if scenario == "corrupt" and operation == "get" and success and body:
+            if (scenario == "corrupt" and operation == "get" and success and body
+                    and key.endswith("/" + "a" * 64 + "/data/data")):
                 body = bytes([body[0] ^ 1]) + body[1:]
             start_response(response["status"], response["headers"])
             return [body]
@@ -167,10 +169,11 @@ class FaultService:
         assert not any(count for (_, operation), count in self.counts.items() if operation == "DELETE")
         assert not any(count for (scenario, _), count in self.counts.items() if scenario == "preflight"), self.counts
         if self.counts["engine-partial", "put"]:
-            assert self.counts["engine-partial", "put"] == 2, self.counts
-            assert client.head_object(Bucket=bucket, Key="roundtrip/engine-partial/first")["ContentLength"] > 0
-            keys = client.list_objects_v2(Bucket=bucket, Prefix="roundtrip/engine-partial/")
-            assert [item["Key"] for item in keys.get("Contents", [])] == ["roundtrip/engine-partial/first"], keys
+            # The failed publication retains only its first payload, never an index.
+            prefix = "roundtrip/engine-partial/" + "a" * 64 + "/"
+            assert client.head_object(Bucket=bucket, Key=prefix + "data/data")["ContentLength"] > 0
+            keys = client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+            assert [item["Key"] for item in keys.get("Contents", [])] == [prefix + "data/data"], keys
         if self.counts["retry", "put"]:
             assert self.counts["retry", "put"] == 3, self.counts
         for operation in ("head", "get", "put"):
@@ -209,7 +212,7 @@ class FaultService:
         if self.counts["verify-failure", "create"]:
             assert self.counts["verify-failure", "list_parts"] == 0, self.counts
         if self.counts["tree", "put"]:
-            metadata = client.head_object(Bucket=bucket, Key="roundtrip/tree/empty")
+            metadata = client.head_object(Bucket=bucket, Key="roundtrip/tree/" + "a" * 64 + "/data/empty")
             assert metadata["ContentLength"] == 0
 
 

@@ -18,9 +18,9 @@
 
 #include "gpu/storage_manifest.hpp"
 #include "gpu/checkpoint.hpp"
+#include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
 #include "transfer/engine/posix/posix_copy_engine.hpp"
 #include "transfer/filesystem/filesystem_storage.hpp"
-#include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -87,18 +87,9 @@ IsSafePathComponent(const std::string& value)
 const StorageBackend&
 ValidateStagedRestore(const StagedRestoreRequest& request)
 {
-  switch (request.selector_case()) {
-    case StagedRestoreRequest::kSource:
-      if (request.source().kind_case() == StorageBackend::KIND_NOT_SET)
-        throw std::invalid_argument("restore source is required");
-      return request.source();
-    case StagedRestoreRequest::kArtifact:
-      // No backend serves store-bound artifacts yet.
-      throw std::invalid_argument("artifact-addressed restore is not implemented");
-    case StagedRestoreRequest::SELECTOR_NOT_SET:
-    default:
-      throw std::invalid_argument("restore source is required");
-  }
+  if (!request.has_source() || request.source().kind_case() == StorageBackend::KIND_NOT_SET)
+    throw std::invalid_argument("restore source is required");
+  return request.source();
 }
 
 void
@@ -111,18 +102,9 @@ ValidateArtifactMetadata(const GetArtifactMetadataRequest& request)
 const StorageBackend&
 ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
 {
-  switch (request.selector_case()) {
-    case PrepareStagedCheckpointRequest::kDestination:
-      if (request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
-        throw std::invalid_argument("checkpoint destination is required");
-      return request.destination();
-    case PrepareStagedCheckpointRequest::kTarget:
-      // No backend serves store-bound artifacts yet.
-      throw std::invalid_argument("artifact-addressed checkpoint is not implemented");
-    case PrepareStagedCheckpointRequest::SELECTOR_NOT_SET:
-    default:
-      throw std::invalid_argument("checkpoint destination is required");
-  }
+  if (!request.has_destination() || request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
+    throw std::invalid_argument("checkpoint destination is required");
+  return request.destination();
 }
 
 FileDescriptor
@@ -289,11 +271,20 @@ class GpuCompletion {
 
 }  // namespace
 
-Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine, std::chrono::seconds lifetime)
-    : lifetime_(lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
+Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine,
+    std::optional<S3Config> config, std::chrono::seconds lifetime)
+    : lifetime_(config ? config->transaction_lifetime : lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
-  io_engines_.push_back(std::make_unique<PosixCopyEngine>(storage_root));
-  io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(storage_root)));
+  if (config) {
+    resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions, config->transaction_lifetime);
+    staging_root_ /= "s3";
+    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config)));
+  } else {
+    io_engines_.push_back(std::make_unique<PosixCopyEngine>(storage_root));
+    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(storage_root)));
+  }
+  // A new daemon starts with no transactions; discard staging from the previous
+  // instance for both storage modes without changing published artifacts.
   filesystem_storage::RemoveStaging(staging_root_ / "restore");
   filesystem_storage::RemoveStaging(staging_root_ / "checkpoint");
   fs::create_directories(staging_root_ / "restore");
@@ -529,6 +520,10 @@ Broker::HandleRequest(const Request& request)
       case Request::kStagedRestore:
         response = Restore(request);
         break;
+      case Request::kGetArtifactMetadata:
+        ValidateArtifactMetadata(request.get_artifact_metadata());
+        response = Metadata(request);
+        break;
       case Request::kPrepareStagedCheckpoint:
         response = PrepareCheckpoint(request);
         break;
@@ -537,10 +532,6 @@ Broker::HandleRequest(const Request& request)
         break;
       case Request::kAbort:
         response = Abort(request);
-        break;
-      case Request::kGetArtifactMetadata:
-        ValidateArtifactMetadata(request.get_artifact_metadata());
-        response = Fail(request, Failure::INVALID_REQUEST, "artifact metadata retrieval is not implemented");
         break;
       default:
         response = Fail(request, Failure::INVALID_REQUEST, "unsupported operation");
@@ -561,7 +552,25 @@ Broker::HandleRequest(const Request& request)
   return response;
 }
 
+const TransferEngine&
+Broker::ArtifactEngine(const IOEngine* selection) const
+{
+  if (selection && !selection->has_model_streamer())
+    throw std::invalid_argument("S3 artifacts require the Model Streamer engine");
+  return Engine(IoEngine::MODEL_STREAMER);
+}
 
+Response
+Broker::Metadata(const Request& request)
+{
+  const auto& operation = request.get_artifact_metadata();
+  if (operation.has_target())
+    throw std::invalid_argument("artifact metadata lookup by identity is not implemented");
+  const auto& artifact = operation.artifact();
+  const auto& engine = ArtifactEngine();
+  engine.ValidateArtifact(artifact);
+  return StageRestore(request, {}, engine, &artifact);
+}
 
 Response
 Broker::DirectRestore(const Request& request)
@@ -575,6 +584,13 @@ Response
 Broker::Restore(const Request& request)
 {
   const auto& operation = request.staged_restore();
+  if (operation.has_artifact()) {
+    if (operation.has_source())
+      throw std::invalid_argument("restore cannot specify both source and artifact");
+    const auto& engine = ArtifactEngine(operation.has_io_engine() ? &operation.io_engine() : nullptr);
+    engine.ValidateArtifact(operation.artifact());
+    return StageRestore(request, {}, engine, &operation.artifact());
+  }
   const auto& source = ValidateStagedRestore(operation);
   const auto& engine = Engine(operation.io_engine());
   return StageRestore(request, source, engine);
@@ -651,9 +667,11 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
   auto response = Reply(request);
   if (direct)
     response.mutable_direct_restore_ready();
-  else if (request.has_get_artifact_metadata())
-    response.mutable_get_artifact_metadata_complete()->set_manifest_directory(access.image_directory.string());
-  else
+  else if (request.has_get_artifact_metadata()) {
+    auto* complete = response.mutable_get_artifact_metadata_complete();
+    complete->set_manifest_directory(access.image_directory.string());
+    *complete->mutable_artifact() = *artifact;
+  } else
     response.mutable_staged_restore_directory()->set_image_directory(access.image_directory.string());
   return response;
 }
@@ -662,6 +680,13 @@ Response
 Broker::PrepareCheckpoint(const Request& request)
 {
   const auto& operation = request.prepare_staged_checkpoint();
+  if (operation.has_target()) {
+    if (operation.has_destination())
+      throw std::invalid_argument("checkpoint cannot specify both destination and target");
+    const auto& engine = ArtifactEngine(operation.has_io_engine() ? &operation.io_engine() : nullptr);
+    const auto artifact = engine.ResolveArtifactTarget(operation.target());
+    return StageCheckpoint(request, {}, engine, &artifact);
+  }
   const auto& destination = ValidateStagedCheckpoint(operation);
   const auto& engine = Engine(operation.io_engine());
   return StageCheckpoint(request, destination, engine);
