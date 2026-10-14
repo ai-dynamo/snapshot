@@ -161,8 +161,9 @@ reference images this is why the build starts from the framework's tested runtim
 image and sets a few environment variables. A packaging method that skips the
 custom image still has to meet these:
 
-- **glibc floor and `x86_64`.** The restore bundle requires a recent glibc, which
-  the reference runtime images already clear. Snapshot is x86_64-only today.
+- **glibc floor and architecture.** The restore bundle requires a recent glibc,
+  which the reference runtime images already clear. The workload image must
+  match the node architecture (x86_64 or arm64).
 - **All file handles must be reopenable.** Disable caches that leave handles CRIU
   cannot reopen after restore — for example `HF_HUB_DISABLE_XET=1`, and loading
   models from a local cache with `HF_HUB_OFFLINE=1`.

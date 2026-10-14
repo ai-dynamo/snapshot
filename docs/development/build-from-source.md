@@ -13,8 +13,11 @@ In addition to the [runtime prerequisites](../../README.md#prerequisites), the b
 - A container registry the cluster can pull from, and push access to it
 - `kubectl` and `helm` configured against the cluster
 
-The node agent is **x86_64 (amd64) only** — `cuda-checkpoint` ships no other
-architecture — so its image builds for `linux/amd64`.
+The node agent supports `linux/amd64` and `linux/arm64`. The agent and
+PageBroker images build for `linux/amd64` by default; pass
+`AGENT_PLATFORM=linux/arm64` to build them for arm64 nodes. See
+[Platform support](../limitations.md#platform-support) for what is validated on
+each architecture.
 
 ## 1. Clone the repository
 
