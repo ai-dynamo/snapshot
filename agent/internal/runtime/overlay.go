@@ -345,6 +345,21 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 	return true, nil
 }
 
+// OverlayDiffBytes is the size of the rootfs diff and deleted-files list
+// written into checkpointDir. Missing files contribute nothing.
+func OverlayDiffBytes(checkpointDir string) int64 {
+	return regularFileSize(filepath.Join(checkpointDir, rootfsDiffFilename)) +
+		regularFileSize(filepath.Join(checkpointDir, deletedFilesFilename))
+}
+
+func regularFileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	return info.Size()
+}
+
 // restoreTarCmd builds the extraction command for a rootfs diff.
 //
 // The bundled tar runs under the bundled loader, named explicitly so the
