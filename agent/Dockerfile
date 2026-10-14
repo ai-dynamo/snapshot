@@ -273,9 +273,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # =============================================================================
 # Stage: Sources - corresponding source for everything added over the base
 # =============================================================================
+# =============================================================================
+# Stage: Base packages - the committed baseline still describes the base image
+# =============================================================================
+# The source delta below is computed against the committed baseline, so a
+# base-image bump without a re-capture would silently skew it: packages the new
+# base added would look like ours, and packages it dropped would vanish from
+# the delta. The build would still succeed, with wrong compliance content.
+#
+# Checked here rather than by a `docker run` before the build. buildx already
+# has this image; a Docker daemon running the check separately does not, and
+# that second pull cost a minute and a half of every CI run. As a stage it is
+# cached on the base digest and the baseline, so it costs nothing until one of
+# them changes.
+FROM ${AGENT_BASE_IMAGE} AS base-packages
+
+COPY compliance/base-packages-manifest.sh /tmp/base-packages-manifest.sh
+COPY compliance/base-packages.tsv /tmp/base-packages.tsv
+
+RUN set -e; \
+    sh /tmp/base-packages-manifest.sh >/tmp/actual.tsv; \
+    diff -u /tmp/base-packages.tsv /tmp/actual.tsv || { \
+      echo "ERROR: agent/compliance/base-packages.tsv is stale for this base image — run 'make capture-base-packages' and commit" >&2; \
+      exit 1; \
+    }
+
 FROM runtime-deps AS sources
 
-COPY compliance/base-packages.tsv /tmp/base-packages.tsv
+# From the stage that checked it rather than from the context, so a stale
+# baseline fails the build instead of quietly skewing the delta below.
+COPY --from=base-packages /tmp/base-packages.tsv /tmp/base-packages.tsv
 COPY compliance/collect-sources.sh /tmp/collect-sources.sh
 
 # Debian/Ubuntu source for the delta against the NGC base image.
@@ -425,3 +452,16 @@ RUN mkdir -p /checkpoints /var/run/snapshot
 USER root
 
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
+
+# =============================================================================
+# Stage: Bundle export - the restore bundle on its own
+# =============================================================================
+# hack/verify-bundle-glibc.sh checks the bundle against an older userspace than
+# the agent is built on. It used to read the bundle out of the agent image,
+# which required that image to be in a Docker daemon; CI no longer loads it
+# there, because unpacking a CUDA-based image costs more than the check does.
+# Exporting the bundle alone keeps the check cheap:
+#
+#   docker buildx build --target bundle-export --output type=local,dest=<dir> .
+FROM scratch AS bundle-export
+COPY --from=agent /snapshot-binaries/ /

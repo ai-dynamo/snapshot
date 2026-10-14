@@ -21,6 +21,14 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Written by push-artifacts.yaml on main; read-only here. See the comment on
+  # CACHE_REF_PREFIX there for why this is not the Actions cache.
+  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
+  # The branch this change targets, whose cache it reads. base_ref is set on a
+  # pull request; ref_name covers a push to main.
+  CACHE_BRANCH: ${{ github.base_ref || github.ref_name }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -85,6 +93,7 @@ jobs:
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_pod_status_writers.py \
+            e2e/tests/test_prune_ghcr.py \
             e2e/tests/test_required_tests.py \
             e2e/tests/test_resolve_snapshot_image_tag.py \
             e2e/tests/test_restored_state.py \
@@ -134,10 +143,29 @@ jobs:
   pagebroker-image:
     needs: check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Read-only, and deliberately so: this job reads the layer cache that
+      # push-artifacts.yaml writes from main. Letting a pull request write it
+      # would let one poison every build that reads it afterwards.
+      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # A pull request from a fork gets a token that cannot read the package.
+      # cache-from treats that as a miss and builds cold, which is what this
+      # job did unconditionally before, so there is nothing to fall back from.
+      - name: Log in to GHCR
+        continue-on-error: true
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - run: |
-          make docker-build-pagebroker \
-            DOCKER_BUILD_ARGS="--cache-from=type=gha,scope=pagebroker \
-              --cache-to=type=gha,scope=pagebroker,mode=max"
+          set -euo pipefail
+          # Assigned, not inlined into the argument: a command substitution
+          # that fails inside a simple command does not trip `set -e`, so an
+          # inline call would drop the cache flags and still build.
+          cache_flags="$(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
+          make docker-build-pagebroker DOCKER_BUILD_ARGS="${cache_flags}"

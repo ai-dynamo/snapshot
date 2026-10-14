@@ -30,6 +30,17 @@ permissions: {}
 env:
   # Passed through to make, so the references we sign are the ones it pushed.
   REGISTRY: ghcr.io/ai-dynamo/snapshot
+  # Layer cache, one tag per image. Not type=gha: the Actions cache is capped
+  # at 10 GiB per repository and the Go module caches alone exceed that, so
+  # buildx entries were evicted before any later run could read them and every
+  # build in every workflow started cold. A registry has no such ceiling, and
+  # it is readable from the pull request workflows, which the Actions cache
+  # was not across refs.
+  #
+  # Only this workflow writes it, and it runs on main and release branches
+  # alone. A pull request that could write a shared cache could also poison
+  # every build that reads it afterwards.
+  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
 
 jobs:
 
@@ -165,7 +176,20 @@ jobs:
           IMAGE: ${{ matrix.image }}
           BUILD_ARGS: ${{ matrix.build_args }}
           TAGS: ${{ needs.version.outputs.tags }}
+          # The branch whose cache this run owns, falling back to main on a
+          # tag. release.yaml calls this workflow on a `release: published`
+          # event, where ref_name is the tag rather than a branch.
+          CACHE_BRANCH: ${{ github.event.workflow_run.head_branch || (github.ref_type == 'tag' && 'main' || github.ref_name) }}
+          # And a release reads without writing: a tag never recurs, so a
+          # cache published under one is a cache no later build ever names.
+          CACHE_MODE: ${{ github.ref_type == 'tag' && 'read' || 'write' }}
         run: |
+          set -euo pipefail
+          # Assigned, not inlined into the argument: a command substitution
+          # that fails inside a simple command does not trip `set -e`, so an
+          # inline call would drop --cache-to and still publish the image,
+          # leaving every later build cold with nothing in the log to say why.
+          cache_flags="$(hack/ci-cache-flags.sh "${CACHE_MODE}" "${IMAGE}" "${CACHE_BRANCH}")"
           make "docker-build-${IMAGE}" \
             REGISTRY="${REGISTRY}" \
             TAGS="${TAGS}" \
@@ -173,8 +197,7 @@ jobs:
               --provenance=mode=max \
               --sbom=true \
               --metadata-file=buildx.json \
-              --cache-from=type=gha,scope=${IMAGE} \
-              --cache-to=type=gha,scope=${IMAGE},mode=max"
+              ${cache_flags}"
           DIGEST="$(jq -er '."containerimage.digest"' buildx.json)"
           echo "${DIGEST}" > "digest-${IMAGE}.txt"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"

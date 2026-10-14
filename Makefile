@@ -27,7 +27,7 @@ AGENT_PLATFORM ?= linux/amd64
 
 .PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
-        capture-base-packages verify-base-packages \
+        capture-base-packages verify-base-packages docker-export-agent-bundle \
         linux-build linux-test pagebroker-check-generated cpu-e2e
 
 CRD_SRC_DIR   := api/v1alpha1/crds
@@ -153,10 +153,11 @@ capture-base-packages:
 	@sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" agent/compliance/base-packages.tsv "$(AGENT_PLATFORM)"
 	@echo "baseline: $$(grep -vc '^#' agent/compliance/base-packages.tsv) packages"
 
-# The source delta is computed against the committed baseline, so a base-image
-# bump without a re-capture would silently skew it: packages the new base added
-# would look like ours, and packages it dropped would vanish from the delta. The
-# build would still succeed, with wrong compliance content. Fail instead.
+# Standalone check of the committed baseline, for a base-image bump you want to
+# validate without building the agent. The build enforces it either way: the
+# Dockerfile's base-packages stage runs the same script and fails the same way,
+# which is why this is not a prerequisite of docker-build-agent. Doing it there
+# costs nothing on a warm cache; doing it here needs its own pull.
 verify-base-packages:
 	@set -e; \
 	tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
@@ -164,13 +165,30 @@ verify-base-packages:
 	diff -u agent/compliance/base-packages.tsv "$$tmp" || \
 	  (echo "ERROR: agent/compliance/base-packages.tsv is stale for $(AGENT_BASE_IMAGE) — run 'make capture-base-packages' and commit"; exit 1)
 
-docker-build-agent: verify-base-packages
-	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
+# Shared by the agent image and the bundle export below, which must resolve to
+# the same build up to the agent stage. Held in one variable because a flag
+# that drifted between them would send the export down a different cache path:
+# it would go cold, and then verify a bundle that is not the one being pushed.
+# Only --target and the output differ.
+AGENT_BUILD_FLAGS = --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
 	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
-	  --build-context=api=./api --build-context=compliance=./hack/compliance \
+	  --build-context=api=./api --build-context=compliance=./hack/compliance
+
+docker-build-agent:
+	docker buildx build $(DOCKER_BUILD_ARGS) $(AGENT_BUILD_FLAGS) \
 	  --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
+
+# The restore bundle, extracted to BUNDLE_DEST, for hack/verify-bundle-glibc.sh.
+# Same build as above up to the agent stage, so a warm cache makes this close
+# to free; the point is to get the bundle without putting a CUDA-based image
+# into a Docker daemon just to copy one directory out of it.
+BUNDLE_DEST ?= ./.agent-bundle
+docker-export-agent-bundle:
+	docker buildx build $(DOCKER_BUILD_ARGS) $(AGENT_BUILD_FLAGS) \
+	  --target bundle-export \
+	  --output "type=local,dest=$(BUNDLE_DEST)" agent/
 
 docker-build-operator:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \
