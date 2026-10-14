@@ -61,10 +61,7 @@ func sampleImageGrowth(checkpointDir string) (stop func() []ImageGrowthSample) {
 		start := time.Now()
 		ticker := time.NewTicker(imageGrowthSampleInterval)
 		defer ticker.Stop()
-		record := func(force bool) {
-			if len(samples) >= maxImageGrowthSamples && !force {
-				return
-			}
+		record := func() {
 			bytes, err := DirectoryBytes(checkpointDir)
 			if err != nil {
 				return
@@ -73,17 +70,19 @@ func sampleImageGrowth(checkpointDir string) (stop func() []ImageGrowthSample) {
 				Offset: time.Since(start),
 				Bytes:  bytes,
 			}
+			// A long dump must keep observations across its whole span.
+			// Thinning leaves the newest sample in place and frees room
+			// for the next one, including the sample taken at stop.
 			if len(samples) >= maxImageGrowthSamples {
-				samples[len(samples)-1] = sample
-				return
+				samples = thinGrowthSamples(samples)
 			}
 			samples = append(samples, sample)
 		}
 		for {
-			record(false)
+			record()
 			select {
 			case <-ctx.Done():
-				record(true)
+				record()
 				done <- samples
 				return
 			case <-ticker.C:
@@ -94,4 +93,20 @@ func sampleImageGrowth(checkpointDir string) (stop func() []ImageGrowthSample) {
 		cancel()
 		return <-done
 	}
+}
+
+// thinGrowthSamples drops every other interior sample. The first and last
+// observations stay, so the series still covers the dump after the sample cap.
+func thinGrowthSamples(samples []ImageGrowthSample) []ImageGrowthSample {
+	n := len(samples)
+	if n < 3 {
+		return samples
+	}
+	kept := make([]ImageGrowthSample, 0, n/2+1)
+	kept = append(kept, samples[0])
+	for i := 2; i < n-1; i += 2 {
+		kept = append(kept, samples[i])
+	}
+	kept = append(kept, samples[n-1])
+	return kept
 }

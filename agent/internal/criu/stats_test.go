@@ -88,6 +88,22 @@ func TestDirectoryBytesSkipsSymlinks(t *testing.T) {
 	}
 }
 
+func TestThinGrowthSamplesKeepsBothEnds(t *testing.T) {
+	samples := make([]ImageGrowthSample, 5)
+	for i := range samples {
+		samples[i] = ImageGrowthSample{Offset: time.Duration(i) * time.Second, Bytes: int64(i)}
+	}
+
+	got := thinGrowthSamples(samples)
+
+	if len(got) >= len(samples) {
+		t.Fatalf("len = %d, want fewer than %d", len(got), len(samples))
+	}
+	if got[0] != samples[0] || got[len(got)-1] != samples[len(samples)-1] {
+		t.Fatalf("ends = %+v, want first %+v and last %+v", got, samples[0], samples[len(samples)-1])
+	}
+}
+
 func TestSampleImageGrowthStops(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "pages-1.img"), []byte("0123"), 0o644); err != nil {
