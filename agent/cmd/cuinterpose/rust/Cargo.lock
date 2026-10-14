@@ -227,6 +227,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_bytes",
+ "tempfile",
  "thiserror",
 ]
 
