@@ -119,6 +119,7 @@ storage:
 pageBroker:
   # Restore directly from the checkpoint directory, or opt into a staged copy.
   restoreMode: direct
+  transferEngine: posix-copy  # posix-copy | model-streamer
   maxConcurrentRequests: 16
   staging:
     # Checkpoint (except GPU CustomStorage capture, which writes directly to

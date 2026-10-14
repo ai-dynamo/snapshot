@@ -25,6 +25,7 @@ message IOEngine
   {
     PosixCopyIOEngine posix_copy = 1;
     NixlIOEngine nixl = 2;
+    ModelStreamerIOEngine model_streamer = 3;
   }
 }
 
@@ -263,3 +264,4 @@ message Response
 
 // Registered-buffer transfers. Directory staging is not implemented for NIXL.
 message NixlIOEngine {}
+message ModelStreamerIOEngine {}

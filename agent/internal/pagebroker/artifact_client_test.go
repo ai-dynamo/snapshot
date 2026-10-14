@@ -119,12 +119,12 @@ func TestArtifactAndLegacySelectors(t *testing.T) {
 			&Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{ManifestDirectory: "/staging/metadata/tx", Artifact: artifact}}},
 		{"legacy checkpoint", &Request_PrepareStagedCheckpoint{PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Selector: &PrepareStagedCheckpointRequest_Destination{Destination: filesystem("/checkpoints/destination")}, IoEngine: posixCopy()}},
 			func(c Client, ctx context.Context) (string, error) {
-				return c.PrepareCheckpoint(ctx, "tx", "/checkpoints/destination")
+				return c.PrepareCheckpoint(ctx, "tx", "/checkpoints/destination", TransferEnginePosixCopy)
 			},
 			&Response_StagedCheckpointDirectory{StagedCheckpointDirectory: &StagedCheckpointDirectory{ImageDirectory: proto.String("/staging/checkpoint/tx")}}},
 		{"legacy restore", &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Selector: &StagedRestoreRequest_Source{Source: filesystem("/checkpoints/source")}, IoEngine: posixCopy()}},
 			func(c Client, ctx context.Context) (string, error) {
-				return c.StagedRestore(ctx, "tx", "/checkpoints/source")
+				return c.StagedRestore(ctx, "tx", "/checkpoints/source", TransferEnginePosixCopy)
 			},
 			&Response_StagedRestoreDirectory{StagedRestoreDirectory: &StagedRestoreDirectory{ImageDirectory: proto.String("/staging/restore/tx")}}},
 	} {
@@ -267,7 +267,7 @@ func TestFailureMessageLimitsPreserveLegacyDiagnostics(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			_, err := client.StagedRestore(ctx, "tx", "/checkpoints/source")
+			_, err := client.StagedRestore(ctx, "tx", "/checkpoints/source", TransferEnginePosixCopy)
 			var failure *FailureError
 			if !errors.As(err, &failure) || failure.Code() != failureCode(code) || !strings.Contains(err.Error(), message) {
 				t.Fatalf("failure diagnostic/classification lost: %v", err)
