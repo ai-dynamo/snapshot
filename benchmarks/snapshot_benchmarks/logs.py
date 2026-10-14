@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Parses the node agent's "Restore timing summary" log line.
+"""Parses the node agent's restore and checkpoint timing summary log lines.
 
 The agent logs with zap's console encoder (agent/internal/logging/logging.go):
 a plain-text preamble (RFC3339Nano timestamp, level, logger, caller, message)
@@ -26,9 +26,10 @@ import json
 import re
 from typing import Any
 
-from snapshot_benchmarks.schema import AgentLogPhases
+from snapshot_benchmarks.schema import AgentLogPhases, CheckpointAgentLog, ImageGrowthSample
 
 RESTORE_SUMMARY_MARKER = "Restore timing summary"
+CHECKPOINT_SUMMARY_MARKER = "Checkpoint timing summary"
 
 _GO_DURATION_TERM = re.compile(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)")
 _GO_DURATION_UNIT_SECONDS = {
@@ -78,9 +79,20 @@ def find_restore_summary_json(
     entirely -- concurrent benchmark runs, or another tenant's workload on a
     shared cluster -- so a bare marker-text match would risk silently
     attributing someone else's phase timings to this run."""
+    return _find_summary_json(
+        log_text,
+        marker=RESTORE_SUMMARY_MARKER,
+        matches={"pod": pod, "snapshot": snapshot},
+    )
+
+
+def _find_summary_json(
+    log_text: str, *, marker: str, matches: dict[str, str]
+) -> dict[str, Any] | None:
+    """Returns the last log line whose trailing JSON object matches every key."""
     summary_payload = None
     for line in log_text.splitlines():
-        if RESTORE_SUMMARY_MARKER not in line:
+        if marker not in line:
             continue
         brace_index = line.find("{")
         if brace_index == -1:
@@ -89,7 +101,9 @@ def find_restore_summary_json(
             candidate = json.loads(line[brace_index:])
         except json.JSONDecodeError:
             continue
-        if candidate.get("pod") == pod and candidate.get("snapshot") == snapshot:
+        if isinstance(candidate, dict) and all(
+            str(candidate.get(key)) == expected for key, expected in matches.items()
+        ):
             summary_payload = candidate
     return summary_payload
 
@@ -142,3 +156,110 @@ def parse_agent_log_phases(
         phases.parse_warnings.append('"restore" object had no "phases" map')
 
     return phases
+
+
+def parse_checkpoint_agent_log(
+    log_text: str, *, log_source_pod: str | None, content: str
+) -> CheckpointAgentLog:
+    """Parses the capture-node agent's checkpoint summary for `content`.
+
+    Best-effort: a missing line or an older agent that only logged phase
+    totals becomes warnings on the returned object, never an exception.
+    """
+    parsed = CheckpointAgentLog(log_source_pod=log_source_pod)
+    payload = _find_summary_json(
+        log_text,
+        marker=CHECKPOINT_SUMMARY_MARKER,
+        matches={"content": content},
+    )
+    if payload is None:
+        parsed.parse_warnings.append(
+            f'"{CHECKPOINT_SUMMARY_MARKER}" line for content={content!r} '
+            "not found in the provided agent log"
+        )
+        return parsed
+
+    checkpoint = payload.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        parsed.parse_warnings.append(
+            f'"{CHECKPOINT_SUMMARY_MARKER}" line found but had no "checkpoint" object'
+        )
+        return parsed
+
+    parsed.log_line_found = True
+    parsed.duration = parse_go_duration(checkpoint.get("duration"))
+    parsed.started_to_complete = parse_go_duration(checkpoint.get("started_to_complete"))
+    phase_map = checkpoint.get("phases")
+    if isinstance(phase_map, dict):
+        parsed.phases = {
+            str(name): seconds
+            for name, value in phase_map.items()
+            if (seconds := parse_go_duration(value if isinstance(value, str) else None)) is not None
+        }
+    else:
+        parsed.parse_warnings.append('"checkpoint" object had no "phases" map')
+
+    cuda = checkpoint.get("cuda")
+    if isinstance(cuda, dict):
+        parsed.cuda_lock = parse_go_duration(_string(cuda.get("lock")))
+        parsed.cuda_copy = parse_go_duration(_string(cuda.get("copy")))
+        parsed.cuda_job_file = parse_go_duration(_string(cuda.get("job_file")))
+
+    criu = checkpoint.get("criu")
+    if isinstance(criu, dict):
+        parsed.criu_freezing = parse_go_duration(_string(criu.get("freezing")))
+        parsed.criu_frozen = parse_go_duration(_string(criu.get("frozen")))
+        parsed.criu_memdump = parse_go_duration(_string(criu.get("memdump")))
+        parsed.criu_memwrite = parse_go_duration(_string(criu.get("memwrite")))
+        parsed.criu_pages_written = _int(criu.get("pages_written"))
+        parsed.criu_pages_written_bytes = _int(criu.get("pages_written_bytes"))
+        parsed.criu_pages_scanned = _int(criu.get("pages_scanned"))
+        parsed.criu_image_bytes = _int(criu.get("image_bytes"))
+        parsed.image_growth = _image_growth(criu.get("image_growth"))
+        stats_error = criu.get("stats_error")
+        if isinstance(stats_error, str) and stats_error:
+            parsed.parse_warnings.append(f"criu stats unavailable: {stats_error}")
+
+    overlay = checkpoint.get("overlay")
+    if isinstance(overlay, dict):
+        parsed.overlay_diff_bytes = _int(overlay.get("diff_bytes"))
+
+    if parsed.cuda_lock is None and parsed.criu_memwrite is None and not any(
+        warning.startswith("criu stats unavailable:") for warning in parsed.parse_warnings
+    ):
+        parsed.parse_warnings.append(
+            "checkpoint summary has no cuda lock/copy or criu memwrite split; "
+            "the agent build predates capture sub-phase instrumentation"
+        )
+    return parsed
+
+
+def _string(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _image_growth(value: Any) -> list[ImageGrowthSample]:
+    if not isinstance(value, list):
+        return []
+    samples: list[ImageGrowthSample] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        offset = parse_go_duration(_string(item.get("offset")))
+        nbytes = _int(item.get("bytes"))
+        if offset is None or nbytes is None:
+            continue
+        samples.append(ImageGrowthSample(offset_seconds=offset, bytes=nbytes))
+    return samples

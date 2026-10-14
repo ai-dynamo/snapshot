@@ -67,6 +67,96 @@ def _fmt_driver(identity: dict) -> str:
     return "-"
 
 
+def _image_section(results: list[dict]) -> list[str]:
+    """Names the files in the checkpoint and the CRIU log lines around the dump."""
+    lines = [
+        "## What is in the checkpoint image",
+        "",
+        "Categories sum every file. Apparent size counts sparse holes; "
+        "allocated size is `st_blocks * 512`. Files lists only those of at "
+        "least 1 MiB. `pages` is CRIU's private page images. Dump log times "
+        "are CRIU's own clock. `Pagemap generated` is the page list, before "
+        "the write. `Dumping core` is the first metadata after that write. "
+        "Thread cores are one line per thread, summarized as first–last. "
+        "`Unfreezing tasks` is the start of killing the frozen tree, and "
+        "`Writing stats` is after that wait. `Dumping finished` is the end.",
+        "",
+    ]
+    for result in results:
+        image = result.get("checkpoint_image") or {}
+        if not image:
+            continue
+        label = (result.get("model") or {}).get("label", "-")
+        lines.append(f"### {label}")
+        lines.append("")
+        lines.append(
+            "| Category | Apparent | Allocated | Files | | Dump log | Offset (s) |"
+        )
+        lines.append("|---|---:|---:|---:|---|---|---:|")
+        categories = image.get("categories") or []
+        marks = _dump_marks(image)
+        rows = max(len(categories), len(marks), 1)
+        for index in range(rows):
+            if index < len(categories):
+                category = categories[index]
+                category_name = category.get("name", "-")
+                category_bytes = _fmt_bytes(category.get("bytes"))
+                category_allocated = _fmt_bytes(category.get("allocated_bytes"))
+                category_count = str(category.get("file_count", "-"))
+            else:
+                category_name, category_bytes, category_allocated, category_count = "", "", "", ""
+            if index < len(marks):
+                mark_name, mark_offset_text = marks[index]
+            else:
+                mark_name, mark_offset_text = "", ""
+            lines.append(
+                f"| {category_name} | {category_bytes} | {category_allocated} | {category_count} | "
+                f"| {mark_name} | {mark_offset_text} |"
+            )
+        lines.append("")
+        lines.append(
+            f"Pages apparent {_fmt_bytes(image.get('pages_bytes'))}, "
+            f"allocated {_fmt_bytes(image.get('pages_allocated_bytes'))}, "
+            f"sparse {_fmt_bytes(image.get('pages_sparse_bytes'))}. "
+            f"Pagemap holes {image.get('pagemap_holes', 0)} "
+            f"({_fmt_bytes(image.get('pagemap_hole_bytes'))})."
+        )
+        lines.append("")
+        large = image.get("files") or []
+        if large:
+            lines.append("| File | Apparent | Allocated |")
+            lines.append("|---|---:|---:|")
+            for item in large:
+                lines.append(
+                    f"| `{item.get('path', '-')}` | {_fmt_bytes(item.get('bytes'))} | "
+                    f"{_fmt_bytes(item.get('allocated_bytes'))} |"
+                )
+            lines.append("")
+    return lines
+
+
+def _dump_marks(image: dict) -> list[tuple[str, str]]:
+    first = image.get("thread_core_first_seconds")
+    last = image.get("thread_core_last_seconds")
+    count = image.get("thread_core_count") or 0
+    if first is None and last is None:
+        thread_span = "-"
+    else:
+        thread_span = f"{_fmt(first)}–{_fmt(last)} ({count})"
+    return [
+        ("First Dumping pages", _fmt(image.get("first_dumping_pages_seconds"))),
+        ("Last Pagemap generated", _fmt(image.get("last_pagemap_seconds"))),
+        ("First Dumping core", _fmt(image.get("first_dumping_core_seconds"))),
+        ("Thread cores", thread_span),
+        ("Dumping mm", _fmt(image.get("dumping_mm_seconds"))),
+        ("Dumping pstree", _fmt(image.get("dumping_pstree_seconds"))),
+        ("Namespaces complete", _fmt(image.get("namespaces_complete_seconds"))),
+        ("Unfreezing tasks", _fmt(image.get("unfreezing_seconds"))),
+        ("Writing stats", _fmt(image.get("writing_stats_seconds"))),
+        ("Dumping finished", _fmt(image.get("dumping_finished_seconds"))),
+    ]
+
+
 def render(results: list[dict]) -> str:
     if not results:
         return "no results found\n"
@@ -136,6 +226,83 @@ def render(results: list[dict]) -> str:
         )
     lines.append("")
 
+    lines.append("## Where the capture time goes")
+    lines.append("")
+    lines.append(
+        "Wall, CUDA, CRIU, and overlay come from the capture-node agent's "
+        "Checkpoint timing summary. CUDA lock is the device freeze; CUDA copy "
+        "moves device state into host memory before CRIU runs. CRIU memdump is "
+        "CRIU reading the frozen process; CRIU memwrite is CRIU writing pages. "
+        "Those two CRIU timers overlap the CRIU wall and are not added to it. "
+        "Checkpoint (API) is the one-second Kubernetes Ready timestamp and is "
+        "coarser than Wall."
+    )
+    lines.append("")
+    lines.append(
+        "| Model | Wall (s) | CUDA lock | CUDA copy | CRIU wall | CRIU freeze | "
+        "CRIU memdump | CRIU memwrite | Overlay | Checkpoint (API) |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for r in results:
+        model = r.get("model", {})
+        checkpoint = r.get("checkpoint") or {}
+        capture = r.get("checkpoint_agent_log") or {}
+        phases = capture.get("phases") or {}
+        lines.append(
+            "| {label} | {wall} | {lock} | {copy} | {criu} | {freeze} | {memdump} | "
+            "{memwrite} | {overlay} | {api} |".format(
+                label=model.get("label", "-"),
+                wall=_fmt(capture.get("duration")),
+                lock=_fmt(capture.get("cuda_lock")),
+                copy=_fmt(capture.get("cuda_copy")),
+                criu=_fmt(phases.get("criu_dump")),
+                freeze=_fmt(capture.get("criu_freezing")),
+                memdump=_fmt(capture.get("criu_memdump")),
+                memwrite=_fmt(capture.get("criu_memwrite")),
+                overlay=_fmt(phases.get("overlay_capture")),
+                api=_fmt(checkpoint.get("checkpoint_seconds")),
+            )
+        )
+    lines.append("")
+
+    lines.append("## How the CRIU image was written")
+    lines.append("")
+    lines.append(
+        "Memwrite GB/s divides CRIU's written page bytes by CRIU's memwrite "
+        "timer. Image GB/s divides the whole CRIU image by the agent's CRIU "
+        "wall, which is the lower number because that wall also includes "
+        "freeze and memory collection. Midpoint fraction is how much of the "
+        "final image was already on disk halfway through the dump: near 0.5 "
+        "is a steady write, near 0 means the bytes arrived late. Max stall is "
+        "the longest stretch where the image size did not grow."
+    )
+    lines.append("")
+    lines.append(
+        "| Model | Pages written | CRIU image | Overlay diff | Memwrite GB/s | "
+        "Image GB/s | Midpoint fraction | Max stall (s) |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    for r in results:
+        model = r.get("model", {})
+        capture = r.get("checkpoint_agent_log") or {}
+        lines.append(
+            "| {label} | {pages} | {image} | {overlay} | {memwrite_rate} | "
+            "{image_rate} | {mid} | {stall} |".format(
+                label=model.get("label", "-"),
+                pages=_fmt_bytes(capture.get("criu_pages_written_bytes")),
+                image=_fmt_bytes(capture.get("criu_image_bytes")),
+                overlay=_fmt_bytes(capture.get("overlay_diff_bytes")),
+                memwrite_rate=_fmt(capture.get("memwrite_gigabytes_per_second")),
+                image_rate=_fmt(capture.get("criu_image_gigabytes_per_second")),
+                mid=_fmt(capture.get("image_growth_midpoint_fraction")),
+                stall=_fmt(capture.get("image_growth_max_stall_seconds")),
+            )
+        )
+    lines.append("")
+
+    if any(r.get("checkpoint_image") for r in results):
+        lines.extend(_image_section(results))
+
     lines.append("## Where the restore time goes")
     lines.append("")
     lines.append(
@@ -178,7 +345,11 @@ def render(results: list[dict]) -> str:
     agent_log_warnings = [
         (r.get("model", {}).get("label", "?"), w)
         for r in results
-        for w in ((r.get("agent_log_phases") or {}).get("parse_warnings") or [])
+        for w in (
+            ((r.get("agent_log_phases") or {}).get("parse_warnings") or [])
+            + ((r.get("checkpoint_agent_log") or {}).get("parse_warnings") or [])
+            + ((r.get("checkpoint_image") or {}).get("parse_warnings") or [])
+        )
     ]
     if warnings or agent_log_warnings:
         lines.append("## Warnings")

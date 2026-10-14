@@ -25,3 +25,12 @@ def test_workload_pods_avoid_mig_nodes_only_when_opted_in(monkeypatch):
     selector = workloads.workload_scheduling()["nodeSelector"]
 
     assert selector[MIG_SELECTOR] == "all-disabled"
+
+
+def test_workload_pods_pin_hostname_when_set(monkeypatch):
+    monkeypatch.delenv("SNAPSHOT_E2E_AVOID_MIG", raising=False)
+    monkeypatch.setenv("SNAPSHOT_E2E_NODE_HOSTNAME", "node-a")
+
+    selector = workloads.workload_scheduling()["nodeSelector"]
+
+    assert selector["kubernetes.io/hostname"] == "node-a"

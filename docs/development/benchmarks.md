@@ -2,6 +2,8 @@
 
 Snapshot captures a fully initialized GPU workload and restores it later on the same node or a different one. These benchmarks show how long that restore takes across several model configurations ranging from 1.5 GB to 145.4 GB of model weights and break the time down into the stages that produce it. We cover the restore path only and we show that the time a restore takes is governed almost entirely by how many bytes have to move, that Snapshot's own coordination cost stays flat at around 10 milliseconds regardless of workload size.
 
+Capture is not in the tables below. The [benchmark tool](benchmarks-guide.md#capture-breakdown) records it for each run: agent wall time, the CUDA lock versus device-to-host copy, and CRIU's freeze, memory-read, and page-write timers alongside how the image size grew during the dump.
+
 > [!TIP]
 > Want to reproduce these numbers, or measure your own hardware and models
 > against them? See the [benchmark guide](benchmarks-guide.md).

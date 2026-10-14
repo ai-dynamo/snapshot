@@ -337,6 +337,34 @@ def test_parse_agent_timing_summary_matches_identity_and_nanosecond_timestamp() 
     assert summary.phases_seconds["criu_dump"] == pytest.approx(64.861411573)
     assert summary.phases_seconds["overlay_capture"] == pytest.approx(0.220658592)
     assert summary.started_to_complete_seconds == pytest.approx(70.345894804)
+    assert summary.nested_seconds == {}
+
+
+def test_parse_agent_timing_summary_keeps_capture_breakdown() -> None:
+    logs = (
+        "2026-09-09T07:48:42.938213483Z\tINFO\tCheckpoint timing summary\t"
+        '{"content":"wanted","checkpoint":{"duration":"7.289s","phases":'
+        '{"criu_dump":"5.197s","cuda_checkpoint":"1.665s"},'
+        '"cuda":{"lock":"100ms","copy":"1.5s","job_file":"65ms"},'
+        '"criu":{"freezing":"12ms","memdump":"400ms","memwrite":"4.5s",'
+        '"pages_written":100,"pages_written_bytes":409600,'
+        '"stats_error":"unread","image_growth":[{"offset":"200ms","bytes":1000}]}}}'
+    )
+
+    summary = benchmark.parse_agent_timing_summary(
+        logs,
+        message="Checkpoint timing summary",
+        field="checkpoint",
+        matches={"content": "wanted"},
+    )
+
+    assert summary.nested_seconds["cuda.lock"] == pytest.approx(0.1)
+    assert summary.nested_seconds["cuda.copy"] == pytest.approx(1.5)
+    assert summary.nested_seconds["criu.memwrite"] == pytest.approx(4.5)
+    assert summary.nested_seconds["criu.memdump"] == pytest.approx(0.4)
+    assert "criu.pages_written" not in summary.nested_seconds
+    assert "criu.stats_error" not in summary.nested_seconds
+    assert "criu.image_growth" not in summary.nested_seconds
 
 
 def test_parse_image_pull_events_reports_pull_and_cache_hit() -> None:
