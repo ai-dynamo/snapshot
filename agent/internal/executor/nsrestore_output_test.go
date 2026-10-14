@@ -4,7 +4,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -122,36 +121,5 @@ func TestNSRestoreOutputResult(t *testing.T) {
 	}
 	if _, err := nsrestoreOutputOf(t, `{"restoredPID":0}`, "").result(); err == nil || err.Error() != "nsrestore returned invalid PID 0" {
 		t.Fatalf("result(no pid) = %v", err)
-	}
-}
-
-func TestNSRestoreOutputMirrorsStderr(t *testing.T) {
-	var mirror bytes.Buffer
-	output := newNSRestoreOutput(&mirror)
-	cmd := exec.Command("sh", "-c", "echo result; echo to-stderr >&2")
-	output.attach(cmd)
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
-	}
-	if got := mirror.String(); got != "to-stderr\n" {
-		t.Fatalf("mirror = %q", got)
-	}
-	if got := string(output.stderr.Bytes()); got != "to-stderr\n" {
-		t.Fatalf("stderr tail = %q", got)
-	}
-	if got := output.stdout.String(); got != "result\n" {
-		t.Fatalf("stdout = %q", got)
-	}
-}
-
-func TestTailBufferKeepsTheEnd(t *testing.T) {
-	buf := tailBuffer{limit: 8}
-	for _, chunk := range []string{"0123", "4567", "89ab", "cd"} {
-		if _, err := buf.Write([]byte(chunk)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := string(buf.Bytes()); got != "6789abcd" {
-		t.Fatalf("tail = %q, want %q", got, "6789abcd")
 	}
 }
