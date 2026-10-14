@@ -4,7 +4,11 @@
 //! Real-driver tests of the cuinterpose frontend, core, and coordinator. Each test runs
 //! its scenarios in fresh processes, as `cuinterpose_gpu_tests::process` describes.
 
+mod access_replay;
+mod allocation_tracking;
+mod context_teardown;
 mod control_replies;
 mod control_socket;
 mod core_registration;
+mod foreign_imports;
 mod symbol_resolution;

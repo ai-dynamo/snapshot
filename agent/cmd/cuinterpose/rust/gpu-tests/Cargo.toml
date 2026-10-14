@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
-cudarc.workspace = true
+cudarc = { workspace = true, features = ["runtime"] }
 cuinterpose-abi.workspace = true
 cuinterpose-protocol.workspace = true
 libc.workspace = true
