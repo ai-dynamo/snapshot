@@ -3,7 +3,7 @@
 
 """Run the canonical failure case against observations without a cluster."""
 
-import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +13,7 @@ import test_snapshot_lifecycle as cases
 
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle as snap
+from snapshot_e2e.restore_failure_qualification import PROBE_TEST, verify_junit
 
 PROBE_ENV = "SNAPSHOT_E2E_RESTORE_FAILURE_PROBE"
 
@@ -107,30 +108,83 @@ import sys
 sys.path.insert(0, {tests_dir!r})
 from test_cpu_restore_failure_probe import exercise_case
 
-def test_real_restore_failure_probe(monkeypatch):
+def {PROBE_TEST}(monkeypatch):
     exercise_case(monkeypatch, probe='true')
 """)
-    result = pytester.runpytest_inprocess("-p", "no:cacheprovider", "-q")
+    report = pytester.path / "cpu-junit.xml"
+    result = pytester.runpytest_inprocess(
+        "-p", "no:cacheprovider", "-q", f"--junitxml={report}"
+    )
     result.assert_outcomes(failed=1)
     assert result.ret == pytest.ExitCode.TESTS_FAILED
     result.stdout.fnmatch_lines(["*unexpected terminal condition*RestoreFailed*"])
+    # The nested test uses a unique module name to avoid pytest's import-file
+    # collision with the real lifecycle test loaded by this process.
+    root = ET.parse(report)
+    case = root.find(".//testcase")
+    assert case is not None
+    case.set("classname", "test_snapshot_lifecycle")
+    case.set("name", PROBE_TEST)
+    root.write(report)
+    verify_junit(report, "failure")
 
 
-def test_workflow_rejects_a_green_manual_probe():
+def test_junit_rejects_unrelated_failures_and_missing_evidence(tmp_path):
+    report = tmp_path / "cpu-junit.xml"
+    root = ET.Element("testsuites")
+    suite = ET.SubElement(root, "testsuite")
+    probe = ET.SubElement(suite, "testcase", classname="test_snapshot_lifecycle", name=PROBE_TEST)
+    expected = (
+        "AssertionError: restore reached unexpected terminal condition for "
+        "snapshot-e2e/restore-pod: RestoreFailed: damaged inventory"
+    )
+    ET.SubElement(probe, "failure", message=expected)
+    ET.ElementTree(root).write(report)
+
+    verify_junit(report, "failure")
+    with pytest.raises(ValueError, match="outcome was 'success'"):
+        verify_junit(report, "success")
+
+    ET.SubElement(suite, "testcase", classname="test_snapshot_lifecycle", name="other_test")
+    ET.SubElement(suite[-1], "failure", message="AssertionError: unrelated failure")
+    ET.ElementTree(root).write(report)
+    with pytest.raises(ValueError, match="only the damaged-checkpoint case may fail"):
+        verify_junit(report, "failure")
+    suite.remove(suite[-1])
+
+    failure = suite[0].find("failure")
+    assert failure is not None
+    failure.set("message", "TimeoutError: restore never reached a terminal condition")
+    failure.text = expected  # A traceback mentioning the phrase is insufficient.
+    ET.ElementTree(root).write(report)
+    with pytest.raises(ValueError, match="did not fail on terminal RestoreFailed"):
+        verify_junit(report, "failure")
+    failure.set("message", expected)
+    ET.SubElement(suite, "testcase", classname="test_snapshot_lifecycle", name="other_test")
+    ET.SubElement(suite[-1], "error", message="fixture setup failed")
+    ET.ElementTree(root).write(report)
+    with pytest.raises(ValueError, match="only the damaged-checkpoint case may fail"):
+        verify_junit(report, "failure")
+    report.unlink()
+    with pytest.raises(ValueError, match="missing or invalid"):
+        verify_junit(report, "failure")
+
+
+def test_workflow_checks_manual_probe_junit_after_pytest_failure():
     workflow = yaml.safe_load((Path(__file__).parents[2] / ".github/workflows/e2e-cpu.yaml").read_text())
     steps = workflow["jobs"]["cpu-e2e"]["steps"]
     names = [step["name"] for step in steps]
-    guard = steps[names.index("Reject an unexpectedly successful restore-failure probe")]
-    assert "success()" in guard["if"]
+    cpu_tests = steps[names.index("Run CPU checkpoint/restore tests")]
+    guard = steps[names.index("Verify restore-failure negative control")]
+    assert cpu_tests["id"] == "cpu_tests"
+    assert '--junitxml="${RUNNER_TEMP}/cpu-e2e-junit.xml"' in cpu_tests["run"]
+    assert "!cancelled()" in guard["if"]
     assert "github.event_name == 'workflow_dispatch'" in guard["if"]
     assert "inputs.qualify_restore_failure" in guard["if"]
-    assert names.index("Run CPU checkpoint/restore tests") < names.index(guard["name"]) < names.index("Collect diagnostics")
-    # Execute the exact workflow shell: unexpected pytest success must become
-    # a blocking, explicitly ineffective-injection verdict with diagnostics.
-    result = subprocess.run(["bash", "-e", "-c", guard["run"]], capture_output=True, text=True)
-    assert result.returncode == 1
-    assert "::error::" in result.stdout
-    assert "did not prove a restore failure" in result.stdout
+    assert guard["env"]["CPU_PYTEST_OUTCOME"] == "${{ steps.cpu_tests.outcome }}"
+    assert "snapshot_e2e.restore_failure_qualification" in guard["run"]
+    assert names.index(cpu_tests["name"]) < names.index(guard["name"]) < names.index("Collect diagnostics")
+    assert 'cp "${RUNNER_TEMP}/cpu-e2e-junit.xml"' in steps[names.index("Collect diagnostics")]["run"]
     assert steps[-1]["name"] == "Delete k3d cluster"
     assert steps[-1]["if"] == "${{ always() }}"
 

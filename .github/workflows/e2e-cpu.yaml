@@ -293,6 +293,7 @@ jobs:
         run: uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
       - name: Run CPU checkpoint/restore tests
+        id: cpu_tests
         timeout-minutes: 25
         env:
           # Dispatch-only negative control; normal PR runs disable it.
@@ -310,13 +311,16 @@ jobs:
           # Recorded even when the suite fails, so a slow run is still
           # measurable; the trap keeps the pipeline's exit status.
           trap 'hack/ci-phase.sh "Run CPU tests" "${start}"' EXIT
-          uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
+          uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s \
+            --junitxml="${RUNNER_TEMP}/cpu-e2e-junit.xml"
 
-      - name: Reject an unexpectedly successful restore-failure probe
-        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.qualify_restore_failure }}
+      - name: Verify restore-failure negative control
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.qualify_restore_failure && steps.cpu_tests.outcome != 'skipped' }}
+        env:
+          CPU_PYTEST_OUTCOME: ${{ steps.cpu_tests.outcome }}
         run: |
-          echo "::error::The restore-failure probe passed; checkpoint corruption did not prove a restore failure."
-          exit 1
+          uv run --locked --project e2e python -m snapshot_e2e.restore_failure_qualification \
+            "${RUNNER_TEMP}/cpu-e2e-junit.xml" --pytest-outcome "${CPU_PYTEST_OUTCOME}"
 
       # Last, and unconditional: the phases worth comparing are exactly the
       # ones a failing run also pays for.
@@ -343,6 +347,9 @@ jobs:
           set +e
           out="${RUNNER_TEMP}/diagnostics"
           mkdir -p "${out}"
+          if [ -f "${RUNNER_TEMP}/cpu-e2e-junit.xml" ]; then
+            cp "${RUNNER_TEMP}/cpu-e2e-junit.xml" "${out}/cpu-e2e-junit.xml"
+          fi
           kubectl get pods -A -o wide >"${out}/pods.txt"
           kubectl describe pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" >"${out}/pods-describe.txt"
           kubectl get events -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
