@@ -38,6 +38,7 @@ func main() {
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	gpuMountAliases := flag.String("gpu-mount-aliases", "{}", "Checkpoint path to destination GPU path JSON")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
+	lsmProfile := flag.String("lsm-profile", "", "CRIU lsm_profile for the restored processes")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
 	flag.Parse()
@@ -54,6 +55,7 @@ func main() {
 		CheckpointPath: *checkpointPath,
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,
+		LSMProfile:     *lsmProfile,
 		TargetPodIP:    *targetPodIP,
 		BundleDir:      *bundleDir,
 	}

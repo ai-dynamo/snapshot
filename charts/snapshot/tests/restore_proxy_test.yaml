@@ -40,3 +40,20 @@ tests:
           content:
             name: SNAPSHOT_NRI_HOST_NAMESPACE
             value: snapshot-e2e-vc
+
+  # CRIU finds the node's LSM through securityfs, to record AppArmor labels.
+  - it: mounts the node's securityfs read-only
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: securityfs
+            mountPath: /sys/kernel/security
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: securityfs
+            hostPath:
+              path: /sys/kernel/security
+              type: Directory

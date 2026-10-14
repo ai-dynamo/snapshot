@@ -37,11 +37,14 @@ var physicalNVIDIADeviceName = regexp.MustCompile(`^nvidia[0-9]+$`)
 
 // ExecuteRestore opens the image/work directory FDs, configures inherited
 // resources, and calls go-criu Restore. Returns the namespace-relative PID.
+// postRestore, if set, runs once every process is restored and before any of
+// them resumes; an error from it aborts the restore.
 func ExecuteRestore(
 	criuOpts *criurpc.CriuOpts,
 	m *types.CheckpointManifest,
 	checkpointPath string,
 	bundleDir string,
+	postRestore func() error,
 	log logr.Logger,
 ) (int32, func() error, time.Duration, time.Duration, error) {
 	settings := m.CRIUDump.CRIU
@@ -121,7 +124,7 @@ func ExecuteRestore(
 
 	inheritedFiles = registerInheritFDs(c, m.K8s.StdioFDs, log)
 
-	notify := &restoreNotify{log: log}
+	notify := &restoreNotify{log: log, postRestore: postRestore}
 	log.V(1).Info("Executing go-criu Restore call")
 	restoreStart := time.Now()
 	if err := c.Restore(criuOpts, notify); err != nil {
@@ -145,7 +148,7 @@ func ExecuteRestore(
 
 // BuildRestoreOpts assembles CriuOpts for a CRIU restore from the checkpoint manifest.
 // ImagesDirFd and WorkDirFd are left unset — ExecuteRestore opens them at restore time.
-func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroupRoot string, log logr.Logger) (*criurpc.CriuOpts, error) {
+func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath, cgroupRoot, lsmProfile string, log logr.Logger) (*criurpc.CriuOpts, error) {
 	extMounts, err := buildRestoreExtMounts(m)
 	if err != nil {
 		return nil, err
@@ -184,6 +187,12 @@ func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroup
 		criuOpts.CgRoot = []*criurpc.CgroupRoot{
 			{Path: proto.String(cgroupRoot)},
 		}
+	}
+
+	// The restore target's own security label. Signals between the
+	// container's processes depend on it too.
+	if lsmProfile != "" {
+		criuOpts.LsmProfile = proto.String(lsmProfile)
 	}
 
 	criuConfPath := filepath.Join(checkpointPath, criuConfFilename)
@@ -578,6 +587,7 @@ func closeFiles(files []*os.File) {
 type restoreNotify struct {
 	criulib.NoNotify
 	restoredPID int32
+	postRestore func() error
 	log         logr.Logger
 }
 
@@ -586,8 +596,13 @@ func (n *restoreNotify) PreRestore() error {
 	return nil
 }
 
+// PostRestore runs after CRIU restored every process and before it resumes
+// them: the credentials and LSM labels are applied, then the processes run.
 func (n *restoreNotify) PostRestore(pid int32) error {
 	n.restoredPID = pid
 	n.log.Info("CRIU post-restore: process restored", "pid", pid)
+	if n.postRestore != nil {
+		return n.postRestore()
+	}
 	return nil
 }

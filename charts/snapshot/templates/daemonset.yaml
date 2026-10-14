@@ -159,6 +159,12 @@ spec:
             # proxy PID 1 in restore containers.
             - name: nri
               mountPath: /var/run/nri
+            # The node's securityfs, read-only. CRIU looks here to find the
+            # node's LSM: with it, a checkpoint records each process's
+            # AppArmor label, and the restore gives it back.
+            - name: securityfs
+              mountPath: /sys/kernel/security
+              readOnly: true
             # Per-container storage: agent reads overlay upperdirs from here
             # to capture the rootfs diff at checkpoint time.
             - name: runtime-storage
@@ -265,6 +271,12 @@ spec:
           hostPath:
             path: /var/run/nri
             type: DirectoryOrCreate
+        # Securityfs. sysfs always has the directory; where securityfs is not
+        # mounted it is empty, and CRIU records no labels.
+        - name: securityfs
+          hostPath:
+            path: /sys/kernel/security
+            type: Directory
         # Per-container storage (overlay upperdirs for rootfs-diff capture).
         - name: runtime-storage
           hostPath:
