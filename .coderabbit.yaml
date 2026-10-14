@@ -78,7 +78,8 @@ reviews:
 knowledge_base:
   code_guidelines:
     filePatterns:
-      - ".ai/**/*.md"
+      - files: ".ai/**/*.md"
+        applyTo: "**/*"
 
 chat:
   auto_reply: true

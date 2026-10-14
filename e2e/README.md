@@ -77,6 +77,13 @@ SNAPSHOT_E2E_KEEP_CLUSTER=true make cpu-e2e      # leave the cluster up to debug
 SNAPSHOT_E2E_SKIP_BUILD=true bash hack/cpu-e2e.sh -m cpu -k restores
 ```
 
+`SNAPSHOT_E2E_SKIP_BUILD` reuses the images a previous run pushed to the local
+registry, so it needs a run that left that registry behind: the
+`SNAPSHOT_E2E_KEEP_CLUSTER=true` line above, since a plain `make cpu-e2e`
+deletes it along with the cluster. A skip-build run leaves it up in turn, so you
+can iterate on one set of images; `k3d registry delete k3d-snapshot-registry`
+discards them.
+
 The agent is linux/amd64 only, so this does not work on an Apple Silicon Mac.
 
 When running the stages separately against the k3d helper cluster, also export

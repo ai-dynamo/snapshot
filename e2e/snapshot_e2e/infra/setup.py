@@ -379,10 +379,21 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
         timeout=args.helm_timeout,
         chart=args.chart_ref,
         chart_version=args.chart_version,
-        helm_overrides=parse_helm_overrides(
-            args.helm_set, os.environ.get("SNAPSHOT_E2E_HELM_SET")
-        ),
+        helm_overrides=snapshot_helm_overrides(args, context),
     )
+
+
+def snapshot_helm_overrides(
+    args: argparse.Namespace, context: SetupContext
+) -> list[str]:
+    overrides = parse_helm_overrides(
+        args.helm_set, os.environ.get("SNAPSHOT_E2E_HELM_SET")
+    )
+    if args.mode == "vcluster":
+        # Other clusters may share the vCluster's nodes: restore only this
+        # vCluster's Pods. First, so the user's overrides still win.
+        overrides.insert(0, f"daemonset.nriHostNamespace={context.host_namespace}")
+    return overrides
 
 
 def setup_snapshot_readiness(args: argparse.Namespace, context: SetupContext) -> None:

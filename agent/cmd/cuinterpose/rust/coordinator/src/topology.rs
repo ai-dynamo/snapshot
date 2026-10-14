@@ -14,9 +14,17 @@ pub struct AllocationSummary {
     pub reference: AllocationReference,
     pub size: u64,
     pub shared: bool,
+    /// Any holder granted another GPU access.
+    pub peer_access_granted: bool,
     pub owner_pid: NamespacePid,
     pub holders: BTreeSet<NamespacePid>,
     location: MemoryLocation,
+}
+
+impl AllocationSummary {
+    pub fn uses_host_carrier(&self) -> bool {
+        self.shared || self.peer_access_granted
+    }
 }
 struct Multicast {
     reference: AllocationReference,
@@ -47,6 +55,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                 Record::Allocation {
                     allocation,
                     shared,
+                    peer_access_granted,
                     size,
                     allocation_type,
                     handle_types,
@@ -71,12 +80,22 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         *size > 0,
                         "participant {namespace_pid}: invalid allocation extent for {allocation:?}"
                     );
+                    // Creators may be nonexportable. CUDA reports no handle types on imports.
+                    let known_handle_types = *handle_types == 0
+                        || *handle_types
+                            == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+                                .0;
                     if allocation.creator_pid == *namespace_pid {
-                        ensure!(*handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
-                            "participant {namespace_pid}: invalid allocation creator {allocation:?}: handle_types={handle_types}");
+                        // Only exportable backing can be shared.
+                        ensure!(
+                            known_handle_types && (*handle_types != 0 || !*shared),
+                            "participant {namespace_pid}: invalid allocation creator {allocation:?}: handle_types={handle_types}"
+                        );
                     } else {
-                        ensure!(*shared && (*handle_types == 0 || *handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0),
-                            "participant {namespace_pid}: invalid imported allocation {allocation:?}");
+                        ensure!(
+                            *shared && known_handle_types,
+                            "participant {namespace_pid}: invalid imported allocation {allocation:?}"
+                        );
                     }
                     let known =
                         allocations
@@ -85,6 +104,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                                 reference: *allocation,
                                 size: *size,
                                 shared: *shared,
+                                peer_access_granted: false,
                                 owner_pid: *namespace_pid,
                                 holders: BTreeSet::new(),
                                 location: *location,
@@ -100,6 +120,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                                 || known.location.id == location.id),
                         "participant {namespace_pid}: inconsistent allocation metadata for {allocation:?}"
                     );
+                    // Each holder grants peer access through its own mappings.
+                    known.peer_access_granted |= *peer_access_granted;
                     ensure!(
                         known.holders.insert(*namespace_pid),
                         "participant {namespace_pid}: duplicate allocation record for {allocation:?}"
@@ -401,6 +423,7 @@ mod tests {
                 allocation,
                 size: 4096,
                 shared: true,
+                peer_access_granted: false,
                 allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32,
                 handle_types: CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
                 location: MemoryLocation {
@@ -421,6 +444,44 @@ mod tests {
                 assert_eq!(summary.len(), 1);
                 assert_eq!(summary[0].reference, allocation);
             }
+        }
+    }
+
+    #[test]
+    fn creators_may_be_nonexportable() {
+        let allocation = AllocationReference {
+            creator_pid: 1,
+            id: [1; 16],
+        };
+        let record = |handle_types, shared| Record::Allocation {
+            allocation,
+            size: 4096,
+            shared,
+            peer_access_granted: true,
+            allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32,
+            handle_types,
+            location: MemoryLocation {
+                location_type: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE as u32,
+                id: 0,
+            },
+            virtual_allocation_handle_count: 1,
+        };
+        for handle_types in [
+            0,
+            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
+        ] {
+            let summary =
+                validate(&BTreeMap::from([(1, vec![record(handle_types, false)])])).unwrap();
+            assert!(summary[0].uses_host_carrier());
+        }
+        for (handle_types, shared) in [
+            (0, true),
+            (
+                CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0,
+                false,
+            ),
+        ] {
+            assert!(validate(&BTreeMap::from([(1, vec![record(handle_types, shared)])])).is_err());
         }
     }
 }

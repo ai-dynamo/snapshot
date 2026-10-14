@@ -53,8 +53,6 @@ ValidateDirectory(int fd)
     throw std::system_error(errno, std::generic_category(), "stat GPU directory");
   }
   Validate(S_ISDIR(info.st_mode), "GPU artifact path must be a directory");
-  Validate(!(info.st_mode & (S_IWGRP | S_IWOTH)),
-           "GPU directory must not be writable by group or others");
 }
 
 struct PrimaryContext {

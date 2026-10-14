@@ -278,7 +278,11 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	direct := req.PageBrokerRestoreMode != "staged"
 	var staged string
 	preparationAttempted = true
-	if direct {
+	if usePageBrokerGPU && direct {
+		gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
+	} else if usePageBrokerGPU {
+		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
+	} else if direct {
 		err = broker.DirectRestore(ctx, transactionID, artifactPath)
 	} else {
 		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
@@ -287,12 +291,6 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
 		return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
-	}
-	if usePageBrokerGPU {
-		gpu, err = broker.OpenCustomStorageExecution(transactionID, gpuContext)
-		if err != nil {
-			return RestoreResult{}, err
-		}
 	}
 	mountStart := time.Now()
 	sourceMount, containerCheckpointPath, err := mountRestoreSource(ctx, mounts, bundleMount, direct, artifactPath, staged)
@@ -655,20 +653,25 @@ func addCustomStorageFiles(ctx context.Context, cmd *exec.Cmd, execution *pagebr
 		_ = cancelWrite.Close()
 		return nil
 	}
-	socketDirectoryFD := firstExtraFileDescriptor + len(cmd.ExtraFiles)
-	hostProcFD := socketDirectoryFD + 1
-	socketFD := socketDirectoryFD + 2
-	cancelFD := socketDirectoryFD + 3
+	inherited := []struct {
+		flag string
+		file *os.File
+	}{
+		{"--pagebroker-socket-directory-fd", execution.SocketDirectory},
+		{"--host-proc-fd", hostProc},
+		{"--pagebroker-execution-fd", execution.Socket},
+		{"--cancel-fd", cancelRead},
+		{"--pagebroker-process-fd", execution.BrokerProcess},
+	}
+	for _, item := range inherited {
+		cmd.Args = append(cmd.Args, item.flag, strconv.Itoa(firstExtraFileDescriptor+len(cmd.ExtraFiles)))
+		cmd.ExtraFiles = append(cmd.ExtraFiles, item.file)
+	}
 	cmd.Args = append(cmd.Args,
 		"--pagebroker-transaction", execution.TransactionID,
-		"--pagebroker-socket-directory-fd", strconv.Itoa(socketDirectoryFD),
-		"--host-proc-fd", strconv.Itoa(hostProcFD),
-		"--pagebroker-execution-fd", strconv.Itoa(socketFD),
-		"--cancel-fd", strconv.Itoa(cancelFD),
 		"--pagebroker-socket-name", execution.SocketName,
 		"--gpu-context", string(gpuContext),
 	)
-	cmd.ExtraFiles = append(cmd.ExtraFiles, execution.SocketDirectory, hostProc, execution.Socket, cancelRead)
 	return func() {
 		stopCancel()
 		cancelRead.Close()

@@ -11,11 +11,16 @@
 # stage's glibc, which always satisfies the loader, so a bundle shipped without
 # its libc/ builds green there and fails only at restore.
 #
-# Usage: verify-bundle-glibc.sh <agent-image> [placeholder-image]
+# Usage: verify-bundle-glibc.sh <agent-image-or-bundle-dir> [placeholder-image]
+#
+# A directory is the agent Dockerfile's bundle-export stage, already extracted.
+# An image is read with `docker create`, which needs it in the local daemon --
+# fine locally, but CI pushes the agent image to a registry rather than loading
+# it, so CI passes the directory.
 
 set -eu
 
-AGENT_IMAGE=${1:?usage: verify-bundle-glibc.sh <agent-image> [placeholder-image]}
+BUNDLE_SRC=${1:?usage: verify-bundle-glibc.sh <agent-image-or-bundle-dir> [placeholder-image]}
 # Ubuntu 22.04 is glibc 2.35, below the GLIBC_2.38 the agent's tar needs.
 PLACEHOLDER=${2:-ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401}
 
@@ -26,8 +31,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cid=$(docker create "$AGENT_IMAGE")
-docker cp "$cid:/snapshot-binaries" "$workdir/bundle"
+if [ -d "$BUNDLE_SRC" ]; then
+    cp -a "$BUNDLE_SRC" "$workdir/bundle"
+else
+    cid=$(docker create "$BUNDLE_SRC")
+    docker cp "$cid:/snapshot-binaries" "$workdir/bundle"
+fi
+
+# Whichever way it arrived, an empty bundle must not read as a clean pass.
+[ -e "$workdir/bundle/tar" ] || {
+    echo "no bundled tar under $BUNDLE_SRC" >&2
+    exit 1
+}
 
 # The assertions are on what the restore produces, not on the argv: the flags
 # below mirror runtime.ApplyRootfsDiff, and a capability or xattr lost here

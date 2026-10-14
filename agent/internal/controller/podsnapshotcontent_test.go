@@ -234,14 +234,7 @@ func TestSingleTargetContainer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			content := &snapshotv1alpha1.PodSnapshotContent{
-				Spec: snapshotv1alpha1.PodSnapshotContentSpec{
-					Source: snapshotv1alpha1.PodSnapshotContentSource{
-						PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", Containers: tc.containers},
-					},
-				},
-			}
-			got, err := singleTargetContainer(content)
+			got, err := singleTargetContainer(tc.containers)
 			if tc.wantErr {
 				require.Error(t, err)
 				return

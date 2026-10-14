@@ -49,12 +49,12 @@ type CheckpointParams struct {
 	CuInterposeRequested bool
 }
 
-// singleTargetContainer returns the one capture-target container from the work order. The CRD
-// enforces exactly one (PodReference.Containers MinItems=1/MaxItems=1) and the runtime dumps a
-// single container this phase; the count is asserted here so a violated invariant becomes a
-// terminal InvalidTargetContainer status rather than an out-of-bounds panic in the node agent.
-func singleTargetContainer(content *snapshotv1alpha1.PodSnapshotContent) (string, error) {
-	containers := content.Spec.Source.PodRef.Containers
+// singleTargetContainer returns the one capture-target container a source podRef names, from a
+// PodSnapshot or its PodSnapshotContent. The CRD enforces exactly one (PodReference.Containers
+// MinItems=1/MaxItems=1) and the runtime dumps a single container this phase; the count is
+// asserted here so a violated invariant becomes a terminal InvalidTargetContainer status rather
+// than an out-of-bounds panic in the node agent.
+func singleTargetContainer(containers []string) (string, error) {
 	if len(containers) != 1 {
 		return "", fmt.Errorf("source podRef must reference exactly one container, got %d", len(containers))
 	}
@@ -99,7 +99,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return w.setSnapshotContentFailed(ctx, content, "MissingContentUID",
 			fmt.Errorf("PodSnapshotContent %q has no UID", content.Name))
 	}
-	containerName, err := singleTargetContainer(content)
+	containerName, err := singleTargetContainer(content.Spec.Source.PodRef.Containers)
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidTargetContainer", err)
 	}

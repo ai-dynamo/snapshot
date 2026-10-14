@@ -4,6 +4,12 @@ Snapshot keeps every checkpoint in a single shared volume that all node agents
 mount. Each agent's PageBroker sidecar publishes checkpoint artifacts there and
 reads them back for restore; workload pods never mount checkpoint storage.
 
+The checkpoint store must prevent unauthorized modification of artifacts through
+filesystem permissions or the storage server's access controls. PageBroker requests
+owner-only permissions for new GPU files and directories, but does not reject
+directory modes that allow group or other users to write. Network filesystems such
+as SMB can report these modes from mount settings rather than per-directory permissions.
+
 ## The checkpoint volume
 
 Today the checkpoint store is a Kubernetes PersistentVolumeClaim (PVC). Because
