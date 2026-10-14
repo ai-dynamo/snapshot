@@ -61,3 +61,4 @@ the agent.
 | `multicast_restore` | Multicast bindings, including nonzero offsets, through a native checkpoint |
 | `multicast_bind_ordering` | Multicast bind and unbind ordering |
 | `multicast_sharing` | A multicast object shared by processes that each bind one GPU |
+| `peer_carriers` | Unexported allocations that another GPU can access |

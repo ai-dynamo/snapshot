@@ -781,3 +781,19 @@ fn restore_fails_when_restored_records_differ_from_checkpoint() {
         harness.restore(&checkpoint, [0, 0], &[restored, vec![]], &[&error]);
     }
 }
+
+// Peer carriers (#550).
+
+#[test]
+fn unexported_allocation_with_peer_access_is_saved_to_host_carrier() {
+    let harness = Harness::new();
+    // An unexported allocation that another GPU can access has one holder.
+    let accessed = with!(
+        allocation(),
+        Allocation.peer_access_granted = true,
+        Allocation.handle_types = 0
+    );
+    let participants = [vec![accessed, mapping()], vec![]];
+    harness.prepare(&participants, &[vec![owner(1, A)], vec![]], [4096, 0]);
+    harness.restore(&participants, [4096, 0], &participants, &[]);
+}
