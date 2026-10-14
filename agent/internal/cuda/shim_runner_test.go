@@ -15,8 +15,8 @@ import (
 )
 
 func TestHelperActionTimeouts(t *testing.T) {
-	if got := helperActionTimeout(actionLock); got != 10*time.Second {
-		t.Fatalf("lock timeout = %s, want 10s", got)
+	if got := helperActionTimeout(actionLock); got != 15*time.Second {
+		t.Fatalf("outer lock deadline = %s, want 15s", got)
 	}
 	if got := helperActionTimeout(actionCheckpoint); got != 10*time.Minute {
 		t.Fatalf("checkpoint timeout = %s, want 10m", got)
@@ -95,10 +95,14 @@ func TestRunActionWithJobFilePassesDriverTimeoutToLock(t *testing.T) {
 }
 
 func TestCheckpointHelperCancellationKillsProcessGroup(t *testing.T) {
-	helper := filepath.Join(t.TempDir(), "cuda-checkpoint-helper")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nsleep 30 &\nwait\n"), 0700); err != nil {
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "cuda-checkpoint-helper")
+	marker := filepath.Join(dir, "surviving-child")
+	script := "#!/bin/sh\n(sleep 0.5; printf x > \"$MARKER_FILE\") &\nwait\n"
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("MARKER_FILE", marker)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	started := time.Now()
@@ -108,5 +112,8 @@ func TestCheckpointHelperCancellationKillsProcessGroup(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > helperWaitDelay+time.Second {
 		t.Fatalf("canceled helper took %s", elapsed)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("descendant survived process-group cancellation; marker stat error = %v", err)
 	}
 }

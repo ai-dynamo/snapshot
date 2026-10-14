@@ -20,6 +20,7 @@ import (
 
 const (
 	cudaLockTimeout       = 10 * time.Second
+	cudaLockKillMargin    = 5 * time.Second
 	cudaCheckpointTimeout = 10 * time.Minute
 	libcudaMapWait        = 100 * time.Millisecond
 )
@@ -27,7 +28,7 @@ const (
 func helperActionTimeout(action string) time.Duration {
 	switch action {
 	case actionLock:
-		return cudaLockTimeout
+		return cudaLockTimeout + cudaLockKillMargin
 	case actionCheckpoint:
 		return cudaCheckpointTimeout
 	default:
