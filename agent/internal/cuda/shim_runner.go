@@ -18,11 +18,14 @@ import (
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
 
+var (
+	cudaLockTimeout    = 10 * time.Second
+	cudaLockKillMargin = 5 * time.Second
+)
+
 const (
-	cudaLockTimeout       = 10 * time.Second
-	cudaLockKillMargin    = 5 * time.Second
 	cudaCheckpointTimeout = 10 * time.Minute
-	libcudaMapWait        = 100 * time.Millisecond
+	libcudaMapWait        = 2 * time.Second
 )
 
 func helperActionTimeout(action string) time.Duration {

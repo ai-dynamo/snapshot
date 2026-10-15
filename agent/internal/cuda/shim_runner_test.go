@@ -26,6 +26,40 @@ func TestHelperActionTimeouts(t *testing.T) {
 	}
 }
 
+func TestLockThatNeverReturnsIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	trace := filepath.Join(dir, "args")
+	helper := filepath.Join(dir, "cuda-checkpoint-helper")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TRACE_FILE\"\nsleep 300 &\nwait\n"
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TRACE_FILE", trace)
+
+	originalLockTimeout, originalKillMargin := cudaLockTimeout, cudaLockKillMargin
+	cudaLockTimeout, cudaLockKillMargin = 200*time.Millisecond, 100*time.Millisecond
+	t.Cleanup(func() {
+		cudaLockTimeout, cudaLockKillMargin = originalLockTimeout, originalKillMargin
+	})
+
+	started := time.Now()
+	err := runCheckpointHelper(context.Background(), 11, actionLock, helper,
+		[]string{"--action", actionLock, "--pid", "11", "--timeout", "200"}, true, logr.Discard())
+	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("runCheckpointHelper() error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > helperWaitDelay+time.Second {
+		t.Fatalf("lock helper took %s after its bounded deadline", elapsed)
+	}
+	args, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--timeout\n200") {
+		t.Fatalf("helper args = %q, want the bounded driver lock timeout", args)
+	}
+}
+
 func TestReadMappedLibcuda(t *testing.T) {
 	procRoot := t.TempDir()
 	mapsDir := filepath.Join(procRoot, "456")
@@ -97,13 +131,15 @@ func TestRunActionWithJobFilePassesDriverTimeoutToLock(t *testing.T) {
 func TestCheckpointHelperCancellationKillsProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	helper := filepath.Join(dir, "cuda-checkpoint-helper")
+	childStarted := filepath.Join(dir, "child-started")
 	marker := filepath.Join(dir, "surviving-child")
-	script := "#!/bin/sh\n(sleep 0.5; printf x > \"$MARKER_FILE\") &\nwait\n"
+	script := "#!/bin/sh\n(printf x > \"$STARTED_FILE\"; sleep 0.5; printf x > \"$MARKER_FILE\") &\nwait\n"
 	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("STARTED_FILE", childStarted)
 	t.Setenv("MARKER_FILE", marker)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	started := time.Now()
 	err := runCheckpointHelper(ctx, 42, actionCheckpoint, helper, []string{"--action", actionCheckpoint}, true, logr.Discard())
@@ -113,6 +149,21 @@ func TestCheckpointHelperCancellationKillsProcessGroup(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > helperWaitDelay+time.Second {
 		t.Fatalf("canceled helper took %s", elapsed)
 	}
+	startDeadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(childStarted); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(startDeadline) {
+			t.Fatal("descendant did not start before cancellation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Wait beyond the descendant's delayed write deadline so this proves it was
+	// terminated, rather than merely not having written the marker yet.
+	time.Sleep(600 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("descendant survived process-group cancellation; marker stat error = %v", err)
 	}
