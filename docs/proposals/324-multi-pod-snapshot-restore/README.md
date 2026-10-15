@@ -217,31 +217,6 @@ flowchart TB
     end
 ```
 
-The controller admits a restore only after every agent passes preflight. An
-agent still decides whether its own member may execute and journals intent
-before destructive work. The brain's **barriers** wait for all required members;
-they cannot replace those local checks or publish release markers.
-
-A **step** is one group exchange or synchronization within an operation. Its
-`stepID` lets the brain match messages from the same step without understanding
-their contents. The next diagram shows one data exchange and local validation.
-The agent uses the result at the appropriate capture or restore gate, described
-in the flows below. Required group validation must finish before mutation.
-
-```mermaid
-sequenceDiagram
-    participant H as Local coordinator
-    participant A as Node agent
-    participant B as Brain service
-    H->>A: stepID and local payload
-    A->>B: Member contribution
-    Note right of B: Wait for all members
-    B-->>A: Complete group payloads
-    A-->>H: Forward unchanged
-    H->>H: Interpret records and validate
-    H->>A: Local validation result
-```
-
 #### Data and Storage
 
 Kubernetes stores operation bindings and results; artifacts store captured state;
@@ -350,10 +325,33 @@ change their membership, bindings, or deadline. Context delivery, authentication
 and credential management are implementation choices; [Security](#security)
 defines their required guarantees.
 
+A **step** is one group exchange or synchronization within an operation. Its
+`stepID` lets the brain match contributions without interpreting their contents.
+
 Messages identify the session, member, and step. Duplicate, stale, foreign, or
 out-of-order messages cannot satisfy a barrier. Runtime coordinators agree on
 step IDs and protocol versions; a conflicting step or failed member fails the
 session. Only an agent can send its member's `ReadyToPrepare` vote.
+
+**Example: exchanging runtime records between members.** During capture
+inspection, each coordinator shares its resource records through its agent. The
+brain waits for all members and returns the collected records for local
+validation. The diagram shows one member's path, repeated for other members
+with coordinators—not the full checkpoint or restore flow.
+
+```mermaid
+sequenceDiagram
+    participant H as Local coordinator
+    participant A as Node agent
+    participant B as Brain service
+    H->>A: stepID and local payload
+    A->>B: Member contribution
+    Note right of B: Wait for all members
+    B-->>A: Complete group payloads
+    A-->>H: Forward unchanged
+    H->>H: Interpret records and validate
+    H->>A: Local validation result
+```
 
 Every member takes part in group safety and completion barriers. A member without
 shims uses its agent's normal per-Pod path, with no cuInterpose coordinator or
