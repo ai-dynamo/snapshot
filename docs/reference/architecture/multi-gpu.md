@@ -719,7 +719,8 @@ A process can create one resource and import another, so the coordinator applies
 
 #### Kubernetes opt-in
 
-CuInterpose opt-in belongs to the source Pod, including when that Pod is captured through a PodSnapshot.
+CuInterpose opt-in is the multi-GPU annotation on the source Pod, including when that Pod is captured through a PodSnapshot.
+Its key is [`podcontract.CuInterposeAnnotation`](../../../api/podcontract/protocol.go), and the [usage guides](../../guides/README.md) show it in each multi-GPU manifest.
 
 - With SnapshotJob, set the annotation in `spec.podTemplate.metadata.annotations`.
 - With a Pod you deploy yourself, set it in that Pod's `metadata.annotations`.
@@ -727,16 +728,8 @@ CuInterpose opt-in belongs to the source Pod, including when that Pod is capture
 The annotation is ignored for CuInterpose activation when placed on `PodSnapshot.metadata.annotations`.
 It is not copied to the source Pod.
 
-```yaml
-metadata:
-  annotations:
-    nvidia.com/snapshot-multi-gpu: "enabled"
-```
-
 - `enabled` requests CuInterpose support.
   `disabled` or an absent annotation does not request it.
-- The release-candidate key `nvidia.com/cuda-shared-memory-support` is a deprecated alias.
-  It is read only when `nvidia.com/snapshot-multi-gpu` is absent.
 - Values are case-sensitive after trimming whitespace.
   SnapshotJob admission and the agent's ordinary-Pod validation reject other values.
 - Removing the annotation does not unload the shim from a running process.
