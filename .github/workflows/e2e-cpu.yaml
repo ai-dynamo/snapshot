@@ -329,11 +329,14 @@ jobs:
           # Recorded even when the suite fails, so a slow run is still
           # measurable; the trap keeps the pipeline's exit status.
           trap 'hack/ci-phase.sh "Run CPU tests" "${start}"' EXIT
+          rc=0
           uv run --locked --project e2e pytest e2e/tests -m "cpu and not serial" \
-            -n "${CPU_E2E_WORKERS}" -vv
-          # Then the tests that must be alone on the node, one at a time.
+            -n "${CPU_E2E_WORKERS}" -vv || rc=$?
+          # Then the tests that must be alone on the node, one at a time. They
+          # run even when the first pass fails, so a red run still reports them.
           SNAPSHOT_E2E_REQUIRED_TESTS= uv run --locked --project e2e pytest e2e/tests \
-            -m "cpu and serial" -vv -s
+            -m "cpu and serial" -vv -s || rc=$?
+          exit "${rc}"
 
       # Last, and unconditional: the phases worth comparing are exactly the
       # ones a failing run also pays for.
