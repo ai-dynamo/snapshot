@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# CuInterpose: checkpoint and restore of shared CUDA memory
+# Multi-GPU support: checkpoint and restore of shared CUDA memory
 
 <!-- toc -->
 - [Motivation](#motivation)
@@ -59,6 +59,9 @@ SPDX-License-Identifier: Apache-2.0
     - [Decoded state example](#decoded-state-example)
   - [Further reading](#further-reading)
 <!-- /toc -->
+
+This page is for contributors. It describes CuInterpose, the component behind Snapshot's multi-GPU support.
+To run a multi-GPU workload, follow the [usage guides](../../guides/README.md) instead.
 
 CuInterpose enables Snapshot to checkpoint CUDA memory shared by processes in one container and restore those processes together on a compatible node.
 It preserves each process's application pointers, the memory contents, and the sharing relationships between processes, so existing CUDA graphs can replay after restore without recapture.
@@ -727,11 +730,13 @@ It is not copied to the source Pod.
 ```yaml
 metadata:
   annotations:
-    nvidia.com/cuda-shared-memory-support: "enabled"
+    nvidia.com/snapshot-multi-gpu: "enabled"
 ```
 
 - `enabled` requests CuInterpose support.
   `disabled` or an absent annotation does not request it.
+- The release-candidate key `nvidia.com/cuda-shared-memory-support` is a deprecated alias.
+  It is read only when `nvidia.com/snapshot-multi-gpu` is absent.
 - Values are case-sensitive after trimming whitespace.
   SnapshotJob admission and the agent's ordinary-Pod validation reject other values.
 - Removing the annotation does not unload the shim from a running process.
@@ -942,7 +947,7 @@ CuInterpose adds no dedicated metrics.
 
 CuInterpose must observe allocation and sharing calls regardless of how the application reaches CUDA.
 Preloading wrappers covers ordinary calls to CUDA symbols, but an application can also obtain function pointers through `dlsym`, `cuGetProcAddress*`, or `cudaGetDriverEntryPoint*` and call those pointers directly.
-The [frontend](../../agent/cmd/cuinterpose/frontend/frontend.c) intercepts these lookup APIs so supported calls still reach the same wrappers.
+The [frontend](../../../agent/cmd/cuinterpose/frontend/frontend.c) intercepts these lookup APIs so supported calls still reach the same wrappers.
 
 #### Keeping backend symbols local
 
@@ -1134,7 +1139,7 @@ Separate `multicast`, `multicast_device`, and `multicast_mapping` records descri
 
 ### Further reading
 
-- [Building Snapshot from source](../development/build-from-source.md)
-- [Checkpointing with PodSnapshot and SnapshotJob](../guides/checkpoint.md)
-- [Workload contract](workload-contract.md)
-- [Restore Pod contract](restore-pod-contract.md)
+- [Building Snapshot from source](../../development/build-from-source.md)
+- [Checkpointing with PodSnapshot and SnapshotJob](../../guides/checkpoint.md)
+- [Workload contract](../workload-contract.md)
+- [Restore Pod contract](../restore-pod-contract.md)

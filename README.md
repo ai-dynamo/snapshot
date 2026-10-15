@@ -164,8 +164,7 @@ operations, indexed below.
 **Reference**
 
 - [API](docs/reference/api.md) — `PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, and the `restore-from` annotation.
-- [Architecture](docs/reference/architecture.md) — operator and node-agent design, and the checkpoint/restore internals.
-- [CuInterpose](docs/reference/cuinterpose.md) — architecture of shared CUDA memory checkpoint and restore.
+- [Architecture](docs/reference/architecture.md) — operator and node-agent design, the checkpoint/restore internals, and multi-GPU support.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
 - [Workload contract](docs/reference/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
 - [Restore Pod contract](docs/reference/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
