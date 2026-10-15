@@ -8,7 +8,7 @@ name, label, pin to a node, and delete individually, so the Deployment's Pod
 template is lifted into a Pod with the minimum of edits: test identity, the
 image under test, e2e scheduling, and — for the restore pod — the PodSnapshot
 to restore from. Everything that makes the Pod checkpointable or restorable
-(control volume, probes, seccomp, device mounts, standby env) stays exactly as
+(control volume, probes, seccomp, device mounts) stays exactly as
 the manifest wrote it, so a framework definition that would not work does not
 pass here.
 """

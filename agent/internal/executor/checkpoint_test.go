@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -46,6 +48,10 @@ func (checkpointPathRuntime) ResolveContainerByPod(context.Context, string, stri
 }
 
 func (checkpointPathRuntime) ResolveContainerImageID(context.Context, string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (checkpointPathRuntime) ResolveContainerPodUID(context.Context, string) (string, error) {
 	return "", errors.New("not implemented")
 }
 
@@ -175,7 +181,19 @@ func replyPageBrokerTest(connection net.Conn, request *pagebroker.Request, respo
 	if err != nil {
 		return err
 	}
-	if err := binary.Write(connection, binary.BigEndian, uint32(len(message))); err != nil {
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(message)))
+	if request.GetRequestBrokerPidfd() && (response.GetDirectCheckpointDirectory() != nil || response.GetStagedCheckpointDirectory() != nil ||
+		response.GetDirectRestoreReady() != nil || response.GetStagedRestoreDirectory() != nil) {
+		fd, err := unix.PidfdOpen(os.Getpid(), 0)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(fd)
+		if _, _, err := connection.(*net.UnixConn).WriteMsgUnix(header, unix.UnixRights(fd), nil); err != nil {
+			return err
+		}
+	} else if _, err := connection.Write(header); err != nil {
 		return err
 	}
 	_, err = connection.Write(message)
@@ -211,10 +229,10 @@ func TestCheckpointPreparationFailure(t *testing.T) {
 				listener := listenPageBroker(t)
 				cfg := &types.AgentConfig{
 					Storage:                types.StorageSpec{BasePath: t.TempDir()},
-					PageBroker:             types.PageBrokerSpec{Enabled: true, ControlSocketPath: listener.Addr().String()},
+					PageBroker:             types.PageBrokerSpec{ControlSocketPath: listener.Addr().String()},
 					CustomStorageAvailable: format == "custom-storage",
 				}
-				req := CheckpointRequest{ContentUID: "content-uid", ContainerName: "main", PageBrokerRequested: true}
+				req := CheckpointRequest{ContentUID: "content-uid", ContainerName: "main"}
 				destination, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
 				require.NoError(t, err)
 				ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
@@ -391,4 +409,31 @@ func TestCheckCuInterposeMountReadOnly(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
+	cfg := &types.AgentConfig{
+		Storage:    types.StorageSpec{BasePath: t.TempDir()},
+		PageBroker: types.PageBrokerSpec{ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	err := checkpoint(ctx, checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+		ContentUID:    "content-uid",
+		ContainerName: "main",
+	}, cfg, func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
+		return &types.CheckpointContainerSnapshot{}, 0, nil
+	})
+	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
+	assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
+	assert.Less(t, time.Since(start), 3*time.Second)
+	assert.False(t, CheckpointNeedsSourceKill(err))
+	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts"))
+}
+
+func TestCheckpointNeedsSourceKill(t *testing.T) {
+	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
+	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
 }

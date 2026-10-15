@@ -39,8 +39,8 @@ type Options struct {
 }
 
 // Build returns a restore-shaped deep copy of pod. The caller's Pod
-// is never mutated, including when validation fails. Workload-specific standby
-// behavior and container commands remain the caller's responsibility. Mapping
+// is never mutated, including when validation fails. Container commands stay as
+// the caller set them: the node agent replaces them when it restores. Mapping
 // sources must come from the referenced PodSnapshot; this pure builder performs
 // no API read to derive them.
 func Build(pod *corev1.Pod, request Request, options Options) (*corev1.Pod, error) {

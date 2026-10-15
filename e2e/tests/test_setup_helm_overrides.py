@@ -77,3 +77,14 @@ def test_install_without_overrides_is_unchanged(monkeypatch):
 
     (command,) = commands
     assert command[-2:] == ["--set-json", "daemonset.imagePullSecrets=[]"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("vcluster", ["daemonset.nriHostNamespace=snapshot-e2e-vc", "a=user"]),
+        ("direct", ["a=user"]),
+    ],
+)
+def test_vcluster_restores_only_its_own_pods(mode, expected):
+    assert setup.snapshot_helm_overrides(mode, "snapshot-e2e-vc", ["a=user"]) == expected

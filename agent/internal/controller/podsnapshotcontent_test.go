@@ -234,14 +234,7 @@ func TestSingleTargetContainer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			content := &snapshotv1alpha1.PodSnapshotContent{
-				Spec: snapshotv1alpha1.PodSnapshotContentSpec{
-					Source: snapshotv1alpha1.PodSnapshotContentSource{
-						PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", Containers: tc.containers},
-					},
-				},
-			}
-			got, err := singleTargetContainer(content)
+			got, err := singleTargetContainer(tc.containers)
 			if tc.wantErr {
 				require.Error(t, err)
 				return
@@ -826,10 +819,7 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 
 func TestExecutorCheckpointInspectionFailureDoesNotKill(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{})
-	w.config.PageBroker = snapshottypes.PageBrokerSpec{
-		Enabled:           true,
-		ControlSocketPath: filepath.Join(t.TempDir(), "pagebroker.sock"),
-	}
+	w.config.PageBroker = snapshottypes.PageBrokerSpec{ControlSocketPath: filepath.Join(t.TempDir(), "pagebroker.sock")}
 	ctx, target := startKillableTarget(t)
 	defer func() {
 		_ = target.Process.Kill()

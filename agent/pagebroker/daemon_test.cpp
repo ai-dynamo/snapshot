@@ -16,6 +16,7 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <poll.h>
 #include <span>
 #include <csignal>
 
@@ -771,11 +772,38 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
     }
   }
 
-  Response Receive(int connection)
+  Response Receive(int connection, FileDescriptor* broker_process = nullptr)
   {
     uint32_t size = 0;
-    if (recv(connection, &size, sizeof(size), MSG_WAITALL) != static_cast<ssize_t>(sizeof(size))) {
+    alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(int))> control{};
+    iovec data{&size, sizeof(size)};
+    msghdr header{};
+    header.msg_iov = &data;
+    header.msg_iovlen = 1;
+    header.msg_control = control.data();
+    header.msg_controllen = control.size();
+    const auto received = recvmsg(connection, &header, MSG_CMSG_CLOEXEC);
+    if (received <= 0) {
       throw std::runtime_error("read test response size");
+    }
+    if (auto* rights = CMSG_FIRSTHDR(&header)) {
+      if (rights->cmsg_level != SOL_SOCKET || rights->cmsg_type != SCM_RIGHTS ||
+          rights->cmsg_len != CMSG_LEN(sizeof(int))) {
+        throw std::runtime_error("invalid response descriptor");
+      }
+      int descriptor;
+      std::memcpy(&descriptor, CMSG_DATA(rights), sizeof(descriptor));
+      FileDescriptor process(descriptor);
+      if (!broker_process) {
+        throw std::runtime_error("unexpected response descriptor");
+      }
+      *broker_process = std::move(process);
+    }
+    if (header.msg_flags & MSG_CTRUNC ||
+        (received < static_cast<ssize_t>(sizeof(size)) &&
+         recv(connection, reinterpret_cast<char*>(&size) + received, sizeof(size) - received, MSG_WAITALL) !=
+             static_cast<ssize_t>(sizeof(size)) - received)) {
+      throw std::runtime_error("truncated response header");
     }
     std::string body(ntohl(size), '\0');
     Response response;
@@ -795,7 +823,12 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
     auto connection = Connect();
     const auto message = request.SerializeAsString();
     const uint32_t size = htonl(message.size());
-    Send(connection.get(), &size, sizeof(size), {files.begin(), files.size()});
+    std::vector<int> descriptors(files);
+    FileDescriptor broker_process(static_cast<int>(syscall(SYS_pidfd_open, server_, 0)));
+    if (request.has_checkpoint_gpu() || request.has_restore_gpu()) {
+      descriptors.insert(descriptors.begin(), broker_process.get());
+    }
+    Send(connection.get(), &size, sizeof(size), descriptors);
     Send(connection.get(), message.data(), message.size());
     return Receive(connection.get());
   }
@@ -806,13 +839,15 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
                          fs::directory_iterator());
   }
 
+  // The broker holds its own pidfd from startup, so wait for a received one.
   bool WaitForPidfd() const
   {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     do {
+      int pidfds = 0;
       for (const auto& entry : fs::directory_iterator("/proc/" + std::to_string(server_) + "/fd")) {
         std::error_code error;
-        if (fs::read_symlink(entry, error) == "anon_inode:[pidfd]") {
+        if (fs::read_symlink(entry, error) == "anon_inode:[pidfd]" && ++pidfds > 1) {
           return true;
         }
       }
@@ -825,6 +860,44 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
   fs::path root_;
   fs::path socket_path_;
 };
+
+TEST_F(DaemonTransportTest, PreparationPidfdIsOptInAndRejectsOtherProcess)
+{
+  auto ordinary = RequestFor("ordinary");
+  Configure(ordinary.mutable_prepare_direct_checkpoint()->mutable_destination(),
+            ordinary.mutable_prepare_direct_checkpoint()->mutable_io_engine(), root_ / "storage" / "ordinary");
+  EXPECT_TRUE(Exchange(ordinary).has_direct_checkpoint_directory());
+
+  auto preparation = RequestFor("prepared");
+  preparation.set_request_broker_pidfd(true);
+  Configure(preparation.mutable_prepare_direct_checkpoint()->mutable_destination(),
+            preparation.mutable_prepare_direct_checkpoint()->mutable_io_engine(), root_ / "storage" / "checkpoint");
+  auto connection = Connect();
+  const auto message = preparation.SerializeAsString();
+  const uint32_t size = htonl(message.size());
+  Send(connection.get(), &size, sizeof(size));
+  Send(connection.get(), message.data(), message.size());
+  FileDescriptor broker_process(-1);
+  ASSERT_TRUE(Receive(connection.get(), &broker_process).has_direct_checkpoint_directory());
+  ASSERT_GE(broker_process.get(), 0);
+  EXPECT_NE(fcntl(broker_process.get(), F_GETFD) & FD_CLOEXEC, 0);
+  pollfd original{broker_process.get(), POLLIN, 0};
+  EXPECT_EQ(poll(&original, 1, 0), 0);
+
+  auto abort = RequestFor("prepared");
+  abort.mutable_abort();
+  FileDescriptor other(static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0)));
+  auto rejected = Exchange(abort, {other.get()});
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().message(), "broker process descriptor does not match");
+  EXPECT_TRUE(Exchange(abort, {broker_process.get()}).has_abort_complete());
+
+  ASSERT_EQ(kill(server_, SIGKILL), 0);
+  while (waitpid(server_, nullptr, 0) < 0 && errno == EINTR) {}
+  server_ = -1;
+  EXPECT_EQ(poll(&original, 1, 0), 1);
+  EXPECT_NE(original.revents & POLLIN, 0);
+}
 
 TEST_F(DaemonTransportTest, BindsGpuDescriptorsAndPreservesControlRequests)
 {
@@ -889,7 +962,8 @@ TEST_F(DaemonTransportTest, HandlesFragmentedHeadersAndRejectsLateOrTruncatedRig
   const auto initial_files = OpenFiles();
   FileDescriptor process(static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0)));
   ASSERT_GE(process.get(), 0);
-  const std::array<int, 1> files{process.get()};
+  FileDescriptor broker_process(static_cast<int>(syscall(SYS_pidfd_open, server_, 0)));
+  const std::array<int, 2> files{broker_process.get(), process.get()};
   auto request = RequestFor("fragmented");
   auto* checkpoint = request.mutable_checkpoint_gpu();
   checkpoint->mutable_context()->add_captured_pids(1);
@@ -952,7 +1026,8 @@ TEST_F(DaemonTransportTest, RejectsGpuAdmissionFromAControlHandlerDuringShutdown
   const auto message = request.SerializeAsString();
   const uint32_t size = htonl(message.size());
   auto connection = Connect();
-  const std::array<int, 1> files{process.get()};
+  FileDescriptor broker_process(static_cast<int>(syscall(SYS_pidfd_open, server_, 0)));
+  const std::array<int, 2> files{broker_process.get(), process.get()};
   Send(connection.get(), &size, 1, files);
   ASSERT_TRUE(WaitForPidfd());
   ASSERT_EQ(kill(server_, SIGTERM), 0);
@@ -978,3 +1053,105 @@ TEST_F(DaemonTransportTest, RejectsGpuAdmissionFromAControlHandlerDuringShutdown
 }
 
 }  // namespace
+
+TEST_F(BrokerTest, RejectsArtifactCheckpointBeforeStagingThenAllowsLegacyFallback)
+{
+  auto request = RequestFor("artifact-checkpoint");
+  auto* operation = request.mutable_prepare_staged_checkpoint();
+  auto* target = operation->mutable_target();
+  target->set_store_id("store-v1-" + std::string(64, 'a'));
+  target->mutable_artifact()->set_artifact_uid("content-1");
+  target->mutable_artifact()->set_container_name("main");
+  const auto rejected = broker().HandleRequest(request);
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_EQ(rejected.request_id(), request.request_id());
+  EXPECT_EQ(rejected.transaction_id(), request.transaction_id());
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "checkpoint" / request.transaction_id()));
+  EXPECT_FALSE(fs::exists(root_ / "storage" / "output"));
+
+  // Rejection did not allocate a transaction; a legacy call on the same ID succeeds.
+  // selector is a oneof, so setting destination here also clears target.
+  Configure(operation->mutable_destination(), operation->mutable_io_engine(), root_ / "storage" / "output");
+  EXPECT_TRUE(broker().HandleRequest(request).has_staged_checkpoint_directory());
+}
+
+TEST_F(BrokerTest, RejectsArtifactRestoreBeforeReadingThenAllowsLegacyFallback)
+{
+  auto request = RequestFor("artifact-restore");
+  auto* operation = request.mutable_staged_restore();
+  auto* artifact = operation->mutable_artifact();
+  artifact->set_store_id("store-v1-" + std::string(64, 'a'));
+  artifact->set_artifact_handle("artifacts/content-1/containers/main");
+  const auto rejected = broker().HandleRequest(request);
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "restore" / request.transaction_id()));
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+  // selector is a oneof, so setting source here also clears artifact.
+  Configure(operation->mutable_source(), operation->mutable_io_engine(), source_);
+  EXPECT_TRUE(broker().HandleRequest(request).has_staged_restore_directory());
+}
+
+TEST_F(BrokerTest, RejectsUnsupportedArtifactSelectorsWithOrWithoutEngine)
+{
+  auto request = RequestFor("empty-target");
+  request.mutable_prepare_staged_checkpoint()->mutable_target();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+  request.mutable_prepare_staged_checkpoint()->mutable_io_engine()->mutable_posix_copy();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+
+  request = RequestFor("empty-artifact");
+  request.mutable_staged_restore()->mutable_artifact();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+  request.mutable_staged_restore()->mutable_io_engine()->mutable_posix_copy();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+
+  request = RequestFor("metadata-subject");
+  request.mutable_get_artifact_metadata();
+  EXPECT_EQ(broker().HandleRequest(request).failure().message(), "metadata subject is required");
+}
+
+TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
+{
+  auto request = RequestFor("metadata");
+  auto* artifact = request.mutable_get_artifact_metadata()->mutable_artifact();
+  artifact->set_store_id("store-v1-" + std::string(64, 'a'));
+  artifact->set_artifact_handle("artifacts/content-1/containers/main");
+  const auto rejected = broker().HandleRequest(request);
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_EQ(rejected.failure().message(), "artifact metadata retrieval is not implemented");
+  EXPECT_EQ(rejected.request_id(), request.request_id());
+  EXPECT_EQ(rejected.transaction_id(), request.transaction_id());
+
+  auto* target = request.mutable_get_artifact_metadata()->mutable_target();
+  target->set_store_id("store-v1-" + std::string(64, 'a'));
+  target->mutable_artifact()->set_artifact_uid("content-1");
+  target->mutable_artifact()->set_container_name("main");
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+
+  request.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+}
+
+TEST_F(BrokerTest, CommitAndAbortReportExpiredTransactions)
+{
+  auto request = RequestFor("expired-live");
+  auto* operation = request.mutable_prepare_staged_checkpoint();
+  Configure(operation->mutable_destination(), operation->mutable_io_engine(), root_ / "storage" / "output");
+  ASSERT_TRUE(broker().HandleRequest(request).has_staged_checkpoint_directory());
+
+  const auto later = std::chrono::steady_clock::now() + std::chrono::hours(2) + std::chrono::minutes(5);
+  broker().SetClock([later] { return later; });
+  request.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_EXPIRED);
+  request.mutable_abort();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_EXPIRED);
+  EXPECT_FALSE(fs::exists(root_ / "storage" / "output"));
+
+  broker().ReapExpiredTransactions(later);
+  request.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}

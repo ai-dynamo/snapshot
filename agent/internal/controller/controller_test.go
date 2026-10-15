@@ -52,6 +52,8 @@ type fakeRuntime struct {
 	containerIDByPod     string
 	resolvedContainerIDs []string
 	resolveContainerPID  int
+	// podUID is the Pod's UID on the node, as the runtime reports it.
+	podUID string
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
@@ -80,6 +82,15 @@ func (r *fakeRuntime) ResolveContainerByPod(_ context.Context, _, _, _ string) (
 }
 
 func (r *fakeRuntime) ResolveContainerImageID(_ context.Context, _ string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (r *fakeRuntime) ResolveContainerPodUID(_ context.Context, _ string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.podUID != "" {
+		return r.podUID, nil
+	}
 	return "", errors.New("not implemented")
 }
 
@@ -126,7 +137,7 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		testr.New(t),
 	)
 	t.Cleanup(w.restoreQueue.ShutDown)
-	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
+	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.writePodControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
 		t.Fatal("default controller operations must be initialized")
 	}
 	if w.compareFn == nil {
@@ -161,19 +172,20 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 			NodeName: testNodeName,
 			Storage:  types.StorageSpec{Type: "pvc", BasePath: t.TempDir()},
 		},
-		clientset:               fake.NewClientset(coreObjects...),
-		client:                  clientBuilder.Build(),
-		runtime:                 &fakeRuntime{},
-		injector:                noopInjector{},
-		restoreFn:               executor.Restore,
-		writeControlSentinelFn:  func(int, string, []byte) error { return nil },
-		controlSentinelExistsFn: func(int, string) (bool, error) { return false, nil },
-		sendSignalFn:            func(logr.Logger, int, syscall.Signal, string) error { return nil },
-		restoreQueue:            workqueue.NewTypedDelayingQueue[client.ObjectKey](),
-		compareFn:               compat.Compare,
-		log:                     testr.New(t),
-		captureQueue:            newTestCaptureQueue(t),
-		stopCh:                  make(chan struct{}),
+		clientset:                 fake.NewClientset(coreObjects...),
+		client:                    clientBuilder.Build(),
+		runtime:                   &fakeRuntime{},
+		injector:                  noopInjector{},
+		restoreFn:                 executor.Restore,
+		writeControlSentinelFn:    func(int, string, []byte) error { return nil },
+		writePodControlSentinelFn: func(string, string, string, []byte) error { return nil },
+		controlSentinelExistsFn:   func(int, string) (bool, error) { return false, nil },
+		sendSignalFn:              func(logr.Logger, int, syscall.Signal, string) error { return nil },
+		restoreQueue:              workqueue.NewTypedDelayingQueue[client.ObjectKey](),
+		compareFn:                 compat.Compare,
+		log:                       testr.New(t),
+		captureQueue:              newTestCaptureQueue(t),
+		stopCh:                    make(chan struct{}),
 	}
 	t.Cleanup(w.restoreQueue.ShutDown)
 	return w
@@ -355,6 +367,11 @@ func readySnapshotObjects() (*snapshotv1alpha1.PodSnapshot, *snapshotv1alpha1.Po
 	contentName := "podsnapshotcontent-snapshot-uid"
 	snapshot := &snapshotv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-a", Namespace: "inference", UID: ktypes.UID("snapshot-uid")},
+		Spec: snapshotv1alpha1.PodSnapshotSpec{
+			Source: snapshotv1alpha1.PodSnapshotSource{
+				PodRef: snapshotv1alpha1.PodReference{Name: "source", Containers: []string{"main"}},
+			},
+		},
 		Status: snapshotv1alpha1.PodSnapshotStatus{
 			BoundPodSnapshotContentName: &contentName,
 			Conditions: []metav1.Condition{{
@@ -1322,6 +1339,7 @@ func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T)
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
+	w.config.PageBroker = types.PageBrokerSpec{ControlSocketPath: "/pagebroker/control/pagebroker.sock"}
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(path, 0o700))
@@ -1341,6 +1359,7 @@ func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T)
 	assert.Equal(t, 1, restoreCalls)
 	assert.Equal(t, "main", request.ArtifactContainerName)
 	assert.Equal(t, "main", request.DestinationContainerName)
+	assert.Equal(t, "/pagebroker/control/pagebroker.sock", request.PageBrokerControlSocketPath)
 	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.False(t, hasFinalizer(live, restorePodFinalizer))
@@ -1722,6 +1741,128 @@ func TestRunRestoreMarksFailureBeforeKillingPlaceholder(t *testing.T) {
 			assert.Equal(t, want, calls)
 		})
 	}
+}
+
+// The restore proxy exits by itself once it sees restore-failed, so the kill
+// can find the placeholder already gone. That is not a second failure.
+func TestRunRestoreIgnoresPlaceholderThatAlreadyExited(t *testing.T) {
+	for name, tc := range map[string]struct {
+		restoreErr  error
+		completeErr error
+		want        string
+	}{
+		"restore error":                {restoreErr: errors.New("criu restore failed"), want: "criu restore failed"},
+		"restore-complete write fails": {completeErr: errors.New("control volume gone"), want: "failed to write restore-complete sentinel: control volume gone"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			w := makeTestController(t, pod)
+			w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+			artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+				return executor.RestoreResult{PlaceholderHostPID: 4242, RestoredPID: 77}, tc.restoreErr
+			}
+			w.writeControlSentinelFn = func(_ int, name string, _ []byte) error {
+				if name == podcontract.RestoreCompleteFile {
+					return tc.completeErr
+				}
+				return nil
+			}
+			w.sendSignalFn = func(_ logr.Logger, pid int, _ syscall.Signal, _ string) error {
+				return fmt.Errorf("failed to signal PID %d: %w", pid, syscall.ESRCH)
+			}
+
+			err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
+
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
+// When the container cannot be resolved, nothing can be killed, so the
+// restore-failed marker goes through the host path of the control volume.
+// kubelet names that path after the Pod's UID on the node, which in a vCluster
+// differs from the UID of the Pod the agent sees.
+func TestRunRestoreFailureMarksUnresolvedContainerThroughHostPath(t *testing.T) {
+	for name, tc := range map[string]struct {
+		runtimePodUID string
+		want          string
+	}{
+		"the runtime knows the Pod's UID on the node": {runtimePodUID: "host-uid", want: "host-uid"},
+		"the runtime cannot tell":                     {want: "restore-pod-uid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			w := makeTestController(t, pod)
+			w.runtime = &fakeRuntime{podUID: tc.runtimePodUID} // ResolveContainer fails
+			artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+				return executor.RestoreResult{}, errors.New("criu restore failed")
+			}
+			var written []string
+			w.writePodControlSentinelFn = func(podUID, container, name string, _ []byte) error {
+				written = append(written, podUID+"/"+container+"/"+name)
+				return nil
+			}
+			w.writeControlSentinelFn = func(int, string, []byte) error {
+				t.Error("no PID was resolved, so nothing may write through /host/proc")
+				return nil
+			}
+			w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+				t.Error("no PID was resolved, so nothing may be killed")
+				return nil
+			}
+
+			err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
+
+			require.Error(t, err)
+			assert.Equal(t, []string{tc.want + "/main/" + podcontract.RestoreFailedFile}, written)
+		})
+	}
+}
+
+func TestRestoreDestinations(t *testing.T) {
+	t.Run("map annotation needs no API read", func(t *testing.T) {
+		pod := multiRestorePod()
+		w := makeTestController(t, pod) // no PodSnapshot exists
+
+		got, err := w.RestoreDestinations(context.Background(), pod)
+
+		require.NoError(t, err)
+		assert.Equal(t, []string{"engine-0", "engine-1"}, got)
+	})
+
+	t.Run("without a map the destination is the captured container", func(t *testing.T) {
+		pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+		snapshot, content := readySnapshotObjects()
+		w := makeTestController(t, pod, snapshot, content)
+
+		got, err := w.RestoreDestinations(context.Background(), pod)
+
+		require.NoError(t, err)
+		assert.Equal(t, []string{content.Spec.Source.PodRef.Containers[0]}, got)
+	})
+
+	t.Run("without a map a PodSnapshot still being taken is enough", func(t *testing.T) {
+		pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+		snapshot, _ := readySnapshotObjects()
+		snapshot.Status = snapshotv1alpha1.PodSnapshotStatus{} // not Ready, no content bound
+		w := makeTestController(t, pod, snapshot)
+
+		got, err := w.RestoreDestinations(context.Background(), pod)
+
+		require.NoError(t, err)
+		assert.Equal(t, snapshot.Spec.Source.PodRef.Containers, got)
+	})
+
+	t.Run("without a map a missing PodSnapshot is an error", func(t *testing.T) {
+		pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+		w := makeTestController(t, pod)
+
+		_, err := w.RestoreDestinations(context.Background(), pod)
+
+		require.Error(t, err)
+	})
 }
 
 func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T) {

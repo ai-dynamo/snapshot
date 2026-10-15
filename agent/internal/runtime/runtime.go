@@ -39,6 +39,9 @@ type Runtime interface {
 	ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error)
 	ResolveContainerByPod(ctx context.Context, pod, ns, ctr string) (int, *specs.Spec, error)
 	ResolveContainerImageID(ctx context.Context, id string) (string, error)
+	// ResolveContainerPodUID returns the UID of the container's Pod on the
+	// node, which names the Pod's directories under kubelet's.
+	ResolveContainerPodUID(ctx context.Context, id string) (string, error)
 	// TerminateContainer requests zero-grace termination through CRI using the
 	// runtime container ID. Implementations validate any supplied runtime scheme
 	// before dispatch.

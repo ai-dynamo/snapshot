@@ -53,10 +53,36 @@ message CheckpointGpuRequest { repeated GpuTarget targets = 1; GpuContext contex
 // Uses the same target validation as CheckpointGpuRequest.
 message RestoreGpuRequest { repeated GpuTarget targets = 1; GpuContext context = 2; }
 message CapabilitiesRequest {}
+// Logical identity before publication. Neither field is a filesystem path.
+message ArtifactIdentity
+{
+  string artifact_uid = 1;    // Owning PodSnapshotContent UID.
+  string container_name = 2;  // Captured container within that content.
+}
+// Selects the configured store and destination before capture begins.
+message ArtifactTarget
+{
+  string store_id = 1;            // Must match the configured store before I/O.
+  ArtifactIdentity artifact = 2;  // Logical destination within that store.
+}
+// Immutable publication descriptor, persisted by Snapshot after checkpoint Commit.
+// Handles are opaque to callers; the configured backend selects the reader.
+message PublishedArtifact
+{
+  string store_id = 1;                 // Bind subsequent reads to the original store.
+  string artifact_handle = 2;          // Backend locator; callers persist it unchanged.
+}
 
 message StagedRestoreRequest
 {
-  StorageBackend source = 1;
+  // Exactly one of source or artifact is required.
+  oneof selector
+  {
+    StorageBackend source = 1;       // Legacy filesystem selector.
+    PublishedArtifact artifact = 3;  // Exact committed source; never substitute another publication.
+  }
+  // Required for legacy source. Optional with artifact: absence uses the configured
+  // engine; an explicit engine must support the bound store. It cannot select a store.
   IOEngine io_engine = 2;
 }
 // Keeps the source open for direct reads. Does not create CPU staging files.
@@ -67,8 +93,30 @@ message DirectRestoreRequest
 }
 message PrepareStagedCheckpointRequest
 {
-  StorageBackend destination = 1;
+  // Exactly one of destination or target is required.
+  oneof selector
+  {
+    StorageBackend destination = 1;  // Legacy filesystem selector.
+    ArtifactTarget target = 3;       // Validate the configured store and destination before capture.
+  }
+  // Required for legacy destination; optional with target (configured engine by default).
   IOEngine io_engine = 2;
+}
+// Fetch verified manifest.yaml for one publication into private shared staging.
+// Snapshot interprets the manifest. This does not verify all checkpoint payloads.
+message GetArtifactMetadataRequest
+{
+  // Exactly one of artifact or target is required.
+  oneof selector
+  {
+    // Exact committed publication, as persisted after checkpoint Commit.
+    PublishedArtifact artifact = 1;
+    // Identity lookup for a publication whose descriptor was never received, for example
+    // after a lost Commit reply or an agent restart. Resolves the single publication for
+    // that store, artifact UID and container, or fails with ARTIFACT_NOT_FOUND. Reads only;
+    // it never creates, completes or substitutes a publication.
+    ArtifactTarget target = 2;
+  }
 }
 message PrepareDirectCheckpointRequest
 {
@@ -76,14 +124,21 @@ message PrepareDirectCheckpointRequest
   IOEngine io_engine = 2;
 }
 // Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
-// Repeating Commit for a retained committed transaction returns CommitComplete.
-// Aborted, expired, or unknown transactions return TRANSACTION_NOT_FOUND.
+// Repeating Commit returns the same retained result, including any PublishedArtifact.
+// Commit for a transaction PageBroker still remembers but whose deadline has passed returns
+// TRANSACTION_EXPIRED. Commit for an aborted, reaped, or unknown transaction returns TRANSACTION_NOT_FOUND.
 message CommitRequest {}
 // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
-// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete. Abort for a committed or
-// expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
+// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete. Abort for a transaction
+// PageBroker still remembers but whose deadline has passed returns TRANSACTION_EXPIRED. Abort for a committed,
+// reaped, or unknown transaction returns TRANSACTION_NOT_FOUND.
+// For an Abort authenticated with the original broker pidfd, TRANSACTION_NOT_FOUND
+// also confirms that this broker has no running GPU work for the transaction.
 message AbortRequest {}
 
+// GPU requests pass the broker pidfd returned by preparation, then one target
+// pidfd per target, via SCM_RIGHTS on the first frame-header bytes. GPU Abort
+// passes the same broker pidfd. The receiver verifies it refers to itself.
 message Request
 {
   // Snapshot assigns an ID to each request.
@@ -91,7 +146,12 @@ message Request
   // Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
   // After two hours and five minutes, the transaction expires. This cancels GPU
   // work. Expiry cleanup waits for active GPU transfers to stop.
+  // Retries never extend a transaction's lifetime.
   optional string transaction_id = 2;
+  // Requests a pidfd for the serving PageBroker on a successful storage
+  // preparation response. GPU clients retain it to bind later execution and
+  // cleanup to the broker that prepared the transaction.
+  bool request_broker_pidfd = 12;
   oneof command
   {
     StagedRestoreRequest staged_restore = 3;
@@ -103,6 +163,8 @@ message Request
     CheckpointGpuRequest checkpoint_gpu = 9;
     RestoreGpuRequest restore_gpu = 10;
     CapabilitiesRequest capabilities = 11;
+    // Storage extensions use 20+; 12-19 are reserved for the CUDA workstream.
+    GetArtifactMetadataRequest get_artifact_metadata = 20;
   }
 }
 
@@ -123,9 +185,23 @@ message StagedCheckpointDirectory
 {
   optional string image_directory = 1;
 }
-message CommitComplete {}
+message CommitComplete
+{
+  // Required for target-addressed checkpoints. Absent for legacy checkpoints and restore cleanup.
+  PublishedArtifact published_artifact = 1;
+}
+message GetArtifactMetadataComplete
+{
+  // Absolute local directory, shared with Snapshot; valid until Abort or metadata transaction expiry.
+  string manifest_directory = 1;
+  // The publication the manifest was read from: the request's artifact unchanged, or the
+  // descriptor resolved from its target. Always present; callers persist it unchanged.
+  PublishedArtifact artifact = 2;
+}
 // GPU work and cleanup have finished before transaction files are released.
 // This does not stop a workload that has already restored successfully.
+// Confirms only that PageBroker transaction state/content was released; it says nothing about the target
+// process or CUDA state.
 message AbortComplete {}
 message Failure
 {
@@ -134,7 +210,7 @@ message Failure
     UNSPECIFIED = 0;
     // The request is invalid or unsupported. PageBroker did not change transaction state.
     INVALID_REQUEST = 1;
-    // The transaction is unknown or has reached the opposite terminal state.
+    // The transaction is unknown, was reaped after expiry, or has reached the opposite terminal state.
     TRANSACTION_NOT_FOUND = 2;
     // The transaction ID or checkpoint destination conflicts with an existing transaction or output.
     TRANSACTION_CONFLICT = 3;
@@ -146,10 +222,25 @@ message Failure
     INTERNAL_ERROR = 6;
     // PageBroker is stopping or its GPU handler budget is full. No operation started.
     UNAVAILABLE = 7;
+    // Storage extensions use 20+ to avoid the CUDA workstream's failure codes.
+    STORE_MISMATCH = 20;       // Descriptor/target names another configured store; no storage I/O.
+    ACCESS_DENIED = 21;        // Authentication, authorization or decryption refused; not proof of absence.
+    STORAGE_UNAVAILABLE = 22;  // Transient storage/transport failure after bounded retries.
+    ARTIFACT_NOT_FOUND = 23;   // Authoritative absence of the requested publication.
+    ARTIFACT_CORRUPT = 24;     // Invalid index, unsafe paths, missing indexed data or digest mismatch.
+    UNSUPPORTED_ARTIFACT = 25; // No reader for the backend or the layout version recorded in the index.
+    OUTCOME_UNKNOWN = 26;     // Cannot establish publication outcome; never authorizes process replay.
+    // The fixed deadline passed while PageBroker still remembers the transaction; no new storage operations
+    // start. Unknown or reaped transactions return TRANSACTION_NOT_FOUND.
+    TRANSACTION_EXPIRED = 27;
   }
   optional Code code = 1;
-  optional string message = 2;
+  optional string message = 2; // Storage-extension codes: at most 1024 UTF-8 bytes, no credentials or SDK bodies.
 }
+// Successful storage preparation responses requested with request_broker_pidfd
+// carry exactly one broker pidfd via SCM_RIGHTS on the first frame-header bytes.
+// The broker opens its own pidfd. GPU clients retain it for execution and pass
+// it to nsrestore. Other responses carry no FDs.
 message Response
 {
   optional string request_id = 1;
@@ -166,6 +257,7 @@ message Response
     GpuComplete gpu_checkpoint_complete = 10;
     GpuComplete gpu_restore_complete = 11;
     Capabilities capabilities = 12;
+    GetArtifactMetadataComplete get_artifact_metadata_complete = 20;
   }
 }
 

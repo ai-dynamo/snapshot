@@ -33,6 +33,15 @@ import (
 
 const failedRestoreTerminationTimeout = 30 * time.Second
 
+// execNSRestoreFunc is overridden in tests: execNSRestore execs the real
+// nsrestore binary inside the placeholder's namespaces, which needs a live
+// placeholder process and is not something a unit test can satisfy.
+var execNSRestoreFunc = execNSRestore
+
+// validateRestoredProcessFunc is overridden in tests: validateRestoredProcess
+// stats the restored process through /host/proc, which only exists on a real node.
+var validateRestoredProcessFunc = validateRestoredProcess
+
 // RestoreMounter installs the fixed binary bundle, the cuinterpose libraries and one
 // validated checkpoint artifact inside a placeholder container's mount namespace.
 type RestoreMounter interface {
@@ -114,8 +123,6 @@ type RestoreRequest struct {
 	ArtifactContainerName       string
 	DestinationContainerName    string
 	Clientset                   kubernetes.Interface
-	PageBrokerRequested         bool
-	PageBrokerEnabled           bool
 	CustomStorageAvailable      bool
 	PageBrokerControlSocketPath string
 	PageBrokerRestoreMode       string
@@ -146,21 +153,14 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return RestoreResult{}, fmt.Errorf("restore mounter is required")
 	}
 
-	brokered := req.PageBrokerRequested && req.PageBrokerEnabled
 	transactionID := ""
-	var broker pagebroker.Client
+	broker := pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 	var gpu *pagebroker.CustomStorageExecution
 	committed := false
+	preparationAttempted := false
 	gpuRestoreComplete := false
 	usePageBrokerGPU := false
 	var terminateFailedRestore func(context.Context) error
-	defer func() {
-		if !usePageBrokerGPU && transactionID != "" && !committed {
-			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
-			defer cancel()
-			_ = broker.Abort(abortCtx, transactionID)
-		}
-	}()
 
 	var cleanupErr error
 	var activeMounts []restoreMount
@@ -173,14 +173,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		if gpu != nil {
 			defer gpu.Close()
 		}
-		if usePageBrokerGPU && transactionID != "" && !committed {
+		if usePageBrokerGPU && transactionID != "" && !committed && preparationAttempted {
 			var err error
 			if gpu != nil && !gpuRestoreComplete {
 				err = abortRestoreTransaction(ctx, gpu, terminateFailedRestore)
 			} else {
-				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
-				err = broker.Abort(abortCtx, transactionID)
-				cancel()
+				err = abortPageBrokerTransaction(broker, transactionID)
 			}
 			if err != nil {
 				if retErr != nil {
@@ -191,13 +189,20 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			}
 		}
 		cleanup()
+		if !usePageBrokerGPU && transactionID != "" && !committed && preparationAttempted {
+			if err := abortPageBrokerTransaction(broker, transactionID); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("abort PageBroker restore %q: %w", transactionID, err))
+			}
+		}
 		if cleanupErr == nil {
 			return
 		}
 		log.Error(cleanupErr, "restore cleanup failed")
 		if retErr == nil {
 			retErr = NewRestoreCleanupError(cleanupErr)
+			return
 		}
+		retErr = errors.Join(retErr, cleanupErr)
 	}()
 
 	restoreStart := time.Now()
@@ -267,57 +272,38 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		})
 	}
 
-	containerCheckpointPath := nsmount.CheckpointDst
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
-	if brokered {
-		transactionID = uuid.NewString()
-		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
-		stageStart := time.Now()
-		direct := req.PageBrokerRestoreMode != "staged"
-		var staged string
-		if direct {
-			err = broker.DirectRestore(ctx, transactionID, artifactPath)
-		} else {
-			staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
-		}
-		pageBrokerStageDuration = time.Since(stageStart)
-		if err != nil {
-			return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
-		}
-		if usePageBrokerGPU {
-			gpu, err = broker.OpenCustomStorageExecution(transactionID, gpuContext)
-			if err != nil {
-				return RestoreResult{}, err
-			}
-		}
-		mountStart := time.Now()
-		var sourceMount nsmount.MountPoint
-		if direct {
-			sourceMount, err = mounts.MountArtifact(ctx, bundleMount, artifactPath)
-		} else {
-			sourceMount, err = mounts.MountPageBroker(ctx, bundleMount, staged)
-			containerCheckpointPath = nsmount.PageBrokerDst
-		}
-		pageBrokerMountDuration = time.Since(mountStart)
-		if err != nil {
-			return RestoreResult{}, fmt.Errorf("mount PageBroker restore source: %w", err)
-		}
-		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount PageBroker restore source from placeholder",
-			point:  sourceMount,
-		})
+	transactionID = uuid.NewString()
+	stageStart := time.Now()
+	direct := req.PageBrokerRestoreMode != "staged"
+	var staged string
+	preparationAttempted = true
+	if usePageBrokerGPU && direct {
+		gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
+	} else if usePageBrokerGPU {
+		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
+	} else if direct {
+		err = broker.DirectRestore(ctx, transactionID, artifactPath)
 	} else {
-		artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
-		if err != nil {
-			return RestoreResult{}, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
-		}
-		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount checkpoint artifact from placeholder",
-			point:  artifactMount,
-		})
+		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
 	}
+	pageBrokerStageDuration = time.Since(stageStart)
+	if err != nil {
+		preparationAttempted = !pagebroker.IsDialError(err)
+		return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
+	}
+	mountStart := time.Now()
+	sourceMount, containerCheckpointPath, err := mountRestoreSource(ctx, mounts, bundleMount, direct, artifactPath, staged)
+	pageBrokerMountDuration = time.Since(mountStart)
+	if err != nil {
+		return RestoreResult{}, fmt.Errorf("mount PageBroker restore source: %w", err)
+	}
+	activeMounts = append(activeMounts, restoreMount{
+		action: "unmount PageBroker restore source from placeholder",
+		point:  sourceMount,
+	})
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, gpu)
+	result, err := execNSRestoreFunc(ctx, log, req, snap, bundleMount, containerCheckpointPath, gpu)
 	if err != nil {
 		if usePageBrokerGPU {
 			// Abort may stop the placeholder before the controller can write its
@@ -332,24 +318,23 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return RestoreResult{}, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	gpuRestoreComplete = usePageBrokerGPU
-	if brokered {
-		sourceMount := activeMounts[len(activeMounts)-1]
-		if err := sourceMount.point.Unmount(ctx); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", sourceMount.action, err))
-		}
-		activeMounts = activeMounts[:len(activeMounts)-1]
-		commitStart := time.Now()
-		if err := broker.Commit(ctx, transactionID); err != nil {
-			log.Error(err, "failed to commit PageBroker restore")
-		} else {
-			committed = true
-		}
-		pageBrokerCommitDuration = time.Since(commitStart)
+	restoreSource := activeMounts[len(activeMounts)-1]
+	if err := restoreSource.point.Unmount(ctx); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", restoreSource.action, err))
 	}
+	activeMounts = activeMounts[:len(activeMounts)-1]
+	commitStart := time.Now()
+	if err := broker.Commit(ctx, transactionID); err != nil {
+		log.Error(err, "failed to commit PageBroker restore")
+	} else {
+		committed = true
+	}
+	pageBrokerCommitDuration = time.Since(commitStart)
+
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
-	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
+	if err := validateRestoredProcessFunc(snap.TargetRoot, result.RestoredPID, log); err != nil {
 		return RestoreResult{}, err
 	}
 
@@ -399,6 +384,17 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	return RestoreResult{PlaceholderHostPID: snap.PlaceholderPID, RestoredPID: result.RestoredPID}, nil
 }
 
+// mountRestoreSource mounts the direct artifact or the PageBroker-staged copy into
+// the placeholder and reports which path nsrestore should read the checkpoint from.
+func mountRestoreSource(ctx context.Context, mounts RestoreMounter, bundleMount nsmount.MountPoint, direct bool, artifactPath, staged string) (nsmount.MountPoint, string, error) {
+	if direct {
+		sourceMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
+		return sourceMount, nsmount.CheckpointDst, err
+	}
+	sourceMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
+	return sourceMount, nsmount.PageBrokerDst, err
+}
+
 func remainingDuration(wall time.Duration, parts ...time.Duration) time.Duration {
 	var sum time.Duration
 	for _, part := range parts {
@@ -437,14 +433,34 @@ func validateCustomStorageRestore(req RestoreRequest, manifest *types.Checkpoint
 	if !manifest.CUDA.CustomStorage {
 		return nil
 	}
-	if !req.PageBrokerEnabled {
-		return fmt.Errorf("CustomStorage checkpoint requires PageBroker")
-	}
-	if !req.PageBrokerRequested {
-		return fmt.Errorf("CustomStorage restore cannot opt out of PageBroker with nvidia.com/snapshot-pagebroker=false")
-	}
 	if !req.CustomStorageAvailable {
 		return fmt.Errorf("PageBroker does not support CustomStorage restore")
+	}
+	return nil
+}
+
+// readInitCmdline returns the command line of the container's PID 1, given
+// its host PID. Tests replace it.
+var readInitCmdline = func(pid int) (string, error) {
+	details, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+	if err != nil {
+		return "", err
+	}
+	return details.Cmdline, nil
+}
+
+// checkRestoreProxy refuses a container whose PID 1 is not the restore proxy.
+// The agent's NRI plugin makes the proxy PID 1 when the container is created.
+// Without the proxy, nothing in the container waits for the restore, and the
+// container does not end when the restored workload does.
+func checkRestoreProxy(pid int) error {
+	cmdline, err := readInitCmdline(pid)
+	if err != nil {
+		return fmt.Errorf("read the command of the container's PID 1: %w", err)
+	}
+	if cmdline != podcontract.RestoreProxyPath {
+		return fmt.Errorf("the container's PID 1 is %q, not %s: the agent's NRI plugin did not set up this container; check that NRI is enabled in the container runtime",
+			cmdline, podcontract.RestoreProxyPath)
 	}
 	return nil
 }
@@ -470,6 +486,9 @@ func inspectRestore(
 		return nil, 0, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
 	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
+	if err := checkRestoreProxy(placeholderPID); err != nil {
+		return nil, 0, err
+	}
 
 	// Read only for the image-digest check, which treats a blank value as
 	// unknown, so neither a skipped gate nor a runtime that cannot answer is
@@ -666,20 +685,25 @@ func addCustomStorageFiles(ctx context.Context, cmd *exec.Cmd, execution *pagebr
 		_ = cancelWrite.Close()
 		return nil
 	}
-	socketDirectoryFD := firstExtraFileDescriptor + len(cmd.ExtraFiles)
-	hostProcFD := socketDirectoryFD + 1
-	socketFD := socketDirectoryFD + 2
-	cancelFD := socketDirectoryFD + 3
+	inherited := []struct {
+		flag string
+		file *os.File
+	}{
+		{"--pagebroker-socket-directory-fd", execution.SocketDirectory},
+		{"--host-proc-fd", hostProc},
+		{"--pagebroker-execution-fd", execution.Socket},
+		{"--cancel-fd", cancelRead},
+		{"--pagebroker-process-fd", execution.BrokerProcess},
+	}
+	for _, item := range inherited {
+		cmd.Args = append(cmd.Args, item.flag, strconv.Itoa(firstExtraFileDescriptor+len(cmd.ExtraFiles)))
+		cmd.ExtraFiles = append(cmd.ExtraFiles, item.file)
+	}
 	cmd.Args = append(cmd.Args,
 		"--pagebroker-transaction", execution.TransactionID,
-		"--pagebroker-socket-directory-fd", strconv.Itoa(socketDirectoryFD),
-		"--host-proc-fd", strconv.Itoa(hostProcFD),
-		"--pagebroker-execution-fd", strconv.Itoa(socketFD),
-		"--cancel-fd", strconv.Itoa(cancelFD),
 		"--pagebroker-socket-name", execution.SocketName,
 		"--gpu-context", string(gpuContext),
 	)
-	cmd.ExtraFiles = append(cmd.ExtraFiles, execution.SocketDirectory, hostProc, execution.Socket, cancelRead)
 	return func() {
 		stopCancel()
 		cancelRead.Close()

@@ -49,16 +49,15 @@ func CheckpointNeedsSourceKill(err error) bool {
 
 // CheckpointRequest holds the content-owned inputs for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID         string
-	ContainerName       string
-	ContentUID          string
-	StartedAt           time.Time
-	NodeName            string
-	PodName             string
-	PodNamespace        string
-	PodIP               string
-	Clientset           kubernetes.Interface
-	PageBrokerRequested bool
+	ContainerID   string
+	ContainerName string
+	ContentUID    string
+	StartedAt     time.Time
+	NodeName      string
+	PodName       string
+	PodNamespace  string
+	PodIP         string
+	Clientset     kubernetes.Interface
 
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
@@ -75,11 +74,8 @@ type checkpointPhaseTimings struct {
 	OverlayCaptureDuration time.Duration
 }
 
-// Checkpoint performs a CRIU dump of a container.
-//
-// The checkpoint directory is staged under the content-owned .tmp directory.
-// On success, the previous checkpoint is removed and the staged directory is
-// renamed atomically into the content/container artifact path.
+// Checkpoint captures a container through PageBroker and commits its artifact.
+// The broker owns storage publication and, when supported, CUDA CustomStorage.
 func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	return checkpoint(ctx, rt, log, req, cfg, inspectContainer)
 }
@@ -99,58 +95,38 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return err
 	}
-	brokered := req.PageBrokerRequested && cfg.PageBroker.Enabled
-	usePageBrokerGPU := brokered && cfg.CustomStorageAvailable && len(state.CUDAHostPIDs) > 0
+	usePageBrokerGPU := cfg.CustomStorageAvailable && len(state.CUDAHostPIDs) > 0
 	transactionID := uuid.NewString()
-	var broker pagebroker.Client
+	broker := pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
 	committed := false
-	var tmpDir string
+	preparationAttempted := false
 	var gpu *pagebroker.CustomStorageExecution
-	if brokered {
-		broker = pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
-		preparationAttempted := false
-		defer func() {
+	defer func() {
+		if gpu != nil {
+			defer gpu.Close()
+		}
+		if preparationAttempted && !committed {
 			if gpu != nil {
-				defer gpu.Close()
-			}
-			if preparationAttempted && !committed {
-				if gpu != nil {
-					if err := gpu.Abort(ctx); err != nil {
-						retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint: %w", err))
-					}
-				} else {
-					retErr = abortCheckpointTransaction(broker, transactionID, retErr)
+				if err := gpu.Abort(ctx); err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint: %w", err))
 				}
-			}
-		}()
-		var executionContext *pagebroker.GpuContext
-		if usePageBrokerGPU {
-			executionContext, err = pagebroker.NewGPUContext(state.CUDANSPIDs, cuda.GPUUUIDs(state.GPUs), "")
-			if err != nil {
-				return err
+			} else {
+				retErr = abortCheckpointTransaction(broker, transactionID, retErr)
 			}
 		}
-		preparationAttempted = true
-		tmpDir, gpu, err = prepareCheckpoint(ctx, broker, transactionID, finalDir, executionContext)
+	}()
+	var executionContext *pagebroker.GpuContext
+	if usePageBrokerGPU {
+		executionContext, err = pagebroker.NewGPUContext(state.CUDANSPIDs, cuda.GPUUUIDs(state.GPUs), "")
 		if err != nil {
-			return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+			return err
 		}
-	} else {
-		tmpRoot, err := nsmount.ResolveArtifactStagingRoot(cfg.Storage.BasePath, req.ContentUID)
-		if err != nil {
-			return fmt.Errorf("resolve checkpoint staging root: %w", err)
-		}
-		if err := os.MkdirAll(tmpRoot, 0700); err != nil {
-			return fmt.Errorf("failed to create checkpoint staging root: %w", err)
-		}
-		if err := os.MkdirAll(filepath.Dir(finalDir), 0700); err != nil {
-			return fmt.Errorf("failed to create checkpoint container root: %w", err)
-		}
-		tmpDir = filepath.Join(tmpRoot, transactionID)
-		if err := os.Mkdir(tmpDir, 0700); err != nil {
-			return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
-		}
-		defer os.RemoveAll(tmpDir)
+	}
+	preparationAttempted = true
+	tmpDir, gpu, err := prepareCheckpoint(ctx, broker, transactionID, finalDir, executionContext)
+	if err != nil {
+		preparationAttempted = !pagebroker.IsDialError(err)
+		return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
 	}
 
 	state.CuInterpose, err = inspectCuInterpose(ctx, state, req.CuInterposeRequested)
@@ -179,21 +155,10 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	switchStart := time.Now()
-	if brokered {
-		if err := broker.Commit(ctx, transactionID); err != nil {
-			return fmt.Errorf("commit PageBroker checkpoint: %w", err)
-		}
-		committed = true
-	} else {
-		// Remove any previous checkpoint with the same identity hash, then
-		// promote the staged checkpoint directory into place.
-		if err := os.RemoveAll(finalDir); err != nil {
-			return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
-		}
-		if err := os.Rename(tmpDir, finalDir); err != nil {
-			return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
-		}
+	if err := broker.Commit(ctx, transactionID); err != nil {
+		return fmt.Errorf("commit PageBroker checkpoint: %w", err)
 	}
+	committed = true
 	switchDuration := time.Since(switchStart)
 
 	wall := time.Since(checkpointStart)
@@ -502,10 +467,15 @@ func captureGPU(ctx context.Context, data *types.CheckpointManifest, state *type
 	return timings.TotalDuration, nil
 }
 
-func abortCheckpointTransaction(broker pagebroker.Client, transactionID string, cause error) error {
+// abortPageBrokerTransaction runs Abort with the shared release timeout.
+func abortPageBrokerTransaction(broker pagebroker.Client, transactionID string) error {
 	abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
 	defer cancel()
-	if err := broker.Abort(abortCtx, transactionID); err != nil {
+	return broker.Abort(abortCtx, transactionID)
+}
+
+func abortCheckpointTransaction(broker pagebroker.Client, transactionID string, cause error) error {
+	if err := abortPageBrokerTransaction(broker, transactionID); err != nil {
 		cause = errors.Join(cause, fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err))
 	}
 	return cause
@@ -516,12 +486,7 @@ func prepareCheckpoint(ctx context.Context, broker pagebroker.Client, transactio
 		directory, err := broker.PrepareCheckpoint(ctx, transactionID, destination)
 		return directory, nil, err
 	}
-	directory, err := broker.PrepareDirectCheckpoint(ctx, transactionID, destination)
-	if err != nil {
-		return "", nil, err
-	}
-	gpu, err := broker.OpenCustomStorageExecution(transactionID, gpuContext)
-	return directory, gpu, err
+	return broker.PrepareGPUCheckpoint(ctx, transactionID, destination, gpuContext)
 }
 
 func logGPUResult(log logr.Logger, result *pagebroker.GpuComplete) {

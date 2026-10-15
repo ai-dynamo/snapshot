@@ -65,17 +65,20 @@ const (
 	// job file.
 	CUDAJobFilePath = SnapshotControlMountPath + "/" + CUDAJobFileName
 
-	// RestoreStandbyModeEnv asks standby-aware workload entrypoints to remain
-	// inert until Snapshot replaces them with restored processes. Snapshot
-	// publishes the name so producers and workloads agree on it, but does not
-	// inject this workload-specific setting.
+	// RestoreStandbyModeEnv asked standby-aware workload entrypoints to remain
+	// inert until Snapshot replaced them with restored processes. Snapshot
+	// published the name but never injected it.
+	//
+	// Deprecated: Snapshot now replaces a restore container's command with
+	// RestoreProxyPath, so the entrypoint never runs and nothing needs to stay
+	// inert. Restore Pods can keep the source's command.
 	RestoreStandbyModeEnv = "SNAPSHOT_RESTORE_STANDBY"
 
 	// LegacyRestoreStandbyModeEnv is the previous name of RestoreStandbyModeEnv,
 	// kept for existing workload integrations that still read it. Snapshot
 	// publishes the name but does not inject it.
 	//
-	// Deprecated: use RestoreStandbyModeEnv. This alias is removed in the next
+	// Deprecated: see RestoreStandbyModeEnv. This alias is removed in the next
 	// release.
 	LegacyRestoreStandbyModeEnv = "DYN_SNAPSHOT_RESTORE_STANDBY"
 
@@ -99,6 +102,10 @@ const (
 	// destination containers. It waits for RestoreCompleteFile, then follows
 	// the restored process and exits with its status.
 	RestoreProxyBinaryName = "snapshot-restore-proxy"
+
+	// RestoreProxyPath is the proxy as the container sees it, in the control
+	// volume. It is the whole command of a restore destination container.
+	RestoreProxyPath = SnapshotControlMountPath + "/" + RestoreProxyBinaryName
 )
 
 // Exit codes reserved by the restore proxy. Every other code is the restored

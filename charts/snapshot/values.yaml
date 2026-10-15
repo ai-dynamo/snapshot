@@ -86,7 +86,8 @@ runtime:
 openshift:
   enabled: false
 
-# Storage configuration for checkpoints
+# Installation-level storage configuration. The chart resolves these values for
+# the operator and PageBroker; backend details are not part of the agent API.
 storage:
   # Storage type stays snapshot-owned for future backend expansion.
   # Only pvc is implemented today.
@@ -96,14 +97,15 @@ storage:
   pvc:
     # Create a new PVC (set to false if using existing PVC)
     create: true
-    # PVC name used by the agent checkpoint store
+    # Checkpoint PVC name, in the Helm release namespace. Name and namespace
+    # identify the store; create/size/storageClass only control provisioning.
     name: snapshot-pvc
     # PVC size
     size: 1Ti
     # Storage class (leave empty for default)
     storageClass: ""
-    # Fixed PVC mount path inside every snapshot-agent pod. The privileged
-    # mount helper independently enforces this source root.
+    # Fixed container-local PVC mount path, not a store identity input. Artifacts
+    # use the claim root (/); the privileged helper enforces this local mount.
     basePath: /checkpoints
 
   # Reserved for future snapshot-owned backends. Unsupported today.
@@ -114,16 +116,18 @@ storage:
   oci:
     uri: ""
 
-# PageBroker owns CustomStorage CUDA calls and transfers in one process.
-# It handles every Pod unless the Pod sets nvidia.com/snapshot-pagebroker: "false".
-# CustomStorage also requires driver support.
+# PageBroker sidecar: stages checkpoint images in memory and publishes them to
+# the checkpoint PVC it shares with the agent. See docs/operations/storage.md.
 pageBroker:
-  enabled: true
   # Restore directly from the checkpoint directory, or opt into a staged copy.
   restoreMode: direct
-  command: []
-  args: []
   maxConcurrentRequests: 16
+  staging:
+    # Checkpoint (except GPU CustomStorage capture, which writes directly to
+    # the PVC) and staged restore write into this RAM volume from the writing
+    # container's own memory limit. Leave headroom above sizeLimit for the
+    # agent's process and CRIU memory; see docs/operations/storage.md.
+    sizeLimit: 64Gi
   # Allocate and register the full ring before accepting GPU work.
   # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
   transferBufferCount: 32
@@ -147,6 +151,13 @@ daemonset:
   # Agent and nsrestore log level (trace, debug, info, warn, error)
   snapshotLogLevel: info
 
+  # Limits the restore proxy to Pods in this host namespace on the node, and
+  # leaves other restore Pods alone. Set it when other clusters share the
+  # nodes, such as vCluster tenants: in a vCluster, set it to the vCluster's
+  # host namespace. Every Snapshot install on the shared nodes must set its
+  # own; an install with it empty acts on every restore Pod on its nodes.
+  nriHostNamespace: ""
+
   # The shipped agent image is public on GHCR. Set this only when an image
   # override is hosted in a private registry.
   imagePullSecrets: []
@@ -157,11 +168,13 @@ daemonset:
   # such RuntimeClass exists; the field is then left out of the pod spec.
   runtimeClassName: nvidia
 
-  # Resource limits and requests
+  # Resource limits and requests. CRIU writes the checkpoint image into the
+  # memory-backed PageBroker staging volume from this container, so
+  # limits.memory also bounds the largest checkpoint image.
   resources:
     limits:
       cpu: 4
-      memory: 4Gi
+      memory: 64Gi
     requests:
       cpu: 2
       memory: 1Gi
