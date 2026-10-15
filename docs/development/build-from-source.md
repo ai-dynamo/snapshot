@@ -15,9 +15,8 @@ In addition to the [runtime prerequisites](../../README.md#prerequisites), the b
 
 The node agent supports `linux/amd64` and `linux/arm64`. The agent,
 PageBroker and operator images build for `linux/amd64` by default; pass
-`AGENT_PLATFORM=linux/arm64` to build them for arm64 nodes. See
-[Platform support](../limitations.md#platform-support) for what is validated on
-each architecture.
+`AGENT_PLATFORM=linux/arm64` to build them for arm64 nodes. Release images are
+published for both architectures; builds from `main` are amd64 only.
 
 ## 1. Clone the repository
 

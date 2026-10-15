@@ -147,8 +147,8 @@ to checkpoint and restore a pod.
 
 Current limitations:
 
-- Linux nodes on x86_64 or arm64; see [Platform support](docs/limitations.md#platform-support).
-- On arm64, only single-GPU workloads have been validated.
+- Linux nodes on x86_64 or arm64.
+- Single-node workloads are supported; multi-node is on the roadmap.
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 
