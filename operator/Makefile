@@ -20,7 +20,7 @@ test:
 # fast and dependency-free.
 test-integration: $(SETUP_ENVTEST)
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-	  go test -tags=integration ./...
+	  go test -tags=integration ./internal/crdinstaller/...
 
 fmt:
 	gofmt -w .
