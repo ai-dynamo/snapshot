@@ -27,11 +27,14 @@ way for single-GPU and multi-GPU workloads, with these differences:
 ## Multi-GPU requirements
 
 - All GPUs of the workload are on one node. Multi-node is on the roadmap.
-- The [driver versions](../../README.md#prerequisites) Snapshot requires.
 - A node with the GPU count, CPU, and memory the manifests request. The
   multi-GPU manifests select eight B200 GPUs. Change `nodeSelector` and the
   parallelism settings for other GPUs.
-- A ReadWriteMany storage class for the shared [model cache](model-cache-pvc.yaml).
+- The multi-GPU manifests load model weights from the `snapshot-model-cache` PVC,
+  so that source and restored Pods read the same files. Create it with
+  [`model-cache-pvc.yaml`](model-cache-pvc.yaml). It requests 2 TiB with
+  `ReadWriteMany` access from the default storage class. Set `storageClassName`
+  if the default does not support `ReadWriteMany`.
 
 ## 1. Make the workload snapshot-ready
 
