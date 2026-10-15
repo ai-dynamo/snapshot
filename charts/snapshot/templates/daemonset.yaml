@@ -1,4 +1,5 @@
 {{- include "snapshot.validateRuntime" . -}}
+{{- include "snapshot.validateStagingHeadroom" . -}}
 {{- if hasKey .Values.image.pageBroker "tag" -}}
 {{- fail "image.pageBroker.tag is unsupported: set image.agent.tag to select matching agent and PageBroker images" -}}
 {{- end -}}
@@ -244,11 +245,9 @@ spec:
         - name: pagebroker
           emptyDir:
             medium: Memory
-            # Falls back even when pageBroker.staging is explicitly null (e.g.
-            # helm upgrade --reuse-values from a release predating this key):
-            # an absent sizeLimit is an unbounded memory-backed volume, not a
-            # safe default.
-            sizeLimit: {{ (.Values.pageBroker.staging | default dict).sizeLimit | default "64Gi" | quote }}
+            # Must stay below daemonset.resources.limits.memory; the helper
+            # owns the default and validateStagingHeadroom enforces the gap.
+            sizeLimit: {{ include "snapshot.stagingSizeLimit" . | quote }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles

@@ -98,22 +98,30 @@ Because the staging volume is RAM, size the agent pod for it:
 
 | Value                                | Purpose                                                                                        | Default      |
 |---------------------------------------|--------------------------------------------------------------------------------------------------|--------------|
-| `pageBroker.staging.sizeLimit`       | Cap on the shared staging volume, used for checkpoint and staged restore                        | `64Gi`       |
+| `pageBroker.staging.sizeLimit`       | Cap on the shared staging volume, used for checkpoint and staged restore                        | `56Gi`       |
 | `daemonset.resources.limits.memory`  | Bounds the largest checkpoint image, since CRIU writes staging from the agent container         | `64Gi`       |
 | `pageBroker.resources.limits.memory` | Bounds staged-restore prefetch, since PageBroker fills staging only in staged restore mode       | `256Gi`      |
 | `pageBroker.resources.requests`      | GPU transfer rings and process memory; added to the agent's requests when scheduling            | 8 CPU / 32Gi |
 
 Pages written to the staging volume are charged to the container that wrote
 them (the agent during checkpoint, PageBroker during staged restore), not to
-the volume. By default `sizeLimit` and `daemonset.resources.limits.memory` are
-both `64Gi`, leaving no headroom for the agent's own process and CRIU memory
-while staging a checkpoint near that size. Leave that headroom — either lower
-`sizeLimit` or raise the agent memory limit — when sizing for your workloads.
+the volume. `sizeLimit` must therefore stay strictly below
+`daemonset.resources.limits.memory`, with enough left over for the agent's own
+process and CRIU's working set: if the two are equal, they can together reach
+the container's limit while the volume is still under its cap, and the kernel
+OOM-kills the agent — taking every capture and restore on that node with it.
+
+**The chart enforces this.** Rendering fails if `sizeLimit` is greater than or
+equal to the agent memory limit, so a release cannot be installed in the
+configuration that OOM-kills. The defaults leave an 8Gi reserve (`56Gi`
+staging against a `64Gi` limit); raise both together to keep it.
+
 The staging-space check (`INSUFFICIENT_STORAGE`) only rejects a transfer that
 would exceed `sizeLimit`; it does not guarantee protection from an OOM kill,
-and it has no way to know the size of a checkpoint before CRIU writes it.
-Leaving `sizeLimit` missing, null, or empty falls back to the chart's `64Gi`
-default, not the node's allocatable memory.
+and it has no way to know the size of a checkpoint before CRIU writes it — the
+headroom above is what makes an oversized checkpoint fail the capture instead
+of the agent. Leaving `sizeLimit` missing, null, or empty falls back to the
+chart's `56Gi` default, not the node's allocatable memory.
 
 To checkpoint workloads whose CPU memory exceeds the defaults, raise the
 staging cap and the agent memory limit together, leaving headroom above the

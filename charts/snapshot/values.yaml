@@ -124,10 +124,14 @@ pageBroker:
   maxConcurrentRequests: 16
   staging:
     # Checkpoint (except GPU CustomStorage capture, which writes directly to
-    # the PVC) and staged restore write into this RAM volume from the writing
-    # container's own memory limit. Leave headroom above sizeLimit for the
-    # agent's process and CRIU memory; see docs/operations/storage.md.
-    sizeLimit: 64Gi
+    # the PVC) and staged restore write into this RAM volume, and its pages are
+    # charged to the writing container's own memory limit. This must therefore
+    # stay strictly below daemonset.resources.limits.memory, leaving room for
+    # the agent process and CRIU's working set, or the agent is OOM-killed
+    # before the volume fills. The chart refuses to render otherwise. The 8Gi
+    # gap below the 64Gi default limit is the reserve; raise both together.
+    # See docs/operations/storage.md and SNEP-394.
+    sizeLimit: 56Gi
   # Allocate and register the full ring before accepting GPU work.
   # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
   transferBufferCount: 32

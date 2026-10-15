@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Staging is a memory-backed emptyDir written from the agent container, so its
+# pages are charged to the agent's cgroup alongside the agent's own
+# allocations. If sizeLimit reaches the container memory limit the agent is
+# OOM-killed before the volume fills, taking every capture and restore on the
+# node with it. These tests pin the gap. See SNEP-394.
+suite: PageBroker staging headroom
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: defaults leave the staging volume below the agent memory limit
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: 56Gi
+      - equal:
+          path: spec.template.spec.containers[?(@.name=="agent")].resources.limits.memory
+          value: 64Gi
+
+  - it: keeps the volume memory-backed and always bounded
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.medium
+          value: Memory
+      - exists:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+
+  - it: bounds the volume even when pageBroker.staging is explicitly null
+    set:
+      pageBroker.staging: null
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: 56Gi
+
+  - it: refuses a sizeLimit equal to the agent memory limit
+    set:
+      pageBroker.staging.sizeLimit: 64Gi
+    asserts:
+      - failedTemplate:
+          errorPattern: must be smaller than daemonset.resources.limits.memory
+
+  - it: refuses a sizeLimit above the agent memory limit
+    set:
+      pageBroker.staging.sizeLimit: 128Gi
+    asserts:
+      - failedTemplate:
+          errorPattern: must be smaller than daemonset.resources.limits.memory
+
+  - it: compares across mixed units rather than string-matching suffixes
+    set:
+      pageBroker.staging.sizeLimit: 65536Mi
+      daemonset.resources.limits.memory: 64Gi
+    asserts:
+      - failedTemplate:
+          errorPattern: must be smaller than daemonset.resources.limits.memory
+
+  - it: accepts a raised limit that preserves the gap
+    set:
+      pageBroker.staging.sizeLimit: 120Gi
+      daemonset.resources.limits.memory: 128Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: 120Gi
+
+  - it: rejects a memory quantity it cannot parse rather than skipping the check
+    set:
+      pageBroker.staging.sizeLimit: plenty
+    asserts:
+      - failedTemplate:
+          errorPattern: cannot parse memory quantity
