@@ -8981,11 +8981,11 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - message: annotation nvidia.com/cuda-shared-memory-support must be
-                    enabled or disabled
+                - message: annotation nvidia.com/snapshot-multi-gpu must be enabled
+                    or disabled
                   rule: '!has(self.metadata) || !has(self.metadata.annotations) ||
-                    !(''nvidia.com/cuda-shared-memory-support'' in self.metadata.annotations)
-                    || self.metadata.annotations[''nvidia.com/cuda-shared-memory-support''].trim()
+                    !(''nvidia.com/snapshot-multi-gpu'' in self.metadata.annotations)
+                    || self.metadata.annotations[''nvidia.com/snapshot-multi-gpu''].trim()
                     in [''enabled'', ''disabled'']'
             required:
             - podSnapshotTemplate
