@@ -43,8 +43,10 @@ STORAGE_CLASS="${SNAPSHOT_E2E_STORAGE_CLASS:-snapshot-e2e-hostpath}"
 
 # The CRDs validate metadata with CEL expressions from the `format` library,
 # which the apiserver only exposes from 1.32 on; k3d's default k3s is older and
-# rejects them. Track the Kubernetes version the GPU e2e already targets.
-K3S_IMAGE="${SNAPSHOT_E2E_K3S_IMAGE:-docker.io/rancher/k3s:v1.32.13-k3s1}"
+# rejects them. The restore proxy needs containerd 2.2 or newer, whose NRI
+# applies a container's args: every k3s 1.32 ships containerd 2.1, and 1.34
+# ships 2.2.
+K3S_IMAGE="${SNAPSHOT_E2E_K3S_IMAGE:-docker.io/rancher/k3s:v1.34.12-k3s1}"
 
 # Checkpoints live on a host directory bind-mounted into the node, so they
 # survive a node restart and can be inspected after a failed run.
@@ -78,7 +80,7 @@ environment:
                             is overwritten, so do not point it at a kubeconfig
                             you want to keep)
   SNAPSHOT_E2E_K3D_CLUSTER  cluster name (default: snapshot-k3d-cpu)
-  SNAPSHOT_E2E_K3S_IMAGE    k3s node image (default: v1.32.13-k3s1)
+  SNAPSHOT_E2E_K3S_IMAGE    k3s node image (default: v1.34.12-k3s1)
   SNAPSHOT_E2E_K3D_REGISTRY       registry name (default: snapshot-registry)
   SNAPSHOT_E2E_K3D_REGISTRY_PORT  host port for it (default: 5000)
   SNAPSHOT_E2E_PVC_SIZE, SNAPSHOT_E2E_STORAGE_CLASS,

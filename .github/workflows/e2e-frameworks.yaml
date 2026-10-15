@@ -251,7 +251,7 @@ jobs:
 
       - name: Resolve Snapshot image tag
         if: ${{ steps.selected.outputs.run == 'true' && (inputs.snapshot_tag || '') == '' }}
-        timeout-minutes: 3
+        timeout-minutes: 23
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -269,7 +269,7 @@ jobs:
           # of its own; fall back to main's, loudly. main and release refs
           # stay strict: a nightly must test the commit it checked out.
           case "${GITHUB_REF_NAME}" in
-            main|release/*) python3 hack/resolve-snapshot-image-tag.py ;;
+            main|release/*) python3 hack/resolve-snapshot-image-tag.py --wait-seconds 1200 ;;
             *) python3 hack/resolve-snapshot-image-tag.py --fallback-main ;;
           esac
 

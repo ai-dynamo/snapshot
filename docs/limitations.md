@@ -5,16 +5,28 @@ roadmap.
 
 ## Current limitations
 
-- Single-GPU workloads only.
-- x86_64 nodes only.
+- Linux nodes on x86_64 or arm64.
+- Single-node workloads are supported; multi-node is on the roadmap.
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 - The checkpointed workload must not have tools that intercept `libcuda.so`
   calls (e.g. Datadog GPU monitoring) — CUDA calls may fail or hang after
   restore, with undefined results. Disable such interception for workloads
   that will be snapshotted.
-
-Multi-GPU and Arm support are on the roadmap.
+- Every node needs a container runtime with NRI v0.10 or newer, enabled:
+  containerd 2.2 or newer. The node agent uses NRI to make its restore proxy
+  PID 1 in restore containers. On a node without NRI, or with an older runtime,
+  which drops that change silently, the agent exits with an error saying so and
+  keeps restarting, so that node can neither checkpoint nor restore. Keep the
+  agent off such nodes with `daemonset.nodeSelector`.
+- A Pod gets one restore. If a restored container starts again, for example
+  under `restartPolicy: Always` after the restored process exits, it ends in
+  `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in
+  the same Pod is on the roadmap.
+- Several Snapshot installations whose clusters share nodes, such as vCluster
+  tenants, work only when each sets `daemonset.nriHostNamespace` to its own host
+  namespace. An installation with it empty acts on every restore Pod on its
+  nodes.
 
 ## GPU device selection and restore paths
 

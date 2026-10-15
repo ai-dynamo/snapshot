@@ -68,12 +68,12 @@ jobs:
 
       - name: Resolve Snapshot image tag
         if: ${{ (inputs.snapshot_tag || '') == '' }}
-        timeout-minutes: 3
+        timeout-minutes: 23
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 hack/resolve-snapshot-image-tag.py
+          python3 hack/resolve-snapshot-image-tag.py --wait-seconds 1200
 
       - name: Use provided Snapshot image tag
         if: ${{ (inputs.snapshot_tag || '') != '' }}

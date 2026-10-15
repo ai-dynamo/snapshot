@@ -12,8 +12,8 @@ pull request, without a cluster:
   relies on (control volume at /snapshot-control with subPath main,
   SNAPSHOT_CONTROL_DIR, io_uring seccomp profile, /dev/net/tun, nvidia
   RuntimeClass, one GPU);
-- the restore pod is an inert placeholder (an explicit sleep command) that
-  restores this run's PodSnapshot;
+- the restore pod keeps the source's command, which the restore proxy
+  replaces, and restores this run's PodSnapshot;
 - the model the guide deploys is the one the tests expect;
 - the image tag is content-addressed and deterministic.
 """
@@ -120,8 +120,8 @@ def test_restore_pod_also_mounts_the_app_configmap(
     spec: frameworks.FrameworkSpec,
 ) -> None:
     # CRIU recreates every mount from the source container's mount
-    # namespace, including this one, even though the placeholder's own
-    # command never reads it.
+    # namespace, including this one, even though the restore container's own
+    # command never runs.
     _, restore, _ = pods(spec)
     main = fw.main_container(restore)
     volumes = {volume["name"]: volume for volume in restore["spec"]["volumes"]}
@@ -142,14 +142,14 @@ def test_app_configmap_matches_the_guide_program(
 
 
 @pytest.mark.workload
-def test_restore_pod_is_standby_placeholder_for_this_run(spec: frameworks.FrameworkSpec) -> None:
-    _, restore, run = pods(spec)
+def test_restore_pod_restores_this_run(spec: frameworks.FrameworkSpec) -> None:
+    source, restore, run = pods(spec)
     main = fw.main_container(restore)
-    # The guide manifests keep the placeholder inert with an explicit sleep
-    # command; without it the guide program would load a model into the GPU
-    # while the agent restores into the same container.
-    assert main["command"] == ["/bin/sh", "-c", "exec sleep infinity"]
-    assert "args" not in main
+    source_main = fw.main_container(source)
+    # The restore container keeps the source's command, which Snapshot
+    # replaces with the restore proxy.
+    assert main["command"] == source_main["command"]
+    assert main.get("args") == source_main.get("args")
     assert fw.env_value(main, "SNAPSHOT_RESTORE_STANDBY") is None
     assert restore["metadata"]["annotations"] == {fw.RESTORE_FROM_ANNOTATION: run.snapshot_name}
     node_terms = restore["spec"]["affinity"]["nodeAffinity"][

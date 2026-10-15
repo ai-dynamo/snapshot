@@ -12,11 +12,11 @@ driven by the guide's own program and manifests (see framework_workloads):
    is checkpointable.
 2. A PodSnapshot captures it. The dump terminates the source process.
 3. A restore pod built from the guide's restore manifest is pinned to the
-   source node. Its own entrypoint stays inert (`sleep infinity`); the agent
+   source node. The restore proxy replaces its entrypoint; the agent
    restores the checkpointed process into it, which resumes the engine,
    generates again, and serves /generate.
 4. The test asserts the restore condition, the restore-ready file, a live
-   /generate answer, and that the placeholder never loaded a model itself —
+   /generate answer, and that the container never loaded a model itself —
    a restore that silently degraded to a cold start must not pass.
 
 Select frameworks with SNAPSHOT_E2E_FRAMEWORK=vllm[,sglang,...]; CI runs one
@@ -249,13 +249,13 @@ def test_framework_checkpoint_restore_serves_inference(
         answer = inference.request_generate(config.namespace, run.restore_pod, frameworks.PROMPT)
         print(f"[{framework.name}] /generate after restore: {answer!r}")
 
-        # The placeholder's own entrypoint must have stayed in standby. If it
-        # had loaded a model, its log would show the pre-checkpoint line and
-        # the "restore" would be an ordinary cold start wearing a Restored
-        # condition.
+        # The container's own command, the source's app.py, must not have
+        # run: the restore proxy replaces it. Had it loaded a model, its log
+        # would show the pre-checkpoint line and the "restore" would be an
+        # ordinary cold start wearing a Restored condition.
         restore_logs = k8s.pod_logs(config.namespace, run.restore_pod, tail_lines=2000)
         assert "pre-checkpoint output=" not in restore_logs, (
-            "restore placeholder loaded a model itself instead of staying in standby"
+            "the restore container loaded a model itself instead of being restored"
         )
         result.mark_event("inference.verified")
         result.finish_test()

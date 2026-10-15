@@ -58,7 +58,7 @@ func TestRestoreTarCmd(t *testing.T) {
 			t.Fatalf("restoreTarCmd: %v", err)
 		}
 
-		wantLoader := "/tmp/snapshot-binaries/libc/ld-linux-x86-64.so.2"
+		wantLoader := "/tmp/snapshot-binaries/libc/" + nsmount.BundleLoader
 		if cmd.Path != wantLoader {
 			t.Fatalf("exec path = %q, want the bundled loader %q", cmd.Path, wantLoader)
 		}

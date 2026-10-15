@@ -58,12 +58,15 @@ spec:
         - name: main
           image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
           imagePullPolicy: IfNotPresent
-          # Inert placeholder: the agent restores the checkpointed process into
-          # this container, so app.py must not run here.
+          # The source's command. Snapshot replaces it with its restore proxy,
+          # which waits for the restore and then follows the restored process.
           command:
-            - /bin/sh
-            - -c
-            - exec sleep infinity
+            - python3
+            - -u
+            - /snapshot-app/app.py
+          args:
+            - --mode
+            - snapshot
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
@@ -112,7 +115,7 @@ spec:
               mountPath: /dev/net/tun
             # The checkpointed process's mount namespace includes this
             # mount (from the source Pod); restore recreates it here too,
-            # even though this placeholder's own command never reads it.
+            # even though this container's own command never runs.
             - name: app
               mountPath: /snapshot-app
               readOnly: true
