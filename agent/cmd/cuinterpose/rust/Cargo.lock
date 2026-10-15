@@ -212,6 +212,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuinterpose-gpu-tests"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "cuinterpose-abi",
+ "cuinterpose-protocol",
+ "libc",
+ "rustix",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "cuinterpose-launch"
 version = "0.1.0"
 dependencies = [

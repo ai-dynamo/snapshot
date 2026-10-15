@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "cuinterpose-gpu-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+cudarc.workspace = true
+cuinterpose-abi.workspace = true
+cuinterpose-protocol.workspace = true
+libc.workspace = true
+rustix.workspace = true
+serde.workspace = true
+tempfile.workspace = true
