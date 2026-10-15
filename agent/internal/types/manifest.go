@@ -68,16 +68,18 @@ func NewCheckpointManifest(
 // agent could not read is left out rather than written empty, so it reads as
 // unknown instead of as a value that happens to be blank.
 type HostManifest struct {
-	KernelVersion string `yaml:"kernelVersion,omitempty"`
-	CPUArch       string `yaml:"cpuArch,omitempty"`
+	KernelVersion string   `yaml:"kernelVersion,omitempty"`
+	CPUArch       string   `yaml:"cpuArch,omitempty"`
+	CPUFeatures   []string `yaml:"cpuFeatures,omitempty"`
 }
 
 // NewHostManifest takes the architecture from the agent binary rather than
 // asking the node: this binary is running on that node, so they agree.
-func NewHostManifest(kernelVersion string) HostManifest {
+func NewHostManifest(kernelVersion string, cpuFeatures []string) HostManifest {
 	return HostManifest{
 		KernelVersion: kernelVersion,
 		CPUArch:       runtime.GOARCH,
+		CPUFeatures:   cpuFeatures,
 	}
 }
 
@@ -296,6 +298,7 @@ func (m *CheckpointManifest) CompatEnvironment() compat.Environment {
 	return compat.Environment{
 		KernelVersion:      m.Host.KernelVersion,
 		CPUArch:            m.Host.CPUArch,
+		CPUFeatures:        m.Host.CPUFeatures,
 		Image:              m.K8s.Image,
 		ImageID:            m.K8s.ImageID,
 		CPULimit:           m.K8s.CPULimit,

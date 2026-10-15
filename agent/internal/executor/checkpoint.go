@@ -372,7 +372,7 @@ func configureCheckpoint(
 		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs).
 			WithPodEnvironment(podEnvironment),
 		types.NewOverlayManifest(overlay, state.UpperDir, state.OCISpec),
-		types.NewHostManifest(cfg.HostKernelVersion),
+		types.NewHostManifest(cfg.HostKernelVersion, cfg.HostCPUFeatures),
 	)
 	if len(state.CUDANSPIDs) > 0 {
 		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUs)

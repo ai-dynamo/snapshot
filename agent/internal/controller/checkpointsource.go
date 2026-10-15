@@ -37,8 +37,9 @@ func checkpointSourceFromManifest(manifest *types.CheckpointManifest) *snapshotv
 		Name:          manifest.K8s.SourceNode,
 		Architecture:  env.CPUArch,
 		KernelVersion: env.KernelVersion,
+		CPUFeatures:   env.CPUFeatures,
 	}
-	if node != (snapshotv1alpha1.CheckpointSourceNode{}) {
+	if node.Name != "" || node.Architecture != "" || node.KernelVersion != "" || len(node.CPUFeatures) > 0 {
 		source.Node = &node
 	}
 

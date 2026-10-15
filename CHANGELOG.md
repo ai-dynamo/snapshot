@@ -35,9 +35,10 @@ commit-level history for each release is on its
 ### Added
 
 - `PodSnapshotContent.status.source` records what a checkpoint was captured on:
-  the source node's name, architecture and kernel version, the captured
-  container's image, image digest and CPU and memory limits, and the NVIDIA
-  driver version and GPU models the capture could see. Informational only —
+  the source node's name, architecture, kernel version and the instruction
+  sets its CPU offers, the captured container's image, image digest and CPU
+  and memory limits, and the NVIDIA driver version and GPU models the capture
+  could see. Informational only —
   restore compatibility still compares the artifact's manifest. CRD change;
   populated for captures that reach `Ready` after the upgrade, so a content
   already `Ready` before it is not backfilled.

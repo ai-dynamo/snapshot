@@ -5,10 +5,14 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	goruntime "runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -389,5 +393,78 @@ func TestReadKernelVersionRejectsWhatItCannotRead(t *testing.T) {
 	writeKernelRelease(t, procPath, "\n")
 	if _, err := ReadKernelVersion(procPath); err == nil {
 		t.Fatal("expected an error when osrelease is blank")
+	}
+}
+
+func writeCPUInfo(t *testing.T, procPath string, flagsPerProcessor ...string) {
+	t.Helper()
+	var content strings.Builder
+	for i, flags := range flagsPerProcessor {
+		fmt.Fprintf(&content, "processor\t: %d\nvendor_id\t: GenuineIntel\nflags\t\t: %s\n\n", i, flags)
+	}
+	if err := os.WriteFile(filepath.Join(procPath, "cpuinfo"), []byte(content.String()), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+func TestReadCPUFeatures(t *testing.T) {
+	if goruntime.GOARCH != "amd64" {
+		t.Skip("procfs parses cpuinfo per architecture, and the agent ships for amd64 only")
+	}
+
+	tests := []struct {
+		name  string
+		flags []string
+		want  []string
+	}{
+		{
+			name:  "flags that name no instruction are dropped",
+			flags: []string{"fpu sse2 hypervisor constant_tsc avx2 md_clear"},
+			want:  []string{"avx2", "fpu", "sse2"},
+		},
+		{
+			// A restored process can be scheduled onto either processor, so
+			// only what both offer is offered at all.
+			name: "a flag one processor lacks is not offered",
+			flags: []string{
+				"fpu sse2 avx2 avx512f",
+				"fpu sse2 avx2",
+			},
+			want: []string{"avx2", "fpu", "sse2"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			procPath := t.TempDir()
+			writeCPUInfo(t, procPath, tc.flags...)
+
+			got, err := ReadCPUFeatures(procPath)
+			if err != nil {
+				t.Fatalf("ReadCPUFeatures: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ReadCPUFeatures() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// What cannot be read is reported rather than recorded as an empty list, which
+// would be indistinguishable from a checkpoint this agent version never
+// recorded features for.
+func TestReadCPUFeaturesRejectsWhatItCannotRead(t *testing.T) {
+	if goruntime.GOARCH != "amd64" {
+		t.Skip("procfs parses cpuinfo per architecture, and the agent ships for amd64 only")
+	}
+
+	if _, err := ReadCPUFeatures(t.TempDir()); err == nil {
+		t.Fatal("expected an error when the host proc mount has no cpuinfo")
+	}
+
+	procPath := t.TempDir()
+	writeCPUInfo(t, procPath, "hypervisor constant_tsc")
+	if _, err := ReadCPUFeatures(procPath); err == nil {
+		t.Fatal("expected an error when no flag is an instruction set")
 	}
 }

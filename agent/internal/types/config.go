@@ -20,6 +20,7 @@ const CheckpointBasePath = "/checkpoints"
 type AgentConfig struct {
 	NodeName               string          `yaml:"-"`
 	HostKernelVersion      string          `yaml:"-"`
+	HostCPUFeatures        []string        `yaml:"-"`
 	CustomStorageAvailable bool            `yaml:"-"`
 	Storage                StorageSpec     `yaml:"storage"`
 	Overlay                OverlaySettings `yaml:"overlay"`

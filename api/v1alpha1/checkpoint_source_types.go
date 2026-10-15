@@ -73,6 +73,12 @@ type CheckpointSourceNode struct {
 	// KernelVersion is the node's kernel release.
 	// +optional
 	KernelVersion string `json:"kernelVersion,omitempty"`
+
+	// CPUFeatures are the instruction-set flags from the node's /proc/cpuinfo
+	// that every processor reported, sorted. A restore needs a target that
+	// offers all of them.
+	// +optional
+	CPUFeatures []string `json:"cpuFeatures,omitempty"`
 }
 
 // CheckpointSourcePod is the container a checkpoint was captured from, and what
