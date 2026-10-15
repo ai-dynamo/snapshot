@@ -25,8 +25,9 @@ arm64 was validated with single-GPU workloads on GB300 nodes (kernel
 `6.17.0-1019-aws-64k`, 64 KiB pages, driver 580.173.02). Other arm64 hardware and
 kernels are untested.
 
-- **Images.** The published Snapshot images are x86_64 only; for arm64, [build them
-  from source](development/build-from-source.md). Framework images must publish a
+- **Images.** Release images support amd64 and arm64. Builds from `main` are amd64
+  only, so for arm64 outside a release, [build from
+  source](development/build-from-source.md). Framework images must publish a
   `linux/arm64` variant. An amd64-only digest will not run on arm64, so pin the
   multi-architecture index digest to work on both.
 - **TensorRT-LLM.** With the guide's default setup, the checkpoint hangs on the
