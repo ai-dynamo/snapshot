@@ -134,7 +134,8 @@ enum CudaRetention { CUDA_OUT_OF_SCOPE, CUDA_RETAINED, CUDA_UNAVAILABLE };
 
 static enum CudaRetention retain_cuda_library(void *selected, void *address) {
     Dl_info info;
-    if (!address || !dladdr(address, &info))
+    struct link_map *provider = NULL;
+    if (!address || !dladdr1(address, &info, (void **)&provider, RTLD_DL_LINKMAP) || !provider)
         return CUDA_OUT_OF_SCOPE;
     int family = cuda_library_family(info.dli_fname);
     if (!family)
@@ -152,9 +153,11 @@ static enum CudaRetention retain_cuda_library(void *selected, void *address) {
         atomic_store(&failed, true);
         return CUDA_UNAVAILABLE;
     }
+    // Compare loaded objects, not addresses. dli_fbase is where the mapping starts,
+    // while l_addr is the load bias. They differ when the first segment's address is
+    // nonzero, as in recent aarch64 libcuda builds.
     struct link_map *map = NULL;
-    if (dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || !map ||
-        (void *)map->l_addr != info.dli_fbase) {
+    if (dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map != provider) {
         dlclose(handle);
         return CUDA_OUT_OF_SCOPE;
     }
@@ -440,18 +443,20 @@ API CUresult cuGetProcAddress_v2_ptsz(const char *name, void **out, int version,
 }
 
 static bool runtime_query_supported(void *function) {
-    Dl_info provider, version_provider;
-    if (!dladdr(function, &provider))
+    Dl_info info, version_info;
+    struct link_map *provider = NULL, *version_provider = NULL;
+    if (!dladdr1(function, &info, (void **)&provider, RTLD_DL_LINKMAP) || !provider)
         return false;
-    void *library = dlopen(provider.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+    void *library = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
     if (!library)
         return false;
     int (*get_version)(int *) = lookup(library, "cudaRuntimeGetVersion");
     int version = 0;
     // A handle lookup can find a dependency's symbol, whose version does not identify
     // the runtime that supplied the query function.
-    bool supported = get_version && dladdr((void *)get_version, &version_provider) &&
-        version_provider.dli_fbase == provider.dli_fbase &&
+    bool supported = get_version &&
+        dladdr1((void *)get_version, &version_info, (void **)&version_provider, RTLD_DL_LINKMAP) &&
+        version_provider == provider &&
         get_version(&version) == cudaSuccess && version >= 12000;
     dlclose(library);
     return supported;
