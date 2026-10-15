@@ -136,7 +136,7 @@ primitives into their own control loop.
 | `nvidia.com/restore-from` | Namespaced | Pod annotation that triggers a restore from a named `PodSnapshot` in the same namespace. |
 
 Under the hood, a control-plane operator and a per-node agent perform the CRIU
-and `cuda-checkpoint` work; see [Architecture](docs/reference/architecture.md).
+and `cuda-checkpoint` work; see [Architecture](docs/reference/architecture/).
 The [API reference](docs/reference/api.md) covers the resources and the
 checkpoint/restore lifecycle.
 
@@ -164,7 +164,7 @@ operations, indexed below.
 **Reference**
 
 - [API](docs/reference/api.md) — `PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, and the `restore-from` annotation.
-- [Architecture](docs/reference/architecture.md) — operator and node-agent design, the checkpoint/restore internals, and multi-GPU support.
+- [Architecture](docs/reference/architecture/) — operator and node-agent design, the checkpoint/restore internals, and multi-GPU support.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
 - [Workload contract](docs/reference/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
 - [Restore Pod contract](docs/reference/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
