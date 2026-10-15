@@ -308,16 +308,22 @@ func TestCheckpointPreparationFailure(t *testing.T) {
 					assert.ErrorContains(t, err, "prepare PageBroker checkpoint: read PageBroker response: EOF")
 					assert.ErrorIs(t, err, io.EOF)
 				}
-				if cleanup == "confirmed" {
+				switch cleanup {
+				case "confirmed":
 					assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
-				} else {
-					assert.ErrorContains(t, err, "abort PageBroker checkpoint")
-					if cleanup == "not-found" {
-						assert.ErrorContains(t, err, "TRANSACTION_NOT_FOUND")
-					} else {
-						assert.ErrorContains(t, err, fmt.Sprintf("abort PageBroker checkpoint %q: read PageBroker response: EOF", transactionID))
-						assert.ErrorIs(t, err, io.EOF)
-					}
+				case "not-found":
+					// A broker that is not holding the transaction has already
+					// done what Abort asked, so it is not reported as a cleanup
+					// failure. This also makes Abort idempotent for the retry
+					// loop, which may release a transaction twice.
+					assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
+					assert.NotContains(t, err.Error(), "TRANSACTION_NOT_FOUND")
+				default:
+					// A transport failure is retried briefly and then reported
+					// as the error that started the retry, not the deadline
+					// that ended it.
+					assert.ErrorContains(t, err, fmt.Sprintf("abort PageBroker checkpoint %q: read PageBroker response: EOF", transactionID))
+					assert.ErrorIs(t, err, io.EOF)
 				}
 				assert.False(t, CheckpointNeedsSourceKill(err))
 				for _, path := range []string{workingDirectory, cfg.Storage.BasePath} {

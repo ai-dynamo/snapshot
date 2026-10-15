@@ -51,6 +51,26 @@ func (e *FailureError) Error() string {
 // Code returns a known wire failure code; unknown codes map to UNSPECIFIED.
 func (e *FailureError) Code() Failure_Code { return e.code }
 
+// TransactionGone reports whether a failure means the broker is not holding
+// the transaction: it never had it, or it expired. Both make a retry of that
+// transaction pointless, and both make an Abort of it unnecessary — it is
+// already in the state Abort was asking for.
+//
+// Callers use this to tell a failure that left recoverable staged data from
+// one that left nothing.
+func TransactionGone(err error) bool {
+	var failure *FailureError
+	if !errors.As(err, &failure) {
+		return false
+	}
+	switch failure.Code() {
+	case Failure_TRANSACTION_NOT_FOUND, Failure_TRANSACTION_EXPIRED:
+		return true
+	default:
+		return false
+	}
+}
+
 func isStorageFailure(code Failure_Code) bool {
 	switch code {
 	case Failure_STORE_MISMATCH, Failure_ACCESS_DENIED, Failure_STORAGE_UNAVAILABLE,
