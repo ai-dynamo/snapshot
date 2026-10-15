@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The vLLM engine: loads and patches docs/guides/vllm/{deployment,
-restore-deployment}.yaml directly, so the benchmark deploys exactly the pod
-template the manual guide documents -- only `image`, `SNAPSHOT_MODEL`, the run
+"""The vLLM engine: loads docs/guides/vllm/capture/qwen3-0.6b.yaml and
+docs/guides/vllm/restore/single-gpu.yaml directly, so the benchmark deploys exactly the pod
+template the manual guide documents -- only `image`, the engine `model`, the run
 name/namespace, and (for restore) the `nvidia.com/restore-from` annotation are
 patched. This is deliberate: the guide's own YAML stays the single source of
 truth for what gets deployed, so the benchmark can't silently drift from the
@@ -19,6 +19,7 @@ directly-created Pod has an immediate, deterministic name and UID (needed for
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -27,14 +28,13 @@ import yaml
 from snapshot_benchmarks.engines import ModelSpec
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-SOURCE_DEPLOYMENT_PATH = _REPO_ROOT / "docs/guides/vllm/deployment.yaml"
-RESTORE_DEPLOYMENT_PATH = _REPO_ROOT / "docs/guides/vllm/restore-deployment.yaml"
+SOURCE_DEPLOYMENT_PATH = _REPO_ROOT / "docs/guides/vllm/capture/qwen3-0.6b.yaml"
+RESTORE_DEPLOYMENT_PATH = _REPO_ROOT / "docs/guides/vllm/restore/single-gpu.yaml"
 
 CONTAINER_NAME = "main"
 VERSION_PROBE_COMMAND = 'python3 -c "import vllm; print(vllm.__version__)"'
 
 RESTORE_FROM_ANNOTATION = "nvidia.com/restore-from"
-SNAPSHOT_MODEL_ENV = "SNAPSHOT_MODEL"
 
 
 def _load_pod_template(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -62,7 +62,7 @@ def _patch_container(
     model: ModelSpec,
     image_pull_policy: str | None,
     tolerations: list[dict[str, str]] | None = None,
-) -> None:
+) -> dict[str, Any]:
     containers = [c for c in pod_spec["containers"] if c["name"] == CONTAINER_NAME]
     if len(containers) != 1:
         raise AssertionError(
@@ -74,11 +74,9 @@ def _patch_container(
         container["imagePullPolicy"] = image_pull_policy
     for env_name, env_value in (model.env or {}).items():
         _set_env(container, env_name, env_value)
-    # Set last so a conflicting `model.env` entry can never make the pod load
-    # a different model than the one `RunResult.model.hf_id_or_path` records.
-    _set_env(container, SNAPSHOT_MODEL_ENV, model.hf_id_or_path)
     if tolerations:
         pod_spec.setdefault("tolerations", []).extend(tolerations)
+    return container
 
 
 def build_source_pod(
@@ -92,12 +90,16 @@ def build_source_pod(
 ) -> dict[str, Any]:
     template_metadata, pod_spec = _load_pod_template(SOURCE_DEPLOYMENT_PATH)
     pod_spec = copy.deepcopy(pod_spec)
-    _patch_container(
+    container = _patch_container(
         pod_spec,
         image=image,
         model=model,
         image_pull_policy=image_pull_policy,
         tolerations=tolerations,
+    )
+    # The guide program takes its engine kwargs as its last argument.
+    container["args"][-1] = json.dumps(
+        {**json.loads(container["args"][-1]), "model": model.hf_id_or_path}
     )
     return {
         "apiVersion": "v1",
