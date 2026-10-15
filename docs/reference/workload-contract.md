@@ -125,8 +125,8 @@ working checkpoint, just a larger or colder one.
 |------------|------|------|--------------|--------|
 | Warm up | SHOULD | one `generate` | `LLM.generate` (two prompts) | one `generate` |
 | Stop in-flight work | MUST | `pause_generation()` | synchronous `generate` returns idle | `pause_generation()` |
-| Park GPU memory | SHOULD | `release_kv_cache_memory()` (sleep mode) | `gc.collect()`; state stays resident | `release_memory_occupation()` (memory saver) |
-| Restore GPU memory | MUST | `wake_up()` | — (resident) | `resume_memory_occupation()` |
+| Park GPU memory | SHOULD | `release_kv_cache_memory()` (sleep mode) | `_collective_rpc("sleep", (["kv_cache"],))` + `gc.collect()` | `release_memory_occupation(tags=["kv_cache"])` (memory saver) |
+| Restore GPU memory | MUST | `wake_up()` | `_collective_rpc("wakeup", (["kv_cache"],))` | `resume_memory_occupation(tags=["kv_cache"])` |
 | Resume | MUST | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` |
 
 The three are the engines the guides document, not the limit of what the
