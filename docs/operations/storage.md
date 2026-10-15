@@ -44,14 +44,6 @@ is `/`, independent of the container-local `/checkpoints` mount. Neither a
 caller-supplied store ID nor an additional PVC namespace setting is required.
 `storage.pvc.basePath` retains its existing mount-path meaning.
 
-The operator validates this resolved identity at startup. Content storage
-bindings and publication descriptors are additive API groundwork: the current
-checkpoint/restore callers still use the existing filesystem flow, and the
-current PageBroker executable keeps its existing arguments. Artifact-addressed
-flow activation requires a compatible PageBroker build that consumes the
-resolved storage configuration; mounting the file does not enable that flow.
-S3 remains unsupported.
-
 If the cluster has no default storage class that can provision RWX, set one:
 
 ```bash

@@ -71,12 +71,6 @@ when it binds a `PodSnapshot`; callers never create it.
 | `storage.artifacts[].containerName`             | string                       | Required container name; entries must be unique.                                                                                                                                                                                           |
 | `storage.artifacts[].artifactHandle`            | string                       | Required opaque publication locator within the bound store, up to 4096 characters. Callers must not interpret it as a filesystem path.                                                                                                     |
 
-The storage fields are groundwork for artifact-addressed checkpoint/restore.
-Existing filesystem producers leave them absent. Neither field carries PVC/S3
-configuration or credentials, and workload requests remain unchanged. A binding
-must be set when content is created; it cannot be added to an existing unbound
-content object. Legacy content remains usable through the existing PVC flow.
-
 ### SnapshotJob
 
 Runs a checkpoint-ready workload pod and captures it into a `PodSnapshot` in one
