@@ -177,9 +177,11 @@ is its position in the checkpoint's member list, not a leader designation.
 | Local coordinator | Temporary process inside the selected container's namespaces | Drive shims; order CUDA steps; interpret exchanged records and handles; validate resource relationships. |
 | Application shim | Library inside each participating process | Track and prepare or reconstruct that process's CUDA resources. |
 
-Only agents connect to the brain. Each local coordinator communicates with its
-agent over a protected local channel; it is a process, not a sidecar container.
-The brain does not interpret CUDA payloads or choose CUDA phase order.
+Only agents connect to the brain. Agent-brain connections belong to Snapshot,
+not to the workload processes, so they are not checkpointed. Each local
+coordinator communicates with its agent over a protected local channel; it is a
+process, not a sidecar container. The brain does not interpret CUDA payloads or
+choose CUDA phase order.
 
 The diagram shows two members on different nodes. Controller-agent communication
 uses Kubernetes resources. The controller supplies session context to the brain;
@@ -369,14 +371,6 @@ joined, loss of its participation, the owner, or live step state fails the
 session. There is no transparent failover or mutating-step replay. A new
 process at the same endpoint is not a continuation of the lost session.
 
-Capture coordination ends at `ReadyForDump`; per-Pod dumps and artifact
-publication follow. A restore agent joins only after local CRIU/native CUDA
-restore succeeds and normal application execution remains held. Once every
-expected member joins, the brain announces that all members' sockets are restored.
-Agents may then end TCP isolation without releasing application execution.
-Runtime reconstruction and verification still precede `ReleaseAuthorized`.
-Agent-brain connections are outside the workload's checkpoint images.
-
 Session success is not proof of an artifact or local release. Those results come
 from per-Pod status and agent evidence. Completed checkpoints and released
 workloads do not depend on the session staying alive.
@@ -402,8 +396,8 @@ The contract has four safety rules:
    revalidate the frozen records before further preparation. Each agent reports
    `Prepared` only after its required preparation and metadata succeed; the brain
    sends `ReadyForDump` only after every member reports `Prepared`.
-3. **Separate TCP readiness from application release.** The all-members-joined
-   milestone permits TCP unblocking, not application execution. Normal workload
+3. **Separate TCP readiness from application release.** `ReadyForTCP` permits
+   TCP unblocking after local checks, not application execution. Normal workload
    execution must remain held independently until every member finishes runtime
    reconstruction and group validation. Only the agent publishes the release
    marker after final authorization and local checks. Local CUDA success or TCP
@@ -417,6 +411,8 @@ Session messages identify the session, member, and step. Failures include a
 reason and distinguish preparation that never began from preparation that began
 or is uncertain. Agents journal that evidence; a lost reply is not safe refusal.
 These message names describe behavior, not additional Kubernetes phases.
+`ReadyForTCP` can be the successful result of the restore join barrier; it does
+not require a separate handshake.
 
 | Message | Sent by | Meaning |
 | --- | --- | --- |
@@ -424,7 +420,7 @@ These message names describe behavior, not additional Kubernetes phases.
 | `Prepared` | Agent | Required preparation and member metadata succeeded. This is not artifact readiness. |
 | `Refused` during capture | Agent | No local preparation began. Before group authorization all sources are untouched; afterward peers may already be preparing. |
 | `ReadyForDump` | Brain | Every member reported `Prepared`. Continue per-Pod capture. |
-| All members joined during restore | Brain | Every member completed local reconstruction and its execution hold is active. Agents may end TCP isolation; application release is still forbidden. |
+| `ReadyForTCP` | Brain | Every member completed local reconstruction and its execution hold is active. Agents may end TCP isolation after local checks; application release is still forbidden. |
 | `ReleaseAuthorized` | Brain | All required reconstruction and verification succeeded. The agent may release after final checks; this is not proof of release. |
 | Failed or uncertain preparation | Agent | Use unsafe-source handling. Do not classify a lost preparation reply as safe refusal. |
 
@@ -1046,10 +1042,10 @@ member. Disappearance after completion does not invalidate its artifact.
 
 ### Restore Flow
 
-The controller admits the whole target set before CRIU. During restore, two
-milestones have different meanings: all sockets restored permits TCP traffic;
-complete runtime verification permits application release. Neither Pod readiness
-nor a placeholder alone provides the required execution hold.
+The controller admits the whole target set before CRIU. During restore,
+`ReadyForTCP` permits TCP traffic; `ReleaseAuthorized` permits application
+release after runtime verification. Both require final local checks. Neither Pod
+readiness nor a placeholder alone provides the required execution hold.
 
 ```mermaid
 sequenceDiagram
@@ -1072,8 +1068,8 @@ sequenceDiagram
         A->>A: Restore processes, sockets<br/>and native CUDA state
         A->>B: Join with local reconstruction complete,<br/>application execution still held
         B->>B: Wait for every expected member
-        B-->>A: All members joined: sockets restored
-        A->>A: Recheck and record transport milestone,<br/>end TCP isolation, keep execution held
+        B-->>A: ReadyForTCP
+        A->>A: Recheck and record ReadyForTCP,<br/>end TCP isolation, keep execution held
         A->>A: Coordinator reconstructs shared resources<br/>through group exchanges
         A->>B: Runtime verification passed
         B->>B: Wait for every member
@@ -1104,10 +1100,9 @@ sequenceDiagram
    agent joins the session while normal application execution remains held.
 4. **Enable TCP communication.** The brain waits for every expected member's
    authenticated join. Each join certifies completed local reconstruction and
-   the independent execution hold. The brain then notifies agents that all
-   members' sockets are restored. After local state checks, agents record this
-   milestone and end TCP isolation. They do not publish `restore-complete` or
-   report Restored. This uses session membership, not another CRD or API phase.
+   the independent execution hold. The brain then returns `ReadyForTCP`. After
+   local state checks, agents record its receipt and end TCP isolation. They do
+   not publish `restore-complete` or report Restored.
 5. **Complete runtime work.** Agents start local coordinators where needed.
    Coordinators exchange saved records, derive fresh GPU handles, rebuild shared
    resources, and verify the graph. The brain exchanges bytes and enforces
@@ -1167,14 +1162,13 @@ early-restored socket's kernel traffic can provoke a reset.
 
 A restore agent joins only after its local sockets and native CUDA state are
 restored and its application execution hold is active. Once every expected
-member joins, the brain notifies agents that TCP communication may resume.
-Agents recheck local state and end isolation; they do not wait for GPU resource
-reconstruction or publish application release at this point. Earlier unblocking
-shortens the interruption but does not solve timer failures during local restore
-or skew between members.
+member joins, the brain sends `ReadyForTCP`. Agents recheck local state and end
+isolation; they do not wait for GPU resource reconstruction or publish application
+release at this point. Earlier unblocking shortens the interruption but does not
+solve timer failures during local restore or skew between members.
 
-The brain authorizes this transport milestone; agents enforce protection and
-cleanup. Reuse existing Snapshot/CRIU networking mechanisms where possible.
+`ReadyForTCP` authorizes TCP unblocking; agents enforce protection and cleanup.
+Reuse existing Snapshot/CRIU networking mechanisms where possible.
 The mechanism is an implementation choice, not a new API or required firewall
 design. It must preserve unrelated policy and allow agent-brain coordination.
 Recovery context must identify only this attempt's protection resources and
@@ -1195,7 +1189,7 @@ Unsupported execution-hold configurations refuse during preflight.
 ID. Existence-based gates and PID readers remain compatible; recovery checks
 identity fields. Readers must never see a partial marker.
 
-TCP readiness or unblocking is not application release. A failure in between
+`ReadyForTCP` or TCP unblocking is not application release. A failure in between
 still abandons an unreleased restore. Agents maintain or re-establish required
 isolation before tearing down the recorded execution and retain it until the
 original target sandbox is removed. Released members are never killed or
@@ -1216,7 +1210,7 @@ the last member's safe capture, not just each Pod's local dump. A per-Pod fix
 must be integrated and qualified for that full interval.
 
 Restore also has a vulnerable interval before all matching sockets exist.
-Allowing TCP traffic at all-members-joined removes the additional wait for
+Allowing TCP traffic after `ReadyForTCP` removes the additional wait for
 runtime reconstruction, but not local restoration time or completion skew.
 
 Timer-safe capture and restore are shared runtime dependencies, not new
@@ -1244,7 +1238,7 @@ The journal distinguishes facts with different recovery consequences:
 | `ReadyToPrepare`, if recorded | Not execution intent. An unused vote never justifies killing a source. |
 | Execution intended | Durable before destructive local work. For cuInterpose capture, after group authorization and before `BeginCheckpoint`. Uncertain work cannot be replayed. |
 | Local restore complete | Sockets/native state restored, but application execution remains held. |
-| TCP readiness and unblocking | Separate from application release. Record transport authorization and protection changes; uncertain state must be treated as potentially unblocked. |
+| `ReadyForTCP` received and TCP unblocking | Separate from application release. Record the notification and protection changes; uncertain state must be treated as potentially unblocked. |
 | Application release proved | Matching marker or durable release record; independent of cleanup/reporting. |
 | Capture complete | Preserve the artifact result; never recapture. |
 
@@ -1252,7 +1246,7 @@ A matching release marker **or** a durable journal release record proves
 application release. Recovery journals marker evidence before cleanup. A later
 container may clear the marker without changing the old restore's result.
 Failure, deletion, expiry, and loss of the Pod never override release evidence.
-TCP readiness or unblocking never supplies that proof.
+`ReadyForTCP` or TCP unblocking never supplies that proof.
 
 Recovery checks release evidence first:
 
@@ -1262,7 +1256,7 @@ Recovery checks release evidence first:
 | Target claim only; live attempt | Rebuild the claim and resume preflight/admission waiting after live revalidation. A stale Passed report is insufficient. |
 | Target claim only; failed, deleted, or expired attempt | Release the claim; the target remains reusable. |
 | Restore intent; no release; target exists | Never rerun CRIU. Stop helpers, maintain the execution hold, and maintain or re-establish TCP isolation before tearing down recorded execution. Fail the member and release its claim. |
-| TCP unblocked or uncertain; no application release | Still unreleased. Apply the preceding teardown rule; never report Restored from this transport milestone. |
+| `ReadyForTCP` received, TCP unblocked or uncertain; no application release | Still unreleased. Apply the preceding teardown rule; never report Restored from this notification or TCP unblocking. |
 | Restore intent; no release; target gone | Finish owned cleanup, release the claim, and report Unknown/TargetGone rather than guessing Failed. |
 | Orphan restore; no release | Tear down recorded unreleased execution with required isolation, then release its claim. |
 | Capture without execution intent | Stop helpers, discard the old readiness vote, and leave the source untouched. |
@@ -1514,9 +1508,10 @@ qualification are tracked by
   Revalidate frozen records. No `ReadyForDump` precedes every member's `Prepared`
   report and saved metadata.
 - **Restore milestones:** a join certifies completed local reconstruction and
-  an active independent execution hold. Do not authorize TCP unblocking until
-  every expected member joins. TCP readiness, unblocking, and local CUDA success
-  cannot publish the release marker or satisfy final runtime verification.
+  an active independent execution hold. The brain sends `ReadyForTCP` only after
+  every expected member joins. Withhold that result from an agent and verify it
+  keeps TCP isolation. Receipt, TCP unblocking and local CUDA success cannot
+  publish the release marker or satisfy final runtime verification.
 - **Execution holds:** after TCP unblocking, kernel packets and reconstruction
   work can proceed while normal application work remains held. Include shimless
   members. Agent/helper failure never implicitly releases the workload.
@@ -1549,7 +1544,7 @@ qualification are tracked by
 | A member is slow or fails during preparation | No ReadyForDump until every member reports Prepared. Apply boundary-specific handling on failure; never publish a partial set checkpoint. |
 | Agent crashes after intent or loses a preparation reply | Do not replay. Treat uncertain capture conservatively. |
 | Agent crashes during restore | Test before/during CRIU, while held, after authorization, after marker, and after journaled release before cleanup. Only proven release prevents teardown. |
-| Agent crashes after TCP readiness or unblocking, before the marker | Still unreleased, never Restored. Maintain the execution hold, use journaled context to re-isolate if needed, and tear down without replay. Repeat with API loss and a failed/deleted attempt. |
+| Agent crashes after receiving ReadyForTCP or TCP unblocking, before the marker | Still unreleased, never Restored. Maintain the execution hold, use journaled context to re-isolate if needed, and tear down without replay. Repeat with API loss and a failed/deleted attempt. |
 | Marker published before journaled release | Recover its identity proof durably, finish cleanup, and never kill/replay. Verify atomic publication, preserved PID, and that local executor success cannot publish early. |
 | Journal proves release but marker is gone | Repeat with later container restart, unreadable marker, API loss, failed/deleted set, and missing Pod. Retain Restored and clean up only the recorded attempt's TCP protection resources. |
 | Crash after Passed before Admitted | Rebuild the target claim, revalidate, or release it if the attempt cannot continue. |
@@ -1559,7 +1554,7 @@ qualification are tracked by
 | Reused target, Pod name, or namespace | Reject executed targets even after a claim is released; allow claim-only/refused targets after cleanup. Never adopt recreated identities. |
 | Same-node members and competing target claims | All same-set members can progress through barriers. Overlapping restore attempts cannot claim the same target. No capture capacity-slot reservation is required. |
 | Delayed initial brain availability | Retry only within the deadline; established-session loss must not become a fresh join after any component restarts. |
-| TCP protection during restore and agent restart | Protection precedes socket reconstruction. End it at all-members-joined while keeping execution held; on failure re-isolate before teardown. Recovery needs no API or in-memory map and never affects another attempt or replacement target. |
+| TCP protection during restore and agent restart | Protection precedes socket reconstruction. End it only after ReadyForTCP and local checks while keeping execution held; on failure re-isolate before teardown. Recovery needs no API or in-memory map and never affects another attempt or replacement target. |
 | Brain communication during TCP protection | Agent-brain communication remains available. Preserve unrelated network policy and keep credentials out of helpers/volumes. |
 | Standalone regression | Existing per-Pod checkpoint, restore, Pod condition, and marker consumers keep their behavior. |
 
