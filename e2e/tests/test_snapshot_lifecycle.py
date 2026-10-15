@@ -656,6 +656,45 @@ def test_refused_cpu_restore_says_why_and_does_no_criu_work(
         raise
 
 
+# Every node of a CI cluster has the same CPU, so the instruction set the target
+# lacks is added to what the checkpoint recorded rather than found on a second
+# machine. No CPU offers all of these, so the node is always missing one.
+FOREIGN_INSTRUCTION_SETS = ("amx_tile", "sse4a", "avx512_vp2intersect")
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_restore_onto_a_cpu_missing_an_instruction_set_is_refused(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node, _ = create_valid_checkpoint(config, run, gpu=False)
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        offered = set.intersection(*snap.node_cpu_flags(config, source_node))
+        missing = next((isa for isa in FOREIGN_INSTRUCTION_SETS if isa not in offered), None)
+        assert missing, f"{source_node} offers every one of {FOREIGN_INSTRUCTION_SETS}"
+        snap.record_cpu_feature(config, source_node, content["metadata"]["uid"], missing)
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node)
+        )
+        pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreIncompatible"
+        )
+
+        refusal = snap.pod_condition(pod, snap.RESTORED_CONDITION)
+        assert f"cpu-features: source {missing}, target missing" in refusal.message
+        assert_restore_events(config.namespace, run.restore_pod, {"RestoreIncompatible"})
+        assert "RestoreFailed" not in restore_event_reasons(config.namespace, run.restore_pod)
+        assert not snap.file_present(config.namespace, run.restore_pod, snap.RESTORE_DONE)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 # Small enough to be refused, large enough to restore into once the checks are
 # off: with the annotation on, the restore this test starts actually runs.
 SKIPPABLE_MEMORY_LIMIT = "3Gi"

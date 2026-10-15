@@ -829,6 +829,32 @@ def checkpoint_manifest(
     return yaml.safe_load(checkpoint_artifact_manifest(config, node, content_uid))
 
 
+def record_cpu_feature(
+    config: k8s.E2EConfig, node: str, content_uid: str, feature: str
+) -> None:
+    """Add an instruction set to the ones the checkpoint says its source CPU had.
+
+    Edits the text rather than re-serializing it, so every other field reaches
+    the agent exactly as the agent wrote it.
+    """
+    lines = checkpoint_artifact_manifest(config, node, content_uid).splitlines(keepends=True)
+    key = next((i for i, line in enumerate(lines) if line.strip() == "cpuFeatures:"), None)
+    if key is None or key + 1 == len(lines):
+        raise AssertionError(f"checkpoint {content_uid} recorded no CPU features")
+    item = lines[key + 1]
+    lines.insert(key + 1, f"{item[: len(item) - len(item.lstrip())]}- {feature}\n")
+    k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"printf '%s' {shlex.quote(''.join(lines))} > "
+        f"{checkpoint_artifact_path(content_uid)}/manifest.yaml",
+        container=AGENT_CONTAINER,
+    )
+    recorded = checkpoint_manifest(config, node, content_uid)["host"]["cpuFeatures"]
+    if feature not in recorded:
+        raise AssertionError(f"checkpoint {content_uid} still records {recorded!r}")
+
+
 def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str:
     """The optional CRI ContainerStatus.image_id that the agent records.
 

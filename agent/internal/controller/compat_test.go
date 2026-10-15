@@ -74,6 +74,7 @@ func TestPreflightCompatibilityComparesTheRecordedEnvironment(t *testing.T) {
 func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
 	r := newGatedRestore(t)
 	r.controller.config.HostKernelVersion = "5.15.0-1071-aws"
+	r.controller.config.HostCPUFeatures = []string{"avx2", "sse2"}
 	r.pod.Spec.Containers[0].Image = "nvcr.io/nvidia/tritonserver:24.09-py3"
 	r.pod.Status.ContainerStatuses[0].ImageID = "sha256:deadbeef"
 	r.pod.Spec.Containers = append(r.pod.Spec.Containers, corev1.Container{
@@ -95,13 +96,67 @@ func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
 	assert.Equal(t, compat.Environment{
 		CPUArch:       runtime.GOARCH,
 		KernelVersion: "5.15.0-1071-aws",
+		CPUFeatures:   []string{"avx2", "sse2"},
 		Image:         "nvcr.io/nvidia/tritonserver:24.09-py3",
 	}, r.comparison.calls[0].target)
 	assert.Equal(t, compat.Environment{
 		CPUArch:       runtime.GOARCH,
 		KernelVersion: "5.15.0-1071-aws",
+		CPUFeatures:   []string{"avx2", "sse2"},
 		Image:         "nvcr.io/nvidia/tritonserver:25.01-py3",
 	}, r.comparison.calls[1].target)
+}
+
+// The rule is tested in api/compat. This runs it through the gate, so the two
+// sides it compares are what the checkpoint recorded and what this agent read
+// at startup.
+func TestPreflightRefusesACPUMissingAnInstructionSet(t *testing.T) {
+	for name, tc := range map[string]struct {
+		recorded []string
+		offered  []string
+		missing  string
+	}{
+		"the target lacks one the source had": {
+			recorded: []string{"avx2", "avx512f", "sse2"},
+			offered:  []string{"avx2", "sse2"},
+			missing:  "avx512f",
+		},
+		"the target offers more": {
+			recorded: []string{"sse2"},
+			offered:  []string{"avx2", "sse2"},
+		},
+		"a checkpoint that recorded none": {
+			offered: []string{"avx2", "sse2"},
+		},
+		"a node that could not read its own": {
+			recorded: []string{"avx512f"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newGatedRestore(t)
+			r.controller.compareFn = compat.Compare
+			r.controller.config.HostCPUFeatures = tc.offered
+			path := writeTestArtifact(t, r.controller.config.Storage.BasePath, "cpu-content", &types.CheckpointManifest{
+				Artifact: types.ArtifactManifest{ContentUID: "cpu-content", ContainerName: gatedRestoreContainer},
+				Host:     types.NewHostManifest(r.controller.config.HostKernelVersion, tc.recorded),
+			})
+
+			err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+				SourceContainerName: gatedRestoreContainer,
+				Path:                path,
+			}, gatedRestoreMappings(), false)
+
+			if tc.missing == "" {
+				require.NoError(t, err)
+				return
+			}
+			var incompatible *compat.IncompatibleError
+			require.ErrorAs(t, err, &incompatible)
+			assert.Equal(t, []compat.Mismatch{
+				{Check: compat.CheckCPUFeatures, Source: tc.missing, Target: "missing"},
+			}, incompatible.Mismatches)
+		})
+	}
 }
 
 // The refusal event is its own reason, so alerting that pages on restore

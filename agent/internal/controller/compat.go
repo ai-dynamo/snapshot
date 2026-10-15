@@ -149,5 +149,6 @@ func (w *NodeController) preflightTargetEnvironment(pod *corev1.Pod, containerNa
 	env := podEnvironment(pod, containerName)
 	env.CPUArch = runtime.GOARCH
 	env.KernelVersion = w.config.HostKernelVersion
+	env.CPUFeatures = w.config.HostCPUFeatures
 	return env
 }
