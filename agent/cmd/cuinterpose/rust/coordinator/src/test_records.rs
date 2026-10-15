@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Valid records for topology unit tests.
+//! Valid records for topology unit tests and participant integration tests.
+#![allow(dead_code, reason = "each test crate uses a different subset")]
 
 use cudarc::driver::sys::{CUmemAllocationHandleType, CUmemAllocationType, CUmemLocationType};
 use cuinterpose_protocol::{
