@@ -145,7 +145,7 @@ jobs:
           - image: operator
           - image: pagebroker
           - image: agent
-            # Dockerfile exits 1 on other arches
+            # amd64 only until multi-arch publishing exists
             build_args: --platform=linux/amd64
     steps:
       # Check out the exact commit that passed CI, not whatever is at HEAD now.
