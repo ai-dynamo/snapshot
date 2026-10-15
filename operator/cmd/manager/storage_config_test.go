@@ -4,7 +4,6 @@
 package main
 
 import (
-	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,46 +28,38 @@ func TestConfiguredStoreIDPreservesLegacyStartup(t *testing.T) {
 	assert.Empty(t, id)
 }
 
-func TestMustConfigureStoreIDReturnsID(t *testing.T) {
+func TestMustStoreIDReturnsID(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "storage.yaml")
 	require.NoError(t, os.WriteFile(configPath, []byte(pvcStorageYAML), 0o600))
 	for _, tc := range []struct {
 		name string
-		args []string
+		path string
 		want string
 	}{
 		{name: "legacy"},
 		{
 			name: "configured",
-			args: []string{"--snapshot-storage-config=" + configPath},
+			path: configPath,
 			want: "store-v1-57e06c9609c92e973d048143531baadb9271a9571f1d1dbc21af2c6cd13d24c2",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			setManagerArgs(t, append(tc.args, "--snapshot-storage-base-path=/checkpoints")...)
-			cleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
-			assert.False(t, flag.Parsed())
-			assert.Equal(t, tc.want, mustConfigureStoreID())
-			assert.True(t, flag.Parsed())
-			// Parsing inside the storage helper also populates the other startup flags.
-			assert.Equal(t, "/checkpoints", cleanupConfig.BasePath)
-			require.NoError(t, cleanupConfig.Validate())
+			assert.Equal(t, tc.want, mustStoreID(tc.path))
 		})
 	}
 }
 
-func TestMustConfigureStoreIDExitsOnInvalidConfiguration(t *testing.T) {
+func TestMustStoreIDExitsOnInvalidConfiguration(t *testing.T) {
 	// Exercise os.Exit in a subprocess so it cannot terminate the test runner.
 	if os.Getenv("SNAPSHOT_TEST_STORAGE_CONFIG_EXIT") == "1" {
 		ctrl.SetLogger(zap.New())
-		setManagerArgs(t, "--snapshot-storage-config="+os.Getenv("SNAPSHOT_TEST_STORAGE_CONFIG_PATH"))
-		mustConfigureStoreID()
+		mustStoreID(os.Getenv("SNAPSHOT_TEST_STORAGE_CONFIG_PATH"))
 		os.Exit(0) // Returning instead of exiting must fail the parent assertion.
 	}
 	executable, err := os.Executable()
 	require.NoError(t, err)
 	cmd := exec.CommandContext(t.Context(), executable,
-		"-test.run=^TestMustConfigureStoreIDExitsOnInvalidConfiguration$")
+		"-test.run=^TestMustStoreIDExitsOnInvalidConfiguration$")
 	cmd.Env = append(os.Environ(), "SNAPSHOT_TEST_STORAGE_CONFIG_EXIT=1",
 		"SNAPSHOT_TEST_STORAGE_CONFIG_PATH="+filepath.Join(t.TempDir(), "missing.yaml"))
 	output, err := cmd.CombinedOutput()
@@ -76,14 +67,6 @@ func TestMustConfigureStoreIDExitsOnInvalidConfiguration(t *testing.T) {
 	require.ErrorAs(t, err, &exitErr)
 	assert.Equal(t, 1, exitErr.ExitCode())
 	assert.Contains(t, string(output), "invalid storage configuration")
-}
-
-func setManagerArgs(t *testing.T, args ...string) {
-	t.Helper()
-	originalFlags, originalArgs := flag.CommandLine, os.Args
-	t.Cleanup(func() { flag.CommandLine, os.Args = originalFlags, originalArgs })
-	flag.CommandLine = flag.NewFlagSet("manager-test", flag.ExitOnError)
-	os.Args = append([]string{"manager-test"}, args...)
 }
 
 func TestConfiguredStoreID(t *testing.T) {

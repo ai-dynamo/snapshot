@@ -4,7 +4,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
@@ -14,15 +13,10 @@ import (
 	"github.com/ai-dynamo/snapshot/api/storage"
 )
 
-// mustConfigureStoreID returns the configured store ID.
-// Call it once at startup, after registering all other flags: it parses the
-// process command line before loading storage configuration.
+// mustStoreID returns the store ID configured at configPath.
 // On invalid configuration, it logs the error and exits with status 1.
-func mustConfigureStoreID() string {
-	var storageConfigPath string
-	flag.StringVar(&storageConfigPath, "snapshot-storage-config", "", "Path to resolved storage configuration shared with PageBroker")
-	flag.Parse()
-	storeID, err := configuredStoreID(storageConfigPath)
+func mustStoreID(configPath string) string {
+	storeID, err := configuredStoreID(configPath)
 	if err != nil {
 		ctrl.Log.Error(err, "invalid storage configuration")
 		os.Exit(1)

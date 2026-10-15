@@ -25,9 +25,11 @@ var version = "dev"
 func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
+	storageConfigPath := flag.String("snapshot-storage-config", "", "Path to resolved storage configuration shared with PageBroker")
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
-	storeID := mustConfigureStoreID()
+	flag.Parse()
+	storeID := mustStoreID(*storageConfigPath)
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
 		os.Exit(1)
