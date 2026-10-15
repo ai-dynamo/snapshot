@@ -1,0 +1,18 @@
+{
+  "combinedRecordCount": 90,
+  "expiresAt": "2026-10-29T10:47:39.767Z",
+  "formatVersion": 1,
+  "generatedAt": "2026-10-15T10:47:39.767Z",
+  "historyRecordCount": 87,
+  "key": "run-38720714347",
+  "previewRecordCount": 3,
+  "source": {
+    "branch": "ci/e2e-frameworks-vcluster-diagnostics",
+    "commit": "946579e65138229c89af744deabb9c4b817ee558",
+    "event": "workflow_dispatch",
+    "pullRequest": null,
+    "runAttempt": 1,
+    "runId": "38720714347",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/38720714347"
+  }
+}
