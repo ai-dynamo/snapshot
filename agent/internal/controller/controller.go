@@ -418,6 +418,7 @@ func (w *NodeController) restorePodRelevant(pod *corev1.Pod) bool {
 // would instead leave deleted pods Terminating behind the queue, since the restore finalizer comes
 // off in processRestoreQueueItem.
 func (w *NodeController) runRestoreQueue(ctx context.Context) {
+	defer recoverPanic(w.log, "restore queue dispatch", nil)
 	for {
 		key, shutdown := w.restoreQueue.Get()
 		if shutdown {
@@ -435,6 +436,9 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 			w.restoreQueue.AddAfter(key, restoreSafetyRequeueInterval)
 		}
 	}()
+	// Registered after the Done defer so it runs first and leaves requeue
+	// false: a panic is deterministic, so redelivering would repeat it.
+	defer recoverPanic(w.log, "restore work order", nil, "pod", key.String())
 
 	pod, err := w.restorePodLister.Pods(key.Namespace).Get(key.Name)
 	if apierrors.IsNotFound(err) {
@@ -1337,6 +1341,7 @@ func (w *NodeController) enqueueCaptureForSourcePod(obj interface{}) {
 // runCaptureQueue gives each work order its own goroutine, for the same reasons as the restore
 // queue. Per-key exclusion still comes from the queue itself.
 func (w *NodeController) runCaptureQueue(ctx context.Context) {
+	defer recoverPanic(w.log, "capture queue dispatch", nil)
 	for {
 		name, shutdown := w.captureQueue.Get()
 		if shutdown {
@@ -1350,6 +1355,13 @@ func (w *NodeController) runCaptureQueue(ctx context.Context) {
 // meanwhile collapse into one redelivery after Done.
 func (w *NodeController) processCaptureQueueItem(ctx context.Context, name string) {
 	defer w.captureQueue.Done(name)
+	// A panic here would otherwise kill the agent and with it every unrelated
+	// capture and restore on this node. The work order is failed terminally
+	// instead of requeued: a panic is deterministic, so retrying it would just
+	// panic again.
+	defer recoverPanic(w.log, "capture work order", func(err error) {
+		w.failCaptureAfterPanic(ctx, name, err)
+	}, "content", name)
 
 	if err := w.reconcileCapture(ctx, name); err != nil {
 		w.log.Error(err, "Failed to reconcile capture work order", "content", name)
