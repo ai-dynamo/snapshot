@@ -202,12 +202,20 @@ def prune_package(org: str, package: str, token: str, keep_days: int,
         return (len(untagged), 0)
 
     # An expired image that a kept index still references is kept, and so is
-    # everything under it.
+    # everything under it. Repeated until nothing changes, because a kept index
+    # can reach one expired index through another, in whatever order the API
+    # lists them. Deciding orphans in a single pass would let a child be
+    # deleted before its parent turned out to be reachable.
+    changed = True
+    while changed:
+        changed = False
+        for v, children in expired:
+            if v.get("name", "") in reachable and not children <= reachable:
+                reachable |= children
+                changed = True
     orphaned: set[str] = set()
     for v, children in expired:
-        if v.get("name", "") in reachable:
-            reachable |= children
-        else:
+        if v.get("name", "") not in reachable:
             orphaned |= children
     orphaned -= reachable
 

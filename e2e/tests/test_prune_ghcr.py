@@ -261,6 +261,29 @@ def test_a_child_a_kept_image_references_is_kept(prune, monkeypatch):
     assert deleted == ["sha256:pr"]
 
 
+def test_a_kept_image_reaches_through_nested_expired_indexes(prune, monkeypatch):
+    """A kept index -> expired A -> expired B, listed B before A.
+
+    Deciding orphans in one pass in list order would see B unreferenced, mark
+    its child orphaned, and only then learn B was reachable through A.
+    """
+    versions = [
+        _version(1, "sha256:b", tags=[PR_TAG], age_days=8),
+        _version(2, "sha256:a", tags=["v0.0.0-pull-request-7-g1a2b3c4d"], age_days=8),
+        _version(3, "sha256:main", tags=["v0.0.0-g0badf00d"], age_days=8),
+        _version(4, "sha256:b-amd64", tags=[], age_days=8),
+    ]
+    _, _, deleted = _pr_sweep(
+        prune, monkeypatch, versions,
+        children={
+            "sha256:main": ["sha256:a"],
+            "sha256:a": ["sha256:b"],
+            "sha256:b": ["sha256:b-amd64"],
+        },
+    )
+    assert deleted == []
+
+
 def test_an_unresolvable_expired_image_blocks_every_deletion(prune, monkeypatch):
     """Its children cannot be told apart from anyone else's, so nothing goes."""
     versions = [

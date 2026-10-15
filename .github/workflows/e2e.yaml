@@ -78,10 +78,17 @@ jobs:
       - name: Use provided Snapshot image tag
         if: ${{ (inputs.snapshot_tag || '') != '' }}
         timeout-minutes: 1
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
         run: |
           set -euo pipefail
-          echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${{ inputs.snapshot_tag }}" >> "$GITHUB_ENV"
-          echo "Using provided Snapshot image tag: ${{ inputs.snapshot_tag }}"
+          # A dispatch input is free text, and this line writes GITHUB_ENV.
+          if [[ ! "${SNAPSHOT_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::snapshot_tag is not a valid image tag: ${SNAPSHOT_TAG}" >&2
+            exit 2
+          fi
+          echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${SNAPSHOT_TAG}" >> "$GITHUB_ENV"
+          echo "Using provided Snapshot image tag: ${SNAPSHOT_TAG}"
 
       - name: Capture host kubeconfig
         id: host

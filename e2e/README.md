@@ -60,9 +60,10 @@ pull request images seven days after they are pushed.
 ### CPU Mode (k3d)
 
 `e2e-cpu.yaml` runs from `e2e-pr.yaml`, where no GPU cluster is available. It
-builds the operator and agent images from the pull request, creates a k3d
-cluster, imports the images into it, installs the chart through the same
-`setup.py` phases the GPU workflow uses, and runs `pytest -m cpu`.
+builds the operator, agent, and pagebroker images from the pull request, pushes
+them to a registry next to a k3d cluster that pulls from it, installs the chart
+through the same `setup.py` phases the GPU workflow uses, and runs
+`pytest -m cpu`.
 
 k3d has no GPU, so `hack/k3d-cpu-e2e.sh cluster-up` fakes the three things the
 chart and test helpers inherited from the GPU environment, each safe only
