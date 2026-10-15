@@ -43,6 +43,8 @@ type Check string
 type Environment struct {
 	KernelVersion string
 	CPUArch       string
+	// /proc/cpuinfo flags. Only the instruction-set ones are compared.
+	CPUFeatures []string
 
 	Image       string
 	ImageID     string
@@ -109,6 +111,7 @@ type check struct {
 // gate that can evaluate it and kept in the order they are reported.
 var checksByGate = registerChecks(
 	cpuArchCheck,
+	cpuFeaturesCheck,
 	kernelVersionCheck,
 	kernelMinimumCheck,
 	imageDigestCheck,
