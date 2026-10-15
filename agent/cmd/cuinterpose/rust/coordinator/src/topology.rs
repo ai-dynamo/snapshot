@@ -368,6 +368,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_records::*;
     use cuinterpose_protocol::{BindingVersion, MemberRange, MulticastProperties};
 
     #[test]
@@ -483,5 +484,150 @@ mod tests {
         ] {
             assert!(validate(&BTreeMap::from([(1, vec![record(handle_types, shared)])])).is_err());
         }
+    }
+
+    /// Validation error for the records of participants 1 and 2, if any.
+    struct Rejection(Option<String>);
+
+    impl Rejection {
+        #[track_caller]
+        fn names(self, check: &str) {
+            let named = self.0.as_ref().is_some_and(|error| error.contains(check));
+            assert!(named, "{:?} lacks {check:?}", self.0);
+        }
+    }
+
+    fn rejection(first: &[Record], second: &[Record]) -> Rejection {
+        let manifest = Manifest::from([(1, first.to_vec()), (2, second.to_vec())]);
+        Rejection(validate(&manifest).err().map(|error| format!("{error:#}")))
+    }
+
+    #[test]
+    fn validate_rejection_names_failed_check() {
+        let null_address = BindingSource::Address {
+            address: 0,
+            tracked_member: None,
+        };
+        // Participant 1 holds `record` after any valid records it references.
+        let alone = |record| rejection(&[record], &[]);
+        let after_allocation = |record| rejection(&[allocation(), record], &[]);
+        let after_multicast = |record| rejection(&[multicast(), record], &[]);
+        let after_both = |record| rejection(&[allocation(), multicast(), record], &[]);
+        // Participant 2 holds `record` after participant 1 creates and shares `A`.
+        let imported = |record| rejection(&[shared()], &[record]);
+
+        alone(with!(allocation(), Allocation.location.location_type = 0))
+            .names("participant 1: unsupported allocation properties");
+        alone(with!(allocation(), Allocation.allocation_type = 0))
+            .names("participant 1: unsupported allocation properties");
+        alone(with!(allocation(), Allocation.allocation.creator_pid = 3))
+            .names("participant 1: missing creator participant");
+        alone(with!(allocation(), Allocation.size = 0))
+            .names("participant 1: invalid allocation extent");
+        alone(with!(shared(), Allocation.handle_types = 8))
+            .names("participant 1: invalid allocation creator");
+        rejection(&[allocation()], &[allocation()])
+            .names("participant 2: invalid imported allocation");
+        imported(with!(shared(), Allocation.handle_types = 8))
+            .names("participant 2: invalid imported allocation");
+        rejection(&[allocation()], &[shared()])
+            .names("participant 2: inconsistent allocation metadata");
+        rejection(
+            &[allocation()],
+            &[with!(allocation(), Allocation.allocation = A2)],
+        )
+        .names("participant 2: inconsistent allocation metadata");
+        imported(with!(shared(), Allocation.size = 8192))
+            .names("participant 2: inconsistent allocation metadata");
+        imported(with!(shared(), Allocation.location = numa(0)))
+            .names("participant 2: inconsistent allocation metadata");
+        rejection(
+            &[with!(shared(), Allocation.location = numa(1))],
+            &[with!(shared(), Allocation.location = numa(0))],
+        )
+        .names("participant 2: inconsistent allocation metadata");
+        after_allocation(allocation()).names("participant 1: duplicate allocation record");
+        imported(with!(
+            shared(),
+            Allocation.virtual_allocation_handle_count = 0
+        ))
+        .names("participant 2: missing allocation anchor");
+        alone(mapping()).names("participant 1: missing creator for");
+        after_allocation(with!(mapping(), Mapping.allocation = A2))
+            .names("participant 1: inconsistent allocation creator");
+        rejection(&[shared()], &[mapping()])
+            .names("participant 2: inconsistent allocation creator");
+        after_allocation(with!(mapping(), Mapping.address = 0))
+            .names("participant 1: invalid mapping or mapping out of bounds");
+        after_allocation(with!(mapping(), Mapping.size = 0))
+            .names("participant 1: invalid mapping or mapping out of bounds");
+        // Ends one byte past `A`.
+        after_allocation(with!(mapping(), Mapping.offset = 1))
+            .names("participant 1: invalid mapping or mapping out of bounds");
+        after_allocation(with!(mapping(), Mapping.offset = u64::MAX))
+            .names("participant 1: invalid mapping or mapping out of bounds");
+        alone(with!(multicast(), Multicast.properties.flags = 1))
+            .names("participant 1: invalid multicast properties");
+        alone(with!(multicast(), Multicast.properties.size = 0))
+            .names("participant 1: invalid multicast properties");
+        alone(with!(multicast(), Multicast.properties.devices = 0))
+            .names("participant 1: invalid multicast properties");
+        alone(with!(multicast(), Multicast.properties.handle_types = 0))
+            .names("participant 1: invalid multicast properties");
+        rejection(
+            &[multicast()],
+            &[with!(multicast(), Multicast.properties.size = 8192)],
+        )
+        .names("participant 2: inconsistent multicast properties");
+        rejection(&[device(), device()], &[]).names("participant 1: duplicate multicast device 0");
+        alone(binding()).names("missing multicast object");
+        after_multicast(with!(binding(), MulticastBinding.allocation = M2))
+            .names("participant 1: inconsistent multicast creator");
+        after_multicast(with!(binding(), MulticastBinding.source = null_address))
+            .names("participant 1: invalid multicast member of");
+        after_multicast(binding())
+            .names("participant 1: invalid multicast member AllocationReference");
+        after_both(with!(binding(), MulticastBinding.source = member(A2, 0)))
+            .names("participant 1: inconsistent allocation creator");
+        // Ends one byte past `A`.
+        after_both(with!(binding(), MulticastBinding.source = member(A, 1)))
+            .names("participant 1: multicast binding out of member bounds");
+        after_both(with!(
+            binding(),
+            MulticastBinding.source = member(A, u64::MAX)
+        ))
+        .names("participant 1: multicast binding out of member bounds");
+        rejection(
+            &[allocation(), multicast(), device(), binding()],
+            &[multicast(), binding()],
+        )
+        .names("participant 2: multicast binding device 0 is not attached in this participant");
+        alone(multicast_mapping()).names("missing multicast object");
+        alone(device()).names("missing multicast object");
+        after_multicast(with!(multicast_mapping(), MulticastMapping.allocation = M2))
+            .names("participant 1: inconsistent multicast creator");
+        rejection(&[], &[multicast()]).names("must have exactly one creator; found 0");
+        after_multicast(multicast()).names("must have exactly one creator; found 2");
+        alone(multicast()).names("incomplete multicast device group");
+        after_multicast(device()).names("incomplete multicast binding group");
+    }
+
+    #[test]
+    fn validate_accepts_different_device_ordinals_for_one_allocation_across_processes() {
+        let other = MemoryLocation { id: 1, ..DEVICE };
+        let importer = with!(shared(), Allocation.location = other);
+        validate(&Manifest::from([(1, vec![shared()]), (2, vec![importer])])).unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_multicast_binding_and_mapping_beyond_requested_object_size() {
+        let creator = vec![
+            allocation(),
+            multicast(),
+            device(),
+            with!(binding(), MulticastBinding.offset = 4096),
+            with!(multicast_mapping(), MulticastMapping.size = 8192),
+        ];
+        validate(&Manifest::from([(1, creator)])).unwrap();
     }
 }
