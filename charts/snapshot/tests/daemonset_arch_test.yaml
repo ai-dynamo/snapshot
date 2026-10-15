@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: snapshot agent architecture
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: schedules on amd64 and arm64 nodes
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0]
+          value:
+            key: kubernetes.io/arch
+            operator: In
+            values:
+              - amd64
+              - arm64
+
+  - it: rejects a custom nodeAffinity
+    set:
+      daemonset.affinity:
+        nodeAffinity: {}
+    asserts:
+      - failedTemplate:
+          errorPattern: restricts kubernetes.io/arch to amd64 and arm64

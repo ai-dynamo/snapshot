@@ -5,9 +5,9 @@ ARG DOCKER_PROXY
 ARG PAGEBROKER_BUILD_IMAGE=ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
 # When bumping the base, update the source URL in compliance/README.source.txt
 # to the matching version.
-ARG PAGEBROKER_BASE_IMAGE=nvcr.io/nvidia/distroless/cc:v4.0.8@sha256:8003f23a7122e630e3a78875dda6e68403c7ccc0adb393470a8c7739fafa4a02
+ARG PAGEBROKER_BASE_IMAGE=nvcr.io/nvidia/distroless/cc:v4.0.8@sha256:92a46f84206c3e4610043eaef50946451019e3c479b71d280015919ba311babb
 
-ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
+ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:843a5e81ed49ad2a2787aa10e48e926dc1f9440522a122ec2a637c27039fc77d
 
 FROM ${CUDA_HEADERS_IMAGE} AS cuda-headers
 
@@ -83,9 +83,10 @@ RUN make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
 # detection, and no build-time driver stub is shipped in the runtime image.
 RUN /src/pagebroker 2>/tmp/usage; status=$?; [ "$status" -eq 2 ] && grep -q '^usage: pagebroker ' /tmp/usage
 
-RUN mv /usr/local/lib /usr/local/lib-build \
+RUN arch="$(uname -m)" \
+    && mv /usr/local/lib /usr/local/lib-build \
     && mkdir -p /runtime-lib \
-    && cp -a /usr/lib/x86_64-linux-gnu/libaio.so.* /runtime-lib/ \
+    && cp -a "/usr/lib/${arch}-linux-gnu"/libaio.so.* /runtime-lib/ \
     && for library in /nixl-runtime-check/libnixl*.so /nixl-runtime-check/plugins/libplugin_POSIX.so; do \
          LD_LIBRARY_PATH=/nixl-runtime-check:/runtime-lib ldd "$library" > /tmp/dependencies \
          && ! grep -q 'not found' /tmp/dependencies || { cat /tmp/dependencies; exit 1; }; \

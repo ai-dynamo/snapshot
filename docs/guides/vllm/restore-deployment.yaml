@@ -29,14 +29,13 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a
           imagePullPolicy: IfNotPresent
-          # Inert placeholder: the agent restores the checkpointed process into
-          # this container, so app.py must not run here.
+          # The source's command. Snapshot replaces it with its restore proxy,
+          # which waits for the restore and then follows the restored process.
           command:
-            - /bin/sh
-            - -c
-            - exec sleep infinity
+            - python3
+            - /snapshot-app/app.py
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
@@ -63,7 +62,7 @@ spec:
               mountPath: /dev/net/tun
             # The checkpointed process's mount namespace includes this
             # mount (from the source Pod); restore recreates it here too,
-            # even though this placeholder's own command never reads it.
+            # even though this container's own command never runs.
             - name: app
               mountPath: /snapshot-app
               readOnly: true

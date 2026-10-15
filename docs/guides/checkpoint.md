@@ -108,7 +108,7 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a
           command:
             - python3
             - /snapshot-app/app.py

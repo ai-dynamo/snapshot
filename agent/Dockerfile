@@ -6,7 +6,7 @@
 # Build targets. Two named build contexts are required for the agent: `api`
 # (the agent module depends on it via `replace => ../api`) and `compliance`
 # (attribution helpers shared with the operator image):
-#   docker build --platform linux/amd64 --target agent \
+#   docker build --platform linux/amd64 --target agent \   (or linux/arm64)
 #     --build-context api=../api --build-context compliance=../hack/compliance \
 #     -t snapshot-agent:latest .
 #
@@ -35,7 +35,7 @@ ARG GOLANGCI_LINT_VERSION=v2.14.0
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
-ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
+ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:843a5e81ed49ad2a2787aa10e48e926dc1f9440522a122ec2a637c27039fc77d
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
 
 # =============================================================================
@@ -44,7 +44,7 @@ ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.0
 FROM ${DOCKER_PROXY}library/golang:${GO_VERSION}@${GO_IMAGE_DIGEST} AS go-base
 
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ARG GO_VERSION
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
@@ -103,7 +103,7 @@ RUN CGO_ENABLED=0 go test ./... -v
 FROM go-base AS builder
 
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
@@ -147,12 +147,13 @@ COPY --from=gcc-15 /usr/local/bin/ /opt/gcc-15/bin/
 COPY --from=gcc-15 /usr/local/lib/gcc/ /opt/gcc-15/lib/gcc/
 COPY --from=gcc-15 /usr/local/libexec/gcc/ /opt/gcc-15/libexec/gcc/
 COPY --from=gcc-15 /usr/local/lib64/ /opt/gcc-15/lib64/
-RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
+RUN arch="$(uname -m)" \
+    && test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
     && apt-get update && apt-get install -y --no-install-recommends \
        musl-tools make gcc binutils \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install cbindgen --version 0.29.4 --locked \
-    && rustup target add x86_64-unknown-linux-musl \
+    && rustup target add "${arch}-unknown-linux-musl" \
     && rustup component add rust-src rustfmt clippy
 WORKDIR /cuinterpose
 COPY cmd/cuinterpose/ ./
@@ -244,11 +245,11 @@ RUN tar -czf /criu-src.tar.gz -C /tmp --exclude-vcs criu
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS runtime-deps
 
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
-RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Snapshot supports x86_64 only, not ${TARGETARCH}" >&2; exit 1; \
-    fi
+RUN case "${TARGETARCH}" in amd64|arm64) ;; *) \
+      echo "ERROR: Snapshot supports amd64 and arm64, not ${TARGETARCH}" >&2; exit 1 ;; \
+    esac
 
 # Install CRIU runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -288,25 +289,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # them changes.
 FROM ${AGENT_BASE_IMAGE} AS base-packages
 
+ARG TARGETARCH
 COPY compliance/base-packages-manifest.sh /tmp/base-packages-manifest.sh
-COPY compliance/base-packages.tsv /tmp/base-packages.tsv
+COPY compliance/base-packages.tsv compliance/base-packages.arm64.tsv /tmp/
 
 RUN set -e; \
+    if [ "${TARGETARCH}" = arm64 ]; then baseline=/tmp/base-packages.arm64.tsv; else baseline=/tmp/base-packages.tsv; fi; \
     sh /tmp/base-packages-manifest.sh >/tmp/actual.tsv; \
-    diff -u /tmp/base-packages.tsv /tmp/actual.tsv || { \
-      echo "ERROR: agent/compliance/base-packages.tsv is stale for this base image — run 'make capture-base-packages' and commit" >&2; \
+    diff -u "${baseline}" /tmp/actual.tsv || { \
+      echo "ERROR: ${baseline} is stale for this base image — run 'make capture-base-packages AGENT_PLATFORM=linux/${TARGETARCH}' and commit" >&2; \
       exit 1; \
-    }
+    }; \
+    cp "${baseline}" /tmp/baseline.tsv
 
 FROM runtime-deps AS sources
 
 # From the stage that checked it rather than from the context, so a stale
 # baseline fails the build instead of quietly skewing the delta below.
-COPY --from=base-packages /tmp/base-packages.tsv /tmp/base-packages.tsv
+COPY --from=base-packages /tmp/baseline.tsv /tmp/baseline.tsv
 COPY compliance/collect-sources.sh /tmp/collect-sources.sh
 
 # Debian/Ubuntu source for the delta against the NGC base image.
-RUN sh /tmp/collect-sources.sh /tmp/base-packages.tsv /sources/dpkg
+RUN sh /tmp/collect-sources.sh /tmp/baseline.tsv /sources/dpkg
 
 # CRIU source, at the exact ref this image was built from.
 COPY --from=criu-builder /criu-src.tar.gz /sources/criu/criu-src.tar.gz
@@ -409,12 +413,18 @@ RUN set -eu; \
     done
 
 # Matched loader + glibc for the bundled tar, which runtime.restoreTarCmd
-# invokes as `ld-linux-x86-64.so.2 --library-path ... tar`. This is what lets
+# invokes as `<loader> --library-path ... tar`, where the loader is
+# ld-linux-x86-64.so.2 or ld-linux-aarch64.so.1 (nsmount.BundleLoader). This is what lets
 # tar run on placeholders older than AGENT_BASE_IMAGE. Keep it out of lib/ —
 # see the bundle layout comment in agent/internal/nsmount/injector.go.
+ARG TARGETARCH
 RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) LOADER_NAME=ld-linux-x86-64.so.2 ;; \
+      arm64) LOADER_NAME=ld-linux-aarch64.so.1 ;; \
+    esac; \
     mkdir -p /snapshot-binaries/libc; \
-    cp -L /lib64/ld-linux-x86-64.so.2 /snapshot-binaries/libc/; \
+    cp -L "$(ldd /snapshot-binaries/tar | awk '/ld-linux/ && !/=>/ {print $1}')" "/snapshot-binaries/libc/${LOADER_NAME}"; \
     ldd /snapshot-binaries/tar | awk '/=> \//{print $3}' \
     | grep -E '/(libc|libm|libmvec|libdl|libpthread|librt|libresolv)[.-]' \
     | xargs -r -I{} cp -Ln {} /snapshot-binaries/libc/
@@ -425,7 +435,10 @@ RUN set -eu; \
 # and only fail on a placeholder older than AGENT_BASE_IMAGE, which is the bug
 # this arrangement exists to prevent.
 RUN set -eu; \
-    LOADER=/snapshot-binaries/libc/ld-linux-x86-64.so.2; \
+    case "${TARGETARCH}" in \
+      amd64) LOADER=/snapshot-binaries/libc/ld-linux-x86-64.so.2 ;; \
+      arm64) LOADER=/snapshot-binaries/libc/ld-linux-aarch64.so.1 ;; \
+    esac; \
     LIBPATH=/snapshot-binaries/libc:/snapshot-binaries/lib; \
     escaped=$("$LOADER" --library-path "$LIBPATH" --list /snapshot-binaries/tar \
               | awk '/=>/{print $3}' | grep -v '^/snapshot-binaries/' || true); \

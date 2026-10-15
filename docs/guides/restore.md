@@ -16,7 +16,7 @@ the container during pod startup.
 Each build-and-deploy guide ships a ready-to-apply `restore-deployment.yaml` next
 to its `deployment.yaml`: the same manifest with an
 `nvidia.com/restore-from` annotation added naming the `PodSnapshot` to restore
-from, and the container command replaced with an inert `sleep infinity`.
+from.
 Download the one for the framework in use:
 
 - [vLLM `restore-deployment.yaml`](vllm/restore-deployment.yaml)
@@ -46,12 +46,17 @@ kubectl rollout status \
   --timeout=30m
 ```
 
-The container starts as an inert `sleep infinity` placeholder, as the
-[restore Pod contract](../reference/restore-pod-contract.md) requires: the agent
-restores the checkpointed process into it as a sibling, so running the
-application there would only load a second copy of the model. Readiness
-therefore waits on the framework's post-restore sentinel — `vllm-restore-ready`
-and its equivalents — not the `ready-for-snapshot` file the source pod writes.
+Snapshot replaces the container's command with its restore proxy, as the
+[restore Pod contract](../reference/restore-pod-contract.md) describes, so the
+application does not start from scratch. The proxy waits for the restore, then
+follows the restored process: the container ends when the restored process
+does. Readiness waits on the framework's post-restore sentinel —
+`vllm-restore-ready` and its equivalents — not the `ready-for-snapshot` file the
+source pod writes.
+
+A Pod gets one restore. The guides use a Deployment, which restarts containers,
+so if the restored process exits, the container ends in `CrashLoopBackOff`
+instead of starting again. Delete the Pod to restore a new replica.
 
 The node agent adds a `nvidia.com/Restored` condition to the pod once the restore
 completes — watch it, along with pod readiness, to confirm. If the restored

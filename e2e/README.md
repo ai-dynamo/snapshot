@@ -84,7 +84,8 @@ deletes it along with the cluster. A skip-build run leaves it up in turn, so you
 can iterate on one set of images; `k3d registry delete k3d-snapshot-registry`
 discards them.
 
-The agent is linux/amd64 only, so this does not work on an Apple Silicon Mac.
+The suite builds the agent for linux/amd64 and needs an amd64 Docker daemon, so
+it does not work on an Apple Silicon Mac.
 
 When running the stages separately against the k3d helper cluster, also export
 `SNAPSHOT_E2E_MODE=direct` and `SNAPSHOT_E2E_CPU_ONLY=true` for installation,

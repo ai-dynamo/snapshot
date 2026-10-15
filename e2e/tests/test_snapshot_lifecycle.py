@@ -394,6 +394,57 @@ def test_one_cpu_snapshot_restores_into_two_containers(
         raise
 
 
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_restored_workload_logs_and_exit_reach_kubernetes(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # The restore proxy is the container's PID 1. It forwards nothing itself:
+    # the restored workload writes to the container's log, and the container
+    # ends with the workload's exit code.
+    try:
+        _, source_node, _ = create_valid_checkpoint(config, run, gpu=False)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node)
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+
+        # The source's lines went to the source Pod's log, so any line here
+        # was written after the restore.
+        snap.wait_for(
+            f"restored output in the log of {run.restore_pod}",
+            lambda: True
+            if "[source] observation seq=" in k8s.pod_logs(config.namespace, run.restore_pod)
+            else None,
+            timeout=60,
+            poll_interval=2,
+        )
+
+        k8s.exec_command(
+            config.namespace, run.restore_pod, f"echo 7 > {snap.EXIT_REQUEST}"
+        )
+        assert snap.wait_for_container_exit(config.namespace, run.restore_pod) == 7
+        # kubelet sets the Pod's phase after it finishes tearing the Pod down,
+        # a little after the container's own status shows the exit.
+        def failed() -> object | None:
+            pod = k8s.read_pod(config.namespace, run.restore_pod)
+            return pod if pod.status.phase == "Failed" else None
+
+        pod = snap.wait_for(f"pod {run.restore_pod} to fail", failed, timeout=60, poll_interval=2)
+        assert pod.status.container_statuses[0].restart_count == 0
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 @pytest.mark.snapshot_failure
 @pytest.mark.gpu
 def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
@@ -762,6 +813,7 @@ def test_snapshot_deletion_cascades_content_and_artifact_cleanup(
 
 
 @pytest.mark.cpu
+@pytest.mark.serial  # waits on the operator's node-wide sweep
 @pytest.mark.snapshot_success
 def test_orphan_sweep_reclaims_uid_root(
     config: k8s.E2EConfig,

@@ -1,0 +1,85 @@
+{
+  "encoding": "Fixed-order UTF-8 fields, each preceded by an unsigned 32-bit big-endian byte length; SHA-256 lowercase hex.",
+  "stores": [
+    {
+      "name": "default",
+      "pvc": {
+        "namespace": "snapshot",
+        "claimName": "snapshot-pvc",
+        "basePath": "/"
+      },
+      "canonicalHex": "00000011736e617073686f742e73746f72652f76310000000370766300000008736e617073686f740000000c736e617073686f742d707663000000012f",
+      "storeID": "store-v1-57e06c9609c92e973d048143531baadb9271a9571f1d1dbc21af2c6cd13d24c2"
+    },
+    {
+      "name": "normalized-root",
+      "pvc": {
+        "namespace": "snapshot",
+        "claimName": "snapshot-pvc",
+        "basePath": "///./"
+      },
+      "canonicalHex": "00000011736e617073686f742e73746f72652f76310000000370766300000008736e617073686f740000000c736e617073686f742d707663000000012f",
+      "storeID": "store-v1-57e06c9609c92e973d048143531baadb9271a9571f1d1dbc21af2c6cd13d24c2"
+    },
+    {
+      "name": "other-namespace",
+      "pvc": {
+        "namespace": "other",
+        "claimName": "snapshot-pvc",
+        "basePath": "/"
+      },
+      "canonicalHex": "00000011736e617073686f742e73746f72652f763100000003707663000000056f746865720000000c736e617073686f742d707663000000012f",
+      "storeID": "store-v1-b4939fa5238a98746407fde26742f0b29cfe3c6852fafb3cf7c091a33fe3475b"
+    },
+    {
+      "name": "other-claim",
+      "pvc": {
+        "namespace": "snapshot",
+        "claimName": "other-pvc",
+        "basePath": "/"
+      },
+      "canonicalHex": "00000011736e617073686f742e73746f72652f76310000000370766300000008736e617073686f74000000096f746865722d707663000000012f",
+      "storeID": "store-v1-30d6006d923ca98446e6d350750e85900de02251821fce3b9d5f7cf3efadb5a0"
+    },
+    {
+      "name": "nested",
+      "pvc": {
+        "namespace": "snapshot",
+        "claimName": "snapshot-pvc",
+        "basePath": "/bundles//./gpu/"
+      },
+      "canonicalHex": "00000011736e617073686f742e73746f72652f76310000000370766300000008736e617073686f740000000c736e617073686f742d7076630000000c2f62756e646c65732f677075",
+      "storeID": "store-v1-6755a08abda881180304fe785b1ef0c622a6ae869b3e2d403eff17b96a1b4a7b"
+    },
+    {
+      "name": "unicode",
+      "pvc": {
+        "namespace": "snapshot",
+        "claimName": "snapshot-pvc",
+        "basePath": "/mod\u00e8les"
+      },
+      "canonicalHex": "00000011736e617073686f742e73746f72652f76310000000370766300000008736e617073686f740000000c736e617073686f742d707663000000092f6d6f64c3a86c6573",
+      "storeID": "store-v1-cc2fff7c6cab6d914458b84badac4f3497900ee89e482f1f944d5b242e304565"
+    },
+    {
+      "name": "field-boundary-a",
+      "pvc": {
+        "namespace": "ab",
+        "claimName": "c",
+        "basePath": "/"
+      },
+      "canonicalHex": "00000011736e617073686f742e73746f72652f7631000000037076630000000261620000000163000000012f",
+      "storeID": "store-v1-1fd0565ff007da2adb3f8ec88d0c282f03cd26a75e3972fade4006f90133b218"
+    },
+    {
+      "name": "field-boundary-b",
+      "pvc": {
+        "namespace": "a",
+        "claimName": "bc",
+        "basePath": "/"
+      },
+      "canonicalHex": "00000011736e617073686f742e73746f72652f7631000000037076630000000161000000026263000000012f",
+      "storeID": "store-v1-794080e8b85311b877d46fb804c8937367dc58e07aa7b9da367d8cd50c97eacb"
+    }
+  ]
+}
