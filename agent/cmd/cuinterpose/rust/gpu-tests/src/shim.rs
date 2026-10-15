@@ -3,17 +3,22 @@
 
 //! The packaged artifacts under test, the control endpoint, and the coordinator.
 
-use crate::cu;
-use crate::process::{self, Child, socket_dir};
-use cuinterpose_protocol::{Record, Reply, Request, Response, socket_path};
+use crate::process::{self, Child, socket_dir, work_dir};
+use crate::{core_abi, cu, loader, sys};
+use cuinterpose_protocol::{Manifest, Record, Reply, Request, Response, socket_path};
 use std::env;
+use std::ffi::{CStr, c_int};
+use std::fs;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, mpsc};
+use std::thread;
 
 pub(crate) const BUILD_DIR: &str = "CUINTERPOSE_BUILD_DIR";
+const STATE_FILENAME: &str = "cuinterpose.state";
+
 pub struct Artifacts {
     pub frontend: PathBuf,
     pub core: PathBuf,
@@ -124,5 +129,77 @@ pub fn coordinate(action: &str, pids: &[u32], checkpoint_dir: Option<&Path>) -> 
     Coordinated {
         success: status.success(),
         stderr,
+    }
+}
+
+/// Prepares and restores `pids`, with a native CUDA checkpoint in between if requested,
+/// and returns the saved records. Every target must be idle in CUDA. A native
+/// checkpoint locks the targets' CUDA, so only the test process can run one.
+pub fn checkpoint(pids: &[u32], native: bool) -> Manifest {
+    let directory = tempfile::Builder::new()
+        .prefix("checkpoint-")
+        .tempdir_in(work_dir())
+        .unwrap();
+    for action in ["--prepare", "--restore"] {
+        let result = coordinate(action, pids, Some(directory.path()));
+        assert!(
+            result.success,
+            "coordinator {action} failed:\n{}",
+            result.stderr
+        );
+        if action == "--prepare" && native {
+            native_checkpoint(pids);
+        }
+    }
+    let state = fs::read(directory.path().join(STATE_FILENAME)).unwrap();
+    cuinterpose_protocol::decode(&state).unwrap()
+}
+
+type Step<T> = unsafe extern "C" fn(c_int, *mut T) -> sys::CUresult;
+
+/// Locks, checkpoints, restores, and unlocks every target in turn.
+fn native_checkpoint(pids: &[u32]) {
+    assert!(
+        process::role().is_none(),
+        "run native checkpoints from the test process"
+    );
+    let targets = pids.to_vec();
+    let (done, finished) = mpsc::channel();
+    // A driver call that never returns must fail the test instead of hanging the binary.
+    thread::spawn(move || {
+        let lock = sys::CUcheckpointLockArgs {
+            timeoutMs: 60_000,
+            reserved0: 0,
+            reserved1: [0; 7],
+        };
+        // SAFETY: all-zero values are the default arguments of the remaining steps.
+        let (checkpoint, restore, unlock) = unsafe { std::mem::zeroed() };
+        step(c"cuCheckpointProcessLock", &targets, lock);
+        step::<sys::CUcheckpointCheckpointArgs>(
+            c"cuCheckpointProcessCheckpoint",
+            &targets,
+            checkpoint,
+        );
+        step::<sys::CUcheckpointRestoreArgs>(c"cuCheckpointProcessRestore", &targets, restore);
+        step::<sys::CUcheckpointUnlockArgs>(c"cuCheckpointProcessUnlock", &targets, unlock);
+        done.send(()).unwrap();
+    });
+    finished
+        .recv_timeout(process::TIMEOUT)
+        .unwrap_or_else(|error| panic!("native checkpoint of {pids:?} did not finish: {error}"));
+}
+
+fn step<T>(name: &CStr, pids: &[u32], mut arguments: T) {
+    // cudarc does not bind the cuCheckpointProcess* entry points.
+    let address = core_abi::driver_symbol(name);
+    assert!(!address.is_null(), "missing {name:?}");
+    let function: Step<T> = loader::cast(address);
+    for &pid in pids {
+        let status = unsafe { function(pid as c_int, &mut arguments) };
+        assert_eq!(
+            status,
+            sys::CUresult::CUDA_SUCCESS,
+            "{name:?} for PID {pid}"
+        );
     }
 }

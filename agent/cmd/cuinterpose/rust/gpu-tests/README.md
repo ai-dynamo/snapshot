@@ -34,6 +34,9 @@ The frontend must be preloaded before a process resolves any CUDA symbol, so the
 process never runs a scenario itself. A test starts itself again in a fresh process with
 the frontend preloaded, and the re-run test function runs the scenario. Tests with
 several processes dispatch on a role name. `src/process.rs` describes the mechanism.
+`shim::checkpoint` drives the coordinator and, from the test process, the native
+`cuCheckpointProcess*` cycle around the scenario processes. It does not run CRIU or
+the agent.
 
 | Module | Covers |
 | --- | --- |
@@ -41,3 +44,7 @@ several processes dispatch on a role name. `src/process.rs` describes the mechan
 | `core_registration` | Core registration and startup with missing driver symbols |
 | `control_socket` | Control socket startup, fork, exec, and existing paths |
 | `control_replies` | Out-of-order requests and lost replies |
+| `allocation_tracking` | Tracked VMM handles, converted mallocs, and rejected calls |
+| `access_replay` | Access updates and their replay after reconstruction |
+| `context_teardown` | Context destruction and primary-context reset or release |
+| `foreign_imports` | Imports from processes without the frontend |
