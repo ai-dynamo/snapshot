@@ -35,7 +35,7 @@ API as part of its control loop.
     duplicate those controller-injected fields.
 
 The framework guides include a complete, working example of a `PodSnapshot`-ready
-pod — see the `deployment.yaml` referenced from the [vLLM](vllm.md),
+pod — see the capture manifest referenced from the [vLLM](vllm.md),
 [SGLang](sglang.md), and [TensorRT-LLM](tensorrt-llm.md) guides.
 
 Set the namespace where the replica runs — the same one used to deploy it:
@@ -86,9 +86,10 @@ completes from the resulting `PodSnapshot` — removing the source replica. Ther
 no long-running replica to manage, which fits pipeline use cases.
 
 `spec.podTemplate` only needs the workload's own container spec — image,
-command, resources, and any volumes it mounts (including `/dev/net/tun`,
-which every framework guide's `deployment.yaml` mounts and which CRIU expects
-to find again on restore). The controller injects the `/snapshot-control`
+command, resources, and any volumes it mounts. The framework recipes do not
+need `/dev/net/tun`. CRIU can log a nonfatal TUN capability-probe error when
+the device is absent. See [TUN probe errors](../operations/troubleshooting.md#criu-reports-unable-to-create-tun).
+The controller injects the `/snapshot-control`
 volume and mount, `SNAPSHOT_CONTROL_DIR`, the `ready-for-snapshot` readiness
 probe, and the seccomp profile before creating the source pod.
 
@@ -108,13 +109,12 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           command:
             - python3
             - /snapshot-app/app.py
-          env:
-            - name: SNAPSHOT_MODEL
-              value: Qwen/Qwen3-0.6B
+          args:
+            - '{"model": "Qwen/Qwen3-0.6B"}'
           resources:
             limits:
               nvidia.com/gpu: "1"
@@ -122,16 +122,10 @@ spec:
             - name: app
               mountPath: /snapshot-app
               readOnly: true
-            - name: tun
-              mountPath: /dev/net/tun
       volumes:
         - name: app
           configMap:
             name: vllm-app
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
 ```
 
 ```bash
@@ -152,3 +146,153 @@ kubectl get snapshotjob vllm-snapshot-job \
 
 Because the source replica is deleted, every serving replica — including the
 first — is brought up via [restore](restore.md).
+
+## Single-GPU and multi-GPU capture
+
+Both options capture single-GPU and multi-GPU workloads on one node. The
+framework guides ship a capture manifest for each combination:
+
+| Framework | Model | GPUs | `PodSnapshot` source (Deployment) | `SnapshotJob` |
+|-----------|-------|------|-----------------------------------|---------------|
+| vLLM | Qwen3 0.6B | 1 | [qwen3-0.6b.yaml](vllm/capture/qwen3-0.6b.yaml) | [qwen3-0.6b-snapshotjob.yaml](vllm/capture/qwen3-0.6b-snapshotjob.yaml) |
+| vLLM | GLM 5.3 NVFP4 | 8 | [glm-5.3.yaml](vllm/capture/glm-5.3.yaml) | [glm-5.3-snapshotjob.yaml](vllm/capture/glm-5.3-snapshotjob.yaml) |
+| vLLM | DeepSeek V4.1 Flash | 8 | [deepseek-v4.1-flash.yaml](vllm/capture/deepseek-v4.1-flash.yaml) | [deepseek-v4.1-flash-snapshotjob.yaml](vllm/capture/deepseek-v4.1-flash-snapshotjob.yaml) |
+| SGLang | Qwen3 0.6B | 1 | [qwen3-0.6b.yaml](sglang/capture/qwen3-0.6b.yaml) | [qwen3-0.6b-snapshotjob.yaml](sglang/capture/qwen3-0.6b-snapshotjob.yaml) |
+| SGLang | GLM 5.3 NVFP4 | 8 | [glm-5.3.yaml](sglang/capture/glm-5.3.yaml) | [glm-5.3-snapshotjob.yaml](sglang/capture/glm-5.3-snapshotjob.yaml) |
+| SGLang | DeepSeek V4.1 Flash | 8 | [deepseek-v4.1-flash.yaml](sglang/capture/deepseek-v4.1-flash.yaml) | [deepseek-v4.1-flash-snapshotjob.yaml](sglang/capture/deepseek-v4.1-flash-snapshotjob.yaml) |
+| TensorRT-LLM | Qwen3 0.6B | 1 | [qwen3-0.6b.yaml](tensorrt-llm/capture/qwen3-0.6b.yaml) | [qwen3-0.6b-snapshotjob.yaml](tensorrt-llm/capture/qwen3-0.6b-snapshotjob.yaml) |
+| TensorRT-LLM | GLM 5.3 NVFP4 | 8 | [glm-5.3.yaml](tensorrt-llm/capture/glm-5.3.yaml) | [glm-5.3-snapshotjob.yaml](tensorrt-llm/capture/glm-5.3-snapshotjob.yaml) |
+
+A multi-GPU capture enables multi-GPU support with the
+`nvidia.com/snapshot-multi-gpu: enabled` annotation on the source Pod. The
+eight-GPU manifests also mount the shared [model cache](model-cache-pvc.yaml)
+that the framework guides create.
+
+### With a `SnapshotJob`
+
+Add the annotation to `spec.podTemplate`. The controller prepares the source
+Pod for multi-GPU capture:
+
+<table>
+<tr><th>Single GPU</th><th>Multi-GPU</th></tr>
+<tr><td>
+
+```yaml
+spec:
+  podTemplate:
+    spec:
+      containers:
+        - name: main
+          command:
+            - python3
+            - /snapshot-app/app.py
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+```
+
+</td><td>
+
+```yaml
+spec:
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/snapshot-multi-gpu: enabled
+    spec:
+      containers:
+        - name: main
+          command:
+            - python3
+            - /snapshot-app/app.py
+          resources:
+            limits:
+              nvidia.com/gpu: "8"
+```
+
+</td></tr>
+</table>
+
+### With a Deployment and `PodSnapshot`
+
+A Pod that Snapshot does not create must also prepare itself. It copies the
+multi-GPU libraries from the Snapshot agent image with an init container, and
+starts the workload through the launcher those libraries include:
+
+<table>
+<tr><th>Single GPU</th><th>Multi-GPU</th></tr>
+<tr><td>
+
+```yaml
+template:
+  spec:
+    containers:
+      - name: main
+        command:
+          - python3
+          - /snapshot-app/app.py
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+```
+
+</td><td>
+
+```yaml
+template:
+  metadata:
+    annotations:
+      nvidia.com/snapshot-multi-gpu: enabled
+  spec:
+    initContainers:
+      - name: snapshot-cuda-install
+        image: ${SNAPSHOT_AGENT_IMAGE}
+        command:
+          - /bin/cp
+        args:
+          - --preserve=mode
+          - --
+          - /usr/local/lib/snapshot/libcuinterpose.so
+          - /usr/local/lib/snapshot/libcuinterpose_core.so
+          - /usr/local/bin/cuinterpose-launch
+          - /tmp/snapshot-cuda/
+        volumeMounts:
+          - name: snapshot-cuda
+            mountPath: /tmp/snapshot-cuda
+    containers:
+      - name: main
+        command:
+          - /tmp/snapshot-cuda/cuinterpose-launch
+          - --library
+          - /tmp/snapshot-cuda/libcuinterpose.so
+          - --
+          - python3
+          - /snapshot-app/app.py
+        resources:
+          limits:
+            nvidia.com/gpu: "8"
+        volumeMounts:
+          - name: snapshot-cuda
+            mountPath: /tmp/snapshot-cuda
+            readOnly: true
+    volumes:
+      - name: snapshot-cuda
+        emptyDir: {}
+```
+
+</td></tr>
+</table>
+
+Set `SNAPSHOT_AGENT_IMAGE` to the image of the installed Snapshot agent, and
+substitute it when applying the manifest:
+
+```bash
+export SNAPSHOT_AGENT_IMAGE=<registry>/snapshot/agent@sha256:<digest>
+
+envsubst '${SNAPSHOT_AGENT_IMAGE}' < capture/glm-5.3.yaml | \
+  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+```
+
+`envsubst` comes with `gettext-base` on Debian and Ubuntu. Then create the
+`PodSnapshot` for the ready source Pod as in
+[Option 1](#option-1--podsnapshot-checkpoint-a-running-replica).

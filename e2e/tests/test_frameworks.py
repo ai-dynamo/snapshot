@@ -89,7 +89,7 @@ def framework(request: pytest.FixtureRequest) -> frameworks.FrameworkSpec:
     name = request.param
     if name not in frameworks.selected_frameworks():
         pytest.skip(f"{name} not selected by SNAPSHOT_E2E_FRAMEWORK")
-    return frameworks.FRAMEWORKS[name]
+    return frameworks.framework_spec(name)
 
 
 @pytest.mark.framework
@@ -102,7 +102,7 @@ def test_framework_checkpoint_restore_serves_inference(
 ) -> None:
     result = benchmark.start(
         suite="framework-checkpoint-restore",
-        case=framework.name,
+        case=framework.case_name,
         environment={
             "namespace": config.namespace,
             "model": framework.model,
@@ -150,21 +150,31 @@ def test_framework_checkpoint_restore_serves_inference(
                 snap.ensure_pvc(guide_pvc)
 
         k8s.apply_configmap(config.namespace, fw.app_configmap(config=config, spec=framework))
-        k8s.create_pod(
-            fw.source_pod(
-                config=config,
-                run=run,
-                spec=framework,
-                image=framework_image,
-                model_cache=model_cache,
-            )
+        source_manifest = fw.source_pod(
+            config=config,
+            run=run,
+            spec=framework,
+            image=framework_image,
+            model_cache=model_cache,
         )
+        multi_gpu = source_manifest["metadata"]["annotations"].get(fw.MULTI_GPU_ANNOTATION)
+        k8s.create_pod(source_manifest)
         source = snap.wait_for_pod_ready(
             config.namespace,
             run.source_pod,
-            timeout=frameworks.SOURCE_READY_TIMEOUT_SECONDS,
+            timeout=framework.source_ready_timeout_seconds,
         )
         source_node = source.spec.node_name
+        source_libraries = (
+            fw.cuinterpose_library_hashes(config, source) if multi_gpu == "enabled" else None
+        )
+        source_main = next(c for c in source.spec.containers if c.name == frameworks.CONTAINER)
+        model, revision, parallelism = frameworks.guide_model(source_main.args)
+        prompts = inference.chat_prompts(config.namespace, run.source_pod, model, revision)
+        result.update_environment(comparisonDimensions={
+            "multiGpu": multi_gpu or "disabled",
+            "tensorParallelSize": parallelism,
+        })
         result.redact(source_node, "source-node")
         result.mark_event("source.ready")
         _record_framework_image_digest(result, source)
@@ -189,7 +199,7 @@ def test_framework_checkpoint_restore_serves_inference(
         pod_snapshot, content = snap.wait_for_snapshot_ready(
             config.namespace,
             run.snapshot_name,
-            timeout=frameworks.CHECKPOINT_TIMEOUT_SECONDS,
+            timeout=framework.checkpoint_timeout_seconds,
         )
         result.finish_duration(CHECKPOINT_DURATION, event="checkpoint.ready")
         assert pod_snapshot["status"]["boundSnapshotContentName"] == content["metadata"]["name"]
@@ -240,14 +250,19 @@ def test_framework_checkpoint_restore_serves_inference(
                 event="traffic.ready",
             ),
         )
+        assert restored_pod.spec.node_name == source_node
         restored_text = restored_text.strip()
         restore_node = restored_pod.spec.node_name
         result.redact(restore_node, "restore-node")
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
+        if source_libraries is not None:
+            assert fw.cuinterpose_library_hashes(config, restored_pod) == source_libraries, (
+                "restored guide libraries differ from the captured bundle"
+            )
 
-        answer = inference.request_generate(config.namespace, run.restore_pod, frameworks.PROMPT)
-        print(f"[{framework.name}] /generate after restore: {answer!r}")
+        answers = inference.verify_chat_answers(config.namespace, run.restore_pod, prompts)
+        print(f"[{framework.name}] /generate after restore: {answers!r}")
 
         # The placeholder's own entrypoint must have stayed in standby. If it
         # had loaded a model, its log would show the pre-checkpoint line and
