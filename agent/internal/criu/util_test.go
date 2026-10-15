@@ -4,6 +4,7 @@
 package criu
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"strings"
@@ -372,7 +373,7 @@ func TestRestorePreservesManifestImageIoMode(t *testing.T) {
 				CRIU:   types.CRIUSettings{ImageIoMode: tc.mode},
 				ExtMnt: map[string]string{"root": "/"},
 			}}
-			opts, err := BuildRestoreOpts(manifest, t.TempDir(), "", logr.Discard())
+			opts, err := BuildRestoreOpts(manifest, t.TempDir(), "", "", logr.Discard())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -380,5 +381,49 @@ func TestRestorePreservesManifestImageIoMode(t *testing.T) {
 				t.Fatalf("restore I/O mode = %v, want %v", opts.GetImageIoMode(), tc.want)
 			}
 		})
+	}
+}
+
+// CRIU runs from the agent, so the restored processes take the restore
+// target's label only when the options name it.
+func TestBuildRestoreOptsLSMProfile(t *testing.T) {
+	for _, profile := range []string{"", "apparmor:cri-containerd.apparmor.d"} {
+		t.Run(profile, func(t *testing.T) {
+			manifest := &types.CheckpointManifest{CRIUDump: types.CRIUDumpManifest{
+				ExtMnt: map[string]string{"root": "/"},
+			}}
+			opts, err := BuildRestoreOpts(manifest, t.TempDir(), "", profile, logr.Discard())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := opts.GetLsmProfile(); got != profile {
+				t.Fatalf("lsm_profile = %q, want %q", got, profile)
+			}
+			if profile == "" && opts.LsmProfile != nil {
+				t.Fatal("lsm_profile is set without a profile")
+			}
+		})
+	}
+}
+
+// The hook runs once the processes are restored and before they resume; its
+// error aborts the restore.
+func TestRestoreNotifyPostRestoreRunsTheHook(t *testing.T) {
+	calls := 0
+	n := &restoreNotify{log: logr.Discard(), postRestore: func() error { calls++; return nil }}
+	if err := n.PostRestore(42); err != nil {
+		t.Fatal(err)
+	}
+	if n.restoredPID != 42 || calls != 1 {
+		t.Fatalf("restoredPID = %d, hook calls = %d", n.restoredPID, calls)
+	}
+
+	failing := &restoreNotify{log: logr.Discard(), postRestore: func() error { return errors.New("unmount failed") }}
+	if err := failing.PostRestore(42); err == nil {
+		t.Fatal("expected the hook's error")
+	}
+
+	if err := (&restoreNotify{log: logr.Discard()}).PostRestore(42); err != nil {
+		t.Fatalf("no hook: %v", err)
 	}
 }

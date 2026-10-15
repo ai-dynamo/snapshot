@@ -44,10 +44,14 @@ type CheckpointContainerSnapshot struct {
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
 type RestoreContainerSnapshot struct {
-	TargetGPUUUIDs  []string
-	PlaceholderPID  int
-	TargetRoot      string
-	CgroupRoot      string
+	TargetGPUUUIDs []string
+	PlaceholderPID int
+	TargetRoot     string
+	CgroupRoot     string
+	// LSMProfile is the placeholder container's AppArmor profile or SELinux
+	// label, as CRIU's lsm_profile takes it ("apparmor:<name>" or
+	// "selinux:<label>"). Empty when the runtime set none.
+	LSMProfile      string
 	CUDADeviceMap   string
 	GPUMountAliases map[string]string
 }
