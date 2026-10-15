@@ -148,8 +148,8 @@ to checkpoint and restore a pod.
 Current limitations:
 
 - Single-GPU workloads only.
-- Linux nodes on x86_64 or arm64. arm64 is validated on NVIDIA GB300 for vLLM and
-  SGLang only; see [Platform support](docs/limitations.md#platform-support).
+- Linux nodes on x86_64 or arm64. arm64 is validated on NVIDIA GB300; see
+  [Platform support](docs/limitations.md#platform-support).
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 

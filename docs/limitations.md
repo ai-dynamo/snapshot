@@ -19,34 +19,29 @@ Multi-GPU support is on the roadmap.
 
 ## Platform support
 
-All results are for single-GPU workloads.
+Single-GPU workloads only.
 
 | Platform | vLLM | SGLang | TensorRT-LLM |
 | --- | --- | --- | --- |
 | x86_64 | Supported | Supported | Supported |
-| arm64, NVIDIA GB300 | Validated | Validated | Not working: the checkpoint does not complete |
+| arm64, NVIDIA GB300 | Validated | Validated | Validated with `TLLM_WORKER_USE_SINGLE_PROCESS=1` |
 
-The arm64 results come from NVIDIA GB300 nodes (kernel `6.17.0-1019-aws-64k`
-with 64 KiB pages, driver 580.173.02, GPU Operator 26.3.3, containerd). Other
-arm64 hardware, kernels and page sizes are untested.
+arm64 was tested on GB300 nodes (kernel `6.17.0-1019-aws-64k`, 64 KiB pages,
+driver 580.173.02). Other arm64 hardware and kernels are untested.
 
-### arm64 requirements
+- **Images.** Use framework images that publish a `linux/arm64` variant, pinned by
+  the multi-architecture index digest. A single-architecture digest pulls the wrong
+  architecture.
+- **TensorRT-LLM.** With the guide's default setup, the checkpoint hangs on the
+  tested nodes because the MPI worker process does not answer CUDA checkpoint
+  requests. Set `TLLM_WORKER_USE_SINGLE_PROCESS=1` to run the worker in the app
+  process. x86_64 is unaffected.
 
-- Set `config.criu.imageIoMode` to `writeback`. With the default `direct`,
-  checkpoint succeeds but restore fails in CRIU with
-  `vdso: Invalid ELF magic` on the tested kernel.
-- Use framework images that publish a `linux/arm64` variant. A digest that pins
-  a single-architecture manifest (rather than the multi-architecture index)
-  pulls the wrong architecture.
-- Build the agent and PageBroker images with `AGENT_PLATFORM=linux/arm64`; see
-  [Build from source](development/build-from-source.md).
+## Storage
 
-### Known issue: TensorRT-LLM checkpoint hangs on arm64
-
-On the tested GB300 nodes the TensorRT-LLM guide workload does not finish its
-checkpoint. The agent logs `Starting checkpoint operation` and the GPU
-checkpoint through PageBroker never completes, with no error. Cancelling the
-checkpoint makes PageBroker exit and restart. vLLM and SGLang are not affected.
+On FSx for Lustre (tested with client 2.15.6), restore failed with the default
+`config.criu.imageIoMode: direct` (`vdso: Invalid ELF magic`). Set it to
+`writeback`. `direct` worked on EBS.
 
 ## GPU device selection and restore paths
 
