@@ -5,7 +5,6 @@ roadmap.
 
 ## Current limitations
 
-- Single-GPU workloads only.
 - Linux nodes on x86_64 or arm64. See [Platform support](#platform-support) for
   what is validated on each.
 - vGPU is not supported.
@@ -15,33 +14,25 @@ roadmap.
   restore, with undefined results. Disable such interception for workloads
   that will be snapshotted.
 
-Multi-GPU support is on the roadmap.
-
 ## Platform support
-
-Single-GPU workloads only.
 
 | Platform | vLLM | SGLang | TensorRT-LLM |
 | --- | --- | --- | --- |
-| x86_64 | Supported | Supported | Supported |
+| x86_64 | Validated | Validated | Validated |
 | arm64, NVIDIA GB300 | Validated | Validated | Validated with `TLLM_WORKER_USE_SINGLE_PROCESS=1` |
 
-arm64 was tested on GB300 nodes (kernel `6.17.0-1019-aws-64k`, 64 KiB pages,
-driver 580.173.02). Other arm64 hardware and kernels are untested.
+arm64 was validated with single-GPU workloads on GB300 nodes (kernel
+`6.17.0-1019-aws-64k`, 64 KiB pages, driver 580.173.02). Other arm64 hardware and
+kernels are untested.
 
-- **Images.** Use framework images that publish a `linux/arm64` variant, pinned by
-  the multi-architecture index digest. A single-architecture digest pulls the wrong
-  architecture.
+- **Images.** The published Snapshot images are x86_64 only; for arm64, [build them
+  from source](development/build-from-source.md). Framework images must publish a
+  `linux/arm64` variant. An amd64-only digest will not run on arm64, so pin the
+  multi-architecture index digest to work on both.
 - **TensorRT-LLM.** With the guide's default setup, the checkpoint hangs on the
   tested nodes because the MPI worker process does not answer CUDA checkpoint
   requests. Set `TLLM_WORKER_USE_SINGLE_PROCESS=1` to run the worker in the app
   process. x86_64 is unaffected.
-
-## Storage
-
-On FSx for Lustre (tested with client 2.15.6), restore failed with the default
-`config.criu.imageIoMode: direct` (`vdso: Invalid ELF magic`). Set it to
-`writeback`. `direct` worked on EBS.
 
 ## GPU device selection and restore paths
 

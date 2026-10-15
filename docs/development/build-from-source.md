@@ -13,8 +13,8 @@ In addition to the [runtime prerequisites](../../README.md#prerequisites), the b
 - A container registry the cluster can pull from, and push access to it
 - `kubectl` and `helm` configured against the cluster
 
-The node agent supports `linux/amd64` and `linux/arm64`. The agent and
-PageBroker images build for `linux/amd64` by default; pass
+The node agent supports `linux/amd64` and `linux/arm64`. The agent,
+PageBroker and operator images build for `linux/amd64` by default; pass
 `AGENT_PLATFORM=linux/arm64` to build them for arm64 nodes. See
 [Platform support](../limitations.md#platform-support) for what is validated on
 each architecture.

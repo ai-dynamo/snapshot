@@ -83,9 +83,10 @@ RUN make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
 # detection, and no build-time driver stub is shipped in the runtime image.
 RUN /src/pagebroker 2>/tmp/usage; status=$?; [ "$status" -eq 2 ] && grep -q '^usage: pagebroker ' /tmp/usage
 
-RUN mv /usr/local/lib /usr/local/lib-build \
+RUN arch="$(uname -m)" \
+    && mv /usr/local/lib /usr/local/lib-build \
     && mkdir -p /runtime-lib \
-    && cp -a "/usr/lib/$(uname -m)-linux-gnu"/libaio.so.* /runtime-lib/ \
+    && cp -a "/usr/lib/${arch}-linux-gnu"/libaio.so.* /runtime-lib/ \
     && for library in /nixl-runtime-check/libnixl*.so /nixl-runtime-check/plugins/libplugin_POSIX.so; do \
          LD_LIBRARY_PATH=/nixl-runtime-check:/runtime-lib ldd "$library" > /tmp/dependencies \
          && ! grep -q 'not found' /tmp/dependencies || { cat /tmp/dependencies; exit 1; }; \

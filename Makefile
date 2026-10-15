@@ -192,7 +192,7 @@ docker-export-agent-bundle:
 	  --output "type=local,dest=$(BUNDLE_DEST)" agent/
 
 docker-build-operator:
-	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f operator/Dockerfile \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/operator:$(t)) .
 
 docker-build-pagebroker:

@@ -147,12 +147,13 @@ COPY --from=gcc-15 /usr/local/bin/ /opt/gcc-15/bin/
 COPY --from=gcc-15 /usr/local/lib/gcc/ /opt/gcc-15/lib/gcc/
 COPY --from=gcc-15 /usr/local/libexec/gcc/ /opt/gcc-15/libexec/gcc/
 COPY --from=gcc-15 /usr/local/lib64/ /opt/gcc-15/lib64/
-RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
+RUN arch="$(uname -m)" \
+    && test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
     && apt-get update && apt-get install -y --no-install-recommends \
        musl-tools make gcc binutils \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install cbindgen --version 0.29.4 --locked \
-    && rustup target add "$(uname -m)-unknown-linux-musl" \
+    && rustup target add "${arch}-unknown-linux-musl" \
     && rustup component add rust-src rustfmt clippy
 WORKDIR /cuinterpose
 COPY cmd/cuinterpose/ ./

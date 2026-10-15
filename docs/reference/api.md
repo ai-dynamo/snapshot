@@ -250,7 +250,7 @@ payload checksums.
 | `linkRemap`         | `true`                                 | Support deleted-but-open files (e.g. `/dev/shm` semaphores).                             |
 | `extMasters`        | `true`                                 | External bind-mount masters.                                                             |
 | `manageCgroupsMode` | `soft`                                 | CRIU cgroup mode: `ignore` / `soft` / `full` / `strict`.                                 |
-| `imageIoMode`       | `direct`                               | CRIU image I/O: `writeback` or `direct`. Use `writeback` on FSx for Lustre.              |
+| `imageIoMode`       | `direct`                               | CRIU image I/O: `writeback` or `direct`.                                                 |
 | `rstSibling`        | `true`                                 | Restore as a sibling process (required for go-criu swrk mode).                           |
 | `mntnsCompatMode`   | `false`                                | Mount-namespace compatibility mode, applied during restore.                              |
 | `evasiveDevices`    | `true`                                 | Use any device path when the original is inaccessible.                                   |
