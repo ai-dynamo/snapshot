@@ -6,7 +6,7 @@
 
 CBINDGEN ?= cbindgen
 PLATFORM ?= linux/amd64
-RUST_ARCH ?= $(shell uname -m)
+RUST_ARCH ?= $(shell uname -m | sed 's/^arm64$$/aarch64/')
 CUDA_INCLUDE ?= /opt/cuda/include
 # The frontend requires GCC 15+ for musttail. Set FRONTEND_CC for local builds.
 FRONTEND_CC ?= /opt/gcc-15/bin/gcc
