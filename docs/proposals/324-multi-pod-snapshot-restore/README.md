@@ -250,21 +250,6 @@ Coordinators validate the complete GPU resource graph. Allocation identities mus
 remain stable, with the original creator distinct from the holder selected to
 save or export an allocation. CPU/GPU dumps use artifact storage, not the brain.
 
-```mermaid
-flowchart TB
-    OLD["Captured member table<br/>Source IPs in local artifact"] --> A["Node agent"]
-    NEW["Pinned targets<br/>Restore status"] --> A
-    A -->|"Derived complete IP map"| C["CRIU repairs TCP sockets"]
-    A -->|"Until all members' sockets are restored"| L["TCP connection protection"]
-    A -->|"Until final release"| G["Application execution hold"]
-    A <-->|"Opaque group payloads"| B["Brain service"]
-    SAVED["Saved runtime records<br/>Member artifact"] --> H["Local coordinator"]
-    H <-->|"Runtime records and results"| A
-    FRESH["Fresh handles<br/>Local shims"] --> H
-    H --> M["GPU-handle replacement map<br/>Coordinator memory"]
-    M --> S["Local shims apply replacements"]
-```
-
 #### Captured Group Metadata
 
 Each set artifact's existing `CheckpointManifest` gains an optional `PodSet`
@@ -294,19 +279,41 @@ type CapturedPodSetMember struct {
 }
 ```
 
-During capture inspection, agents exchange their observed source identities and
-IPs. They validate one complete table in checkpoint member order and pin it
-locally. Every artifact records the same version, capture UID, and ordered table;
-`MemberID` identifies the local artifact and its list position determines rank.
-The table's local IP must match the existing `k8s.podIP`. Source IP changes before
-execution refuse capture rather than rewrite the table.
+`Version` identifies the metadata format. `CaptureUID` is the capture operation's
+UID. `MemberID` identifies the member whose state is saved in this artifact.
 
-Restore preflight validates the version, capture UID, membership, Pod UIDs,
-container names, and local artifact identity against the referenced checkpoint.
-IDs and source IPs must be complete and unique; IPs must be supported IPv4 values.
-Agents reject missing or inconsistent metadata before CRIU. Captured metadata is
-immutable, not refreshed from source Pods. Each agent needs only its assigned
-artifact and the common target bindings to derive the full map.
+**Capture.** During inspection, agents exchange each member's source Pod UID,
+container name and IP through the brain. They validate the complete list in
+`PodSetSnapshot.spec.members` order, which preserves ranks. Every artifact saves
+the same list, format version and capture UID. The list stays fixed after
+inspection. If a source IP changes before execution, the agent refuses capture.
+
+**Restore.** Each agent reads the saved source IPs from its assigned artifact
+and matches member IDs to the target IPs pinned in `PodSetRestore` status.
+For example:
+
+| Member | Saved source IP | Target IP for this restore |
+| --- | --- | --- |
+| worker-a | `10.0.0.1` | `10.1.0.8` |
+| worker-b | `10.0.0.2` | `10.1.0.9` |
+
+This gives every agent the complete old-to-new IP map for CRIU. No agent needs
+to read another member's artifact or contact the original Pods. Saved source
+IPs are never refreshed from live Pods.
+
+**Validation.** Before CRIU, each agent checks that:
+
+- The metadata format is supported and `CaptureUID` matches the requested
+  `PodSetSnapshot` UID.
+- The ordered member list, source Pod UIDs and container names match that
+  checkpoint's sources.
+- The artifact's `MemberID` and content identity match the assigned member and
+  its recorded content reference.
+- Every member ID and source IP is present and unique, and all source IPs are
+  valid IPv4 addresses.
+- Its own member's source IP matches the manifest's existing `k8s.podIP`.
+
+The agent refuses restore if metadata is missing or any check fails.
 
 #### Runtime Session
 
