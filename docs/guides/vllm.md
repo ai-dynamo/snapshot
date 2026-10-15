@@ -12,6 +12,9 @@ after restore. The Snapshot agent injects the restore tooling at runtime.
 > This example is validated on vLLM 0.27.1 (the pinned
 > `vllm/vllm-openai:v0.27.1-ubuntu2404` image) and does not work on vLLM
 > 0.28.
+>
+> For newer-version results and the Snapshot 0.1.0 and 0.2+ options, see
+> [vLLM 0.28+ compatibility notes](vllm-028-and-newer.md).
 
 ## 1. Download the example files
 
