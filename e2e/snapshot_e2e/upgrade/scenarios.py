@@ -10,6 +10,7 @@ from datetime import datetime
 
 import pytest
 from kubernetes import client
+from packaging.version import Version
 
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
@@ -81,8 +82,34 @@ def delete_source(ctx: UpgradeContext, state: ScenarioState) -> None:
     lifecycle.wait_for_pod_deleted(ctx.config.namespace, state.run.source_pod)
 
 
+# The first release whose agent restores through the restore proxy.
+RESTORE_PROXY_RELEASE = (0, 2)
+
+
+def has_restore_proxy(agent_tag: str) -> bool:
+    """Whether the agent at agent_tag restores through the restore proxy.
+
+    Dev builds (v0.0.0-...) come from this tree, so they have it. Release
+    candidates count as their release.
+    """
+    if agent_tag.startswith("v0.0.0-"):
+        return True
+    return Version(agent_tag.removeprefix("v")).release >= RESTORE_PROXY_RELEASE
+
+
+def restoring_agent_tag(ctx: UpgradeContext, *, upgraded: bool) -> str:
+    if not upgraded:
+        return ctx.settings.from_tag
+    return configs.get(ctx.settings.config).agent_tag(ctx.settings)
+
+
 def restore_from_snapshot(
-    ctx: UpgradeContext, state: ScenarioState, *, gpu: bool, snapshot_name: str | None = None
+    ctx: UpgradeContext,
+    state: ScenarioState,
+    *,
+    gpu: bool,
+    upgraded: bool,
+    snapshot_name: str | None = None,
 ) -> client.V1Pod:
     namespace = ctx.config.namespace
     run = state.run
@@ -101,8 +128,7 @@ def restore_from_snapshot(
         restore_token=run.restore_token,
         checkpoint_observations=state.observations,
         gpu=gpu,
-        # The restoring agent may predate the restore proxy.
-        proxy=False,
+        proxy=has_restore_proxy(restoring_agent_tag(ctx, upgraded=upgraded)),
     )
     return pod
 
@@ -124,7 +150,7 @@ class RestorePreUpgradeSnapshot(UpgradeScenario):
         assert f"contentUID: {recorded.content_uid}" in manifest
         assert "containerName: main" in manifest
 
-        restore_from_snapshot(ctx, state, gpu=self.gpu)
+        restore_from_snapshot(ctx, state, gpu=self.gpu, upgraded=True)
         reasons = event_reasons(ctx.config.namespace, state.run.restore_pod)
         assert RESTORE_COMPAT_UNCHECKED not in reasons, (
             f"the restore skipped its compatibility checks: events {sorted(reasons)}"
@@ -141,7 +167,7 @@ class RestoredPodSurvivesUpgrade(UpgradeScenario):
             ctx.config.namespace, state.run.source_pod, state.run.source_token, gpu=self.gpu, minimum=2
         )
         take_snapshot(ctx, state, source)
-        restored = restore_from_snapshot(ctx, state, gpu=self.gpu)
+        restored = restore_from_snapshot(ctx, state, gpu=self.gpu, upgraded=False)
         state.restored_pod_uid = restored.metadata.uid
 
     def post_upgrade(self, ctx: UpgradeContext, state: ScenarioState) -> None:
@@ -267,7 +293,7 @@ class SnapshotJobCompleted(SnapshotJobScenario):
         assert snapshotjob["status"]["completedAt"] == state.extra["completed_at"], "the SnapshotJob completed again"
         assert k8s.read_job(namespace, name) is None, "the upgrade re-created the SnapshotJob's source Job"
         assert not k8s.list_job_pods(namespace, name), "the upgrade re-ran the SnapshotJob's source pod"
-        restore_from_snapshot(ctx, state, gpu=False, snapshot_name=state.snapshot.name)
+        restore_from_snapshot(ctx, state, gpu=False, upgraded=True, snapshot_name=state.snapshot.name)
 
 
 @dataclass(frozen=True)

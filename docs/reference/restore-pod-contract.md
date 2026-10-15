@@ -161,11 +161,6 @@ after that PodSnapshot exists; it does not have to be Ready yet. Until it
 exists, container creation fails, and kubelet retries with a backoff of up to 5
 minutes.
 
-Restore Pods no longer need a standby entrypoint. `SNAPSHOT_RESTORE_STANDBY`
-(`RestoreStandbyModeEnv`) and its `DYN_SNAPSHOT_RESTORE_STANDBY` alias are
-deprecated. Snapshot never injected them, and nothing reads them now. The alias
-is removed in the next release.
-
 Probes belong to the workload. Kubernetes runs liveness and readiness probes
 from container start, while the restore is still running and nothing in the
 container answers them yet. A liveness probe that fails during that time kills

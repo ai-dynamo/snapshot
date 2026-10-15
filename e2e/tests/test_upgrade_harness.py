@@ -140,6 +140,41 @@ def test_configs_say_which_version_each_component_runs_after_the_upgrade(
     )
 
 
+@pytest.mark.parametrize(
+    ("tag", "proxy"),
+    [
+        ("v0.1.0", False),
+        ("v0.1.0-rc2", False),
+        ("v0.2.0-rc.1", True),
+        ("v0.2.0", True),
+        ("v0.10.3", True),
+        ("v1.0.0", True),
+        ("v0.0.0-g1a2b3c4d", True),
+        ("v0.0.0-feat-restore-proxy-on-g1a2b3c4d", True),
+    ],
+)
+def test_restore_proxy_starts_with_0_2(tag: str, proxy: bool) -> None:
+    assert scenarios.has_restore_proxy(tag) is proxy
+
+
+@pytest.mark.parametrize(
+    ("name", "upgraded", "agent"),
+    [
+        ("full", False, "v0.1.0"),
+        ("full", True, "v0.0.0-g1a2b3c4d"),
+        ("operator-first", True, "v0.1.0"),
+        ("agent-first", True, "v0.0.0-g1a2b3c4d"),
+    ],
+)
+def test_restoring_agent_follows_the_config(
+    env: pytest.MonkeyPatch, name: str, upgraded: bool, agent: str
+) -> None:
+    env.setenv("SNAPSHOT_E2E_UPGRADE_CONFIG", name)
+    ctx = UpgradeContext(config=SimpleNamespace(), settings=UpgradeSettings.from_env())
+
+    assert scenarios.restoring_agent_tag(ctx, upgraded=upgraded) == agent
+
+
 def test_manual_workflow_offers_every_config() -> None:
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     inputs = workflow[True]["workflow_dispatch"]["inputs"]
