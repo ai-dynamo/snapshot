@@ -49,8 +49,8 @@ require_linux_amd64_docker() {
   local os arch
   os="$(docker version --format '{{.Server.Os}}')"
   arch="$(docker version --format '{{.Server.Arch}}')"
-  # The agent image ships linux/amd64 only, because cuda-checkpoint does. The
-  # k3d node runs on the same daemon, so the daemon has to match.
+  # The suite builds the agent for linux/amd64 by default, and the k3d node runs
+  # on the same daemon, so the daemon has to match.
   if [[ "${os}/${arch}" != "linux/amd64" ]]; then
     echo "the CPU e2e suite needs a linux/amd64 Docker daemon, found ${os}/${arch}" >&2
     exit 1
