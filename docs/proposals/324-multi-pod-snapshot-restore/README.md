@@ -166,9 +166,7 @@ their nodes. For workloads using cuInterpose, an agent starts a temporary
 **local coordinator** that drives the application's **shims**.
 
 A **member** is a Pod and its selected container. Its ID is stable; its **rank**
-is its position in the checkpoint's member list, not a leader designation. A
-**participant** is an application process with a shim. Participants are identified
-by `(member ID, namespace PID)`, since PIDs can repeat across Pods.
+is its position in the checkpoint's member list, not a leader designation.
 
 | Component | Where it runs | Responsibility |
 | --- | --- | --- |
@@ -380,10 +378,10 @@ workloads do not depend on the session staying alive.
 
 #### Runtime Extension Contract
 
-The local runtime receives ordered membership, exact local participants, protocol
-and artifact versions, and saved records for restore. Coordinators must reject
-mixed checkpoints, changed ranks, unsupported handles, and incompatible topology.
-Agents validate artifact and execution identity independently.
+The local runtime receives ordered membership, local processes with shims,
+protocol and artifact versions, and saved records for restore. Coordinators must
+reject mixed checkpoints, changed ranks, unsupported handles, and incompatible
+topology. Agents validate artifact and execution identity independently.
 
 The contract has four safety rules:
 
@@ -1520,8 +1518,8 @@ qualification are tracked by
 - **Local authority:** workload files, endpoints, helpers, and forwarded payloads
   cannot forge agent votes or execution grants. Local-channel loss fails the
   member rather than allowing independent continuation.
-- **Barriers and loss:** delay required participants, including same-node and
-  no-shim members. Required validation and completion barriers cannot pass.
+- **Barriers and loss:** delay required members, including those on the same node
+  and those without shims. Required validation and completion barriers cannot pass.
   Lost `BeginCheckpoint` replies are uncertain preparation, never safe refusal.
   A lost established member or owner fails the session without replay; the same
   endpoint becoming reachable does not resume it. All work uses one deadline.
