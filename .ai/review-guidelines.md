@@ -7,6 +7,16 @@ SPDX-License-Identifier: Apache-2.0
 
 Apply these rules to changed code, tests, comments, documentation, Snapshot Enhancement Proposals (SNEPs) under docs/proposals/, and PR text. Keep findings tied to the PR and the behavior it affects. Match surrounding conventions. Do not infer AI authorship from wording or code style.
 
+## Examine every added or changed line
+
+Examine every added or changed line for correctness, necessity, and avoidable complexity. Ask whether the line serves the stated requirement, whether an existing mechanism could replace it, and whether it adds unnecessary state, branching, duplication, dependencies, or maintenance work. Trace surrounding code before reaching a conclusion.
+
+For comments and documentation, check that every claim is accurate and every sentence is useful. Flag vague or grandiose wording, padding, and unnecessarily complicated explanations. Suggest simple wording that preserves the technical meaning.
+
+Raise each concrete concern as an actionable review thread, even when the code works. Give the exact location, explain the consequence, and propose the smallest suitable fix or simpler alternative. Ask for justification when necessity depends on an unstated requirement. Group related lines and repeated instances into one thread.
+
+Do not invent objections, demand justification for obvious code, or repeat questions already answered by the PR, linked issue, or source.
+
 ## Raise actionable findings as threads
 
 - Raise a separate review thread for each independently actionable problem, including simplifications and wording fixes. Do not report actionable findings only in the summary or walkthrough.
