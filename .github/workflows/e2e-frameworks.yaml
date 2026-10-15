@@ -429,6 +429,9 @@ jobs:
         timeout-minutes: 5
         run: |
           set +e
+          if [ -f "${SNAPSHOT_E2E_TARGET_KUBECONFIG}" ]; then
+            export KUBECONFIG="${SNAPSHOT_E2E_TARGET_KUBECONFIG}"
+          fi
           out="${RUNNER_TEMP}/diagnostics"
           mkdir -p "${out}"
           kubectl get pods -n "${TEST_NAMESPACE}" -o yaml > "${out}/pods.yaml"
@@ -438,6 +441,8 @@ jobs:
           kubectl get podsnapshotcontents -o yaml > "${out}/podsnapshotcontents.yaml"
           kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=snapshot-agent \
             --all-containers --tail=-1 --prefix > "${out}/snapshot-agent.log"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=snapshot-agent \
+            --all-containers --tail=-1 --prefix --previous > "${out}/snapshot-agent-previous.log"
           kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=snapshot-operator \
             --all-containers --tail=-1 --prefix > "${out}/snapshot-operator.log"
           for pod in $(kubectl get pods -n "${TEST_NAMESPACE}" -l snapshot-e2e-test -o name); do
