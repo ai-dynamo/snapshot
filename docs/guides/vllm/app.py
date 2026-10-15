@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
+import sys
 import traceback
 from pathlib import Path
 from uuid import uuid4
@@ -22,7 +24,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
-MODEL = os.environ["SNAPSHOT_MODEL"]
 # Small single-GPU sizing so the example fits alongside other GPU tenants and
 # keeps the checkpoint artifact small. Override through the Pod template.
 MAX_MODEL_LEN = int(os.environ.get("VLLM_MAX_MODEL_LEN", "2048"))
@@ -91,14 +92,17 @@ async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
 async def main() -> None:
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
+    engine_args = {
+        "max_model_len": MAX_MODEL_LEN,
+        "gpu_memory_utilization": GPU_MEMORY_UTILIZATION,
+        "trust_remote_code": TRUST_REMOTE_CODE,
+        # JSON keys are AsyncEngineArgs API keyword arguments, not CLI flags.
+        **json.loads(sys.argv[1]),
+        # Capture releases KV through sleep mode.
+        "enable_sleep_mode": True,
+    }
     engine = AsyncLLM.from_engine_args(
-        AsyncEngineArgs(
-            model=MODEL,
-            enable_sleep_mode=True,
-            max_model_len=MAX_MODEL_LEN,
-            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            trust_remote_code=TRUST_REMOTE_CODE,
-        ),
+        AsyncEngineArgs(**engine_args),
         usage_context=UsageContext.LLM_CLASS,
     )
 
@@ -110,7 +114,8 @@ async def main() -> None:
     print(f"vLLM pre-checkpoint output={text!r}", flush=True)
 
     await engine.pause_generation()
-    await engine.sleep()
+    # Discard the KV cache and keep weights on the GPU for capture.
+    await engine.release_kv_cache_memory()
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
         "ready\n",
         encoding="utf-8",

@@ -85,7 +85,11 @@ Before installing Snapshot, make sure the following are in place:
 
 - A Kubernetes cluster with NVIDIA GPU nodes running Linux kernel 5.13 or newer
 - containerd or CRI-O as the container runtime
-- [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with CUDA driver 580 or newer and MIG disabled
+- [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with MIG disabled
+- NVIDIA kernel-mode driver 580 or newer, and CUDA user-mode driver
+  (`libcuda.so`) 615 or newer. With an older kernel-mode driver, point
+  `LD_LIBRARY_PATH` at a 615 `libcuda.so` in both the workload and the Snapshot
+  agent. Both must load the same `libcuda.so` version, or checkpoint can hang.
 - A `ReadWriteMany` (RWX) storage class
 - The [Helm](https://helm.sh/docs/intro/install) CLI
 - A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
@@ -148,7 +152,7 @@ to checkpoint and restore a pod.
 Current limitations:
 
 - Linux nodes on x86_64 or arm64.
-- Single-node workloads are supported; multi-node is on the roadmap.
+- Workloads, including multi-GPU workloads, must run on a single node. Multi-node is on the roadmap.
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 

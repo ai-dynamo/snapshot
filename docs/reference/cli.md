@@ -28,8 +28,8 @@ snapshotctl checkpoint \
 
 The manifest must be a `Pod` (not a Deployment or Job) using a
 [snapshot-ready workload](../guides/README.md) — `snapshotctl` rejects any
-other `kind`. The framework guides ship `deployment.yaml`, not a standalone
-Pod; wrap its `spec.template.spec` in a Pod manifest to use it here:
+other `kind`. The framework guides ship capture Deployments. Wrap the selected manifest's
+`spec.template.spec` in a Pod manifest to use it here:
 
 ```yaml
 apiVersion: v1
@@ -37,7 +37,7 @@ kind: Pod
 metadata:
   name: vllm-replica-pod
 spec:
-  # deployment.yaml's spec.template.spec, unchanged
+  # The capture Deployment's spec.template.spec, unchanged
   ...
 ```
 

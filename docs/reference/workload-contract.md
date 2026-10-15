@@ -125,7 +125,7 @@ working checkpoint, just a larger or colder one.
 |------------|------|------|--------------|--------|
 | Warm up | SHOULD | one `generate` | `LLM.generate` (two prompts) | one `generate` |
 | Stop in-flight work | MUST | `pause_generation()` | synchronous `generate` returns idle | `pause_generation()` |
-| Park GPU memory | SHOULD | `sleep()` (sleep mode) | `gc.collect()`; state stays resident | `release_memory_occupation()` (memory saver) |
+| Park GPU memory | SHOULD | `release_kv_cache_memory()` (sleep mode) | `gc.collect()`; state stays resident | `release_memory_occupation()` (memory saver) |
 | Restore GPU memory | MUST | `wake_up()` | — (resident) | `resume_memory_occupation()` |
 | Resume | MUST | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` |
 
@@ -137,7 +137,7 @@ and meets the pod and runtime requirements below is snapshot-ready. See
 ## Pod requirements
 
 The source pod gives the workload the shared directory and the conditions
-checkpointing needs. The framework `deployment.yaml` files referenced from the
+checkpointing needs. The framework capture manifests referenced from the
 [usage guides](../guides/README.md) are the complete reference; the load-bearing
 fields are:
 

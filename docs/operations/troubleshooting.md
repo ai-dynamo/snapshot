@@ -33,3 +33,11 @@ kubectl get pvc -n <ns>
 The `snapshot-agent` runs privileged with `hostPID`, `hostIPC`, and `hostNetwork`.
 If the namespace enforces a restrictive Pod Security level, the agent — or a
 restore pod — can be rejected. See [Security](security.md).
+
+## CRIU reports `Unable to create tun`
+
+`Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory`
+comes from a nonfatal TUN capability probe and can appear on successful
+restores. Workloads that do not use TUN devices do not need a `/dev/net/tun`
+mount. For a failed restore, look past this line to the final CRIU errors and
+the agent's `CRIU restore tail` diagnostics.
