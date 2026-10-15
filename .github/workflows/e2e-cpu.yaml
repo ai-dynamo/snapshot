@@ -46,6 +46,10 @@ on:
           without disturbing the cache other runs are reading.
         required: false
         default: ""
+      workers:
+        description: CPU tests run at once. 1 runs the whole suite serially.
+        required: false
+        default: "3"
 
 concurrency:
   group: snapshot-e2e-cpu-${{ github.ref }}
@@ -68,6 +72,8 @@ env:
   # the cluster is given a mirror that maps it to the registry's container.
   IMAGE_REGISTRY: localhost:5000
   IMAGE_TAG: cpu-e2e
+  # CPU tests run at once. Set to 1 to run the whole suite serially.
+  CPU_E2E_WORKERS: ${{ inputs.workers || '3' }}
   SNAPSHOT_E2E_MODE: direct
   SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
   SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
@@ -323,7 +329,14 @@ jobs:
           # Recorded even when the suite fails, so a slow run is still
           # measurable; the trap keeps the pipeline's exit status.
           trap 'hack/ci-phase.sh "Run CPU tests" "${start}"' EXIT
-          uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
+          rc=0
+          uv run --locked --project e2e pytest e2e/tests -m "cpu and not serial" \
+            -n "${CPU_E2E_WORKERS}" -vv || rc=$?
+          # Then the tests that must be alone on the node, one at a time. They
+          # run even when the first pass fails, so a red run still reports them.
+          SNAPSHOT_E2E_REQUIRED_TESTS= uv run --locked --project e2e pytest e2e/tests \
+            -m "cpu and serial" -vv -s || rc=$?
+          exit "${rc}"
 
       # Last, and unconditional: the phases worth comparing are exactly the
       # ones a failing run also pays for.

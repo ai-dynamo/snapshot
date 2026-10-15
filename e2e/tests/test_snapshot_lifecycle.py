@@ -745,6 +745,7 @@ def test_snapshot_deletion_cascades_content_and_artifact_cleanup(
 
 
 @pytest.mark.cpu
+@pytest.mark.serial  # waits on the operator's node-wide sweep
 @pytest.mark.snapshot_success
 def test_orphan_sweep_reclaims_uid_root(
     config: k8s.E2EConfig,
