@@ -19,6 +19,7 @@
 #include "restore_transaction_descriptor.hpp"
 #include "transaction.hpp"
 #include "s3_config.hpp"
+#include "model_streamer_config.hpp"
 #include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
@@ -26,7 +27,7 @@ class Broker {
  public:
   Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine = nullptr,
       std::optional<S3Config> config = std::nullopt,
-      std::chrono::seconds lifetime = std::chrono::seconds{7500});
+      std::chrono::seconds lifetime = std::chrono::seconds{7500}, ModelStreamerOptions model_streamer = {});
   ~Broker();
   Response HandleGpuRequest(const Request& request, CancellationPtr cancellation,
                             std::vector<FileDescriptor> target_descriptors);

@@ -23,6 +23,7 @@ struct DaemonOptions {
   bool enable_gpu = true;
   std::chrono::seconds transaction_lifetime{7500};
   std::filesystem::path storage_config;
+  std::filesystem::path model_streamer_config;
 };
 
 DaemonOptions ParseDaemonOptions(std::span<const std::string_view> arguments);
