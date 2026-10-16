@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	contentvalidation "k8s.io/apimachinery/pkg/api/validate/content"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
@@ -50,6 +51,9 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	}
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
+	if err := injectNonTargetArtifactContract(podTemplate, targetContainer, string(sj.UID)); err != nil {
+		return nil, err
+	}
 
 	return protocol.NewSourceJob(podTemplate, protocol.SourceJobOptions{
 		Namespace:             sj.Namespace,
@@ -60,4 +64,39 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 		TTLSecondsAfterFinish: nil,
 		WrapLaunchJob:         false,
 	})
+}
+
+func injectNonTargetArtifactContract(template *corev1.PodTemplateSpec, target, uid string) error {
+	nonTargets, err := podcontract.NonTargetArtifactContainers(template.Annotations)
+	if err != nil || len(nonTargets) == 0 {
+		return err
+	}
+	subdir, err := podcontract.NonTargetArtifactSubdir(uid)
+	if err != nil {
+		return err
+	}
+	for _, name := range nonTargets {
+		if name == target {
+			return fmt.Errorf("%s must not name capture target %q", podcontract.NonTargetArtifactContainersAnnotation, name)
+		}
+		var nonTarget *corev1.Container
+		for i := range template.Spec.Containers {
+			if template.Spec.Containers[i].Name == name {
+				nonTarget = &template.Spec.Containers[i]
+				break
+			}
+		}
+		if nonTarget == nil {
+			return fmt.Errorf("%s names missing regular non-target container %q", podcontract.NonTargetArtifactContainersAnnotation, name)
+		}
+		for _, env := range nonTarget.Env {
+			if env.Name == podcontract.SnapshotJobUIDEnv || env.Name == podcontract.NonTargetArtifactSubdirEnv {
+				return fmt.Errorf("non-target container %q sets controller-owned environment variable %s", name, env.Name)
+			}
+		}
+		nonTarget.Env = append(nonTarget.Env,
+			corev1.EnvVar{Name: podcontract.SnapshotJobUIDEnv, Value: uid},
+			corev1.EnvVar{Name: podcontract.NonTargetArtifactSubdirEnv, Value: subdir})
+	}
+	return nil
 }
