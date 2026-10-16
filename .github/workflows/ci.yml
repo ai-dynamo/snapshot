@@ -163,10 +163,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - run: |
-          set -euo pipefail
-          # Assigned, not inlined into the argument: a command substitution
-          # that fails inside a simple command does not trip `set -e`, so an
-          # inline call would drop the cache flags and still build.
-          cache_flags="$(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
-          make docker-build-pagebroker DOCKER_BUILD_ARGS="${cache_flags}"
+      - uses: ./.github/actions/build-image
+        with:
+          image: pagebroker
+          push: "false"
+          cache_mode: read
+          cache_branch: ${{ env.CACHE_BRANCH }}
+          cache_ref_prefix: ${{ env.CACHE_REF_PREFIX }}

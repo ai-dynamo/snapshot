@@ -39,13 +39,31 @@ there, runs the environment check, then runs the snapshot lifecycle tests.
 The workflow resolves the latest published Snapshot operator/agent image tag and
 passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
+### Pull Requests
+
+Pull requests are tested by `e2e-pr.yaml` on their copy-pr-bot mirror branch
+(`pull-request/<number>`), because the GPU runners accept push events but not
+`pull_request`. A pull request from a trusted author with signed commits is
+mirrored automatically; any other needs a maintainer's `/ok to test <sha>`.
+
+On each mirror push the workflow first checks whether the pull request touches
+the images, chart, CRDs, harness, or these workflows, comparing against where it
+branched from `main`. If it does, the CPU suite runs while the operator, agent,
+and pagebroker images are built from the mirrored commit and pushed to GHCR as
+`v0.0.0-pull-request-<number>-g<sha8>`. The GPU suite in `e2e.yaml` runs only
+once both succeed, and installs those images rather than main's.
+
+The `PR E2E` check passes only when every suite the change needed passed, or
+when the change needed none of them. The scheduled registry prune deletes
+pull request images seven days after they are pushed.
+
 ### CPU Mode (k3d)
 
-`e2e-cpu.yaml` runs on pull requests that touch the images, chart, CRDs, or
-harness, where no GPU cluster is available. It builds the operator and agent
-images from the pull request, creates a k3d cluster, imports the images into it,
-installs the chart through the same `setup.py` phases the GPU workflow uses, and
-runs `pytest -m cpu`.
+`e2e-cpu.yaml` runs from `e2e-pr.yaml`, where no GPU cluster is available. It
+builds the operator, agent, and pagebroker images from the pull request, pushes
+them to a registry next to a k3d cluster that pulls from it, installs the chart
+through the same `setup.py` phases the GPU workflow uses, and runs
+`pytest -m cpu`.
 
 k3d has no GPU, so `hack/k3d-cpu-e2e.sh cluster-up` fakes the three things the
 chart and test helpers inherited from the GPU environment, each safe only
