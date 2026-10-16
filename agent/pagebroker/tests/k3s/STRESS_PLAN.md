@@ -386,7 +386,8 @@ See [daemon.cpp](../../daemon.cpp),
 [s3_client.cpp](../../transfer/s3/s3_client.cpp) and
 [model_streamer_transfer_engine.cpp](../../transfer/engine/model_streamer/model_streamer_transfer_engine.cpp).
 
-`start` must obtain credential expiry metadata, require validity through the
+For temporary credentials, `start` must obtain credential expiry metadata,
+require validity through the
 five-hour Job deadline plus 15 minutes, and check again immediately before S3 Job
 creation. The AWS CLI credential source may export credentials directly into
 memory. A shared-credentials input containing a session token also requires
@@ -395,8 +396,13 @@ create long-lived AWS access keys as part of preparing this test.
 
 Create the Kubernetes Secret without persisting its values in the checkout,
 result PVC, generated manifests or logs. Record only expiry and provider type.
-If available credentials are too short-lived, the S3 campaign needs a separate
-runtime credential-refresh change or a suitable existing credential source.
+Explicit static credentials use the `static-environment` provider, with access
+and secret keys only and null expiry. The launcher and helper reject session
+tokens and expiration metadata in this mode. Static credentials do not relax
+run deadlines, TLS verification, cleanup ownership or evidence validation.
+
+If available temporary credentials are too short-lived, the S3 campaign needs a
+separate runtime credential-refresh change or a suitable existing credential source.
 Do not substitute an emulator for requested live AWS coverage or restart the
 broker to conceal expiry. Emulator testing remains a distinct validation stage.
 

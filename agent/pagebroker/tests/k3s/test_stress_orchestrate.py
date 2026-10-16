@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import io
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -54,6 +55,9 @@ def normalize_api(resource):
     resource = deepcopy(resource)
     pod = resource.get("spec", {}).get("template", {}).get("spec", {}) if resource["kind"] == "Job" else resource.get("spec", {})
     for container in pod.get("containers", []):
+        for variable in container.get("env", []):
+            if variable.get("value") == "":
+                del variable["value"]
         if container.get("env") == []:
             del container["env"]
     if resource["kind"] == "Job":
@@ -221,6 +225,64 @@ class EnduranceControllerTest(unittest.TestCase):
         self.assertEqual(json.loads(remote["data"]["run.json"]), saved)
         self.assertTrue(entry["podUID"])
         self.assertTrue(entry["uids"]["Job/" + JOB])
+
+    def test_static_launch_uses_two_key_secret_and_nonsecret_provider_metadata(self):
+        self.args.backend = "s3"
+        self.args.credentials_source = "static-environment"
+        values = {"AWS_ACCESS_KEY_ID": "fake-static-access", "AWS_SECRET_ACCESS_KEY": "fake-static-secret"}
+        with patch.dict(os.environ, values, clear=True):
+            admitted, expiry = cli.credentials(self.args)
+        self.record = cli.make_record(self.args, now=1000, credential_expiry=expiry)
+        controller = cli.Controller(self.kube, self.record, self.args.record, self.clock)
+        with patch("stress_orchestrate.sdk_client", return_value=Mock()), patch("stress_orchestrate.OwnedStore") as store:
+            store.return_value.inventory.return_value = ([], [], "Disabled")
+            controller.start(admitted)
+        self.assertEqual(self.record["launchStatus"], "READY")
+        entry = self.record["backends"]["s3"]
+        self.assertEqual(entry["spec"]["s3"]["credential_provider"], "static-environment")
+        self.assertIsNone(entry["spec"]["s3"]["credential_expiry"])
+        secret = self.kube.get("Secret", SECRET, entry["namespace"])
+        self.assertEqual(set(secret["data"]), set(values))
+        for container in entry["job"]["spec"]["template"]["spec"]["containers"]:
+            environment = {item["name"]: item for item in container.get("env", [])}
+            if container["name"] in ("pagebroker", "s3-helper"):
+                self.assertEqual({name for name, item in environment.items() if "valueFrom" in item}, set(values))
+                for name in ("AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CREDENTIAL_EXPIRATION"):
+                    self.assertEqual(environment[name], {"name": name})
+            else:
+                self.assertFalse(any(name.startswith("AWS_") for name in environment))
+        for value in values.values():
+            self.assertNotIn(value, self.args.record.read_text())
+
+    def test_static_credentials_require_explicit_source_and_reject_session_metadata(self):
+        values = {"AWS_ACCESS_KEY_ID": "fake-static-access", "AWS_SECRET_ACCESS_KEY": "fake-static-secret"}
+        with patch.dict(os.environ, values, clear=True), self.assertRaises(ValueError):
+            cli.credentials(self.args)
+        self.args.credentials_source = "static-environment"
+        for name in ("AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CREDENTIAL_EXPIRATION"):
+            with patch.dict(os.environ, values | {name: "fake-sensitive-value"}, clear=True):
+                with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "must not include") as result:
+                    cli.credentials(self.args)
+                self.assertNotIn("fake-sensitive-value", str(result.exception))
+        for name in values:
+            with patch.dict(os.environ, {name: values[name]}, clear=True), self.assertRaisesRegex(RuntimeError, "require"):
+                cli.credentials(self.args)
+
+    def test_temporary_sources_still_require_token_and_expiry(self):
+        for source in ("environment", "aws-cli"):
+            self.args.credentials_source = source
+            values = fake_credentials()
+            exported = {field: values[name] for name, field in (
+                ("AWS_ACCESS_KEY_ID", "AccessKeyId"), ("AWS_SECRET_ACCESS_KEY", "SecretAccessKey"),
+                ("AWS_SESSION_TOKEN", "SessionToken"), ("AWS_CREDENTIAL_EXPIRATION", "Expiration"))}
+            with self.subTest(source=source), patch.dict(os.environ, values, clear=True), \
+                    patch("stress_orchestrate.execute", return_value=json.dumps(exported)):
+                self.assertEqual(cli.credentials(self.args), (values, 10000))
+            exported.pop("SessionToken")
+            values.pop("AWS_SESSION_TOKEN")
+            with patch.dict(os.environ, values, clear=True), \
+                    patch("stress_orchestrate.execute", return_value=json.dumps(exported)), self.assertRaises(ValueError):
+                cli.credentials(self.args)
 
     def test_lost_create_and_update_replies_are_reconciled(self):
         self.kube.lost_create = {"Namespace", "PersistentVolumeClaim", "ConfigMap", "Job", "Secret"}

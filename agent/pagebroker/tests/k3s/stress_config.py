@@ -132,7 +132,7 @@ class S3Options:
     prefix: str
     region: str
     endpoint: str
-    credential_expiry: float
+    credential_expiry: float | None = None
     addressing: str = "virtual"
     credential_provider: str = "temporary-environment"
     credential_margin: int = 900
@@ -159,11 +159,6 @@ class S3Options:
             raise ValueError("S3 requires a credential-free HTTPS endpoint")
         if self.addressing not in ("path", "virtual"):
             raise ValueError("S3 addressing must match the backend's path or virtual configuration")
-        if self.credential_provider != "temporary-environment" or self.credential_margin != 900:
-            raise ValueError("S3 requires temporary credentials and the planned 15-minute margin")
-        if (isinstance(self.credential_expiry, bool) or not isinstance(self.credential_expiry, (int, float))
-                or not math.isfinite(self.credential_expiry)):
-            raise ValueError("S3 credential expiry must be known")
         for name, maximum in (("max_pages", 100), ("max_items", 10000), ("page_size", 1000),
                               ("retained_bytes", 1024**3)):
             value = getattr(self, name)
@@ -173,6 +168,17 @@ class S3Options:
 
     def validate_expiry(self, spec, now):
         # Recheck at launch and helper admission; mounted Secret rotation cannot refresh clients.
+        if self.credential_margin != 900:
+            raise ValueError("S3 requires the planned 15-minute credential margin")
+        if self.credential_provider == "static-environment":
+            if self.credential_expiry is not None:
+                raise ValueError("static S3 credentials must not declare an expiry")
+            return
+        if self.credential_provider != "temporary-environment":
+            raise ValueError("unsupported S3 credential provider")
+        if (isinstance(self.credential_expiry, bool) or not isinstance(self.credential_expiry, (int, float))
+                or not math.isfinite(self.credential_expiry)):
+            raise ValueError("S3 credential expiry must be known")
         if self.credential_expiry < max(now, spec.created_at) + spec.timing.job + self.credential_margin:
             raise ValueError("S3 credentials do not cover the full Job deadline plus 15 minutes")
 

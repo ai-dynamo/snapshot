@@ -265,7 +265,7 @@ def validate_directory(root, spec, summary=None, pulse=lambda: None):
 
 def validate_cleanup(root, spec, supervisor, pulse=lambda: None):
     ready = read_json(root, "cleanup-readiness.json")
-    if (ready.get("runId") != spec.run_id or ready.get("status") != "READY"
+    if (ready.get("runId") != spec.run_id or ready.get("status") != "READY" or "credentialExpiry" not in ready
             or ready.get("credentialExpiry") != spec.s3.credential_expiry
             or ready.get("credentialProvider") != spec.s3.credential_provider
             or ready.get("incompleteUploads") != 0):

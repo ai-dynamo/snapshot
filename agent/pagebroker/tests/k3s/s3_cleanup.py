@@ -25,8 +25,19 @@ class CleanupError(RuntimeError):
     pass
 
 
+def static_credentials(environment):
+    names = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+    if any(environment.get(name) for name in ("AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CREDENTIAL_EXPIRATION")):
+        raise CleanupError("static credentials must not include a session token or expiration")
+    if any(not environment.get(name) for name in names):
+        raise CleanupError("static credentials require an access key and secret key")
+    return {name: environment[name] for name in names}
+
+
 def frozen_credentials(spec, environment, now):
     spec.s3.validate_expiry(spec, now)
+    if spec.s3.credential_provider == "static-environment":
+        return static_credentials(environment)
     names = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_CREDENTIAL_EXPIRATION")
     if any(not environment.get(name) for name in names):
         raise CleanupError("temporary environment credentials and expiry are required")
@@ -46,7 +57,7 @@ def sdk_client(spec, credentials, ca_bundle=None):
                         verify=ca_bundle or os.environ.get("AWS_CA_BUNDLE") or True,
                         aws_access_key_id=credentials["AWS_ACCESS_KEY_ID"],
                         aws_secret_access_key=credentials["AWS_SECRET_ACCESS_KEY"],
-                        aws_session_token=credentials["AWS_SESSION_TOKEN"],
+                        aws_session_token=credentials.get("AWS_SESSION_TOKEN"),
                         config=Config(connect_timeout=2, read_timeout=3,
                                       retries={"total_max_attempts": 2, "mode": "standard"},
                                       s3={"addressing_style": spec.s3.addressing}))

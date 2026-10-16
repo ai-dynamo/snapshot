@@ -139,6 +139,15 @@ Shorter or unknown expiry is a blocker. Secret rotation does not refresh existin
 PageBroker clients. Both launcher and helper recheck expiry. Never put credential
 values in the profiles, command arguments, manifests or review artifacts.
 
+For an S3-compatible test service with non-expiring keys, use the explicit
+`--credentials-source static-environment` alternative documented in the README.
+Export only its access key and secret key; session-token and expiry variables
+must be unset or empty. Supply its HTTPS `--endpoint`, `--addressing path` and
+trusted `--ca-bundle` as needed. Record `static-environment` and null expiry in
+the run evidence. Temporary AWS credentials retain the lifetime requirements
+above; static mode does not add runtime credential refresh. Rebuild/import the
+harness image before launching either qualification or the longer campaign.
+
 ## Import the reviewed images and run qualification
 
 Run only after review. Import exactly the two reviewed images into k3s.

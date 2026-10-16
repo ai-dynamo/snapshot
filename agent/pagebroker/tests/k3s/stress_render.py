@@ -90,8 +90,16 @@ def render_stress(spec, namespace, campaign, owner, client_image, broker_image, 
                                   for mount in helper["volumeMounts"] if mount["name"] != "socket"]
         helper["resources"] = {"requests": {"cpu": "100m", "memory": "128Mi"},
                                "limits": {"cpu": "500m", "memory": "512Mi"}}
-        environment = [{"name": name, "valueFrom": {"secretKeyRef": {"name": SECRET, "key": name}}}
-                       for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_CREDENTIAL_EXPIRATION")]
+        names = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+        temporary = ("AWS_SESSION_TOKEN", "AWS_CREDENTIAL_EXPIRATION")
+        if spec.s3.credential_provider == "temporary-environment":
+            names += temporary
+        environment = [{"name": name, "valueFrom": {"secretKeyRef": {"name": SECRET, "key": name}}} for name in names]
+        # Name-only entries override image defaults with empty strings. Kubernetes
+        # omits empty value fields, so use its canonical form for ownership checks.
+        environment.append({"name": "AWS_SECURITY_TOKEN"})
+        if spec.s3.credential_provider == "static-environment":
+            environment.extend({"name": name} for name in temporary)
         environment.extend({"name": name, "value": value} for name, value in (
             ("AWS_EC2_METADATA_DISABLED", "true"), ("AWS_CONFIG_FILE", "/dev/null"),
             ("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")))

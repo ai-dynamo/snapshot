@@ -125,12 +125,13 @@ been executed while implementing steps 1–5. Native integration uses the separa
 
 For S3, the nonsecret `s3` spec contains `bucket`, `prefix`, `region`, an HTTPS
 `endpoint`, `addressing` (`virtual` or `path`), `credential_provider`
-(`temporary-environment`) and UTC Unix `credential_expiry`. The prefix must end
-in the backend run UUID; `store_id` must be `stress-<UUID>`. The renderer generates
+(`temporary-environment` or `static-environment`) and `credential_expiry` (a UTC
+Unix timestamp for temporary credentials, JSON `null` for static keys). The prefix
+must end in the backend run UUID; `store_id` must be `stress-<UUID>`. The renderer generates
 the broker storage configuration from these same settings; a Capabilities response
 cannot prove which bucket/prefix a configured store uses.
 
-Only PageBroker and the helper receive credentials. Before starting the helper,
+Only PageBroker and the helper receive credentials. For temporary credentials,
 export `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and
 `AWS_CREDENTIAL_EXPIRATION` (timezone-qualified ISO 8601). The helper freezes these
 values and requires expiry metadata to match, with validity through a full Job
@@ -139,6 +140,12 @@ The host launcher checks again immediately before Job creation and delivers the
 same credentials to PageBroker; mounted Secret rotation does not
 refresh the current broker clients. No credential values belong in a RunSpec,
 generated manifest, result file or log. The Go client and supervisor need none.
+
+Static keys require the explicit `static-environment` provider and only
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Session tokens (including the
+legacy `AWS_SECURITY_TOKEN`) and expiration metadata must be unset or empty.
+The helper records a null expiry rather than inventing a future timestamp. Run
+deadlines, TLS verification, owned-prefix cleanup and resource budgets still apply.
 
 The helper refuses populated prefixes, then conditionally creates and retains
 `.snapshot-stress-owner.json`. Readiness exercises read/write, multipart
@@ -234,9 +241,36 @@ stressctl start --record "$RUN_DIR/run.json" --backend both \
 process` into memory; `--aws-profile NAME` optionally selects its source. The
 default `--credentials-source environment` uses the four AWS variables documented
 above. No credential file or Secret manifest is written. Each S3 namespace gets
-an immutable temporary Secret, referenced only by the broker and helper. S3
-requires expiry through the full configured Job deadline plus 15 minutes, checked
+an immutable temporary Secret, referenced only by the broker and helper. Temporary
+credentials require expiry through the full configured Job deadline plus 15 minutes, checked
 again before submission. Unknown/short-lived expiry cannot launch the S3 Job.
+
+For a local S3-compatible service or other non-expiring keys, explicitly select
+`--credentials-source static-environment`. Load `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` from your private credential source first; do not put
+their values on the command line. Check that these are static keys before clearing
+any inherited session metadata:
+
+```bash
+unset AWS_SESSION_TOKEN AWS_SECURITY_TOKEN AWS_CREDENTIAL_EXPIRATION
+stressctl start --record "$RUN_DIR/run.json" --backend s3 \
+  --node "$NODE" --client-image "$STRESS_IMAGE" \
+  --pagebroker-image "$PAGEBROKER_IMAGE" \
+  --harness-revision "$HARNESS_SHA" --broker-revision "$BROKER_SHA" \
+  --image-identities "$REVIEW_DIR/images/identities.json" \
+  --profile "$RUN_PROFILE" \
+  --bucket "$S3_BUCKET" --region "$S3_REGION" --prefix "$S3_PREFIX" \
+  --endpoint "$S3_ENDPOINT" --addressing path --ca-bundle "$S3_CA_BUNDLE" \
+  --credentials-source static-environment
+```
+
+The endpoint must be reachable from both the launcher and Pods. Use the same
+trusted CA for both. Static mode creates a Secret with only the two key fields;
+it rejects session tokens or expiration metadata instead of silently treating
+temporary credentials as non-expiring. The default `environment` and `aws-cli`
+sources continue to require a session token and sufficient expiry. Rebuild and
+import the updated harness image so the in-Pod helper supports the same provider
+as the launcher; the native PageBroker image does not need a credential change.
 
 `--backend filesystem` requires no S3 arguments or credentials; `--backend s3`
 selects S3 alone. The default is `both`, and an unavailable backend fails the

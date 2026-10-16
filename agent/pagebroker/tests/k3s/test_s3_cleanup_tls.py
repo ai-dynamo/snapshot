@@ -17,10 +17,10 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from s3_cleanup import CleanupError, OwnedStore, sdk_client
+from s3_cleanup import CleanupError, OwnedStore, frozen_credentials, sdk_client
 from stress_config import Clock
 from stress_control import Peer
-from stress_evidence import validate_cleanup
+from stress_evidence import IncompleteEvidence, validate_cleanup
 from test_s3_cleanup import credentials, s3_spec
 import test_stress_process as processes
 
@@ -92,7 +92,22 @@ class TLSCleanupTest(unittest.TestCase):
         self.assertEqual(self.client.get_object(Bucket=self.spec.s3.bucket, Key=key)["Body"].read(), b"retain")
         self.assertEqual(len(self.client.list_multipart_uploads(Bucket=self.spec.s3.bucket, Prefix=store.prefix)["Uploads"]), 1)
 
-    def harness(self, client_sleep=None):
+    def test_static_sdk_requests_do_not_inherit_a_session_token(self):
+        spec = replace(self.spec, s3=replace(self.spec.s3, credential_provider="static-environment", credential_expiry=None))
+        values = {name: self.environment[name] for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")}
+        tokens = []
+        with patch.dict(os.environ, {"AWS_SESSION_TOKEN": "fake-inherited-token"}, clear=True):
+            client = sdk_client(spec, frozen_credentials(spec, values, spec.created_at), self.environment["AWS_CA_BUNDLE"])
+        self.addCleanup(client.close)
+        client.meta.events.register("before-send.s3", lambda request, **_: tokens.append(request.headers.get("X-Amz-Security-Token")))
+        store = OwnedStore(client, spec, time.monotonic() + 30)
+        ready = store.ready()
+        self.assertEqual(ready["credentialProvider"], "static-environment")
+        self.assertIsNone(ready["credentialExpiry"])
+        self.assertTrue(tokens)
+        self.assertTrue(all(token is None for token in tokens))
+
+    def harness(self, client_sleep=None, static=False):
         harness = processes.ProcessTest(methodName="runTest")
         harness.setUp()
         self.addCleanup(harness.doCleanups)
@@ -100,6 +115,8 @@ class TLSCleanupTest(unittest.TestCase):
                          measured=3, cadence=0.6, batch=2, cleanup=3, drain=5, job=45)
         settings = replace(self.spec.s3, prefix="test/" + harness.spec.run_id,
                            credential_expiry=harness.spec.created_at + 7200)
+        if static:
+            settings = replace(settings, credential_provider="static-environment", credential_expiry=None)
         harness.spec = replace(harness.spec, mode="s3", store_id="stress-" + harness.spec.run_id, s3=settings,
                                timing=timing, startup_deadline=harness.spec.created_at + timing.startup,
                                expires_at=harness.spec.created_at + timing.job).validate()
@@ -107,12 +124,36 @@ class TLSCleanupTest(unittest.TestCase):
         harness.start(runner_environment={"FIXTURE_CLIENT_SLEEP": client_sleep} if client_sleep else None)
         log = (harness.root / "helper.log").open("w+")
         harness.logs.append(log)
-        environment = self.environment | credentials(harness.spec) | {"PYTHONDONTWRITEBYTECODE": "1"}
+        if static:
+            environment = {key: value for key, value in self.environment.items()
+                           if key not in ("AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CREDENTIAL_EXPIRATION")}
+        else:
+            environment = self.environment | credentials(harness.spec)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         helper = subprocess.Popen([sys.executable, str(processes.HERE / "s3_cleanup.py"), "--spec", str(harness.path)],
                                   env=environment, stdout=log, stderr=subprocess.STDOUT)
         harness.processes.append(helper)
         harness.helper = helper
         return harness
+
+    def test_static_helper_finishes_and_records_explicit_nonexpiring_evidence(self):
+        harness = self.harness(static=True)
+        harness.runner.wait(timeout=25)
+        summary = harness.assert_finished(True)
+        harness.helper.wait(timeout=3)
+        self.assertEqual(harness.helper.returncode, 0)
+        self.assertEqual(summary["evidenceStatus"], "COMPLETE")
+        root = Path(harness.spec.results)
+        supervisor = json.loads((root / "supervisor.json").read_text())
+        validate_cleanup(root, harness.spec, supervisor)
+        path = root / "cleanup-readiness.json"
+        ready = json.loads(path.read_text())
+        self.assertEqual(ready["credentialProvider"], "static-environment")
+        self.assertIsNone(ready["credentialExpiry"])
+        del ready["credentialExpiry"]
+        path.write_text(json.dumps(ready))
+        with self.assertRaises(IncompleteEvidence):
+            validate_cleanup(root, harness.spec, supervisor)
 
     def test_persistent_runner_and_helper_full_handshake(self):
         harness = self.harness()

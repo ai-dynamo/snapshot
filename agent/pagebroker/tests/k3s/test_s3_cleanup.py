@@ -72,6 +72,39 @@ class CleanupTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full Job"):
             frozen_credentials(self.spec, credentials(self.spec), self.clock.time() + 3600)
 
+    def test_static_credentials_have_no_expiry_and_roundtrip_without_secrets(self):
+        spec = replace(self.spec, s3=replace(self.spec.s3, credential_provider="static-environment",
+                                           credential_expiry=None)).validate()
+        values = {"AWS_ACCESS_KEY_ID": "fake-static-access", "AWS_SECRET_ACCESS_KEY": "fake-static-secret"}
+        self.assertEqual(frozen_credentials(spec, values, self.clock.time() + 86400), values)
+        self.assertEqual(RunSpec.from_dict(spec.as_dict()), spec)
+        self.assertIsNone(spec.as_dict()["s3"]["credential_expiry"])
+        for value in values.values():
+            self.assertNotIn(value, json.dumps(spec.as_dict()))
+        # Static credentials do not relax the run's independent admission deadline.
+        late = FakeClock()
+        late.sleep(spec.timing.startup)
+        with self.assertRaises(TimeoutError):
+            spec.deadlines(late)
+
+    def test_static_credentials_reject_missing_keys_and_temporary_metadata(self):
+        spec = replace(self.spec, s3=replace(self.spec.s3, credential_provider="static-environment", credential_expiry=None))
+        values = {"AWS_ACCESS_KEY_ID": "fake-static-access", "AWS_SECRET_ACCESS_KEY": "fake-static-secret"}
+        for name in values:
+            with self.subTest(missing=name), self.assertRaises(CleanupError):
+                frozen_credentials(spec, {key: value for key, value in values.items() if key != name}, self.clock.time())
+        for name in ("AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CREDENTIAL_EXPIRATION"):
+            with self.subTest(metadata=name), self.assertRaises(CleanupError) as result:
+                frozen_credentials(spec, values | {name: "fake-sensitive-metadata"}, self.clock.time())
+            self.assertNotIn("fake-sensitive-metadata", str(result.exception))
+        with self.assertRaisesRegex(ValueError, "must not declare"):
+            replace(spec, s3=replace(spec.s3, credential_expiry=10000)).validate()
+
+    def test_temporary_credentials_cannot_omit_or_forge_expiry(self):
+        for expiry in (None, True, float("nan"), float("inf"), "10000"):
+            with self.subTest(expiry=expiry), self.assertRaises(ValueError):
+                replace(self.spec, s3=replace(self.spec.s3, credential_expiry=expiry)).validate()
+
     def test_unknown_or_mismatched_expiry_and_provider_rejected(self):
         for field in ("AWS_SESSION_TOKEN", "AWS_CREDENTIAL_EXPIRATION"):
             environment = credentials(self.spec)

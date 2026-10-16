@@ -22,7 +22,7 @@ import uuid
 
 from evidence import condition
 from render import DNS_LABEL
-from s3_cleanup import frozen_credentials, sdk_client, OwnedStore
+from s3_cleanup import frozen_credentials, sdk_client, static_credentials, OwnedStore
 from stress_config import EvidenceOptions, RunSpec, S3Options, Timing
 from stress_evidence import validate_directory
 from stress_export import extract, inventory
@@ -66,6 +66,8 @@ def metadata(record, namespace, name):
 
 
 def credentials(args):
+    if args.credentials_source == "static-environment":
+        return static_credentials(os.environ), None
     if args.credentials_source == "environment":
         value = {name: os.environ.get(name, "") for name in (
             "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_CREDENTIAL_EXPIRATION")}
@@ -120,7 +122,9 @@ def make_record(args, now=None, credential_expiry=None):
         if mode == "s3":
             s3 = S3Options(bucket=args.bucket, prefix=args.prefix + "/" + run_id, region=args.region,
                            endpoint=args.endpoint or f"https://s3.{args.region}.amazonaws.com",
-                           addressing=args.addressing, credential_expiry=credential_expiry)
+                           addressing=args.addressing, credential_expiry=credential_expiry,
+                           credential_provider="static-environment" if args.credentials_source == "static-environment"
+                           else "temporary-environment")
         spec = RunSpec(run_id=run_id, mode=mode, socket="/shared/pb.sock", staging="/staging", storage="/storage",
                        results="/results", control="/control", created_at=now, startup_deadline=now + timing.startup,
                        expires_at=now + timing.job, timing=timing, evidence=evidence, s3=s3,
@@ -781,7 +785,8 @@ def parser():
     start.add_argument("--endpoint")
     start.add_argument("--prefix", default="pagebroker-stress")
     start.add_argument("--addressing", choices=("virtual", "path"), default="virtual")
-    start.add_argument("--credentials-source", choices=("environment", "aws-cli"), default="environment")
+    start.add_argument("--credentials-source", choices=("environment", "aws-cli", "static-environment"), default="environment",
+                       help="temporary credentials from environment/aws-cli, or explicit static keys without a session token")
     start.add_argument("--aws-profile")
     start.add_argument("--ca-bundle", type=Path)
     for name in ("status", "collect", "stop"):
