@@ -95,7 +95,7 @@ represented in the agent log at all, so if you're reproducing the published
 
 Cold start is timed from pod creation to the source pod's `Ready` condition
 (model load + one warmup generation + pause — the readiness gate
-[deployment.yaml](../guides/vllm/deployment.yaml) already uses), with
+[capture/qwen3-0.6b.yaml](../guides/vllm/capture/qwen3-0.6b.yaml) already uses), with
 container start (`cold_start.container_start_seconds`) reported separately so
 it can be excluded to match the published doc's "Cold start" column.
 
