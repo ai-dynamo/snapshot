@@ -126,11 +126,19 @@ def {PROBE_TEST}(monkeypatch):
     case.set("classname", "test_snapshot_lifecycle")
     case.set("name", PROBE_TEST)
     root.write(report)
-    verify_junit(report, "failure")
+    serial_report = pytester.path / "cpu-serial-junit.xml"
+    serial_suite = ET.Element("testsuite")
+    ET.SubElement(serial_suite, "testcase", classname="test_serial", name="passes")
+    ET.ElementTree(serial_suite).write(serial_report)
+    verify_junit(report, serial_report, "failure")
 
 
 def test_junit_rejects_unrelated_failures_and_missing_evidence(tmp_path):
     report = tmp_path / "cpu-junit.xml"
+    serial_report = tmp_path / "cpu-serial-junit.xml"
+    serial_suite = ET.Element("testsuite")
+    ET.SubElement(serial_suite, "testcase", classname="test_serial", name="passes")
+    ET.ElementTree(serial_suite).write(serial_report)
     root = ET.Element("testsuites")
     suite = ET.SubElement(root, "testsuite")
     probe = ET.SubElement(suite, "testcase", classname="test_snapshot_lifecycle", name=PROBE_TEST)
@@ -141,15 +149,22 @@ def test_junit_rejects_unrelated_failures_and_missing_evidence(tmp_path):
     ET.SubElement(probe, "failure", message=expected)
     ET.ElementTree(root).write(report)
 
-    verify_junit(report, "failure")
+    verify_junit(report, serial_report, "failure")
     with pytest.raises(ValueError, match="outcome was 'success'"):
-        verify_junit(report, "success")
+        verify_junit(report, serial_report, "success")
+
+    ET.SubElement(serial_suite[0], "failure", message="unrelated serial failure")
+    ET.ElementTree(serial_suite).write(serial_report)
+    with pytest.raises(ValueError, match="only the damaged-checkpoint case may fail"):
+        verify_junit(report, serial_report, "failure")
+    serial_suite[0].remove(serial_suite[0][0])
+    ET.ElementTree(serial_suite).write(serial_report)
 
     ET.SubElement(suite, "testcase", classname="test_snapshot_lifecycle", name="other_test")
     ET.SubElement(suite[-1], "failure", message="AssertionError: unrelated failure")
     ET.ElementTree(root).write(report)
     with pytest.raises(ValueError, match="only the damaged-checkpoint case may fail"):
-        verify_junit(report, "failure")
+        verify_junit(report, serial_report, "failure")
     suite.remove(suite[-1])
 
     failure = suite[0].find("failure")
@@ -158,16 +173,25 @@ def test_junit_rejects_unrelated_failures_and_missing_evidence(tmp_path):
     failure.text = expected  # A traceback mentioning the phrase is insufficient.
     ET.ElementTree(root).write(report)
     with pytest.raises(ValueError, match="did not fail on terminal RestoreFailed"):
-        verify_junit(report, "failure")
+        verify_junit(report, serial_report, "failure")
     failure.set("message", expected)
     ET.SubElement(suite, "testcase", classname="test_snapshot_lifecycle", name="other_test")
     ET.SubElement(suite[-1], "error", message="fixture setup failed")
     ET.ElementTree(root).write(report)
     with pytest.raises(ValueError, match="only the damaged-checkpoint case may fail"):
-        verify_junit(report, "failure")
+        verify_junit(report, serial_report, "failure")
     report.unlink()
     with pytest.raises(ValueError, match="missing or invalid"):
-        verify_junit(report, "failure")
+        verify_junit(report, serial_report, "failure")
+
+    ET.ElementTree(root).write(report)
+    serial_report.unlink()
+    with pytest.raises(ValueError, match="missing or invalid"):
+        verify_junit(report, serial_report, "failure")
+
+    ET.ElementTree(ET.Element("testsuite")).write(serial_report)
+    with pytest.raises(ValueError, match="contains no test cases"):
+        verify_junit(report, serial_report, "failure")
 
 
 def test_workflow_checks_manual_probe_junit_after_pytest_failure():
@@ -178,13 +202,16 @@ def test_workflow_checks_manual_probe_junit_after_pytest_failure():
     guard = steps[names.index("Verify restore-failure negative control")]
     assert cpu_tests["id"] == "cpu_tests"
     assert '--junitxml="${RUNNER_TEMP}/cpu-e2e-junit.xml"' in cpu_tests["run"]
+    assert '--junitxml="${RUNNER_TEMP}/cpu-e2e-serial-junit.xml"' in cpu_tests["run"]
     assert "!cancelled()" in guard["if"]
     assert "github.event_name == 'workflow_dispatch'" in guard["if"]
     assert "inputs.qualify_restore_failure" in guard["if"]
     assert guard["env"]["CPU_PYTEST_OUTCOME"] == "${{ steps.cpu_tests.outcome }}"
     assert "snapshot_e2e.restore_failure_qualification" in guard["run"]
+    assert '"${RUNNER_TEMP}/cpu-e2e-serial-junit.xml"' in guard["run"]
     assert names.index(cpu_tests["name"]) < names.index(guard["name"]) < names.index("Collect diagnostics")
     assert 'cp "${RUNNER_TEMP}/cpu-e2e-junit.xml"' in steps[names.index("Collect diagnostics")]["run"]
+    assert 'cp "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml"' in steps[names.index("Collect diagnostics")]["run"]
     assert steps[-1]["name"] == "Delete k3d cluster"
     assert steps[-1]["if"] == "${{ always() }}"
 

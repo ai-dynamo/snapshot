@@ -324,7 +324,8 @@ jobs:
           # Then the tests that must be alone on the node, one at a time. They
           # run even when the first pass fails, so a red run still reports them.
           SNAPSHOT_E2E_REQUIRED_TESTS= uv run --locked --project e2e pytest e2e/tests \
-            -m "cpu and serial" -vv -s || rc=$?
+            -m "cpu and serial" -vv -s \
+            --junitxml="${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" || rc=$?
           exit "${rc}"
 
       - name: Verify restore-failure negative control
@@ -333,7 +334,9 @@ jobs:
           CPU_PYTEST_OUTCOME: ${{ steps.cpu_tests.outcome }}
         run: |
           uv run --locked --project e2e python -m snapshot_e2e.restore_failure_qualification \
-            "${RUNNER_TEMP}/cpu-e2e-junit.xml" --pytest-outcome "${CPU_PYTEST_OUTCOME}"
+            "${RUNNER_TEMP}/cpu-e2e-junit.xml" \
+            "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" \
+            --pytest-outcome "${CPU_PYTEST_OUTCOME}"
 
       # Last, and unconditional: the phases worth comparing are exactly the
       # ones a failing run also pays for.
@@ -362,6 +365,9 @@ jobs:
           mkdir -p "${out}"
           if [ -f "${RUNNER_TEMP}/cpu-e2e-junit.xml" ]; then
             cp "${RUNNER_TEMP}/cpu-e2e-junit.xml" "${out}/cpu-e2e-junit.xml"
+          fi
+          if [ -f "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" ]; then
+            cp "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" "${out}/cpu-e2e-serial-junit.xml"
           fi
           kubectl get pods -A -o wide >"${out}/pods.txt"
           kubectl describe pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" >"${out}/pods-describe.txt"

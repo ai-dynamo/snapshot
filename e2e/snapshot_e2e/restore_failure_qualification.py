@@ -18,17 +18,19 @@ EXPECTED_FAILURE = re.compile(
 )
 
 
-def verify_junit(report: Path, pytest_outcome: str) -> None:
+def verify_junit(report: Path, serial_report: Path, pytest_outcome: str) -> None:
     if pytest_outcome != "failure":
         raise ValueError(f"CPU pytest outcome was {pytest_outcome!r}, not failure")
-    try:
-        root = ET.parse(report).getroot()
-    except (OSError, ET.ParseError) as exc:
-        raise ValueError(f"CPU JUnit report is missing or invalid: {report}") from exc
-
-    cases = root.findall(".//testcase")
-    if not cases:
-        raise ValueError("CPU JUnit report contains no test cases")
+    cases = []
+    for path in (report, serial_report):
+        try:
+            root = ET.parse(path).getroot()
+        except (OSError, ET.ParseError) as exc:
+            raise ValueError(f"CPU JUnit report is missing or invalid: {path}") from exc
+        report_cases = root.findall(".//testcase")
+        if not report_cases:
+            raise ValueError(f"CPU JUnit report contains no test cases: {path}")
+        cases.extend(report_cases)
     probe = [
         case for case in cases
         if case.get("classname", "").rsplit(".", 1)[-1] == "test_snapshot_lifecycle"
@@ -55,10 +57,11 @@ def verify_junit(report: Path, pytest_outcome: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
+    parser.add_argument("serial_report", type=Path)
     parser.add_argument("--pytest-outcome", required=True)
     args = parser.parse_args()
     try:
-        verify_junit(args.report, args.pytest_outcome)
+        verify_junit(args.report, args.serial_report, args.pytest_outcome)
     except ValueError as exc:
         parser.exit(1, f"restore-failure qualification rejected: {exc}\n")
     print(

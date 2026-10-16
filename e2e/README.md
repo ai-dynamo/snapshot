@@ -43,7 +43,7 @@ passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
 `e2e-cpu.yaml` runs on every pull request, where no GPU cluster is available.
 It builds the operator, agent, and PageBroker images from the pull request,
-creates a k3d cluster, imports the images into it,
+creates a k3d cluster, pushes the images to its disposable registry,
 installs the chart through the same `setup.py` phases the GPU workflow uses, and
 runs `pytest -m cpu`.
 
