@@ -17,3 +17,17 @@ COPY --from=build /pagebroker-smoke.test /usr/local/bin/pagebroker-smoke.test
 COPY agent/pagebroker/tests/k3s/run.py agent/pagebroker/tests/k3s/monitor.py /opt/smoke/
 USER 65532:65532
 ENTRYPOINT ["python3", "/opt/smoke/run.py"]
+
+FROM runtime AS stress
+USER root
+COPY agent/pagebroker/tests/k3s/stress-requirements.txt /opt/stress/stress-requirements.txt
+RUN python3 -m pip install --no-cache-dir --only-binary=:all: --require-hashes \
+    -r /opt/stress/stress-requirements.txt
+COPY agent/pagebroker/tests/k3s/run.py agent/pagebroker/tests/k3s/monitor.py \
+     agent/pagebroker/tests/k3s/stress.py agent/pagebroker/tests/k3s/stress_config.py \
+     agent/pagebroker/tests/k3s/stress_control.py agent/pagebroker/tests/k3s/stress_supervisor.py \
+     agent/pagebroker/tests/k3s/stress_evidence.py agent/pagebroker/tests/k3s/stress_analysis.py \
+     agent/pagebroker/tests/k3s/stress_cgroup.py agent/pagebroker/tests/k3s/stress_storage.py \
+     agent/pagebroker/tests/k3s/s3_cleanup.py agent/pagebroker/tests/k3s/stress_export.py /opt/stress/
+USER 65532:65532
+ENTRYPOINT ["python3", "/opt/stress/stress.py"]
