@@ -19,16 +19,56 @@ from snapshot_e2e.infra.preflight import load_config
 SNAPSHOT_LABEL = "app.kubernetes.io/name=snapshot"
 
 
+def bool_env(name: str) -> bool:
+    value = os.environ.get(name, "false")
+    if value not in ("", "false", "true"):
+        raise ValueError(f"{name} must be true or false")
+    return value == "true"
+
+
+def cpu_only_mode() -> bool:
+    return bool_env("SNAPSHOT_E2E_CPU_ONLY")
+
+
+def require_single_cpu_node() -> None:
+    nodes = client.CoreV1Api().list_node().items
+    if len(nodes) != 1:
+        raise ValueError("CPU-only E2E requires exactly one Kubernetes node")
+    node = nodes[0]
+    ready = any(
+        c.type == "Ready" and c.status == "True" for c in node.status.conditions or []
+    )
+    if node.spec.unschedulable or not ready:
+        raise ValueError("CPU-only E2E requires a ready, schedulable node")
+    # CPU workloads declare no tolerations for blocking node taints. A Ready
+    # node can still leave every source/restore pod Pending.
+    blocking = [
+        f"{taint.key}={taint.value or ''}:{taint.effect}"
+        for taint in node.spec.taints or []
+        if taint.effect in ("NoSchedule", "NoExecute")
+    ]
+    if blocking:
+        raise ValueError(f"CPU-only E2E node has blocking taints: {', '.join(blocking)}")
+
+
 @dataclass(frozen=True)
 class E2EConfig:
     namespace: str
     release: str
     pvc_name: str
     kubeconfig: str | None
+    cpu_only: bool = False
+
+    @property
+    def pvc_access_mode(self) -> str:
+        return "ReadWriteOnce" if self.cpu_only else "ReadWriteMany"
 
     @classmethod
     def from_env(cls) -> "E2EConfig":
         mode = os.environ.get("SNAPSHOT_E2E_MODE", "direct")
+        cpu_only = cpu_only_mode()
+        if cpu_only and mode != "direct":
+            raise ValueError("CPU-only E2E requires direct mode")
         if mode == "vcluster":
             kubeconfig = os.environ.get(
                 "SNAPSHOT_E2E_TARGET_KUBECONFIG"
@@ -41,11 +81,14 @@ class E2EConfig:
             release=os.environ.get("SNAPSHOT_E2E_SNAPSHOT_RELEASE", "snapshot"),
             pvc_name=os.environ.get("SNAPSHOT_E2E_PVC_NAME", "snapshot-pvc"),
             kubeconfig=kubeconfig,
+            cpu_only=cpu_only,
         )
 
 
 def configure(config: E2EConfig) -> None:
     load_config(config.kubeconfig, None)
+    if config.cpu_only:
+        require_single_cpu_node()
 
 
 def read_namespace(name: str) -> client.V1Namespace:
