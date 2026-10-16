@@ -24,8 +24,14 @@ Status: Draft
   - [Checkpoint Flow](#checkpoint-flow)
   - [Restore Flow](#restore-flow)
   - [Failure and Recovery](#failure-and-recovery)
-    - [Outcomes and Checkpoint Availability](#outcomes-and-checkpoint-availability)
-    - [Durable Evidence and Agent Recovery](#durable-evidence-and-agent-recovery)
+    - [Operation Conditions](#operation-conditions)
+    - [Checkpoint Member Results and Availability](#checkpoint-member-results-and-availability)
+    - [Restore Member Outcomes](#restore-member-outcomes)
+    - [Agent Restart Recovery](#agent-restart-recovery)
+      - [Shared Recovery Rules](#shared-recovery-rules)
+      - [Capture Recovery](#capture-recovery)
+      - [Restore Recovery](#restore-recovery)
+      - [Retrying a Restore](#retrying-a-restore)
     - [Failure and Cancellation](#failure-and-cancellation)
     - [Controller Recovery and Deletion](#controller-recovery-and-deletion)
   - [Restore Pod Contract](#restore-pod-contract)
@@ -96,7 +102,8 @@ it into replacement Pods, and see what succeeded if the operation fails.
   topology on restore.
 - Atomic capture or release, rollback, or keeping sources running after destructive
   capture starts.
-- Transparent session failover or automatic workload recovery.
+- Transparent session failover, resuming interrupted execution, partial-member
+  restore retries, or automatic workload recovery.
 - Declaring application health or protecting in-flight requests.
 - Cross-namespace or cross-cluster restore, retained artifacts after checkpoint
   deletion, or a hierarchy of groups.
@@ -131,14 +138,20 @@ Restored; Snapshot tears down only members known to be unreleased.
 Restored means Snapshot completed reconstruction and released the member.
 It does not mean the application is healthy or the Pod is Ready.
 
+Once any member may have started restoration, retry requires a new PodSetRestore
+and fresh target Pods for every member. The owner retires the partial replica
+and supplies the replacements. The new attempt uses the same checkpoint but a
+new complete IP map; the failed attempt's bindings never change. A refusal
+before any member starts execution does not by itself make the targets unusable.
+
 ### User Stories
 
 - Restore a distributed inference replica into replacement Pods, then register
   it for traffic after Snapshot and application readiness checks succeed.
 - Capture one distributed prefill or decode replica without including unrelated
   replicas. Connections outside the group keep standalone restore behavior.
-- Inspect a failed attempt's member results, retire its Pods, and retry with
-  fresh targets and the same checkpoint.
+- Inspect a failed attempt's member results, retire its Pods, and retry the
+  whole group with fresh targets and the same checkpoint.
 
 ### Limitations, Risks, and Mitigations
 
@@ -146,6 +159,7 @@ It does not mean the application is healthy or the Pod is Ready.
 | --- | --- |
 | Partial capture or release | No rollback. Publish only complete checkpoints and preserve released member results. |
 | Agent crashes during release | Recover from durable release evidence. If evidence cannot be read, report uncertainty rather than kill a possibly released workload. |
+| Execution helpers survive an agent crash | Cancel and drain old helper work; confirm it can no longer act before cleanup or new execution. Never terminate a released application as helper cleanup. |
 | Brain loses an active session | Fail affected operations without replay. Completed artifacts and released workloads remain valid. |
 | Stale or missing execution context | Pin exact identities, enforce deadlines, and recheck live state at execution boundaries. |
 | TCP timers expire during interruption | Qualify the full capture and restore windows. Application quiescing and earlier TCP unblocking do not solve all timer failures. |
@@ -167,7 +181,7 @@ leader designation.
 | Workload owner | Workload controller or caller | Create and place Pods; request operations; manage application readiness and recovery. |
 | Set controller | Snapshot operator | Bind members and artifacts, supply session context, admit restores, and aggregate results. |
 | Brain | Shared service outside workload Pods | Authenticate agents, exchange opaque payloads, and enforce membership, barriers, deadlines, and session failure. |
-| Node agent | One per node | Represent local members; validate, journal, and execute work; own release and cleanup. |
+| Node agent | One per node | Represent local members; validate and execute work; own release, local recovery, and cleanup. |
 | Local coordinator | Temporary process inside the selected container's namespaces | Drive cuInterpose shims, order CUDA work, and validate exchanged runtime records. |
 | Application shim | Library in an application process | Track, prepare, and reconstruct that process's CUDA resources. |
 
@@ -309,51 +323,66 @@ Application work must already be quiesced and GPU work synchronized as required
 by the runtime. Inspection and group barriers do not make a busy application
 safe to capture.
 
-Capture has two gates: all members ready before preparation, and all members
-prepared before dumping. The diagram shows the success path; each Member agent
-lane operation is repeated for every member. Failure handling is defined in
+Members first exchange inspection data through the brain. It waits for every
+member's contribution before returning the combined data for validation.
+The execution gates then require every member to vote ready before preparation,
+and every member to be prepared before dumping.
+
+The diagram shows one member's success path; member paths run concurrently.
+Controller-agent arrows represent Kubernetes writes and watches, not direct
+messages. Failure handling is defined in
 [Failure and Recovery](#failure-and-recovery).
 
 ```mermaid
 sequenceDiagram
     participant O as Owner
     participant C as Set controller
-    participant P as Per-Pod controllers
+    participant P as PodSnapshot controller
     participant A as Member agent
     participant B as Brain
     O->>C: Create PodSetSnapshot
     C->>B: Expected session context
     C->>P: Create child PodSnapshots
+    Note over P,A: Member paths run concurrently, one shown
+    P->>P: Create member PodSnapshotContent
     P->>A: PodSnapshotContent triggers work
-    A->>B: Join and exchange inspection records
-    B-->>A: Complete group records
-    A->>A: Validate records and current source
+    A->>B: Join and submit local inspection data
+    Note over A,B: Wait for every member's inspection data
+    B-->>A: Inspection data from all members
+    A->>A: Validate collected data and current source
     A->>B: ReadyToPrepare
     Note over A,B: Wait for every member's vote
     B-->>A: Preparation authorized
-    A->>A: Recheck, journal intent, prepare
+    A->>A: Recheck, record intent, prepare
     A->>B: Prepared
     Note over A,B: Wait for every member's preparation
     B-->>A: ReadyForDump
-    A->>P: Per-Pod dump and artifact result
+    A->>A: Per-Pod dump and publish artifact
+    A-->>P: Record PodSnapshotContent result
     P->>C: Child results and exact content identities
     C->>C: Ready only when all artifacts are ready
 ```
 
 1. **Activate.** The controller validates sources, records their nodes, supplies
    session context, and creates one owned child PodSnapshot per member. The
-   existing reconciler creates each PodSnapshotContent; its creation triggers the
-   node agent. A set-owned child waits for its recorded binding and session.
-   It never falls back to standalone capture.
-2. **Inspect and vote.** Agents validate live sources and prerequisites, retain
-   per-source exclusion, and exchange source identities, IPs, and runtime records.
-   Each agent validates and pins the common captured-member table. Where shims
-   exist, coordinators inspect group resources without changing application state.
-   The agent checks operation state, deadline, source identity, and IP, then sends
-   ReadyToPrepare. Any refusal before group authorization leaves every source
-   untouched.
+   PodSnapshot controller creates each PodSnapshotContent; its creation triggers
+   the node agent. Members proceed concurrently. A set-owned child waits for its
+   recorded binding and session; it never falls back to standalone capture.
+2. **Inspect and vote.** Agents validate live sources and prerequisites and retain
+   per-source exclusion. Where shims exist, local coordinators inspect runtime
+   resources without changing application state. Each agent joins the session
+   and submits its source identity, IP, and runtime inspection records. Every
+   member contributes, even if it has no runtime records.
+
+   The brain waits for every member's contribution, then returns the collected
+   data to each agent without interpreting CUDA records. Agents validate and pin
+   the common captured-member table; local coordinators validate runtime resource
+   relationships. Each agent then checks operation state, deadline, source
+   identity, and IP before sending ReadyToPrepare. Collecting all data does not
+   authorize preparation: every member must first validate it and vote ready.
+   Any refusal before group authorization leaves every source untouched.
 3. **Prepare.** The brain authorizes preparation after every vote. Each agent
-   repeats its local checks and journals intent before permitting destructive
+   repeats its local checks and records intent before permitting destructive
    work. For cuInterpose, that boundary is BeginCheckpoint; the coordinator
    freezes registries, revalidates the frozen records, and prepares resources.
    Agents save required metadata before reporting Prepared. Members without a
@@ -362,7 +391,7 @@ sequenceDiagram
 4. **Dump and publish.** After every Prepared report, the brain sends ReadyForDump
    and capture coordination ends. Agents execute per-Pod dumps and artifact
    publication. A member that has not yet crossed its destructive boundary
-   rechecks local state and journals intent before native CUDA or CPU capture.
+   rechecks local state and records intent before native CUDA or CPU capture.
    The controller records exact content names and UIDs and sets Ready only after
    every artifact succeeds.
 
@@ -393,16 +422,23 @@ sequenceDiagram
     A->>C: Preflight Passed
     Note over C,A: Wait for every member
     C-->>A: Admitted, container IDs pinned
-    A->>A: Recheck, journal intent, protect and restore
-    A->>B: Join: sockets restored, application held
+    A->>A: Recheck, record intent, protect and restore
+    A->>B: Join: sockets restored, application held<br/>Saved runtime records
     Note over A,B: Wait for every member
-    B-->>A: ReadyForTCP
-    A->>A: Recheck, record notification, enable TCP
-    A->>A: Reconstruct and verify runtime resources
+    B-->>A: ReadyForTCP + collected runtime records
+    A->>A: Recheck, enable TCP
+    A->>A: Start coordinator<br/>Validate saved relationships
+    loop Runtime reconstruction steps, as needed
+        A->>A: Perform local runtime step
+        A->>B: Fresh handles or other runtime data
+        Note over A,B: Wait for every member
+        B-->>A: Collected runtime data
+    end
+    A->>A: Verify reconstructed runtime resources
     A->>B: Runtime work verified
     Note over A,B: Wait for every member
     B-->>A: ReleaseAuthorized
-    A->>A: Final checks, publish marker, journal release
+    A->>A: Final checks, publish marker, preserve release proof
     A->>A: Finish owned cleanup
     A->>C: Restored
     C->>C: Ready only when all members are Restored
@@ -417,22 +453,55 @@ sequenceDiagram
    hold. It durably claims the target before reporting Passed. The controller
    accepts only current reports and pins all admitted container IDs in the same
    status update that sets Admitted. Any refusal prevents all CRIU starts.
-3. **Reconstruct locally.** The agent rechecks admission, deadline, operation,
-   and execution identity; journals intent; and establishes the execution hold
-   and TCP protection. It restores processes, sockets, and native CUDA state,
-   using the complete map and group-aware socket handling. It joins the brain
-   only after local restore succeeds and normal application execution is held.
-4. **Enable TCP.** After every member joins, the brain returns ReadyForTCP.
-   Agents recheck local state, journal the notification, and end TCP isolation.
-   Kernel TCP traffic may proceed; application execution stays held.
+3. **Reconstruct locally.** Immediately before starting, the per-Pod executor
+   verifies that the target Pod, container, sandbox, and IP still match the
+   admitted context, the attempt and original session remain active, and the
+   deadline has not expired. A mismatch or terminal operation state fails the
+   member without starting its restore. If current state cannot be verified,
+   wait without starting, within the deadline. These are execution checks, not
+   another group preflight round. If valid, the agent records intent and
+   establishes the execution hold and TCP protection. It restores processes,
+   sockets, and native CUDA state using the complete map and group-aware socket
+   handling. It joins the brain only after local restore succeeds and normal
+   application execution is held. The join includes the member's saved runtime
+   records from its artifact, or an empty contribution if it has none.
+4. **Enable TCP and share records.** After every member joins, the brain sends
+   ReadyForTCP and distributes the collected saved records unchanged. They may
+   share a response, but record delivery must not hold up TCP authorization.
+   Agents recheck local state and end TCP isolation. ReadyForTCP does not wait
+   for runtime validation or reconstruction. Kernel TCP traffic may proceed;
+   application execution stays held.
+
+   **Collected runtime records** are the saved CUDA metadata from all members:
+   allocation identities, sizes and device placement; memory mappings and access
+   rights; export/import relationships; and multicast membership and bindings.
+   For example, A exported allocation X as handle H, while B imported H as its
+   local allocation Y. Together, these records describe which resources must be
+   shared after restore. This exchange carries metadata, not GPU-memory contents.
+
 5. **Rebuild runtime resources.** Agents start coordinators where needed.
-   Coordinators exchange saved records, derive fresh handles, rebuild shared GPU
-   resources, and validate the result. The brain exchanges bytes and waits for
-   the required contributions. Members without runtime work also report
-   completion through their agents.
+   Coordinators validate the collected saved records, then reconstruct shared
+   resources through a sequence of runtime steps. Each iteration of the diagram's
+   loop is a different step, not a retry. For cuInterpose, **collected runtime
+   data** means the following:
+
+   | Runtime step | Data exchanged through agents and the brain |
+   | --- | --- |
+   | Reload shared allocations | Captured-handle to new-handle mappings. Peers use the replacement handles to import rebuilt allocations. |
+   | Restore unicast mappings | Completion results only; this step produces no new handles. All members must finish before the next step. |
+   | Recreate multicast resources | Captured-handle to new-handle mappings for multicast resources, needed before peers can import them. |
+   | Import multicast resources, add devices, and restore bindings | Completion results for each of these three separate steps; they produce no new handles. Each step waits for every member. |
+   | Inspect reconstructed resources | Fresh records describing the restored allocations, mappings and sharing relationships. Coordinators compare them with the saved records, accounting for replacement handles. |
+
+   The brain waits for every member's contribution before completing each
+   exchange. Coordinators interpret the data; the brain forwards it unchanged.
+   Members without local runtime data contribute an empty payload and still
+   report completion. Each agent reports Runtime work verified only after its
+   required reconstruction and validation succeed.
+
 6. **Release.** When all members succeed, the brain returns ReleaseAuthorized.
    Each agent makes final local checks, atomically publishes restore-complete,
-   journals release, finishes owned cleanup, and releases the target claim.
+   preserves release proof, finishes owned cleanup, and releases the target claim.
    It reports Restored and writes the existing nvidia.com/Restored Pod condition.
 
 TCP unblocking is not release. An observed failure stops unreleased work even
@@ -443,7 +512,11 @@ report Unknown rather than infer failure.
 
 ### Failure and Recovery
 
-#### Outcomes and Checkpoint Availability
+#### Operation Conditions
+
+Conditions describe the overall operation. Member results describe what happened
+to each member. Conditions are not mutually exclusive: ContextReady and Admitted
+remain recorded milestones even if a restore later fails.
 
 | Resource | Condition | Meaning when True |
 | --- | --- | --- |
@@ -454,18 +527,49 @@ report Unknown rather than infer failure.
 | PodSetRestore | Ready | Every member is Restored and the attempt has not failed. |
 | PodSetRestore | Failed | The attempt cannot succeed; member reports and cleanup may still arrive. |
 
-Waiting is not failure. Failed is permanent: retry requires a new operation.
-ContextReady and Admitted are recorded milestones, not permission to work after
-failure, deletion, or expiry. Conditions include observedGeneration, a stable
-reason, and a useful message.
+Once an operation's Failed condition is True, retry requires a new operation object.
+A successful restore stays Ready. Completed milestones do not authorize work
+after failure, deletion, or expiry. Conditions include observedGeneration, a
+stable reason, and a useful message.
 
-| Restore outcome | Meaning |
+#### Checkpoint Member Results and Availability
+
+For capture, `status.members[].phase` reports each child's progress and result,
+derived from the child PodSnapshot's conditions:
+
+| Phase | Meaning |
+| --- | --- |
+| Pending | Waiting to begin capture. |
+| Capturing | Capture is in progress. |
+| Captured | This member's artifact was successfully produced. |
+| Failed | This member did not complete capture successfully. |
+
+If a member's capture is cancelled before completion, it reports Failed with
+reason Cancelled. Members already Captured keep that result, including when a
+sibling fails. The set becomes Ready only when every member succeeds.
+
+A checkpoint's Ready condition describes current availability, not capture
+history. If a recorded child or content is missing, deleting, replaced, or failed,
+withdraw Ready and set Failed/ArtifactUnavailable. Keep exact references and
+Captured member results; never adopt replacements or recapture. Revalidate objects
+before each restore and artifact data on each agent. Ready is not a
+storage-retention guarantee.
+
+#### Restore Member Outcomes
+
+For restore, `status.members[].outcome` answers whether the member was released,
+rather than describing its execution progress:
+
+| Outcome | Meaning |
 | --- | --- |
 | Pending | Waiting or executing; no final result is known. |
 | Restored | The release marker was published. Final. |
-| Failed | The member failed and is known not to have been released. Final. |
-| Cancelled | The member stopped unreleased because the operation was deleted. Final while the object exists. |
+| Failed | The member did not complete restore and is known not to have been released. Final. |
 | Unknown | Release cannot currently be established or ruled out. Later evidence may settle it. |
+
+Cancellation reports Failed with reason Cancelled only when the member is known
+not to have been released. Members already Restored keep that result. If release
+is uncertain, cancellation does not resolve Unknown.
 
 A target disappearing before admission is Failed/TargetGone. After admission,
 disappearance without a final result is Unknown/TargetGone. If execution started
@@ -474,69 +578,171 @@ Unknown/ReleaseEvidenceUnavailable. Either Unknown case fails the attempt, but
 later evidence can settle the member without reopening it. Known final outcomes
 never change.
 
-A successful restore stays Ready. A checkpoint's Ready condition instead
-describes current availability. If a recorded child or content is missing,
-deleting, replaced, or failed, withdraw Ready and set Failed/ArtifactUnavailable.
-Keep the recorded references and Captured results; never adopt replacements or
-recapture. Revalidate objects before each restore and artifact data on each agent.
-Ready is an observation, not a storage-retention guarantee.
+#### Agent Restart Recovery
 
-#### Durable Evidence and Agent Recovery
+After an agent restarts, recovery preserves completed results and cleans up
+interrupted work. It never repeats destructive work that may have started.
+A restore member that provably never began may still start under the same valid
+attempt. Capture checks for a committed artifact; restore checks whether the
+application was released or local execution can safely begin for the first time.
 
-Each agent keeps a durable journal outside workload mounts, keyed by Pod UID and
-operation UID. It survives an agent restart on the same node, not loss of the
-node or journal storage. It records the selected container and sandbox, target
-claim, execution intent, pinned capture metadata, TCP-protection and execution-hold
-recovery context, release evidence, and cleanup progress.
+##### Shared Recovery Rules
 
-The following facts have different consequences:
+Both paths keep a small durable local record containing:
 
-| Fact | Meaning |
+- The operation UID and exact Pod UID, container, and sandbox being acted on.
+- Whether destructive work may have started. Save this **execution intent**
+  before starting that work or allowing a helper to start it.
+- The information needed to stop owned helpers and remove temporary resources.
+  Save cleanup information before creating those resources.
+
+The record is private to Snapshot and survives an agent restart on the same
+node, not loss of the node or its storage. It is not a step-by-step journal and
+need not copy runtime exchanges or coordination notifications. Its storage
+format is an implementation choice.
+
+An intact record matching the exact operation and member, with no execution
+intent, proves no local destructive work started. It says nothing about other
+members. A missing, corrupt, or unreadable record does not prove that work never
+started.
+
+CRIU, local coordinators, and other execution helpers are separate processes.
+Restarting the agent does not prove they stopped. The shared per-Pod executor
+must cancel their work on agent loss and let the replacement confirm that it
+has stopped or drained.
+Until old helper work can no longer act, block new execution and cleanup that
+could race with it. Helper cancellation must neither kill a released application
+nor release an application that is still held. If stopping or draining cannot
+be confirmed, retain ownership, preserve known results, and report
+CleanupIncomplete.
+
+Cleanup is repeatable and acts only on the recorded resources, never a
+replacement container or sandbox. The saved information must support safe local
+cleanup without API access or an in-memory IP map. Reporting results can wait
+for API recovery; safe cleanup need not.
+
+##### Capture Recovery
+
+After stopping or draining old helpers, the agent checks whether its member's
+artifact was committed. If not, execution intent determines whether the source
+may already have been changed:
+
+| Evidence | Recovery action |
 | --- | --- |
-| Target claimed | Durable before Passed; prevents competing attempts. Not execution and not a capacity reservation. |
-| ReadyToPrepare vote | Not execution evidence; an unused vote never justifies source termination. |
-| Execution intent | Durable before destructive local work. Interrupted work must not be replayed. The restore target is no longer reusable. |
-| Local restore complete / ReadyForTCP | Sockets are restored; TCP may have been unblocked. Neither proves application release. |
-| Release proved | A matching marker or durable release record proves the member was released. |
-| Capture complete | Preserve the artifact result; never recapture. |
-| Cleanup complete | Separate from release and execution results. |
+| Committed artifact | Preserve it, report Captured, and finish cleanup. Do not capture again. |
+| No committed artifact; intact matching record has no execution intent | Discard the old readiness vote and leave the source untouched. |
+| No committed artifact; execution may have started or cannot be ruled out | Fail the child and apply existing unsafe-source handling. Do not repeat preparation or dump. |
 
-Recovery first checks release evidence. A marker must match the attempt UID and
-admitted container ID. A matching marker or journaled release is sufficient,
-even when the other is missing. Recovery makes marker evidence durable before
-cleanup; once release is journaled, recovery does not depend on the marker
-surviving. Failure, expiry, deletion, and later container or Pod loss do not
-override proof of release.
+##### Restore Recovery
 
-**Unreadable is not absent.** Once execution has started, a failed marker read
-without journaled release cannot prove non-release. The agent reports
-Unknown/ReleaseEvidenceUnavailable, retains the claim and journal, and retries
-evidence collection. It must not kill, replay, release again, or change the
-target's execution hold or TCP protection
-based on that uncertainty. This may leave cleanup unresolved; expose it rather
-than risk disturbing a released workload. The same rule applies to orphaned
-attempts and cancellation.
+Restore needs two additional facts in its local record:
 
-| Evidence after restart | Action |
-| --- | --- |
-| Marker or journal proves release | Never kill or replay. Finish only attempt-owned cleanup, release the claim, and report Restored. |
-| Restore intent, release evidence inaccessible, no release proof | Preserve the target, claim, and journal; report Unknown and retry observation. Do not infer non-release. |
-| Claim only, live attempt | Rebuild the claim and revalidate before resuming preflight/admission waiting. A stale Passed report is insufficient. |
-| Claim only, failed/deleted/expired attempt | Release the claim. The target remains reusable. |
-| Restore intent, confirmed unreleased, target exists | Never rerun CRIU. Stop helpers, maintain the execution hold, and maintain or re-establish TCP isolation before teardown. Report failure and release the claim. |
-| Restore intent, target gone, no final evidence | Finish owned cleanup, release the claim, and report Unknown/TargetGone. |
-| Orphan restore | Apply the same evidence-first rules; object loss is not permission to kill a possibly released workload. |
-| Capture without intent | Stop helpers, discard the old vote, and leave the source untouched. |
-| Capture intent, no completed artifact | Never rerun preparation or dump. Fail the child and apply unsafe-source handling. |
-| Capture complete | Preserve the result and finish cleanup. |
+- **Target ownership.** Before reporting that a member passed restore preflight
+  (`report.preflight: Passed`), the agent durably reserves its target Pod for
+  this attempt. This claim prevents competing attempts from using it; it does
+  not mean restoration started.
+- **Application release.** After publishing restore-complete, the agent saves
+  that release locally. A matching marker found during recovery is also saved
+  before cleanup. This preserves the result if the marker later disappears.
 
-Before teardown, stop old helpers and confirm the recorded target identity.
-A confirmed-unreleased member whose TCP state is uncertain must be treated as
-potentially unblocked and re-isolated before teardown. Journal context must
-support this without API access or an in-memory IP map. Never operate on a
-replacement container or sandbox. Reporting may wait for API recovery; safe
-local cleanup does not. Execution-intent records continue to forbid target reuse
-after the claim is released.
+The agent uses a matching restore-complete marker, its saved release record, or
+an already recorded Restored result as proof of release. Each must identify the
+attempt and admitted container. Coordination notifications such as ReadyForTCP
+or ReleaseAuthorized are not proof that the application was released.
+
+After an agent restart, the following flow selects recovery actions, not new API
+states. Stopping helpers does not mean stopping the application:
+
+```mermaid
+flowchart TD
+    H{"Old helper work<br/>stopped or drained?"}
+    H -->|No| WAIT["Block new work<br/>Keep known results<br/>Retry helper cleanup"]
+    H -->|Yes| R
+    R{"Release proved?"}
+    R -->|Yes| KEEP["Keep workload<br/>Report Restored<br/>Finish owned cleanup"]
+    R -->|No| I{"Execution-start evidence?"}
+    I -->|"Intact matching record:<br/>no execution intent"| A{"Can first local restore start<br/>under the original admission?"}
+    A -->|"Start checks pass"| FIRST["Record intent<br/>Start first local restore"]
+    A -->|"Not yet admitted"| PREFLIGHT["Recheck local preflight<br/>Wait for original admission"]
+    A -->|No| FREE["Do not start restore<br/>Report Failed; finish owned cleanup<br/>Free target reservation"]
+    A -->|"Cannot verify"| HOLD["Keep target reservation<br/>Wait for current state"]
+    I -->|"Execution intent recorded"| U{"Confirmed<br/>unreleased?"}
+    I -->|"Record missing,<br/>unreadable, or inconsistent"| UNKNOWN
+    U -->|No| UNKNOWN["Unknown<br/>Preserve target and claim<br/>Retry evidence collection"]
+    U -->|Yes| STOP["Maintain execution hold<br/>Re-isolate TCP, then tear down<br/>Report Failed"]
+```
+
+**Local restore never started.** This branch requires an intact matching recovery
+record with no execution intent and old helpers that can no longer act. Recover
+the target reservation, then check the original attempt, bindings, session, and
+deadline:
+
+- **Not yet admitted:** repeat local preflight checks and wait for admission.
+- **Already admitted:** verify that the target still matches its admitted Pod,
+  container, sandbox, and IP; the attempt and original session remain active;
+  and the deadline has not expired. If valid, durably record execution intent
+  and start this member's first restore. Do not reset admission or require
+  other members to pass preflight again.
+- **Target no longer matches, or the attempt/session has failed, been deleted,
+  or expired:** do not start. Report Failed, finish owned cleanup, and release
+  the reservation.
+- **Current state cannot be verified:** retain the reservation and wait without
+  starting execution.
+
+These are the normal per-Pod checks before execution, not a second full
+preflight. If they find an invalid context after admission, the attempt fails;
+peers may already be restoring and follow normal failure handling. Admission
+remains recorded, and completed Restored results are preserved.
+
+Starting an untouched member within an active attempt is not a retry: it keeps
+the same bindings, IP map, and session. The member joins the restore session for
+the first time after local restore succeeds. It cannot join a replacement for a
+failed session. New attempts follow [Retrying a Restore](#retrying-a-restore).
+
+**Release proved.** Keep Restored and finish owned cleanup only. Failure, expiry,
+deletion, or later container/Pod loss does not undo this result. Never kill or
+replay the released workload. Release and cleanup completion are separate facts.
+
+**Confirmed not released.** Once old helpers have stopped, a missing marker in
+the verified original container and intact control volume proves non-release
+only if no earlier release is known. Report Failed. Maintain the application
+execution hold and maintain or re-establish TCP isolation before teardown;
+uncertain TCP state is treated as potentially unblocked. Release the claim
+after cleanup, but retain execution intent while the Pod exists to prevent reuse.
+
+**Release unknown.** An unreadable marker is not a missing marker. Without other
+release proof, report Unknown/ReleaseEvidenceUnavailable. Retain the target,
+claim, and recovery record; retry observation. Do not kill, replay, release again,
+or change protection based on that uncertainty. These rules also apply after
+cancellation or deletion of the attempt.
+
+The same Unknown outcome applies when the execution record cannot be verified
+and no independent release proof exists. Do not treat that uncertainty as
+permission to execute again, tear down the workload, or reuse the target.
+
+If the Pod is gone after admission and no final result or release proof exists,
+report Unknown/TargetGone. Finish safe helper/resource cleanup and free the
+claim. Known final outcomes never change.
+
+##### Retrying a Restore
+
+A failed attempt cannot be restarted; retry always requires a new PodSetRestore.
+The target Pod rules apply to the whole group:
+
+1. **No member could have started restoration**, for example because preflight
+   refused the group. Untouched placeholders may be reused after the old claims
+   are released and every member passes preflight again, including the remaining
+   startup-gate budget.
+2. **Any member started, or execution cannot be ruled out.** Retry requires fresh
+   Pod UIDs and network namespaces for every member, not just the failed one.
+   The workload owner retires the partial replica and creates the replacement
+   group. Snapshot does not replace Pods or rebind members inside an attempt.
+
+The new attempt reuses the checkpoint and derives a new complete IP map. It does
+not update the failed attempt's map or mix its restored members into a new
+session. Members already restored stay reported as Restored even when the owner
+retires them; this is not Snapshot rollback. Agents reject previously executed
+targets as TargetReused.
 
 #### Failure and Cancellation
 
@@ -548,11 +754,13 @@ cancellation. Its deadline and member-loss detection still apply without API
 access.
 
 Deletion is the V1 cancellation request. It cannot retract delivered commands or
-undo destructive work.
+undo destructive work. A member known to be unreleased reports Failed with
+reason Cancelled. Completed results and uncertain release follow the recovery
+rules above.
 
 | Restore state | Failure or cancellation handling |
 | --- | --- |
-| Before execution | Release the claim; leave the placeholder running. Report Failed or Cancelled as appropriate. |
+| Before execution | Release the claim; leave the placeholder running. Report Failed with reason Cancelled on deletion, or the failure reason otherwise. |
 | Execution started, confirmed unreleased | Stop helpers, maintain the execution hold, and re-isolate TCP before teardown. Do not publish release. |
 | Release proved | Preserve Restored and finish cleanup. |
 | Release unknown because evidence is inaccessible | Preserve the target and evidence; retry observation under the recovery rules. |
@@ -582,75 +790,40 @@ waits for referencing non-terminal attempts, stops capture, and deletes children
 through the existing content/artifact cleanup path. No namespaced owner reference
 is added to cluster-scoped content.
 
-Grace-period expiry emits CleanupIncomplete and allows deletion. Journals retain
-responsibility for unresolved local cleanup, including unknown release evidence.
+Grace-period expiry emits CleanupIncomplete and allows deletion. Local recovery
+records retain unresolved cleanup obligations, including unknown release evidence.
 Finalizer removal does not prove an unreachable node has stopped. No
 child-protection finalizer prevents deletion of a child or content. There is no
 Retain policy or restore from surviving content after set deletion.
 
 ### Restore Pod Contract
 
-Set-mode support must extend the existing
-[Pod-contract builder and validator](https://github.com/ai-dynamo/snapshot/blob/0b6d7d98e48aa6a4a852af548d76852ccf1b4cd8/docs/reference/restore-pod-contract.md)
-and the NRI path that installs the restore proxy. A new annotation alone is not
-sufficient.
+Group restore Pods follow the existing
+[single-Pod restore contract](https://github.com/ai-dynamo/snapshot/blob/0b6d7d98e48aa6a4a852af548d76852ccf1b4cd8/docs/reference/restore-pod-contract.md).
+The restore proxy, control volume, and restart behavior stay the same.
 
-- Recognize `nvidia.com/restore-set` and resolve the selected destination from the
-  referenced attempt's target list. Verify the target Pod identity.
-- Replace the selected container's command with Snapshot's inert restore proxy.
-  The original application command must never run as a fallback.
-- If the attempt or destination cannot yet be resolved, wait or refuse container
-  creation for retry. Do not allow normal startup while selection is ambiguous.
-- Reject conflicting standalone restore annotations. Validate the canonical
-  control volume and startup gate before preflight passes.
+The Pod builder, validator, and NRI (Node Resource Interface) startup plugin must
+support these group-specific rules:
 
-Pods and the attempt may be created in either order. This does not guarantee
-that a selected container can start before its set context is available. Binding
-the target must not require that container to be application-ready.
+- **Select the destination through the attempt.** Use `nvidia.com/restore-set`
+  to find the PodSetRestore. Resolve the destination container from its target
+  list and verify the Pod identity. Reject conflicting standalone restore
+  annotations.
+- **Wait for missing context.** If the attempt or destination cannot yet be
+  resolved, wait or refuse container creation for retry. The original application
+  command must never run as a fallback.
+- **Require the existing startup gate.** The restore-complete startup probe is
+  optional for standalone restores but required for group restores. Agents check
+  it and its remaining time budget before preflight passes; see
+  [Validation and Binding](#validation-and-binding).
 
-For example, the owner supplies this target shape using its qualified image.
-Snapshot's startup interception, not the command shown here, runs the restore
-proxy:
+Pods and the attempt may be created in either order, but the selected container
+cannot start until its group context is available. The controller must bind
+targets without waiting for application readiness.
 
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: replacement-0
-  namespace: inference
-  annotations:
-    nvidia.com/restore-set: replica-restore-1
-spec:
-  restartPolicy: Never
-  volumes:
-    - name: snapshot-control
-      emptyDir: {}
-  containers:
-    - name: engine
-      image: inference-engine:qualified
-      command: ["/app/engine"]
-      securityContext:
-        seccompProfile:
-          type: Localhost
-          localhostProfile: profiles/block-iouring.json
-      env:
-        - name: SNAPSHOT_CONTROL_DIR
-          value: /snapshot-control
-      volumeMounts:
-        - name: snapshot-control
-          mountPath: /snapshot-control
-          subPath: engine
-      startupProbe:
-        exec:
-          command: ["cat", "/snapshot-control/restore-complete"]
-        timeoutSeconds: 1
-        periodSeconds: 1
-        failureThreshold: 1800
-        successThreshold: 1
-```
-
-This Pod shape starts a placeholder; it does not hold a reconstructed application.
-The independent execution hold described below is still required.
+The proxy and startup gate do not keep the restored application paused. Group
+restore needs a separate hold until release, as described in
+[TCP Protection and Execution Hold](#tcp-protection-and-execution-hold).
 
 ### Validation and Binding
 
@@ -674,9 +847,10 @@ source fails with SourceGone. Invalid requests fail with a specific reason.
 
 The controller rejects overlap with another unfinished restore as TargetInUse.
 The agent's durable, exclusive Pod-UID claim resolves races between attempts.
-A claim alone does not spend a target. Once execution intent is durable, retry
-requires a fresh Pod UID and network namespace. Release of the claim does not
-make an executed target reusable.
+A claim alone does not spend a target. Once execution intent is durable, the
+agent rejects that target as TargetReused, even after its claim is released.
+An interrupted group is retried with a complete new target group, as defined in
+[Retrying a Restore](#retrying-a-restore); there is no individual-member retry.
 
 Agents own only their member reports; the controller owns bindings, outcomes,
 and conditions. Writers use partial apply documents, such as generated apply
@@ -703,9 +877,9 @@ the attempt rather than renewing its budget. Standalone gate behavior is unchang
 ### Captured Metadata and Storage
 
 Kubernetes stores bindings and results. Artifacts store captured process and
-runtime state. Node journals store durable execution and recovery evidence.
-The brain keeps only live coordination state, not artifacts or a durable
-execution log.
+runtime state. Agents retain only local ownership, execution-start and release
+evidence, and cleanup information. The brain keeps live coordination state,
+not artifacts or a durable execution log.
 
 | Data | Written by | Stored in | Used by |
 | --- | --- | --- | --- |
@@ -721,7 +895,7 @@ execution log.
 | Current step and contributions | Brain | Active session memory | Barriers and payload exchange |
 | Release marker | Agent | restore-complete in target control volume: PID, attempt UID, admitted container ID | Execution gate, PID readers, recovery |
 | Member report and outcome | Agent / controller | PodSetRestore.status.members | Controller and workload owner |
-| Claims, intent, release, protection and cleanup evidence | Agent | Node journal outside workload mounts | Restart recovery |
+| Execution identity, intent, and cleanup information; restore also records target ownership and release proof | Agent | Small durable local record inaccessible to the workload | Restart recovery |
 
 #### Captured Member Table
 
@@ -773,6 +947,8 @@ session, member, and step IDs; the brain uses them to match contributions withou
 interpreting CUDA payloads. Duplicate contributions never count twice. Stale,
 foreign, conflicting, or out-of-order contributions cannot complete a barrier.
 Agents and local runtimes agree on protocol versions and step IDs.
+Each data exchange returns the collected payloads only after every member has
+contributed, including an empty payload when a member has no runtime data.
 
 This example is one capture-inspection exchange, not the full operation:
 
@@ -783,7 +959,7 @@ sequenceDiagram
     participant B as Brain
     H->>A: stepID and local resource records
     A->>B: Member contribution
-    Note over A,B: Wait for required contributions
+    Note over A,B: Wait for every member
     B-->>A: Collected records
     A-->>H: Records unchanged
     H->>H: Validate resource relationships
@@ -803,9 +979,9 @@ Successful coordination alone proves neither artifact publication nor release.
 #### Runtime Responsibilities
 
 The agent supplies its coordinator with ordered membership, local shim processes,
-protocol/artifact versions, and saved records for restore. Coordinators validate
-the complete resource graph and reject mixed checkpoints, changed ranks,
-unsupported handles, and incompatible topology. Allocation identities remain
+protocol/artifact versions, and the collected saved runtime records for restore.
+Coordinators validate the complete resource graph and reject mixed checkpoints,
+changed ranks, unsupported handles, and incompatible topology. Allocation identities remain
 stable; the original creator is distinct from the holder selected to save or
 export an allocation. The GPU-handle map is rebuilt locally during restore;
 the brain interprets neither it nor the CRIU IP map.
@@ -819,13 +995,14 @@ not safe refusal.
 
 The local channel separates runtime payloads from agent authority. Forwarded
 bytes cannot forge votes or execution grants. Interrupted mutating work is
-never replayed, and all helper work uses the operation deadline.
+never replayed, and all helper work uses the operation deadline and the shared
+executor's [shared recovery rules](#shared-recovery-rules).
 
 #### Coordination Milestones
 
 These labels define behavior, not wire formats, extra RPC round trips, or
 Kubernetes phases. In particular, ReadyForTCP may be the successful response
-to the restore join barrier.
+to the restore join barrier, alongside the collected saved runtime records.
 
 | Event | Sender | Meaning |
 | --- | --- | --- |
@@ -887,7 +1064,7 @@ attempt UID and admitted container ID. Existing existence-based gates and PID
 readers must remain compatible; recovery validates the identity fields.
 
 The marker is the application release point. It must never be partly visible.
-Journaled release then preserves that fact independently of the marker.
+The agent then preserves release proof independently of the marker's lifetime.
 ReadyForTCP and TCP unblocking are not evidence of application release.
 Recovery and cancellation follow the evidence-first rules in
 [Failure and Recovery](#failure-and-recovery).
@@ -933,9 +1110,9 @@ resources and must not be logged.
 **Local authority.** The agent-coordinator channel must prevent workload processes
 from impersonating either endpoint or forging execution permission. Workload-writable
 control files cannot supply authority. Sharing namespaces is not a security
-boundary. Journals stay outside workload mounts. The release marker remains
-workload-visible; this design does not claim safety against malicious marker
-tampering.
+boundary. Durable recovery records are inaccessible to the workload. The release
+marker remains workload-visible; this design does not claim safety against
+malicious marker tampering.
 
 **Trust limits.** The controller validates report identities, not which node wrote
 them. V1 trusts privileged agents, which may share a service account; it does not
@@ -993,7 +1170,7 @@ deliver the following capabilities:
 | Per-Pod integration | Set-owned capture detection; set-mode Pod-contract validation and restore-proxy interception; direct set restore through the per-Pod executor. |
 | Generic coordination | Controller-supplied context, authenticated agent-brain transport, fixed membership, deadlines, barriers, and session loss handling. |
 | Local runtime extension | Protected agent-coordinator channel; read-only inspection, preparation, shared-resource reconstruction, and local validation. |
-| Durable execution and release | Claims, intent, atomic marker publication, recovery with missing or unreadable evidence, and bounded API cleanup. |
+| Shared executor lifecycle and recovery | Cancel and drain helpers after agent loss; retain execution and cleanup evidence. Restore also needs exclusive target ownership and durable release proof. Reuse artifacts and member results; never replay interrupted set execution. |
 | Preserved TCP | Complete artifact-derived map; group-aware socket-image handling; protection until ReadyForTCP and safe failure cleanup. |
 | Execution hold | A qualified hold independent of TCP isolation for both shimmed and shimless members. |
 | Timer safety and source lifetime | Set-wide integration of #577 work and tests establishing source restart/deletion constraints. |
@@ -1029,6 +1206,12 @@ Tests must drive the set API, not only local executors. Tracking:
   Completed checkpoints do not expire with the capture deadline.
 - Test TargetGone before/after admission, Unknown from unreadable release evidence,
   late evidence settling Unknown, and final results surviving restarts and loss.
+- Validate cancellation as Failed with reason Cancelled. Reject Cancelled as a
+  restore outcome or report phase. Cancellation never overrides Restored or
+  resolves Unknown without release evidence.
+- Reject replacing one target inside a bound attempt. Retry an interrupted group
+  with a new attempt and a complete new set of Pod UIDs; keep the original
+  bindings and member results unchanged.
 
 #### Artifact and Per-Pod Integration Tests
 
@@ -1067,10 +1250,24 @@ Tests must drive the set API, not only local executors. Tracking:
   local permission before BeginCheckpoint. Revalidate frozen records; a lost
   reply is uncertain, not refused. ReadyForDump requires every Prepared report
   and saved metadata.
+- Withhold one member's inspection data: the brain cannot return a complete
+  collection, and members cannot vote ReadyToPrepare. Once all contributions
+  arrive, each member validates the collected data before voting. Include
+  members without runtime records and members on the same node.
 - Withhold ReadyForTCP after one member restores: isolation remains. After it is
   delivered, kernel TCP traffic may proceed but application work remains held,
   including without shims and after agent/helper loss. Runtime verification and
   ReleaseAuthorized remain necessary.
+- Include saved runtime records in restore joins, with empty contributions where
+  needed. Withhold one join: neither ReadyForTCP nor the complete record set is
+  returned. Once all join, distribute records unchanged; record delivery and
+  runtime validation or reconstruction must not delay TCP authorization.
+  Withhold a later runtime-step contribution: its complete data set cannot be
+  returned and application release remains blocked.
+- Exercise allocation and multicast replacement-handle exchanges, completion-only
+  steps, and the final inspection exchange. Peers must use the replacement handles;
+  coordinators must reject a reconstructed resource graph that differs from the
+  checkpoint. A completion-only step cannot advance until every member succeeds.
 - Workload files, endpoints, and forwarded bytes cannot forge votes or grants.
   Local-channel loss fails the member. Established member/owner loss fails the
   session without replay; reconnecting to the same endpoint does not resume it.
@@ -1083,16 +1280,24 @@ Tests must drive the set API, not only local executors. Tracking:
 | Refusal or identity/IP change after authorization | Stop local new work; apply boundary-specific handling to peers already preparing. Never rewrite pinned context. |
 | Crash after readiness vote or authorization, before intent | No source termination based on the vote alone. |
 | Crash during preparation or lost BeginCheckpoint reply | No replay; use unsafe-source handling if execution cannot be excluded. |
+| Agent process crash or agent-container restart during CRIU or GPU work | Cancel/drain old helper work and confirm it cannot act before cleanup or new execution. Test surviving helpers, unavailable stop confirmation, and a race with completion. Never terminate a released application as helper cleanup. |
+| Artifact committed, crash before reporting capture success | Recover the committed artifact and report Captured; do not dump again. |
+| Execution record missing, corrupt, unreadable, or inconsistent | Never infer that work did not start. Preserve independent success/release proof; otherwise restore remains Unknown without replay, teardown, or target reuse. Capture follows unsafe-source handling if destructive work cannot be excluded. |
 | Any restore preflight refusal or insufficient gate budget | No CRIU starts; placeholders remain. Test fresh and partly spent gates and conflicting annotations. |
-| Crash after Passed, before Admitted | Recover/revalidate the claim or free it; do not trust the stale report. |
+| Crash after Passed, before Admitted | Recover the target reservation and repeat local preflight if not yet admitted. If admission was committed meanwhile, verify the admitted identity, active attempt/session, and deadline before first execution; do not reset group admission. |
+| Agent restarts with no local execution intent while peers are already restoring | If the original attempt, bindings, session, and deadline remain valid, start this member's first restore under existing admission. Keep the same IP map and join the original session only after local restore. |
+| Admitted target identity changes before first local execution | Do not start this member. Fail the attempt without resetting admission or requiring new preflight votes. Peers follow normal partial-failure handling; preserve completed Restored results. |
+| Same restart after attempt/session failure, deletion, or expiry | Do not start restoration. Finish owned cleanup and free the reservation. If current state cannot be verified, retain the reservation and wait. |
 | Crash during local restore or after TCP unblocking, confirmed unreleased | Maintain hold; re-isolate before teardown without API access or a surviving IP map. Never infer release from ReadyForTCP. |
-| Marker published, crash before release is journaled | Recover matching evidence durably, preserve Restored, and finish cleanup. |
-| Execution intent recorded, marker unreadable, no journaled release | Report Unknown; do not kill, replay, release again, or alter target protection. Retry observation, including after attempt failure/deletion. |
+| Marker published, crash before release is otherwise recorded | Recover the matching marker, preserve Restored, and finish cleanup. |
+| Execution intent recorded, marker unreadable, no other release proof | Report Unknown; do not kill, replay, release again, or alter target protection. Retry observation, including after attempt failure/deletion. |
 | Evidence becomes readable after Unknown | Settle the member from evidence; never reopen the failed attempt. Test both proved release and confirmed non-release. |
-| Journal proves release, marker missing/unreadable | Preserve Restored despite API loss, failed/deleted attempt, target loss, or later container restart. Cleanup only recorded resources. |
-| Brain or agent connection loss | Fail affected live sessions without replay. Preserve completed artifacts and proved release, and respect unknown release evidence. |
+| Durable release proof exists, marker missing/unreadable | Preserve Restored despite API loss, failed/deleted attempt, target loss, or later container restart. Cleanup only recorded resources. |
+| Brain owner loss or established member-connection loss | Fail affected live sessions without replay. Preserve completed artifacts and proved release, and respect unknown release evidence. |
 | Failure/deletion/expiry at every boundary | Stop new work; follow evidence-first cleanup and bounded finalizers. Commands already delivered are not retractable. |
-| Reused Pod/container/sandbox or competing attempt | Reject spent targets; permit claim-only targets after cleanup. Never adopt or clean up replacements. |
+| Capture or restore cancelled before successful completion | Report Failed with reason Cancelled where non-completion is established. Preserve Captured/Restored results; unknown release remains Unknown. |
+| Reused Pod/container/sandbox or competing attempt | Reject spent targets. Reuse untouched placeholders only after cleanup and only if no group member may have executed. Never adopt or clean up replacements. |
+| Retry after partial restore or partial release | Use the same checkpoint with a new attempt and fresh targets for every member. Derive a complete new IP map; never reuse restored peers or mutate the old bindings. Owner retirement leaves old Restored results unchanged. |
 | Delayed initial brain availability | Retry within the absolute deadline; never renew it or transparently rejoin a lost session. |
 | TCP protection and agent restart | Preserve unrelated policy and agent-brain reachability; cleanup/re-isolation uses only attempt-owned resources. |
 
@@ -1128,8 +1333,9 @@ Tests must drive the set API, not only local executors. Tracking:
 pass CPU, contract, and fault tests. Cross-node GPU reconstruction and preserved
 TCP pass together, plus at least one inference workload. Set-mode startup,
 group-aware socket handling, artifact-derived maps, actual execution holds
-with and without shims, and evidence-first recovery pass. Timer and source-lifetime
-results establish supported operating constraints.
+with and without shims, helper-loss cleanup, full-group retries, and evidence-first
+recovery pass. Timer and source-lifetime results establish supported operating
+constraints.
 
 **Beta readiness:** API/status ownership is stable in use. Repeated multi-node
 tests cover restarts/upgrades, partial release, session loss, scheduling delays,
@@ -1328,15 +1534,15 @@ type PodSetRestoreSpec struct {
 	Targets []PodSetRestoreTarget `json:"targets"`
 }
 
-// +kubebuilder:validation:Enum=Pending;Restored;Failed;Cancelled;Unknown
+// Cancellation is reported as Failed with reason Cancelled.
+// +kubebuilder:validation:Enum=Pending;Restored;Failed;Unknown
 type RestoreOutcome string
 
 const (
-	RestorePending   RestoreOutcome = "Pending"
-	RestoreRestored  RestoreOutcome = "Restored"
-	RestoreFailed    RestoreOutcome = "Failed"
-	RestoreCancelled RestoreOutcome = "Cancelled"
-	RestoreUnknown   RestoreOutcome = "Unknown"
+	RestorePending  RestoreOutcome = "Pending"
+	RestoreRestored RestoreOutcome = "Restored"
+	RestoreFailed   RestoreOutcome = "Failed"
+	RestoreUnknown  RestoreOutcome = "Unknown"
 )
 
 // +kubebuilder:validation:Enum=Passed;Refused
@@ -1347,14 +1553,13 @@ const (
 	PreflightRefused PreflightResult = "Refused"
 )
 
-// +kubebuilder:validation:Enum=Restoring;Restored;Failed;Cancelled;Unknown
+// +kubebuilder:validation:Enum=Restoring;Restored;Failed;Unknown
 type RestoreReportPhase string
 
 const (
 	RestoreReportRestoring RestoreReportPhase = "Restoring"
 	RestoreReportRestored  RestoreReportPhase = "Restored"
 	RestoreReportFailed    RestoreReportPhase = "Failed"
-	RestoreReportCancelled RestoreReportPhase = "Cancelled"
 	RestoreReportUnknown   RestoreReportPhase = "Unknown"
 )
 
@@ -1379,8 +1584,8 @@ type RestoreMemberReport struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.admittedContainerID) || (has(self.admittedContainerID) && self.admittedContainerID == oldSelf.admittedContainerID)",message="admitted container ID is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName == oldSelf.nodeName)",message="target node is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.targetPodIP) || (has(self.targetPodIP) && self.targetPodIP == oldSelf.targetPodIP)",message="target Pod IP is immutable"
-// +kubebuilder:validation:XValidation:rule="!(oldSelf.outcome in ['Restored', 'Failed', 'Cancelled']) || self.outcome == oldSelf.outcome",message="final member outcomes are immutable"
-// +kubebuilder:validation:XValidation:rule="oldSelf.outcome != 'Unknown' || self.outcome in ['Unknown', 'Restored', 'Failed', 'Cancelled']",message="Unknown can only remain Unknown or become final"
+// +kubebuilder:validation:XValidation:rule="!(oldSelf.outcome in ['Restored', 'Failed']) || self.outcome == oldSelf.outcome",message="final member outcomes are immutable"
+// +kubebuilder:validation:XValidation:rule="oldSelf.outcome != 'Unknown' || self.outcome in ['Unknown', 'Restored', 'Failed']",message="Unknown can only remain Unknown or become final"
 type PodSetRestoreMemberStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
