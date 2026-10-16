@@ -23,6 +23,8 @@
 #include <chrono>
 #include <charconv>
 #include <optional>
+#include <set>
+#include <limits>
 #include <stdexcept>
 #include <cstring>
 #include <filesystem>
@@ -683,6 +685,7 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
   }
   gpu_connections.Stop();
   listener = FileDescriptor(-1);
+  broker.CancelActiveTransactions();
   broker.CancelGpuWork();
   WaitForHandlers(handlers);
 }
@@ -711,8 +714,11 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
   options.socket_path = arguments[0];
   options.staging_directory = arguments[1];
   options.storage_root = arguments[2];
+  std::set<std::string_view> seen;
   for (size_t index = kPathArgumentCount; index < arguments.size(); ++index) {
     const auto option = arguments[index];
+    if (!seen.insert(option).second)
+      throw std::invalid_argument("duplicate option: " + std::string(option));
     if (++index == arguments.size()) {
       throw std::invalid_argument("missing value for " + std::string(option));
     }
@@ -722,6 +728,14 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
         throw std::invalid_argument("invalid value for --custom-storage-engine: " + std::string(input));
       }
       options.enable_gpu = input == "on";
+    } else if (option == "--transaction-lifetime") {
+      const auto seconds = ParseSize(option, input, false);
+      // Leave room for adding the duration to the monotonic clock.
+      const auto maximum = std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::steady_clock::duration::max() / 2).count();
+      if (seconds > static_cast<uint64_t>(maximum))
+        throw std::invalid_argument("transaction lifetime exceeds clock range");
+      options.transaction_lifetime = std::chrono::seconds(seconds);
     } else if (option == "--max-concurrent-requests") {
       options.max_concurrent_requests = ParseSize(option, input, false);
     } else if (option == "--custom-storage-buffer-count") {
@@ -771,7 +785,7 @@ RunDaemon(const DaemonOptions& options)
     return Fail("protect control socket", {errno, std::generic_category()});
   }
   try {
-    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine));
+    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine), options.transaction_lifetime);
     Serve(listener, broker, options.max_concurrent_requests);
   } catch (const std::exception& failure) {
     std::cerr << "PageBroker: " << failure.what() << '\n';

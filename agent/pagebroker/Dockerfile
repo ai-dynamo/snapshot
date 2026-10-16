@@ -54,7 +54,7 @@ RUN find /tmp/nixl/subprojects -type f \( -iname 'license*' -o -iname 'copying*'
       done < /tmp/nixl-notices > /nixl-runtime/THIRD-PARTY-NOTICES.txt
 RUN git -C /tmp/nvtx rev-parse HEAD > /NVTX_COMMIT
 
-FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build
+FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build-dependencies
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -72,6 +72,7 @@ COPY --from=nixl /nixl-runtime/lib/ /nixl-runtime-check/
 ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 
+FROM build-dependencies AS build
 WORKDIR /src
 COPY . .
 # Run CPU tests and compile GPU tests. GPU tests run separately.

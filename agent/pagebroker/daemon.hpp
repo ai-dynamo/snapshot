@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <filesystem>
 #include <span>
 #include <string_view>
@@ -20,6 +21,7 @@ struct DaemonOptions {
   size_t max_concurrent_requests = kDefaultMaxConcurrentRequests;
   snapshot::pagebroker::gpu::EngineOptions gpu;
   bool enable_gpu = true;
+  std::chrono::seconds transaction_lifetime{7500};
 };
 
 DaemonOptions ParseDaemonOptions(std::span<const std::string_view> arguments);
