@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import contextlib
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -63,11 +64,78 @@ class S3FixtureTest(unittest.TestCase):
             stack.enter_context(patch.object(s3_integration, "create_session", return_value=session))
             failure = RuntimeError("native restore failed")
             stack.enter_context(patch.object(s3_integration, "run_native", side_effect=failure))
-            args = SimpleNamespace(tls=False, image=None, binary="unused-test-binary")
+            args = SimpleNamespace(tls=False, resources=False, image=None, binary="unused-test-binary")
             with self.assertRaises(RuntimeError) as raised:
                 s3_integration.run(args, environment)
             self.assertIs(raised.exception, failure)
             self.assertFalse(Path(environment["PAGEBROKER_S3_TEST_FIXTURE"]).parent.exists())
+
+
+class FaultServiceTest(unittest.TestCase):
+    def test_partial_tree_fault_allows_first_object_and_only_denies_bad_put(self):
+        forwarded = []
+
+        def backend(environment, start_response):
+            forwarded.append((environment["REQUEST_METHOD"], environment["PATH_INFO"]))
+            start_response("200 OK", [("Content-Length", "2")])
+            return [b"ok"]
+
+        service = s3_integration.FaultService(backend)
+        statuses = []
+        for method, name in (("PUT", "first"), ("PUT", "bad"), ("HEAD", "first")):
+            service({"PATH_INFO": "/bucket/roundtrip/engine-partial/" + name,
+                     "QUERY_STRING": "", "REQUEST_METHOD": method},
+                    lambda status, headers: statuses.append(status))
+        self.assertEqual(statuses, ["200 OK", "403 Forbidden", "200 OK"])
+        self.assertEqual(forwarded, [("PUT", "/bucket/roundtrip/engine-partial/first"),
+                                     ("HEAD", "/bucket/roundtrip/engine-partial/first")])
+
+    def test_retries_are_scoped_to_the_native_test_prefix(self):
+        forwarded = []
+
+        def backend(environment, start_response):
+            forwarded.append(environment["PATH_INFO"])
+            start_response("200 OK", [("Content-Length", "2")])
+            return [b"ok"]
+
+        service = s3_integration.FaultService(backend)
+        statuses = []
+        for key in ("fixture/retry", "roundtrip/retry/data", "roundtrip/retry/data", "roundtrip/retry/data"):
+            environment = {"PATH_INFO": "/bucket/" + key, "QUERY_STRING": "", "REQUEST_METHOD": "PUT",
+                           "wsgi.input": io.BytesIO(b"")}
+            service(environment, lambda status, headers: statuses.append(status))
+        self.assertEqual(statuses, ["200 OK", "503 Service Unavailable", "503 Service Unavailable", "200 OK"])
+        self.assertEqual(forwarded, ["/bucket/fixture/retry", "/bucket/roundtrip/retry/data"])
+
+    def test_lost_response_happens_after_backend_completion(self):
+        accepted = []
+
+        def backend(environment, start_response):
+            accepted.append(True)
+            start_response("200 OK", [("Content-Length", "2")])
+            return [b"ok"]
+
+        service = s3_integration.FaultService(backend)
+        statuses = []
+        body = service({"PATH_INFO": "/bucket/roundtrip/lost-complete/data", "QUERY_STRING": "uploadId=test-id",
+                        "REQUEST_METHOD": "POST"}, lambda status, headers: statuses.append(status))
+        self.assertEqual(accepted, [True])
+        self.assertEqual(statuses, ["503 Service Unavailable"])
+        self.assertIn(b"ServiceUnavailable", b"".join(body))
+
+    def test_expected_cancelled_body_does_not_hide_unrelated_backend_errors(self):
+        def backend(environment, start_response):
+            raise OSError("Invalid chunk header")
+
+        service = s3_integration.FaultService(backend)
+        environment = {"PATH_INFO": "/bucket/roundtrip/source-truncated/data", "QUERY_STRING": "",
+                       "REQUEST_METHOD": "PUT"}
+        statuses = []
+        service(environment, lambda status, headers: statuses.append(status))
+        self.assertEqual(statuses, ["408 Request Timeout"])
+        environment["PATH_INFO"] = "/bucket/roundtrip/ordinary/data"
+        with self.assertRaises(OSError):
+            service(environment, lambda status, headers: None)
 
 
 if __name__ == "__main__":
