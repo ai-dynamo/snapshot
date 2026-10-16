@@ -50,6 +50,28 @@ func TestFailureCodeMapsUnknownValuesToUnspecified(t *testing.T) {
 	}
 }
 
+func TestProtocolIOEngine(t *testing.T) {
+	posix, err := protocolIOEngine(TransferEnginePosixCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posix.GetPosixCopy() == nil {
+		t.Fatalf("protocolIOEngine(%q) = %v, want POSIX copy", TransferEnginePosixCopy, posix)
+	}
+
+	modelStreamer, err := protocolIOEngine(TransferEngineModelStreamer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modelStreamer.GetModelStreamer() == nil {
+		t.Fatalf("protocolIOEngine(%q) = %v, want Model Streamer", TransferEngineModelStreamer, modelStreamer)
+	}
+
+	if _, err := protocolIOEngine("unknown"); err == nil {
+		t.Fatal("protocolIOEngine accepted an unknown transfer engine")
+	}
+}
+
 func TestRequestStopsWhenContextIsCanceled(t *testing.T) {
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {

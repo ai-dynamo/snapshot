@@ -59,6 +59,19 @@ func (c *AgentConfig) Validate() error {
 	default:
 		return &ConfigError{Field: "pageBroker.restoreMode", Message: "pageBroker.restoreMode must be staged or direct"}
 	}
+	transferEngine := strings.TrimSpace(c.PageBroker.TransferEngine)
+	if transferEngine == "" {
+		transferEngine = "posix-copy"
+	}
+	switch transferEngine {
+	case "posix-copy", "model-streamer":
+		c.PageBroker.TransferEngine = transferEngine
+	default:
+		return &ConfigError{
+			Field:   "pageBroker.transferEngine",
+			Message: fmt.Sprintf("unsupported transfer engine %q; expected %q or %q", transferEngine, "posix-copy", "model-streamer"),
+		}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
@@ -89,6 +102,7 @@ type PageBrokerSpec struct {
 	// RestoreMode selects the restore source. Empty defaults to direct.
 	RestoreMode       string `yaml:"restoreMode"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
+	TransferEngine    string `yaml:"transferEngine"`
 }
 
 // DefaultCheckpointTimeoutSeconds bounds a dump for a config written before the field existed.
