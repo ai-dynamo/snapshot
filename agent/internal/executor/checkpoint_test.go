@@ -301,11 +301,11 @@ func TestCheckpointPreparationFailure(t *testing.T) {
 						return state, 0, nil
 					})
 				waitPageBrokerTest(t, server)
-				require.ErrorContains(t, err, "prepare PageBroker checkpoint")
+				require.ErrorContains(t, err, "while preparing PageBroker checkpoint")
 				if preparation == "rejected" {
 					assert.ErrorContains(t, err, "STORAGE_ERROR: storage unavailable")
 				} else {
-					assert.ErrorContains(t, err, "prepare PageBroker checkpoint: read PageBroker response: EOF")
+					assert.ErrorContains(t, err, "while preparing PageBroker checkpoint: read PageBroker response: EOF")
 					assert.ErrorIs(t, err, io.EOF)
 				}
 				if cleanup == "confirmed" {
@@ -426,7 +426,7 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	}, cfg, func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
 		return &types.CheckpointContainerSnapshot{}, 0, nil
 	})
-	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
+	require.ErrorContains(t, err, "while preparing PageBroker checkpoint")
 	assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
 	assert.Less(t, time.Since(start), 3*time.Second)
 	assert.False(t, CheckpointNeedsSourceKill(err))
