@@ -3,11 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# SNEP-324: Coordinated Multi-Pod Checkpoint and Restore
-
-Tracking issue: [snapshot#324](https://github.com/ai-dynamo/snapshot/issues/324)
-
-Status: Draft
+# SNEP-324: Coordinated multi-Pod snapshot and restore
 
 <!-- toc -->
 - [Summary](#summary)
@@ -16,1344 +12,899 @@ Status: Draft
   - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
   - [User Stories](#user-stories)
+    - [Story 1: Scaling out a multi-node inference worker](#story-1-scaling-out-a-multi-node-inference-worker)
+    - [Story 2: A communication library that restores itself](#story-2-a-communication-library-that-restores-itself)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
   - [Architecture](#architecture)
+  - [The coordination session](#the-coordination-session)
+  - [Communication paths](#communication-paths)
+  - [Phases at a glance](#phases-at-a-glance)
+  - [Group checkpoint](#group-checkpoint)
+  - [Group restore](#group-restore)
+  - [cuInterpose across nodes](#cuinterpose-across-nodes)
+  - [Communication libraries](#communication-libraries)
+  - [Cross-Pod TCP connections](#cross-pod-tcp-connections)
+  - [Failure handling and recovery](#failure-handling-and-recovery)
+  - [Deadlines](#deadlines)
   - [API](#api)
-    - [Examples](#examples)
-  - [Checkpoint Flow](#checkpoint-flow)
-  - [Restore Flow](#restore-flow)
-  - [Failure and Recovery](#failure-and-recovery)
-    - [Operation Conditions](#operation-conditions)
-    - [Checkpoint Member Results and Availability](#checkpoint-member-results-and-availability)
-    - [Restore Member Outcomes](#restore-member-outcomes)
-    - [Agent Restart Recovery](#agent-restart-recovery)
-      - [Shared Recovery Rules](#shared-recovery-rules)
-      - [Capture Recovery](#capture-recovery)
-      - [Restore Recovery](#restore-recovery)
-      - [Retrying a Restore](#retrying-a-restore)
-    - [Failure and Cancellation](#failure-and-cancellation)
-    - [Controller Recovery and Deletion](#controller-recovery-and-deletion)
-  - [Restore Pod Contract](#restore-pod-contract)
-  - [Validation and Binding](#validation-and-binding)
-  - [Captured Metadata and Storage](#captured-metadata-and-storage)
-    - [Captured Member Table](#captured-member-table)
-  - [Runtime Session and Extension Contract](#runtime-session-and-extension-contract)
-    - [Session](#session)
-    - [Runtime Responsibilities](#runtime-responsibilities)
-    - [Coordination Milestones](#coordination-milestones)
-  - [Network Identity and Application Release](#network-identity-and-application-release)
-    - [Preserving Member Connections](#preserving-member-connections)
-    - [TCP Protection and Execution Hold](#tcp-protection-and-execution-hold)
-    - [Release Evidence](#release-evidence)
-    - [Timer Safety and Source Lifetime](#timer-safety-and-source-lifetime)
   - [Security](#security)
   - [Configuration](#configuration)
   - [Performance and Scalability](#performance-and-scalability)
   - [Monitoring](#monitoring)
-  - [Dependencies and Qualification Gates](#dependencies-and-qualification-gates)
+  - [Dependencies](#dependencies)
   - [Test Plan](#test-plan)
-    - [API and Controller Tests](#api-and-controller-tests)
-    - [Artifact and Per-Pod Integration Tests](#artifact-and-per-pod-integration-tests)
-    - [Runtime Contract Tests](#runtime-contract-tests)
-    - [Crash and Cancellation Tests](#crash-and-cancellation-tests)
-    - [End-to-End Qualification](#end-to-end-qualification)
   - [Graduation Criteria](#graduation-criteria)
-- [Appendix: API Definitions](#appendix-api-definitions)
-  - [Public Kubernetes Types](#public-kubernetes-types)
-  - [Artifact Metadata Types](#artifact-metadata-types)
+- [Implementation History](#implementation-history)
+- [Alternatives](#alternatives)
+- [Appendix](#appendix)
+  - [A. Open questions](#a-open-questions)
+  - [B. Changes from the prototype](#b-changes-from-the-prototype)
+  - [C. Diagram sources](#c-diagram-sources)
+  - [D. API definitions](#d-api-definitions)
 <!-- /toc -->
 
 ## Summary
 
-Add Kubernetes resources to checkpoint and restore a group of cooperating Pods,
-including across nodes. A checkpoint is reusable; each restore attempt names a
-target Pod for every member. Snapshot checks all members before destructive work,
-coordinates reconstruction, and reports the group result and each member's
-result. Operations are not atomic and do not support rollback.
+Distributed inference and training workloads often run as a set of Pods whose
+processes depend on one another: they hold communicators that span the Pods,
+keep long-lived control-plane connections between them, and, on GPU fabrics
+that span nodes, may even share GPU memory across nodes. Because Snapshot
+checkpoints and restores each Pod in isolation, none of this cross-Pod state
+survives today. This SNEP introduces `PodSetSnapshot` and `PodSetRestore`, which
+let a user checkpoint such a set as one unit and restore it on the same or
+different nodes, with members that keep their identity and rank, an admission
+step that refuses unsafe attempts before anything irreversible happens, and a
+single outcome for the whole set. A short-lived coordination session, hosted by
+a new Snapshot coordinator and reachable only through each node's agent,
+synchronizes the members of every attempt and serves as the restore-time
+rendezvous for cuInterpose and for communication libraries such as NCCL, so that
+workloads neither deploy a rendezvous server nor handle secrets, while a single
+Pod continues to behave exactly as it does today.
 
 ## Motivation
 
-A distributed inference replica can span several Pods. Restoring each Pod
-independently is not enough: established TCP connections need the new addresses
-of both endpoints, and shared GPU resources need coordinated reconstruction.
-An early-restored member must not send traffic to a peer whose sockets do not
-yet exist.
+Snapshot's pipeline is per Pod by design: an agent quiesces one container,
+checkpoints its CUDA state, dumps it with CRIU, and later restores it into a
+placeholder Pod without knowing that any other Pod exists. Workloads that span
+several Pods, such as tensor- or pipeline-parallel inference engines,
+disaggregated serving with multi-node workers, and distributed training jobs,
+break that assumption because part of their state lives between the Pods rather
+than inside any one of them. Their communicators, NCCL being the common case,
+are bound to peer addresses that change when Pods move; their control planes,
+typically MPI or a custom RPC layer launched across Pods, depend on TCP
+connections that Snapshot restores as closed; and, where the GPU fabric lets
+processes on different nodes import one another's memory, the shared
+allocations and multicast teams escape
+[SNEP-295](https://github.com/ai-dynamo/snapshot/issues/295)'s cuInterpose,
+whose coordinator only sees the processes of one Pod. Even where each Pod could
+be handled on its own, a snapshot in which one member succeeded and another
+failed cannot be restored, so the set also needs a single outcome.
 
-The workload owner needs one operation to capture a complete replica, restore
-it into replacement Pods, and see what succeeded if the operation fails.
+All of these gaps reduce to one missing capability, namely a place where the
+members of a checkpoint or restore attempt can find each other, exchange small
+amounts of metadata, and move through phases together, and that capability is
+currently being built three times. The multi-node cuInterpose prototype
+embedded a coordination "brain" in rank 0's coordinator, NCCL Checkpoint expects
+an operator to start Redis and publish its address in a file before restore,
+and CUDA Checkpoint is adding a restore-time rendezvous interface for
+communication libraries while leaving the server to the platform. Snapshot
+already decides when every Pod is quiesced, dumped, restored, and released,
+which makes it the natural host for that rendezvous on Kubernetes; providing it
+once replaces three servers, with three lifecycles and three security models,
+by a single session that follows the attempt it serves.
 
 ### Goals
 
-- Publish a reusable checkpoint only when every member artifact is ready.
-- Restore onto compatible nodes and new IPs while preserving established
-  connections within the group and supported shared GPU resources.
-- Check all members before destructive work; enforce one operation deadline.
-- Preserve accurate member results after partial failure or component restart,
-  without replaying destructive work.
-- Reuse per-Pod execution and leave standalone APIs unchanged.
-- Keep group coordination independent of CUDA and support members without shims.
-- Leave Pod creation, placement, application readiness, and workload recovery to
-  the workload owner.
+- Capture a set of Pods and restore it on the same or different nodes as one
+  unit, with members that keep their identity and rank from checkpoint to
+  restore and one outcome per attempt.
+- Refuse an attempt before any irreversible step whenever the set cannot be
+  captured or restored safely, so that a refusal leaves every workload running.
+- Provide one coordination session per attempt that Snapshot's agents,
+  cuInterpose, NCCL Checkpoint, and CUDA Checkpoint's communication-library
+  interface all share, without a coordination listener on the Pod network and
+  without secrets inside Pods.
+- Preserve GPU memory that processes share across Pods, through cuInterpose,
+  wherever the platform supports cross-node sharing, without moving allocation
+  bytes between nodes, while letting members that share no GPU memory, such as
+  CPU-only control-plane Pods, take part in the same set.
+- Preserve TCP connections between members of the set across relocation.
+- Tolerate agent restarts without ever replaying CRIU into a restored container.
+- Keep single-Pod checkpoint and restore, and the existing resources, unchanged.
 
 ### Non-Goals
 
-- Discovering members, scheduling Pods, or changing membership, ranks, or logical
-  topology on restore.
-- Atomic capture or release, rollback, or keeping sources running after destructive
-  capture starts.
-- Transparent session failover, resuming interrupted execution, partial-member
-  restore retries, or automatic workload recovery.
-- Declaring application health or protecting in-flight requests.
-- Cross-namespace or cross-cluster restore, retained artifacts after checkpoint
-  deletion, or a hierarchy of groups.
-- Claiming support for an engine, transport, or GPU topology without qualification.
+- Creating, scheduling, or placing Pods. Snapshot provides primitives rather
+  than orchestration, so the workload owner, for example the Dynamo operator
+  with Grove, places the Pods, and Snapshot only verifies that the placement can
+  work.
+- Rolling back after the point of no return, retrying a failed member in place,
+  or changing the size of a set between checkpoint and restore.
+- Keeping an attempt alive across a coordinator failure, which this SNEP treats
+  as a failure of that attempt.
+- Assigning ranks or identities to library processes, which remains the
+  libraries' concern, and judging application health, which remains the owner's.
+- Moving shared GPU memory between fabric domains, and preserving connections
+  to peers outside the set, which are reset as they are today.
 
 ## Proposal
 
-Snapshot adds two namespaced resources:
+A workload owner checkpoints a multi-Pod workload by listing its Pods in a
+`PodSetSnapshot`, giving each one a member ID, and restores it by creating
+restore Pods, as it already does for a single Pod, together with a
+`PodSetRestore` that maps each member ID to one of them. Snapshot does the rest:
+the operator expands the set into per-member work that reuses the existing
+per-Pod pipeline, the agents carry that work out in lockstep, and the set
+resource reports progress per member and one outcome for the attempt.
 
-- **PodSetSnapshot** describes the source Pods and selected containers. Snapshot
-  creates one child PodSnapshot per member. The set becomes Ready only when all
-  artifacts are ready.
-- **PodSetRestore** references that checkpoint and names a target Pod and container
-  for each member. Each object is one attempt; multiple attempts may use the same
-  checkpoint.
+Every attempt moves through the same stages, and those stages define what a user
+can rely on. During admission, Snapshot only observes and validates: it waits
+until every member is ready, checks that the members can be captured or restored
+together, and, if anything is wrong, ends the attempt with a `Refused` or
+`DeadlineExceeded` reason while every workload keeps running. Admission ends
+with a commit, recorded as `committedAt`, which marks the point of no return;
+from then on the members proceed in lockstep, and a failure in any of them
+terminates all of them, because shared state cannot be left half-prepared. A
+capture ends when every member's artifacts are stored, whereas a restore ends
+with a release in which every workload resumes at about the same time, with
+shared GPU memory back at its original addresses, communicators rebuilt by their
+libraries, and connections between members intact on their new IP addresses.
+Release means that Snapshot handed the workload back, not that the application
+is healthy, so owners keep gating traffic on their own readiness checks.
 
-The workload owner creates the target Pods using Snapshot's restore Pod contract.
-Their selected containers run inert restore proxies, not the application command.
-Every target must be able to start without waiting for another member's
-application readiness.
-
-Restore has two separate milestones. First, every member's sockets are restored,
-so TCP communication can resume. Then shared runtime resources are rebuilt and
-verified, so application execution can be released. Application work stays held
-between these milestones, independently of Pod readiness and TCP isolation.
-
-Capture is destructive: a completed member capture ends its source process.
-A sibling's failure cannot undo it. Release is also asynchronous: an attempt may
-fail after some members have been released. Those members stay reported as
-Restored; Snapshot tears down only members known to be unreleased.
-
-Restored means Snapshot completed reconstruction and released the member.
-It does not mean the application is healthy or the Pod is Ready.
-
-Once any member may have started restoration, retry requires a new PodSetRestore
-and fresh target Pods for every member. The owner retires the partial replica
-and supplies the replacements. The new attempt uses the same checkpoint but a
-new complete IP map; the failed attempt's bindings never change. A refusal
-before any member starts execution does not by itself make the targets unusable.
+The boundaries are equally explicit. Snapshot's workload contract does not
+change, since a workload still reports `ready-for-snapshot` once quiescent and
+stays parked until `restore-complete`, although for a set that second rule
+becomes load-bearing: it is what keeps a restored member from acting before its
+peers are reconstructed, so a workload that cannot honor it is not supported.
+The owner must not delete or replace a source until its member is captured, and
+set restore Pods must carry the existing restore startup probe. Placement stays
+with the owner, but Snapshot refuses a restore that cannot work, for example one
+whose members share GPU memory across nodes but were placed in different fabric
+domains, because such a restore would otherwise fail only after its destructive
+steps. A refused restore leaves its Pods untouched, so a new attempt can reuse
+them, whereas a restore that failed after its commit needs fresh Pods for every
+member. Finally, a plain `PodSnapshot` or a single restore Pod never contacts the
+coordinator, so existing users are unaffected.
 
 ### User Stories
 
-- Restore a distributed inference replica into replacement Pods, then register
-  it for traffic after Snapshot and application readiness checks succeed.
-- Capture one distributed prefill or decode replica without including unrelated
-  replicas. Connections outside the group keep standalone restore behavior.
-- Inspect a failed attempt's member results, retire its Pods, and retry the
-  whole group with fresh targets and the same checkpoint.
+#### Story 1: Scaling out a multi-node inference worker
+
+A platform team serves a model with TensorRT-LLM at tensor parallelism 8 across
+two Pods with four GPUs each, on nodes connected by a multi-node NVLink fabric.
+To scale out without repeating model loading and warm-up, the Dynamo operator
+checkpoints a warmed-up pair of workers once with a `PodSetSnapshot`, and for
+every new replica it creates two restore Pods on other nodes of the same fabric
+together with a `PodSetRestore`. The restored workers resume with their shared
+GPU buffers at the same virtual addresses, NCCL rebuilds its communicators
+through the session, and the MPI connections between the two Pods continue on
+the new IPs, so the replica serves its first request without initialization.
+
+#### Story 2: A communication library that restores itself
+
+A communication-library maintainer adds checkpoint support by registering with
+CUDA Checkpoint and, during restore, publishing new connection identifiers
+through its rendezvous interface. On Kubernetes the library needs no deployment
+change and no knowledge of Snapshot, because the agents drive CUDA Checkpoint's
+phases in the right order and the coordinator serves the rendezvous for each
+restore, whereas on other platforms the same code runs against whatever
+rendezvous server those platforms provide.
 
 ### Limitations, Risks, and Mitigations
 
-| Risk | Handling |
+| Risk or limitation | Mitigation or decision |
 | --- | --- |
-| Partial capture or release | No rollback. Publish only complete checkpoints and preserve released member results. |
-| Agent crashes during release | Recover from durable release evidence. If evidence cannot be read, report uncertainty rather than kill a possibly released workload. |
-| Execution helpers survive an agent crash | Cancel and drain old helper work; confirm it can no longer act before cleanup or new execution. Never terminate a released application as helper cleanup. |
-| Brain loses an active session | Fail affected operations without replay. Completed artifacts and released workloads remain valid. |
-| Stale or missing execution context | Pin exact identities, enforce deadlines, and recheck live state at execution boundaries. |
-| TCP timers expire during interruption | Qualify the full capture and restore windows. Application quiescing and earlier TCP unblocking do not solve all timer failures. |
-| Artifact is lost | Withdraw checkpoint availability. Do not recapture or substitute an artifact. |
-| Source restarts while a peer is dumping | Establish source-lifetime constraints through qualification; do not assume a surviving Pod object is sufficient. |
-| Unsupported workload or topology | Refuse unsupported configurations and qualify each claimed combination. |
+| Every restore keeps the original set size and GPU count per member, and a set whose members share GPU memory across nodes must restore within one fabric domain. | The owner places the Pods, and admission verifies these constraints before CRIU runs, so a misplaced restore is refused without side effects. |
+| Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, the commit time is recorded, and member results report partial outcomes truthfully, so the owner can retire the set and retry with a new attempt. |
+| Snapshot does not freeze restored processes until release, because CUDA and cuInterpose need them running. | Release relies on the existing workload contract, under which the application stays parked until `restore-complete`; this SNEP states it as a requirement and leaves an enforced hold to future work. |
+| Holds that protect preserved connections pause their traffic while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
+| The coordinator is a single point of failure for attempts in flight. | Failure is fail-stop and reported as `CoordinatorLost`, and a standby replica serves new attempts; replicating sessions is deferred until operational evidence justifies it. |
+| The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
+| Importing GPU memory shared from another node after a native CUDA restore depends on a driver fix, and cuInterpose currently infers the kind of an imported FABRIC handle from its opaque contents. | Cross-node sharing in alpha requires a driver with the fix, and a public query for the handle kind is a beta prerequisite. |
+| CUDA Checkpoint's communication-library interface is not released yet. | NCCL Checkpoint works today through a compatibility endpoint, which the CUDA integration replaces once it is available. |
+| A restore Pod may already have spent part of its 30-minute startup probe waiting for its peers. | Admission refuses with `GateBudgetTooShort` unless every restore Pod's remaining probe time covers the remaining deadline. |
 
 ## Design Details
 
 ### Architecture
 
-Snapshot separates Kubernetes control, group coordination, and local execution.
-A **member** is a Pod and its selected container. Its stable ID matches capture
-to restore. Its **rank** is its position in the checkpoint member list, not a
-leader designation.
+![Components and communication paths](diagrams/architecture.svg)
 
-| Component | Location | Responsibility |
+*Figure 1. Components and communication paths.*
+
+The architecture separates three kinds of state because their lifetimes and
+failure modes differ. Durable intent and outcome live in the Kubernetes API,
+where the operator owns the set resources and each agent reports on the members
+it hosts, so status survives any process restart. Coordination state lives only
+for one attempt and only in the coordinator's memory: a session holds the keys,
+counters, and barriers through which members synchronize, and it disappears with
+the attempt, which keeps fabric handles and bootstrap identifiers out of etcd and
+gives every restore a fresh rendezvous store. Node-local mechanics remain with
+the agent, which already sequences CUDA checkpointing and CRIU and now also
+relays every exchange between a Pod and its session.
+
+That relaying is the decision with the widest consequences. The cuInterpose
+relay receives its session on a socket inherited from the agent, and libraries
+inside the workload reach the session through a per-Pod endpoint served by the
+agent, so no process in a Pod opens a coordination connection across the Pod
+network. As a result, no secret is delivered to a Pod or captured in a CRIU
+image, no NetworkPolicy must admit coordination traffic in workload namespaces,
+and the hold that protects preserved TCP connections during restore cannot block
+coordination; moreover, because the agent stamps each request with the identity
+of the Pod it came from, the coordinator authorizes requests by node and Pod
+rather than by a shared token.
+
+Within a session, the coordinator offers only generic operations, whose
+semantics deliberately match CUDA Checkpoint's rendezvous interface, and it
+leaves domain logic with the clients that understand it: cuInterpose's global
+validation and handle table run in rank 0's relay, NCCL publishes communicator
+identifiers under its own keys, and the agents build their phase barriers on the
+same operations. Consequently, the coordinator stays small, and new participants
+integrate without changing it.
+
+| Component | Runs as | Responsibility |
 | --- | --- | --- |
-| Workload owner | Workload controller or caller | Create and place Pods; request operations; manage application readiness and recovery. |
-| Set controller | Snapshot operator | Bind members and artifacts, supply session context, admit restores, and aggregate results. |
-| Brain | Shared service outside workload Pods | Authenticate agents, exchange opaque payloads, and enforce membership, barriers, deadlines, and session failure. |
-| Node agent | One per node | Represent local members; validate and execute work; own release, local recovery, and cleanup. |
-| Local coordinator | Temporary process inside the selected container's namespaces | Drive cuInterpose shims, order CUDA work, and validate exchanged runtime records. |
-| Application shim | Library in an application process | Track, prepare, and reconstruct that process's CUDA resources. |
+| Set controllers | Snapshot operator | Validate sets, pin identities, create member `PodSnapshot`s, enforce the deadline, and aggregate member results into one outcome. |
+| Snapshot coordinator | Deployment with one active replica and a standby | Host one in-memory session per attempt, authorize every request, enforce the deadline, and fail every member when one fails. |
+| Group executor | Snapshot agent | Run each member's capture or restore as session phases around the existing CUDA and CRIU steps, and record its intent before destructive work. |
+| Session proxy | Snapshot agent | Hold one stream per hosted member, serve the relay's socket and the Pod's endpoint, and stamp member identity on every request. |
+| cuInterpose relay | Short-lived process in each Pod that uses cuInterpose | Fan commands out to the Pod's processes as in SNEP-295 and, in rank 0, also lead the group. |
+| Communication libraries | Inside workload processes | Tear down and rebuild their own connections, using the session for rendezvous. |
 
-Only agents connect to the brain. Local coordinators communicate with their
-agents over protected local channels; they are not sidecars. The brain does not
-interpret CUDA records or choose CUDA phase order. Members without shims use
-their agents without a CUDA coordinator.
+### The coordination session
 
-The diagram shows two members on different nodes. Member boxes enclose the
-selected container's namespaces. Agents watch and report through Kubernetes.
-The controller supplies expected session context to the brain; the
-transport and delivery mechanism are implementation choices.
+A session corresponds to exactly one attempt, that is, one capture of a
+`PodSetSnapshot` or one `PodSetRestore`, and it is identified by that resource's
+UID, because each resource is exactly one attempt. The coordinator creates the session when the
+first agent attaches and reads members, ranks, and the deadline from the
+resource through a read-only watch, so sessions need no creation API and the
+resource remains the single source of truth; when the attempt ends, the session
+and all of its keys are discarded.
 
-```mermaid
-flowchart TB
-    C["Snapshot set controller"] <-->|"Bindings and results"| K["Kubernetes API"]
-    C -->|"Expected session context"| B["Shared brain service"]
-    K <-.->|"Watch and report"| A0
-    K <-.->|"Watch and report"| A1
-    B <-->|"Session messages"| A0
-    B <-->|"Session messages"| A1
-    subgraph N0["Node A"]
-        A0["Node agent"]
-        subgraph P0["Member 0 namespaces"]
-            H0["Local coordinator"] <-->|"CUDA operations"| S0["Application shim"]
-        end
-        A0 <-->|"Protected local channel"| H0
-    end
-    subgraph N1["Node B"]
-        A1["Node agent"]
-        subgraph P1["Member 1 namespaces"]
-            H1["Local coordinator"] <-->|"CUDA operations"| S1["Application shim"]
-        end
-        A1 <-->|"Protected local channel"| H1
-    end
-```
+| Operation | Semantics |
+| --- | --- |
+| `Insert(key, value)` | Stores a value only if the key is absent. Values are opaque bytes, limited to 64 KiB in library namespaces and to 32 MiB in Snapshot's own namespaces. |
+| `Get(key, wait)` | Returns the value as soon as it exists; otherwise returns `NOT_YET` when `wait` expires, `NOT_FOUND` at once when `wait` is zero, or `ABORTED` when the session fails. |
+| `Unset`, `Incr`, `Decr`, `CAS` | Linearizable updates on byte or 64-bit integer values, where `Incr` and `Decr` create an absent key at zero. |
+| `BarrierCreate(name, n)`, `BarrierPost`, `BarrierWait` | Named counters whose expected count the creator supplies; posting or waiting before creation is valid. |
+| `Attach`, `Commit`, `Fail`, `Leave` | Session control, reserved for Snapshot's agents and relays, together with events that announce commit, release, abort, and failure. |
 
-Agent-brain connections belong to Snapshot, not to application processes, and are
-not part of the checkpoint images.
+Two properties of these operations shape the rest of the design. Reads block on
+the server rather than polling, so a waiting `Get` completes the moment its key
+is inserted, and when the session fails, every pending read and barrier
+completes with `ABORTED`, which means no member waits out its own timeout after
+a peer has already failed. Requests also carry identifiers and may complete out
+of order, so a blocked read never stalls other requests on the same stream, and
+the agent can coalesce identical reads from the processes of one Pod into a
+single upstream request.
+
+Keys live in per-client namespaces that the coordinator enforces from the role
+that the agent stamps on each request. Agents use `snapshot/`, relays use
+`cuinterpose/`, and each CUDA Checkpoint client uses
+`cuda/<library>/<version>/`, which is the isolation that CUDA's interface
+promises its clients, whereas workload processes can never read or write
+Snapshot's or cuInterpose's keys. Every member takes part in the agents'
+barriers, including members that run no relay, and an agent that hosts several
+members of the same set attaches once per member and drives them concurrently,
+because handling them one after the other would deadlock the first barrier.
+
+![Coordination session lifecycle](diagrams/session-lifecycle.svg)
+
+*Figure 2. Lifecycle of a coordination session.*
+
+The commit is the hinge of this lifecycle. Before it, a failure aborts the
+attempt and leaves workloads running, whereas after it a failure is fail-stop.
+A capture commits just before its first destructive step, and a restore commits
+when admission completes, just before the first CRIU restore. For a restore,
+passing the release barrier moves the session to `Released`, after which a
+failure no longer affects running workloads and only ends the rendezvous, and
+the session closes once every member has left or its deadline expires.
+
+### Communication paths
+
+Every path in the system is either local to a node or runs between an agent and
+the coordinator; members never address one another through the coordinator,
+and no participant ever needs to send a message to one specific rank.
+
+| Path | Transport | Identity |
+| --- | --- | --- |
+| Operator, agents, and coordinator to the API server | Kubernetes API, read-only for the coordinator | RBAC |
+| Agent to coordinator | One gRPC stream per session and hosted member, over TLS | Pod-bound ServiceAccount token checked with TokenReview; the member Pod must run on the agent's node |
+| Agent to cuInterpose relay | Socket pair inherited through `nsenter` or `nsrestore` | Implicit, because the agent created it |
+| Workload processes to agent | Per-Pod endpoint: a Unix socket in the control volume, or a loopback listener inside the Pod's network namespace | Implicit, because the endpoint belongs to one Pod |
+| Relay to shims | Per-process Unix sockets from SNEP-295 | File permissions |
+| Workload to workload | GPU fabric, preserved TCP connections, and new library connections | Not involved |
+
+Every exchange that crosses Pods is one of six patterns, and each pattern is
+built from the session operations rather than added to them:
+
+| Pattern | Used by | Built from |
+| --- | --- | --- |
+| Broadcast | The cuInterpose leader sends each round's command to every relay | One `Insert`, read with a waiting `Get` by every relay |
+| Gather to one rank | Relays return records, results, and new fabric handles to the leader | One key per rank, read by the leader |
+| All-gather | Agents exchange new Pod IPs, capture IDs, fabric domains, and versions at admission | One key per rank, read by every agent after a barrier |
+| Barrier | Agents synchronize `prepare`, `net-freeze`, `sockets-restored`, `resume`, and `release` | A named counter whose expected count is the number of members |
+| Publish by key | The owner of a communicator or listening endpoint gives its peers a new identifier | `Insert` by the owner, waiting `Get` by each peer |
+| Session event | The coordinator announces commit, release, abort, and failure to every agent | Pushed on each agent's stream |
+
+A cuInterpose round combines the first two patterns, and because every phase of
+cuInterpose is one such round, Figure 3 is the unit from which the checkpoint
+and restore flows below are assembled. The leader inserts one command that every
+relay reads, every rank executes it at the same time, and each relay inserts one
+reply that the leader collects; the leader therefore never addresses a single
+rank, since the command carries the expected values for every rank and each
+relay keeps its own.
+
+![One cuInterpose round](diagrams/round.svg)
+
+*Figure 3. One cuInterpose round: a broadcast followed by a gather.*
+
+The loopback listener exists for clients that can only speak TCP, which today
+means NCCL Checkpoint's Redis client. The agent creates it by moving one thread
+into the Pod's network namespace, binding `127.0.0.1` on a port that the kernel
+chooses, and moving the thread back; the socket then belongs to the Pod's
+namespace while its file descriptor stays in the agent, so it is reachable only
+from inside that Pod. The agent opens the listener after CRIU restore, when it
+can no longer take a port that a restored process needs, and closes it, together
+with every connection it accepted, when the session closes.
+
+### Phases at a glance
+
+![Phases of a group checkpoint and a group restore](diagrams/phases.svg)
+
+*Figure 4. Phases of a group checkpoint and a group restore.*
+
+Figure 4 shows how the session steps, the cuInterpose rounds, and CUDA
+Checkpoint's phases interleave with the steps Snapshot already performs, and
+where each attempt commits. Figures 5 and 6 expand both columns into complete
+sequences, in which every shaded band labeled "round" is one instance of
+Figure 3, drawn with the same messages so that each round can be traced from
+the leader's command to the replies it collects.
+
+### Group checkpoint
+
+Capture starts once the operator has created a member `PodSnapshot` for every
+Pod in the set, each owned by the set and labeled with its member ID, so that
+the agent receiving the member's `PodSnapshotContent` follows the owner
+reference to the `PodSetSnapshot` and reads the member's rank, the set's size,
+and the set's UID, which names the session, without any change to the existing
+resources. Each agent
+waits until its workload reports `ready-for-snapshot`, attaches to the session,
+and contributes its Pod IP, its fabric domain when the Pod shares GPU memory
+across nodes, and its component versions to the admission exchange, while the
+relays run a first round that inspects every process and gathers the records to
+rank 0 for a global validation. Admission therefore changes nothing in any
+workload, and a mismatch, an invalid sharing topology, or a member that never
+becomes ready aborts the attempt with every source still running.
+
+After admission, the agents pass a `prepare` barrier and, where CUDA Checkpoint
+supports it, invoke its prepare phase on every CUDA process of every Pod at
+once, so that communication libraries tear down their connections while CUDA is
+still usable and while their peers do the same; invoking it one process at a
+time would deadlock libraries whose teardown is collective. A second round then
+moves the shims into their checkpointing phase, the leader revalidates a
+topology that now contains only application-owned shared memory and commits the
+attempt, and three more rounds run the destructive cuInterpose phases. Finally,
+every agent locks and checkpoints CUDA, holds the Pod's preserved connections,
+passes a `net-freeze` barrier, and only then runs CRIU, because each source ends
+with its own dump and the freeze is what lets dumps finish at different times
+without one member's disappearance resetting another member's sockets. Every
+artifact records the capture ID, which is the `PodSetSnapshot`'s UID, its own member ID, and the ordered table of all
+members with their Pod UIDs, containers, and Pod IPs, which is what a restore
+later uses to check that all members come from the same capture and to build
+the IP map.
+
+![Group checkpoint](diagrams/checkpoint.svg)
+
+*Figure 5. Group checkpoint. Each shaded band is a round as in Figure 3.*
+
+The operator marks the `PodSetSnapshot` Ready only when every member is
+Captured, and otherwise records which member failed and why. Since every source
+ends at its own dump, a failure after the commit leaves no source running, which
+the recorded commit time makes explicit to the owner. Ready also describes
+availability rather than history: if a member's content later disappears, the
+operator withdraws Ready with `ArtifactUnavailable` and refuses new restores,
+without ever recapturing.
+
+### Group restore
+
+Restore starts from Pods that the owner has already placed. Each restore Pod
+carries `nvidia.com/restore-set`, which tells the NRI plugin and the agent to
+take the container mapping from the `PodSetRestore` and to wait for the set
+rather than restore the Pod on its own, and a Pod can be the target of only one
+unfinished attempt. Admission again comes first and again changes nothing: each
+agent resolves its member's artifact, runs the existing compatibility checks,
+verifies that the restore Pod's remaining startup-probe time covers the
+remaining deadline, and contributes its new Pod IP, the capture ID from its
+artifact, its fabric domain, and its GPU count. Every agent therefore ends
+admission holding the complete IP map, built from the member table in its own
+artifact and the new IPs, together with the assurance that all members restore
+the same capture onto a placement that can work. Admission also pins each
+target's Pod UID, container, and IP, so that a change after that point fails
+the member with `PodIPChanged` instead of restoring with a stale map.
+
+Once the session commits, each agent records the `Restoring` reason on its
+restore Pod before anything destructive happens, holds the preserved connections
+in its Pod, and restores the processes with CRIU using the group IP map. As
+soon as every member has restored its sockets, the `sockets-restored` barrier
+lifts the holds, which keeps that window short and leaves the Pod network open
+for the connections that libraries create later; this is safe because the
+restored workload stays parked until `restore-complete`, so kernel traffic
+resumes while application traffic does not. In parallel, `nsrestore` restores
+and unlocks CUDA and runs the relays, whose rounds first match the restored
+processes to the saved records and then rebuild shared memory in lockstep,
+carrying the table of old and new fabric handles from one round to the next.
+Only then do the agents write the rendezvous endpoint, pass a `resume` barrier,
+and invoke CUDA Checkpoint's resume phase on every process, so that libraries
+reconnect on top of memory that is already back at its original addresses.
+
+A final `release` barrier guarantees that no workload resumes before every
+member has been reconstructed, after which each agent writes `restore-complete`
+with the `PodSetRestore`'s UID as an `attempt` key next to the existing `pid`
+key. That file is both the
+release point and the proof of release that a restarted agent checks first, and
+since each agent writes its own, a member can still fail before its release
+while its peers are already released, in which case the set reports both
+results as they are.
+
+![Group restore up to release](diagrams/restore.svg)
+
+*Figure 6. Group restore up to release. Each shaded band is a round as in Figure 3.*
+
+### cuInterpose across nodes
+
+SNEP-295 preserves CUDA memory shared between the processes of one Pod, and
+this SNEP extends it across Pods while keeping its per-process machinery and its
+fail-stop semantics. Where the GPU fabric supports cross-node sharing, the shim
+now admits FABRIC allocations and multicast objects, and their handles stay real
+at runtime: an export returns the driver's own handle and an import goes to the
+driver, so Snapshot never sits on the application's import path, while the shim
+records every handle so that the handle itself becomes the key that joins an
+importer to its creator on another node. Each shared allocation is still saved
+once, on its creator's node, and no allocation bytes therefore cross nodes.
+
+Every Pod that uses cuInterpose keeps a short-lived relay that fans each command
+out to its processes over their per-process sockets, and rank 0's relay also
+acts as the leader. The leader gathers every Pod's records, makes process
+identities unique by prefixing them with the rank, resolves importers to
+creators through the recorded handles, validates multicast teams whose devices
+span Pods, and then drives each phase as a round of Figure 3, in which the
+command carries the operation, the expected carrier bytes for every rank, and
+the current handle table, and each reply carries the new handles that the
+relay's creators exported. Members without cuInterpose run no relay, and since
+admission tells the leader which ranks run one, its gathers wait only for those.
+A Pod that is not part of a set keeps today's behavior and never opens a
+session.
+
+The barrier between adding every device of a multicast team and binding memory
+on any of them must be global, because the driver waits for the whole team
+before a bind or a mapping completes, and the round deadline doubles as the
+watchdog for a team that never forms. cuInterpose deliberately does not register
+as a CUDA Checkpoint client: CUDA does not order callbacks across clients, so
+nothing would guarantee that cuInterpose rebuilds memory before NCCL uses it,
+CUDA's store does not exist during checkpoint when cuInterpose needs lockstep
+teardown, and topology records exceed its value limit. Running between CUDA's
+phases, under the agent's control, provides that ordering instead.
+
+### Communication libraries
+
+Communication libraries need much less than cuInterpose: during restore, the
+owner of each communicator or listening endpoint publishes a fresh identifier
+under a key derived from its old one, and every peer reads it. The session
+supports that pattern through two integrations, one available today and one that
+will replace it.
+
+![Library rendezvous through the session](diagrams/library-rendezvous.svg)
+
+*Figure 7. Library rendezvous through the session, shown for NCCL.*
+
+[NCCL Checkpoint](https://github.com/NVIDIA/nccl/tree/master/contrib/nccl_checkpoint)
+reads `<host>:<port>[/<prefix>]` from the file named by
+`NCCL_CHECKPOINT_KVS_PATH` and then uses a small subset of the Redis protocol,
+in which rank 0 of every communicator sets a 128-byte identifier while the other
+ranks poll until it appears; the application calls NCCL's prepare before
+reporting `ready-for-snapshot` and NCCL's restore after `restore-complete`.
+Because the variable is captured in the CRIU image, Snapshot requires it to point
+into the Pod's control volume, rejects other paths during admission, and records
+the path in the artifact. At restore, the agent writes that file with the
+address of its loopback listener and a per-attempt prefix, translates `SET` into
+`Insert` and `GET` into a lookup in a per-node cache that one blocking upstream
+read per key fills, and keeps the session open after release until every member
+reports that it has resumed or NCCL's own timeout elapses. The file must stay in
+the Pod rather than on a volume shared between Pods, since each Pod's endpoint
+differs.
+
+CUDA Checkpoint is adding a prepare phase before lock and a resume phase after
+unlock, during which registered libraries tear down and rebuild their
+connections, together with a restore-time rendezvous interface whose per-library
+namespaces, write-once keys, atomics, and named barriers the session operations
+mirror. Snapshot integrates by driving both phases from the agents at the
+barriers of Figures 5 and 6 and by serving the rendezvous through the same
+per-Pod endpoint, with each restore attempt providing the fresh store that CUDA
+requires for every restore. Once NCCL Checkpoint moves onto this interface,
+applications no longer call NCCL's prepare and restore, the compatibility
+endpoint and the post-release window become unnecessary, and libraries are
+rebuilt before the workload resumes.
+
+### Cross-Pod TCP connections
+
+Connections between members of a set must survive relocation, because control
+planes such as MPI cache their peers' addresses and cannot reconnect, yet today
+they come back closed for three independent reasons. The restore-image rewriter
+disconnects every established socket whose peer lives in another image, the
+address remap rewrites only the Pod's own IP, and once CRIU releases a socket
+from repair mode, the kernel may send probes or data that a peer Pod, whose
+sockets do not exist yet, answers with a reset.
+
+The set closes all three gaps with information that admission already provides.
+The agent passes CRIU's address-rewrite hook the mapping from every member's old
+IP to its new one, together with the peers whose connections must be kept
+exactly as dumped rather than disconnected. Before CRIU runs, the agent drops,
+inside the Pod's network namespace, only the packets of those preserved
+connections, and it lifts that hold at the `sockets-restored` barrier, by which
+time every peer socket exists; new connections, including library bootstrap
+traffic, are never affected. At capture, the `net-freeze` barrier applies the
+same narrow hold before any member is dumped.
+
+Holding traffic does not stop the kernel's TCP timers, so keepalive,
+retransmission, and user timeouts keep running while a peer is dumped or
+restored, and a long interruption can still break a preserved connection
+([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). Taking each
+hold as late and lifting it as early as possible shortens that window but does
+not remove it, which is why qualification measures the whole interruption,
+including staggered dumps, and documents the supported limits. Connections
+through Service virtual IPs and to peers outside the set are still reset, and
+the mechanism is limited to IPv4 and to the 256 address mappings that the CRIU
+plugin holds, which is also why a set has at most 256 members.
+
+### Failure handling and recovery
+
+The commit decides whether a failure is harmless. Before it, nothing
+irreversible has happened, so relays return the shims to their active phase and
+agents leave sources running or restore Pods untouched; after it, a failure is
+fail-stop as in SNEP-295, so the coordinator completes every pending operation
+with `ABORTED`, every relay and CUDA phase exits with an error, and every agent
+terminates its source or fails its restore.
+
+| Event | Before commit | After commit | After release |
+| --- | --- | --- | --- |
+| Validation refusal, placement mismatch, or short probe budget | Abort with `Refused` or `GateBudgetTooShort`; workloads keep running | Not applicable | Not applicable |
+| Member error during a phase, including a Pod IP or container change | Abort | Every member fails with `MemberFailed` or `PodIPChanged` | The rendezvous ends; workloads keep running |
+| Agent stream lost or coordinator restart | Abort | Every member fails with `MemberFailed` or `CoordinatorLost` | The rendezvous ends |
+| Deadline expires | Abort with `DeadlineExceeded` | Every member fails with `DeadlineExceeded` | The session closes |
+| Set resource deleted | Abort with `Cancelled` | A finalizer waits for the attempt to end | The session closes |
+
+![Failure paths](diagrams/failure-paths.svg)
+
+*Figure 8. How a failure reaches every member before and after the commit.*
+
+One case needs care. At capture, CUDA's prepare phase tears down library
+connections before the commit, so an abort after that point must resume the
+libraries with a fresh rendezvous before the workloads continue; this requires
+CUDA Checkpoint to allow a resume without a restore, and until it does, an abort
+after prepare is treated as a failure.
+
+Restore is not idempotent, so an agent that restarts during a restore relies on
+two durable facts rather than on its memory. It first looks for
+`restore-complete` with the attempt's ID: if the file exists, the member was
+released and stays Released, whatever happens to the attempt afterwards. If it
+does not exist, the `Restoring` reason, written before CRIU started, means that
+CRIU may already have run, so the agent never starts it again and fails the
+member, which fails the attempt; only a member without that reason can still
+start its first restore within the same attempt. Helpers left by the crashed
+agent, such as `nsrestore` or a relay, lose their inherited sockets and stop at
+their next step, and failing the member terminates whatever they restored.
+During capture, a restart before the commit aborts the attempt and a restart
+after it fails the member, as an agent restart does today.
+
+### Deadlines
+
+Each set resource carries a single `deadlineSeconds`, counted from its creation,
+which bounds the whole attempt; the coordinator fails the session and the
+operator fails the resource when it expires, while finished captures and
+released members are unaffected.
+
+| Bound | Value | Enforced by |
+| --- | --- | --- |
+| Attempt deadline | `spec.deadlineSeconds` from creation | The coordinator and the operator, with reason `DeadlineExceeded` |
+| Phase timeout | The operation's own timeout plus a margin, never beyond the attempt deadline | Each barrier and each cuInterpose round |
+| Startup-probe budget | Each restore Pod's remaining probe time must cover the remaining deadline | Restore admission, with reason `GateBudgetTooShort` |
+| Post-release rendezvous | NCCL Checkpoint's own timeout, 300 seconds by default | Only libraries that restore after release |
 
 ### API
 
-Both resources use nvidia.com/v1alpha1. Sources, targets, child PodSnapshots,
-and the referenced PodSetSnapshot belong to the operation's namespace.
-PodSnapshotContent stays cluster-scoped and represents one member artifact.
-
-V1 supports one selected container per Pod, one destination per member, and IPv4.
-Member IDs and Pods are distinct. The checkpoint's member order defines ranks;
-target-list order does not. Specs and recorded bindings are immutable.
-
-Complete public types and validation markers are in [Appendix: API Definitions](#appendix-api-definitions).
-PodSnapshotSource is reused unchanged. Standalone source UIDs remain optional;
-set capture requires them. Target UIDs are optional and are pinned on binding.
-
-The current TCP-remapping plugin holds
-[256 IP pairs](https://github.com/ai-dynamo/snapshot/blob/fc349012c44e6e6a3afa82685112d746cd6c28a9/agent/plugins/inet-remap/snapshot_inet_remap.c#L16).
-That sets the API's current 256-member maximum, not a qualified workload size.
-Supporting larger groups requires increasing the plugin capacity and revalidating
-the schemas.
-
-PodSetSnapshot and PodSetRestore are the working names in this draft. Review
-still needs to settle PodSet versus PodGroup; this proposal adds no hierarchy.
-
-#### Examples
-
-Capture identifies exact source Pods:
+This SNEP adds two namespaced kinds to `nvidia.com/v1alpha1`, generated from Go
+types as usual, and changes no existing resource schema.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: PodSetSnapshot
 metadata:
-  name: replica-checkpoint
-  namespace: inference
-spec:
+  name: llm-tp8
+  namespace: serving
+spec:                                   # immutable
   deadlineSeconds: 1800
-  members:
-    - id: rank-0
-      source:
-        podRef:
-          name: replica-0
-          uid: "11111111-1111-4111-8111-111111111111"
-          containers: [engine]
-    - id: rank-1
-      source:
-        podRef:
-          name: replica-1
-          uid: "22222222-2222-4222-8222-222222222222"
-          containers: [engine]
-```
-
-Once it is Ready, a restore attempt maps each member to a target. The first target
-below is bound by name; the second requires the supplied UID:
-
-```yaml
+  members:                              # list order is the rank; 1 to 256 members
+  - id: worker-0
+    source:                             # PodSnapshotSource, unchanged; the UID is required here
+      podRef: {name: llm-worker-0, uid: <uid>, containers: [main]}
+  - id: worker-1
+    source:
+      podRef: {name: llm-worker-1, uid: <uid>, containers: [main]}
+status:                                 # the resource UID names the coordination session
+  committedAt: "2026-10-16T18:02:11Z"   # absent while every source is untouched
+  members:                              # keyed by id
+  - {id: worker-0, rank: 0, nodeName: node-a, podSnapshot: {name: llm-tp8-worker-0, uid: <uid>}, phase: Captured}
+  - {id: worker-1, rank: 1, nodeName: node-b, podSnapshot: {name: llm-tp8-worker-1, uid: <uid>}, phase: Captured}
+  conditions: []                        # Admitted, Committed, Ready, Failed
+---
 apiVersion: nvidia.com/v1alpha1
 kind: PodSetRestore
 metadata:
-  name: replica-restore-1
-  namespace: inference
-spec:
-  snapshotRef:
-    name: replica-checkpoint
-    uid: "33333333-3333-4333-8333-333333333333"
+  name: llm-tp8-r1
+  namespace: serving
+spec:                                   # immutable
+  snapshotRef: {name: llm-tp8, uid: <uid>}
   deadlineSeconds: 1500
-  targets:
-    - id: rank-0
-      podRef:
-        name: replacement-0
-      containerMapping:
-        source: engine
-        destination: engine
-    - id: rank-1
-      podRef:
-        name: replacement-1
-        uid: "44444444-4444-4444-8444-444444444444"
-      containerMapping:
-        source: engine
-        destination: engine
+  targets:                              # one per member id
+  - id: worker-0
+    podRef: {name: llm-worker-0-r1}     # the UID is optional and pinned at admission
+    containerMapping: {source: main, destination: main}
+  - id: worker-1
+    podRef: {name: llm-worker-1-r1, uid: <uid>}
+    containerMapping: {source: main, destination: main}
+status:
+  committedAt: "2026-10-16T18:20:40Z"
+  members:                              # keyed by id; bindings are pinned at admission
+  - {id: worker-0, pod: {name: llm-worker-0-r1, uid: <uid>}, nodeName: node-c, sourcePodIP: 10.1.4.7, targetPodIP: 10.1.9.2, phase: Released}
+  - {id: worker-1, pod: {name: llm-worker-1-r1, uid: <uid>}, nodeName: node-d, sourcePodIP: 10.1.6.3, targetPodIP: 10.1.2.8, phase: Released}
+  conditions: []                        # Admitted, Committed, Released, Ready, Failed
 ```
 
-Targets carry `nvidia.com/restore-set: replica-restore-1`, not the standalone
-`restore-from` or `restore-container-map` annotations. The set target list supplies
-the container mappings. The annotation requests set-mode handling; only the bound
-Pod UID, admitted container ID, and admitted attempt authorize restore.
-The [Restore Pod Contract](#restore-pod-contract) defines startup behavior.
+The specs follow the shape of the existing resources. A member's `source` is the
+same `PodSnapshotSource` that a standalone capture uses, and its `id` is a stable
+name that links capture to restore, whereas its rank is simply its position in
+the list. Lists are keyed by `id`, which keeps status updates mergeable, and
+every reference that matters carries a UID, so name reuse cannot redirect an
+attempt; a restore target may omit its UID, in which case admission pins it. A
+single deadline bounds each attempt, and the limit of 256 members is the
+capacity of the address-remap plugin rather than a qualified scale.
 
-Capture reuses child `PodSnapshot` and `PodSnapshotContent` resources and reports
-through the child's conditions. Agents verify each child's exact identity and
-member binding against its parent before execution. A set-owned child cannot be
-restored through the standalone annotation. Set restore calls the per-Pod executor
-after admission; it adds no per-member restore CRD. Its reporting channel is the
-member report in `PodSetRestore.status`.
+The `PodSetSnapshot` controller creates one owned `PodSnapshot` per member, so
+artifacts, storage, and cleanup reuse the per-Pod pipeline, and deleting the set
+deletes its members. A `PodSetSnapshot` can be restored many times, and each
+`PodSetRestore` is one attempt with its own session, which is also the
+per-restore epoch that CUDA Checkpoint expects. Agents keep reporting where they
+report today, on each member's `PodSnapshotContent` and on each restore Pod's
+`nvidia.com/Restored` condition, and the operator alone aggregates those results
+into the set's status. Member phases progress through `Pending`, `Admitted`, and
+`Captured` during capture, and through `Pending`, `Admitted`, `Restoring`,
+`Reconstructed`, and `Released` during restore, with `Failed` and a reason
+otherwise; a restore is Ready only when every member is Released.
 
-### Checkpoint Flow
-
-**Prerequisite:** every member must satisfy Snapshot's existing
-[workload checkpoint-readiness contract](https://github.com/ai-dynamo/snapshot/blob/0b6d7d98e48aa6a4a852af548d76852ccf1b4cd8/docs/reference/workload-contract.md#L62).
-Application work must already be quiesced and GPU work synchronized as required
-by the runtime. Inspection and group barriers do not make a busy application
-safe to capture.
-
-Members first exchange inspection data through the brain. It waits for every
-member's contribution before returning the combined data for validation.
-The execution gates then require every member to vote ready before preparation,
-and every member to be prepared before dumping.
-
-The diagram shows one member's success path; member paths run concurrently.
-Controller-agent arrows represent Kubernetes writes and watches, not direct
-messages. Failure handling is defined in
-[Failure and Recovery](#failure-and-recovery).
-
-```mermaid
-sequenceDiagram
-    participant O as Owner
-    participant C as Set controller
-    participant P as PodSnapshot controller
-    participant A as Member agent
-    participant B as Brain
-    O->>C: Create PodSetSnapshot
-    C->>B: Expected session context
-    C->>P: Create child PodSnapshots
-    Note over P,A: Member paths run concurrently, one shown
-    P->>P: Create member PodSnapshotContent
-    P->>A: PodSnapshotContent triggers work
-    A->>B: Join and submit local inspection data
-    Note over A,B: Wait for every member's inspection data
-    B-->>A: Inspection data from all members
-    A->>A: Validate collected data and current source
-    A->>B: ReadyToPrepare
-    Note over A,B: Wait for every member's vote
-    B-->>A: Preparation authorized
-    A->>A: Recheck, record intent, prepare
-    A->>B: Prepared
-    Note over A,B: Wait for every member's preparation
-    B-->>A: ReadyForDump
-    A->>A: Per-Pod dump and publish artifact
-    A-->>P: Record PodSnapshotContent result
-    P->>C: Child results and exact content identities
-    C->>C: Ready only when all artifacts are ready
-```
-
-1. **Activate.** The controller validates sources, records their nodes, supplies
-   session context, and creates one owned child PodSnapshot per member. The
-   PodSnapshot controller creates each PodSnapshotContent; its creation triggers
-   the node agent. Members proceed concurrently. A set-owned child waits for its
-   recorded binding and session; it never falls back to standalone capture.
-2. **Inspect and vote.** Agents validate live sources and prerequisites and retain
-   per-source exclusion. Where shims exist, local coordinators inspect runtime
-   resources without changing application state. Each agent joins the session
-   and submits its source identity, IP, and runtime inspection records. Every
-   member contributes, even if it has no runtime records.
-
-   The brain waits for every member's contribution, then returns the collected
-   data to each agent without interpreting CUDA records. Agents validate and pin
-   the common captured-member table; local coordinators validate runtime resource
-   relationships. Each agent then checks operation state, deadline, source
-   identity, and IP before sending ReadyToPrepare. Collecting all data does not
-   authorize preparation: every member must first validate it and vote ready.
-   Any refusal before group authorization leaves every source untouched.
-3. **Prepare.** The brain authorizes preparation after every vote. Each agent
-   repeats its local checks and records intent before permitting destructive
-   work. For cuInterpose, that boundary is BeginCheckpoint; the coordinator
-   freezes registries, revalidates the frozen records, and prepares resources.
-   Agents save required metadata before reporting Prepared. Members without a
-   runtime preparation phase report Prepared after validating and saving their
-   metadata; they do not start native capture yet.
-4. **Dump and publish.** After every Prepared report, the brain sends ReadyForDump
-   and capture coordination ends. Agents execute per-Pod dumps and artifact
-   publication. A member that has not yet crossed its destructive boundary
-   rechecks local state and records intent before native CUDA or CPU capture.
-   The controller records exact content names and UIDs and sets Ready only after
-   every artifact succeeds.
-
-Group authorization is not atomic execution. A late local refusal can occur
-after peers have started preparation. A lost preparation reply is uncertain,
-not proof that the source is safe. Apply the capture failure rules; there is no
-guarantee of a working source deployment after capture starts.
-
-### Restore Flow
-
-The controller admits every member before CRIU. Restore then separates socket
-readiness from application release. The diagram shows the success path, repeated
-for every member; it does not imply simultaneous execution.
-
-Controller–agent arrows represent status updates and watches through the
-Kubernetes API, not direct messages. Agents publish preflight reports; the
-controller publishes admission; agents observe admission before restoring.
-
-```mermaid
-sequenceDiagram
-    participant O as Owner
-    participant C as Set controller
-    participant A as Member agent
-    participant B as Brain
-    O->>C: Create target Pods and PodSetRestore
-    C->>B: Expected session context
-    C-->>A: ContextReady: targets and artifacts bound
-    A->>C: Preflight Passed
-    Note over C,A: Wait for every member
-    C-->>A: Admitted, container IDs pinned
-    A->>A: Recheck, record intent, protect and restore
-    A->>B: Join: sockets restored, application held<br/>Saved runtime records
-    Note over A,B: Wait for every member
-    B-->>A: ReadyForTCP + collected runtime records
-    A->>A: Recheck, enable TCP
-    A->>A: Start coordinator<br/>Validate saved relationships
-    loop Runtime reconstruction steps, as needed
-        A->>A: Perform local runtime step
-        A->>B: Fresh handles or other runtime data
-        Note over A,B: Wait for every member
-        B-->>A: Collected runtime data
-    end
-    A->>A: Verify reconstructed runtime resources
-    A->>B: Runtime work verified
-    Note over A,B: Wait for every member
-    B-->>A: ReleaseAuthorized
-    A->>A: Final checks, publish marker, preserve release proof
-    A->>A: Finish owned cleanup
-    A->>C: Restored
-    C->>C: Ready only when all members are Restored
-```
-
-1. **Bind.** The controller validates the checkpoint UID, availability, and exact
-   artifacts; binds target UIDs, nodes, and IPs; supplies session context; and
-   sets ContextReady. Missing targets may wait until the deadline.
-2. **Preflight and admit.** Each agent validates its assigned artifact and derives
-   the complete IP map. It checks the live destination, compatibility, remaining
-   startup-gate budget, target reuse, and an independent application execution
-   hold. It durably claims the target before reporting Passed. The controller
-   accepts only current reports and pins all admitted container IDs in the same
-   status update that sets Admitted. Any refusal prevents all CRIU starts.
-3. **Reconstruct locally.** Immediately before starting, the per-Pod executor
-   verifies that the target Pod, container, sandbox, and IP still match the
-   admitted context, the attempt and original session remain active, and the
-   deadline has not expired. A mismatch or terminal operation state fails the
-   member without starting its restore. If current state cannot be verified,
-   wait without starting, within the deadline. These are execution checks, not
-   another group preflight round. If valid, the agent records intent and
-   establishes the execution hold and TCP protection. It restores processes,
-   sockets, and native CUDA state using the complete map and group-aware socket
-   handling. It joins the brain only after local restore succeeds and normal
-   application execution is held. The join includes the member's saved runtime
-   records from its artifact, or an empty contribution if it has none.
-4. **Enable TCP and share records.** After every member joins, the brain sends
-   ReadyForTCP and distributes the collected saved records unchanged. They may
-   share a response, but record delivery must not hold up TCP authorization.
-   Agents recheck local state and end TCP isolation. ReadyForTCP does not wait
-   for runtime validation or reconstruction. Kernel TCP traffic may proceed;
-   application execution stays held.
-
-   **Collected runtime records** are the saved CUDA metadata from all members:
-   allocation identities, sizes and device placement; memory mappings and access
-   rights; export/import relationships; and multicast membership and bindings.
-   For example, A exported allocation X as handle H, while B imported H as its
-   local allocation Y. Together, these records describe which resources must be
-   shared after restore. This exchange carries metadata, not GPU-memory contents.
-
-5. **Rebuild runtime resources.** Agents start coordinators where needed.
-   Coordinators validate the collected saved records, then reconstruct shared
-   resources through a sequence of runtime steps. Each iteration of the diagram's
-   loop is a different step, not a retry. For cuInterpose, **collected runtime
-   data** means the following:
-
-   | Runtime step | Data exchanged through agents and the brain |
-   | --- | --- |
-   | Reload shared allocations | Captured-handle to new-handle mappings. Peers use the replacement handles to import rebuilt allocations. |
-   | Restore unicast mappings | Completion results only; this step produces no new handles. All members must finish before the next step. |
-   | Recreate multicast resources | Captured-handle to new-handle mappings for multicast resources, needed before peers can import them. |
-   | Import multicast resources, add devices, and restore bindings | Completion results for each of these three separate steps; they produce no new handles. Each step waits for every member. |
-   | Inspect reconstructed resources | Fresh records describing the restored allocations, mappings and sharing relationships. Coordinators compare them with the saved records, accounting for replacement handles. |
-
-   The brain waits for every member's contribution before completing each
-   exchange. Coordinators interpret the data; the brain forwards it unchanged.
-   Members without local runtime data contribute an empty payload and still
-   report completion. Each agent reports Runtime work verified only after its
-   required reconstruction and validation succeed.
-
-6. **Release.** When all members succeed, the brain returns ReleaseAuthorized.
-   Each agent makes final local checks, atomically publishes restore-complete,
-   preserves release proof, finishes owned cleanup, and releases the target claim.
-   It reports Restored and writes the existing nvidia.com/Restored Pod condition.
-
-TCP unblocking is not release. An observed failure stops unreleased work even
-after ReadyForTCP or ReleaseAuthorized. A container or IP change before release
-fails the member; an application restart after Restored does not undo that result.
-On failure or recovery, if release can neither be established nor ruled out,
-report Unknown rather than infer failure.
-
-### Failure and Recovery
-
-#### Operation Conditions
-
-Conditions describe the overall operation. Member results describe what happened
-to each member. Conditions are not mutually exclusive: ContextReady and Admitted
-remain recorded milestones even if a restore later fails.
-
-| Resource | Condition | Meaning when True |
+| Resource or contract | Change | Purpose |
 | --- | --- | --- |
-| PodSetSnapshot | Ready | Every member artifact and its exact child/content objects are available for restore. |
-| PodSetSnapshot | Failed | Capture failed or a published checkpoint lost a required artifact or object. |
-| PodSetRestore | ContextReady | Target UIDs, nodes, IPs, artifact references, and session endpoint are bound. |
-| PodSetRestore | Admitted | Every member passed preflight for that context and its pinned container ID. |
-| PodSetRestore | Ready | Every member is Restored and the attempt has not failed. |
-| PodSetRestore | Failed | The attempt cannot succeed; member reports and cleanup may still arrive. |
-
-Once an operation's Failed condition is True, retry requires a new operation object.
-A successful restore stays Ready. Completed milestones do not authorize work
-after failure, deletion, or expiry. Conditions include observedGeneration, a
-stable reason, and a useful message.
-
-#### Checkpoint Member Results and Availability
-
-For capture, `status.members[].phase` reports each child's progress and result,
-derived from the child PodSnapshot's conditions:
-
-| Phase | Meaning |
-| --- | --- |
-| Pending | Waiting to begin capture. |
-| Capturing | Capture is in progress. |
-| Captured | This member's artifact was successfully produced. |
-| Failed | This member did not complete capture successfully. |
-
-If a member's capture is cancelled before completion, it reports Failed with
-reason Cancelled. Members already Captured keep that result, including when a
-sibling fails. The set becomes Ready only when every member succeeds.
-
-A checkpoint's Ready condition describes current availability, not capture
-history. If a recorded child or content is missing, deleting, replaced, or failed,
-withdraw Ready and set Failed/ArtifactUnavailable. Keep exact references and
-Captured member results; never adopt replacements or recapture. Revalidate objects
-before each restore and artifact data on each agent. Ready is not a
-storage-retention guarantee.
-
-#### Restore Member Outcomes
-
-For restore, `status.members[].outcome` answers whether the member was released,
-rather than describing its execution progress:
-
-| Outcome | Meaning |
-| --- | --- |
-| Pending | Waiting or executing; no final result is known. |
-| Restored | The release marker was published. Final. |
-| Failed | The member did not complete restore and is known not to have been released. Final. |
-| Unknown | Release cannot currently be established or ruled out. Later evidence may settle it. |
-
-Cancellation reports Failed with reason Cancelled only when the member is known
-not to have been released. Members already Restored keep that result. If release
-is uncertain, cancellation does not resolve Unknown.
-
-A target disappearing before admission is Failed/TargetGone. After admission,
-disappearance without a final result is Unknown/TargetGone. If execution started
-and the marker is unreadable without other release proof, report
-Unknown/ReleaseEvidenceUnavailable. Either Unknown case fails the attempt, but
-later evidence can settle the member without reopening it. Known final outcomes
-never change.
-
-#### Agent Restart Recovery
-
-After an agent restarts, recovery preserves completed results and cleans up
-interrupted work. It never repeats destructive work that may have started.
-A restore member that provably never began may still start under the same valid
-attempt. Capture checks for a committed artifact; restore checks whether the
-application was released or local execution can safely begin for the first time.
-
-##### Shared Recovery Rules
-
-Both paths keep a small durable local record containing:
-
-- The operation UID and exact Pod UID, container, and sandbox being acted on.
-- Whether destructive work may have started. Save this **execution intent**
-  before starting that work or allowing a helper to start it.
-- The information needed to stop owned helpers and remove temporary resources.
-  Save cleanup information before creating those resources.
-
-The record is private to Snapshot and survives an agent restart on the same
-node, not loss of the node or its storage. It is not a step-by-step journal and
-need not copy runtime exchanges or coordination notifications. Its storage
-format is an implementation choice.
-
-An intact record matching the exact operation and member, with no execution
-intent, proves no local destructive work started. It says nothing about other
-members. A missing, corrupt, or unreadable record does not prove that work never
-started.
-
-CRIU, local coordinators, and other execution helpers are separate processes.
-Restarting the agent does not prove they stopped. The shared per-Pod executor
-must cancel their work on agent loss and let the replacement confirm that it
-has stopped or drained.
-Until old helper work can no longer act, block new execution and cleanup that
-could race with it. Helper cancellation must neither kill a released application
-nor release an application that is still held. If stopping or draining cannot
-be confirmed, retain ownership, preserve known results, and report
-CleanupIncomplete.
-
-Cleanup is repeatable and acts only on the recorded resources, never a
-replacement container or sandbox. The saved information must support safe local
-cleanup without API access or an in-memory IP map. Reporting results can wait
-for API recovery; safe cleanup need not.
-
-##### Capture Recovery
-
-After stopping or draining old helpers, the agent checks whether its member's
-artifact was committed. If not, execution intent determines whether the source
-may already have been changed:
-
-| Evidence | Recovery action |
-| --- | --- |
-| Committed artifact | Preserve it, report Captured, and finish cleanup. Do not capture again. |
-| No committed artifact; intact matching record has no execution intent | Discard the old readiness vote and leave the source untouched. |
-| No committed artifact; execution may have started or cannot be ruled out | Fail the child and apply existing unsafe-source handling. Do not repeat preparation or dump. |
-
-##### Restore Recovery
-
-Restore needs two additional facts in its local record:
-
-- **Target ownership.** Before reporting that a member passed restore preflight
-  (`report.preflight: Passed`), the agent durably reserves its target Pod for
-  this attempt. This claim prevents competing attempts from using it; it does
-  not mean restoration started.
-- **Application release.** After publishing restore-complete, the agent saves
-  that release locally. A matching marker found during recovery is also saved
-  before cleanup. This preserves the result if the marker later disappears.
-
-The agent uses a matching restore-complete marker, its saved release record, or
-an already recorded Restored result as proof of release. Each must identify the
-attempt and admitted container. Coordination notifications such as ReadyForTCP
-or ReleaseAuthorized are not proof that the application was released.
-
-After an agent restart, the following flow selects recovery actions, not new API
-states. Stopping helpers does not mean stopping the application:
-
-```mermaid
-flowchart TD
-    H{"Old helper work<br/>stopped or drained?"}
-    H -->|No| WAIT["Block new work<br/>Keep known results<br/>Retry helper cleanup"]
-    H -->|Yes| R
-    R{"Release proved?"}
-    R -->|Yes| KEEP["Keep workload<br/>Report Restored<br/>Finish owned cleanup"]
-    R -->|No| I{"Execution-start evidence?"}
-    I -->|"Intact matching record:<br/>no execution intent"| A{"Can first local restore start<br/>under the original admission?"}
-    A -->|"Start checks pass"| FIRST["Record intent<br/>Start first local restore"]
-    A -->|"Not yet admitted"| PREFLIGHT["Recheck local preflight<br/>Wait for original admission"]
-    A -->|No| FREE["Do not start restore<br/>Report Failed; finish owned cleanup<br/>Free target reservation"]
-    A -->|"Cannot verify"| HOLD["Keep target reservation<br/>Wait for current state"]
-    I -->|"Execution intent recorded"| U{"Confirmed<br/>unreleased?"}
-    I -->|"Record missing,<br/>unreadable, or inconsistent"| UNKNOWN
-    U -->|No| UNKNOWN["Unknown<br/>Preserve target and claim<br/>Retry evidence collection"]
-    U -->|Yes| STOP["Maintain execution hold<br/>Re-isolate TCP, then tear down<br/>Report Failed"]
-```
-
-**Local restore never started.** This branch requires an intact matching recovery
-record with no execution intent and old helpers that can no longer act. Recover
-the target reservation, then check the original attempt, bindings, session, and
-deadline:
-
-- **Not yet admitted:** repeat local preflight checks and wait for admission.
-- **Already admitted:** verify that the target still matches its admitted Pod,
-  container, sandbox, and IP; the attempt and original session remain active;
-  and the deadline has not expired. If valid, durably record execution intent
-  and start this member's first restore. Do not reset admission or require
-  other members to pass preflight again.
-- **Target no longer matches, or the attempt/session has failed, been deleted,
-  or expired:** do not start. Report Failed, finish owned cleanup, and release
-  the reservation.
-- **Current state cannot be verified:** retain the reservation and wait without
-  starting execution.
-
-These are the normal per-Pod checks before execution, not a second full
-preflight. If they find an invalid context after admission, the attempt fails;
-peers may already be restoring and follow normal failure handling. Admission
-remains recorded, and completed Restored results are preserved.
-
-Starting an untouched member within an active attempt is not a retry: it keeps
-the same bindings, IP map, and session. The member joins the restore session for
-the first time after local restore succeeds. It cannot join a replacement for a
-failed session. New attempts follow [Retrying a Restore](#retrying-a-restore).
-
-**Release proved.** Keep Restored and finish owned cleanup only. Failure, expiry,
-deletion, or later container/Pod loss does not undo this result. Never kill or
-replay the released workload. Release and cleanup completion are separate facts.
-
-**Confirmed not released.** Once old helpers have stopped, a missing marker in
-the verified original container and intact control volume proves non-release
-only if no earlier release is known. Report Failed. Maintain the application
-execution hold and maintain or re-establish TCP isolation before teardown;
-uncertain TCP state is treated as potentially unblocked. Release the claim
-after cleanup, but retain execution intent while the Pod exists to prevent reuse.
-
-**Release unknown.** An unreadable marker is not a missing marker. Without other
-release proof, report Unknown/ReleaseEvidenceUnavailable. Retain the target,
-claim, and recovery record; retry observation. Do not kill, replay, release again,
-or change protection based on that uncertainty. These rules also apply after
-cancellation or deletion of the attempt.
-
-The same Unknown outcome applies when the execution record cannot be verified
-and no independent release proof exists. Do not treat that uncertainty as
-permission to execute again, tear down the workload, or reuse the target.
-
-If the Pod is gone after admission and no final result or release proof exists,
-report Unknown/TargetGone. Finish safe helper/resource cleanup and free the
-claim. Known final outcomes never change.
-
-##### Retrying a Restore
-
-A failed attempt cannot be restarted; retry always requires a new PodSetRestore.
-The target Pod rules apply to the whole group:
-
-1. **No member could have started restoration**, for example because preflight
-   refused the group. Untouched placeholders may be reused after the old claims
-   are released and every member passes preflight again, including the remaining
-   startup-gate budget.
-2. **Any member started, or execution cannot be ruled out.** Retry requires fresh
-   Pod UIDs and network namespaces for every member, not just the failed one.
-   The workload owner retires the partial replica and creates the replacement
-   group. Snapshot does not replace Pods or rebind members inside an attempt.
-
-The new attempt reuses the checkpoint and derives a new complete IP map. It does
-not update the failed attempt's map or mix its restored members into a new
-session. Members already restored stay reported as Restored even when the owner
-retires them; this is not Snapshot rollback. Agents reject previously executed
-targets as TargetReused.
-
-#### Failure and Cancellation
-
-Agents observe failure, deletion, and expiry and recheck them before destructive
-work, TCP unblocking, and release. They stop new work and interrupt helpers when
-cancellation is observed. The controller closes the session; agents notify the
-brain when reachable. The brain completes no barrier after observing failure or
-cancellation. Its deadline and member-loss detection still apply without API
-access.
-
-Deletion is the V1 cancellation request. It cannot retract delivered commands or
-undo destructive work. A member known to be unreleased reports Failed with
-reason Cancelled. Completed results and uncertain release follow the recovery
-rules above.
-
-| Restore state | Failure or cancellation handling |
-| --- | --- |
-| Before execution | Release the claim; leave the placeholder running. Report Failed with reason Cancelled on deletion, or the failure reason otherwise. |
-| Execution started, confirmed unreleased | Stop helpers, maintain the execution hold, and re-isolate TCP before teardown. Do not publish release. |
-| Release proved | Preserve Restored and finish cleanup. |
-| Release unknown because evidence is inaccessible | Preserve the target and evidence; retry observation under the recovery rules. |
-
-| Capture state | Failure or cancellation handling |
-| --- | --- |
-| Before preparation authorization | Stop helpers and fail the child. Every source is untouched. |
-| Authorized, with proof local destructive work never began | Leave this source untouched. Peers may already be preparing. |
-| BeginCheckpoint, native CUDA checkpoint, or dump began; or boundary uncertain | Apply existing unsafe-source handling, including CheckpointNeedsSourceKill where applicable. No rollback. |
-
-A preparation refusal means no local destructive preparation began. A lost reply
-or crash does not establish that fact. A source disappearing before its capture
-completes fails the member; disappearance after completion does not invalidate
-its artifact.
-
-#### Controller Recovery and Deletion
-
-The controller resumes from recorded bindings, child/content identities, session
-endpoint, and admission. Re-delivering identical session context must not reset
-a live session. Loss of needed session state fails the operation with SessionLost;
-agents do not join a replacement to replay work. Per-Pod dumps after ReadyForDump,
-artifact publication, and released cleanup no longer need the brain.
-
-Both resources use bounded controller finalizers. Restore deletion waits for
-members to stop or complete. Checkpoint deletion first blocks new restores,
-waits for referencing non-terminal attempts, stops capture, and deletes children
-through the existing content/artifact cleanup path. No namespaced owner reference
-is added to cluster-scoped content.
-
-Grace-period expiry emits CleanupIncomplete and allows deletion. Local recovery
-records retain unresolved cleanup obligations, including unknown release evidence.
-Finalizer removal does not prove an unreachable node has stopped. No
-child-protection finalizer prevents deletion of a child or content. There is no
-Retain policy or restore from surviving content after set deletion.
-
-### Restore Pod Contract
-
-Group restore Pods follow the existing
-[single-Pod restore contract](https://github.com/ai-dynamo/snapshot/blob/0b6d7d98e48aa6a4a852af548d76852ccf1b4cd8/docs/reference/restore-pod-contract.md).
-The restore proxy, control volume, and restart behavior stay the same.
-
-The Pod builder, validator, and NRI (Node Resource Interface) startup plugin must
-support these group-specific rules:
-
-- **Select the destination through the attempt.** Use `nvidia.com/restore-set`
-  to find the PodSetRestore. Resolve the destination container from its target
-  list and verify the Pod identity. Reject conflicting standalone restore
-  annotations.
-- **Wait for missing context.** If the attempt or destination cannot yet be
-  resolved, wait or refuse container creation for retry. The original application
-  command must never run as a fallback.
-- **Require the existing startup gate.** The restore-complete startup probe is
-  optional for standalone restores but required for group restores. Agents check
-  it and its remaining time budget before preflight passes; see
-  [Validation and Binding](#validation-and-binding).
-
-Pods and the attempt may be created in either order, but the selected container
-cannot start until its group context is available. The controller must bind
-targets without waiting for application readiness.
-
-The proxy and startup gate do not keep the restored application paused. Group
-restore needs a separate hold until release, as described in
-[TCP Protection and Execution Hold](#tcp-protection-and-execution-hold).
-
-### Validation and Binding
-
-Validation has three owners:
-
-| Owner | Checks |
-| --- | --- |
-| API server | Required fields, cardinality, unique IDs and distinct target names; immutable specs, write-once bindings/sessions, retained status entries, and final outcomes. |
-| Controller | Distinct source Pods, live source identities, checkpoint and artifact identities, exact target membership, mappings, and target binding. |
-| Agent | Live local containers/sandboxes, artifact metadata, runtime compatibility, startup budget, claims, and execution safety. |
-
-Schema and CEL cover structural rules without an admission webhook. Cross-object
-and live execution checks remain necessary even with API acceptance: targets
-may not exist yet, and runtime state may change.
-
-The controller initializes all status member entries before agents report.
-If a target UID is supplied, it must match. Otherwise the controller pins the UID
-on first binding. An unbound missing or unschedulable target waits visibly;
-a missing bound UID is never replaced with a same-named Pod. A missing bound
-source fails with SourceGone. Invalid requests fail with a specific reason.
-
-The controller rejects overlap with another unfinished restore as TargetInUse.
-The agent's durable, exclusive Pod-UID claim resolves races between attempts.
-A claim alone does not spend a target. Once execution intent is durable, the
-agent rejects that target as TargetReused, even after its claim is released.
-An interrupted group is retried with a complete new target group, as defined in
-[Retrying a Restore](#retrying-a-restore); there is no individual-member retry.
-
-Agents own only their member reports; the controller owns bindings, outcomes,
-and conditions. Writers use partial apply documents, such as generated apply
-configurations, not fully serialized status structs. An agent's member entry
-contains only id and report, under a separate SSA field manager for that member.
-Controller updates preserve reports.
-
-Before admission, Passed must match the live destination container ID and pinned
-Pod, node, and IP. The controller pins accepted IDs as admittedContainerID when
-setting Admitted, revalidating concurrent changes. Execution reports are matched
-against that pinned ID, not a later application container.
-
-All work shares metadata.creationTimestamp + spec.deadlineSeconds. Expiry fails
-unfinished work with DeadlineExceeded; it does not expire a completed checkpoint
-or stop necessary cleanup. Neither local timeouts nor container restarts extend
-the deadline.
-
-Set targets use the canonical restore-complete startup probe with roughly
-30 minutes of allowance. Agents require the operation deadline to fit within
-every container's remaining gate time, with a conservative probe margin.
-Otherwise preflight refuses with GateBudgetTooShort. A pre-release restart fails
-the attempt rather than renewing its budget. Standalone gate behavior is unchanged.
-
-### Captured Metadata and Storage
-
-Kubernetes stores bindings and results. Artifacts store captured process and
-runtime state. Agents retain only local ownership, execution-start and release
-evidence, and cleanup information. The brain keeps live coordination state,
-not artifacts or a durable execution log.
-
-| Data | Written by | Stored in | Used by |
-| --- | --- | --- | --- |
-| Sources and targets | Caller, validated by controller | Set specs, matched by member ID | Controller and agents |
-| Nodes, exact object identities, target IPs, endpoint | Controller | Write-once status bindings | Controller, agents, and session authorization |
-| Expected session context | Controller | Supplied to brain from the operation bindings | Brain checking membership |
-| Credentials | Deployment authentication mechanism | Protected service/agent configuration | Brain and agents only |
-| Member artifact | Agent through per-Pod capture | Artifact storage and PodSnapshotContent; exact content identity in set status | Restoring agent |
-| Source identities and IPs | Agents during capture inspection | Common ordered table in every artifact manifest | Agents deriving the complete IP map |
-| Saved runtime records | Coordinator where needed | Member artifact | Coordinators reconstructing shared resources |
-| Exchanged records and fresh handles | Coordinators | Transient session payloads and local memory | Local runtime validation and reconstruction |
-| GPU-handle map | Coordinators | Local memory for that restore | Shims |
-| Current step and contributions | Brain | Active session memory | Barriers and payload exchange |
-| Release marker | Agent | restore-complete in target control volume: PID, attempt UID, admitted container ID | Execution gate, PID readers, recovery |
-| Member report and outcome | Agent / controller | PodSetRestore.status.members | Controller and workload owner |
-| Execution identity, intent, and cleanup information; restore also records target ownership and release proof | Agent | Small durable local record inaccessible to the workload | Restart recovery |
-
-#### Captured Member Table
-
-Each set artifact adds an optional `PodSet` field to `CheckpointManifest`, with
-YAML key `podSet` and type `*CapturedPodSetManifest`. Standalone artifacts omit it.
-The [complete artifact types](#artifact-metadata-types) are in the appendix.
-
-During capture inspection, agents exchange each source Pod UID, container name,
-and IP through the brain. Each validates the full table in checkpoint member
-order. All artifacts save that same ordered table, format version, and capture
-UID; MemberID identifies the artifact's own member. The local source IP must
-match the existing manifest k8s.podIP. An observed IP change refuses capture
-rather than rewriting the pinned table.
-
-On restore, each agent reads its assigned artifact and matches the table to
-target IPs in restore status by member ID:
-
-| Member | Saved source IP | Bound target IP |
-| --- | --- | --- |
-| rank-0 | 10.0.0.1 | 10.1.0.8 |
-| rank-1 | 10.0.0.2 | 10.1.0.9 |
-
-Every agent can derive the complete map without reading peers' artifacts or
-contacting source Pods. Saved IPs are immutable.
-
-Before CRIU, reject missing metadata, unsupported versions, a capture UID that
-does not match the checkpoint, changed member order/UIDs/container names, or
-an artifact whose local member/content identity is wrong. Member IDs and source
-IPs must be complete and unique, source IPs must be IPv4, and the artifact's local
-IP must match k8s.podIP.
-
-### Runtime Session and Extension Contract
-
-#### Session
-
-One operation has one session, identified by its PodSetSnapshot or PodSetRestore
-UID. Restore never reuses the capture session. The long-running brain service
-can host concurrent sessions. Each active session has one owning process;
-replication or load balancing must not turn owner loss into transparent failover.
-
-The controller supplies the mode, expected members, Pod UIDs, containers, nodes,
-and absolute deadline. The brain authenticates agents and checks participation
-against this context. Agents cannot create sessions or alter bindings, membership,
-or deadlines. Hosting, transport, and authentication mechanisms are implementation
-choices subject to [Security](#security).
-
-A step is one exchange or synchronization within an operation. Messages carry
-session, member, and step IDs; the brain uses them to match contributions without
-interpreting CUDA payloads. Duplicate contributions never count twice. Stale,
-foreign, conflicting, or out-of-order contributions cannot complete a barrier.
-Agents and local runtimes agree on protocol versions and step IDs.
-Each data exchange returns the collected payloads only after every member has
-contributed, including an empty payload when a member has no runtime data.
-
-This example is one capture-inspection exchange, not the full operation:
-
-```mermaid
-sequenceDiagram
-    participant H as Local coordinator
-    participant A as Node agent
-    participant B as Brain
-    H->>A: stepID and local resource records
-    A->>B: Member contribution
-    Note over A,B: Wait for every member
-    B-->>A: Collected records
-    A-->>H: Records unchanged
-    H->>H: Validate resource relationships
-    H->>A: Inspection result
-```
-
-Every member joins group safety and completion barriers, including members
-without shims. Those agents report completion directly when no local runtime
-work is needed. Same-node members contribute separately and must progress
-concurrently; serial execution must not deadlock a barrier.
-
-Initial connections may retry until the deadline. Once joined, loss of an
-established member connection, the owning brain process, or required step state
-fails the session. Reaching the same endpoint again does not resume it.
-Successful coordination alone proves neither artifact publication nor release.
-
-#### Runtime Responsibilities
-
-The agent supplies its coordinator with ordered membership, local shim processes,
-protocol/artifact versions, and the collected saved runtime records for restore.
-Coordinators validate the complete resource graph and reject mixed checkpoints,
-changed ranks, unsupported handles, and incompatible topology. Allocation identities remain
-stable; the original creator is distinct from the holder selected to save or
-export an allocation. The GPU-handle map is rebuilt locally during restore;
-the brain interprets neither it nor the CRIU IP map.
-
-Inspection is read-only. After all ReadyToPrepare votes, the agent repeats its
-live checks and makes intent durable before granting local execution permission.
-A coordinator cannot authorize itself. For cuInterpose, permission precedes
-BeginCheckpoint and frozen-record validation. A refusal before that boundary is
-proof of no local preparation only when explicitly confirmed; a lost reply is
-not safe refusal.
-
-The local channel separates runtime payloads from agent authority. Forwarded
-bytes cannot forge votes or execution grants. Interrupted mutating work is
-never replayed, and all helper work uses the operation deadline and the shared
-executor's [shared recovery rules](#shared-recovery-rules).
-
-#### Coordination Milestones
-
-These labels define behavior, not wire formats, extra RPC round trips, or
-Kubernetes phases. In particular, ReadyForTCP may be the successful response
-to the restore join barrier, alongside the collected saved runtime records.
-
-| Event | Sender | Meaning |
-| --- | --- | --- |
-| ReadyToPrepare | Agent | Inspection, group metadata validation, and current agent checks passed; preparation has not started. |
-| Preparation authorized | Brain | All members voted ready; each agent may make its final local checks and grant preparation. |
-| Prepared | Agent | Required preparation and saved metadata succeeded; this does not mean an artifact is ready. |
-| Refused | Agent | No local destructive preparation began. Before authorization all sources are untouched; afterward peers may already be preparing. |
-| ReadyForDump | Brain | Every member reported Prepared; continue per-Pod capture. |
-| ReadyForTCP | Brain | All members restored local sockets/native state and hold application execution; TCP may be unblocked after local checks. |
-| Runtime work verified | Agent | Required local runtime reconstruction and group-resource validation succeeded. |
-| ReleaseAuthorized | Brain | Every member verified; the agent may release after final checks. Not proof of release. |
-| Failed or uncertain preparation | Agent | Apply unsafe-source handling; do not classify uncertainty as refusal. |
-
-### Network Identity and Application Release
-
-#### Preserving Member Connections
-
-Each agent derives a full IPv4 source-to-target map with one unique address on
-each side per member. The map must fit the plugin's capacity and
-criu.tcpEstablished must be true. Agents pass the map to CRIU; workload annotations
-do not supply it.
-
-**Set-aware socket handling is required.** Restore-image preparation must preserve
-established connections between declared members, including their matching ports,
-even when the reciprocal endpoint is in another artifact. It must not classify
-such a socket as external solely because the peer is absent from the local image.
-External connections retain standalone disconnect/clone behavior. The IP map
-alone cannot repair a socket that image preparation has already disconnected.
-
-Pod UID does not guarantee a stable sandbox IP. Before execution, TCP unblocking,
-and application release, agents recheck the recorded container/sandbox and pinned
-IP. Mismatch fails with PodIPChanged. Never regenerate source tables or target
-bindings, and never clean up a replacement container or sandbox.
-
-#### TCP Protection and Execution Hold
-
-Before restoring sockets, protect them from traffic to peers whose matching
-sockets do not yet exist; otherwise kernel traffic can provoke a reset.
-[CRIU documents this requirement](https://www.criu.org/TCP_connection).
-
-ReadyForTCP permits agents to end that isolation after local checks. Protection
-must preserve unrelated policy and allow agent-brain communication. Reuse existing
-Snapshot/CRIU mechanisms where possible; this SNEP does not prescribe firewall
-rules. Recovery context must support cleanup or re-isolation without API access
-or an in-memory map.
-
-The application execution hold is separate. It must remain effective while TCP
-and runtime reconstruction proceed, until the release marker is published.
-Neither Pod readiness nor a startup probe pauses restored processes.
-Agent/helper loss must not implicitly release work. Implement and qualify this
-hold for all supported workloads, including members without shims; refuse
-unsupported configurations at preflight.
-
-#### Release Evidence
-
-After ReleaseAuthorized and final checks, the agent atomically publishes
-restore-complete, preserving its key=value format and pid field while adding
-attempt UID and admitted container ID. Existing existence-based gates and PID
-readers must remain compatible; recovery validates the identity fields.
-
-The marker is the application release point. It must never be partly visible.
-The agent then preserves release proof independently of the marker's lifetime.
-ReadyForTCP and TCP unblocking are not evidence of application release.
-Recovery and cancellation follow the evidence-first rules in
-[Failure and Recovery](#failure-and-recovery).
-
-#### Timer Safety and Source Lifetime
-
-Network isolation can trigger kernel keepalive, retransmission, and user timeouts
-while applications are paused. [snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)
-shows this during a single Pod's dump; a group adds capture and restore skew.
-
-Qualification must cover the whole interruption: before and during every member's
-dump, while peers finish, and during local restores until every matching socket
-exists and TCP can resume. Earlier unblocking shortens the restore interruption;
-it does not solve timer failures during reconstruction skew.
-
-As with standalone capture, the owner must not deliberately delete, replace, or
-evict a source during that member's capture, until its child is terminal.
-Snapshot does not suppress kubelet restarts or other authorized controllers.
-
-What must survive after one member finishes while peers still capture remains
-a qualification question. A surviving Pod object alone does not preserve its
-sandbox or protect peers' TCP timers. Test restarts, deletion, and sandbox
-replacement to establish the required runtime or owner constraints. This SNEP
-does not choose a fencing mechanism without that evidence.
+| `PodSnapshot` and `PodSnapshotContent` | No schema change; set-owned children carry an owner reference and a member-ID label, and cannot be restored on their own | The agent reads group parameters from the parent set |
+| Artifact manifest | Adds an optional `podSet` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs, plus each process's rendezvous file path | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
+| Restore Pod contract | New annotation `nvidia.com/restore-set: <PodSetRestore>`, used instead of `restore-from` and `restore-container-map`; set targets must carry the restore startup probe, and the NRI plugin never runs the original command while the set context is missing | One source of truth, and no race with standalone restore |
+| `restore-complete` file | Adds an `attempt` key holding the `PodSetRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
+| `nvidia.com/Restored` condition | New reasons `SetPending`, `Admitted`, `Restoring`, and `Reconstructed` | Restart safety and status aggregation |
+| Control volume | Reserves `coordination/` for rendezvous endpoints | Gives every Pod a private and stable endpoint path |
+| `SnapshotJob` and single-Pod restore | Unchanged | Not applicable |
+
+[Appendix D](#d-api-definitions) gives the complete Go types with their
+validation rules, the artifact metadata, and the Pod-contract constants. The
+coordinator's gRPC API, the framing between agents and relays, and the
+endpoint protocol for CUDA Checkpoint are internal and versioned, so a version
+mismatch fails admission rather than surfacing later. The operator needs full
+access to the new kinds, the agents need read access to them, and the
+coordinator needs read access to them and to Pods, plus permission to create
+TokenReviews.
 
 ### Security
 
-**Workload authority.** Restrict creation to callers authorized to capture and
-restore workloads in that namespace. Exact UIDs prevent name reuse from changing
-bindings. Controllers need set/per-Pod resources, Pods, and Events. Agents need
-their assigned context, existing execution permissions, and restore-status writes.
+No credential ever reaches a workload. Each agent authenticates to the
+coordinator with an audience-scoped, Pod-bound ServiceAccount token over TLS,
+the coordinator verifies it with a TokenReview, and the agent may then act only
+for members whose Pods run on its own node. Inside a node, the per-Pod endpoint
+is reachable only from that Pod, so the endpoint itself identifies the caller,
+and the coordinator restricts workload processes to the library namespaces of
+their own session, which prevents them from forging cuInterpose commands or
+Snapshot barriers.
 
-**Session authority.** Only controller-supplied context authorizes a session.
-The brain authenticates agents and checks each member against that context,
-accepting messages only for the active session and step. Missing or mismatched
-authorization fails closed. Connections authenticate endpoints and protect
-credentials and payloads in transit.
+The data that crosses the session is small but sensitive, since fabric handles,
+communicator identifiers, and topology records could help an attacker reach
+another workload's memory or connections. It therefore exists only in the
+coordinator's memory for the lifetime of one session and is never written to
+etcd, to logs, or to checkpoint images; in addition, using a fabric handle still
+requires access to the same fabric domain, which the platform grants per
+workload.
 
-Credentials stay out of coordinators, shims, status, annotations, artifacts,
-arguments, and logs. Opaque runtime records and GPU handles may grant access to
-resources and must not be logged.
-
-**Local authority.** The agent-coordinator channel must prevent workload processes
-from impersonating either endpoint or forging execution permission. Workload-writable
-control files cannot supply authority. Sharing namespaces is not a security
-boundary. Durable recovery records are inaccessible to the workload. The release
-marker remains workload-visible; this design does not claim safety against
-malicious marker tampering.
-
-**Trust limits.** The controller validates report identities, not which node wrote
-them. V1 trusts privileged agents, which may share a service account; it does not
-provide per-node authorization or contain a compromised agent.
-
-**Isolation.** Sessions isolate identity, routing, payloads, and deadlines. Bound
-capacity and payload size before destructive work. Coordination reachability must
-respect unrelated network policy; reachability is not authentication. TCP cleanup
-affects only recorded attempt resources, never unrelated policy or replacement
-targets. Artifact storage retains its existing security model.
+The agent's privileges do not grow in kind, because it already enters workload
+namespaces, although it now also creates a loopback listener and narrow packet
+rules there, both of which it removes on every exit path. The coordinator needs
+no write access to the API. As for abuse, a compromised workload can at worst
+fail its own set's attempt, and a flood of requests can delay an attempt into a
+timeout but cannot corrupt another session. Pods that use the host network are
+refused unless their libraries use the Unix-socket endpoint, because their
+loopback interface is shared with the node.
 
 ### Configuration
 
-Operators configure the brain endpoint, authentication and transport protection,
-service capacity, and cleanup grace period. Deployment and upgrade documentation
-must explain session ownership and the effect of an owner restart. Standalone
-operations remain usable without the brain.
-
-This feature adds no node capacity-slot pool. Capture retains per-source
-exclusion; restore claims provide target exclusivity, not throttling. Any later
-concurrency policy must allow same-group members to progress.
+Multi-Pod support is gated behind a `MultiPodSnapshot` feature gate, which is
+alpha and disabled by default. The Helm chart gains a coordinator Deployment
+with TLS, resource, and replica settings, while the agent gains a switch for the
+NCCL Checkpoint compatibility endpoint. A plain `PodSnapshot` needs no
+configuration change.
 
 ### Performance and Scalability
 
-Capture creates a set object plus a snapshot/content pair per member. Restore
-creates one attempt, without per-member restore CRDs. Runtime exchanges use
-session connections, not Kubernetes status writes; dumps use artifact storage.
-
-Measure admission, joins and step latency, metadata volume, brain resource use,
-concurrent-session capacity, API updates, operation duration, and cleanup cost.
-One session must not starve others. API capacity does not establish qualification
-at that scale.
+Coordination is cheap relative to the data that capture and restore move. A
+capture adds five cuInterpose rounds and four barriers, and a restore eight
+rounds and four barriers, each costing a few in-cluster round trips. The largest
+payloads are cuInterpose's topology records, which reach at most 32 MiB per
+member and are gathered only to rank 0, whereas handle tables grow by about 128
+bytes per recreated handle and NCCL identifiers take 128 bytes per communicator.
+Blocking reads and per-node coalescing keep library traffic to about one
+upstream request per key per node, which comfortably supports at least 100
+concurrent library clients per session with per-operation latency well under 100
+milliseconds. Because sessions are independent, one coordinator replica serves
+many concurrent attempts and can later be sharded by attempt; alpha qualifies
+sets of 2 to 16 Pods, and larger sets are measured before beta.
 
 ### Monitoring
 
-Conditions and member entries are the progress interface. Waiting reasons
-distinguish missing targets, scheduling, placeholder startup, and preflight.
-Failure reasons include SourceGone, TargetGone, PodIPChanged, ArtifactUnavailable,
-RestoreIncompatible, TargetInUse, TargetReused, GateBudgetTooShort, GroupRefused,
-MemberFailed, SessionUnavailable, SessionLost, DeadlineExceeded, Cancelled, and
-ReleaseEvidenceUnavailable.
+`PodSetSnapshot` and `PodSetRestore` report `Admitted`, `Committed`,
+`Released`, `Ready`, and `Failed` conditions, with reasons that distinguish
+`Refused`, `DeadlineExceeded`, `GateBudgetTooShort`, `PodIPChanged`,
+`ArtifactUnavailable`, `MemberFailed`, `CoordinatorLost`, and `Cancelled`, while
+each member's phase shows how far it progressed. The operator emits events at
+every transition, agents log each phase with its attempt, member, and duration,
+and the coordinator exports metrics for active sessions, operation latency,
+barrier wait time, and failures by reason.
 
-Emit Events for refusal, failure, expiry, unknown release evidence, and incomplete
-cleanup. Logs identify operation UID, member, Pod UID, and stage, never credentials
-or payloads. Metrics cover results, admission waits, sessions, step duration, and
-recovery/cleanup failures. Keep attempt UIDs out of metric labels.
+### Dependencies
 
-### Dependencies and Qualification Gates
-
-The Kubernetes API does not by itself provide runtime safety. Implementation must
-deliver the following capabilities:
-
-| Capability | Required work or evidence |
-| --- | --- |
-| Per-Pod integration | Set-owned capture detection; set-mode Pod-contract validation and restore-proxy interception; direct set restore through the per-Pod executor. |
-| Generic coordination | Controller-supplied context, authenticated agent-brain transport, fixed membership, deadlines, barriers, and session loss handling. |
-| Local runtime extension | Protected agent-coordinator channel; read-only inspection, preparation, shared-resource reconstruction, and local validation. |
-| Shared executor lifecycle and recovery | Cancel and drain helpers after agent loss; retain execution and cleanup evidence. Restore also needs exclusive target ownership and durable release proof. Reuse artifacts and member results; never replay interrupted set execution. |
-| Preserved TCP | Complete artifact-derived map; group-aware socket-image handling; protection until ReadyForTCP and safe failure cleanup. |
-| Execution hold | A qualified hold independent of TCP isolation for both shimmed and shimless members. |
-| Timer safety and source lifetime | Set-wide integration of #577 work and tests establishing source restart/deletion constraints. |
-| Cross-node NVLink | FABRIC reconstruction, ComputeDomain/clique compatibility, and release of conflicting source channel claims for in-place restore. |
-
-[SNEP-295](https://github.com/ai-dynamo/snapshot/issues/295) supplies the local CUDA
-foundation, not the cross-Pod contract. CUDA protocol/resource validation stays
-in local coordinators; generic payload transport does not replace it. Other
-transports, topologies, and engines require their own qualification.
+- [SNEP-295](https://github.com/ai-dynamo/snapshot/issues/295), cuInterpose,
+  which this SNEP extends across Pods.
+- For GPU memory shared across nodes, a CUDA driver in which FABRIC handles
+  exported on another node can be imported after a native CUDA restore, whose
+  fix is in progress, and fabric-domain access for restore Pods, for example
+  through an IMEX channel granted by a ComputeDomain.
+- A CRIU build with the inet-socket update hook, which is currently available
+  only on CRIU's development branch, so the agent must pin the commit it builds.
+- NCCL 2.31 or newer for NCCL Checkpoint and, later, CUDA Checkpoint's
+  communication-library interface.
+- Optionally, [SNEP-411](https://github.com/ai-dynamo/snapshot/issues/411)
+  application contracts, for signals beyond control-volume files.
 
 ### Test Plan
 
-Tests must drive the set API, not only local executors. Tracking:
-[snapshot#324](https://github.com/ai-dynamo/snapshot/issues/324).
+Unit tests cover the coordinator's operations against the semantics in the
+session table, including blocking reads, atomics, barriers posted before their
+creation, abort fan-out, namespace isolation, and authorization by node; the set
+controllers' validation, identity pinning, aggregation, artifact withdrawal, and
+cancellation; the agents' phase sequencing, including concurrent members on one
+node, members without cuInterpose, and a restart at every phase, in particular
+during CRIU and between `restore-complete` and the status update; and
+cuInterpose's validation of multi-rank topologies with teams that span Pods,
+importers resolved by handle, missing ranks, and duplicated creators.
 
-#### API and Controller Tests
+Integration tests extend the existing end-to-end suite on CPU-only nodes. A
+two-Pod set with TCP and ZeroMQ connections is captured and restored onto
+swapped nodes, the same set without the group IP map serves as a negative
+control, a refusal during admission and a short probe budget must leave both
+Pods running, and a failure injected after the commit must terminate both. The
+same harness delays one member's dump and restore to measure how long preserved
+connections survive the hold. A multi-process fake of a CUDA Checkpoint client
+exercises the rendezvous endpoint, and NCCL Checkpoint's Redis client exercises
+the compatibility endpoint.
 
-- Generate schemas and exercise CEL against an API server. Cover required source
-  UIDs, optional target UIDs, distinct IDs/Pods, one-container mappings, size
-  limits, immutable specs/bindings/sessions, retained member entries, and outcome
-  finality. Reject clearing status or removing and re-adding entries.
-- Verify partial SSA payloads: agent entries contain only id and report;
-  same-node members do not erase each other's reports, and controller writes
-  preserve them.
-- Test ContextReady/Admitted ordering, stale reports, changed live container IDs,
-  competing target claims, missing targets, and deadlines. Unsupported execution
-  holds refuse before any CRIU starts.
-- Delete or replace children/contents under a Ready checkpoint. Withdraw
-  availability without losing exact references or recapturing; refuse new
-  restores and fail unfinished ones despite stale cached conditions.
-- Test controller restart, identical context redelivery, referencing restores
-  during checkpoint deletion, bounded finalizers, and CleanupIncomplete.
-  Completed checkpoints do not expire with the capture deadline.
-- Test TargetGone before/after admission, Unknown from unreadable release evidence,
-  late evidence settling Unknown, and final results surviving restarts and loss.
-- Validate cancellation as Failed with reason Cancelled. Reject Cancelled as a
-  restore outcome or report phase. Cancellation never overrides Restored or
-  resolves Unknown without release evidence.
-- Reject replacing one target inside a bound attempt. Retry an interrupted group
-  with a new attempt and a complete new set of Pod UIDs; keep the original
-  bindings and member results unchanged.
-
-#### Artifact and Per-Pod Integration Tests
-
-- Round-trip complete versioned artifact metadata. Every artifact has the same
-  capture UID and ordered member table, with its own MemberID. Reject missing or
-  inconsistent metadata, changed ranks, unsupported versions, wrong local/content
-  identity, invalid or duplicate IPs, and local IP mismatch.
-- Derive the complete map from only the assigned artifact and pinned targets;
-  do not read source Pods or peer artifacts. Source IPs remain absent from set
-  status; target IPs are write-once.
-- Verify content creation triggers set validation, missing context waits, and
-  no standalone capture or restore can bypass set handling.
-- Exercise set-mode Pod building, validation, and runtime interception with
-  Pods created before and after the attempt. The original selected-container
-  command never runs, including when context is missing or conflicting.
-- Test socket-image handling with reciprocal endpoints in different member
-  artifacts: preserve their established state and matching ports. Include external
-  peers and standalone clone restores as regression cases.
-- Existing PID parsers, restore proxies, and existence-based marker readers
-  accept the new identity fields without changing their behavior.
-
-#### Runtime Contract Tests
-
-- Run the brain without CUDA libraries; exchange arbitrary payloads unchanged.
-  Reject unauthorized context, wrong session/member/step, conflicting protocol,
-  stale messages, and duplicate counting. Isolate concurrent sessions and bound
-  payload/capacity rejection before execution.
-- Include shimless and same-node members in safety/completion barriers. Runtime
-  resource validation rejects mixed checkpoints, changed ranks, unsupported
-  handles/topology, and incorrect creator/holder identities. Same PIDs in different
-  members remain distinct.
-- Refuse an unready workload without preparation. Inspection must not pause or
-  drain it, alter registries, or substitute for checkpoint readiness.
-- Delay, refuse, or expire any ReadyToPrepare vote: no preparation starts before
-  all votes. After authorization require final agent checks, durable intent, and
-  local permission before BeginCheckpoint. Revalidate frozen records; a lost
-  reply is uncertain, not refused. ReadyForDump requires every Prepared report
-  and saved metadata.
-- Withhold one member's inspection data: the brain cannot return a complete
-  collection, and members cannot vote ReadyToPrepare. Once all contributions
-  arrive, each member validates the collected data before voting. Include
-  members without runtime records and members on the same node.
-- Withhold ReadyForTCP after one member restores: isolation remains. After it is
-  delivered, kernel TCP traffic may proceed but application work remains held,
-  including without shims and after agent/helper loss. Runtime verification and
-  ReleaseAuthorized remain necessary.
-- Include saved runtime records in restore joins, with empty contributions where
-  needed. Withhold one join: neither ReadyForTCP nor the complete record set is
-  returned. Once all join, distribute records unchanged; record delivery and
-  runtime validation or reconstruction must not delay TCP authorization.
-  Withhold a later runtime-step contribution: its complete data set cannot be
-  returned and application release remains blocked.
-- Exercise allocation and multicast replacement-handle exchanges, completion-only
-  steps, and the final inspection exchange. Peers must use the replacement handles;
-  coordinators must reject a reconstructed resource graph that differs from the
-  checkpoint. A completion-only step cannot advance until every member succeeds.
-- Workload files, endpoints, and forwarded bytes cannot forge votes or grants.
-  Local-channel loss fails the member. Established member/owner loss fails the
-  session without replay; reconnecting to the same endpoint does not resume it.
-
-#### Crash and Cancellation Tests
-
-| Scenario | Required result |
-| --- | --- |
-| Refusal before capture authorization | Every source remains untouched; include every member role and same-node groups. |
-| Refusal or identity/IP change after authorization | Stop local new work; apply boundary-specific handling to peers already preparing. Never rewrite pinned context. |
-| Crash after readiness vote or authorization, before intent | No source termination based on the vote alone. |
-| Crash during preparation or lost BeginCheckpoint reply | No replay; use unsafe-source handling if execution cannot be excluded. |
-| Agent process crash or agent-container restart during CRIU or GPU work | Cancel/drain old helper work and confirm it cannot act before cleanup or new execution. Test surviving helpers, unavailable stop confirmation, and a race with completion. Never terminate a released application as helper cleanup. |
-| Artifact committed, crash before reporting capture success | Recover the committed artifact and report Captured; do not dump again. |
-| Execution record missing, corrupt, unreadable, or inconsistent | Never infer that work did not start. Preserve independent success/release proof; otherwise restore remains Unknown without replay, teardown, or target reuse. Capture follows unsafe-source handling if destructive work cannot be excluded. |
-| Any restore preflight refusal or insufficient gate budget | No CRIU starts; placeholders remain. Test fresh and partly spent gates and conflicting annotations. |
-| Crash after Passed, before Admitted | Recover the target reservation and repeat local preflight if not yet admitted. If admission was committed meanwhile, verify the admitted identity, active attempt/session, and deadline before first execution; do not reset group admission. |
-| Agent restarts with no local execution intent while peers are already restoring | If the original attempt, bindings, session, and deadline remain valid, start this member's first restore under existing admission. Keep the same IP map and join the original session only after local restore. |
-| Admitted target identity changes before first local execution | Do not start this member. Fail the attempt without resetting admission or requiring new preflight votes. Peers follow normal partial-failure handling; preserve completed Restored results. |
-| Same restart after attempt/session failure, deletion, or expiry | Do not start restoration. Finish owned cleanup and free the reservation. If current state cannot be verified, retain the reservation and wait. |
-| Crash during local restore or after TCP unblocking, confirmed unreleased | Maintain hold; re-isolate before teardown without API access or a surviving IP map. Never infer release from ReadyForTCP. |
-| Marker published, crash before release is otherwise recorded | Recover the matching marker, preserve Restored, and finish cleanup. |
-| Execution intent recorded, marker unreadable, no other release proof | Report Unknown; do not kill, replay, release again, or alter target protection. Retry observation, including after attempt failure/deletion. |
-| Evidence becomes readable after Unknown | Settle the member from evidence; never reopen the failed attempt. Test both proved release and confirmed non-release. |
-| Durable release proof exists, marker missing/unreadable | Preserve Restored despite API loss, failed/deleted attempt, target loss, or later container restart. Cleanup only recorded resources. |
-| Brain owner loss or established member-connection loss | Fail affected live sessions without replay. Preserve completed artifacts and proved release, and respect unknown release evidence. |
-| Failure/deletion/expiry at every boundary | Stop new work; follow evidence-first cleanup and bounded finalizers. Commands already delivered are not retractable. |
-| Capture or restore cancelled before successful completion | Report Failed with reason Cancelled where non-completion is established. Preserve Captured/Restored results; unknown release remains Unknown. |
-| Reused Pod/container/sandbox or competing attempt | Reject spent targets. Reuse untouched placeholders only after cleanup and only if no group member may have executed. Never adopt or clean up replacements. |
-| Retry after partial restore or partial release | Use the same checkpoint with a new attempt and fresh targets for every member. Derive a complete new IP map; never reuse restored peers or mutate the old bindings. Owner retirement leaves old Restored results unchanged. |
-| Delayed initial brain availability | Retry within the absolute deadline; never renew it or transparently rejoin a lost session. |
-| TCP protection and agent restart | Preserve unrelated policy and agent-brain reachability; cleanup/re-isolation uses only attempt-owned resources. |
-
-#### End-to-End Qualification
-
-1. **CPU TCP.** Restore on original and swapped nodes with changed/permuted IPs.
-   Delay one member's socket reconstruction and exercise queued data and kernel
-   probes. Verify preserved cross-Pod connections; use disabled remapping and
-   disabled protection as controlled negative cases. After ReadyForTCP, delay
-   final release: probes receive replies while application work stays held.
-   Validate existing CRIU hooks before choosing additional enforcement. Repeat
-   each case at least three times.
-2. **MPI.** Run ping-pong after in-place and relocated restore.
-3. **GPU plus application TCP.** In the same workload, reconstruct cross-node
-   FABRIC resources and preserve TCP. Verify topology/ComputeDomain/clique
-   compatibility, in-place source-claim release, GPU results, and fresh work
-   after release. Prolong runtime reconstruction after ReadyForTCP to test the
-   execution hold separately from TCP health.
-4. **Inference engines.** Qualify distributed TensorRT-LLM, vLLM, and SGLang
-   combinations before claiming support; record engine versions, topology,
-   transport, and workload.
-5. **Source lifetime.** Delay B's dump after A finishes, then separately restart
-   A, delete its Pod, and replace its sandbox. Inspect B's saved sockets and
-   restored behavior to establish lifecycle/isolation constraints.
-6. **TCP timers.** Reproduce #577 in a multi-process Pod and across Pods with
-   staggered dump/restore. Exercise keepalive, retransmission, and user timeouts
-   over the full interruption, including before a peer's dump begins. Qualify
-   the runtime fix or documented restrictions; earlier unblocking is not enough.
+End-to-end tests run on GPU nodes, including a multi-node NVLink system for
+cross-node sharing. They restore, in place and relocated, a two-node set that
+uses shared GPU memory and a multicast team spanning both nodes; they restore
+TensorRT-LLM at tensor parallelism 8 across two Pods, using NCCL Checkpoint and
+MPI, onto other nodes and require identical outputs for fixed prompts; and they
+kill a member during a destructive phase to confirm that every member fails.
 
 ### Graduation Criteria
 
-**Alpha:** the set APIs, controllers, agents, brain, and local runtime extension
-pass CPU, contract, and fault tests. Cross-node GPU reconstruction and preserved
-TCP pass together, plus at least one inference workload. Set-mode startup,
-group-aware socket handling, artifact-derived maps, actual execution holds
-with and without shims, helper-loss cleanup, full-group retries, and evidence-first
-recovery pass. Timer and source-lifetime results establish supported operating
-constraints.
+**Alpha** requires two-Pod capture and restore, both in place and relocated,
+for NCCL Checkpoint, in-set TCP connections, and GPU memory shared across nodes
+including multicast, with admission refusals and fail-stop behavior tested;
+evidence that a restarted agent never replays CRIU and never kills a released
+member; measured limits for how long preserved connections survive a hold; and
+an unchanged result for the existing single-Pod suite.
 
-**Beta readiness:** API/status ownership is stable in use. Repeated multi-node
-tests cover restarts/upgrades, partial release, session loss, scheduling delays,
-concurrent-session isolation, capacity limits, and cleanup. Supported combinations,
-upgrade behavior, and remaining owner constraints are documented and enforced
-where applicable.
+**Beta** requires integration with CUDA Checkpoint's communication-library
+interface, with the NCCL compatibility endpoint deprecated; a released driver
+with the cross-node import fix and a public way to identify FABRIC handle
+kinds; scale measured beyond 16 Pods; decisions on IPv6, on the coordinator's
+availability model, and on an enforced execution hold, informed by operational
+evidence; and an API review that settles the open questions in
+[Appendix A](#a-open-questions).
 
-No release timing or automatic support for additional engines/transports is implied.
+**GA** is not planned by this SNEP.
 
-## Appendix: API Definitions
+## Implementation History
 
-### Public Kubernetes Types
+- 2026-09: Tracking issue #324 and the first draft of this SNEP.
+- 2026-09-30: Prototypes of multi-node cuInterpose and of cross-Pod TCP
+  preservation ran on GB300 NVL72 hardware, including relocated restores.
+- 2026-10-16: This revision replaces the first draft with a shared coordination
+  session aligned with NCCL Checkpoint and CUDA Checkpoint, and keeps the first
+  draft's API shape.
 
-The following Go definitions include every new public type. They reuse
-[PodSnapshotSource](https://github.com/ai-dynamo/snapshot/blob/0b6d7d98e48aa6a4a852af548d76852ccf1b4cd8/api/v1alpha1/podsnapshot_types.go)
-and leave its standalone semantics unchanged. Validation markers express the
-structural and write-once rules; live checks are described in
-[Validation and Binding](#validation-and-binding).
+## Alternatives
+
+| Alternative | Why it was not chosen |
+| --- | --- |
+| Coordination inside rank 0's cuInterpose coordinator, as prototyped | It exits before libraries restore, listens on the Pod network behind a shared secret, collides with the TCP hold, and serves only cuInterpose. |
+| Coordination inside the operator | It saves a component, but operator upgrades and leader changes would fail restores in flight and data-plane traffic would cross the control plane; building the coordinator as a library keeps this option open. |
+| Coordination hosted by an elected agent | It ties every attempt to one node's health and requires agent-to-agent TLS on the host network as well as an election. |
+| Redis or etcd as the store | It adds a stateful service to secure and operate, still leaves membership and failure handling to Snapshot, and stores fabric handles where any client of the store can read them. |
+| Pods connect to the coordinator directly | It requires credentials inside Pods and possibly inside CRIU images, NetworkPolicy changes in every workload namespace, and exemptions from the TCP hold. |
+| A Session custom resource | Writing every operation through etcd would be slow and would persist fabric handles and bootstrap identifiers. |
+| cuInterpose as a CUDA Checkpoint client | CUDA does not order callbacks across clients and offers no store during checkpoint, whereas cuInterpose must rebuild memory before libraries run and exchange records larger than CUDA's value limit. |
+| Every member validates all cuInterpose records, with no leader | It treats every rank alike, but every member then receives every other member's records, up to 32 MiB each, and every coordinator must reach the same verdict; a single validator in rank 0 is simpler to reason about and already proven by the prototype. |
+| Agents write member reports into the set's status | It gives one place to read, but it adds a status with many writers, whereas agents already report on `PodSnapshotContent` and the restore Pod and the operator can aggregate those. |
+| An "Unknown" member outcome for uncertain release | The attempt ID in `restore-complete` makes release provable, so uncertainty no longer needs its own outcome. |
+| Peer IP annotations on restore Pods, as prototyped | They require the owner to know old Pod IPs and add API polling to the critical path, whereas the member table in every artifact provides the same mapping at no cost. |
+
+## Appendix
+
+### A. Open questions
+
+1. **CUDA Checkpoint.** The integration needs a documented backend protocol or
+   plugin interface for the rendezvous, an endpoint passed to the resume phase
+   by the orchestrator, preferably as a Unix socket, a distinct status that
+   unblocks reads and barriers when an attempt aborts, a resume that is allowed
+   without a restore, and per-library results from the prepare and resume
+   phases.
+2. **NCCL Checkpoint.** Until NCCL moves onto CUDA Checkpoint, would it accept a
+   Unix-socket endpoint, and does every key receive exactly one `SET` per
+   restore?
+3. **Execution hold.** Should a later version enforce the hold before release
+   instead of relying on the workload contract, and how, given that CUDA and
+   cuInterpose need the restored processes running?
+4. **Source lifetime.** What must survive of a source that has finished its dump
+   while its peers are still capturing, beyond the owner not deleting it?
+5. **Naming.** Should the kinds be called `PodSet` or `PodGroup`?
+6. **Cross-namespace restore.** Would restoring a set into another namespace
+   justify a cluster-scoped, set-level content resource?
+7. **Availability.** Which evidence would justify replicating sessions instead
+   of failing attempts when the coordinator restarts?
+
+### B. Changes from the prototype
+
+The prototype validated the shim and coordinator mechanics on hardware, and this
+SNEP keeps them while changing how members find each other. The brain moves out
+of rank 0's coordinator into the coordinator service, leaving rank 0's relay
+with only cuInterpose's leader logic, and its commands become pure broadcasts
+because they now carry the expected bytes for every rank. Group parameters come
+from the resources instead of Pod annotations, which removes the shared secret,
+and the per-Pod inspection becomes a group admission, without which every
+multi-node workload would be refused. Finally, the TCP hold drops only preserved
+connections and lifts at `sockets-restored`, which removes the prototype's
+conflict between the hold and its own coordination traffic.
+
+### C. Diagram sources
+
+The figures in `diagrams/` are generated by `diagrams/generate.py`, in which
+every sequence diagram is a list of steps, so a change to a flow is an edit to
+that list followed by `python3 diagrams/generate.py`.
+
+### D. API definitions
+
+The Go definitions below cover every new public type. They reuse
+`PodSnapshotSource` unchanged, so a set member is described exactly like a
+standalone capture, and their validation markers express the structural,
+immutability, and write-once rules that the API server enforces without a
+webhook. Cross-object and live checks, such as whether a target Pod exists or
+whether its startup probe has enough time left, stay with the controllers and
+agents. The operator is the only writer of both status blocks.
 
 ```go
 package v1alpha1
@@ -1363,93 +914,105 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// Condition types. Released applies to PodSetRestore only.
 const (
-	PodSetConditionContextReady = "ContextReady"
-	PodSetConditionAdmitted     = "Admitted"
-	PodSetConditionReady        = "Ready"
-	PodSetConditionFailed       = "Failed"
+	PodSetConditionAdmitted  = "Admitted"
+	PodSetConditionCommitted = "Committed"
+	PodSetConditionReleased  = "Released"
+	PodSetConditionReady     = "Ready"
+	PodSetConditionFailed    = "Failed"
 )
 
-// ObjectIdentity identifies an exact object. Its namespace is implicit.
+// Reasons used on conditions and on member results.
+const (
+	PodSetReasonRefused             = "Refused"
+	PodSetReasonDeadlineExceeded    = "DeadlineExceeded"
+	PodSetReasonGateBudgetTooShort  = "GateBudgetTooShort"
+	PodSetReasonPodIPChanged        = "PodIPChanged"
+	PodSetReasonTargetInUse         = "TargetInUse"
+	PodSetReasonArtifactUnavailable = "ArtifactUnavailable"
+	PodSetReasonMemberFailed        = "MemberFailed"
+	PodSetReasonCoordinatorLost     = "CoordinatorLost"
+	PodSetReasonCancelled           = "Cancelled"
+)
+
+// ObjectIdentity names an exact object, in the operation's namespace or at
+// cluster scope.
 type ObjectIdentity struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
-	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	UID types.UID `json:"uid"`
 }
 
-// TargetPodReference allows a target to be named before it is created.
+// TargetPodReference names a restore Pod that may not exist yet. Admission
+// pins its UID when the caller omits it.
 type TargetPodReference struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 	// +optional
-	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	UID types.UID `json:"uid,omitempty"`
 }
 
-// RuntimeSession identifies the coordination service for this operation.
-// The parent object's UID identifies the session; credentials are not API data.
-type RuntimeSession struct {
-	// Endpoint is the address agents use. Workload callers treat it as opaque.
-	// +kubebuilder:validation:MinLength=1
-	Endpoint string `json:"endpoint"`
-}
-
-// +kubebuilder:validation:Enum=Pending;Capturing;Captured;Failed
-type CapturePhase string
-
-const (
-	CapturePending   CapturePhase = "Pending"
-	CaptureCapturing CapturePhase = "Capturing"
-	CaptureCaptured  CapturePhase = "Captured"
-	CaptureFailed    CapturePhase = "Failed"
-)
+// ---------------------------------------------------------------- capture
 
 type PodSetSnapshotMember struct {
+	// ID names the member from capture to restore. Its position in the list
+	// is its rank.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	ID string `json:"id"`
-	// Reuses the source shape of PodSnapshot. A set source must have a UID.
+	// Source is the standalone capture source; a set source must name its UID.
 	// +kubebuilder:validation:XValidation:rule="has(self.podRef.uid) && size(self.podRef.uid) > 0",message="set sources require a Pod UID"
 	Source PodSnapshotSource `json:"source"`
 }
 
 // +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.filter(n, n.id == m.id).size() == 1)",message="member IDs must be unique"
+// +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.filter(n, n.source.podRef.name == m.source.podRef.name).size() == 1)",message="source Pods must be distinct"
 type PodSetSnapshotSpec struct {
-	// Seconds from this object's creation. Required; there is no infinite wait.
+	// DeadlineSeconds bounds the capture, counted from creation.
 	// +kubebuilder:validation:Minimum=1
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
-	// Order is rank. Do not treat this list as an unordered map.
+	// Members in rank order. 256 is the capacity of the address-remap plugin.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=256
 	// +listType=atomic
 	Members []PodSetSnapshotMember `json:"members"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.podSnapshot) || (has(self.podSnapshot) && self.podSnapshot == oldSelf.podSnapshot)",message="child snapshot identity is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content identity is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName == oldSelf.nodeName)",message="source node is immutable"
+// +kubebuilder:validation:Enum=Pending;Admitted;Captured;Failed
+type CapturePhase string
+
+const (
+	CapturePending  CapturePhase = "Pending"
+	CaptureAdmitted CapturePhase = "Admitted"
+	CaptureCaptured CapturePhase = "Captured"
+	CaptureFailed   CapturePhase = "Failed"
+)
+
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.podSnapshot) || (has(self.podSnapshot) && self.podSnapshot == oldSelf.podSnapshot)",message="podSnapshot is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content is immutable"
+// +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Captured', 'Failed']) || self.phase == oldSelf.phase",message="final phases are immutable"
 type PodSetSnapshotMemberStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	ID string `json:"id"`
+	// +kubebuilder:validation:Minimum=0
+	Rank int32 `json:"rank"`
 	// +optional
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
 	NodeName string `json:"nodeName,omitempty"`
+	// PodSnapshot is the child that the set owns for this member.
 	// +optional
 	PodSnapshot *ObjectIdentity `json:"podSnapshot,omitempty"`
-	// Content is immutable once the completed set is published.
+	// Content is the member's PodSnapshotContent, pinned once captured.
 	// +optional
 	Content *ObjectIdentity `json:"content,omitempty"`
-	// Derived from the child PodSnapshot's conditions.
 	// +kubebuilder:default=Pending
 	Phase CapturePhase `json:"phase"`
 	// +optional
@@ -1458,15 +1021,14 @@ type PodSetSnapshotMemberStatus struct {
 	Message string `json:"message,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.session) || (has(self.session) && self.session == oldSelf.session)",message="runtime session is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.committedAt) || (has(self.committedAt) && self.committedAt == oldSelf.committedAt)",message="committedAt is write-once"
 type PodSetSnapshotStatus struct {
+	// CommittedAt is set when the capture crosses its point of no return.
 	// +optional
-	Session *RuntimeSession `json:"session,omitempty"`
-	// Controller-owned; child PodSnapshot status is the agent's capture report.
+	CommittedAt *metav1.Time `json:"committedAt,omitempty"`
 	// +optional
-	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=256
-	// +kubebuilder:validation:XValidation:rule="oldSelf.all(o, self.exists(n, n.id == o.id))",message="member status entries cannot be removed"
+	// +kubebuilder:validation:XValidation:rule="oldSelf.all(o, self.exists(n, n.id == o.id))",message="member entries cannot be removed"
 	// +listType=map
 	// +listMapKey=id
 	Members []PodSetSnapshotMemberStatus `json:"members,omitempty"`
@@ -1479,9 +1041,10 @@ type PodSetSnapshotStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.members) || (has(self.status) && has(self.status.members))",message="member status cannot be cleared"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.session) || (has(self.status) && has(self.status.session))",message="runtime session cannot be cleared"
+// +kubebuilder:resource:scope=Namespaced,shortName=podsetsnap
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Committed",type=date,JSONPath=`.status.committedAt`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, self.spec.members.exists(s, s.id == m.id))",message="status must refer to declared members"
 type PodSetSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -1499,21 +1062,21 @@ type PodSetSnapshotList struct {
 	Items           []PodSetSnapshot `json:"items"`
 }
 
+// ---------------------------------------------------------------- restore
+
 type ContainerMapping struct {
-	// Name of the container captured for this member.
+	// Source is the container captured for this member.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Source string `json:"source"`
-	// Name of the placeholder container to receive the restored processes.
+	// Destination is the restore Pod's container that receives the processes.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Destination string `json:"destination"`
 }
 
 type PodSetRestoreTarget struct {
-	// Must match exactly one member ID in the referenced checkpoint.
+	// ID must match exactly one member of the referenced PodSetSnapshot.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -1525,6 +1088,8 @@ type PodSetRestoreTarget struct {
 // +kubebuilder:validation:XValidation:rule="self.targets.all(t, self.targets.filter(n, n.podRef.name == t.podRef.name).size() == 1)",message="target Pods must be distinct"
 type PodSetRestoreSpec struct {
 	SnapshotRef ObjectIdentity `json:"snapshotRef"`
+	// DeadlineSeconds bounds the restore, counted from creation. Admission
+	// refuses targets whose startup probe cannot cover what remains of it.
 	// +kubebuilder:validation:Minimum=1
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
 	// +kubebuilder:validation:MinItems=1
@@ -1534,98 +1099,59 @@ type PodSetRestoreSpec struct {
 	Targets []PodSetRestoreTarget `json:"targets"`
 }
 
-// Cancellation is reported as Failed with reason Cancelled.
-// +kubebuilder:validation:Enum=Pending;Restored;Failed;Unknown
-type RestoreOutcome string
+// +kubebuilder:validation:Enum=Pending;Admitted;Restoring;Reconstructed;Released;Failed
+type RestorePhase string
 
 const (
-	RestorePending  RestoreOutcome = "Pending"
-	RestoreRestored RestoreOutcome = "Restored"
-	RestoreFailed   RestoreOutcome = "Failed"
-	RestoreUnknown  RestoreOutcome = "Unknown"
+	RestorePending       RestorePhase = "Pending"
+	RestoreAdmitted      RestorePhase = "Admitted"
+	RestoreRestoring     RestorePhase = "Restoring"
+	RestoreReconstructed RestorePhase = "Reconstructed"
+	RestoreReleased      RestorePhase = "Released"
+	RestoreFailed        RestorePhase = "Failed"
 )
 
-// +kubebuilder:validation:Enum=Passed;Refused
-type PreflightResult string
-
-const (
-	PreflightPassed  PreflightResult = "Passed"
-	PreflightRefused PreflightResult = "Refused"
-)
-
-// +kubebuilder:validation:Enum=Restoring;Restored;Failed;Unknown
-type RestoreReportPhase string
-
-const (
-	RestoreReportRestoring RestoreReportPhase = "Restoring"
-	RestoreReportRestored  RestoreReportPhase = "Restored"
-	RestoreReportFailed    RestoreReportPhase = "Failed"
-	RestoreReportUnknown   RestoreReportPhase = "Unknown"
-)
-
-// RestoreMemberReport is the node agent's report for this member.
-type RestoreMemberReport struct {
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=1024
-	ContainerID string `json:"containerID"`
-	// +optional
-	Preflight PreflightResult `json:"preflight,omitempty"`
-	// +optional
-	Phase RestoreReportPhase `json:"phase,omitempty"`
-	// +optional
-	Reason string `json:"reason,omitempty"`
-	// +optional
-	Message    string      `json:"message,omitempty"`
-	ObservedAt metav1.Time `json:"observedAt"`
-}
-
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.pod) || (has(self.pod) && self.pod == oldSelf.pod)",message="target Pod identity is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content identity is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.admittedContainerID) || (has(self.admittedContainerID) && self.admittedContainerID == oldSelf.admittedContainerID)",message="admitted container ID is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.pod) || (has(self.pod) && self.pod == oldSelf.pod)",message="target Pod is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName == oldSelf.nodeName)",message="target node is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.containerID) || (has(self.containerID) && self.containerID == oldSelf.containerID)",message="admitted container is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.targetPodIP) || (has(self.targetPodIP) && self.targetPodIP == oldSelf.targetPodIP)",message="target Pod IP is immutable"
-// +kubebuilder:validation:XValidation:rule="!(oldSelf.outcome in ['Restored', 'Failed']) || self.outcome == oldSelf.outcome",message="final member outcomes are immutable"
-// +kubebuilder:validation:XValidation:rule="oldSelf.outcome != 'Unknown' || self.outcome in ['Unknown', 'Restored', 'Failed']",message="Unknown can only remain Unknown or become final"
+// +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Released', 'Failed']) || self.phase == oldSelf.phase",message="final phases are immutable"
 type PodSetRestoreMemberStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	ID string `json:"id"`
-	// Everything except Report is controller-owned.
+	// Pod, NodeName, ContainerID, and TargetPodIP are pinned at admission.
 	// +optional
 	Pod *ObjectIdentity `json:"pod,omitempty"`
 	// +optional
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
 	NodeName string `json:"nodeName,omitempty"`
 	// +optional
-	Content *ObjectIdentity `json:"content,omitempty"`
+	// +kubebuilder:validation:MaxLength=1024
+	ContainerID string `json:"containerID,omitempty"`
+	// SourcePodIP comes from the member table in the artifact.
 	// +optional
 	// +kubebuilder:validation:Format=ipv4
-	// +kubebuilder:validation:MaxLength=15
-	TargetPodIP string `json:"targetPodIP,omitempty"`
-	// Pinned when Admitted=True, and never replaced with a later container ID.
+	SourcePodIP string `json:"sourcePodIP,omitempty"`
 	// +optional
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=1024
-	AdmittedContainerID string `json:"admittedContainerID,omitempty"`
+	// +kubebuilder:validation:Format=ipv4
+	TargetPodIP string `json:"targetPodIP,omitempty"`
 	// +kubebuilder:default=Pending
-	Outcome RestoreOutcome `json:"outcome"`
+	Phase RestorePhase `json:"phase"`
 	// +optional
 	Reason string `json:"reason,omitempty"`
 	// +optional
 	Message string `json:"message,omitempty"`
-	// +optional
-	Report *RestoreMemberReport `json:"report,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.session) || (has(self.session) && self.session == oldSelf.session)",message="runtime session is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.committedAt) || (has(self.committedAt) && self.committedAt == oldSelf.committedAt)",message="committedAt is write-once"
 type PodSetRestoreStatus struct {
+	// CommittedAt is set when admission completes, just before the first
+	// CRIU restore.
 	// +optional
-	Session *RuntimeSession `json:"session,omitempty"`
+	CommittedAt *metav1.Time `json:"committedAt,omitempty"`
 	// +optional
-	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=256
-	// +kubebuilder:validation:XValidation:rule="oldSelf.all(o, self.exists(n, n.id == o.id))",message="member status entries cannot be removed"
+	// +kubebuilder:validation:XValidation:rule="oldSelf.all(o, self.exists(n, n.id == o.id))",message="member entries cannot be removed"
 	// +listType=map
 	// +listMapKey=id
 	Members []PodSetRestoreMemberStatus `json:"members,omitempty"`
@@ -1638,10 +1164,11 @@ type PodSetRestoreStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.members) || (has(self.status) && has(self.status.members))",message="member status cannot be cleared"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.session) || (has(self.status) && has(self.status.session))",message="runtime session cannot be cleared"
-// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, self.spec.targets.exists(t, t.id == m.id))",message="status must refer to declared members"
+// +kubebuilder:resource:scope=Namespaced,shortName=podsetrestore
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Committed",type=date,JSONPath=`.status.committedAt`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, self.spec.targets.exists(t, t.id == m.id))",message="status must refer to declared targets"
 type PodSetRestore struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -1659,27 +1186,68 @@ type PodSetRestoreList struct {
 }
 ```
 
-### Artifact Metadata Types
-
-`CheckpointManifest` gains an optional field named `PodSet` with type
-`*CapturedPodSetManifest` and YAML key `podSet`. Standalone artifacts omit it.
+Each artifact's manifest gains an optional section, identical across the
+members of one capture except for `MemberID`, and standalone artifacts omit
+it.
 
 ```go
 package types
 
-const CapturedPodSetVersion = 1
+// CheckpointManifest gains:
+//
+//	PodSet *PodSetManifest `yaml:"podSet,omitempty"`
 
-type CapturedPodSetManifest struct {
-	Version    int                    `yaml:"version"`
-	CaptureUID string                 `yaml:"captureUID"`
-	MemberID   string                 `yaml:"memberID"`
-	Members    []CapturedPodSetMember `yaml:"members"`
+const PodSetManifestVersion = 1
+
+type PodSetManifest struct {
+	Version int `yaml:"version"`
+	// CaptureUID is the PodSetSnapshot's UID; every member must restore the same one.
+	CaptureUID string `yaml:"captureUID"`
+	// MemberID identifies this artifact's own member.
+	MemberID string `yaml:"memberID"`
+	// Members is the ordered member table, so its index is the rank.
+	Members []PodSetManifestMember `yaml:"members"`
+	// RendezvousFiles are the endpoint files that this member's processes read
+	// at restore, such as NCCL_CHECKPOINT_KVS_PATH, all inside the control volume.
+	RendezvousFiles []string `yaml:"rendezvousFiles,omitempty"`
 }
 
-type CapturedPodSetMember struct {
+type PodSetManifestMember struct {
 	ID            string `yaml:"id"`
 	PodUID        string `yaml:"podUID"`
 	ContainerName string `yaml:"containerName"`
 	PodIP         string `yaml:"podIP"`
 }
+```
+
+Finally, the Pod contract gains a few constants and one key in the
+`restore-complete` file, whose existing format and readers stay unchanged.
+
+```go
+package podcontract
+
+const (
+	// RestoreSetAnnotation marks a restore Pod as a target of a PodSetRestore.
+	// On set targets it replaces the restore-from and restore-container-map
+	// annotations, and it requires the restore startup probe.
+	RestoreSetAnnotation = "nvidia.com/restore-set"
+
+	// Labels on the PodSnapshots that a PodSetSnapshot owns.
+	PodSetLabel       = "nvidia.com/podset"
+	PodSetMemberLabel = "nvidia.com/podset-member"
+
+	// Reasons of the nvidia.com/Restored condition on a set restore Pod.
+	RestoredReasonSetPending    = "SetPending"    // waiting for the PodSetRestore
+	RestoredReasonAdmitted      = "Admitted"      // admitted, nothing destructive yet
+	RestoredReasonRestoring     = "Restoring"     // written before CRIU starts; never replay
+	RestoredReasonReconstructed = "Reconstructed" // rebuilt, waiting for release
+
+	// CoordinationDir is reserved in the control volume for rendezvous endpoints.
+	CoordinationDir = "coordination"
+)
+
+// restore-complete on a set restore Pod:
+//
+//	pid=4242
+//	attempt=<PodSetRestore UID>
 ```
