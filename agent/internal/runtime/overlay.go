@@ -228,10 +228,11 @@ func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logg
 	if err != nil {
 		return err
 	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// tar prefixes its messages with the path it was invoked by.
+	output := NewProcessOutput(os.Stderr, filepath.Join(bundleDir, nsmount.BundleTar)+":")
+	output.Attach(cmd)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tar extract failed: %w", err)
+		return WithDetail(fmt.Errorf("tar extract failed: %w", err), output.Detail())
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
@@ -318,6 +319,21 @@ func TestCaptureRootfsDiff(t *testing.T) {
 }
 
 func TestApplyRootfsDiff(t *testing.T) {
+	t.Run("corrupt archive names tar's error", func(t *testing.T) {
+		checkpointDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("this is not a tar archive"), 0644); err != nil {
+			t.Fatalf("write corrupt rootfs diff: %v", err)
+		}
+		bundle := testBundle(t)
+		err := ApplyRootfsDiff(checkpointDir, t.TempDir(), bundle, testr.New(t))
+		if err == nil || !strings.Contains(err.Error(), "tar extract failed: exit status") {
+			t.Fatalf("ApplyRootfsDiff(corrupt) = %v, want the exit status", err)
+		}
+		if !strings.Contains(err.Error(), filepath.Join(bundle, nsmount.BundleTar)+": ") || strings.Contains(err.Error(), "Exiting with failure status") {
+			t.Fatalf("ApplyRootfsDiff(corrupt) = %v, want tar's first message, not its exit notice", err)
+		}
+	})
+
 	t.Run("missing archive is no-op", func(t *testing.T) {
 		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), testBundle(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
