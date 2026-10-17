@@ -32,22 +32,23 @@ import (
 func makeNodeControllerWithInterceptor(t *testing.T, fc *fakeCheckpointer, funcs interceptor.Funcs, objs ...client.Object) *NodeController {
 	t.Helper()
 	s := contentScheme(t)
-	idx := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
-	for _, o := range objs {
-		if sc, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {
-			require.NoError(t, idx.Add(mustUnstructured(t, sc)))
-		}
-	}
 	w := &NodeController{
 		config:    &snapshottypes.AgentConfig{NodeName: "node-a", Storage: snapshottypes.StorageSpec{Type: "pvc", BasePath: t.TempDir()}},
 		clientset: k8sfake.NewClientset(),
 		client: crfake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
 			WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).
 			WithInterceptorFuncs(funcs).Build(),
-		runtime:        &fakeRuntime{},
-		log:            logr.Discard(),
-		contentIndexer: idx,
-		captureQueue:   newTestCaptureQueue(t),
+		runtime:      &fakeRuntime{},
+		log:          logr.Discard(),
+		captureQueue: newTestCaptureQueue(t),
+	}
+	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
+	for _, o := range objs {
+		if _, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {
+			stored := &snapshotv1alpha1.PodSnapshotContent{}
+			require.NoError(t, w.client.Get(context.Background(), client.ObjectKeyFromObject(o), stored))
+			require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, stored)))
+		}
 	}
 	w.checkpointFn = fc.fn
 	return w
@@ -93,23 +94,29 @@ func TestReconcileCapture_LabelErrorLeavesPodUnlabeled(t *testing.T) {
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
-func TestReconcileCapture_ContentGetErrorReturns(t *testing.T) {
+func TestReconcileCapture_ReadsContentFromInformerCache(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
+	reconciling := false
 	funcs := interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok {
-				return errors.New("apiserver unavailable")
+			if _, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok && reconciling {
+				return errors.New("reconcileCapture must not read PodSnapshotContent from the API server")
 			}
 			return c.Get(ctx, key, obj, opts...)
 		},
 	}
 	w := makeNodeControllerWithInterceptor(t, fc, funcs, content, pod)
+	deleting := content.DeepCopy()
+	deleting.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+	deleting.Finalizers = []string{"test"}
+	w.contentIndexer = seedIndex(t, deleting)
+	reconciling = true
 
-	require.Error(t, w.reconcileCapture(context.Background(), content.Name))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
-	assert.False(t, fc.wasCalled(), "a content Get error must abort before the dump")
+	assert.False(t, fc.wasCalled(), "a deletion observed by the informer cache must stop the dump")
 	_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
 	assert.False(t, labeled)
 }
@@ -181,7 +188,7 @@ func TestSetSnapshotContentSucceeded_StatusPatchErrorReturnsError(t *testing.T) 
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	err := w.setSnapshotContentSucceeded(context.Background(), content, nil)
+	err := w.setSnapshotContentSucceeded(context.Background(), content, nil, "", nil)
 
 	require.Error(t, err)
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
@@ -196,7 +203,7 @@ func TestSetSnapshotContentSucceeded_ConflictReturnsError(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	err := w.setSnapshotContentSucceeded(context.Background(), content, nil)
+	err := w.setSnapshotContentSucceeded(context.Background(), content, nil, "", nil)
 
 	require.Error(t, err)
 	assert.True(t, apierrors.IsConflict(err))
@@ -210,7 +217,7 @@ func TestSetSnapshotContentSucceeded_NoSourceLeavesAPublishedOneAlone(t *testing
 	content.Status.Source = recordedSource()
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, interceptor.Funcs{}, content)
 
-	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, nil))
+	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, nil, "", nil))
 
 	assert.Equal(t, recordedSource(), getContent(t, w, content.Name).Status.Source)
 }
@@ -263,7 +270,7 @@ func TestMarkCheckpointReady_FailedBeforeReadyIsSticky(t *testing.T) {
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 
-	err := w.markCheckpointReady(context.Background(), stale, "")
+	err := w.markCheckpointReady(context.Background(), stale, "", "", nil)
 
 	require.NoError(t, err, "a sticky Failed condition is an accepted outcome, not a retryable error")
 	got := getContent(t, w, stored.Name)
@@ -291,7 +298,7 @@ func TestMarkCheckpointReady_PublishesAfterAReadyConflict(t *testing.T) {
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
 	path := committedArtifact(t, w, string(stored.UID))
 
-	require.NoError(t, w.markCheckpointReady(context.Background(), stored, path))
+	require.NoError(t, w.markCheckpointReady(context.Background(), stored, path, "", nil))
 
 	assert.Equal(t, 1, conflicts, "the first Ready write has to be the rejected one")
 	got := getContent(t, w, stored.Name)
@@ -336,7 +343,7 @@ func TestMarkCheckpointReady_AlreadyReadyNoOp(t *testing.T) {
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 
-	err := w.markCheckpointReady(context.Background(), stale, "")
+	err := w.markCheckpointReady(context.Background(), stale, "", "", nil)
 
 	require.NoError(t, err, "another holder's Ready write is success, not a conflict to escalate")
 }
@@ -372,7 +379,7 @@ func TestMarkCheckpointReady_SecondConflictObservesFailed(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
 
-	err := w.markCheckpointReady(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), "")
+	err := w.markCheckpointReady(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), "", "", nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, readyPatches, "Failed must be observed on the second Ready conflict")

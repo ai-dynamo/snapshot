@@ -65,6 +65,52 @@ func (c Client) StagedArtifactRestore(ctx context.Context, transactionID string,
 	return imageDirectory(response.GetStagedRestoreDirectory().GetImageDirectory())
 }
 
+// PrepareGPUArtifactCheckpoint is PrepareArtifactCheckpoint with the broker pidfd
+// and CustomStorage execution a GPU capture needs.
+func (c Client) PrepareGPUArtifactCheckpoint(ctx context.Context, transactionID string, target *ArtifactTarget, engine *IOEngine, gpuContext *GpuContext) (string, *CustomStorageExecution, error) {
+	if err := validateArtifactTarget(target); err != nil {
+		return "", nil, err
+	}
+	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, &Request_PrepareStagedCheckpoint{
+		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{
+			Selector: &PrepareStagedCheckpointRequest_Target{Target: target},
+			IoEngine: engine,
+		},
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	directory, err := imageDirectory(response.GetStagedCheckpointDirectory().GetImageDirectory())
+	if err != nil {
+		execution.Close()
+		return "", nil, err
+	}
+	return directory, execution, nil
+}
+
+// PrepareGPUStagedArtifactRestore is StagedArtifactRestore with the broker pidfd
+// and CustomStorage execution a GPU restore needs.
+func (c Client) PrepareGPUStagedArtifactRestore(ctx context.Context, transactionID string, artifact *PublishedArtifact, engine *IOEngine, gpuContext *GpuContext) (string, *CustomStorageExecution, error) {
+	if err := validatePublishedArtifact(artifact); err != nil {
+		return "", nil, err
+	}
+	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, &Request_StagedRestore{
+		StagedRestore: &StagedRestoreRequest{
+			Selector: &StagedRestoreRequest_Artifact{Artifact: artifact},
+			IoEngine: engine,
+		},
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	directory, err := imageDirectory(response.GetStagedRestoreDirectory().GetImageDirectory())
+	if err != nil {
+		execution.Close()
+		return "", nil, err
+	}
+	return directory, execution, nil
+}
+
 // GetArtifactMetadata returns a private shared directory with verified
 // manifest.yaml, not a verified payload. The caller must Abort on every exit,
 // including a lost reply, using a bounded cleanup context if ctx was cancelled.
