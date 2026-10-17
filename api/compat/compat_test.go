@@ -13,6 +13,7 @@ func populatedEnvironment() Environment {
 	return Environment{
 		KernelVersion: "6.8.0-45-generic",
 		CPUArch:       "amd64",
+		CPUFeatures:   []string{"avx2", "avx512f", "sse2"},
 		Image:         "nvcr.io/nvidia/tritonserver:24.09",
 		ImageID:       "sha256:1111111111111111111111111111111111111111111111111111111111111111",
 		CPULimit:      "8",
@@ -30,6 +31,7 @@ func differentEnvironment() Environment {
 	return Environment{
 		KernelVersion: "5.15.0-89-generic",
 		CPUArch:       "arm64",
+		CPUFeatures:   []string{"sse2"},
 		Image:         "nvcr.io/nvidia/tritonserver:24.01",
 		ImageID:       "sha256:2222222222222222222222222222222222222222222222222222222222222222",
 		CPULimit:      "1",
