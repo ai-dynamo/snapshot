@@ -34,6 +34,13 @@ or upgrading. To migrate, create a new RWX claim, copy the retained checkpoint
 data once if it must be preserved, then set `storage.pvc.create=false` and
 `storage.pvc.name` to the new claim. The old retained claim remains untouched.
 
+A node-local `ReadWriteOnce` claim is supported for a single-GPU-node install:
+point `storage.pvc.create=false` at the claim, schedule the operator onto the
+node with `operator.nodeSelector` and `operator.tolerations`, and keep every
+agent on that node with `daemonset.nodeSelector` or `daemonset.affinity`. See
+[storage](../../docs/operations/storage.md#single-node-node-local-stores) for the
+full constraint list.
+
 When using AWS EFS, make sure a reused static PV references a real EFS file
 system ID and has mount targets reachable from every GPU node. A placeholder
 such as `fs-xxxx` can bind a PVC but the snapshot agent will not start because

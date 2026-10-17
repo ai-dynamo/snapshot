@@ -18,7 +18,10 @@ helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
 ```
 
 By default the chart provisions its own `ReadWriteMany` checkpoint volume, shared
-by every checkpoint. See [Storage](storage.md) for the volume model and options,
+by every checkpoint. A node-local `ReadWriteOnce` claim is supported for
+single-GPU-node installs; see
+[Single-node (node-local) stores](storage.md#single-node-node-local-stores).
+See [Storage](storage.md) for the volume model and options,
 including reusing an existing claim.
 
 Each agent pod runs two containers: the agent and the PageBroker sidecar, which
