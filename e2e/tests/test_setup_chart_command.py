@@ -33,6 +33,8 @@ def test_default_command_installs_the_local_chart() -> None:
         "storage.pvc.create=false",
         "storage.pvc.name=snapshot-pvc",
         "operator.artifactCleanup.scanInterval=5s",
+        "pageBroker.artifactAddressing=true",
+        "operator.bindNewContents=true",
         "daemonset.imagePullSecrets=[]",
     ]
 
