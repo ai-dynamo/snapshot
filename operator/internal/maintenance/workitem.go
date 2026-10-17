@@ -30,10 +30,10 @@ type Enqueuer interface {
 // WorkItemKey identifies one unit of maintenance work; it is comparable so
 // the workqueue deduplicates repeated enqueues.
 //
-// Name/UID matter only for ModeDeleteContent: the worker re-reads
-// the object and compares UID, so a content deleted and recreated under the
-// same name never matches a stale key. ModeSweep carries no identity, so
-// duplicate sweep triggers coalesce into one key.
+// Name/UID matter only for ModeDeleteContent: the worker re-reads the object
+// and compares UID, so a content deleted and recreated under the same name
+// never matches a stale key. ModeSweep carries no identity, so duplicate
+// sweep triggers coalesce into one key.
 type WorkItemKey struct {
 	Mode Mode
 	Name string
