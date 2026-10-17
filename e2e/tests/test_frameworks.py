@@ -589,6 +589,13 @@ def _record_agent_summary(
             "seconds",
             duration,
         )
+    for name, duration in summary.nested_seconds.items():
+        result.record_measurement(
+            f"{operation}.{name}.duration",
+            f"{operation.capitalize()} {name.replace('.', ' ')}",
+            "seconds",
+            duration,
+        )
 
 
 def _record_environment_error(

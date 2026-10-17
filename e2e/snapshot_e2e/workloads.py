@@ -305,6 +305,9 @@ def workload_scheduling() -> dict[str, Any]:
     node_selector = {
         "nvidia.com/gpu.present": "true",
     }
+    hostname = os.environ.get("SNAPSHOT_E2E_NODE_HOSTNAME", "").strip()
+    if hostname:
+        node_selector["kubernetes.io/hostname"] = hostname
     if os.environ.get("SNAPSHOT_E2E_AVOID_MIG") == "true":
         # Opt-in for clusters that serve both MIG-capable and non-MIG GPU pools,
         # where preflight also pins the non-MIG pool. Clusters that do not expose

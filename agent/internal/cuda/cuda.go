@@ -43,8 +43,17 @@ var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
 var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
 
+// CheckpointPhaseTimings splits a CUDA checkpoint.
+//
+// Lock is the cuda-checkpoint-helper lock of every CUDA process. Copy is the
+// following checkpoint action, which copies device state into host memory.
+// JobFile is the refresh of the launch-job artifact. Total is the wall around
+// all three and is what the checkpoint summary reports as cuda_checkpoint.
 type CheckpointPhaseTimings struct {
-	TotalDuration time.Duration
+	TotalDuration   time.Duration
+	LockDuration    time.Duration
+	CopyDuration    time.Duration
+	JobFileDuration time.Duration
 }
 
 type RestorePhaseTimings struct {
@@ -454,23 +463,33 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 	var timings CheckpointPhaseTimings
 
 	start := time.Now()
+	lockStart := time.Now()
 	for _, pid := range cudaPIDs {
 		if err := lockWithJobFile(ctx, pid, jobFile, log); err != nil {
+			timings.LockDuration = time.Since(lockStart)
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
+	timings.LockDuration = time.Since(lockStart)
 
+	copyStart := time.Now()
 	for _, pid := range cudaPIDs {
 		if err := checkpointWithJobFile(ctx, pid, jobFile, log); err != nil {
+			timings.CopyDuration = time.Since(copyStart)
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
+	timings.CopyDuration = time.Since(copyStart)
+
+	jobStart := time.Now()
 	if err := refreshJobFileArtifact(jobFile, checkpointDir); err != nil {
+		timings.JobFileDuration = time.Since(jobStart)
 		timings.TotalDuration = time.Since(start)
 		return timings, err
 	}
+	timings.JobFileDuration = time.Since(jobStart)
 	timings.TotalDuration = time.Since(start)
 
 	return timings, nil
