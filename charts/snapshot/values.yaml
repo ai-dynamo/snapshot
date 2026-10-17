@@ -251,7 +251,10 @@ config:
   overlay:
     # Rootfs diff tar exclusions. Absolute-looking paths are normalized
     # relative to the tar root, and patterns starting with * are passed
-    # through as tar globs unchanged.
+    # through as tar globs unchanged. A file the checkpointed processes hold
+    # open or mapped at dump time is archived even when an exclusion matches
+    # it, so CRIU can reopen it. Other excluded files are not restored, so an
+    # excluded cache starts cold and the workload regenerates it on demand.
     exclusions:
       - /proc
       - /sys

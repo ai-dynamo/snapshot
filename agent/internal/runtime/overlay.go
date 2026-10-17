@@ -4,12 +4,17 @@
 package runtime
 
 import (
+	"archive/tar"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -54,26 +59,53 @@ func GetOverlayUpperDir(pid int) (string, error) {
 	return "", fmt.Errorf("overlay upperdir not found for pid %d", pid)
 }
 
+// RootfsDiffOptions selects what CaptureRootfsDiff archives from the upperdir.
+type RootfsDiffOptions struct {
+	// Exclusions are tar patterns left out of the archive.
+	Exclusions types.OverlaySettings
+	// BindMountDests are the container's bind mount destinations, left out of
+	// the archive.
+	BindMountDests []string
+	// Keep lists container paths, such as criu.ReadReferencedPaths returns,
+	// that are archived even when an exclusion matches them.
+	Keep []string
+}
+
+// RootfsDiff describes a captured rootfs diff.
+type RootfsDiff struct {
+	// Path is the published archive.
+	Path string
+	// Kept lists the Keep paths that the exclusions left out and that were
+	// appended to the archive.
+	Kept []string
+	// KeptBytes is the total size of the regular files in Kept.
+	KeptBytes int64
+}
+
 // CaptureRootfsDiff captures the overlay upperdir to a tar file.
+//
+// Files and directories in opts.Keep that are in the upperdir are kept even
+// when they match an exclusion. Keep paths missing from the upperdir, or that
+// would be reached through a symlink there, are skipped.
 //
 // The archive is written to a temporary file first and renamed atomically on
 // success, so a partial or failed capture never leaves a corrupt archive at the
 // final path.
-func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlaySettings, bindMountDests []string) (string, error) {
+func CaptureRootfsDiff(upperDir, checkpointDir string, opts RootfsDiffOptions) (RootfsDiff, error) {
 	if upperDir == "" {
-		return "", fmt.Errorf("upperdir is empty")
+		return RootfsDiff{}, fmt.Errorf("upperdir is empty")
 	}
 
 	rootfsDiffPath := filepath.Join(checkpointDir, rootfsDiffFilename)
 
 	tmpFile, err := os.CreateTemp(checkpointDir, rootfsDiffFilename+".*.tmp")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temporary rootfs diff: %w", err)
+		return RootfsDiff{}, fmt.Errorf("failed to create temporary rootfs diff: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	if err := tmpFile.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("failed to close temporary rootfs diff: %w", err)
+		return RootfsDiff{}, fmt.Errorf("failed to close temporary rootfs diff: %w", err)
 	}
 	defer func() {
 		if tmpPath != "" {
@@ -81,26 +113,51 @@ func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlayS
 		}
 	}()
 
-	cmd := exec.Command("tar", captureTarArgs(upperDir, tmpPath, exclusions, bindMountDests)...)
+	keep, err := upperDirEntries(upperDir, opts.Keep)
+	if err != nil {
+		return RootfsDiff{}, err
+	}
+
+	cmd := exec.Command("tar", captureTarArgs(upperDir, tmpPath, opts.Exclusions, opts.BindMountDests)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("tar failed: %w (output: %s)", err, string(output))
+		return RootfsDiff{}, fmt.Errorf("tar failed: %w (output: %s)", err, string(output))
+	}
+
+	diff := RootfsDiff{Path: rootfsDiffPath}
+	if len(keep) > 0 {
+		archived, err := archiveMembers(tmpPath)
+		if err != nil {
+			return RootfsDiff{}, err
+		}
+		members, appended := unarchivedMembers(slices.Sorted(maps.Keys(keep)), archived)
+		if len(members) > 0 {
+			cmd := exec.Command("tar", appendTarArgs(upperDir, tmpPath)...)
+			cmd.Stdin = strings.NewReader(strings.Join(members, "\x00") + "\x00")
+			if output, err := cmd.CombinedOutput(); err != nil {
+				return RootfsDiff{}, fmt.Errorf("tar append of kept files failed: %w (output: %s)", err, string(output))
+			}
+		}
+		for _, rel := range appended {
+			diff.Kept = append(diff.Kept, "/"+rel)
+			diff.KeptBytes += keep[rel]
+		}
 	}
 
 	info, err := os.Stat(tmpPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to stat temporary rootfs diff: %w", err)
+		return RootfsDiff{}, fmt.Errorf("failed to stat temporary rootfs diff: %w", err)
 	}
 	if info.Size() == 0 {
-		return "", fmt.Errorf("tar produced empty rootfs diff")
+		return RootfsDiff{}, fmt.Errorf("tar produced empty rootfs diff")
 	}
 
 	if err := os.Rename(tmpPath, rootfsDiffPath); err != nil {
-		return "", fmt.Errorf("failed to publish rootfs diff: %w", err)
+		return RootfsDiff{}, fmt.Errorf("failed to publish rootfs diff: %w", err)
 	}
 	tmpPath = ""
 
-	return rootfsDiffPath, nil
+	return diff, nil
 }
 
 // captureTarArgs builds the archive-creation arguments for a rootfs diff.
@@ -117,6 +174,117 @@ func captureTarArgs(upperDir, outPath string, exclusions types.OverlaySettings, 
 		args = append(args, "--exclude=."+dest)
 	}
 	return append(args, "-C", upperDir, "-cf", outPath, ".")
+}
+
+// appendTarArgs builds the arguments that append the NUL-separated members
+// read from stdin to an archive captureTarArgs created, with the same xattr
+// handling and without descending into directories.
+func appendTarArgs(upperDir, outPath string) []string {
+	return []string{
+		"--xattrs", "--xattrs-exclude=trusted.*", "--no-recursion",
+		"-C", upperDir, "-rf", outPath, "--null", "--verbatim-files-from", "-T", "-",
+	}
+}
+
+// upperDirEntries returns the paths that are regular files or directories in
+// the upperdir, relative to it, with the size of each regular file. A path is
+// skipped when an upperdir ancestor is not a directory, so archiving it by name
+// never resolves through a symlink. Any error other than a missing path is
+// returned rather than read as absence.
+func upperDirEntries(upperDir string, paths []string) (map[string]int64, error) {
+	entries := make(map[string]int64)
+	for _, p := range paths {
+		p = filepath.Clean(p)
+		if !filepath.IsAbs(p) || p == "/" {
+			continue
+		}
+		rel := strings.TrimPrefix(p, "/")
+		info, err := lstatUnderDirectories(upperDir, rel)
+		if err != nil {
+			return nil, err
+		}
+		if info == nil {
+			continue
+		}
+		switch {
+		case info.Mode().IsRegular():
+			entries[rel] = info.Size()
+		case info.IsDir():
+			entries[rel] = 0
+		}
+	}
+	return entries, nil
+}
+
+// lstatUnderDirectories returns the Lstat result for rel in dir, or nil when rel
+// is missing or one of its ancestors is not a directory.
+func lstatUnderDirectories(dir, rel string) (os.FileInfo, error) {
+	current := dir
+	parts := strings.Split(rel, "/")
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect /%s in the upperdir: %w", rel, err)
+		}
+		if i == len(parts)-1 {
+			return info, nil
+		}
+		if !info.IsDir() {
+			return nil, nil
+		}
+	}
+	return nil, nil
+}
+
+// archiveMembers returns the member names of the tar archive at path, without
+// their "./" prefix or a trailing slash. Names come from the headers, so any
+// byte a name holds survives.
+func archiveMembers(path string) (map[string]struct{}, error) {
+	archive, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open rootfs diff: %w", err)
+	}
+	defer archive.Close()
+	// tar.Reader seeks over member data in an *os.File instead of reading it.
+	reader := tar.NewReader(archive)
+	members := make(map[string]struct{})
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			return members, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read rootfs diff members: %w", err)
+		}
+		members[strings.TrimSuffix(strings.TrimPrefix(header.Name, "./"), "/")] = struct{}{}
+	}
+}
+
+// unarchivedMembers returns the members to append so every kept path is in the
+// archive: each kept path the archive lacks, preceded by its ancestors the
+// archive lacks. Ancestors are archived too so newly created directories can
+// retain their modes and owners. appended holds the kept paths among them.
+func unarchivedMembers(kept []string, archived map[string]struct{}) (members, appended []string) {
+	queued := maps.Clone(archived)
+	for _, rel := range kept {
+		parts := strings.Split(rel, "/")
+		for i := range parts {
+			name := strings.Join(parts[:i+1], "/")
+			if _, ok := queued[name]; ok {
+				continue
+			}
+			queued[name] = struct{}{}
+			members = append(members, "./"+name)
+			if name == rel {
+				appended = append(appended, rel)
+			}
+		}
+	}
+	return members, appended
 }
 
 // buildExclusions merges exclusion lists and normalizes paths for tar --exclude patterns.
