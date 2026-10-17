@@ -524,6 +524,9 @@ func inspectRestore(
 		if len(manifest.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
+		if err := refuseMIGRestore(ctx, log, placeholderPID, req.SkipCompatCheck); err != nil {
+			return nil, 0, err
+		}
 		discoverStart := time.Now()
 		var env []string
 		if ociSpec != nil && ociSpec.Process != nil {
