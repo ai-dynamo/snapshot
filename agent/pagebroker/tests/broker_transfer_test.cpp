@@ -44,16 +44,16 @@ enum class Boundary { PrepareRestore, StageRestore, ValidateCheckpoint, InspectC
 // Real filesystem operations with deterministic interruption at engine boundaries.
 class InterruptingEngine : public TransferEngine {
  public:
-  using Callback = std::function<void(Boundary, TransferControl)>;
+  using Callback = std::function<void(Boundary, Cancellation)>;
   InterruptingEngine(const Path& storage, Callback callback) : posix_(storage), callback_(std::move(callback)) {}
   IoEngine type() const override { return IoEngine::POSIX_COPY; }
-  PreparedRestore PrepareRestore(const StorageBackend& source, TransferControl control,
+  PreparedRestore PrepareRestore(const StorageBackend& source, Cancellation control,
       const PublishedArtifact* artifact, bool metadata_only, TransferMode mode) const override
   {
     callback_(Boundary::PrepareRestore, control);
     return posix_.PrepareRestore(source, control, artifact, metadata_only, mode);
   }
-  RestoreAccess StageRestore(PreparedRestore preparation, const Path& destination, TransferControl control) const override
+  RestoreAccess StageRestore(PreparedRestore preparation, const Path& destination, Cancellation control) const override
   {
     auto access = posix_.StageRestore(std::move(preparation), destination, control);
     callback_(Boundary::StageRestore, control);
@@ -61,25 +61,25 @@ class InterruptingEngine : public TransferEngine {
   }
   Path PrepareCheckpoint(const StorageBackend& destination, const Path& staging_directory,
       const std::string& transaction_id, TransferMode mode, const PublishedArtifact* artifact,
-      TransferControl control) const override
+      Cancellation control) const override
   {
     ValidateCheckpointDestination(destination, artifact, control);
     return posix_.PrepareCheckpoint(destination, staging_directory, transaction_id, mode, artifact, control);
   }
   void ValidateCheckpointDestination(const StorageBackend& destination,
-      const PublishedArtifact* artifact, TransferControl control) const override
+      const PublishedArtifact* artifact, Cancellation control) const override
   {
     callback_(Boundary::ValidateCheckpoint, control);
     posix_.ValidateCheckpointDestination(destination, artifact, control);
   }
   RestorePlan InspectCheckpoint(const Path& source, const PublishedArtifact* artifact,
-      TransferControl control) const override
+      Cancellation control) const override
   {
     callback_(Boundary::InspectCheckpoint, control);
     return posix_.InspectCheckpoint(source, artifact, control);
   }
   void PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
-      CheckpointPublication* publication, TransferControl control, TransferMode mode) const override
+      CheckpointPublication* publication, Cancellation control, TransferMode mode) const override
   {
     callback_(Boundary::PublishCheckpoint, control);
     posix_.PublishCheckpoint(source, destination, std::move(plan), publication, control, mode);
@@ -200,7 +200,7 @@ TEST_F(BrokerTransferTest, DirectRestoreUsesGenericPreparationAndBorrowsItsSourc
   auto resources = Limit(broker, std::chrono::hours(1));
   ASSERT_EQ(mkfifo((source_ / "unscanned").c_str(), 0600), 0);
   std::vector<Boundary> calls;
-  Intercept(broker, [&](Boundary boundary, TransferControl) { calls.push_back(boundary); });
+  Intercept(broker, [&](Boundary boundary, Cancellation) { calls.push_back(boundary); });
   auto request = RequestFor("direct");
   request.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
   request.mutable_direct_restore()->mutable_io_engine()->mutable_posix_copy();
@@ -230,7 +230,7 @@ TEST_F(BrokerTransferTest, BothCheckpointModesUseGenericPreparationAndPublicatio
     SCOPED_TRACE(direct);
     Broker broker(staging_, storage_);
     std::vector<Boundary> calls;
-    Intercept(broker, [&](Boundary boundary, TransferControl) { calls.push_back(boundary); });
+    Intercept(broker, [&](Boundary boundary, Cancellation) { calls.push_back(boundary); });
     auto request = RequestFor(direct ? "direct-save" : "staged-save");
     auto* destination = direct ? request.mutable_prepare_direct_checkpoint()->mutable_destination()
                                : request.mutable_prepare_staged_checkpoint()->mutable_destination();
@@ -255,7 +255,7 @@ TEST_F(BrokerTransferTest, BothCheckpointModesUseGenericPreparationAndPublicatio
 TEST_F(BrokerTransferTest, FailedDirectRestoreNeverRemovesBorrowedData)
 {
   Broker broker(staging_, storage_);
-  Intercept(broker, [&](Boundary boundary, TransferControl) {
+  Intercept(broker, [&](Boundary boundary, Cancellation) {
     if (boundary == Boundary::StageRestore)
       throw std::runtime_error("access failed");
   });
@@ -274,8 +274,8 @@ TEST_F(BrokerTransferTest, PreservesFailureCodesAcrossRequestAndTransferBoundari
     std::exception_ptr error;
     Failure::Code code;
   } failures[] = {
-      {std::make_exception_ptr(TransferInterrupted(TransferInterrupted::Reason::CANCELLED)), Failure::INTERNAL_ERROR},
-      {std::make_exception_ptr(TransferInterrupted(TransferInterrupted::Reason::DEADLINE_EXCEEDED)), Failure::TRANSACTION_EXPIRED},
+      {std::make_exception_ptr(CancellationError(CancellationError::Reason::CANCELLED)), Failure::INTERNAL_ERROR},
+      {std::make_exception_ptr(CancellationError(CancellationError::Reason::DEADLINE_EXCEEDED)), Failure::TRANSACTION_EXPIRED},
       {std::make_exception_ptr(TransferError(Failure::OUTCOME_UNKNOWN, "publication uncertain")), Failure::OUTCOME_UNKNOWN},
       {std::make_exception_ptr(std::runtime_error("storage failed")), Failure::STORAGE_ERROR},
   };
@@ -285,7 +285,7 @@ TEST_F(BrokerTransferTest, PreservesFailureCodesAcrossRequestAndTransferBoundari
                                Boundary::InspectCheckpoint, Boundary::PublishCheckpoint}) {
       SCOPED_TRACE(static_cast<int>(boundary));
       Broker broker(staging_, storage_);
-      Intercept(broker, [&](Boundary current, TransferControl) {
+      Intercept(broker, [&](Boundary current, Cancellation) {
         if (current == boundary)
           std::rethrow_exception(failure.error);
       });
@@ -325,11 +325,11 @@ TEST_F(BrokerTransferTest, ShutdownCancelsActiveRestoreAndRemovesStaging)
 {
   Broker broker(staging_, storage_);
   std::promise<void> staged, resume;
-  Intercept(broker, [&](Boundary boundary, TransferControl control) {
+  Intercept(broker, [&](Boundary boundary, Cancellation control) {
     if (boundary == Boundary::StageRestore) {
       staged.set_value();
       resume.get_future().wait();
-      control.Check();
+      control.ThrowIfCancelled();
     }
   });
   const auto request = Restore();
@@ -340,7 +340,7 @@ TEST_F(BrokerTransferTest, ShutdownCancelsActiveRestoreAndRemovesStaging)
   const auto response = restore.get();
   ASSERT_TRUE(response.has_failure()) << response.DebugString();
   EXPECT_EQ(response.failure().code(), Failure::INTERNAL_ERROR);
-  EXPECT_EQ(response.failure().message(), "transfer cancelled");
+  EXPECT_EQ(response.failure().message(), "operation cancelled");
   EXPECT_FALSE(fs::exists(staging_ / "restore" / "restore"));
 }
 
@@ -348,13 +348,13 @@ TEST_F(BrokerTransferTest, PreparationUsesTheTransactionDeadline)
 {
   Broker broker(staging_, storage_);
   SetLifetime(broker, std::chrono::seconds(1));
-  Intercept(broker, [&](Boundary boundary, TransferControl control) {
+  Intercept(broker, [&](Boundary boundary, Cancellation control) {
     if (boundary != Boundary::PrepareRestore)
       return;
     EXPECT_NE(Find(broker, "restore"), nullptr);
-    EXPECT_NE(control.deadline, TransferControl::Clock::time_point::max());
-    if (control.deadline != TransferControl::Clock::time_point::max())
-      std::this_thread::sleep_until(control.deadline);
+    EXPECT_NE(control.Deadline(), Cancellation::Clock::time_point::max());
+    if (control.Deadline() != Cancellation::Clock::time_point::max())
+      std::this_thread::sleep_until(control.Deadline());
   });
   const auto response = broker.HandleRequest(Restore());
   EXPECT_EQ(response.failure().code(), Failure::TRANSACTION_EXPIRED) << response.DebugString();
@@ -371,9 +371,9 @@ TEST_F(BrokerTransferTest, AbortAndShutdownCancelPreparation)
     auto resumed = resume.get_future();
     auto stopped = cancelled.get_future();
     std::stop_token token;
-    Intercept(broker, [&](Boundary boundary, TransferControl control) {
+    Intercept(broker, [&](Boundary boundary, Cancellation control) {
       if (boundary == Boundary::PrepareRestore) {
-        token = control.cancellation;
+        token = control.Token();
         preparing.set_value();
         resumed.wait();
       }
@@ -432,14 +432,14 @@ TEST_F(BrokerTransferTest, CompletionRejectsExpiryAndCancellationAfterTransfer)
         fs::remove(source_ / "image");
       Broker broker(staging_, storage_);
       SetLifetime(broker, std::chrono::seconds(1));
-      Intercept(broker, [&](Boundary boundary, TransferControl control) {
+      Intercept(broker, [&](Boundary boundary, Cancellation control) {
         if (boundary != Boundary::StageRestore)
           return;
         // Simulate interruption as the final copy (or empty-directory setup) returns.
         if (expire)
-          std::this_thread::sleep_until(control.deadline);
+          std::this_thread::sleep_until(control.Deadline());
         else
-          Find(broker, "restore")->CancelTransfer();
+          Find(broker, "restore")->CancelWork();
       });
       const auto response = broker.HandleRequest(Restore());
       EXPECT_EQ(response.failure().code(), expire ? Failure::TRANSACTION_EXPIRED : Failure::INTERNAL_ERROR)
@@ -456,14 +456,14 @@ TEST_F(BrokerTransferTest, CheckpointPreparationUsesTheTransactionDeadline)
     SCOPED_TRACE(direct);
     Broker broker(staging_, storage_);
     SetLifetime(broker, std::chrono::seconds(1));
-    Intercept(broker, [&](Boundary boundary, TransferControl control) {
+    Intercept(broker, [&](Boundary boundary, Cancellation control) {
       if (boundary != Boundary::ValidateCheckpoint)
         return;
       EXPECT_NE(Find(broker, "checkpoint"), nullptr);
-      EXPECT_TRUE(control.cancellation.stop_possible());
-      EXPECT_NE(control.deadline, TransferControl::Clock::time_point::max());
-      if (control.deadline != TransferControl::Clock::time_point::max())
-        std::this_thread::sleep_until(control.deadline);
+      EXPECT_TRUE(control.Token().stop_possible());
+      EXPECT_NE(control.Deadline(), Cancellation::Clock::time_point::max());
+      if (control.Deadline() != Cancellation::Clock::time_point::max())
+        std::this_thread::sleep_until(control.Deadline());
     });
     EXPECT_EQ(broker.HandleRequest(Checkpoint(direct)).failure().code(), Failure::TRANSACTION_EXPIRED);
     EXPECT_FALSE(fs::exists(CheckpointOutput(direct)));
@@ -481,9 +481,9 @@ TEST_F(BrokerTransferTest, CheckpointPreparationObservesAbortAndShutdown)
       auto resumed = resume.get_future();
       auto stopped = cancelled.get_future();
       std::stop_token token;
-      Intercept(broker, [&](Boundary boundary, TransferControl control) {
+      Intercept(broker, [&](Boundary boundary, Cancellation control) {
         if (boundary == Boundary::ValidateCheckpoint) {
-          token = control.cancellation;
+          token = control.Token();
           preparing.set_value();
           resumed.wait();
         }
@@ -526,7 +526,7 @@ TEST_F(BrokerTransferTest, CheckpointMkdirRejectsExpiryAndCancellationBeforeRetu
         if (Path(path) != output)
           return;
         if (expire)
-          std::this_thread::sleep_until(Find(broker, "checkpoint")->control().deadline);
+          std::this_thread::sleep_until(Find(broker, "checkpoint")->cancellation().Deadline());
         else
           broker.CancelActiveTransactions();
       });
@@ -551,7 +551,7 @@ TEST_F(BrokerTransferTest, CheckpointInterruptedCleanupRemainsRetryable)
     ScopedCheckpointMkdirHook hook([&](const char* path) {
       if (Path(path) != output)
         return;
-      Find(broker, "checkpoint")->CancelTransfer();
+      Find(broker, "checkpoint")->CancelWork();
       fs::rename(parent, held);
       std::ofstream(parent) << "blocks cleanup";
     });
@@ -612,11 +612,11 @@ TEST_F(BrokerTransferTest, DirectCheckpointRetryKeepsDeadlineAndCaptureOnRejecti
     const auto request = Checkpoint(true);
     ASSERT_TRUE(broker.HandleRequest(request).has_direct_checkpoint_directory());
     const auto transaction = Find(broker, "checkpoint");
-    const auto deadline = transaction->control().deadline;
+    const auto deadline = transaction->cancellation().Deadline();
     const auto output = CheckpointOutput(true);
     std::ofstream(output / "payload") << "capture";
     EXPECT_EQ(broker.HandleRequest(request).direct_checkpoint_directory().image_directory(), output.string());
-    EXPECT_EQ(transaction->control().deadline, deadline);
+    EXPECT_EQ(transaction->cancellation().Deadline(), deadline);
     auto changed = request;
     changed.mutable_prepare_direct_checkpoint()->mutable_destination()->mutable_filesystem()->set_directory(
         (storage_ / "other").string());
@@ -625,10 +625,10 @@ TEST_F(BrokerTransferTest, DirectCheckpointRetryKeepsDeadlineAndCaptureOnRejecti
     if (expire)
       std::this_thread::sleep_until(deadline);
     else
-      transaction->CancelTransfer();
+      transaction->CancelWork();
     EXPECT_EQ(broker.HandleRequest(request).failure().code(),
         expire ? Failure::TRANSACTION_EXPIRED : Failure::INTERNAL_ERROR);
-    EXPECT_EQ(transaction->control().deadline, deadline);
+    EXPECT_EQ(transaction->cancellation().Deadline(), deadline);
     EXPECT_TRUE(fs::exists(output / "payload"));
     broker.ReapExpiredTransactions(deadline);
     EXPECT_FALSE(fs::exists(output));
@@ -704,7 +704,7 @@ TEST_F(BrokerTransferTest, ExpiryReclaimsEveryTransferKindAndRestoresAdmission)
     const auto sweep = std::chrono::steady_clock::now() + std::chrono::minutes(2);
     broker.ReapExpiredTransactions(sweep);
     EXPECT_EQ(transaction->state(), Transaction::State::ABORTED);
-    EXPECT_TRUE(transaction->control().cancellation.stop_requested());
+    EXPECT_TRUE(transaction->cancellation().Token().stop_requested());
     EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
     EXPECT_EQ(resources->active, 0u);
     EXPECT_EQ(resources->reserved, 0u);
@@ -760,7 +760,7 @@ TEST_F(BrokerTransferTest, ExpiryWaitsForGpuDrainBeforeRemovingStaging)
   auto transaction = Seed(broker, Transaction::Kind::RESTORE, Transaction::State::STAGED);
   auto operation = std::make_shared<Transaction::GpuOperation>();
   operation->state = Transaction::GpuOperation::State::Running;
-  operation->cancellation = std::make_shared<Cancellation>();
+  operation->cancellation = std::make_shared<Cancellation>(Cancellation::ChildOf(transaction->cancellation()));
   transaction->gpu_operation = operation;
   const auto sweep = std::chrono::steady_clock::now() + std::chrono::minutes(2);
   broker.ReapExpiredTransactions(sweep);
@@ -784,13 +784,35 @@ TEST_F(BrokerTransferTest, ExpiryWaitsForGpuDrainBeforeRemovingStaging)
   EXPECT_EQ(broker.HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
 }
 
+TEST_F(BrokerTransferTest, ShutdownSignalsGpuWithoutWaitingForTransactionMutex)
+{
+  Broker broker(staging_, storage_);
+  Limit(broker, std::chrono::minutes(1));
+  auto transaction = Seed(broker, Transaction::Kind::RESTORE, Transaction::State::STAGED);
+  auto operation = std::make_shared<Transaction::GpuOperation>();
+  operation->state = Transaction::GpuOperation::State::Running;
+  operation->cancellation = std::make_shared<Cancellation>(Cancellation::ChildOf(transaction->cancellation()));
+  transaction->gpu_operation = operation;
+  std::unique_lock lock(transaction->mutex());
+  auto shutdown = std::async(std::launch::async, [&] { broker.CancelActiveTransactions(); });
+  const auto signalled = shutdown.wait_for(std::chrono::seconds(2));
+  lock.unlock();
+  shutdown.get();
+  EXPECT_EQ(signalled, std::future_status::ready);
+  EXPECT_TRUE(operation->cancellation->IsCancelled());
+  EXPECT_TRUE(fs::exists(staging_ / "restore/seed/image"));
+  operation->state = Transaction::GpuOperation::State::Finished;
+  broker.ReapExpiredTransactions(std::chrono::steady_clock::now() + std::chrono::minutes(2));
+  EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
+}
+
 TEST_F(BrokerTransferTest, ExpirySkipsActiveTransfersUntilTheyDrain)
 {
   std::ofstream(source_ / "image") << "data";
   Broker broker(staging_, storage_);
   const auto resources = Limit(broker, std::chrono::minutes(1));
   std::promise<void> staged, resume;
-  Intercept(broker, [&](Boundary boundary, TransferControl) {
+  Intercept(broker, [&](Boundary boundary, Cancellation) {
     if (boundary == Boundary::StageRestore) {
       staged.set_value();
       resume.get_future().wait();

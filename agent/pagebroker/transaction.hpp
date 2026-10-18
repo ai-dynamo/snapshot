@@ -7,7 +7,6 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
-#include <stop_token>
 #include <set>
 #include <system_error>
 #include <variant>
@@ -15,6 +14,7 @@
 #include <vector>
 
 #include "checkpoint_transaction_descriptor.hpp"
+#include "cancellation.hpp"
 #include "restore_transaction_descriptor.hpp"
 #include "gpu/engine.hpp"
 
@@ -64,7 +64,7 @@ class Transaction {
     std::condition_variable completed;
   };
   using GpuOperationPtr = std::shared_ptr<GpuOperation>;
-  // Protected by mutex(), except the atomic cancellation token.
+  // The pointer is protected by mutex(); cancellation is safe to signal independently.
   GpuOperationPtr gpu_operation;
 
   // Callers hold mutex() while accessing transaction state.
@@ -84,11 +84,11 @@ class Transaction {
   void OwnDirectory(const Path& directory);
 
   void Reserve(uintmax_t bytes);
-  TransferControl control() const { return {deadline_, cancellation_.get_token()}; }
+  Cancellation cancellation() const { return cancellation_.WithDeadline(deadline_); }
   bool has_limits() const { return resources_ != nullptr; }
   Kind kind() const { return kind_; }
   CheckpointPublication* publication() { return publication_ ? &*publication_ : nullptr; }
-  void CancelTransfer(); // Thread-safe; call before waiting for mutex().
+  void CancelWork(); // Thread-safe; call before waiting for mutex().
   void RemoveStaging(const Path& directory);
   void RemoveStaging(const Path& directory, std::error_code& error);
   void CleanupTransfer();
@@ -107,9 +107,9 @@ class Transaction {
   Descriptor descriptor_;
   std::chrono::steady_clock::time_point staging_started_at_;
   bool terminal_retained_ = false;
-  std::stop_source cancellation_;
+  Cancellation cancellation_;
   Kind kind_ = Kind::RESTORE;
-  TransferControl::Clock::time_point deadline_ = TransferControl::Clock::time_point::max();
+  Cancellation::Clock::time_point deadline_ = Cancellation::Clock::time_point::max();
   std::shared_ptr<TransactionResources> resources_;
   uintmax_t reserved_ = 0;
   bool released_ = false;

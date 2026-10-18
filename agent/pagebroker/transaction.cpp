@@ -80,7 +80,7 @@ Transaction::retain_terminal()
 bool
 Transaction::expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const
 {
-  if (deadline_ != TransferControl::Clock::time_point::max())
+  if (deadline_ != Cancellation::Clock::time_point::max())
     return state_ != State::COMMITTED && state_ != State::ABORTED && (transfer_expired_ || now >= deadline_);
   return (state_ == State::STAGED || state_ == State::ABORTING) && now - staging_started_at_ >= lifetime;
 }
@@ -100,7 +100,7 @@ Transaction::PrepareTransfer(std::shared_ptr<TransactionResources> resources, Ki
 {
   kind_ = kind;
   transfer_directory_ = directory;
-  deadline_ = TransferControl::Clock::now() + (resources ? resources->lifetime : lifetime);
+  deadline_ = Cancellation::Clock::now() + (resources ? resources->lifetime : lifetime);
   if (!resources)
     return;
   if (kind == Kind::CHECKPOINT && artifact)
@@ -152,9 +152,9 @@ Transaction::ReleaseReservation() noexcept
 }
 
 void
-Transaction::CancelTransfer()
+Transaction::CancelWork()
 {
-  cancellation_.request_stop();
+  cancellation_.Cancel();
 }
 
 void
@@ -207,7 +207,7 @@ Transaction::ExpireTransfer(std::chrono::steady_clock::time_point now)
   if (!expired(now, std::chrono::seconds{7500}))
     return false;
   transfer_expired_ = true;
-  CancelTransfer();
+  CancelWork();
   // Block new work while cleanup retries or GPU work drains.
   set_state(State::ABORTING);
   return true;

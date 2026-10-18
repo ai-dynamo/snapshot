@@ -54,7 +54,8 @@ daemon: generate
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DAEMON_SOURCES) v1/pagebroker.pb.cc \
 		-Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o pagebroker
 
-test: generate build/gpu-cuda-driver.o build/gpu-engine-test | build
+test: generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test | build
+	./build/cancellation-test
 	./build/gpu-engine-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp tests/daemon_test.cpp tests/broker_transfer_test.cpp tests/storage_contract_test.cpp $(TRANSFER_TEST_SOURCES) v1/pagebroker.pb.cc -Wl,--wrap=mkdir -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o build/pagebroker-test
 	./build/pagebroker-test
@@ -69,6 +70,9 @@ test: generate build/gpu-cuda-driver.o build/gpu-engine-test | build
 	./build/io-engine-test
 
 # Compile the optional driver loader without requiring a CUDA library.
+build/cancellation-test: tests/cancellation_test.cpp cancellation.hpp fatal_cleanup.hpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(GTEST_FLAGS) -o $@
+
 build/gpu-cuda-driver.o: gpu/cuda_driver.cpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 

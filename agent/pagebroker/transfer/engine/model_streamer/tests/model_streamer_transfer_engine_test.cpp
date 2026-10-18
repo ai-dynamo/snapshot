@@ -409,21 +409,22 @@ TEST_F(ModelStreamerTransferEngineTest, CancellationKeepsMappingsAliveUntilNativ
   RestorePlan plan;
   plan.files.push_back({"s3://local-test-bucket/source", "data", 1, fs::perms::owner_read});
   ModelStreamerRestore restore(restore_timeout_);
-  std::stop_source cancellation;
+  Cancellation cancellation;
   auto stage = std::async(std::launch::async, [&] {
-    restore.Stage(plan, root_.path() / "cancelled", {TransferControl::Clock::now() + std::chrono::seconds(5), cancellation.get_token()});
+    restore.Stage(plan, root_.path() / "cancelled",
+        cancellation.WithDeadline(Cancellation::Clock::now() + std::chrono::seconds(5)));
   });
-  const auto wait_until = TransferControl::Clock::now() + std::chrono::seconds(2);
-  while (next_submission_id == 0 && TransferControl::Clock::now() < wait_until)
+  const auto wait_until = Cancellation::Clock::now() + std::chrono::seconds(2);
+  while (next_submission_id == 0 && Cancellation::Clock::now() < wait_until)
     std::this_thread::yield();
   EXPECT_GT(next_submission_id, 0U);
-  cancellation.request_stop();
-  while (!end_entered && TransferControl::Clock::now() < wait_until)
+  cancellation.Cancel();
+  while (!end_entered && Cancellation::Clock::now() < wait_until)
     std::this_thread::yield();
   EXPECT_TRUE(end_entered);
   EXPECT_EQ(stage.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
   release_end = true;
-  EXPECT_THROW(stage.get(), TransferInterrupted);
+  EXPECT_THROW(stage.get(), CancellationError);
   hold_end = false;
   EXPECT_EQ(ends, 1U);
   EXPECT_TRUE(restore.Failed());

@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "transfer/transfer_control.hpp"
+#include "cancellation.hpp"
 
 namespace snapshot::pagebroker {
 // Identifies one object using a bucket and its literal key, rather than a URL.
@@ -126,15 +126,15 @@ class S3Client {
   // Streams regular-file contents, using multipart upload when needed, and
   // returns their size only after completion is confirmed.
   S3UploadResult UploadFile(const std::filesystem::path& source, const S3ObjectLocation& destination,
-                           TransferControl control = {});
+                           Cancellation control = {});
   // Returns the object size, or nullopt for a missing object; other failures throw.
-  std::optional<std::uint64_t> Head(const S3ObjectLocation& object, TransferControl control = {});
+  std::optional<std::uint64_t> Head(const S3ObjectLocation& object, Cancellation control = {});
   // Returns at most max_bytes after checking HEAD/GET sizes, or returns nullopt
   // for a missing object. Oversized or inconsistent responses throw S3ResponseError.
-  std::optional<std::string> Get(const S3ObjectLocation& object, std::size_t max_bytes, TransferControl control = {});
+  std::optional<std::string> Get(const S3ObjectLocation& object, std::size_t max_bytes, Cancellation control = {});
   // Metadata writes are create-only; a lost response requires caller confirmation.
   // Rejects input larger than max_bytes before sending a request.
-  void Put(const S3ObjectLocation& object, const std::string& bytes, std::size_t max_bytes, TransferControl control = {});
+  void Put(const S3ObjectLocation& object, const std::string& bytes, std::size_t max_bytes, Cancellation control = {});
 
  private:
   // Hides SDK types and shared operation admission.

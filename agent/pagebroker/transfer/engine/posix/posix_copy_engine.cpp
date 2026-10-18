@@ -23,7 +23,7 @@ PosixCopyEngine::type() const
 }
 
 PreparedRestore
-PosixCopyEngine::PrepareRestore(const StorageBackend& source, TransferControl control,
+PosixCopyEngine::PrepareRestore(const StorageBackend& source, Cancellation control,
     const PublishedArtifact* artifact, bool metadata_only, TransferMode mode) const
 {
   if (artifact || metadata_only)
@@ -32,9 +32,9 @@ PosixCopyEngine::PrepareRestore(const StorageBackend& source, TransferControl co
 }
 
 RestoreAccess
-PosixCopyEngine::StageRestore(PreparedRestore preparation, const Path& destination, TransferControl control) const
+PosixCopyEngine::StageRestore(PreparedRestore preparation, const Path& destination, Cancellation control) const
 {
-  control.Check();
+  control.ThrowIfCancelled();
   if (preparation.mode == TransferMode::Staged)
     filesystem_storage::StageRestore(preparation.plan, destination, control);
   return filesystem_storage::CompleteRestore(std::move(preparation), destination);
@@ -42,7 +42,7 @@ PosixCopyEngine::StageRestore(PreparedRestore preparation, const Path& destinati
 
 Path
 PosixCopyEngine::PrepareCheckpoint(const StorageBackend& destination, const Path& staging_directory,
-    const std::string& transaction_id, TransferMode mode, const PublishedArtifact* artifact, TransferControl control) const
+    const std::string& transaction_id, TransferMode mode, const PublishedArtifact* artifact, Cancellation control) const
 {
   ValidateCheckpointDestination(destination, artifact, control);
   return filesystem_storage::PrepareCheckpoint(destination, storage_root_, staging_directory, transaction_id, mode);
@@ -50,16 +50,16 @@ PosixCopyEngine::PrepareCheckpoint(const StorageBackend& destination, const Path
 
 void
 PosixCopyEngine::ValidateCheckpointDestination(const StorageBackend& destination,
-    const PublishedArtifact* artifact, TransferControl control) const
+    const PublishedArtifact* artifact, Cancellation control) const
 {
-  control.Check();
+  control.ThrowIfCancelled();
   if (artifact)
     throw std::invalid_argument("POSIX copy requires filesystem storage");
   filesystem_storage::DestinationPath(destination, storage_root_);
 }
 
 RestorePlan
-PosixCopyEngine::InspectCheckpoint(const Path& source, const PublishedArtifact* artifact, TransferControl control) const
+PosixCopyEngine::InspectCheckpoint(const Path& source, const PublishedArtifact* artifact, Cancellation control) const
 {
   if (artifact)
     throw std::invalid_argument("POSIX copy requires filesystem storage");
@@ -68,7 +68,7 @@ PosixCopyEngine::InspectCheckpoint(const Path& source, const PublishedArtifact* 
 
 void
 PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
-    CheckpointPublication* publication, TransferControl control, TransferMode mode) const
+    CheckpointPublication* publication, Cancellation control, TransferMode mode) const
 {
   ValidateCheckpointDestination(destination, publication ? &publication->artifact : nullptr, control);
   filesystem_storage::PublishCheckpoint(source, destination, storage_root_, plan, mode, control);
