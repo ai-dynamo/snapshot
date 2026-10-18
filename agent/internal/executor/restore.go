@@ -129,6 +129,9 @@ type RestoreRequest struct {
 
 	// Decided by the caller, so both gates reach the same answer.
 	SkipCompatCheck bool
+	// WithoutProxy restores into a container whose PID 1 is its own command,
+	// on a node without the restore proxy. Otherwise PID 1 must be the proxy.
+	WithoutProxy bool
 }
 
 // RestoreResult identifies the processes a successful restore leaves behind.
@@ -486,8 +489,10 @@ func inspectRestore(
 		return nil, 0, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
 	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
-	if err := checkRestoreProxy(placeholderPID); err != nil {
-		return nil, 0, err
+	if !req.WithoutProxy {
+		if err := checkRestoreProxy(placeholderPID); err != nil {
+			return nil, 0, err
+		}
 	}
 
 	// Read only for the image-digest check, which treats a blank value as

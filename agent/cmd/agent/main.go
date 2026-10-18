@@ -82,15 +82,22 @@ func main() {
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}
-	// Both run until shutdown. If either stops early, the agent exits and the
-	// DaemonSet restarts it.
+	// The controller, and the plugin when it registers, run until shutdown. If
+	// either stops early, the agent exits and the DaemonSet restarts it.
 	group, groupCtx := errgroup.WithContext(rootCtx)
+	// The plugin registers before the controller runs, so every restore knows
+	// whether the node has the restore proxy.
+	plugin := nri.NewPlugin(nodeController, rootLog.WithName("nri"), os.Getenv(nri.HostNamespaceEnv))
+	if err := plugin.Start(groupCtx); err != nil {
+		agentLog.Error(err, "Restoring without the restore proxy: restore containers keep their own command as PID 1")
+		nodeController.RestoreWithoutProxy()
+	} else {
+		group.Go(func() error {
+			return untilShutdown(rootCtx, "NRI plugin", plugin.Wait(groupCtx))
+		})
+	}
 	group.Go(func() error {
 		return untilShutdown(rootCtx, "snapshot node controller", nodeController.Run(groupCtx))
-	})
-	plugin := nri.NewPlugin(nodeController, rootLog.WithName("nri"), os.Getenv(nri.HostNamespaceEnv))
-	group.Go(func() error {
-		return untilShutdown(rootCtx, "NRI plugin", plugin.Run(groupCtx))
 	})
 	if runErr := group.Wait(); runErr != nil {
 		fatal(agentLog, runErr, "Snapshot agent exited with error")

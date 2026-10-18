@@ -78,8 +78,11 @@ type Plugin struct {
 	openControlDir func(podUID, containerName string) (*os.File, error)
 	proxyPath      string
 	socketPath     string
-	// runtimeNRIVersion is the stub's, set in Run.
+	// runtimeNRIVersion is the stub's, set in Start.
 	runtimeNRIVersion func() string
+	// stub and closed are set when Start registers.
+	stub   stub.Stub
+	closed chan struct{}
 }
 
 // NewPlugin returns a plugin that resolves destinations through resolver. If
@@ -98,11 +101,10 @@ func NewPlugin(resolver DestinationResolver, log logr.Logger, hostNamespace stri
 	}
 }
 
-// Run registers with the runtime and serves until ctx ends. It returns an
-// error if registration fails or the connection to the runtime drops, and the
-// agent then exits: restores need NRI, so a node without it must not look
-// healthy, and checkpoints taken there could not be restored on it either.
-func (p *Plugin) Run(ctx context.Context) error {
+// Start registers with the runtime. It fails when the runtime has no NRI, or
+// one too old for the restore proxy, and restores on the node then run without
+// the proxy.
+func (p *Plugin) Start(ctx context.Context) error {
 	closed := make(chan struct{})
 	var once sync.Once
 	opts := []stub.Option{
@@ -120,17 +122,24 @@ func (p *Plugin) Run(ctx context.Context) error {
 	// Configure, called during Start, reads the runtime's NRI version.
 	p.runtimeNRIVersion = s.RuntimeNRIVersion
 	if err := s.Start(ctx); err != nil {
-		return fmt.Errorf("NRI plugin could not register with the container runtime; "+
-			"restores need NRI, so the agent stops. Enable NRI in the runtime, or keep the agent off this node: %w", err)
+		return fmt.Errorf("NRI plugin could not register with the container runtime: %w", err)
 	}
+	p.stub, p.closed = s, closed
+	return nil
+}
+
+// Wait serves a started plugin until ctx ends. It returns an error if the
+// connection to the runtime drops, and the agent then exits: it registers
+// again when it restarts, or restores without the proxy if it cannot.
+func (p *Plugin) Wait(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
-		s.Stop()
+		p.stub.Stop()
 		return nil
-	case <-closed:
+	case <-p.closed:
 		// Stopping the stub also closes the connection, so a shutdown can
 		// land here too.
-		s.Stop()
+		p.stub.Stop()
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -139,8 +148,8 @@ func (p *Plugin) Run(ctx context.Context) error {
 }
 
 // Configure is called when the plugin registers. It refuses a runtime too old
-// to apply the restore proxy command, which fails the registration and stops
-// the agent, as a runtime without NRI does: no restore could work there.
+// to apply the restore proxy command, which fails the registration, as a
+// runtime without NRI does.
 func (p *Plugin) Configure(_ context.Context, _, runtime, version string) (api.EventMask, error) {
 	nriVersion := ""
 	if p.runtimeNRIVersion != nil {
@@ -148,7 +157,7 @@ func (p *Plugin) Configure(_ context.Context, _, runtime, version string) (api.E
 	}
 	if dropsArgs(nriVersion) {
 		return 0, fmt.Errorf("container runtime %s/%s has NRI %s, which ignores the restore proxy command; "+
-			"restores need NRI %s or newer (containerd 2.2 or newer)", runtime, version, nriVersion, argsNRIVersion)
+			"the restore proxy needs NRI %s or newer (containerd 2.2 or newer)", runtime, version, nriVersion, argsNRIVersion)
 	}
 	p.log.Info("Registered with the container runtime", "runtime", runtime+"/"+version, "nri_version", nriVersion)
 	return 0, nil

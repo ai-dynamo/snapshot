@@ -402,6 +402,8 @@ def test_restored_workload_logs_and_exit_reach_kubernetes(
     # The restore proxy is the container's PID 1. It forwards nothing itself:
     # the restored workload writes to the container's log, and the container
     # ends with the workload's exit code.
+    if not snap.restore_proxy():
+        pytest.skip("the container follows the restored workload only with the restore proxy")
     try:
         _, source_node, _ = create_valid_checkpoint(config, run, gpu=False)
 

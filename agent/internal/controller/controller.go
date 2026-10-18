@@ -71,6 +71,7 @@ type NodeController struct {
 	restoreQueue              workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister          corev1listers.PodLister
 	compareFn                 func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
+	withoutProxy              bool
 
 	// captureQueue holds PodSnapshotContent names. Its per-key exclusion is the capture path's only
 	// lock, which is enough because exactly one agent runs per node.
@@ -238,6 +239,12 @@ func newDefaultController(
 	}
 	w.checkpointFn = w.executorCheckpoint
 	return w
+}
+
+// RestoreWithoutProxy makes restores run without the restore proxy, on a node
+// whose runtime cannot run it. Call it before Run.
+func (w *NodeController) RestoreWithoutProxy() {
+	w.withoutProxy = true
 }
 
 // Run starts the local pod informers and processes checkpoint/restore events.
@@ -1031,6 +1038,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 		ArtifactContainerName:       op.artifact.SourceContainerName,
 		DestinationContainerName:    op.destination,
 		SkipCompatCheck:             op.skipCompatCheck,
+		WithoutProxy:                w.withoutProxy,
 		Clientset:                   w.clientset,
 		CustomStorageAvailable:      w.config.CustomStorageAvailable,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,

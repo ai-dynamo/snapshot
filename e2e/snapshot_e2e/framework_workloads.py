@@ -29,7 +29,9 @@ from snapshot_e2e.frameworks import FrameworkSpec
 from snapshot_e2e.frameworks import SharedModelCache
 from snapshot_e2e.frameworks import framework_image
 from snapshot_e2e.frameworks import framework_image_overridden
+from snapshot_e2e.workloads import INERT_COMMAND
 from snapshot_e2e.workloads import TestRun
+from snapshot_e2e.workloads import restore_proxy
 from snapshot_e2e.workloads import same_node_affinity
 from snapshot_e2e.workloads import workload_scheduling
 
@@ -92,6 +94,11 @@ def restore_pod(
     # that holds the artifact is the one on the source node.
     pod["metadata"]["annotations"] = {RESTORE_FROM_ANNOTATION: run.snapshot_name}
     pod["spec"]["affinity"] = same_node_affinity(source_node)
+    if not restore_proxy():
+        # As the restore guide says for nodes without the proxy.
+        main = main_container(pod)
+        main["command"] = list(INERT_COMMAND)
+        main.pop("args", None)
     return pod
 
 

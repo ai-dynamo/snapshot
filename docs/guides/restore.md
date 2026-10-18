@@ -54,6 +54,12 @@ does. Readiness waits on the framework's post-restore sentinel —
 `vllm-restore-ready` and its equivalents — not the `ready-for-snapshot` file the
 source pod writes.
 
+On nodes without NRI v0.10 or newer, there is no restore proxy. Before applying
+`restore-deployment.yaml`, change the container's command to
+`["sleep", "infinity"]`, remove its `args`, and add a liveness probe on the
+framework's API. See
+[Nodes without the restore proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
+
 A Pod gets one restore. The guides use a Deployment, which restarts containers,
 so if the restored process exits, the container ends in `CrashLoopBackOff`
 instead of starting again. Delete the Pod to restore a new replica.

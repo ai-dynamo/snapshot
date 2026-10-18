@@ -441,11 +441,13 @@ func TestInspectRestoreRequiresTheRestoreProxy(t *testing.T) {
 		types.HostManifest{},
 	)
 	for name, tc := range map[string]struct {
-		cmdline string
-		readErr error
-		wantErr string
+		cmdline      string
+		readErr      error
+		withoutProxy bool
+		wantErr      string
 	}{
 		"the proxy":            {cmdline: "/snapshot-control/snapshot-restore-proxy"},
+		"a node without it":    {cmdline: "sleep infinity", withoutProxy: true},
 		"the image's command":  {cmdline: "sleep infinity", wantErr: "NRI plugin did not set up this container"},
 		"the proxy with args":  {cmdline: "/snapshot-control/snapshot-restore-proxy --x", wantErr: "NRI plugin"},
 		"PID 1 cannot be read": {readErr: errors.New("no such process"), wantErr: "no such process"},
@@ -466,8 +468,15 @@ func TestInspectRestoreRequiresTheRestoreProxy(t *testing.T) {
 				PodNamespace:             "default",
 				ArtifactContainerName:    "main",
 				DestinationContainerName: "main",
+				WithoutProxy:             tc.withoutProxy,
 			}, manifest)
 
+			if tc.withoutProxy {
+				if err != nil || readPID != 0 {
+					t.Fatalf("inspectRestore: %v, read PID %d; want no error and no PID 1 check", err, readPID)
+				}
+				return
+			}
 			if readPID != 123 {
 				t.Fatalf("read PID %d, want the container's PID 1, 123", readPID)
 			}

@@ -274,7 +274,7 @@ spec:
         # NRI socket directory. A directory, not the socket itself: a
         # socket-typed hostPath would keep the Pod from starting at all, and
         # hide the reason. On a node without NRI the agent starts, cannot
-        # register its NRI plugin, and exits with an error saying so.
+        # register its NRI plugin, and restores without the restore proxy.
         - name: nri
           hostPath:
             path: /var/run/nri

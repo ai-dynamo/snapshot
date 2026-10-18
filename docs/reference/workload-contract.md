@@ -89,7 +89,9 @@ workload useful and operable.
    Snapshot replaces the restore container's command with its restore proxy,
    which waits for the restore and then follows the restored process. The
    restored process continues from the checkpoint; nothing the entrypoint does
-   at startup happens again.
+   at startup happens again. On nodes without the restore proxy, the restore
+   Pod's own inert command runs instead; see
+   [Nodes without the restore proxy](restore-pod-contract.md#nodes-without-the-restore-proxy).
 9. **MUST** wait for `restore-complete` before touching the engine.
 10. **MUST** bring the engine back to a serving-ready state in this order: let
     `cuda-checkpoint` restore GPU memory (CUDA contexts, streams, and device

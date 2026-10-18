@@ -28,6 +28,7 @@ from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import multi_restore_pod
 from snapshot_e2e.workloads import restore_pod
+from snapshot_e2e.workloads import restore_proxy
 from snapshot_e2e.workloads import source_pod
 
 
@@ -1029,8 +1030,9 @@ def assert_restored_state(
 
     With proxy, also check that the restore proxy is PID 1, and that
     restore-complete names the restored workload. Agents from before the
-    proxy, in upgrade tests, restore without it.
+    proxy, in upgrade tests, and nodes without it restore without it.
     """
+    proxy = proxy and restore_proxy()
     expected_gpu = source_token if gpu else "disabled"
     # The restored process: the CUDA program, or the CPU loop, whose script
     # names the observations file.

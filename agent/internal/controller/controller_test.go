@@ -542,6 +542,29 @@ func TestReconcileRestorePodRunsMappedDestinationsConcurrently(t *testing.T) {
 	assert.Contains(t, payload, `"reason":"RestoreSucceeded"`)
 }
 
+func TestExecuteRestorePassesTheNodesProxyMode(t *testing.T) {
+	for name, withoutProxy := range map[string]bool{"with the proxy": false, "without the proxy": true} {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			w := makeTestController(t, pod)
+			if withoutProxy {
+				w.RestoreWithoutProxy()
+			}
+			var got executor.RestoreRequest
+			w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
+				got = req
+				return executor.RestoreResult{}, nil
+			}
+			plan := &restorePlan{artifact: &restoreArtifact{}}
+
+			_, err := w.newRestoreOperation(pod, plan, "main", "container-id", time.Now()).executeRestore(context.Background())
+
+			require.NoError(t, err)
+			assert.Equal(t, withoutProxy, got.WithoutProxy)
+		})
+	}
+}
+
 func TestReconcileRestorePodReportsPartialSuccess(t *testing.T) {
 	pod := multiRestorePod()
 	snapshot, content := readySnapshotObjects()

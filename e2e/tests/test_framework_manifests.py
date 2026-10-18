@@ -13,7 +13,8 @@ pull request, without a cluster:
   SNAPSHOT_CONTROL_DIR, io_uring seccomp profile, /dev/net/tun, nvidia
   RuntimeClass, one GPU);
 - the restore pod keeps the source's command, which the restore proxy
-  replaces, and restores this run's PodSnapshot;
+  replaces, or idles on nodes without the proxy, and restores this run's
+  PodSnapshot;
 - the model the guide deploys is the one the tests expect;
 - the image tag is content-addressed and deterministic.
 """
@@ -142,7 +143,10 @@ def test_app_configmap_matches_the_guide_program(
 
 
 @pytest.mark.workload
-def test_restore_pod_restores_this_run(spec: frameworks.FrameworkSpec) -> None:
+def test_restore_pod_restores_this_run(
+    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SNAPSHOT_E2E_RESTORE_PROXY", raising=False)
     source, restore, run = pods(spec)
     main = fw.main_container(restore)
     source_main = fw.main_container(source)
@@ -156,6 +160,18 @@ def test_restore_pod_restores_this_run(spec: frameworks.FrameworkSpec) -> None:
         "requiredDuringSchedulingIgnoredDuringExecution"
     ]["nodeSelectorTerms"]
     assert node_terms[0]["matchFields"][0]["values"] == ["gpu-node-0"]
+
+
+@pytest.mark.workload
+def test_restore_pod_idles_without_the_proxy(
+    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "false")
+    _, restore, _ = pods(spec)
+    main = fw.main_container(restore)
+    # The source's command would load a second model beside the restored one.
+    assert main["command"] == workloads.INERT_COMMAND
+    assert "args" not in main
 
 
 @pytest.mark.workload
