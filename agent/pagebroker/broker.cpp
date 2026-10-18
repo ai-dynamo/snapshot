@@ -146,9 +146,7 @@ void
 BeginAbort(Transaction& transaction)
 {
   transaction.set_state(Transaction::State::ABORTING);
-  if (transaction.gpu_operation) {
-    transaction.gpu_operation->cancellation->Cancel();
-  }
+  transaction.CancelWork();
 }
 
 std::string
@@ -290,7 +288,7 @@ Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engin
 
 Broker::~Broker()
 {
-  CancelGpuWork();
+  CancelActiveTransactions();
 }
 
 std::vector<std::pair<std::string, Broker::TransactionHandle>>
@@ -306,18 +304,7 @@ Broker::CancelActiveTransactions()
   std::lock_guard lock(transactions_mutex_);
   stopping_ = true;
   for (const auto& [id, transaction] : transactions_)
-    transaction->CancelTransfer();
-}
-
-void
-Broker::CancelGpuWork()
-{
-  for (const auto& [id, transaction] : TransactionSnapshot()) {
-    std::lock_guard lock(transaction->mutex());
-    if (transaction->gpu_operation) {
-      transaction->gpu_operation->cancellation->Cancel();
-    }
-  }
+    transaction->CancelWork();
 }
 
 std::error_code
@@ -589,8 +576,8 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
         {}, nullptr, lifetime_);
     transaction->set_state(Transaction::State::PREPARING);
     // Preparation can scan storage; it shares the transfer's deadline and cancellation.
-    auto prepared = engine.PrepareRestore(source, transaction->control(), artifact, metadata_only, mode);
-    transaction->control().Check();
+    auto prepared = engine.PrepareRestore(source, transaction->cancellation(), artifact, metadata_only, mode);
+    transaction->cancellation().ThrowIfCancelled();
     source_prepared = true;
     bytes = prepared.plan.size_bytes();
     transaction->Reserve(bytes);
@@ -608,9 +595,9 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
       owned = true;
       transaction->OwnDirectory(staging_directory);
     }
-    access = engine.StageRestore(std::move(prepared), staging_directory, transaction->control());
+    access = engine.StageRestore(std::move(prepared), staging_directory, transaction->cancellation());
     // A final blocking copy may return after expiry or cancellation.
-    transaction->control().Check();
+    transaction->cancellation().ThrowIfCancelled();
     if (staging_reserved)
       ReleaseStaging(bytes);
     staging_reserved = false;
@@ -669,10 +656,10 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
         prepared->output() != mode || prepared->engine_type() != engine.type())
       return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
     // Retries use the original control and never clean up an existing capture.
-    transaction->control().Check();
+    transaction->cancellation().ThrowIfCancelled();
     output = engine.PrepareCheckpoint(destination, staging_directory, request.transaction_id(), mode,
-        artifact, transaction->control());
-    transaction->control().Check();
+        artifact, transaction->cancellation());
+    transaction->cancellation().ThrowIfCancelled();
     if (prepared->staging_directory() != output)
       return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
   } else {
@@ -681,17 +668,17 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
       // Admission precedes backend I/O; cleanup ownership starts only after mkdir succeeds.
       transaction->PrepareTransfer(direct ? nullptr : resources_, Transaction::Kind::CHECKPOINT, {}, artifact, lifetime_);
       transaction->set_state(Transaction::State::PREPARING);
-      transaction->control().Check();
+      transaction->cancellation().ThrowIfCancelled();
       output = engine.PrepareCheckpoint(destination, staging_directory, request.transaction_id(), mode,
-          artifact, transaction->control());
-      transaction->control().Check();
+          artifact, transaction->cancellation());
+      transaction->cancellation().ThrowIfCancelled();
       if (fs::exists(fs::symlink_status(output)))
         throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
       if (transaction->has_limits() && !HasAvailableSpace(staging_root_, 1))
         throw TransferError(Failure::INSUFFICIENT_STORAGE, "insufficient checkpoint staging capacity");
-      transaction->control().Check();
+      transaction->cancellation().ThrowIfCancelled();
       fs::create_directories(output.parent_path());
-      transaction->control().Check();
+      transaction->cancellation().ThrowIfCancelled();
       if (mkdir(output.c_str(), S_IRWXU)) {
         if (errno == EEXIST)
           throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
@@ -700,7 +687,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
       owned = true;
       transaction->OwnDirectory(output);
       // mkdir may have completed after the deadline or a concurrent Abort.
-      transaction->control().Check();
+      transaction->cancellation().ThrowIfCancelled();
       transaction->set_descriptor(CheckpointTransactionDescriptor(output, destination, engine.type(), mode));
       transaction->set_state(Transaction::State::STAGED);
     }
@@ -794,11 +781,11 @@ Broker::PublishCheckpoint(
     auto* publication = transaction.publication();
     RestorePlan plan;
     if (!publication || publication->pending_index.empty()) {
-      plan = engine.InspectCheckpoint(staging_directory, publication ? &publication->artifact : nullptr, transaction.control());
+      plan = engine.InspectCheckpoint(staging_directory, publication ? &publication->artifact : nullptr, transaction.cancellation());
       transaction.Reserve(plan.size_bytes());
     }
     engine.PublishCheckpoint(staging_directory, descriptor.destination_storage(), std::move(plan), publication,
-        transaction.control(), descriptor.output());
+        transaction.cancellation(), descriptor.output());
     transaction.clear_descriptor();
     transaction.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;
@@ -817,7 +804,7 @@ Broker::Abort(const Request& request)
   if (!transaction) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   }
-  transaction->CancelTransfer(); // Interrupt transfer work before waiting for its lock.
+  transaction->CancelWork(); // Interrupt transfer work before waiting for its lock.
   std::unique_lock lock(transaction->mutex());
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::COMMITTED) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
@@ -892,14 +879,16 @@ Broker::HandleGpuRequest(const Request& request, CancellationPtr cancellation,
         response.set_request_id(request.request_id());
         return response;
       }
-      previous->cancellation = std::move(cancellation);
+      previous->cancellation = std::make_shared<Cancellation>(
+          Cancellation::Join(transaction->cancellation(), *cancellation));
       return ExecuteGpu(request, previous, std::move(lock));
     }
     auto operation = std::make_shared<GpuOperation>();
     operation->artifact = CreateGpuArtifact(*transaction, decoded);
     operation->request = std::move(decoded);
     operation->target_descriptors = std::move(target_descriptors);
-    operation->cancellation = std::move(cancellation);
+    operation->cancellation = std::make_shared<Cancellation>(
+        Cancellation::Join(transaction->cancellation(), *cancellation));
     transaction->gpu_operation = operation;
     return ExecuteGpu(request, operation, std::move(lock));
   } catch (const std::invalid_argument& error) {

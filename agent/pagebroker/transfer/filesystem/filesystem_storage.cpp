@@ -162,9 +162,9 @@ RemoveStaging(const Path& directory)
 }
 
 void
-StageRestore(const RestorePlan& plan, const Path& destination, TransferControl control)
+StageRestore(const RestorePlan& plan, const Path& destination, Cancellation control)
 {
-  control.Check();
+  control.ThrowIfCancelled();
   for (const auto& directory : plan.directories) {
     if (!IsSafeRelativePath(directory.relative_path))
       throw std::invalid_argument("invalid restore directory");
@@ -175,36 +175,36 @@ StageRestore(const RestorePlan& plan, const Path& destination, TransferControl c
   }
   fs::create_directory(destination);
   for (const auto& directory : plan.directories) {
-    control.Check();
+    control.ThrowIfCancelled();
     fs::create_directory(destination / directory.relative_path);
   }
   for (const auto& file : plan.files) {
-    control.Check();
+    control.ThrowIfCancelled();
     fs::copy_file(file.source_locator, destination / file.relative_path);
-    control.Check();
+    control.ThrowIfCancelled();
     fs::permissions(destination / file.relative_path, file.permissions);
   }
   // Apply directory modes only after all children have been populated.
   for (auto directory = plan.directories.rbegin(); directory != plan.directories.rend(); ++directory) {
-    control.Check();
+    control.ThrowIfCancelled();
     fs::permissions(destination / directory->relative_path, directory->permissions);
   }
-  control.Check();
+  control.ThrowIfCancelled();
   fs::permissions(destination, plan.root_permissions);
-  control.Check();
+  control.ThrowIfCancelled();
 }
 
 namespace {
 RestorePlan
-BuildPlan(const Path& source, TransferControl control, std::size_t limit, bool cpu_restore)
+BuildPlan(const Path& source, Cancellation control, std::size_t limit, bool cpu_restore)
 {
-  control.Check();
+  control.ThrowIfCancelled();
   ValidateSourceRoot(source);
   RestorePlan plan;
   plan.root_permissions = fs::symlink_status(source).permissions();
   for (auto it = fs::recursive_directory_iterator(source); it != fs::recursive_directory_iterator(); ++it) {
     const auto& entry = *it;
-    control.Check();
+    control.ThrowIfCancelled();
     if (plan.files.size() + plan.directories.size() >= limit)
       throw std::invalid_argument("checkpoint exceeds entry limit");
     const auto status = entry.symlink_status();
@@ -241,13 +241,13 @@ BuildPlan(const Path& source, TransferControl control, std::size_t limit, bool c
 }  // namespace
 
 RestorePlan
-BuildRestorePlan(const Path& source, TransferControl control, std::size_t limit)
+BuildRestorePlan(const Path& source, Cancellation control, std::size_t limit)
 {
   return BuildPlan(source, control, limit, false);
 }
 
 RestorePlan
-BuildCpuRestorePlan(const Path& source, TransferControl control)
+BuildCpuRestorePlan(const Path& source, Cancellation control)
 {
   return BuildPlan(source, control, std::numeric_limits<std::size_t>::max(), true);
 }
@@ -262,9 +262,9 @@ OpenDirectory(const Path& directory)
 }
 
 PreparedRestore
-PrepareRestore(const StorageBackend& source, const Path& storage_root, TransferMode mode, TransferControl control)
+PrepareRestore(const StorageBackend& source, const Path& storage_root, TransferMode mode, Cancellation control)
 {
-  control.Check();
+  control.ThrowIfCancelled();
   PreparedRestore prepared;
   prepared.mode = mode;
   prepared.local_source = SourcePath(source, storage_root);
@@ -299,9 +299,9 @@ PrepareCheckpoint(const StorageBackend& destination, const Path& storage_root,
 
 void
 PublishCheckpoint(const Path& source, const StorageBackend& destination, const Path& storage_root,
-    const RestorePlan& plan, TransferMode mode, TransferControl control)
+    const RestorePlan& plan, TransferMode mode, Cancellation control)
 {
-  control.Check();
+  control.ThrowIfCancelled();
   const Path published = DestinationPath(destination, storage_root);
   CheckPublicationConflict(published);
   if (mode == TransferMode::Direct) {
@@ -315,7 +315,7 @@ PublishCheckpoint(const Path& source, const StorageBackend& destination, const P
     throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint destination conflicts");
   try {
     StageRestore(plan, partial, control);
-    control.Check();
+    control.ThrowIfCancelled();
     ReplaceDirectory(partial, published);
   }
   catch (...) {

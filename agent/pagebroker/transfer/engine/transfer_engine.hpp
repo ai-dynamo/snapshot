@@ -10,7 +10,7 @@
 
 #include "pagebroker_types.hpp"
 #include "transfer/restore_plan.hpp"
-#include "transfer/transfer_control.hpp"
+#include "cancellation.hpp"
 
 namespace snapshot::pagebroker {
 using Path = std::filesystem::path;
@@ -60,30 +60,30 @@ class TransferEngine {
   virtual void Close();
 
   // Resolves the source and retains local access before staging begins.
-  virtual PreparedRestore PrepareRestore(const StorageBackend& source, TransferControl control = {},
+  virtual PreparedRestore PrepareRestore(const StorageBackend& source, Cancellation control = {},
       const PublishedArtifact* artifact = nullptr, bool metadata_only = false,
       TransferMode mode = TransferMode::Staged) const;
 
   // Makes the prepared restore accessible and identifies transaction-owned staging.
   virtual RestoreAccess StageRestore(PreparedRestore preparation, const Path& destination,
-      TransferControl control = {}) const;
+      Cancellation control = {}) const;
 
   // Resolves the local capture directory without creating or claiming it.
   virtual Path PrepareCheckpoint(const StorageBackend& destination, const Path& staging_directory,
       const std::string& transaction_id, TransferMode mode = TransferMode::Staged,
-      const PublishedArtifact* artifact = nullptr, TransferControl control = {}) const;
+      const PublishedArtifact* artifact = nullptr, Cancellation control = {}) const;
 
   // Rejects invalid checkpoint destinations before capture begins.
   virtual void ValidateCheckpointDestination(const StorageBackend& destination,
-      const PublishedArtifact* artifact = nullptr, TransferControl control = {}) const;
+      const PublishedArtifact* artifact = nullptr, Cancellation control = {}) const;
 
   // Builds the checkpoint plan before the caller reserves staging capacity.
   virtual RestorePlan InspectCheckpoint(const Path& source, const PublishedArtifact* artifact = nullptr,
-      TransferControl control = {}) const;
+      Cancellation control = {}) const;
 
   // Publishes a checkpoint after admission, rejecting destination conflicts.
   virtual void PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
-      CheckpointPublication* publication = nullptr, TransferControl control = {},
+      CheckpointPublication* publication = nullptr, Cancellation control = {},
       TransferMode mode = TransferMode::Staged) const;
 
   // Resolves a logical target into a publication descriptor, if artifacts are supported.
