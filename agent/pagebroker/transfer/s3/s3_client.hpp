@@ -12,7 +12,6 @@
 #include <stdexcept>
 #include <string>
 
-#include "utils/sha256.hpp"
 #include "transfer/transfer_control.hpp"
 
 namespace snapshot::pagebroker {
@@ -70,11 +69,10 @@ struct S3Limits {
   bool operator==(const S3Limits&) const = default;
 };
 
-// Returned after a completed upload; the digest covers the source payload bytes.
+// Returned only after upload completion is confirmed.
 struct S3UploadResult {
   S3ObjectLocation destination;
   std::uint64_t size_bytes;
-  utils::Sha256Digest sha256;
 };
 
 // Identifies the failed SDK operation without retaining its response body or
@@ -126,7 +124,7 @@ class S3Client {
 
   // Source files must remain immutable; overwrites require exclusive destination keys.
   // Streams regular-file contents, using multipart upload when needed, and
-  // returns their size and SHA-256 digest only after completion is confirmed.
+  // returns their size only after completion is confirmed.
   S3UploadResult UploadFile(const std::filesystem::path& source, const S3ObjectLocation& destination,
                            TransferControl control = {});
   // Returns the object size, or nullopt for a missing object; other failures throw.

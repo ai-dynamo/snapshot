@@ -153,8 +153,6 @@ class FaultService:
                 return self.error(start_response)
             if scenario in ("lost-put", "lost-metadata-put") and operation == "put":
                 return self.error(start_response)
-            if scenario == "corrupt" and operation == "get" and success and body:
-                body = bytes([body[0] ^ 1]) + body[1:]
             start_response(response["status"], response["headers"])
             return [body]
         finally:

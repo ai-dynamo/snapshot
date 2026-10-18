@@ -137,7 +137,7 @@ applies the same patch automatically.
 Build the patched revision with `BUILD_ONLY=s3-crt`, shared
 libraries, and `CMAKE_INSTALL_LIBDIR=lib`. Run
 `make -C agent/pagebroker test daemon MODEL_STREAMER_LIB_DIR=/path/to/libraries AWS_SDK_PREFIX=/path/to/aws-sdk`
-for filesystem, digest, and session-recovery tests. These tests need no S3
+for filesystem, session-recovery, and S3 client tests. These tests need no S3
 endpoint or credentials.
 
 To exercise S3 in the distroless runtime, build the dedicated image target;
@@ -161,8 +161,10 @@ The Linux Docker runner uses host networking to reach it. Python prepares the
 isolated reader fixtures; C++ backend uploads populate separate round-trip
 prefixes, which the native Model Streamer restores.
 
-The tests cover hashes, permissions, empty files/directories, concurrency,
-multipart uploads, corruption, truncation, missing objects and endpoint errors.
+The tests independently compare payload bytes and cover permissions, empty
+files/directories, concurrency, multipart uploads, truncation, missing objects,
+and endpoint errors. PageBroker does not perform application-level payload
+integrity verification.
 Injected failures exercise retries, cleanup and uncertain remote outcomes.
 `--resources` measures peak RSS and throughput in isolated uploads with a fixed
 buffer budget. `--tls` uses a temporary CA and checks that both clients reject

@@ -25,7 +25,6 @@
 #include "file_descriptor.hpp"
 #include <streamer/streamer.h>
 #include "utils/event_loop.hpp"
-#include "utils/sha256.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -94,13 +93,6 @@ ApplyPermissions(const Path& path, fs::perms permissions)
 }
 
 void
-VerifyDigest(std::span<const std::byte> bytes, const std::optional<utils::Sha256Digest>& expected, TransferControl control = {})
-{
-  if (expected && utils::ComputeSha256(bytes, [&] { control.Check(); }) != *expected)
-    throw RestoreIntegrityError();
-}
-
-void
 ValidateRestorePlan(const RestorePlan& plan)
 {
   std::set<Path> directories;
@@ -129,7 +121,7 @@ class MappedFile {
  public:
   MappedFile(const RestoreFile& file, const Path& destination)
       : source_(file.source_locator), destination_(destination), bytes_(CheckedSize(file.size_bytes)),
-        permissions_(file.permissions), expected_sha256_(file.expected_sha256)
+        permissions_(file.permissions)
   {
     FileDescriptor descriptor(open(destination_.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
     if (descriptor.get() < 0)
@@ -157,9 +149,8 @@ class MappedFile {
   const std::string& source() const { return source_; }
   void* address() const { return address_; }
   size_t bytes() const { return bytes_; }
-  void Finish(TransferControl control) const
+  void Finish() const
   {
-    VerifyDigest({static_cast<const std::byte*>(address_), bytes_}, expected_sha256_, control);
     ApplyPermissions(destination_, permissions_);
   }
 
@@ -176,7 +167,6 @@ class MappedFile {
   Path destination_;
   size_t bytes_;
   fs::perms permissions_;
-  std::optional<utils::Sha256Digest> expected_sha256_;
   void* address_ = nullptr;
 };
 
@@ -196,9 +186,7 @@ CreateEmptyFile(const RestoreFile& file, const Path& destination)
   FileDescriptor descriptor(open(destination.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600));
   if (descriptor.get() < 0)
     throw SystemError("create empty restore staging file");
-  // Empty files have no native submission: this verifies their local contents,
-  // not the existence of the remote object.
-  VerifyDigest({}, file.expected_sha256);
+  // Empty files need no native submission; the backend checks remote existence.
   ApplyPermissions(destination, file.permissions);
 }
 
@@ -623,7 +611,7 @@ ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destinat
 
     for (const auto& file : batch) {
       control.Check();
-      file->Finish(control);
+      file->Finish();
     }
   }
 }
