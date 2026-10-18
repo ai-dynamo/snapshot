@@ -53,7 +53,7 @@ ModelStreamerTransferEngine::type() const
 }
 
 PreparedRestore
-ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, TransferControl control,
+ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, Cancellation control,
     const PublishedArtifact* artifact, bool metadata_only, TransferMode mode) const
 {
   if (artifact || metadata_only)
@@ -62,9 +62,9 @@ ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, Transf
 }
 
 RestoreAccess
-ModelStreamerTransferEngine::StageRestore(PreparedRestore preparation, const Path& destination, TransferControl control) const
+ModelStreamerTransferEngine::StageRestore(PreparedRestore preparation, const Path& destination, Cancellation control) const
 {
-  control.Check();
+  control.ThrowIfCancelled();
   if (preparation.mode == TransferMode::Staged)
     AcquireRestore()->Stage(preparation.plan, destination, control);
   return filesystem_storage::CompleteRestore(std::move(preparation), destination);
@@ -72,7 +72,7 @@ ModelStreamerTransferEngine::StageRestore(PreparedRestore preparation, const Pat
 
 Path
 ModelStreamerTransferEngine::PrepareCheckpoint(const StorageBackend& destination, const Path& staging_directory,
-    const std::string& transaction_id, TransferMode mode, const PublishedArtifact* artifact, TransferControl control) const
+    const std::string& transaction_id, TransferMode mode, const PublishedArtifact* artifact, Cancellation control) const
 {
   ValidateCheckpointDestination(destination, artifact, control);
   return filesystem_storage::PrepareCheckpoint(destination, storage_root_, staging_directory, transaction_id, mode);
@@ -80,16 +80,16 @@ ModelStreamerTransferEngine::PrepareCheckpoint(const StorageBackend& destination
 
 void
 ModelStreamerTransferEngine::ValidateCheckpointDestination(const StorageBackend& destination,
-    const PublishedArtifact* artifact, TransferControl control) const
+    const PublishedArtifact* artifact, Cancellation control) const
 {
-  control.Check();
+  control.ThrowIfCancelled();
   if (artifact)
     throw std::invalid_argument("Model Streamer requires filesystem storage");
   filesystem_storage::DestinationPath(destination, storage_root_);
 }
 
 RestorePlan
-ModelStreamerTransferEngine::InspectCheckpoint(const Path& source, const PublishedArtifact* artifact, TransferControl control) const
+ModelStreamerTransferEngine::InspectCheckpoint(const Path& source, const PublishedArtifact* artifact, Cancellation control) const
 {
   if (artifact)
     throw std::invalid_argument("Model Streamer requires filesystem storage");
@@ -98,7 +98,7 @@ ModelStreamerTransferEngine::InspectCheckpoint(const Path& source, const Publish
 
 void
 ModelStreamerTransferEngine::PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
-    CheckpointPublication* publication, TransferControl control, TransferMode mode) const
+    CheckpointPublication* publication, Cancellation control, TransferMode mode) const
 {
   ValidateCheckpointDestination(destination, publication ? &publication->artifact : nullptr, control);
   filesystem_storage::PublishCheckpoint(source, destination, storage_root_, plan, mode, control);

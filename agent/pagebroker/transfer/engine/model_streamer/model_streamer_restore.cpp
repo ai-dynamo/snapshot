@@ -150,9 +150,9 @@ class MappedFile {
   const std::string& source() const { return source_; }
   void* address() const { return address_; }
   size_t bytes() const { return bytes_; }
-  void Finish(TransferControl control) const
+  void Finish(Cancellation control) const
   {
-    control.Check();
+    control.ThrowIfCancelled();
     ApplyPermissions(destination_, permissions_);
   }
 
@@ -369,10 +369,10 @@ ModelStreamerRestore::DiscardInterruptedPending()
 {
   for (auto entry = pending_.begin(); entry != pending_.end();) {
     try {
-      (*entry)->control.Check();
+      (*entry)->control.ThrowIfCancelled();
       ++entry;
     }
-    catch (const TransferInterrupted&) {
+    catch (const CancellationError&) {
       FailEntry(**entry, std::current_exception());
       entry = pending_.erase(entry);
     }
@@ -383,9 +383,9 @@ void
 ModelStreamerRestore::SubmitNative(std::unique_ptr<StreamerEntry>& entry)
 {
   try {
-    entry->control.Check();
+    entry->control.ThrowIfCancelled();
   }
-  catch (const TransferInterrupted&) {
+  catch (const CancellationError&) {
     // Cancellation can race with session startup or admission. No native
     // request owns this entry yet, so it must not fail other submissions.
     FailEntry(*entry, std::current_exception());
@@ -410,7 +410,7 @@ ModelStreamerRestore::SubmitNative(std::unique_ptr<StreamerEntry>& entry)
   if (submission_id == 0)
     throw std::runtime_error("Model Streamer accepted a submission without assigning an ID");
 
-  entry->deadline = std::min(entry->control.deadline, std::chrono::steady_clock::now() + submission_timeout_);
+  entry->deadline = std::min(entry->control.Deadline(), std::chrono::steady_clock::now() + submission_timeout_);
   const auto [active, inserted] = active_.try_emplace(submission_id);
   if (!inserted)
     throw std::runtime_error("Model Streamer returned a duplicate submission ID");
@@ -482,7 +482,7 @@ ModelStreamerRestore::ReceiveAndDispatch()
   for (const auto& [submission_id, entry] : active_) {
     // The native API cannot cancel one submission. Failing the event loop stops
     // the shared streamer before waking every Stage call in HandleFailure.
-    entry->control.Check();
+    entry->control.ThrowIfCancelled();
     if (now >= entry->deadline)
       throw std::runtime_error("Model Streamer submission " + std::to_string(submission_id) + " timed out");
   }
@@ -564,13 +564,13 @@ ModelStreamerRestore::FailAll(std::exception_ptr error) noexcept
 }
 
 void
-ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destination, TransferControl control)
+ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destination, Cancellation control)
 {
   for (auto file = plan.files.begin(); file != plan.files.end();) {
     MappedFiles batch;
     uintmax_t batch_bytes = 0;
     while (file != plan.files.end()) {
-      control.Check();
+      control.ThrowIfCancelled();
       const Path staged = destination / file->relative_path;
       if (file->size_bytes == 0) {
         CreateEmptyFile(*file, staged);
@@ -613,21 +613,21 @@ ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destinat
     }
 
     for (const auto& file : batch) {
-      control.Check();
+      control.ThrowIfCancelled();
       file->Finish(control);
     }
   }
 }
 
 void
-ModelStreamerRestore::Stage(const RestorePlan& plan, const Path& destination, TransferControl control)
+ModelStreamerRestore::Stage(const RestorePlan& plan, const Path& destination, Cancellation control)
 {
-  control.Check();
+  control.ThrowIfCancelled();
   ValidateRestorePlan(plan);
   CreateDirectoryTree(plan, destination);
   std::call_once(start_once_, [this] { event_loop_.Start(); });
   RestoreFiles(plan, destination, control);
-  control.Check();
+  control.ThrowIfCancelled();
   ApplyTreePermissions(plan, destination);
 }
 }  // namespace snapshot::pagebroker
