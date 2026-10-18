@@ -11,6 +11,23 @@
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
+namespace {
+void
+ExpectDestinationConflict(const std::shared_ptr<TransactionResources>& resources, const PublishedArtifact& artifact)
+{
+  Transaction contender;
+  try {
+    contender.PrepareTransfer(resources, Transaction::Kind::CHECKPOINT, {}, &artifact);
+    FAIL() << "destination reservation was released too early";
+  }
+  catch (const TransferError& error) {
+    EXPECT_EQ(error.code, Failure::TRANSACTION_CONFLICT);
+  }
+  // A failed contender must not release the successful owner's reservation.
+  contender.set_state(Transaction::State::ABORTED);
+  contender.CleanupTransfer();
+}
+}  // namespace
 
 TEST(TransactionTest, RestoreKeepsStagingBudgetUntilConsumerCleanup)
 {
@@ -178,6 +195,74 @@ TEST(TransactionTest, PublicationAndDestinationOutliveStaging)
   checkpoint.reset();
   Transaction replacement;
   EXPECT_NO_THROW(replacement.PrepareTransfer(resources, Transaction::Kind::CHECKPOINT, staged, &artifact));
+}
+
+TEST(TransactionTest, AbortedDestinationCanBeReusedBeforeTransactionDestruction)
+{
+  for (const bool has_staging : {false, true}) {
+    for (const bool cleanup_first : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "has_staging=" << has_staging << ", cleanup_first=" << cleanup_first);
+      test::TemporaryDirectory root;
+      auto resources = std::make_shared<TransactionResources>(100, 4, std::chrono::minutes(1));
+      PublishedArtifact artifact;
+      artifact.set_artifact_handle(std::string(64, 'a'));
+      auto checkpoint = std::make_unique<Transaction>();
+      const Path staged = has_staging ? root.path() / "checkpoint" : Path{};
+      checkpoint->PrepareTransfer(resources, Transaction::Kind::CHECKPOINT, staged, &artifact);
+      if (has_staging)
+        fs::create_directory(staged);
+      checkpoint->set_state(Transaction::State::ABORTING);
+      if (cleanup_first)
+        checkpoint->CleanupTransfer();
+      else
+        checkpoint->set_state(Transaction::State::ABORTED);
+      ExpectDestinationConflict(resources, artifact);
+      if (cleanup_first)
+        checkpoint->set_state(Transaction::State::ABORTED);
+      else
+        checkpoint->CleanupTransfer();
+      ASSERT_TRUE(checkpoint->retain_terminal());
+
+      Transaction replacement;
+      ASSERT_NO_THROW(replacement.PrepareTransfer(resources, Transaction::Kind::CHECKPOINT, {}, &artifact));
+      // Repeated cleanup and destruction of the retained result cannot erase the new owner.
+      checkpoint->CleanupTransfer();
+      checkpoint->set_state(Transaction::State::ABORTED);
+      ExpectDestinationConflict(resources, artifact);
+      checkpoint.reset();
+      ExpectDestinationConflict(resources, artifact);
+      EXPECT_EQ(resources->active, 1u);
+      EXPECT_EQ(resources->reserved, 1u);
+    }
+  }
+}
+
+TEST(TransactionTest, AbortedDestinationRemainsReservedUntilCleanupSucceeds)
+{
+  test::TemporaryDirectory root;
+  const auto parent = root.path() / "parent";
+  const auto staged = parent / "checkpoint";
+  auto resources = std::make_shared<TransactionResources>(100, 4, std::chrono::minutes(1));
+  PublishedArtifact artifact;
+  artifact.set_artifact_handle(std::string(64, 'a'));
+  Transaction checkpoint;
+  checkpoint.PrepareTransfer(resources, Transaction::Kind::CHECKPOINT, staged, &artifact);
+  checkpoint.set_state(Transaction::State::ABORTED);
+  std::ofstream(parent) << "blocks cleanup even when running as root";
+  std::error_code error;
+  checkpoint.CleanupTransfer(error);
+  ASSERT_TRUE(error);
+  EXPECT_FALSE(checkpoint.retain_terminal());
+  ExpectDestinationConflict(resources, artifact);
+
+  fs::remove(parent);
+  fs::create_directories(staged);
+  checkpoint.CleanupTransfer(error);
+  ASSERT_FALSE(error);
+  EXPECT_FALSE(fs::exists(staged));
+  EXPECT_TRUE(checkpoint.retain_terminal());
+  Transaction replacement;
+  EXPECT_NO_THROW(replacement.PrepareTransfer(resources, Transaction::Kind::CHECKPOINT, {}, &artifact));
 }
 
 TEST(TransactionTest, DeadlineAndCancellationCoverTheWholeOperation)

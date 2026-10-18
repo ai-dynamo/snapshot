@@ -29,6 +29,7 @@ Transaction::set_state(State state)
   }
   if (state == State::PREPARING)
     staging_started_at_ = std::chrono::steady_clock::now();
+  ReleaseAbortedDestination();
 }
 
 const Transaction::Descriptor&
@@ -152,6 +153,17 @@ Transaction::ReleaseReservation() noexcept
 }
 
 void
+Transaction::ReleaseAbortedDestination()
+{
+  if (state_ != State::ABORTED || HasPendingCleanup() || !resources_ || !publication_)
+    return;
+  std::lock_guard lock(resources_->mutex);
+  resources_->destinations.erase(publication_->artifact.artifact_handle());
+  // Keep the aborted result, but prevent its destructor from erasing a later owner's reservation.
+  publication_.reset();
+}
+
+void
 Transaction::CancelWork()
 {
   cancellation_.Cancel();
@@ -168,6 +180,7 @@ Transaction::RemoveStaging(const Path& directory)
 
   ReleaseReservation();
   transfer_directory_.clear();
+  ReleaseAbortedDestination();
   if (state_ == State::COMMITTED || state_ == State::ABORTED)
     clear_descriptor();
 }
