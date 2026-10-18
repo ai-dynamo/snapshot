@@ -304,13 +304,20 @@ func TestS3CheckpointDaemon(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("empty object existence and integrity", func(t *testing.T) {
-		for _, scenario := range []string{"missing-empty", "corrupt-data", "corrupt-index"} {
+	t.Run("missing objects and malformed indexes", func(t *testing.T) {
+		for _, scenario := range []string{"missing-empty", "corrupt-index"} {
 			id := publish(t, scenario, "valid data")
 			control(t, scenario, id)
 			_, err := client.restoreArtifact(ctx, scenario+"-bad-restore", id)
 			expectCode(t, err, Failure_ARTIFACT_CORRUPT)
 		}
+	})
+	t.Run("same-size payload replacement is not integrity checked", func(t *testing.T) {
+		id := publish(t, "corrupt-data", "valid data")
+		control(t, "corrupt-data", id)
+		// The fixture re-PUTs a regular payload with its first byte changed.
+		// Its size and transport checks remain valid; the test checks bytes independently.
+		verify(t, "replaced-payload", id, "walid data")
 	})
 	t.Run("one writer owns a checkpoint destination", func(t *testing.T) {
 		id := target(t, "owned")

@@ -10,14 +10,14 @@
 #include <string>
 
 #include "tests/temporary_directory.hpp"
-#include "utils/sha256.hpp"
+#include "tests/file_contents.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
-class VerifiedRestoreTest : public ::testing::Test {
+class RestoreContentsTest : public ::testing::Test {
  protected:
-  RestorePlan Plan(const std::string& contents, bool verify = true)
+  RestorePlan Plan(const std::string& contents)
   {
     const auto source = root_.path() / "source";
     std::ofstream(source, std::ios::binary).write(contents.data(), contents.size());
@@ -26,8 +26,6 @@ class VerifiedRestoreTest : public ::testing::Test {
     plan.directories.push_back({"nested", fs::perms::owner_read | fs::perms::owner_exec});
     plan.directories.push_back({"empty", fs::perms::owner_all});
     plan.files.push_back({source.string(), "nested/data", contents.size(), fs::perms::none});
-    if (verify)
-      plan.files.back().expected_sha256 = utils::ComputeFileSha256(source);
     return plan;
   }
 
@@ -35,7 +33,7 @@ class VerifiedRestoreTest : public ::testing::Test {
   ModelStreamerRestore restore_{std::chrono::seconds(5)};
 };
 
-TEST_F(VerifiedRestoreTest, CancellationAndDeadlineRejectBeforeCreatingStaging)
+TEST_F(RestoreContentsTest, CancellationAndDeadlineRejectBeforeCreatingStaging)
 {
   const auto plan = Plan("data");
   std::stop_source cancellation;
@@ -48,7 +46,7 @@ TEST_F(VerifiedRestoreTest, CancellationAndDeadlineRejectBeforeCreatingStaging)
   EXPECT_NO_THROW(restore_.Stage(plan, root_.path() / "retry"));
 }
 
-TEST_F(VerifiedRestoreTest, VerifiesBeforeApplyingRestrictivePermissions)
+TEST_F(RestoreContentsTest, RestoresBinaryContentsAndRestrictivePermissions)
 {
   const auto plan = Plan(std::string("binary\0data", 11));
   const auto destination = root_.path() / "restored";
@@ -57,48 +55,27 @@ TEST_F(VerifiedRestoreTest, VerifiesBeforeApplyingRestrictivePermissions)
   EXPECT_EQ(fs::status(destination / "nested").permissions(), plan.directories.front().permissions);
   EXPECT_TRUE(fs::is_empty(destination / "empty"));
   fs::permissions(destination / "nested/data", fs::perms::owner_read);
-  EXPECT_EQ(utils::ComputeFileSha256(destination / "nested/data"), plan.files.front().expected_sha256);
+  EXPECT_TRUE(test::FilesEqual(plan.files.front().source_locator, destination / "nested/data"));
 }
 
-TEST_F(VerifiedRestoreTest, RejectsSameSizeCorruptionAndKeepsSessionUsable)
-{
-  auto plan = Plan("original");
-  std::ofstream(plan.files.front().source_locator) << "modified";
-  const auto destination = root_.path() / "failed";
-  try {
-    restore_.Stage(plan, destination);
-    FAIL() << "corrupted contents were accepted";
-  }
-  catch (const std::runtime_error& error) {
-    EXPECT_NE(std::string(error.what()).find("SHA-256 mismatch"), std::string::npos);
-  }
-  EXPECT_FALSE(restore_.Failed());
-  // Failed staging is still owned by the caller, with accessible permissions.
-  EXPECT_TRUE(fs::exists(destination / "nested/data"));
-  EXPECT_EQ(fs::status(destination / "nested/data").permissions(), fs::perms::owner_read | fs::perms::owner_write);
-  plan.files.front().expected_sha256 = utils::ComputeFileSha256(plan.files.front().source_locator);
-  EXPECT_NO_THROW(restore_.Stage(plan, root_.path() / "retry"));
-}
-
-TEST_F(VerifiedRestoreTest, RejectsTruncatedSource)
+TEST_F(RestoreContentsTest, RejectsTruncatedSource)
 {
   const auto plan = Plan("original");
   std::ofstream(plan.files.front().source_locator) << "short";
   EXPECT_THROW(restore_.Stage(plan, root_.path() / "restored"), std::runtime_error);
 }
 
-TEST_F(VerifiedRestoreTest, VerifiesEmptyFilesWithoutReadingSource)
+TEST_F(RestoreContentsTest, CreatesEmptyFilesWithoutReadingSource)
 {
   auto plan = Plan("");
   fs::remove(plan.files.front().source_locator);
   EXPECT_NO_THROW(restore_.Stage(plan, root_.path() / "empty-success"));
-  plan.files.front().expected_sha256->front() ^= 1;
-  EXPECT_THROW(restore_.Stage(plan, root_.path() / "empty-failure"), std::runtime_error);
+  EXPECT_EQ(fs::file_size(root_.path() / "empty-success/nested/data"), 0);
 }
 
-TEST_F(VerifiedRestoreTest, PreservesOptionalDigestAndConcurrentRestores)
+TEST_F(RestoreContentsTest, SupportsConcurrentRestores)
 {
-  const auto plan = Plan("no digest", false);
+  const auto plan = Plan("concurrent data");
   auto first = std::async(std::launch::async, [&] { restore_.Stage(plan, root_.path() / "first"); });
   auto second = std::async(std::launch::async, [&] { restore_.Stage(plan, root_.path() / "second"); });
   EXPECT_NO_THROW(first.get());

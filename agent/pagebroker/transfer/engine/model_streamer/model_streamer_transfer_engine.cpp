@@ -23,9 +23,6 @@ RethrowS3TransferError(std::exception_ptr exception, TransferControl control)
   catch (const TransferError&) {
     throw;
   }
-  catch (const RestoreIntegrityError&) {
-    throw TransferError(Failure::ARTIFACT_CORRUPT, "checkpoint checksum mismatch");
-  }
   catch (const S3ResponseError&) {
     throw TransferError(Failure::ARTIFACT_CORRUPT, "invalid checkpoint object size");
   }

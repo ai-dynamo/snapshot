@@ -16,8 +16,8 @@ MODEL_STREAMER_FLAGS := -L$(MODEL_STREAMER_LIB_DIR) -lstreamer -Wl,-rpath,$(MODE
 CRYPTO_FLAGS = $(shell pkg-config --cflags --libs libcrypto)
 AWS_SDK_PREFIX ?= /usr/local
 AWS_FLAGS := -I$(AWS_SDK_PREFIX)/include -L$(AWS_SDK_PREFIX)/lib -Wl,-rpath,$(AWS_SDK_PREFIX)/lib -laws-cpp-sdk-s3-crt -laws-cpp-sdk-core -laws-c-common -pthread
-STREAMER_SOURCES := model_streamer_config.cpp transfer/engine/model_streamer/model_streamer_restore.cpp utils/event_loop.cpp utils/sha256.cpp
-S3_SOURCES := s3_config.cpp transfer/s3/s3_client.cpp transfer/s3/s3_storage_backend.cpp transfer/s3/checkpoint_index.cpp
+STREAMER_SOURCES := model_streamer_config.cpp transfer/engine/model_streamer/model_streamer_restore.cpp utils/event_loop.cpp
+S3_SOURCES := utils/sha256.cpp s3_config.cpp transfer/s3/s3_client.cpp transfer/s3/s3_storage_backend.cpp transfer/s3/checkpoint_index.cpp
 RESTORE_SOURCES := file_descriptor.cpp $(STREAMER_SOURCES)
 ENGINE_SOURCES = $(COMMON_SOURCES) $(STREAMER_SOURCES) $(S3_SOURCES) transfer/engine/model_streamer/model_streamer_transfer_engine.cpp transfer/engine/transfer_engine.cpp
 TRANSFER_TEST_SOURCES := tests/model_streamer_config_test.cpp tests/daemon_options_test.cpp tests/transaction_test.cpp transfer/s3/tests/checkpoint_index_test.cpp transfer/s3/tests/s3_storage_backend_test.cpp tests/s3_config_test.cpp utils/tests/event_loop_test.cpp utils/tests/sha256_test.cpp transfer/engine/model_streamer/tests/model_streamer_restore_test.cpp transfer/s3/tests/s3_client_test.cpp tests/temporary_directory_test.cpp
@@ -61,7 +61,7 @@ test: generate build/gpu-cuda-driver.o build/gpu-engine-test | build
 	./build/pagebroker-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODEL_STREAMER_RECOVERY_TEST_SOURCES) v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(CRYPTO_FLAGS) $(AWS_FLAGS) -o build/model-streamer-recovery-test
 	./build/model-streamer-recovery-test
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODEL_STREAMER_SESSION_TEST_SOURCES) $(GTEST_FLAGS) $(CRYPTO_FLAGS) -Wl,--wrap=posix_fallocate -o build/model-streamer-session-test
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODEL_STREAMER_SESSION_TEST_SOURCES) $(GTEST_FLAGS) -Wl,--wrap=posix_fallocate -o build/model-streamer-session-test
 	./build/model-streamer-session-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/storage_manifest.cpp gpu/storage_manifest_test.cpp -o build/gpu-storage-test
 	./build/gpu-storage-test

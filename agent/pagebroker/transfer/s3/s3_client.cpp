@@ -492,7 +492,6 @@ struct S3Client::Impl {
       throw std::invalid_argument("S3 upload source must be a regular file");
     const auto size = static_cast<std::uint64_t>(status.st_size);
     limits.ValidateFileSize(size);
-    const auto digest = utils::ComputeFileSha256(source.get(), [&] { operation->Check(); });
     CheckSource(source.get(), status);
     operation->Check();
     auto remote_state = S3RemoteState::NO_WRITES_ISSUED;
@@ -516,7 +515,7 @@ struct S3Client::Impl {
       CheckSource(source.get(), status);
       if (!outcome.IsSuccess())
         throw S3Error(RequestFailure("PutObject", outcome.GetError()));
-      return {destination, size, digest};
+      return {destination, size};
     }
     catch (...) {
       try {

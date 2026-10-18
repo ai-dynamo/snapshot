@@ -49,13 +49,13 @@ class S3StorageBackend {
       TransferMode mode, TransferControl control) const;
 
   // Validates the local tree and index/part limits before remote writes. Assigns
-  // payload locations, leaving digests unset until the upload reads each file.
+  // payload locations for the inspected tree.
   RestorePlan InspectCheckpoint(const Path& source, const PublishedArtifact& storage, TransferControl control) const;
   // Parses the index and checks payload sizes before assigning Model Streamer
   // source URLs. metadata_only selects manifest.yaml with private staging modes.
   RestorePlan LoadRestorePlan(const PublishedArtifact& storage, bool metadata_only, TransferControl control) const;
 
-  // Uploads an inspected plan and serializes its digests without publishing it.
+  // Uploads an inspected plan and serializes its metadata without publishing it.
   // Keep the source immutable during upload. Save the returned index in the
   // checkpoint publication state before calling PublishIndex, including on retries.
   std::string UploadCheckpointPayloads(const Path& source, RestorePlan plan, TransferControl control) const;
@@ -70,8 +70,8 @@ class S3StorageBackend {
   S3Client& Client() const;
   // Validates the descriptor and places a key beneath its configured artifact prefix.
   S3ObjectLocation Object(const PublishedArtifact& storage, const std::string& key) const;
-  // Uploads planned files in turn, verifying their sizes and recording digests.
-  RestorePlan UploadFiles(const Path& source, RestorePlan plan, TransferControl control) const;
+  // Uploads planned files in turn, checking their sizes.
+  void UploadFiles(const Path& source, const RestorePlan& plan, TransferControl control) const;
   // Returns false for an absent index, true for an exact match, and throws on conflict.
   bool ConfirmIndex(const S3ObjectLocation& object, const std::string& index, TransferControl control) const;
 

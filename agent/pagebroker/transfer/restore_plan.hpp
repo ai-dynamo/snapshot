@@ -5,23 +5,15 @@
 
 #include <cstdint>
 #include <filesystem>
-#include <optional>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "file_descriptor.hpp"
-#include "utils/sha256.hpp"
 
 namespace snapshot::pagebroker {
 using Path = std::filesystem::path;
-
-class RestoreIntegrityError : public std::runtime_error {
- public:
-  // Creates an error for a restored file's SHA-256 mismatch.
-  RestoreIntegrityError() : std::runtime_error("restored file SHA-256 mismatch") {}
-};
 
 // Checks for a normalized relative path without NUL bytes or dot components.
 inline bool
@@ -57,8 +49,6 @@ struct RestoreFile {
   Path relative_path;
   uintmax_t size_bytes = 0;
   std::filesystem::perms permissions = std::filesystem::perms::unknown;
-  // Verified after native access finishes, before applying final permissions.
-  std::optional<utils::Sha256Digest> expected_sha256 = std::nullopt;
 };
 
 // Transfer plan with unique, normalized relative paths and no dot components.

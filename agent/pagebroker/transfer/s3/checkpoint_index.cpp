@@ -61,14 +61,6 @@ CheckpointEntriesAreOrdered(const RestorePlan& plan)
 }
 
 bool
-HasValidFileMetadata(const RestoreFile& file, bool require_digests, std::uint64_t bytes)
-{
-  if (require_digests && !file.expected_sha256)
-    return false;
-  return file.size_bytes <= kMaxCheckpointBytes - bytes;
-}
-
-bool
 HasValidIndexEntries(const Json& value)
 {
   if (!value.at("directories").is_array() || !value.at("files").is_array())
@@ -76,30 +68,6 @@ HasValidIndexEntries(const Json& value)
   return value.at("directories").size() + value.at("files").size() <= kMaxCheckpointEntries;
 }
 
-std::string
-Digest(const utils::Sha256Digest& digest)
-{
-  constexpr char hex[] = "0123456789abcdef";
-  std::string result;
-  for (auto byte : digest) {
-    const auto value = static_cast<unsigned>(byte);
-    result += hex[value >> 4];
-    result += hex[value & 15];
-  }
-  return result;
-}
-
-utils::Sha256Digest
-ParseDigest(const std::string& text)
-{
-  if (text.size() != 64 || text.find_first_not_of("0123456789abcdef") != std::string::npos)
-    throw std::invalid_argument("invalid checkpoint digest");
-  utils::Sha256Digest result;
-  auto nibble = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
-  for (std::size_t i = 0; i < result.size(); ++i)
-    result[i] = static_cast<std::uint8_t>((nibble(text[2 * i]) << 4) | nibble(text[2 * i + 1]));
-  return result;
-}
 }  // namespace
 
 void
@@ -110,7 +78,7 @@ ValidateCheckpointID(std::string_view id)
 }
 
 std::uint64_t
-ValidateCheckpointPlan(const RestorePlan& plan, bool require_digests)
+ValidateCheckpointPlan(const RestorePlan& plan)
 {
   if (!HasValidPlanLimits(plan))
     throw std::invalid_argument("checkpoint exceeds index limits");
@@ -129,8 +97,8 @@ ValidateCheckpointPlan(const RestorePlan& plan, bool require_digests)
   std::uint64_t bytes = 0;
   for (const auto& file : plan.files) {
     add(file.relative_path, file.permissions);
-    if (!HasValidFileMetadata(file, require_digests, bytes))
-      throw std::invalid_argument("checkpoint has invalid size or missing digest");
+    if (file.size_bytes > kMaxCheckpointBytes - bytes)
+      throw std::invalid_argument("checkpoint has invalid size");
     bytes += file.size_bytes;
     if (file.relative_path == "manifest.yaml") {
       if (file.size_bytes == 0 || file.size_bytes > kMaxManifestBytes)
@@ -153,7 +121,7 @@ SerializeCheckpointIndex(const RestorePlan& plan)
     value["directories"].push_back({{"path", directory.relative_path.generic_string()}, {"mode", static_cast<unsigned>(directory.permissions)}});
   for (const auto& file : plan.files)
     value["files"].push_back({{"path", file.relative_path.generic_string()}, {"mode", static_cast<unsigned>(file.permissions)},
-                              {"size", file.size_bytes}, {"sha256", Digest(*file.expected_sha256)}});
+                              {"size", file.size_bytes}});
   const auto text = value.dump();
   if (text.size() > kMaxIndexBytes)
     throw std::invalid_argument("checkpoint index exceeds size limit");
@@ -177,9 +145,9 @@ ParseCheckpointIndex(std::string_view text)
       plan.directories.push_back({directory.at("path").get<std::string>(), static_cast<fs::perms>(utils::Unsigned(directory.at("mode"), 0777))});
     }
     for (const auto& file : value.at("files")) {
-      Fields(file, {"path", "mode", "size", "sha256"});
+      Fields(file, {"path", "mode", "size"});
       plan.files.push_back({"", file.at("path").get<std::string>(), utils::Unsigned(file.at("size"), kMaxCheckpointBytes),
-          static_cast<fs::perms>(utils::Unsigned(file.at("mode"), 0777)), ParseDigest(file.at("sha256").get<std::string>())});
+          static_cast<fs::perms>(utils::Unsigned(file.at("mode"), 0777))});
     }
     (void)ValidateCheckpointPlan(plan);
     return plan;

@@ -48,7 +48,7 @@ const (
 	Failure_ACCESS_DENIED        Failure_Code = 21 // Authentication, authorization or decryption refused; not proof of absence.
 	Failure_STORAGE_UNAVAILABLE  Failure_Code = 22 // Transient storage/transport failure after bounded retries.
 	Failure_ARTIFACT_NOT_FOUND   Failure_Code = 23 // Authoritative absence of the requested publication.
-	Failure_ARTIFACT_CORRUPT     Failure_Code = 24 // Invalid index, unsafe paths, missing indexed data or digest mismatch.
+	Failure_ARTIFACT_CORRUPT     Failure_Code = 24 // Invalid index, unsafe paths, missing indexed data or invalid object size.
 	Failure_UNSUPPORTED_ARTIFACT Failure_Code = 25 // No reader for the backend or the layout version recorded in the index.
 	Failure_OUTCOME_UNKNOWN      Failure_Code = 26 // Cannot establish publication outcome; never authorizes process replay.
 	// The fixed deadline passed while PageBroker still remembers the transaction; no new storage operations
@@ -1081,8 +1081,8 @@ func (*PrepareStagedCheckpointRequest_Destination) isPrepareStagedCheckpointRequ
 
 func (*PrepareStagedCheckpointRequest_Target) isPrepareStagedCheckpointRequest_Selector() {}
 
-// Fetch verified manifest.yaml for one publication into private shared staging.
-// Snapshot interprets the manifest. This does not verify all checkpoint payloads.
+// Fetch manifest.yaml for one publication into private shared staging.
+// Snapshot interprets the manifest. Payload integrity is not verified.
 type GetArtifactMetadataRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Exactly one of artifact or target is required.

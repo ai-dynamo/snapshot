@@ -13,7 +13,7 @@
 #include <string>
 
 #include "tests/temporary_directory.hpp"
-#include "utils/sha256.hpp"
+#include "tests/file_contents.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -45,7 +45,7 @@ class ModelStreamerS3Test : public ::testing::Test {
       } else {
         ASSERT_TRUE(entry.is_regular_file());
         plan_.files.push_back({"s3://" + bucket + "/" + prefix + relative.generic_string(), relative,
-                               entry.file_size(), entry.status().permissions(), utils::ComputeFileSha256(entry.path())});
+                               entry.file_size(), entry.status().permissions()});
       }
     }
     ASSERT_FALSE(plan_.files.empty());
@@ -79,7 +79,7 @@ class ModelStreamerS3Test : public ::testing::Test {
       const auto path = destination / file.relative_path;
       EXPECT_EQ(fs::file_size(path), file.size_bytes);
       EXPECT_EQ(fs::status(path).permissions(), file.permissions);
-      EXPECT_EQ(utils::ComputeFileSha256(path), file.expected_sha256);
+      EXPECT_TRUE(test::FilesEqual(Path(Environment("PAGEBROKER_S3_TEST_FIXTURE")) / file.relative_path, path));
     }
   }
 
@@ -88,7 +88,7 @@ class ModelStreamerS3Test : public ::testing::Test {
   RestorePlan plan_;
 };
 
-TEST_F(ModelStreamerS3Test, RestoresVerifiedTreeThroughNativePlugin)
+TEST_F(ModelStreamerS3Test, RestoresTreeThroughNativePlugin)
 {
   ModelStreamerRestore restore(options_, std::chrono::seconds(30));
   const auto begin = std::chrono::steady_clock::now();
@@ -115,18 +115,9 @@ TEST_F(ModelStreamerS3Test, SupportsConcurrentRestores)
   CheckTree(root_.path() / "second");
 }
 
-TEST_F(ModelStreamerS3Test, RejectsWrongDigestAndTruncatedObject)
+TEST_F(ModelStreamerS3Test, RejectsTruncatedObject)
 {
   ModelStreamerRestore restore(options_, std::chrono::seconds(30));
-  auto wrong = NonemptyFile();
-  wrong.files.front().expected_sha256->front() ^= 1;
-  try {
-    restore.Stage(wrong, root_.path() / "wrong");
-    FAIL() << "wrong digest was accepted";
-  }
-  catch (const std::runtime_error& error) {
-    EXPECT_NE(std::string(error.what()).find("SHA-256 mismatch"), std::string::npos);
-  }
   auto truncated = NonemptyFile();
   ++truncated.files.front().size_bytes;
   EXPECT_THROW(restore.Stage(truncated, root_.path() / "truncated"), std::runtime_error);
