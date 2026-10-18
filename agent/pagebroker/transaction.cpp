@@ -160,18 +160,16 @@ Transaction::CancelWork()
 void
 Transaction::RemoveStaging(const Path& directory)
 {
-  if (!directory.empty()) {
-    if (directory == transfer_directory_)
-      filesystem_storage::RemoveStaging(directory);
-    else
-      std::filesystem::remove_all(directory);
-  }
-  if (directory == transfer_directory_) {
-    ReleaseReservation();
-    transfer_directory_.clear();
-    if (state_ == State::COMMITTED || state_ == State::ABORTED)
-      clear_descriptor();
-  }
+  if (directory != transfer_directory_)
+    return;
+
+  if (!directory.empty())
+    filesystem_storage::RemoveStaging(directory);
+
+  ReleaseReservation();
+  transfer_directory_.clear();
+  if (state_ == State::COMMITTED || state_ == State::ABORTED)
+    clear_descriptor();
 }
 
 void
