@@ -18,9 +18,10 @@ TEST(TransactionTest, RestoreKeepsStagingBudgetUntilConsumerCleanup)
   auto resources = std::make_shared<TransactionResources>(100, 2, std::chrono::minutes(1));
   Transaction restore;
   const auto staged = root.path() / "restored";
-  restore.PrepareTransfer(resources, Transaction::Kind::RESTORE, staged);
+  restore.PrepareTransfer(resources, Transaction::Kind::RESTORE, {});
   restore.Reserve(80);
   fs::create_directory(staged);
+  restore.OwnDirectory(staged);
   restore.set_state(Transaction::State::STAGED);
   EXPECT_EQ(restore.publication(), nullptr);
 
@@ -28,9 +29,89 @@ TEST(TransactionTest, RestoreKeepsStagingBudgetUntilConsumerCleanup)
   next.PrepareTransfer(resources, Transaction::Kind::RESTORE, root.path() / "next");
   EXPECT_THROW(next.Reserve(21), TransferError);
   restore.RemoveStaging(staged);
+  EXPECT_FALSE(fs::exists(staged));
+  fs::create_directory(staged);
+  std::ofstream(staged / "new-owner") << "keep";
   restore.RemoveStaging(staged); // Cleanup retries cannot release the reservation twice.
   EXPECT_NO_THROW(next.Reserve(100));
-  EXPECT_FALSE(fs::exists(staged));
+  EXPECT_EQ(resources->active, 1u);
+  EXPECT_EQ(resources->reserved, 100u);
+  EXPECT_EQ(fs::file_size(staged / "new-owner"), 4u);
+}
+
+TEST(TransactionTest, UnownedCleanupPreservesDirectoriesAndPendingState)
+{
+  for (bool limited : {false, true}) {
+    SCOPED_TRACE(limited);
+    test::TemporaryDirectory root;
+    auto resources = std::make_shared<TransactionResources>(100, 1, std::chrono::minutes(1));
+    Transaction restore;
+    const auto owned = root.path() / "owned";
+    const auto borrowed = root.path() / "borrowed";
+    restore.PrepareTransfer(limited ? resources : nullptr, Transaction::Kind::RESTORE, {});
+    fs::create_directory(owned);
+    fs::create_directory(borrowed);
+    std::ofstream(owned / "marker") << "owned";
+    std::ofstream(borrowed / "marker") << "borrowed";
+    restore.OwnDirectory(owned);
+    restore.Reserve(80);
+    restore.set_descriptor(RestoreTransactionDescriptor(owned));
+    restore.set_state(Transaction::State::COMMITTED);
+
+    restore.RemoveStaging(borrowed);
+    std::error_code error = std::make_error_code(std::errc::permission_denied);
+    restore.RemoveStaging({}, error);
+    EXPECT_FALSE(error);
+    EXPECT_EQ(fs::file_size(owned / "marker"), 5u);
+    EXPECT_EQ(fs::file_size(borrowed / "marker"), 8u);
+    restore.clear_descriptor();
+    EXPECT_TRUE(std::holds_alternative<RestoreTransactionDescriptor>(restore.descriptor()));
+    EXPECT_FALSE(restore.retain_terminal());
+    if (limited) {
+      EXPECT_EQ(resources->active, 1u);
+      EXPECT_EQ(resources->reserved, 80u);
+    }
+
+    restore.CleanupTransfer();
+    EXPECT_FALSE(fs::exists(owned));
+    EXPECT_TRUE(fs::exists(borrowed / "marker"));
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(restore.descriptor()));
+    EXPECT_TRUE(restore.retain_terminal());
+    if (limited) {
+      EXPECT_EQ(resources->active, 0u);
+      EXPECT_EQ(resources->reserved, 0u);
+    }
+  }
+}
+
+TEST(TransactionTest, EmptyOwnedDirectoryReleasesReservation)
+{
+  for (bool with_error : {false, true}) {
+    SCOPED_TRACE(with_error);
+    auto resources = std::make_shared<TransactionResources>(100, 1, std::chrono::minutes(1));
+    Transaction restore;
+    restore.PrepareTransfer(resources, Transaction::Kind::RESTORE, {});
+    restore.Reserve(80);
+    restore.set_descriptor(RestoreTransactionDescriptor({}));
+    restore.set_state(Transaction::State::ABORTED);
+    ASSERT_EQ(resources->active, 1u);
+    ASSERT_EQ(resources->reserved, 80u);
+
+    if (with_error) {
+      std::error_code error = std::make_error_code(std::errc::permission_denied);
+      restore.RemoveStaging({}, error);
+      EXPECT_FALSE(error);
+    } else {
+      restore.RemoveStaging({});
+    }
+    EXPECT_EQ(resources->active, 0u);
+    EXPECT_EQ(resources->reserved, 0u);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(restore.descriptor()));
+    EXPECT_TRUE(restore.retain_terminal());
+    restore.RemoveStaging({});
+    EXPECT_EQ(resources->active, 0u);
+    EXPECT_EQ(resources->reserved, 0u);
+  }
 }
 
 TEST(TransactionTest, FailedCleanupRetainsReservationAndDescriptor)
