@@ -114,12 +114,13 @@ Common `make` targets from the repo root:
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
 
-### Native S3 read verification
+### Native S3 read tests
 
 Build the `s3-test` Docker target; it downloads the pinned SDK. Install
 `agent/pagebroker/tests/requirements.txt` in a virtual environment, then run
 `agent/pagebroker/tests/s3_integration.py --image local/pagebroker:s3-test`.
 Add `--tls` to verify the temporary CA and rejection of untrusted TLS. The
 fixture uses disposable local Moto storage and fake credentials. Payloads are
-read by the native Model Streamer plugin and checked against the restore plan's
-SHA-256 digests before final permissions are applied.
+read by the native Model Streamer plugin. The tests independently compare restored
+bytes with their source fixtures and check sizes, permissions, and error handling.
+PageBroker does not perform application-level payload integrity verification.

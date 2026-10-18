@@ -18,8 +18,7 @@ Source for PageBroker and the third-party components distributed in this image:
 This image also ships the pinned Model Streamer core and S3 native libraries,
 with their SDK license and release metadata in /legal/model-streamer/.
 The S3 plugin license is also in /legal/model-streamer-s3/.
-OpenSSL libcrypto provides SHA-256; its attribution
-is in /legal/openssl/copyright. The base image
+The base image
 contains third-party components of its own -- glibc, libstdc++ and libgcc,
 which this binary links dynamically. Source for the base image's own contents
 is published by NVIDIA and is not duplicated here:

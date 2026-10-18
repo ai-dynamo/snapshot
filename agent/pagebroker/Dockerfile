@@ -96,7 +96,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libaio-dev \
     libgtest-dev \
     libprotobuf-dev \
-    libssl-dev \
     pkg-config \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
@@ -161,8 +160,6 @@ COPY --from=nixl /nixl-runtime/lib/ /usr/local/lib/
 COPY --from=sources /legal /legal
 ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
-COPY --from=build /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/local/lib/libcrypto.so.3
-COPY --from=build /usr/share/doc/libssl-dev/copyright /legal/openssl/copyright
 COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/ /legal/model-streamer/
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamers3.so /usr/local/lib/libstreamers3.so
