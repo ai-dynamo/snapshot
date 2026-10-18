@@ -641,11 +641,20 @@ TEST_F(S3RoundTripTest, DeadlineDrainsAndReleasesResources)
   limits_.request_timeout = std::chrono::milliseconds(300);
   limits_.request_retries = 0;
   S3Client uploader(connection_, limits_);
+  Cancellation parent;
   const auto begin = std::chrono::steady_clock::now();
-  const auto error = FailedUpload(uploader, "stalled", false);
+  S3Error error({"test", "UnexpectedSuccess"});
+  try {
+    uploader.UploadFile(fixture_ / "small", Destination("stalled"), parent);
+    ADD_FAILURE() << "upload unexpectedly succeeded";
+  }
+  catch (const S3Error& failure) {
+    error = failure;
+  }
   EXPECT_EQ(error.primary.code, "DeadlineExceeded");
   EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::seconds(10));
-  EXPECT_NO_THROW(uploader.UploadFile(fixture_ / "small", Destination("after-deadline")));
+  EXPECT_FALSE(parent.IsCancelled());
+  EXPECT_NO_THROW(uploader.UploadFile(fixture_ / "small", Destination("after-deadline"), parent));
 }
 
 TEST_F(S3RoundTripTest, MultipartDeadlineDrainsBeforeAborting)
@@ -677,8 +686,7 @@ TEST_F(S3RoundTripTest, CancellationDrainsAndLeavesClientUsable)
 {
   limits_.request_retries = 0;
   S3Client uploader(connection_, limits_);
-  std::stop_source cancellation;
-  TransferControl control{TransferControl::Clock::time_point::max(), cancellation.get_token()};
+  Cancellation control;
   auto upload = std::async(std::launch::async, [&] {
     try {
       uploader.UploadFile(fixture_ / "nested/large", Destination("cancel-upload"), control);
@@ -689,7 +697,7 @@ TEST_F(S3RoundTripTest, CancellationDrainsAndLeavesClientUsable)
     }
   });
   EXPECT_TRUE(Barrier("wait", "cancel-upload"));
-  cancellation.request_stop();
+  control.Cancel();
   EXPECT_TRUE(Barrier("release", "cancel-upload"));
   const auto error = upload.get();
   EXPECT_EQ(error.primary.code, "Cancelled");
@@ -723,6 +731,43 @@ TEST_F(S3RoundTripTest, CoexistsWithReaderAndMultipleUploaderLifetimes)
     EXPECT_NO_THROW(first.UploadFile(fixture_ / "small", Destination("after-second")));
   }
   EXPECT_NO_THROW(reader.Stage(reader_fixture, temporary_.path() / "after"));
+}
+TEST_F(S3RoundTripTest, CancellationWakesUploadWaitingForSlot)
+{
+  limits_.active_files = 1;
+  limits_.operation_timeout = std::chrono::seconds(20);
+  S3Client uploader(connection_, limits_);
+  auto owner = std::async(std::launch::async, [&] {
+    uploader.UploadFile(fixture_ / "small", Destination("slot-owner"));
+  });
+  const bool held = Barrier("wait", "slot-owner");
+  EXPECT_TRUE(held);
+
+  Cancellation control;
+  std::promise<void> started;
+  auto started_future = started.get_future();
+  auto waiter = std::async(std::launch::async, [&] {
+    started.set_value();
+    try {
+      uploader.UploadFile(fixture_ / "missing", Destination("slot-waiter"), control);
+      return S3Error({"test", "UnexpectedSuccess"});
+    }
+    catch (const S3Error& error) {
+      return error;
+    }
+  });
+  started_future.wait();
+  EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  control.Cancel();
+  const auto stopped = waiter.wait_for(std::chrono::seconds(3));
+  EXPECT_EQ(stopped, std::future_status::ready);
+  // Always release the owner, including on a failed assertion, before joining either future.
+  EXPECT_TRUE(Barrier("release", "slot-owner"));
+  const auto error = waiter.get();
+  EXPECT_EQ(error.primary.code, "Cancelled");
+  EXPECT_EQ(error.remote_state, S3RemoteState::NO_WRITES_ISSUED);
+  EXPECT_NO_THROW(owner.get());
+  EXPECT_NO_THROW(uploader.UploadFile(fixture_ / "small", Destination("after-slot-cancel")));
 }
 
 TEST_F(S3RoundTripTest, RejectsUntrustedTLS)

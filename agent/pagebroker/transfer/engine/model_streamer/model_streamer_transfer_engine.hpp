@@ -30,30 +30,30 @@ class ModelStreamerTransferEngine final : public TransferEngine {
   IoEngine type() const override;
 
   // Delegates source validation and planning to the configured storage backend.
-  PreparedRestore PrepareRestore(const StorageBackend& source, TransferControl control = {},
+  PreparedRestore PrepareRestore(const StorageBackend& source, Cancellation control = {},
       const PublishedArtifact* artifact = nullptr, bool metadata_only = false,
       TransferMode mode = TransferMode::Staged) const override;
 
   // Returns direct access or streams the prepared files into owned staging.
   RestoreAccess StageRestore(PreparedRestore preparation, const Path& destination,
-      TransferControl control = {}) const override;
+      Cancellation control = {}) const override;
 
   // Selects a local capture directory appropriate for the requested mode.
   Path PrepareCheckpoint(const StorageBackend& destination, const Path& staging_directory,
       const std::string& transaction_id, TransferMode mode = TransferMode::Staged,
-      const PublishedArtifact* artifact = nullptr, TransferControl control = {}) const override;
+      const PublishedArtifact* artifact = nullptr, Cancellation control = {}) const override;
 
   // Validates the destination through the configured storage backend.
   void ValidateCheckpointDestination(const StorageBackend& destination,
-      const PublishedArtifact* artifact = nullptr, TransferControl control = {}) const override;
+      const PublishedArtifact* artifact = nullptr, Cancellation control = {}) const override;
 
   // Scans local checkpoint output before publication admission.
   RestorePlan InspectCheckpoint(const Path& source, const PublishedArtifact* artifact = nullptr,
-      TransferControl control = {}) const override;
+      Cancellation control = {}) const override;
 
   // Delegates checkpoint publication and retry state to the storage backend.
   void PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
-      CheckpointPublication* publication = nullptr, TransferControl control = {},
+      CheckpointPublication* publication = nullptr, Cancellation control = {},
       TransferMode mode = TransferMode::Staged) const override;
 
   // Resolves a logical artifact target in the configured S3 store.

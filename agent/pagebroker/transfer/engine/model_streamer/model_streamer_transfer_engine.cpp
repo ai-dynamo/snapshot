@@ -15,7 +15,7 @@ namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
 [[noreturn]] void
-RethrowS3TransferError(std::exception_ptr exception, TransferControl control)
+RethrowS3TransferError(std::exception_ptr exception, Cancellation control)
 {
   try {
     std::rethrow_exception(exception);
@@ -26,11 +26,11 @@ RethrowS3TransferError(std::exception_ptr exception, TransferControl control)
   catch (const S3ResponseError&) {
     throw TransferError(Failure::ARTIFACT_CORRUPT, "invalid checkpoint object size");
   }
-  catch (const TransferInterrupted& error) {
+  catch (const CancellationError& error) {
     throw TransferError(TransferFailureCode(error), error.what());
   }
   catch (const S3Error& error) {
-    const bool expired = TransferControl::Clock::now() >= control.deadline || error.primary.code == "DeadlineExceeded";
+    const bool expired = control.DeadlineExceeded() || error.primary.code == "DeadlineExceeded";
     throw TransferError(expired ? Failure::TRANSACTION_EXPIRED :
         error.primary.code == "Cancelled" ? Failure::INTERNAL_ERROR :
         error.primary.http_status == 401 || error.primary.http_status == 403 ? Failure::ACCESS_DENIED : Failure::STORAGE_UNAVAILABLE,
@@ -160,17 +160,17 @@ ModelStreamerTransferEngine::type() const
 }
 
 RestoreAccess
-ModelStreamerTransferEngine::StageRestore(PreparedRestore preparation, const Path& destination, TransferControl control) const
+ModelStreamerTransferEngine::StageRestore(PreparedRestore preparation, const Path& destination, Cancellation control) const
 {
   if (s3_options_)
     ValidateS3Configuration();
   const auto stage = [&] {
-    control.Check();
+    control.ThrowIfCancelled();
     if (store_ && preparation.mode == TransferMode::Direct)
       throw std::invalid_argument("S3 restore requires staging");
     if (preparation.mode == TransferMode::Staged)
       AcquireRestore()->Stage(preparation.plan, destination, control);
-    control.Check();
+    control.ThrowIfCancelled();
     return filesystem_storage::CompleteRestore(std::move(preparation), destination);
   };
   if (!store_)
@@ -196,7 +196,7 @@ ModelStreamerTransferEngine::ValidateArtifact(const PublishedArtifact& artifact)
 }
 
 PreparedRestore
-ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, TransferControl control,
+ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, Cancellation control,
     const PublishedArtifact* artifact, bool metadata_only, TransferMode mode) const
 {
   if (!artifact) {
@@ -214,7 +214,7 @@ ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, Transf
 
 Path
 ModelStreamerTransferEngine::PrepareCheckpoint(const StorageBackend& destination, const Path& staging_directory,
-    const std::string& transaction_id, TransferMode mode, const PublishedArtifact* artifact, TransferControl control) const
+    const std::string& transaction_id, TransferMode mode, const PublishedArtifact* artifact, Cancellation control) const
 {
   if (!artifact) {
     ValidateCheckpointDestination(destination, nullptr, control);
@@ -230,18 +230,18 @@ ModelStreamerTransferEngine::PrepareCheckpoint(const StorageBackend& destination
 
 void
 ModelStreamerTransferEngine::ValidateCheckpointDestination(const StorageBackend& destination,
-    const PublishedArtifact* artifact, TransferControl control) const
+    const PublishedArtifact* artifact, Cancellation control) const
 {
   if (!artifact) {
     if (store_)
       throw std::invalid_argument("configured engine requires an artifact");
-    control.Check();
+    control.ThrowIfCancelled();
     filesystem_storage::DestinationPath(destination, storage_root_);
     return;
   }
   try {
     ArtifactStorage().PrepareCheckpoint(*artifact, control);
-    control.Check();
+    control.ThrowIfCancelled();
   }
   catch (...) {
     RethrowS3TransferError(std::current_exception(), control);
@@ -250,7 +250,7 @@ ModelStreamerTransferEngine::ValidateCheckpointDestination(const StorageBackend&
 
 RestorePlan
 ModelStreamerTransferEngine::InspectCheckpoint(const Path& source, const PublishedArtifact* artifact,
-    TransferControl control) const
+    Cancellation control) const
 {
   if (!artifact) {
     if (store_)
@@ -268,7 +268,7 @@ ModelStreamerTransferEngine::InspectCheckpoint(const Path& source, const Publish
 
 void
 ModelStreamerTransferEngine::PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
-    CheckpointPublication* publication, TransferControl control, TransferMode mode) const
+    CheckpointPublication* publication, Cancellation control, TransferMode mode) const
 {
   if (!publication) {
     if (store_)

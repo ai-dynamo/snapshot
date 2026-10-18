@@ -132,8 +132,7 @@ TEST(S3ClientTest, RejectsExpiredAndCancelledWorkBeforeOpeningSource)
 {
   S3Client uploader(OfflineConnection(), SmallLimits());
   const S3ObjectLocation destination{"local-test-bucket", "data"};
-  TransferControl control;
-  control.deadline = TransferControl::Clock::now();
+  Cancellation control(Cancellation::Clock::now());
   try {
     uploader.UploadFile("/missing", destination, control);
     FAIL() << "deadline was ignored";
@@ -142,9 +141,8 @@ TEST(S3ClientTest, RejectsExpiredAndCancelledWorkBeforeOpeningSource)
     EXPECT_EQ(error.primary.code, "DeadlineExceeded");
     EXPECT_EQ(error.remote_state, S3RemoteState::NO_WRITES_ISSUED);
   }
-  std::stop_source cancellation;
-  cancellation.request_stop();
-  control = {TransferControl::Clock::time_point::max(), cancellation.get_token()};
+  control = Cancellation{};
+  control.Cancel();
   try {
     uploader.UploadFile("/missing", destination, control);
     FAIL() << "cancellation was ignored";
@@ -162,14 +160,12 @@ TEST(S3ClientTest, RejectsInvalidOrCancelledMetadataWithoutConnecting)
   EXPECT_THROW(client.Head({"", "index.json"}), std::invalid_argument);
   EXPECT_THROW(client.Get(object, std::numeric_limits<std::size_t>::max()), std::invalid_argument);
   EXPECT_THROW(client.Put(object, "{}", 1), std::invalid_argument);
-  std::stop_source cancellation;
-  cancellation.request_stop();
-  for (const auto& control : {
-      TransferControl{TransferControl::Clock::now(), {}},
-      TransferControl{TransferControl::Clock::time_point::max(), cancellation.get_token()}}) {
-    EXPECT_THROW(client.Head(object, control), TransferInterrupted);
-    EXPECT_THROW(client.Get(object, 1024, control), TransferInterrupted);
-    EXPECT_THROW(client.Put(object, "{}", 1024, control), TransferInterrupted);
+  Cancellation cancelled;
+  cancelled.Cancel();
+  for (const auto& control : {Cancellation(Cancellation::Clock::now()), cancelled}) {
+    EXPECT_THROW(client.Head(object, control), CancellationError);
+    EXPECT_THROW(client.Get(object, 1024, control), CancellationError);
+    EXPECT_THROW(client.Put(object, "{}", 1024, control), CancellationError);
   }
 }
 }  // namespace

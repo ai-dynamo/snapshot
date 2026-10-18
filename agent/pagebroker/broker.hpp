@@ -31,7 +31,6 @@ class Broker {
   ~Broker();
   Response HandleGpuRequest(const Request& request, CancellationPtr cancellation,
                             std::vector<FileDescriptor> target_descriptors);
-  void CancelGpuWork();
   Response HandleRequest(const Request& request);
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
   using Clock = std::function<std::chrono::steady_clock::time_point()>;
