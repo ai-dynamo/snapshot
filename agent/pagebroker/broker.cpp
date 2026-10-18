@@ -5,7 +5,6 @@
 
 #include <sys/statvfs.h>
 #include <sys/stat.h>
-#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -105,15 +104,6 @@ ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
   if (!request.has_destination() || request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
     throw std::invalid_argument("checkpoint destination is required");
   return request.destination();
-}
-
-FileDescriptor
-OpenDirectory(const Path& path)
-{
-  FileDescriptor directory(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-  if (directory.get() < 0)
-    throw std::system_error(errno, std::generic_category(), "open artifact directory");
-  return directory;
 }
 
 bool
@@ -219,7 +209,7 @@ CreateGpuArtifact(const Transaction& transaction, const GpuRequest& request)
   if (!checkpoint) {
     throw std::invalid_argument("GPU checkpoint requires a checkpoint transaction");
   }
-  auto directory = OpenDirectory(checkpoint->staging_directory());
+  auto directory = filesystem_storage::OpenDirectory(checkpoint->staging_directory());
   return std::make_unique<gpu::Artifact>(directory.get(), request.direction,
       request.captured_pids, request.visible_devices, request.device_map);
 }
