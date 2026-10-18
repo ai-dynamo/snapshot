@@ -89,6 +89,7 @@ class Transaction {
   Kind kind() const { return kind_; }
   CheckpointPublication* publication() { return publication_ ? &*publication_ : nullptr; }
   void CancelWork(); // Thread-safe; call before waiting for mutex().
+  // Only the recorded directory may be removed. A matching empty path still releases reservations.
   void RemoveStaging(const Path& directory);
   void RemoveStaging(const Path& directory, std::error_code& error);
   void CleanupTransfer();
