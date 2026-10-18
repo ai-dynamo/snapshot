@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "transfer/restore_plan.hpp"
-#include "transfer/transfer_control.hpp"
+#include "cancellation.hpp"
 #include "utils/event_loop.hpp"
 
 namespace snapshot::pagebroker {
@@ -51,7 +51,7 @@ class ModelStreamerRestore {
   // before any failed submission waiter is released.
   bool Failed() const noexcept;
   // Creates the destination tree and blocks until all planned data is restored.
-  void Stage(const RestorePlan& plan, const Path& destination, TransferControl control = {});
+  void Stage(const RestorePlan& plan, const Path& destination, Cancellation control = {});
 
  private:
   // Owns one submission's ABI arrays, response progress, and completion signal.
@@ -72,7 +72,7 @@ class ModelStreamerRestore {
     std::string first_error;
     std::promise<void> completion;
     std::chrono::steady_clock::time_point deadline;
-    TransferControl control;
+    Cancellation control;
   };
 
   // Holds one response returned by the Model Streamer API for dispatch by ID.
@@ -117,7 +117,7 @@ class ModelStreamerRestore {
   // Starts a native session on the event-loop thread.
   void Start();
   // Restores files in byte-bounded submissions and then applies their permissions.
-  void RestoreFiles(const RestorePlan& plan, const Path& destination, TransferControl control);
+  void RestoreFiles(const RestorePlan& plan, const Path& destination, Cancellation control);
   // Queues an entry until the current native session can admit it.
   void Submit(std::unique_ptr<StreamerEntry>& entry);
   // Admits a bounded group of queued submissions into one native session.

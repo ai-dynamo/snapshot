@@ -712,7 +712,6 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
   gpu_connections.Stop();
   listener = FileDescriptor(-1);
   broker.CancelActiveTransactions();
-  broker.CancelGpuWork();
   WaitForHandlers(handlers);
 }
 

@@ -49,10 +49,10 @@ S3StorageBackend::Client() const
 }
 
 void
-S3StorageBackend::UploadFiles(const Path& source, const RestorePlan& plan, TransferControl control) const
+S3StorageBackend::UploadFiles(const Path& source, const RestorePlan& plan, Cancellation control) const
 {
   for (const auto& file : plan.files) {
-    control.Check();
+    control.ThrowIfCancelled();
     const auto slash = file.source_locator.find('/', 5);
     const S3ObjectLocation destination{file.source_locator.substr(5, slash - 5), file.source_locator.substr(slash + 1)};
     const auto result = Client().UploadFile(source / file.relative_path, destination, control);
@@ -112,21 +112,21 @@ S3StorageBackend::Object(const PublishedArtifact& storage, const std::string& ke
 }
 
 bool
-S3StorageBackend::CheckpointExists(const PublishedArtifact& storage, TransferControl control) const
+S3StorageBackend::CheckpointExists(const PublishedArtifact& storage, Cancellation control) const
 {
   const auto object = Object(storage, "index.json");
   return Client().Get(object, kMaxIndexBytes, control).has_value();
 }
 
 void
-S3StorageBackend::PrepareCheckpoint(const PublishedArtifact& storage, TransferControl control) const
+S3StorageBackend::PrepareCheckpoint(const PublishedArtifact& storage, Cancellation control) const
 {
   if (CheckpointExists(storage, control))
     throw CheckpointError(Failure::TRANSACTION_CONFLICT, "checkpoint is already published; recover using its ID");
 }
 
 RestorePlan
-S3StorageBackend::InspectCheckpoint(const Path& source, const PublishedArtifact& storage, TransferControl control) const
+S3StorageBackend::InspectCheckpoint(const Path& source, const PublishedArtifact& storage, Cancellation control) const
 {
   ValidateCheckpoint(storage);
   auto plan = filesystem_storage::BuildRestorePlan(source, control, kMaxCheckpointEntries);
@@ -142,14 +142,14 @@ S3StorageBackend::InspectCheckpoint(const Path& source, const PublishedArtifact&
 }
 
 std::string
-S3StorageBackend::UploadCheckpointPayloads(const Path& source, RestorePlan plan, TransferControl control) const
+S3StorageBackend::UploadCheckpointPayloads(const Path& source, RestorePlan plan, Cancellation control) const
 {
   UploadFiles(source, plan, control);
   return SerializeCheckpointIndex(plan);
 }
 
 bool
-S3StorageBackend::ConfirmIndex(const S3ObjectLocation& object, const std::string& index, TransferControl control) const
+S3StorageBackend::ConfirmIndex(const S3ObjectLocation& object, const std::string& index, Cancellation control) const
 {
   const auto existing = Client().Get(object, kMaxIndexBytes, control);
   if (!existing)
@@ -160,7 +160,7 @@ S3StorageBackend::ConfirmIndex(const S3ObjectLocation& object, const std::string
 }
 
 void
-S3StorageBackend::PublishIndex(const PublishedArtifact& storage, const std::string& index, TransferControl control) const
+S3StorageBackend::PublishIndex(const PublishedArtifact& storage, const std::string& index, Cancellation control) const
 {
   try {
     const auto object = Object(storage, "index.json");
@@ -187,7 +187,7 @@ S3StorageBackend::PublishIndex(const PublishedArtifact& storage, const std::stri
 }
 
 RestorePlan
-S3StorageBackend::LoadRestorePlan(const PublishedArtifact& storage, bool metadata_only, TransferControl control) const
+S3StorageBackend::LoadRestorePlan(const PublishedArtifact& storage, bool metadata_only, Cancellation control) const
 {
   const auto object = Object(storage, "index.json");
   auto& client = Client();
@@ -214,18 +214,18 @@ S3StorageBackend::LoadRestorePlan(const PublishedArtifact& storage, bool metadat
 
 Path
 S3StorageBackend::PrepareCheckpoint(const PublishedArtifact& storage, const Path& staging_directory,
-    TransferMode mode, TransferControl control) const
+    TransferMode mode, Cancellation control) const
 {
   if (mode == TransferMode::Direct)
     throw std::invalid_argument("S3 checkpoints require staging");
   PrepareCheckpoint(storage, control);
-  control.Check();
+  control.ThrowIfCancelled();
   return staging_directory;
 }
 
 PreparedRestore
 S3StorageBackend::PrepareRestore(const PublishedArtifact& storage, bool metadata_only,
-    TransferMode mode, TransferControl control) const
+    TransferMode mode, Cancellation control) const
 {
   if (mode == TransferMode::Direct)
     throw std::invalid_argument("S3 restores require staging");
@@ -236,7 +236,7 @@ S3StorageBackend::PrepareRestore(const PublishedArtifact& storage, bool metadata
 
 void
 S3StorageBackend::PublishCheckpoint(const Path& source, RestorePlan plan, CheckpointPublication& publication,
-    TransferMode mode, TransferControl control) const
+    TransferMode mode, Cancellation control) const
 {
   if (mode == TransferMode::Direct)
     throw std::invalid_argument("S3 checkpoints require staging");

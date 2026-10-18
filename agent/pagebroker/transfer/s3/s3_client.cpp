@@ -167,24 +167,21 @@ ValidateText(const std::string& value)
 }
 
 struct Operation {
-  explicit Operation(std::chrono::milliseconds timeout, TransferControl control = {})
-      : deadline(std::min(Clock::now() + timeout, control.deadline)), cancellation(control.cancellation) {}
+  explicit Operation(std::chrono::milliseconds timeout, Cancellation control = {})
+      : cancellation(control.WithDeadline(Clock::now() + timeout)) {}
 
   bool Continue() const noexcept
   {
-    return !cancellation.stop_requested() && Clock::now() < deadline;
+    return !cancellation.IsCancelled();
   }
 
   void Check() const
   {
-    if (Clock::now() >= deadline)
-      throw S3Error({"upload", "DeadlineExceeded"});
-    if (cancellation.stop_requested())
-      throw S3Error({"upload", "Cancelled"});
+    if (const auto reason = cancellation.Reason())
+      throw S3Error({"upload", *reason == CancellationError::Reason::DEADLINE_EXCEEDED ? "DeadlineExceeded" : "Cancelled"});
   }
 
-  const Clock::time_point deadline;
-  const std::stop_token cancellation;
+  const Cancellation cancellation;
 };
 
 // A lease bounds admitted file transfers and metadata operations, not CRT parts.
@@ -216,7 +213,8 @@ class Slots {
   Lease Acquire(const Operation& operation)
   {
     std::unique_lock lock(mutex_);
-    changed_.wait_until(lock, operation.cancellation, operation.deadline, [&] { return !available_.empty() || !operation.Continue(); });
+    changed_.wait_until(lock, operation.cancellation.Token(), operation.cancellation.Deadline(),
+                        [&] { return !available_.empty() || !operation.Continue(); });
     operation.Check();
     const auto slot = available_.back();
     available_.pop_back();
@@ -439,10 +437,10 @@ struct S3Client::Impl {
   }
 
   template<class Request, class Call>
-  auto MetadataRequest(Request& request, const S3ObjectLocation& object, TransferControl control, Call call)
+  auto MetadataRequest(Request& request, const S3ObjectLocation& object, Cancellation control, Call call)
   {
     object.Validate();
-    control.Check();
+    control.ThrowIfCancelled();
     request.WithBucket(object.bucket).WithKey(object.key);
     auto operation = std::make_shared<Operation>(limits.operation_timeout, control);
     return RequestResult(request, operation, call);
@@ -475,7 +473,7 @@ struct S3Client::Impl {
   }
 
   S3UploadResult UploadFile(const std::filesystem::path& path, const S3ObjectLocation& destination,
-                            TransferControl control)
+                            Cancellation control)
   {
     destination.Validate();
     if (path.native().find('\0') != std::string::npos)
@@ -551,13 +549,13 @@ S3Client::~S3Client() noexcept = default;
 
 S3UploadResult
 S3Client::UploadFile(const std::filesystem::path& source, const S3ObjectLocation& destination,
-                       TransferControl control)
+                       Cancellation control)
 {
   return impl_->UploadFile(source, destination, control);
 }
 
 std::optional<std::uint64_t>
-S3Client::Head(const S3ObjectLocation& object, TransferControl control)
+S3Client::Head(const S3ObjectLocation& object, Cancellation control)
 {
   Aws::S3Crt::Model::HeadObjectRequest request;
   const auto result = impl_->MetadataRequest(request, object, control, [&](const auto& value) { return impl_->client->HeadObject(value); });
@@ -572,7 +570,7 @@ S3Client::Head(const S3ObjectLocation& object, TransferControl control)
 }
 
 std::optional<std::string>
-S3Client::Get(const S3ObjectLocation& object, std::size_t max_bytes, TransferControl control)
+S3Client::Get(const S3ObjectLocation& object, std::size_t max_bytes, Cancellation control)
 {
   if (max_bytes >= static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()))
     throw std::invalid_argument("invalid S3 metadata byte limit");
@@ -603,7 +601,7 @@ S3Client::Get(const S3ObjectLocation& object, std::size_t max_bytes, TransferCon
 }
 
 void
-S3Client::Put(const S3ObjectLocation& object, const std::string& bytes, std::size_t max_bytes, TransferControl control)
+S3Client::Put(const S3ObjectLocation& object, const std::string& bytes, std::size_t max_bytes, Cancellation control)
 {
   if (bytes.size() > max_bytes || bytes.size() > impl_->limits.part_size)
     throw std::invalid_argument("metadata exceeds size limit or single-PUT threshold");

@@ -9,7 +9,7 @@
 
 #include "pagebroker_types.hpp"
 #include "transfer/restore_plan.hpp"
-#include "transfer/transfer_control.hpp"
+#include "cancellation.hpp"
 
 namespace snapshot::pagebroker::filesystem_storage {
 using Path = std::filesystem::path;
@@ -24,21 +24,21 @@ Path DestinationPath(const StorageBackend& destination, const Path& storage_root
 void RemoveStaging(const Path& directory);
 
 // Copies the planned files into staging and applies saved permissions.
-void StageRestore(const RestorePlan& plan, const Path& destination, TransferControl control = {});
+void StageRestore(const RestorePlan& plan, const Path& destination, Cancellation control = {});
 
 // Scans a checkpoint tree into a restore plan, enforcing the entry limit.
 RestorePlan BuildRestorePlan(
-    const Path& source, TransferControl control = {}, std::size_t limit = std::numeric_limits<std::size_t>::max());
+    const Path& source, Cancellation control = {}, std::size_t limit = std::numeric_limits<std::size_t>::max());
 
 // Builds a CPU restore plan that omits the payload directory owned by the GPU engine.
-RestorePlan BuildCpuRestorePlan(const Path& source, TransferControl control = {});
+RestorePlan BuildCpuRestorePlan(const Path& source, Cancellation control = {});
 
 // Opens a local directory without following its final symlink.
 FileDescriptor OpenDirectory(const Path& directory);
 
 // Retains the source descriptor and scans files only when staging is requested.
 PreparedRestore PrepareRestore(const StorageBackend& source, const Path& storage_root,
-    TransferMode mode, TransferControl control = {});
+    TransferMode mode, Cancellation control = {});
 
 // Returns local access, borrowing the original GPU source when one was prepared.
 RestoreAccess CompleteRestore(PreparedRestore preparation, const Path& destination);
@@ -49,5 +49,5 @@ Path PrepareCheckpoint(const StorageBackend& destination, const Path& storage_ro
 
 // Publishes by direct rename or staged copy, checking cancellation before promotion.
 void PublishCheckpoint(const Path& source, const StorageBackend& destination, const Path& storage_root,
-    const RestorePlan& plan, TransferMode mode, TransferControl control = {});
+    const RestorePlan& plan, TransferMode mode, Cancellation control = {});
 }  // namespace snapshot::pagebroker::filesystem_storage

@@ -105,23 +105,48 @@ TEST(TransactionTest, DeadlineAndCancellationCoverTheWholeOperation)
   auto resources = std::make_shared<TransactionResources>(100, 1, std::chrono::minutes(1));
   Transaction restore;
   restore.PrepareTransfer(resources, Transaction::Kind::RESTORE, root.path() / "restore");
-  const auto control = restore.control();
+  const auto control = restore.cancellation();
   restore.set_state(Transaction::State::PREPARING);
   restore.set_state(Transaction::State::STAGED);
-  EXPECT_EQ(restore.control().deadline, control.deadline);
-  EXPECT_TRUE(restore.expired(control.deadline, {}));
-  restore.CancelTransfer();
-  EXPECT_THROW(control.Check(), TransferInterrupted);
+  EXPECT_EQ(restore.cancellation().Deadline(), control.Deadline());
+  EXPECT_TRUE(restore.expired(control.Deadline(), {}));
+  restore.CancelWork();
+  EXPECT_THROW(control.ThrowIfCancelled(), CancellationError);
 }
+TEST(TransactionTest, CancellationBeforePreparationIsNotLost)
+{
+  Transaction transaction;
+  transaction.CancelWork();
+  transaction.PrepareTransfer(nullptr, Transaction::Kind::RESTORE, {}, nullptr, std::chrono::minutes{1});
+  EXPECT_TRUE(transaction.cancellation().Token().stop_requested());
+  EXPECT_EQ(transaction.cancellation().Reason(), CancellationError::Reason::CANCELLED);
+}
+
+TEST(TransactionTest, GpuRequestAndTransactionStopIndependently)
+{
+  Transaction transaction;
+  transaction.PrepareTransfer(nullptr, Transaction::Kind::RESTORE, {});
+  Cancellation old_request, new_request;
+  auto old_operation = Cancellation::Join(transaction.cancellation(), old_request);
+  old_request.Cancel();
+  EXPECT_TRUE(old_operation.IsCancelled());
+  EXPECT_FALSE(transaction.cancellation().IsCancelled());
+  auto retry = Cancellation::Join(transaction.cancellation(), new_request);
+  EXPECT_FALSE(retry.IsCancelled());
+  transaction.CancelWork();
+  EXPECT_TRUE(retry.IsCancelled());
+  EXPECT_FALSE(new_request.IsCancelled());
+}
+
 TEST(TransactionTest, LegacyDirectDeadlineStartsAtPrepareAndIsNotExtended)
 {
   Transaction transaction;
   transaction.PrepareTransfer(nullptr, Transaction::Kind::CHECKPOINT, {}, nullptr, std::chrono::seconds{17});
-  const auto deadline = transaction.control().deadline;
+  const auto deadline = transaction.cancellation().Deadline();
   transaction.set_state(Transaction::State::PREPARING);
   EXPECT_FALSE(transaction.expired(deadline - std::chrono::seconds{1}, {}));
   transaction.set_state(Transaction::State::STAGED);
-  EXPECT_EQ(transaction.control().deadline, deadline);
+  EXPECT_EQ(transaction.cancellation().Deadline(), deadline);
   EXPECT_TRUE(transaction.expired(deadline, {}));
   transaction.set_state(Transaction::State::COMMITTED);
   EXPECT_FALSE(transaction.expired(deadline + std::chrono::hours{1}, {}));

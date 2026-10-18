@@ -6,6 +6,7 @@ import io
 import os
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -72,6 +73,29 @@ class S3FixtureTest(unittest.TestCase):
 
 
 class FaultServiceTest(unittest.TestCase):
+    def test_slot_owner_barrier_holds_response_until_release(self):
+        def backend(environment, start_response):
+            start_response("200 OK", [("Content-Length", "0")])
+            return [b""]
+
+        service = s3_integration.FaultService(backend)
+        key = "roundtrip/slot-owner/data"
+        statuses = []
+        owner = threading.Thread(target=lambda: service(
+            {"PATH_INFO": "/bucket/" + key, "QUERY_STRING": "", "REQUEST_METHOD": "PUT"},
+            lambda status, headers: statuses.append(status)))
+        owner.start()
+        with service.changed:
+            held = service.changed.wait_for(lambda: key in service.first_parts, timeout=2)
+        still_running = owner.is_alive()
+        service({"PATH_INFO": "/bucket/roundtrip/release/slot-owner", "QUERY_STRING": "",
+                 "REQUEST_METHOD": "HEAD"}, lambda status, headers: None)
+        owner.join(timeout=2)
+        self.assertTrue(held)
+        self.assertTrue(still_running)
+        self.assertFalse(owner.is_alive())
+        self.assertEqual(statuses, ["200 OK"])
+
     def test_partial_tree_fault_allows_first_object_and_only_denies_bad_put(self):
         forwarded = []
 

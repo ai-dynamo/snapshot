@@ -136,6 +136,11 @@ class FaultService:
                 return self.error(start_response, "RequestTimeout", "408 Request Timeout")
             success = response["status"].startswith("2")
             with self.changed:
+                if scenario == "slot-owner" and success and operation == "put":
+                    self.first_parts.add(key)
+                    self.changed.notify_all()
+                    if not self.changed.wait_for(lambda: key in self.released, timeout=10):
+                        return self.error(start_response)
                 if success and operation == "part" and query["partNumber"] == ["1"]:
                     self.first_parts.add(key)
                     self.changed.notify_all()
@@ -168,6 +173,7 @@ class FaultService:
         # Run only assertions for cases actually selected by the native filter.
         assert not any(count for (_, operation), count in self.counts.items() if operation == "DELETE")
         assert not any(count for (scenario, _), count in self.counts.items() if scenario == "preflight"), self.counts
+        assert not any(count for (scenario, _), count in self.counts.items() if scenario == "slot-waiter"), self.counts
         if self.counts["engine-partial", "put"]:
             # The failed publication retains only its first payload, never an index.
             prefix = "roundtrip/engine-partial/" + "a" * 64 + "/"
