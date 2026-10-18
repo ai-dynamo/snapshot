@@ -74,6 +74,9 @@ env:
   IMAGE_TAG: cpu-e2e
   # CPU tests run at once. Set to 1 to run the whole suite serially.
   CPU_E2E_WORKERS: ${{ inputs.workers || '3' }}
+  # k3s 1.34 runs the restore proxy. Set, not detected, so a node that fails
+  # to set it up fails the tests.
+  SNAPSHOT_E2E_RESTORE_PROXY: "true"
   SNAPSHOT_E2E_MODE: direct
   SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
   SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot

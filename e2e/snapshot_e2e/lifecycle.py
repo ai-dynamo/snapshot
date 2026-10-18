@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import time
 from datetime import datetime, timezone
@@ -1013,6 +1014,32 @@ def checkpoint_agent_pod(config: k8s.E2EConfig, node: str) -> str:
             f"expected one snapshot agent on node {node!r}, found {len(agents)}"
         )
     return agents[0].metadata.name
+
+
+# What the agent logs at start: its NRI plugin registered, or the agent
+# restores without the restore proxy.
+PROXY_REGISTERED_LOG = "Registered with the container runtime"
+PROXY_FALLBACK_LOG = "Restoring without the restore proxy"
+
+
+def restore_proxy_on(config: k8s.E2EConfig, node: str) -> bool:
+    """Whether restores on node run through the restore proxy.
+
+    SNAPSHOT_E2E_RESTORE_PROXY=auto asks the node's agent, for clusters whose
+    nodes may or may not support the proxy. Any other value is restore_proxy().
+    """
+    if os.environ.get("SNAPSHOT_E2E_RESTORE_PROXY") != "auto":
+        return restore_proxy()
+    agent = checkpoint_agent_pod(config, node)
+    # The whole log: the lines are from the agent's start.
+    log = k8s.pod_logs(config.namespace, agent, tail_lines=None, container=AGENT_CONTAINER)
+    if PROXY_REGISTERED_LOG in log:
+        return True
+    if PROXY_FALLBACK_LOG in log:
+        return False
+    raise AssertionError(
+        f"agent {agent} logged neither {PROXY_REGISTERED_LOG!r} nor {PROXY_FALLBACK_LOG!r}"
+    )
 
 
 def assert_restored_state(

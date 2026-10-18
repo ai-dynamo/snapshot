@@ -175,6 +175,34 @@ def test_restore_pod_idles_without_the_proxy(
 
 
 @pytest.mark.workload
+@pytest.mark.parametrize(
+    ("agent_log", "proxy"),
+    [
+        ("... Registered with the container runtime ...", True),
+        ("... Restoring without the restore proxy ...", False),
+    ],
+)
+def test_restore_pod_follows_the_agent_in_auto_mode(
+    monkeypatch: pytest.MonkeyPatch, agent_log: str, proxy: bool
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "auto")
+    monkeypatch.setattr(fw.lifecycle, "checkpoint_agent_pod", lambda config, node: "agent-0")
+    monkeypatch.setattr(fw.lifecycle.k8s, "pod_logs", lambda *args, **kwargs: agent_log)
+    _, restore, _ = pods(frameworks.FRAMEWORKS["vllm"])
+    idles = fw.main_container(restore)["command"] == workloads.INERT_COMMAND
+    assert idles is not proxy
+
+
+@pytest.mark.workload
+def test_auto_mode_fails_when_the_agent_says_neither(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "auto")
+    monkeypatch.setattr(fw.lifecycle, "checkpoint_agent_pod", lambda config, node: "agent-0")
+    monkeypatch.setattr(fw.lifecycle.k8s, "pod_logs", lambda *args, **kwargs: "starting")
+    with pytest.raises(AssertionError, match="logged neither"):
+        pods(frameworks.FRAMEWORKS["vllm"])
+
+
+@pytest.mark.workload
 def test_guide_deploys_the_expected_model(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
     for pod in (source, restore):

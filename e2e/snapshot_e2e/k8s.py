@@ -175,7 +175,7 @@ def pod_logs(
     namespace: str,
     name: str,
     *,
-    tail_lines: int = 120,
+    tail_lines: int | None = 120,
     container: str | None = None,
 ) -> str:
     try:

@@ -305,7 +305,8 @@ def restore_proxy() -> bool:
     """Whether the agents restore through the restore proxy.
 
     SNAPSHOT_E2E_RESTORE_PROXY=false is for nodes without NRI v0.10 or newer,
-    where the agent restores without it.
+    where the agent restores without it. For auto, see
+    lifecycle.restore_proxy_on.
     """
     return os.environ.get("SNAPSHOT_E2E_RESTORE_PROXY", "true") != "false"
 

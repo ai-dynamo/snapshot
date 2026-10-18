@@ -152,10 +152,9 @@ jobs:
       SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
       SNAPSHOT_E2E_MODE: vcluster
       SNAPSHOT_E2E_AVOID_MIG: "true"
-      # The GPU nodes run containerd 1.7 with NRI disabled, so the agent
-      # restores without the restore proxy. Remove once they run containerd
-      # 2.2 or newer with NRI enabled (#621).
-      SNAPSHOT_E2E_RESTORE_PROXY: "false"
+      # Expect the restore proxy where the agent has it: GPU nodes with
+      # containerd older than 2.2, or NRI disabled, restore without it.
+      SNAPSHOT_E2E_RESTORE_PROXY: auto
       SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
       SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
       SNAPSHOT_E2E_HELM_TIMEOUT: 6m
