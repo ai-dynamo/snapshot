@@ -373,7 +373,7 @@ func TestRestorePreservesManifestImageIoMode(t *testing.T) {
 				CRIU:   types.CRIUSettings{ImageIoMode: tc.mode},
 				ExtMnt: map[string]string{"root": "/"},
 			}}
-			opts, err := BuildRestoreOpts(manifest, t.TempDir(), "", "", logr.Discard())
+			opts, err := BuildRestoreOpts(manifest, "", "", logr.Discard())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -384,15 +384,13 @@ func TestRestorePreservesManifestImageIoMode(t *testing.T) {
 	}
 }
 
-// CRIU runs from the agent, so the restored processes take the restore
-// target's label only when the options name it.
 func TestBuildRestoreOptsLSMProfile(t *testing.T) {
 	for _, profile := range []string{"", "apparmor:cri-containerd.apparmor.d"} {
 		t.Run(profile, func(t *testing.T) {
 			manifest := &types.CheckpointManifest{CRIUDump: types.CRIUDumpManifest{
 				ExtMnt: map[string]string{"root": "/"},
 			}}
-			opts, err := BuildRestoreOpts(manifest, t.TempDir(), "", profile, logr.Discard())
+			opts, err := BuildRestoreOpts(manifest, "", profile, logr.Discard())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -406,11 +404,14 @@ func TestBuildRestoreOptsLSMProfile(t *testing.T) {
 	}
 }
 
-// The hook runs once the processes are restored and before they resume; its
-// error aborts the restore.
-func TestRestoreNotifyPostRestoreRunsTheHook(t *testing.T) {
+// The hook runs before CRIU creates any process or mount; its error aborts
+// the restore.
+func TestRestoreNotifyPreRestoreRunsTheHook(t *testing.T) {
 	calls := 0
-	n := &restoreNotify{log: logr.Discard(), postRestore: func() error { calls++; return nil }}
+	n := &restoreNotify{log: logr.Discard(), preRestore: func() error { calls++; return nil }}
+	if err := n.PreRestore(); err != nil {
+		t.Fatal(err)
+	}
 	if err := n.PostRestore(42); err != nil {
 		t.Fatal(err)
 	}
@@ -418,12 +419,40 @@ func TestRestoreNotifyPostRestoreRunsTheHook(t *testing.T) {
 		t.Fatalf("restoredPID = %d, hook calls = %d", n.restoredPID, calls)
 	}
 
-	failing := &restoreNotify{log: logr.Discard(), postRestore: func() error { return errors.New("unmount failed") }}
-	if err := failing.PostRestore(42); err == nil {
+	failing := &restoreNotify{log: logr.Discard(), preRestore: func() error { return errors.New("unmount failed") }}
+	if err := failing.PreRestore(); err == nil {
 		t.Fatal("expected the hook's error")
 	}
 
-	if err := (&restoreNotify{log: logr.Discard()}).PostRestore(42); err != nil {
+	if err := (&restoreNotify{log: logr.Discard()}).PreRestore(); err != nil {
 		t.Fatalf("no hook: %v", err)
+	}
+}
+
+// The restore config comes from the manifest's settings, with the bundle's
+// libdir. A criu.conf in the checkpoint is not read, so it cannot override the
+// options passed via RPC.
+func TestWriteRestoreCRIUConf(t *testing.T) {
+	scratch := t.TempDir()
+	settings := &types.CRIUSettings{
+		LibDir:       "/usr/local/lib/snapshot/criu-plugins",
+		AllowUprobes: true,
+		SkipInFlight: true,
+	}
+	path, err := writeRestoreCRIUConf(settings, scratch, "/tmp/snapshot-binaries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "libdir /tmp/snapshot-binaries/criu-plugins\nallow-uprobes\nskip-in-flight\n"
+	if string(got) != want {
+		t.Fatalf("restore config = %q, want %q", got, want)
+	}
+
+	if _, err := writeRestoreCRIUConf(settings, "", "/tmp/snapshot-binaries"); err == nil {
+		t.Fatal("expected an error without a scratch directory")
 	}
 }

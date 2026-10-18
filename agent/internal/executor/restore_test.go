@@ -1491,3 +1491,19 @@ func TestMountSecurityFSForCRIUMountsOnlyWhenNeeded(t *testing.T) {
 		})
 	}
 }
+
+// within bounds the securityfs unmount: a call that blocks gives an error in
+// time, and a call that returns passes its result through.
+func TestWithin(t *testing.T) {
+	unmountErr := errors.New("unmount failed")
+	if err := within(time.Second, func() error { return unmountErr }); !errors.Is(err, unmountErr) {
+		t.Fatalf("within(returns) = %v, want %v", err, unmountErr)
+	}
+
+	block := make(chan struct{})
+	defer close(block)
+	err := within(10*time.Millisecond, func() error { <-block; return nil })
+	if err == nil || !strings.Contains(err.Error(), "no answer in 10ms") {
+		t.Fatalf("within(blocks) = %v, want a timeout", err)
+	}
+}

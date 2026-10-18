@@ -161,7 +161,7 @@ spec:
               mountPath: /var/run/nri
             # The node's securityfs, read-only. CRIU looks here to find the
             # node's LSM: with it, a checkpoint records each process's
-            # AppArmor label, and the restore gives it back.
+            # AppArmor label, which a restore into a labeled container needs.
             - name: securityfs
               mountPath: /sys/kernel/security
               readOnly: true

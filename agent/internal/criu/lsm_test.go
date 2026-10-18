@@ -64,6 +64,13 @@ func TestCheckRecordedLSMLabels(t *testing.T) {
 			},
 			profile: profile,
 		},
+		// The target's label replaces it, as it replaces any recorded label.
+		"a process in a child profile": {
+			images: map[string][]*criu_core.CoreEntry{
+				"core-1.img": {coreEntry(true, "cri-containerd.apparmor.d//restricted")},
+			},
+			profile: profile,
+		},
 		"a zombie has no credentials": {
 			images: map[string][]*criu_core.CoreEntry{
 				"core-1.img": {coreEntry(true, "cri-containerd.apparmor.d")},

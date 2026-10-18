@@ -50,7 +50,7 @@ type RestoreContainerSnapshot struct {
 	CgroupRoot     string
 	// LSMProfile is the placeholder container's AppArmor profile or SELinux
 	// label, as CRIU's lsm_profile takes it ("apparmor:<name>" or
-	// "selinux:<label>"). Empty when the runtime set none.
+	// "selinux:<label>"), or criu.LSMProfileNone ("none:") when it has none.
 	LSMProfile      string
 	CUDADeviceMap   string
 	GPUMountAliases map[string]string

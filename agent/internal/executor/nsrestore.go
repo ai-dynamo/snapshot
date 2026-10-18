@@ -109,7 +109,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	if err := criu.CheckRecordedLSMLabels(opts.CheckpointPath, opts.LSMProfile); err != nil {
 		return nil, err
 	}
-	criuOpts, err := criu.BuildRestoreOpts(m, opts.CheckpointPath, opts.CgroupRoot, opts.LSMProfile, log)
+	criuOpts, err := criu.BuildRestoreOpts(m, opts.CgroupRoot, opts.LSMProfile, log)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +245,7 @@ func executeRestore(
 	}
 	defer func() {
 		if err := unmountSecurityFS(); err != nil {
-			log.Error(err, "failed to unmount securityfs after restore")
+			log.Error(err, "failed to unmount securityfs")
 		}
 	}()
 	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, unmountSecurityFS, log)
@@ -367,19 +367,20 @@ func restoreCustomStorage(ctx context.Context, opts RestoreOptions, capturedPIDs
 	return nil
 }
 
-// securityFSPath is where securityfs is mounted, and where CRIU looks for
-// AppArmor before it applies an apparmor lsm_profile.
-const securityFSPath = "/sys/kernel/security"
+const (
+	// securityFSPath is where securityfs is mounted, and where CRIU looks for
+	// AppArmor before it applies an apparmor lsm_profile.
+	securityFSPath = "/sys/kernel/security"
 
-// mountSecurityFSForCRIU makes AppArmor visible to CRIU in the restore target's
-// mount namespace, where containers usually lack securityfs: without it CRIU
-// refuses an apparmor lsm_profile as unsupported by the kernel. CRIU's "none"
-// needs it too: a checkpoint taken where the agent saw AppArmor is recorded as
-// an AppArmor one, and CRIU refuses to restore it where it doesn't see
-// AppArmor. CRIU needs it only while it prepares the restore, so the returned
-// unmount runs at CRIU's post-restore stage, before the restored processes
-// resume; they never see it. The mount is read-only. unmount is safe to call
-// more than once.
+	// securityFSUnmountTimeout bounds the securityfs unmount. CRIU waits for
+	// it, and a timeout aborts the restore.
+	securityFSUnmountTimeout = 10 * time.Second
+)
+
+// mountSecurityFSForCRIU mounts securityfs read-only where it is missing, so
+// CRIU can detect AppArmor, including for "none:" restores on AppArmor hosts.
+// The returned unmount detaches it from the caller's mount namespace, within
+// securityFSUnmountTimeout. It is safe to call more than once.
 func mountSecurityFSForCRIU(path, lsmProfile string, log logr.Logger) (unmount func() error, err error) {
 	noop := func() error { return nil }
 	if !strings.HasPrefix(lsmProfile, "apparmor:") && lsmProfile != criu.LSMProfileNone {
@@ -397,12 +398,26 @@ func mountSecurityFSForCRIU(path, lsmProfile string, log logr.Logger) (unmount f
 	var unmountErr error
 	return func() error {
 		once.Do(func() {
-			if err := unix.Unmount(path, unix.MNT_DETACH); err != nil {
+			err := within(securityFSUnmountTimeout, func() error { return unix.Unmount(path, unix.MNT_DETACH) })
+			if err != nil {
 				unmountErr = fmt.Errorf("unmount securityfs at %s: %w", path, err)
 				return
 			}
-			log.V(1).Info("Unmounted securityfs before the restored processes resume", "path", path)
+			log.V(1).Info("Unmounted securityfs", "path", path)
 		})
 		return unmountErr
 	}, nil
+}
+
+// within runs fn, and returns an error if it takes longer than timeout. fn
+// keeps running after that, and its result is dropped.
+func within(timeout time.Duration, fn func() error) error {
+	errC := make(chan error, 1)
+	go func() { errC <- fn() }()
+	select {
+	case err := <-errC:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("no answer in %s", timeout)
+	}
 }
