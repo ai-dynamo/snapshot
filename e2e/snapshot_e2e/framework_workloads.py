@@ -8,7 +8,7 @@ name, label, pin to a node, and delete individually, so the Deployment's Pod
 template is lifted into a Pod with the minimum of edits: test identity, the
 image under test, e2e scheduling, and — for the restore pod — the PodSnapshot
 to restore from. Everything that makes the Pod checkpointable or restorable
-(control volume, probes, seccomp, device mounts, standby env) stays exactly as
+(control volume, probes, seccomp, device mounts) stays exactly as
 the manifest wrote it, so a framework definition that would not work does not
 pass here.
 """
@@ -23,12 +23,14 @@ from typing import Any
 import yaml
 
 from snapshot_e2e import k8s
+from snapshot_e2e import lifecycle
 from snapshot_e2e.frameworks import MODEL_CACHE_MOUNT
 from snapshot_e2e.frameworks import MODEL_CACHE_VOLUME
 from snapshot_e2e.frameworks import FrameworkSpec
 from snapshot_e2e.frameworks import SharedModelCache
 from snapshot_e2e.frameworks import framework_image
 from snapshot_e2e.frameworks import framework_image_overridden
+from snapshot_e2e.workloads import INERT_COMMAND
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import same_node_affinity
 from snapshot_e2e.workloads import workload_scheduling
@@ -92,6 +94,11 @@ def restore_pod(
     # that holds the artifact is the one on the source node.
     pod["metadata"]["annotations"] = {RESTORE_FROM_ANNOTATION: run.snapshot_name}
     pod["spec"]["affinity"] = same_node_affinity(source_node)
+    if not lifecycle.restore_proxy_on(config, source_node):
+        # As the restore guide says for nodes without the proxy.
+        main = main_container(pod)
+        main["command"] = list(INERT_COMMAND)
+        main.pop("args", None)
     return pod
 
 

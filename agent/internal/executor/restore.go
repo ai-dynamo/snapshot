@@ -129,6 +129,9 @@ type RestoreRequest struct {
 
 	// Decided by the caller, so both gates reach the same answer.
 	SkipCompatCheck bool
+	// WithoutProxy restores into a container whose PID 1 is its own command,
+	// on a node without the restore proxy. Otherwise PID 1 must be the proxy.
+	WithoutProxy bool
 }
 
 // RestoreResult identifies the processes a successful restore leaves behind.
@@ -456,6 +459,32 @@ func lsmProfileFromSpec(spec *specs.Spec) string {
 	return criu.LSMProfileNone
 }
 
+// readInitCmdline returns the command line of the container's PID 1, given
+// its host PID. Tests replace it.
+var readInitCmdline = func(pid int) (string, error) {
+	details, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+	if err != nil {
+		return "", err
+	}
+	return details.Cmdline, nil
+}
+
+// checkRestoreProxy refuses a container whose PID 1 is not the restore proxy.
+// The agent's NRI plugin makes the proxy PID 1 when the container is created.
+// Without the proxy, nothing in the container waits for the restore, and the
+// container does not end when the restored workload does.
+func checkRestoreProxy(pid int) error {
+	cmdline, err := readInitCmdline(pid)
+	if err != nil {
+		return fmt.Errorf("read the command of the container's PID 1: %w", err)
+	}
+	if cmdline != podcontract.RestoreProxyPath {
+		return fmt.Errorf("the container's PID 1 is %q, not %s: the agent's NRI plugin did not set up this container; check that NRI is enabled in the container runtime",
+			cmdline, podcontract.RestoreProxyPath)
+	}
+	return nil
+}
+
 func inspectRestore(
 	ctx context.Context,
 	rt snapshotruntime.Runtime,
@@ -477,6 +506,11 @@ func inspectRestore(
 		return nil, 0, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
 	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
+	if !req.WithoutProxy {
+		if err := checkRestoreProxy(placeholderPID); err != nil {
+			return nil, 0, err
+		}
+	}
 
 	// Read only for the image-digest check, which treats a blank value as
 	// unknown, so neither a skipped gate nor a runtime that cannot answer is

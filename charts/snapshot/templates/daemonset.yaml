@@ -62,10 +62,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- if and .Values.daemonset.affinity (hasKey .Values.daemonset.affinity "nodeAffinity") }}
-      {{- fail "daemonset.affinity.nodeAffinity is not supported because the chart already enforces kubernetes.io/arch=amd64; use daemonset.nodeSelector or daemonset.affinity.podAffinity/podAntiAffinity instead" }}
+      {{- fail "daemonset.affinity.nodeAffinity is not supported because the chart already restricts kubernetes.io/arch to amd64 and arm64; use daemonset.nodeSelector or daemonset.affinity.podAffinity/podAntiAffinity instead" }}
       {{- end }}
       affinity:
-        # cuda-checkpoint only supports x86_64 — never schedule on arm64 nodes
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
@@ -74,6 +73,7 @@ spec:
                     operator: In
                     values:
                       - amd64
+                      - arm64
         {{- with .Values.daemonset.affinity }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -218,6 +218,11 @@ spec:
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
+            # Expose the same PVC identity to the external artifact-contract
+            # build. The current filesystem-only broker keeps its existing args.
+            - name: storage-config
+              mountPath: /etc/snapshot
+              readOnly: true
             - name: pagebroker
               mountPath: /pagebroker
             - name: checkpoints
@@ -227,6 +232,15 @@ spec:
         - name: config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: storage-config
+          configMap:
+            name: {{ include "snapshot.fullname" . }}-config
+            items:
+              - key: storage.yaml
+                path: storage.yaml
         - name: pagebroker
           emptyDir:
             medium: Memory
@@ -266,7 +280,7 @@ spec:
         # NRI socket directory. A directory, not the socket itself: a
         # socket-typed hostPath would keep the Pod from starting at all, and
         # hide the reason. On a node without NRI the agent starts, cannot
-        # register its NRI plugin, and exits with an error saying so.
+        # register its NRI plugin, and restores without the restore proxy.
         - name: nri
           hostPath:
             path: /var/run/nri

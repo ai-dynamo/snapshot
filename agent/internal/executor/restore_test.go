@@ -251,6 +251,13 @@ func TestCleanupRestoreMountsRetainsLibrariesOnlyAfterSuccess(t *testing.T) {
 	}
 }
 
+// TestMain reports the restore proxy as every container's PID 1: the fake
+// runtimes return PIDs that do not exist on the test machine.
+func TestMain(m *testing.M) {
+	readInitCmdline = func(int) (string, error) { return podcontract.RestoreProxyPath, nil }
+	os.Exit(m.Run())
+}
+
 type restoreFakeRuntime struct {
 	resolvedID             string
 	resolvedByPodContainer string
@@ -473,6 +480,68 @@ func TestInspectRestoreTakesThePlaceholdersLSMProfile(t *testing.T) {
 	}
 	if snap.LSMProfile != "apparmor:cri-containerd.apparmor.d" {
 		t.Fatalf("LSMProfile = %q", snap.LSMProfile)
+	}
+}
+
+func TestInspectRestoreRequiresTheRestoreProxy(t *testing.T) {
+	manifest := types.NewCheckpointManifest(
+		"content-uid-123",
+		"main",
+		types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.OverlayManifest{},
+		types.HostManifest{},
+	)
+	for name, tc := range map[string]struct {
+		cmdline      string
+		readErr      error
+		withoutProxy bool
+		wantErr      string
+	}{
+		"the proxy":            {cmdline: "/snapshot-control/snapshot-restore-proxy"},
+		"a node without it":    {cmdline: "sleep infinity", withoutProxy: true},
+		"the image's command":  {cmdline: "sleep infinity", wantErr: "NRI plugin did not set up this container"},
+		"the proxy with args":  {cmdline: "/snapshot-control/snapshot-restore-proxy --x", wantErr: "NRI plugin"},
+		"PID 1 cannot be read": {readErr: errors.New("no such process"), wantErr: "no such process"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var readPID int
+			original := readInitCmdline
+			readInitCmdline = func(pid int) (string, error) {
+				readPID = pid
+				return tc.cmdline, tc.readErr
+			}
+			t.Cleanup(func() { readInitCmdline = original })
+
+			_, _, err := inspectRestore(context.Background(), &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+				ContentUID:               "content-uid-123",
+				ContainerID:              "placeholder-id",
+				PodName:                  "restore-pod",
+				PodNamespace:             "default",
+				ArtifactContainerName:    "main",
+				DestinationContainerName: "main",
+				WithoutProxy:             tc.withoutProxy,
+			}, manifest)
+
+			if tc.withoutProxy {
+				if err != nil || readPID != 0 {
+					t.Fatalf("inspectRestore: %v, read PID %d; want no error and no PID 1 check", err, readPID)
+				}
+				return
+			}
+			if readPID != 123 {
+				t.Fatalf("read PID %d, want the container's PID 1, 123", readPID)
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("inspectRestore: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

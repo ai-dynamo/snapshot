@@ -407,21 +407,49 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 
-	// Overlay rootfs diff capture is best-effort. Failures are logged but not
-	// propagated — a checkpoint without overlay diffs is still valid for restore
-	// (the base container image provides the filesystem).
 	if state.UpperDir != "" {
 		overlayCaptureStart := time.Now()
-		if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
-			log.Error(err, "Failed to capture rootfs diff")
-		}
-		if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
-			log.Error(err, "Failed to capture deleted files")
+		if err := captureOverlay(state.UpperDir, data.Overlay, checkpointDir, log); err != nil {
+			return nil, err
 		}
 		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 	}
 
 	return timings, nil
+}
+
+// captureOverlay records the upperdir's rootfs diff and deleted files for a
+// dump in checkpointDir.
+//
+// Overlay rootfs diff capture is best-effort. Failures are logged but not
+// propagated — a checkpoint without overlay diffs is still valid for restore
+// (the base container image provides the filesystem). Two failures are fatal
+// instead, because restore would then fail: a dump whose referenced files
+// cannot be read, since restore decodes the same images, and a rootfs diff
+// that may lack a referenced upperdir file, which restore reopens.
+func captureOverlay(upperDir string, overlay types.OverlayManifest, checkpointDir string, log logr.Logger) error {
+	referenced, err := criu.ReadReferencedPaths(checkpointDir)
+	if err != nil {
+		return fmt.Errorf("read the files the dump references: %w", err)
+	}
+	diff, err := snapshotruntime.CaptureRootfsDiff(upperDir, checkpointDir, snapshotruntime.RootfsDiffOptions{
+		Exclusions:     overlay.Exclusions,
+		BindMountDests: overlay.BindMountDests,
+		Keep:           referenced,
+	})
+	if errors.Is(err, snapshotruntime.ErrKeptFilesMissing) {
+		return fmt.Errorf("capture rootfs diff: %w", err)
+	}
+	if err != nil {
+		log.Error(err, "Failed to capture rootfs diff")
+	} else if len(diff.Kept) > 0 {
+		log.Info("Kept referenced files matched by rootfs exclusions",
+			"count", len(diff.Kept), "bytes", diff.KeptBytes, "paths", diff.Kept[:min(len(diff.Kept), 20)])
+	}
+	if _, err := snapshotruntime.CaptureDeletedFiles(upperDir, checkpointDir); err != nil {
+		log.Error(err, "Failed to capture deleted files")
+	}
+	return nil
 }
 
 func captureGPU(ctx context.Context, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot,

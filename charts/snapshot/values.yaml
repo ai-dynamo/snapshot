@@ -25,7 +25,7 @@ operator:
   resources:
     limits:
       cpu: 500m
-      memory: 128Mi
+      memory: 256Mi
     requests:
       cpu: 50m
       memory: 64Mi
@@ -86,7 +86,8 @@ runtime:
 openshift:
   enabled: false
 
-# Storage configuration for checkpoints
+# Installation-level storage configuration. The chart resolves these values for
+# the operator and PageBroker; backend details are not part of the agent API.
 storage:
   # Storage type stays snapshot-owned for future backend expansion.
   # Only pvc is implemented today.
@@ -96,14 +97,15 @@ storage:
   pvc:
     # Create a new PVC (set to false if using existing PVC)
     create: true
-    # PVC name used by the agent checkpoint store
+    # Checkpoint PVC name, in the Helm release namespace. Name and namespace
+    # identify the store; create/size/storageClass only control provisioning.
     name: snapshot-pvc
     # PVC size
     size: 1Ti
     # Storage class (leave empty for default)
     storageClass: ""
-    # Fixed PVC mount path inside every snapshot-agent pod. The privileged
-    # mount helper independently enforces this source root.
+    # Fixed container-local PVC mount path, not a store identity input. Artifacts
+    # use the claim root (/); the privileged helper enforces this local mount.
     basePath: /checkpoints
 
   # Reserved for future snapshot-owned backends. Unsupported today.
@@ -249,7 +251,10 @@ config:
   overlay:
     # Rootfs diff tar exclusions. Absolute-looking paths are normalized
     # relative to the tar root, and patterns starting with * are passed
-    # through as tar globs unchanged.
+    # through as tar globs unchanged. A file the checkpointed processes hold
+    # open or mapped at dump time is archived even when an exclusion matches
+    # it, so CRIU can reopen it. Other excluded files are not restored; the
+    # workload must recreate them if needed.
     exclusions:
       - /proc
       - /sys

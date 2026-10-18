@@ -219,16 +219,63 @@ func TestInstallProxyReplacesAnEarlierCopy(t *testing.T) {
 	assert.Len(t, entries, 1, "no temporary file may be left behind")
 }
 
-// Restores need NRI, so the agent stops when the runtime has none.
-func TestRunFailsWithoutNRI(t *testing.T) {
+// Without NRI, Start fails at once, and the agent restores without the proxy.
+func TestStartFailsWithoutNRI(t *testing.T) {
 	p, _ := testPlugin(t, &fakeResolver{})
 	p.socketPath = filepath.Join(t.TempDir(), "nri.sock") // nothing listens here
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	err := p.Run(ctx)
+	err := p.Start(ctx)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "could not register with the container runtime")
 	assert.NoError(t, ctx.Err(), "fails at once, without waiting")
+}
+
+func TestWithin(t *testing.T) {
+	failed := errors.New("failed")
+	assert.ErrorIs(t, within(time.Second, func() error { return failed }), failed)
+
+	block := make(chan struct{})
+	defer close(block)
+	err := within(10*time.Millisecond, func() error { <-block; return nil })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no answer in 10ms")
+}
+
+func TestDropsArgs(t *testing.T) {
+	for version, want := range map[string]bool{
+		"v0.8.0":  true, // containerd 2.0 and 2.1
+		"v0.9.1":  true,
+		"v0.10.0": false, // containerd 2.2
+		"v0.11.0": false,
+		"":        false, // unknown: not reported
+		"unknown": false,
+	} {
+		assert.Equal(t, want, dropsArgs(version), version)
+	}
+}
+
+func TestConfigure(t *testing.T) {
+	t.Run("a runtime that applies args keeps the default events", func(t *testing.T) {
+		p, _ := testPlugin(t, &fakeResolver{})
+		p.runtimeNRIVersion = func() string { return "v0.11.0" }
+
+		events, err := p.Configure(context.Background(), "", "containerd", "v2.2.1")
+
+		require.NoError(t, err)
+		assert.Zero(t, events, "zero keeps the events the plugin implements")
+	})
+
+	// Registration fails, as without NRI, and restores run without the proxy.
+	t.Run("a runtime that drops args is refused", func(t *testing.T) {
+		p, _ := testPlugin(t, &fakeResolver{})
+		p.runtimeNRIVersion = func() string { return "v0.8.0" }
+
+		_, err := p.Configure(context.Background(), "", "containerd", "v2.1.5")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "containerd 2.2 or newer")
+	})
 }

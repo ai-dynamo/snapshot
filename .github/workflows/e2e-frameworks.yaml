@@ -152,6 +152,9 @@ jobs:
       SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
       SNAPSHOT_E2E_MODE: vcluster
       SNAPSHOT_E2E_AVOID_MIG: "true"
+      # Expect the restore proxy where the agent has it: GPU nodes with
+      # containerd older than 2.2, or NRI disabled, restore without it.
+      SNAPSHOT_E2E_RESTORE_PROXY: auto
       SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
       SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
       SNAPSHOT_E2E_HELM_TIMEOUT: 6m
@@ -251,7 +254,7 @@ jobs:
 
       - name: Resolve Snapshot image tag
         if: ${{ steps.selected.outputs.run == 'true' && (inputs.snapshot_tag || '') == '' }}
-        timeout-minutes: 3
+        timeout-minutes: 23
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -269,7 +272,7 @@ jobs:
           # of its own; fall back to main's, loudly. main and release refs
           # stay strict: a nightly must test the commit it checked out.
           case "${GITHUB_REF_NAME}" in
-            main|release/*) python3 hack/resolve-snapshot-image-tag.py ;;
+            main|release/*) python3 hack/resolve-snapshot-image-tag.py --wait-seconds 1200 ;;
             *) python3 hack/resolve-snapshot-image-tag.py --fallback-main ;;
           esac
 

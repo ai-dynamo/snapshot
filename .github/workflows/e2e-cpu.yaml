@@ -46,6 +46,10 @@ on:
           without disturbing the cache other runs are reading.
         required: false
         default: ""
+      workers:
+        description: CPU tests run at once. 1 runs the whole suite serially.
+        required: false
+        default: "3"
 
 concurrency:
   group: snapshot-e2e-cpu-${{ github.ref }}
@@ -62,12 +66,17 @@ env:
   PYTHONUNBUFFERED: "1"
   UV_LINK_MODE: copy
   K3D_VERSION: v5.8.3
-  KUBECTL_VERSION: v1.32.13
+  KUBECTL_VERSION: v1.34.12
   # The k3d-managed registry hack/k3d-cpu-e2e.sh creates. localhost is the one
   # name Docker and BuildKit treat as plain-HTTP without further configuration;
   # the cluster is given a mirror that maps it to the registry's container.
   IMAGE_REGISTRY: localhost:5000
   IMAGE_TAG: cpu-e2e
+  # CPU tests run at once. Set to 1 to run the whole suite serially.
+  CPU_E2E_WORKERS: ${{ inputs.workers || '3' }}
+  # k3s 1.34 runs the restore proxy. Set, not detected, so a node that fails
+  # to set it up fails the tests.
+  SNAPSHOT_E2E_RESTORE_PROXY: "true"
   SNAPSHOT_E2E_MODE: direct
   SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
   SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
@@ -293,6 +302,8 @@ jobs:
           image.operator.pullPolicy=IfNotPresent
           image.agent.pullPolicy=IfNotPresent
           image.pageBroker.pullPolicy=IfNotPresent"
+          # For the install without the restore proxy, below.
+          printf 'SNAPSHOT_E2E_HELM_SET<<EOF\n%s\nEOF\n' "${SNAPSHOT_E2E_HELM_SET}" >>"${GITHUB_ENV}"
           uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-install \
             --skip-host-preflight
@@ -309,6 +320,7 @@ jobs:
         run: uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
       - name: Run CPU checkpoint/restore tests
+        id: tests
         timeout-minutes: 25
         env:
           # The cases this job exists to prove. pytest exits 0 when a test is
@@ -323,7 +335,39 @@ jobs:
           # Recorded even when the suite fails, so a slow run is still
           # measurable; the trap keeps the pipeline's exit status.
           trap 'hack/ci-phase.sh "Run CPU tests" "${start}"' EXIT
-          uv run --locked --project e2e pytest e2e/tests -m cpu -vv -s
+          rc=0
+          uv run --locked --project e2e pytest e2e/tests -m "cpu and not serial" \
+            -n "${CPU_E2E_WORKERS}" -vv || rc=$?
+          # Then the tests that must be alone on the node, one at a time. They
+          # run even when the first pass fails, so a red run still reports them.
+          SNAPSHOT_E2E_REQUIRED_TESTS= uv run --locked --project e2e pytest e2e/tests \
+            -m "cpu and serial" -vv -s || rc=$?
+          exit "${rc}"
+
+      # On nodes whose runtime is too old for the restore proxy, the agent
+      # restores without it. Check that path on k3s 1.32, whose containerd 2.1
+      # has NRI v0.8, with the images built above and two tests: a restore,
+      # and a failed one. Only after a pass, as it replaces the cluster that
+      # the diagnostics below would read.
+      - name: Run CPU tests without the restore proxy
+        if: ${{ steps.tests.outcome == 'success' }}
+        timeout-minutes: 25
+        env:
+          SNAPSHOT_E2E_K3S_IMAGE: docker.io/rancher/k3s:v1.32.13-k3s1
+          SNAPSHOT_E2E_RESTORE_PROXY: "false"
+          SNAPSHOT_E2E_REQUIRED_TESTS: >-
+            test_one_cpu_snapshot_restores_into_two_containers,
+            test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot
+        run: |
+          set -euo pipefail
+          hack/k3d-cpu-e2e.sh cluster-down-keep-registry
+          hack/k3d-cpu-e2e.sh cluster-up
+          for phase in snapshot-install snapshot-ready; do
+            uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+              --phase "${phase}" --skip-host-preflight
+          done
+          uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv \
+            -k "test_one_cpu_snapshot_restores_into_two_containers or test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot"
 
       # Last, and unconditional: the phases worth comparing are exactly the
       # ones a failing run also pays for.

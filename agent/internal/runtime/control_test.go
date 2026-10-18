@@ -10,91 +10,177 @@ import (
 	"testing"
 )
 
-func TestWriteSentinelInDir_CreatesFileAtomically(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := writeSentinelInDir(dir, "snapshot-complete", []byte("pid=42\n")); err != nil {
-		t.Fatalf("writeSentinelInDir failed: %v", err)
+// fakeContainer lays out procRoot/<pid>/root/snapshot-control, as the agent
+// sees a container through /host/proc, and returns procRoot, the PID and the
+// control directory. The PID is arbitrary: nothing reads the real /proc.
+func fakeContainer(t *testing.T) (procRoot string, pid int, controlDir string) {
+	t.Helper()
+	procRoot = t.TempDir()
+	pid = 4242
+	controlDir = filepath.Join(procRoot, "4242", "root", "snapshot-control")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
+	return procRoot, pid, controlDir
+}
 
-	data, err := os.ReadFile(filepath.Join(dir, "snapshot-complete"))
+func readSentinel(t *testing.T, path string) string {
+	t.Helper()
+	info, err := os.Lstat(path)
 	if err != nil {
 		t.Fatalf("sentinel not found: %v", err)
 	}
-	if string(data) != "pid=42\n" {
-		t.Errorf("unexpected sentinel contents: %q", data)
+	if !info.Mode().IsRegular() {
+		t.Fatalf("sentinel %s is %v, not a regular file", path, info.Mode())
 	}
-
-	entries, err := os.ReadDir(dir)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("failed to read dir: %v", err)
+		t.Fatal(err)
 	}
-	for _, e := range entries {
-		if e.Name() != "snapshot-complete" {
-			t.Errorf("unexpected leftover file %q in control dir", e.Name())
+	return string(data)
+}
+
+func TestWriteControlSentinelCreatesAndOverwrites(t *testing.T) {
+	procRoot, pid, controlDir := fakeContainer(t)
+
+	for _, contents := range []string{"pid=1\n", "pid=2\n"} {
+		if err := writeControlSentinel(procRoot, pid, "restore-complete", []byte(contents)); err != nil {
+			t.Fatalf("writeControlSentinel: %v", err)
+		}
+		if got := readSentinel(t, filepath.Join(controlDir, "restore-complete")); got != contents {
+			t.Errorf("sentinel = %q, want %q", got, contents)
 		}
 	}
-}
-
-func TestWriteSentinelInDir_Overwrites(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeSentinelInDir(dir, "restore-complete", []byte("pid=1\n")); err != nil {
-		t.Fatalf("first write failed: %v", err)
-	}
-	if err := writeSentinelInDir(dir, "restore-complete", []byte("pid=2\n")); err != nil {
-		t.Fatalf("second write failed: %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "restore-complete"))
+	entries, err := os.ReadDir(controlDir)
 	if err != nil {
-		t.Fatalf("sentinel not found: %v", err)
+		t.Fatal(err)
 	}
-	if string(data) != "pid=2\n" {
-		t.Errorf("unexpected sentinel contents: %q", data)
-	}
-}
-
-func TestWriteSentinelInDir_DirMissing(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	if err := writeSentinelInDir(missing, "snapshot-complete", nil); err == nil {
-		t.Fatal("expected error writing into missing directory")
+	if len(entries) != 1 {
+		t.Errorf("control dir has %d entries, want only the sentinel", len(entries))
 	}
 }
 
-func TestWriteControlSentinel_RejectsInvalidPID(t *testing.T) {
-	if err := WriteControlSentinel(0, "snapshot-complete", nil); err == nil {
-		t.Fatal("expected error for PID 0")
-	}
-	if err := WriteControlSentinel(-1, "snapshot-complete", nil); err == nil {
-		t.Fatal("expected error for negative PID")
+// Existing entries in the control directory are replaced, not written into.
+func TestWriteControlSentinelReplacesExistingEntries(t *testing.T) {
+	for name, entry := range map[string]string{
+		"a temporary name": ".restore-complete.tmp",
+		"the final name":   "restore-complete",
+	} {
+		t.Run(name, func(t *testing.T) {
+			procRoot, pid, controlDir := fakeContainer(t)
+			target := filepath.Join(t.TempDir(), "target")
+			if err := os.WriteFile(target, []byte("original\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(controlDir, entry)); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := writeControlSentinel(procRoot, pid, "restore-complete", []byte("pid=42\n")); err != nil {
+				t.Fatalf("writeControlSentinel: %v", err)
+			}
+
+			if got, _ := os.ReadFile(target); string(got) != "original\n" {
+				t.Errorf("link target = %q, want it unchanged", got)
+			}
+			if got := readSentinel(t, filepath.Join(controlDir, "restore-complete")); got != "pid=42\n" {
+				t.Errorf("sentinel = %q, want %q", got, "pid=42\n")
+			}
+		})
 	}
 }
 
-func TestControlSentinelExistsInDir(t *testing.T) {
-	dir := t.TempDir()
-	exists, err := controlSentinelExistsInDir(dir, "restore-complete")
-	if err != nil {
-		t.Fatalf("check missing sentinel: %v", err)
+// The control directory's path resolves inside the container's root.
+func TestWriteControlSentinelResolvesInContainerRoot(t *testing.T) {
+	procRoot, pid, controlDir := fakeContainer(t)
+	root := filepath.Dir(controlDir)
+	if err := os.Remove(controlDir); err != nil {
+		t.Fatal(err)
 	}
-	if exists {
-		t.Fatal("missing sentinel reported as present")
+	inRoot := filepath.Join(root, "elsewhere")
+	if err := os.Mkdir(inRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// An absolute link resolves against the container's root.
+	if err := os.Symlink("/elsewhere", controlDir); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := writeSentinelInDir(dir, "restore-complete", nil); err != nil {
-		t.Fatalf("writeSentinelInDir: %v", err)
+	if err := writeControlSentinel(procRoot, pid, "restore-failed", []byte("x\n")); err != nil {
+		t.Fatalf("writeControlSentinel: %v", err)
 	}
-	exists, err = controlSentinelExistsInDir(dir, "restore-complete")
-	if err != nil {
-		t.Fatalf("check existing sentinel: %v", err)
-	}
-	if !exists {
-		t.Fatal("existing sentinel reported as missing")
+
+	if got := readSentinel(t, filepath.Join(inRoot, "restore-failed")); got != "x\n" {
+		t.Errorf("sentinel = %q, want %q", got, "x\n")
 	}
 }
 
-func TestControlSentinelExistsInDir_MissingDir(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	if _, err := controlSentinelExistsInDir(missing, "restore-complete"); err == nil {
-		t.Fatal("expected error for missing control mount")
+func TestWriteControlSentinelErrors(t *testing.T) {
+	procRoot, pid, _ := fakeContainer(t)
+	for name, tc := range map[string]struct {
+		pid  int
+		name string
+	}{
+		"PID 0":              {pid: 0, name: "restore-complete"},
+		"negative PID":       {pid: -1, name: "restore-complete"},
+		"no such container":  {pid: pid + 1, name: "restore-complete"},
+		"a path, not a name": {pid: pid, name: "../restore-complete"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := writeControlSentinel(procRoot, tc.pid, tc.name, nil); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}
+
+func TestWriteControlSentinelWithoutControlDir(t *testing.T) {
+	procRoot, pid, controlDir := fakeContainer(t)
+	if err := os.Remove(controlDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeControlSentinel(procRoot, pid, "restore-complete", nil); err == nil {
+		t.Fatal("expected an error for a missing control mount")
+	}
+}
+
+func TestControlSentinelExists(t *testing.T) {
+	procRoot, pid, controlDir := fakeContainer(t)
+	check := func(wantExists, wantErr bool) {
+		t.Helper()
+		exists, err := controlSentinelExists(procRoot, pid, "restore-complete")
+		if (err != nil) != wantErr {
+			t.Fatalf("err = %v, want error %v", err, wantErr)
+		}
+		if exists != wantExists {
+			t.Fatalf("exists = %v, want %v", exists, wantExists)
+		}
+	}
+
+	check(false, false) // nothing there
+
+	path := filepath.Join(controlDir, "restore-complete")
+	if err := os.Symlink(filepath.Join(t.TempDir(), "anything"), path); err != nil {
+		t.Fatal(err)
+	}
+	check(false, true) // not a regular file
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check(true, false)
+}
+
+func TestControlSentinelExistsWithoutControlDir(t *testing.T) {
+	procRoot, pid, controlDir := fakeContainer(t)
+	if err := os.Remove(controlDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlSentinelExists(procRoot, pid, "restore-complete"); err == nil {
+		t.Fatal("expected an error for a missing control mount")
 	}
 }
 
@@ -107,8 +193,8 @@ func TestRemoveControlSentinel_MissingFile(t *testing.T) {
 
 func TestRemoveControlSentinel_RemovesExisting(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeSentinelInDir(dir, "restore-complete", nil); err != nil {
-		t.Fatalf("writeSentinelInDir: %v", err)
+	if err := os.WriteFile(filepath.Join(dir, "restore-complete"), nil, 0o644); err != nil {
+		t.Fatal(err)
 	}
 	if err := RemoveControlSentinel(dir, "restore-complete"); err != nil {
 		t.Fatalf("RemoveControlSentinel: %v", err)

@@ -44,10 +44,23 @@ fi
     exit 1
 }
 
+# The bundle names its own architecture: it carries the loader of the platform
+# it was built for.
+if [ -e "$workdir/bundle/libc/ld-linux-aarch64.so.1" ]; then
+    arch=arm64
+    loader=ld-linux-aarch64.so.1
+elif [ -e "$workdir/bundle/libc/ld-linux-x86-64.so.2" ]; then
+    arch=amd64
+    loader=ld-linux-x86-64.so.2
+else
+    echo "no known loader under $BUNDLE_SRC/libc" >&2
+    exit 1
+fi
+
 # The assertions are on what the restore produces, not on the argv: the flags
 # below mirror runtime.ApplyRootfsDiff, and a capability or xattr lost here
 # means the extract-side mask regressed there.
-docker run --rm --platform linux/amd64 -e DEBIAN_FRONTEND=noninteractive \
+docker run --rm --platform "linux/$arch" -e DEBIAN_FRONTEND=noninteractive -e LOADER="$loader" \
     -v "$workdir/bundle:/bundle:ro" "$PLACEHOLDER" sh -eu -c '
     apt-get update -qq >/dev/null
     apt-get install -y -qq attr libcap2-bin >/dev/null
@@ -66,7 +79,7 @@ docker run --rm --platform linux/amd64 -e DEBIAN_FRONTEND=noninteractive \
         echo "NOTE: a direct exec worked, so this placeholder is no longer older than the agent" >&2
     fi
 
-    /bundle/libc/ld-linux-x86-64.so.2 \
+    "/bundle/libc/$LOADER" \
       --library-path /bundle/libc:/bundle/lib \
       /bundle/tar \
       --xattrs --xattrs-include="user.*" --xattrs-include="security.capability" \

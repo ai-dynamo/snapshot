@@ -40,8 +40,8 @@ The program loads the model selected in `deployment.yaml`, runs one
 generation to initialize vLLM, and then calls `pause_generation()` and
 `sleep()`. It writes
 `ready-for-snapshot` only when the process is safe to checkpoint. In a restore
-container, it waits in standby until Snapshot injects the checkpointed process.
-That process calls `wake_up()` and `resume_generation()`, runs another
+container, Snapshot runs its restore proxy in place of the program and restores
+the checkpointed process. That process calls `wake_up()` and `resume_generation()`, runs another
 generation, starts an API, and writes `vllm-restore-ready` when the API is
 listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as

@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"slices"
 	"sync"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
 	"github.com/go-logr/logr"
+	"golang.org/x/mod/semver"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
@@ -42,6 +42,16 @@ const (
 	// ProxyBinaryPath is where the agent image ships the proxy.
 	ProxyBinaryPath = nsmount.SnapshotBinSrc + "/" + podcontract.RestoreProxyBinaryName
 
+	// argsNRIVersion is the first NRI version whose runtimes apply a
+	// container's args adjustment, containerd 2.2 and later. Older runtimes
+	// accept it and drop it silently.
+	argsNRIVersion = "v0.10.0"
+
+	// registerTimeout bounds Start. After registering, the stub waits for
+	// the runtime's Configure call without a deadline, and a runtime that
+	// drops the connection in between would hold the agent there forever.
+	registerTimeout = 30 * time.Second
+
 	// lookupTimeout bounds the API read for Pods without a container map. It
 	// runs inside the runtime's CreateContainer call. NRI gives that whole call
 	// 2 s by default, and drops a plugin that takes longer, so the read gets
@@ -58,10 +68,6 @@ const (
 	vclusterUIDAnnotation       = "vcluster.loft.sh/object-uid"
 )
 
-// proxyCommand is the proxy as the container sees it: the control directory
-// is mounted at SnapshotControlMountPath.
-var proxyCommand = []string{path.Join(podcontract.SnapshotControlMountPath, podcontract.RestoreProxyBinaryName)}
-
 // DestinationResolver returns the containers a restore Pod restores into.
 type DestinationResolver interface {
 	RestoreDestinations(ctx context.Context, pod *corev1.Pod) ([]string, error)
@@ -77,6 +83,11 @@ type Plugin struct {
 	openControlDir func(podUID, containerName string) (*os.File, error)
 	proxyPath      string
 	socketPath     string
+	// runtimeNRIVersion is the stub's, set in Start.
+	runtimeNRIVersion func() string
+	// stub and closed are set when Start registers.
+	stub   stub.Stub
+	closed chan struct{}
 }
 
 // NewPlugin returns a plugin that resolves destinations through resolver. If
@@ -95,11 +106,10 @@ func NewPlugin(resolver DestinationResolver, log logr.Logger, hostNamespace stri
 	}
 }
 
-// Run registers with the runtime and serves until ctx ends. It returns an
-// error if registration fails or the connection to the runtime drops, and the
-// agent then exits: restores need NRI, so a node without it must not look
-// healthy, and checkpoints taken there could not be restored on it either.
-func (p *Plugin) Run(ctx context.Context) error {
+// Start registers with the runtime. It fails when the runtime has no NRI, or
+// one too old for the restore proxy, and restores on the node then run without
+// the proxy.
+func (p *Plugin) Start(ctx context.Context) error {
 	closed := make(chan struct{})
 	var once sync.Once
 	opts := []stub.Option{
@@ -114,23 +124,67 @@ func (p *Plugin) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create NRI plugin: %w", err)
 	}
-	if err := s.Start(ctx); err != nil {
-		return fmt.Errorf("NRI plugin could not register with the container runtime; "+
-			"restores need NRI, so the agent stops. Enable NRI in the runtime, or keep the agent off this node: %w", err)
+	// Configure, called during Start, reads the runtime's NRI version.
+	p.runtimeNRIVersion = s.RuntimeNRIVersion
+	if err := within(registerTimeout, func() error { return s.Start(ctx) }); err != nil {
+		return fmt.Errorf("NRI plugin could not register with the container runtime: %w", err)
 	}
+	p.stub, p.closed = s, closed
+	return nil
+}
+
+// within runs fn, and returns an error if it takes longer than timeout. fn
+// keeps running after that, and its result is dropped.
+func within(timeout time.Duration, fn func() error) error {
+	errC := make(chan error, 1)
+	go func() { errC <- fn() }()
+	select {
+	case err := <-errC:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("no answer in %s", timeout)
+	}
+}
+
+// Wait serves a started plugin until ctx ends. It returns an error if the
+// connection to the runtime drops, and the agent then exits: it registers
+// again when it restarts, or restores without the proxy if it cannot.
+func (p *Plugin) Wait(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
-		s.Stop()
+		p.stub.Stop()
 		return nil
-	case <-closed:
+	case <-p.closed:
 		// Stopping the stub also closes the connection, so a shutdown can
 		// land here too.
-		s.Stop()
+		p.stub.Stop()
 		if ctx.Err() != nil {
 			return nil
 		}
 		return errors.New("NRI connection to the container runtime closed")
 	}
+}
+
+// Configure is called when the plugin registers. It refuses a runtime too old
+// to apply the restore proxy command, which fails the registration, as a
+// runtime without NRI does.
+func (p *Plugin) Configure(_ context.Context, _, runtime, version string) (api.EventMask, error) {
+	nriVersion := ""
+	if p.runtimeNRIVersion != nil {
+		nriVersion = p.runtimeNRIVersion()
+	}
+	if dropsArgs(nriVersion) {
+		return 0, fmt.Errorf("container runtime %s/%s has NRI %s, which ignores the restore proxy command; "+
+			"the restore proxy needs NRI %s or newer (containerd 2.2 or newer)", runtime, version, nriVersion, argsNRIVersion)
+	}
+	p.log.Info("Registered with the container runtime", "runtime", runtime+"/"+version, "nri_version", nriVersion)
+	return 0, nil
+}
+
+// dropsArgs reports whether a runtime with this NRI version drops a
+// container's args adjustment. An unknown version is not reported.
+func dropsArgs(nriVersion string) bool {
+	return semver.IsValid(nriVersion) && semver.Compare(nriVersion, argsNRIVersion) < 0
 }
 
 // CreateContainer shapes restore destination containers and leaves every
@@ -175,7 +229,7 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	}
 
 	adjust := &api.ContainerAdjustment{}
-	adjust.SetArgs(proxyCommand)
+	adjust.SetArgs([]string{podcontract.RestoreProxyPath})
 	log.Info("Restore proxy is PID 1", "control_dir", dir.Name())
 	return adjust, nil, nil
 }

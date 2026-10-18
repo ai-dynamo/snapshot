@@ -11,6 +11,8 @@ agent injects the restore tooling at runtime.
 
 > [!NOTE]
 > TensorRT-LLM support is experimental and currently limited to a single GPU.
+> On arm64, set `TLLM_WORKER_USE_SINGLE_PROCESS=1` in the container `env`; without
+> it the checkpoint hangs.
 
 ## 1. Download the example files
 
