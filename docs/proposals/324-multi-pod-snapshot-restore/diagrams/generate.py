@@ -303,11 +303,11 @@ CHECKPOINT = (
      ("R", "Relays", "other ranks", "t"), ("W", "Workload", "processes, shims", "g")],
     [
         ("m", "O", "A", "member PodSnapshotContent, owned through its PodSnapshot by the set"),
-        ("s", "A", "read rank, size, and attempt from the parent PodSetSnapshot"),
+        ("s", "A", "read rank, size, and UID from the parent PodSetSnapshot"),
         ("s", "W", "finish GPU work, park"),
         ("m", "W", "A", "ready-for-snapshot (readiness probe)"),
-        ("m", "A", "C", "Attach(session, rank) with a Pod-bound token"),
-        ("m", "C", "A", "Welcome {size, members, deadlines}", 1),
+        ("m", "A", "C", "Attach(session UID, member ID) with a Pod-bound token"),
+        ("m", "C", "A", "Welcome {epoch, rank, size, members, deadline}", 1),
         ("g", "admission · no side effects"),
         ("m", "A", "C", "all-gather snapshot/admit {Pod IP, fabric domain, versions}"),
         ("m", "C", "A", "payloads of every rank", 1),
@@ -371,7 +371,8 @@ RESTORE = (
     [
         ("m", "O", "A", "restore Pods with restore-set, PodSetRestore mapping member IDs to Pods"),
         ("s", "A", "preflight: artifact, compatibility, GPU map, probe budget"),
-        ("m", "A", "C", "Attach(session, rank)"),
+        ("m", "A", "C", "Attach(session UID, member ID) with a Pod-bound token"),
+        ("m", "C", "A", "Welcome {epoch, rank, size, members, deadline}", 1),
         ("g", "admission · no side effects"),
         ("m", "A", "C", "all-gather snapshot/admit {new IP, capture ID, fabric domain, GPUs}"),
         ("m", "C", "A", "payloads of every rank: IP map with the artifact table, checks", 1),
@@ -548,61 +549,90 @@ def lifecycle():
 
 
 def phases():
+    """Two columns: each step of a group checkpoint and a group restore, with
+    the commit line, and the restore fork where the sockets-restored barrier
+    runs alongside CUDA restore and the cuInterpose rounds."""
     b = []
-    cols = [
-        (40, "Checkpoint", [
-            ("p", "Admission: inspect, all-gather"),
-            ("p", "Barrier: prepare"),
-            ("a", "CUDA prepare: libraries tear down"),
-            ("t", "Round: begin, revalidate"),
-            ("COMMIT",),
-            ("t", "Rounds: destructive phases"),
-            ("g", "CUDA lock and checkpoint"),
-            ("p", "Barrier: net-freeze"),
-            ("g", "CRIU dump"),
-        ]),
-        (380, "Restore", [
-            ("p", "Admission: all-gather, IP map"),
-            ("COMMIT",),
-            ("g", "Hold flows, CRIU restore"),
-            ("p", "Barrier: sockets-restored"),
-            ("g", "CUDA restore and unlock"),
-            ("t", "Rounds: rebuild shared memory"),
-            ("p", "Barrier: resume, endpoint"),
-            ("a", "CUDA resume: libraries rendezvous"),
-            ("p", "Barrier: release, restore-complete"),
-        ]),
-    ]
-    bottom = 0
-    for x, title, steps in cols:
-        w = 300
+    W, w, H40, H56, gap = 750, 330, 40, 56, 16
+
+    def commit(x, y):
+        b.append(T(x, y, "commit", "tm", 12, anchor="start"))
+        b.append(line(x + 52, y, x + w, y, cls="frm", marker=None, dash="5 4", width=1.2))
+
+    def column(x, title, steps, y=50):
         b.append(T(x + w / 2, 30, title, "tx", 15, True))
-        y = 50
         prev = None
         for st in steps:
             if st[0] == "COMMIT":
-                mid = y + 6
-                b.append(T(x, mid, "commit", "tm", 12, anchor="start"))
-                b.append(line(x + 52, mid, x + w, mid, cls="frm", marker=None, dash="5 4", width=1.2))
+                commit(x, y + 6)
                 y += 16
                 continue
             if prev is not None:
                 b.append(line(x + w / 2, prev, x + w / 2, y - 2))
-            b += box(x, y, w, 40, st[0], st[1])
-            prev = y + 40
-            y += 56
-        bottom = max(bottom, y)
-    ly = bottom + 8
+            b.extend(box(x, y, w, H40, st[0], st[1]))
+            prev = y + H40
+            y += H40 + gap
+        return y, prev
+
+    # Checkpoint: every step in sequence.
+    ck_bottom, _ = column(30, "Checkpoint", [
+        ("p", "Admission: all-gather"),
+        ("t", "Round: inspect, validate"),
+        ("p", "Barrier: prepare"),
+        ("a", "CUDA prepare: libraries tear down"),
+        ("t", "Round: begin, revalidate"),
+        ("COMMIT",),
+        ("t", "Rounds: destructive phases"),
+        ("g", "CUDA lock and checkpoint"),
+        ("p", "Hold flows, barrier: net-freeze"),
+        ("g", "CRIU dump"),
+    ])
+
+    # Restore: sequence, then a fork, then a join.
+    x = 390
+    y, prev = column(x, "Restore", [
+        ("p", "Admission: all-gather, IP map"),
+        ("COMMIT",),
+        ("g", "Hold flows, CRIU restore"),
+    ])
+    lx, lw = x, 150                      # left branch: the barrier
+    rx, rw = x + w - 168, 168            # right branch: CUDA, then rounds
+    lcx, rcx = lx + lw / 2, rx + rw / 2
+    b.append(line(lcx, prev, lcx, y - 2))
+    b.append(line(rcx, prev, rcx, y - 2))
+    b.append(T((lcx + rcx) / 2, (prev + y) / 2, "in parallel", "tm", 12))
+    b.extend(box(lx, y, lw, H56, "p", "Sockets-restored", "barrier, lift the hold"))
+    b.extend(box(rx, y, rw, H56, "g", "CUDA restore", "and unlock"))
+    left_bottom = y + H56
+    y2 = y + H56 + gap
+    b.append(line(rcx, y + H56, rcx, y2 - 2))
+    b.extend(box(rx, y2, rw, H56, "t", "Rounds", "inspect, rebuild, verify"))
+    right_bottom = y2 + H56
+    y3 = y2 + H56 + gap + 8
+    b.append(line(lcx, left_bottom, lcx, y3 - 2))
+    b.append(line(rcx, right_bottom, rcx, y3 - 2))
+    prev = None
+    for k, label in (("p", "Endpoint, barrier: resume"),
+                     ("a", "CUDA resume: libraries rendezvous"),
+                     ("p", "Barrier: release, restore-complete")):
+        if prev is not None:
+            b.append(line(x + w / 2, prev, x + w / 2, y3 - 2))
+        b.extend(box(x, y3, w, H40, k, label))
+        prev = y3 + H40
+        y3 += H40 + gap
+
+    ly = max(ck_bottom, y3) + 8
     for i, (k, label) in enumerate((("p", "Session step"), ("t", "cuInterpose rounds"),
                                     ("a", "CUDA Checkpoint phase"), ("g", "Existing step"))):
-        lx = 40 + i * 165
-        b.append(f'<rect class="k-{k}" x="{lx}" y="{ly}" width="12" height="12" rx="2" stroke-width="0.8"/>')
-        b.append(T(lx + 18, ly + 6, label, "tm", 12, anchor="start"))
-    svg("phases.svg", 720, ly + 34, "Phases of a group checkpoint and a group restore",
-        "Checkpoint: admission, prepare barrier, CUDA prepare, a revalidation round, commit, destructive cuInterpose "
-        "rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU dump. Restore: admission, commit, CRIU restore "
-        "under a narrow hold, sockets-restored barrier, CUDA restore and unlock, cuInterpose rebuild rounds, resume "
-        "barrier, CUDA resume, release barrier.", b)
+        lx2 = 30 + i * 175
+        b.append(f'<rect class="k-{k}" x="{lx2}" y="{ly}" width="12" height="12" rx="2" stroke-width="0.8"/>')
+        b.append(T(lx2 + 18, ly + 6, label, "tm", 12, anchor="start"))
+    svg("phases.svg", W, ly + 34, "Phases of a group checkpoint and a group restore",
+        "Checkpoint: admission all-gather, an INSPECT round, prepare barrier, CUDA prepare, a revalidation round, "
+        "commit, destructive cuInterpose rounds, CUDA lock and checkpoint, hold and net-freeze barrier, CRIU dump. "
+        "Restore: admission, commit, CRIU restore under a narrow hold, then in parallel the sockets-restored barrier "
+        "and CUDA restore with the cuInterpose rounds, then the endpoint and resume barrier, CUDA resume, and the "
+        "release barrier.", b)
 
 
 def main():

@@ -357,11 +357,12 @@ with every connection it accepted, when the session closes.
 *Figure 4. Phases of a group checkpoint and a group restore.*
 
 Figure 4 shows how the session steps, the cuInterpose rounds, and CUDA
-Checkpoint's phases interleave with the steps Snapshot already performs, and
-where each attempt commits. Figures 5 and 6 expand both columns into complete
-sequences, in which every shaded band labeled "round" is one instance of
-Figure 3, drawn with the same messages so that each round can be traced from
-the leader's command to the replies it collects.
+Checkpoint's phases interleave with the steps Snapshot already performs, where
+each attempt commits, and where a restore runs the `sockets-restored` barrier in
+parallel with CUDA restore and the cuInterpose rounds. Figures 5 and 6 expand
+both columns into complete sequences, in which every shaded band labeled "round"
+is one instance of Figure 3, drawn with the same messages so that each round can
+be traced from the leader's command to the replies it collects.
 
 ### Group checkpoint
 
@@ -742,7 +743,7 @@ configuration change.
 ### Performance and Scalability
 
 Coordination is cheap relative to the data that capture and restore move. A
-capture adds five cuInterpose rounds and four barriers, and a restore eight
+capture adds five cuInterpose rounds and three barriers, and a restore eight
 rounds and four barriers, each costing a few in-cluster round trips. The largest
 payloads are cuInterpose's topology records, which reach at most 32 MiB per
 member and are gathered only to rank 0, whereas handle tables grow by about 128
