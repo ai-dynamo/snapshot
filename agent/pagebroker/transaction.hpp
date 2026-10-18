@@ -103,6 +103,7 @@ class Transaction {
   // Allows one terminal retention only after staging and reservations are released.
   bool CanRetainTerminal() const;
   void ReleaseReservation() noexcept;
+  void ReleaseAbortedDestination();
   std::mutex mutex_;
   State state_ = State::NEW;
   Descriptor descriptor_;
