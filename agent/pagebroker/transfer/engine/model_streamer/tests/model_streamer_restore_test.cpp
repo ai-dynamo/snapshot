@@ -36,12 +36,12 @@ class RestoreContentsTest : public ::testing::Test {
 TEST_F(RestoreContentsTest, CancellationAndDeadlineRejectBeforeCreatingStaging)
 {
   const auto plan = Plan("data");
-  std::stop_source cancellation;
-  cancellation.request_stop();
+  Cancellation cancellation;
+  cancellation.Cancel();
   const auto destination = root_.path() / "cancelled";
-  EXPECT_THROW(restore_.Stage(plan, destination, {TransferControl::Clock::time_point::max(), cancellation.get_token()}), TransferInterrupted);
+  EXPECT_THROW(restore_.Stage(plan, destination, cancellation), CancellationError);
   EXPECT_FALSE(fs::exists(destination));
-  EXPECT_THROW(restore_.Stage(plan, destination, {TransferControl::Clock::now(), {}}), TransferInterrupted);
+  EXPECT_THROW(restore_.Stage(plan, destination, Cancellation(Cancellation::Clock::now())), CancellationError);
   EXPECT_FALSE(fs::exists(destination));
   EXPECT_NO_THROW(restore_.Stage(plan, root_.path() / "retry"));
 }
