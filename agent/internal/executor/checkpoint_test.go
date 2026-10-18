@@ -437,3 +437,18 @@ func TestCheckpointNeedsSourceKill(t *testing.T) {
 	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
 	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
 }
+
+// A rootfs-diff capture failure must fail the checkpoint. Swallowing it publishes an
+// artifact whose restore silently drops every container-created file.
+func TestCaptureOverlayFailsCheckpointOnRootfsDiffError(t *testing.T) {
+	manifest := &types.CheckpointManifest{}
+
+	// Absent upperdir: nothing to capture, no failure.
+	duration, err := captureOverlay("", t.TempDir(), manifest)
+	require.NoError(t, err)
+	assert.Zero(t, duration)
+
+	// Unreadable upperdir: tar fails and the error must propagate.
+	_, err = captureOverlay(filepath.Join(t.TempDir(), "missing-upperdir"), t.TempDir(), manifest)
+	require.ErrorContains(t, err, "failed to capture rootfs diff")
+}
