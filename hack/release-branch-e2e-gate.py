@@ -10,12 +10,15 @@ picks the (branch, workflow) pairs a sweep should dispatch.
 A pair runs when the branch has moved since that suite last ran on it: the
 newest run of the suite on the branch is compared with the branch head, so a
 branch nobody touched is skipped and a run already covering the head is not
-duplicated. The newest run counts whatever its conclusion, because re-running
-the same suite on the same commit would only repeat the result; use --force,
-or dispatch the suite directly, to retry a failure in place. A suite absent
-from a branch is skipped: release branches cut before a suite existed do not
-carry its workflow file. If the run history cannot be read, every pair runs.
-Prints the JSON list of pairs to dispatch.
+duplicated. The newest run counts whether it passed, failed or is still going,
+because re-running the same suite on the same commit would only repeat the
+result; use --force, or dispatch the suite directly, to retry a failure in
+place. A cancelled run is the exception: it reached no verdict, so it must not
+stand in for one. A suite absent from a branch is skipped, which is how
+release branches cut before a suite existed stay quiet. If a lookup fails, the
+pair it failed on runs and the rest are still judged on their own history, so
+one flaky read cannot dispatch every GPU suite at once. Prints the JSON list
+of pairs to dispatch.
 """
 
 from __future__ import annotations
@@ -99,10 +102,20 @@ def version_key(branch: str) -> tuple[int, ...]:
     return tuple(key)
 
 
-def last_run_sha(*, repository: str, workflow: str, branch: str, headers: dict[str, str]) -> str | None:
-    """Head SHA of the newest run of this suite on this branch, if any."""
+def last_run_sha(
+    *, repository: str, workflow: str, branch: str, headers: dict[str, str], max_runs: int = 20
+) -> str | None:
+    """Head SHA of the newest run of this suite that stands as coverage.
+
+    Pull request runs are excluded: they test a merge commit, not the branch
+    head. Cancelled runs are skipped, so cancelling a sweep does not suppress
+    the next one; a run still in flight does count, which is what keeps a
+    sweep from dispatching a second copy of one already going.
+    """
     base = f"https://api.github.com/repos/{repository}/actions"
-    query = urllib.parse.urlencode({"branch": branch, "per_page": 1})
+    query = urllib.parse.urlencode(
+        {"branch": branch, "exclude_pull_requests": "true", "per_page": max_runs}
+    )
     try:
         payload = github_json(f"{base}/workflows/{workflow}/runs?{query}", headers)
     except urllib.error.HTTPError as exc:
@@ -110,7 +123,11 @@ def last_run_sha(*, repository: str, workflow: str, branch: str, headers: dict[s
             raise
         return None
     runs = payload.get("workflow_runs", []) if isinstance(payload, dict) else []
-    return runs[0]["head_sha"] if runs else None
+    for run in runs:
+        if run.get("conclusion") == "cancelled":
+            continue
+        return run["head_sha"]
+    return None
 
 
 def workflow_present(*, repository: str, workflow: str, branch: str, headers: dict[str, str]) -> bool:
@@ -157,13 +174,12 @@ def main() -> int:
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    history_error: str | None = None
     try:
         branches = release_branches(repository=args.repository, headers=headers)
         if args.branches:
             wanted = {item.strip() for item in args.branches.split(",") if item.strip()}
             branches = [branch for branch in branches if branch["branch"] in wanted]
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"error: cannot list release branches ({exc})", file=sys.stderr)
         return 1
 
@@ -171,9 +187,6 @@ def main() -> int:
     for branch in branches:
         for workflow in workflows:
             pair = {"branch": branch["branch"], "workflow": workflow}
-            if history_error:
-                decisions.append((pair, True, history_error))
-                continue
             try:
                 present = workflow_present(
                     repository=args.repository, workflow=workflow, branch=pair["branch"], headers=headers
@@ -185,10 +198,13 @@ def main() -> int:
                     if present
                     else None
                 )
-            except (OSError, ValueError) as exc:
-                history_error = f"run history unavailable ({exc})"
-                print(f"warning: {history_error}; dispatching every pair", file=sys.stderr)
-                decisions.append((pair, True, history_error))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                # Fail open for this pair alone. Failing open for every pair
+                # left would let one flaky read start a GPU suite on every
+                # release branch at once, and they share a single runner.
+                reason = f"history unavailable for this suite ({exc})"
+                decisions.append((pair, True, reason))
+                print(f"dispatch {pair['branch']} {workflow}: {reason}", file=sys.stderr)
                 continue
             run, reason = decide(
                 force=args.force,

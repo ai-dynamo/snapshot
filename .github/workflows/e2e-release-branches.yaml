@@ -84,15 +84,19 @@ jobs:
           PAIRS: ${{ steps.select.outputs.pairs }}
         run: |
           set -euo pipefail
+          # Parsed before the loop, not piped into it: a `done < <(... | jq)`
+          # process substitution hides a jq failure from set -e, so malformed
+          # input would run the loop zero times and report success.
+          pairs="$(echo "${PAIRS}" | jq -r '.[] | "\(.branch) \(.workflow)"')"
           failed=0
           while read -r branch workflow; do
             [ -n "${branch}" ] || continue
             echo "dispatching ${workflow} on ${branch}"
             if ! gh workflow run "${workflow}" --repo "${GITHUB_REPOSITORY}" --ref "${branch}"; then
-              echo "::warning::failed to dispatch ${workflow} on ${branch}"
+              echo "::error::failed to dispatch ${workflow} on ${branch}"
               failed=1
             fi
-          done < <(echo "${PAIRS}" | jq -r '.[] | "\(.branch) \(.workflow)"')
+          done <<< "${pairs}"
           exit "${failed}"
 
       - name: Report an empty sweep
