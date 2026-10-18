@@ -9,6 +9,7 @@
 
 #include "transfer/filesystem/filesystem_storage.hpp"
 #include "transfer/engine/transfer_engine.hpp"
+#include "utils/sha256.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -47,10 +48,10 @@ S3StorageBackend::Client() const
   return *client_;
 }
 
-RestorePlan
-S3StorageBackend::UploadFiles(const Path& source, RestorePlan plan, TransferControl control) const
+void
+S3StorageBackend::UploadFiles(const Path& source, const RestorePlan& plan, TransferControl control) const
 {
-  for (auto& file : plan.files) {
+  for (const auto& file : plan.files) {
     control.Check();
     const auto slash = file.source_locator.find('/', 5);
     const S3ObjectLocation destination{file.source_locator.substr(5, slash - 5), file.source_locator.substr(slash + 1)};
@@ -61,9 +62,7 @@ S3StorageBackend::UploadFiles(const Path& source, RestorePlan plan, TransferCont
       error.remote_state = S3RemoteState::COMPLETED;
       throw error;
     }
-    file.expected_sha256 = result.sha256;
   }
-  return plan;
 }
 
 PublishedArtifact
@@ -131,26 +130,22 @@ S3StorageBackend::InspectCheckpoint(const Path& source, const PublishedArtifact&
 {
   ValidateCheckpoint(storage);
   auto plan = filesystem_storage::BuildRestorePlan(source, control, kMaxCheckpointEntries);
-  (void)ValidateCheckpointPlan(plan, false);
+  (void)ValidateCheckpointPlan(plan);
   for (auto& file : plan.files) {
     const auto object = Object(storage, "data/" + file.relative_path.generic_string());
     object.Validate();
     config_.transfer.upload_limits.ValidateFileSize(file.size_bytes);
     file.source_locator = "s3://" + object.bucket + "/" + object.key;
-    // Digests have fixed encoded length. Bound the final index before writes
-    // without a second checksum pass over every source file.
-    file.expected_sha256 = utils::Sha256Digest{};
   }
   (void)SerializeCheckpointIndex(plan);
-  for (auto& file : plan.files)
-    file.expected_sha256.reset();
   return plan;
 }
 
 std::string
 S3StorageBackend::UploadCheckpointPayloads(const Path& source, RestorePlan plan, TransferControl control) const
 {
-  return SerializeCheckpointIndex(UploadFiles(source, std::move(plan), control));
+  UploadFiles(source, plan, control);
+  return SerializeCheckpointIndex(plan);
 }
 
 bool

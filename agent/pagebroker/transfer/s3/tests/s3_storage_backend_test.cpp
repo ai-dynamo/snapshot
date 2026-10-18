@@ -43,7 +43,7 @@ TEST(S3StorageBackendTest, BindsIdentityBeforeStorageIO)
   target.mutable_artifact()->set_container_name("main");
   const auto artifact = backend.ResolveTarget(target);
   EXPECT_EQ(artifact.SerializeAsString(), backend.ResolveTarget(target).SerializeAsString());
-  EXPECT_EQ(artifact.artifact_handle().size(), 64);
+  EXPECT_EQ(artifact.artifact_handle(), "1af8613931732ed5268feb17176aa79ed0feae2dd18071c26068c4bbef2070c3");
   target.mutable_artifact()->set_container_name("sidecar");
   EXPECT_NE(artifact.artifact_handle(), backend.ResolveTarget(target).artifact_handle());
   target.set_store_id("another-store");
@@ -65,6 +65,20 @@ TEST(S3StorageBackendTest, BindsIdentityBeforeStorageIO)
   }
 }
 
+TEST(S3StorageBackendTest, SeparatesIdentityTupleBoundaries)
+{
+  const auto config = ParseS3Config(R"({"storeId":"test-store","endpoint":"https://unused.invalid","region":"us-east-1","bucket":"test-bucket"})");
+  S3StorageBackend backend(config);
+  ArtifactTarget target;
+  target.set_store_id(config.store_id);
+  target.mutable_artifact()->set_artifact_uid("ab");
+  target.mutable_artifact()->set_container_name("c");
+  const auto first = backend.ResolveTarget(target);
+  target.mutable_artifact()->set_artifact_uid("a");
+  target.mutable_artifact()->set_container_name("bc");
+  EXPECT_NE(first.artifact_handle(), backend.ResolveTarget(target).artifact_handle());
+}
+
 TEST(S3StorageBackendTest, PreflightsCompleteCaptureWithoutStorageIO)
 {
   test::TemporaryDirectory root;
@@ -77,7 +91,6 @@ TEST(S3StorageBackendTest, PreflightsCompleteCaptureWithoutStorageIO)
   std::ofstream(root.path() / "manifest.yaml") << "version: 1\n";
   const auto plan = backend.InspectCheckpoint(root.path(), destination, {});
   ASSERT_EQ(plan.files.size(), 1);
-  EXPECT_FALSE(plan.files.front().expected_sha256);
   EXPECT_EQ(plan.files.front().source_locator, "s3://test-bucket/" + std::string(64, 'a') + "/data/manifest.yaml");
   fs::create_symlink(root.path() / "manifest.yaml", root.path() / "link");
   EXPECT_THROW(backend.InspectCheckpoint(root.path(), destination, {}), std::runtime_error);

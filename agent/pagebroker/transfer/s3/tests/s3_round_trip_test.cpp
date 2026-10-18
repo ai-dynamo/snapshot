@@ -30,6 +30,7 @@
 #include "transfer/filesystem/filesystem_storage.hpp"
 #include "transfer/s3/s3_storage_backend.hpp"
 #include "tests/temporary_directory.hpp"
+#include "tests/file_contents.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -122,18 +123,17 @@ class S3RoundTripTest : public ::testing::Test {
     RestorePlan plan;
     plan.root_permissions = fs::perms::owner_all;
     plan.files.push_back({"s3://" + result.destination.bucket + "/" + result.destination.key,
-                          "data", result.size_bytes, fs::perms::owner_read, result.sha256});
+                          "data", result.size_bytes, fs::perms::owner_read});
     return plan;
   }
 
   void VerifyFile(const S3UploadResult& result, const Path& source, const std::string& name)
   {
     ASSERT_EQ(result.size_bytes, fs::file_size(source));
-    ASSERT_EQ(result.sha256, utils::ComputeFileSha256(source));
     ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
     const auto destination = temporary_.path() / name;
     restore_reader.Stage(FilePlan(result), destination);
-    EXPECT_EQ(utils::ComputeFileSha256(destination / "data"), utils::ComputeFileSha256(source));
+    EXPECT_TRUE(test::FilesEqual(source, destination / "data"));
     EXPECT_EQ(fs::status(destination / "data").permissions(), fs::perms::owner_read);
   }
 
@@ -202,7 +202,6 @@ TEST_F(S3RoundTripTest, UploadsAndRestoresVerifiedTree)
       ASSERT_NE(file, plan.files.end());
       EXPECT_EQ(file->source_locator, "s3://" + bucket_ + "/roundtrip/tree/" + Artifact().artifact_handle() + "/data/" + relative.generic_string());
       EXPECT_EQ(file->size_bytes, entry.file_size());
-      EXPECT_EQ(file->expected_sha256, utils::ComputeFileSha256(entry.path()));
       EXPECT_EQ(file->permissions, entry.status().permissions());
     }
   }
@@ -223,7 +222,7 @@ TEST_F(S3RoundTripTest, UploadsAndRestoresVerifiedTree)
   }
   for (const auto& file : plan.files) {
     EXPECT_EQ(fs::file_size(destination / file.relative_path), fs::file_size(source / file.relative_path));
-    EXPECT_EQ(utils::ComputeFileSha256(destination / file.relative_path), utils::ComputeFileSha256(source / file.relative_path));
+    EXPECT_TRUE(test::FilesEqual(source / file.relative_path, destination / file.relative_path));
     EXPECT_EQ(fs::status(destination / file.relative_path).permissions(), file.permissions);
   }
 }
@@ -522,7 +521,7 @@ TEST_F(S3RoundTripTest, DoesNotClaimCleanupItCannotVerify)
   EXPECT_EQ(error.cleanup_state, S3CleanupState::UNCONFIRMED);
 }
 
-TEST_F(S3RoundTripTest, SourceTruncationNeverReturnsAVerifiedUpload)
+TEST_F(S3RoundTripTest, RejectsSourceTruncationDuringUpload)
 {
   S3Client uploader(connection_, limits_);
   const auto source = temporary_.path() / "source";
@@ -571,21 +570,18 @@ TEST_F(S3RoundTripTest, ReportsLostInitiationWithoutClaimingCleanup)
   EXPECT_EQ(error.cleanup_state, S3CleanupState::UNCONFIRMED);
 }
 
-TEST_F(S3RoundTripTest, DetectsCorruptionThroughNativeReader)
+TEST_F(S3RoundTripTest, RejectsTruncatedReadAndKeepsSessionUsable)
 {
-  S3StorageBackend storage(Config("corrupt"));
+  S3StorageBackend storage(Config("truncated-read"));
   ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
-  const auto source = SingleFileTree("integrity-source");
-  const auto corrupt = PublishTree(storage, source);
-  EXPECT_THROW(restore_reader.Stage(corrupt, temporary_.path() / "corrupt"), std::runtime_error);
-  EXPECT_EQ(fs::status(temporary_.path() / "corrupt/data").permissions(), fs::perms::owner_read | fs::perms::owner_write);
+  const auto source = SingleFileTree("truncation-source");
   const auto good = PublishTree(storage, source, 'b');
   auto truncated = good;
   ++truncated.files.front().size_bytes;
   EXPECT_THROW(restore_reader.Stage(truncated, temporary_.path() / "truncated"), std::runtime_error);
   EXPECT_EQ(fs::status(temporary_.path() / "truncated/data").permissions(), fs::perms::owner_read | fs::perms::owner_write);
-  EXPECT_NO_THROW(restore_reader.Stage(good, temporary_.path() / "integrity-recovered"));
-  EXPECT_EQ(utils::ComputeFileSha256(temporary_.path() / "integrity-recovered/data"), utils::ComputeFileSha256(source / "data"));
+  EXPECT_NO_THROW(restore_reader.Stage(good, temporary_.path() / "read-recovered"));
+  EXPECT_TRUE(test::FilesEqual(source / "data", temporary_.path() / "read-recovered/data"));
 }
 
 TEST_F(S3RoundTripTest, BoundsConcurrentUploadsAndIsolatesFailure)
@@ -609,7 +605,7 @@ TEST_F(S3RoundTripTest, BoundsConcurrentUploadsAndIsolatesFailure)
     const auto plan = uploads[i].get();
     restores.push_back(std::async(std::launch::async, [&, plan, destination] {
       restore_reader.Stage(plan, destination);
-      EXPECT_EQ(utils::ComputeFileSha256(destination / "data"), utils::ComputeFileSha256(source / "data"));
+      EXPECT_TRUE(test::FilesEqual(source / "data", destination / "data"));
     }));
   }
   failing.get();
@@ -706,7 +702,7 @@ TEST_F(S3RoundTripTest, CoexistsWithReaderAndMultipleUploaderLifetimes)
   ModelStreamerRestore reader(ReaderOptions(), std::chrono::seconds(30));
   RestorePlan reader_fixture;
   reader_fixture.files.push_back({"s3://" + bucket_ + "/fixture/small", "data", fs::file_size(fixture_ / "small"),
-                                  fs::perms::owner_read, utils::ComputeFileSha256(fixture_ / "small")});
+                                  fs::perms::owner_read});
   reader.Stage(reader_fixture, temporary_.path() / "before");
   {
     S3Client first(connection_, limits_);
@@ -740,7 +736,7 @@ TEST_F(S3RoundTripTest, RejectsUntrustedTLS)
   EXPECT_THROW(client.UploadFile(fixture_ / "small", Destination("untrusted")), S3Error);
   RestorePlan plan;
   plan.files.push_back({"s3://" + bucket_ + "/fixture/small", "data", fs::file_size(fixture_ / "small"),
-                        fs::perms::owner_read, utils::ComputeFileSha256(fixture_ / "small")});
+                        fs::perms::owner_read});
   EXPECT_THROW(restore_reader.Stage(plan, temporary_.path() / "untrusted-restore"), std::runtime_error);
 }
 
@@ -763,7 +759,6 @@ TEST_F(S3RoundTripTest, UploadMemoryProbe)
   S3Client client(connection_, limits_);
   const auto uploaded = client.UploadFile(source, Destination("memory", requested));
   EXPECT_EQ(uploaded.size_bytes, size);
-  EXPECT_EQ(uploaded.sha256, utils::ComputeFileSha256(source));
   struct rusage usage {};
   ASSERT_EQ(getrusage(RUSAGE_SELF, &usage), 0);
   const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
