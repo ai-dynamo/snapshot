@@ -95,6 +95,7 @@ jobs:
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_pod_status_writers.py \
             e2e/tests/test_prune_ghcr.py \
+            e2e/tests/test_release_branch_e2e_gate.py \
             e2e/tests/test_required_tests.py \
             e2e/tests/test_resolve_snapshot_image_tag.py \
             e2e/tests/test_restored_state.py \

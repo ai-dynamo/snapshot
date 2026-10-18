@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: E2E Release Branches
+
+# GitHub runs a scheduled workflow only on the default branch, so the nightly
+# suites never fire on release/*. Until this existed, a release branch was
+# covered by whatever someone remembered to dispatch by hand. This sweep runs
+# from main and dispatches those suites on each release branch that moved
+# since the suite last ran there; an untouched branch costs four API reads.
+on:
+  schedule:
+    # 03:00 Pacific Standard Time, after the nightly suites on main have
+    # finished with the GPU runner they share (07:00, 08:00 and 09:00 UTC).
+    - cron: "0 11 * * *"
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: >-
+          Comma-separated release branches to sweep. Leave empty for every
+          release/* branch.
+        required: false
+        type: string
+      workflows:
+        description: >-
+          Comma-separated suite workflow files to dispatch. Leave empty for
+          the default set.
+        required: false
+        type: string
+      force:
+        description: Dispatch every suite even when the branch has not moved.
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: e2e-release-branches
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: Dispatch e2e suites on release branches
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Dispatching a suite is a write to the Actions API. workflow_dispatch is
+      # one of the two events GITHUB_TOKEN may raise, so the dispatched runs do
+      # start; the recursion guard that silences other token-raised events does
+      # not apply to it.
+      actions: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select branches and suites
+        id: select
+        # Inputs reach the script as arguments through the environment, never
+        # interpolated into the shell: a dispatch input is attacker-controlled
+        # the moment anyone with write access is phished.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_BRANCHES: ${{ inputs.branches }}
+          INPUT_WORKFLOWS: ${{ inputs.workflows }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${INPUT_BRANCHES:-}" ]; then args+=(--branches "${INPUT_BRANCHES}"); fi
+          if [ -n "${INPUT_WORKFLOWS:-}" ]; then args+=(--workflows "${INPUT_WORKFLOWS}"); fi
+          if [ "${INPUT_FORCE:-false}" = "true" ]; then args+=(--force); fi
+          # Expands to nothing when empty, rather than to one empty argument.
+          python3 hack/release-branch-e2e-gate.py ${args[@]+"${args[@]}"} >/dev/null
+
+      - name: Dispatch selected suites
+        if: ${{ steps.select.outputs.any == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAIRS: ${{ steps.select.outputs.pairs }}
+        run: |
+          set -euo pipefail
+          failed=0
+          while read -r branch workflow; do
+            [ -n "${branch}" ] || continue
+            echo "dispatching ${workflow} on ${branch}"
+            if ! gh workflow run "${workflow}" --repo "${GITHUB_REPOSITORY}" --ref "${branch}"; then
+              echo "::warning::failed to dispatch ${workflow} on ${branch}"
+              failed=1
+            fi
+          done < <(echo "${PAIRS}" | jq -r '.[] | "\(.branch) \(.workflow)"')
+          exit "${failed}"
+
+      - name: Report an empty sweep
+        if: ${{ steps.select.outputs.any != 'true' }}
+        run: echo "No release branch moved since its last run; nothing dispatched."
