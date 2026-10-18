@@ -47,6 +47,11 @@ const (
 	// accept it and drop it silently.
 	argsNRIVersion = "v0.10.0"
 
+	// registerTimeout bounds Start. After registering, the stub waits for
+	// the runtime's Configure call without a deadline, and a runtime that
+	// drops the connection in between would hold the agent there forever.
+	registerTimeout = 30 * time.Second
+
 	// lookupTimeout bounds the API read for Pods without a container map. It
 	// runs inside the runtime's CreateContainer call. NRI gives that whole call
 	// 2 s by default, and drops a plugin that takes longer, so the read gets
@@ -121,11 +126,24 @@ func (p *Plugin) Start(ctx context.Context) error {
 	}
 	// Configure, called during Start, reads the runtime's NRI version.
 	p.runtimeNRIVersion = s.RuntimeNRIVersion
-	if err := s.Start(ctx); err != nil {
+	if err := within(registerTimeout, func() error { return s.Start(ctx) }); err != nil {
 		return fmt.Errorf("NRI plugin could not register with the container runtime: %w", err)
 	}
 	p.stub, p.closed = s, closed
 	return nil
+}
+
+// within runs fn, and returns an error if it takes longer than timeout. fn
+// keeps running after that, and its result is dropped.
+func within(timeout time.Duration, fn func() error) error {
+	errC := make(chan error, 1)
+	go func() { errC <- fn() }()
+	select {
+	case err := <-errC:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("no answer in %s", timeout)
+	}
 }
 
 // Wait serves a started plugin until ctx ends. It returns an error if the

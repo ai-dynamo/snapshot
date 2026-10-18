@@ -283,7 +283,6 @@ jobs:
         run: hack/k3d-cpu-e2e.sh cluster-up
 
       - name: Install Snapshot
-        id: install
         timeout-minutes: 10
         run: |
           set -euo pipefail
@@ -321,6 +320,7 @@ jobs:
         run: uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
       - name: Run CPU checkpoint/restore tests
+        id: tests
         timeout-minutes: 25
         env:
           # The cases this job exists to prove. pytest exits 0 when a test is
@@ -347,9 +347,10 @@ jobs:
       # On nodes whose runtime is too old for the restore proxy, the agent
       # restores without it. Check that path on k3s 1.32, whose containerd 2.1
       # has NRI v0.8, with the images built above and two tests: a restore,
-      # and a failed one.
+      # and a failed one. Only after a pass, as it replaces the cluster that
+      # the diagnostics below would read.
       - name: Run CPU tests without the restore proxy
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ steps.tests.outcome == 'success' }}
         timeout-minutes: 25
         env:
           SNAPSHOT_E2E_K3S_IMAGE: docker.io/rancher/k3s:v1.32.13-k3s1

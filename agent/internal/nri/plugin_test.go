@@ -233,6 +233,17 @@ func TestStartFailsWithoutNRI(t *testing.T) {
 	assert.NoError(t, ctx.Err(), "fails at once, without waiting")
 }
 
+func TestWithin(t *testing.T) {
+	failed := errors.New("failed")
+	assert.ErrorIs(t, within(time.Second, func() error { return failed }), failed)
+
+	block := make(chan struct{})
+	defer close(block)
+	err := within(10*time.Millisecond, func() error { <-block; return nil })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no answer in 10ms")
+}
+
 func TestDropsArgs(t *testing.T) {
 	for version, want := range map[string]bool{
 		"v0.8.0":  true, // containerd 2.0 and 2.1
