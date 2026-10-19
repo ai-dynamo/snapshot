@@ -74,7 +74,7 @@ kubectl apply \
 A recipe is one inference engine serving one model on a fixed number of GPUs.
 Pick a row and set the three values from it:
 
-| Recipe | `FRAMEWORK` | `MODEL` | `GPUS` |
+| Recipe | FRAMEWORK | MODEL | GPUS |
 |--------|-------------|---------|--------|
 | vLLM, Qwen3 0.6B | `vllm` | `qwen3-0.6b` | `1` |
 | vLLM, GLM 5.3 NVFP4 | `vllm` | `glm-5.3` | `8` |
