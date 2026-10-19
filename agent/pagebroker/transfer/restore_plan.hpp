@@ -15,6 +15,14 @@
 namespace snapshot::pagebroker {
 using Path = std::filesystem::path;
 
+// Checks a single path component, rejecting separators, NUL bytes and dot components.
+inline bool
+IsSafePathComponent(const std::string& value)
+{
+  return !value.empty() && value != "." && value != ".." && value.find('/') == std::string::npos &&
+         value.find('\\') == std::string::npos && value.find('\0') == std::string::npos;
+}
+
 // Checks for a normalized relative path without NUL bytes or dot components.
 inline bool
 IsSafeRelativePath(const Path& path)
