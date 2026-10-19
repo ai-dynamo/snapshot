@@ -32,11 +32,8 @@ const (
 
 var commitRetryLimit = 30 * time.Second
 
-// abortRetryLimit is deliberately far shorter than commitRetryLimit. Commit
-// publishes a capture that already cost a CUDA suspend and a CRIU dump, so it
-// is worth waiting for. Abort is cleanup: an abort that cannot land promptly
-// costs staging held until the transaction expires, which the broker does on
-// its own, whereas retrying for long stalls every failure path behind it.
+// Far shorter than commitRetryLimit: cleanup is not worth stalling every
+// failure path behind it.
 var abortRetryLimit = 2 * time.Second
 
 // Client speaks the local PageBroker protocol. Filesystem operations run against
@@ -137,15 +134,9 @@ func (c Client) commit(ctx context.Context, transactionID string) (*CommitComple
 	return response.GetCommitComplete(), nil
 }
 
-// Abort releases a live transaction. Transport errors are retried on the same
-// schedule as Commit: an abort that does not land leaves staging pinned until
-// the transaction expires, which on a memory-backed volume is node RAM held
-// for nothing.
-//
-// A transaction the broker no longer has is the state Abort was asking for, so
-// TRANSACTION_NOT_FOUND and TRANSACTION_EXPIRED are success. That also makes
-// Abort idempotent, which a retry loop needs: it may abort a transaction a
-// previous attempt already released.
+// Abort releases a live transaction, retrying transport errors. A transaction
+// the broker no longer has counts as success, which also makes Abort
+// idempotent.
 func (c Client) Abort(ctx context.Context, transactionID string) error {
 	err := c.abort(ctx, transactionID)
 	if isRetryableTransportError(err) {
@@ -154,10 +145,8 @@ func (c Client) Abort(ctx context.Context, transactionID string) error {
 	return ignoreAlreadyReleased(err)
 }
 
-// retryAbort rides out a transport blip. If it never lands it reports the
-// failure that started the retry, not the deadline that ended it: the first
-// error says what actually went wrong with the broker, while the last one only
-// says the retry budget ran out.
+// retryAbort reports the failure that started the retry, not the deadline that
+// ended it.
 func (c Client) retryAbort(ctx context.Context, transactionID string, first error) error {
 	retryCtx, cancel := context.WithTimeout(ctx, abortRetryLimit)
 	defer cancel()
@@ -169,9 +158,7 @@ func (c Client) retryAbort(ctx context.Context, transactionID string, first erro
 		}
 		err := c.abort(retryCtx, transactionID)
 		if retryCtx.Err() != nil {
-			// The budget ran out inside the attempt, so err is the deadline
-			// rather than anything the broker said. Report what started the
-			// retry instead.
+			// err is the deadline, not anything the broker said.
 			return first
 		}
 		if !isRetryableTransportError(err) {
@@ -180,8 +167,6 @@ func (c Client) retryAbort(ctx context.Context, transactionID string, first erro
 	}
 }
 
-// ignoreAlreadyReleased maps a transaction the broker is not holding onto
-// success, which is the state Abort was asking for.
 func ignoreAlreadyReleased(err error) error {
 	if TransactionGone(err) {
 		return nil
