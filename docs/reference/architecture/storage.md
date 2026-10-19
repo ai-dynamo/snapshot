@@ -6,192 +6,182 @@ SPDX-License-Identifier: Apache-2.0
 # Storage and artifacts
 
 <!-- toc -->
-- [The store](#the-store)
-- [Artifact layout](#artifact-layout)
+- [Where an artifact lives](#where-an-artifact-lives)
 - [The manifest](#the-manifest)
-- [Publishing](#publishing)
-- [Reading at restore](#reading-at-restore)
+- [How an artifact is published](#how-an-artifact-is-published)
+- [How an artifact is read](#how-an-artifact-is-read)
 - [Compatibility checks](#compatibility-checks)
-- [Cleanup](#cleanup)
-- [Object storage](#object-storage)
+- [How an artifact is deleted](#how-an-artifact-is-deleted)
+- [Identifying the store, and object storage](#identifying-the-store-and-object-storage)
 <!-- /toc -->
 
-This page is for contributors.
-It describes what a checkpoint artifact is, how it is identified, published, checked, and deleted, and where object storage fits.
+This page describes what a checkpoint is once it is on disk: how it is laid out, what it records about its origin, how it is published and read, how a destination is judged able to run it, and how it is deleted.
+The [overview](README.md) introduces the pieces this page assumes.
 To size and configure the checkpoint volume, see [Storage](../../operations/storage.md) instead.
 
-## The store
+A stored checkpoint is called an **artifact**.
+It is a directory on the shared volume containing CRIU's image files, the GPU memory when CustomStorage was used, an archive of the files the container changed, and a manifest that describes the machine the checkpoint was taken on.
+Every agent, every PageBroker, and the operator mount the volume at `/checkpoints`.
+Workload pods never do.
 
-Today the store is one `ReadWriteMany` PersistentVolumeClaim per installation, mounted at `/checkpoints` in every agent, every PageBroker, and the operator.
-Workload pods never mount it.
-Agents on different nodes write and read it concurrently, which is why it must be RWX.
+## Where an artifact lives
 
-The mount path is fixed.
-`ns-bind-mount`, the C helper that places the artifact into a restore container, has `/checkpoints` compiled in as the only allowed source root, and the agent's configuration validation rejects any other `storage.basePath`.
-
-The chart also renders a `storage.yaml` that names the claim and the path inside it.
-The operator hashes those fields into a **store ID** of the form `store-v1-<sha256>`.
-A `PodSnapshotContent` can carry that ID in `spec.storage.storeID`, and maintenance refuses to clean up a content bound to a different store, so a missing directory on some other volume is never mistaken for a completed deletion.
-The operator does not set `spec.storage` on the contents it creates today.
-The field exists for the object storage work described at the end of this page.
-
-## Artifact layout
-
-Every artifact lives at a path derived from two immutable identifiers:
+Every artifact lives at a path built from two identifiers that never change:
 
 ```
 /checkpoints/artifacts/<PodSnapshotContent UID>/containers/<container name>/
 ```
 
-The UID, not the name, owns the path.
-A content that is deleted and recreated gets a new UID and therefore a new, empty path, so it can never adopt a stale checkpoint.
-`agent/pkg/artifact` validates every path element against a small character set and checks containment, and the operator's cleanup imports the same package so the two sides cannot disagree about the layout.
+The UID, not the name, chooses the path.
+A `PodSnapshotContent` that is deleted and recreated gets a new UID, and therefore a fresh, empty path, so it can never pick up a stale checkpoint.
+Both the agent and the operator compute this path through `agent/pkg/artifact`, which also validates every path element, so the two sides cannot disagree.
 
-A committed artifact directory contains:
+The mount point itself is fixed.
+`ns-bind-mount`, the helper that mounts an artifact into a destination container, has `/checkpoints` compiled in as the only allowed source, and the agent refuses any other `storage.basePath`.
 
-| File | Written by | Present when |
+A published artifact contains:
+
+| File | Written by | Present |
 | --- | --- | --- |
 | `manifest.yaml` | The agent, before the dump | Always |
-| `criu.conf` | The agent | When CRIU options that cannot travel over its RPC are set, which the chart always does |
-| `dump.log` and the CRIU images (`pstree.img`, `core-*.img`, `files.img`, `mountpoints-*.img`, page files, and so on) | CRIU | Always |
-| `rootfs-diff.tar` | The agent, after the dump | Normally. Absent if the diff failed in a non-fatal way |
-| `deleted-files.json` | The agent | Only if the container deleted files from its image |
-| `cuda-checkpoint-job` | The agent, copied from the workload's control directory | Native GPU captures launched under `cuda-checkpoint --launch-job` |
-| `cuinterpose.state` | The CuInterpose coordinator | [Multi-GPU](multi-gpu.md) captures |
-| `gpu/<pid>/manifest.txt` and `gpu/<pid>/device-NNNN.bin` | PageBroker | CustomStorage GPU captures |
+| `criu.conf` | The agent | Always in practice. It carries the CRIU options that cannot be passed any other way. |
+| `dump.log` and the CRIU image files | CRIU | Always |
+| `rootfs-diff.tar` | The agent, after the dump | Unless archiving failed in a way that is not fatal |
+| `deleted-files.json` | The agent | When the container deleted files from its image |
+| `cuda-checkpoint-job` | The agent, copied from the control directory | For GPU checkpoints taken without CustomStorage whose workload ran under `cuda-checkpoint --launch-job` |
+| `cuinterpose.state` | The CuInterpose coordinator | For [multi-GPU](multi-gpu.md) checkpoints |
+| `gpu/<pid>/manifest.txt` and `gpu/<pid>/device-NNNN.bin` | PageBroker | For GPU checkpoints taken with CustomStorage |
 
-Beside a destination, a contributor may see transient siblings while a capture is in flight: `<name>.pagebroker-tx-<txn>` for a direct capture, `<name>.pagebroker-partial` while a staged capture is being copied in, and `<name>.pagebroker-previous` while an older artifact is being replaced.
-They never survive a committed or aborted transaction.
+While a capture is in flight, sibling directories can appear next to the final one: `<name>.pagebroker-tx-<id>` for a transaction being written directly on the volume, `<name>.pagebroker-partial` for one being copied in from memory, and `<name>.pagebroker-previous` for an older artifact being replaced.
+None of them survives a committed or aborted transaction.
 
 ## The manifest
 
-`manifest.yaml` is the artifact's self-description.
-`agent/internal/types/manifest.go` defines it.
-The agent writes it before CRIU runs, so it is complete regardless of how the dump ends, and restore reads it before touching anything.
+`manifest.yaml` is the artifact's description of itself.
+The agent writes it before the dump, so that it is complete no matter how the dump ends, and restore reads it before touching anything.
+It is defined in `agent/internal/types/manifest.go`.
 
-| Section | Contents | Read by |
+| Section | Records | Used for |
 | --- | --- | --- |
-| `artifact` | `contentUID` and `containerName` | The agent, to confirm a directory belongs to the content it is handling |
-| `createdAt` | Timestamp | Nothing. Informational |
-| `criuDump` | The CRIU settings in force at dump time, and the external mount map | Restore, which dumps and restores with the same settings. The map's keys feed the `mount` compatibility check |
-| `k8s` | Source container ID, PID, node, pod name and namespace, pod IP, stdio descriptor targets, image, image ID, CPU and memory limits | The compatibility checks, the inet-remap plugin, stdio re-wiring, and `status.source` |
-| `overlay` | The exclusions, upper directory, and bind mount destinations used for the diff | Informational after capture |
-| `cudaRestore` | Whether CustomStorage was used, the CUDA PIDs, the source GPU UUIDs and models in ordinal order, the driver version, the UUID to `/dev/nvidiaN` map, and `NVIDIA_VISIBLE_DEVICES` | GPU restore, the device map, and the GPU compatibility checks |
-| `host` | Kernel version and CPU architecture | The preflight compatibility checks |
-| `cuinterpose` | SHA-256 of each CuInterpose library and the PIDs that participated | [Multi-GPU](multi-gpu.md) restore |
+| `artifact` | The `PodSnapshotContent` UID and container name | Confirming a directory belongs to the object being handled |
+| `criuDump` | The CRIU options in force at dump time, and the mounts CRIU externalized | Restoring with the same options. The externalized mounts feed the `mount` compatibility check |
+| `k8s` | The source container ID and PID, node, pod name and namespace, pod IP, the pipes behind its standard streams, image, image ID, and CPU and memory limits | Compatibility checks, the IP rewrite, reconnecting the standard streams, and the `status.source` block |
+| `overlay` | How the root filesystem archive was taken | Informational |
+| `cudaRestore` | Whether CustomStorage was used, the CUDA process IDs, the source GPUs in CUDA's order with their UUIDs and models, the driver version, and each GPU's `/dev/nvidiaN` path | GPU restore, the device map, and the GPU compatibility checks |
+| `host` | Kernel version and CPU architecture | Compatibility checks |
+| `cuinterpose` | The hash of each CuInterpose library and the processes that used them | [Multi-GPU](multi-gpu.md) restore |
 
-A value the agent could not read at capture is left out rather than written empty, so it reads as unknown.
-Fields are added over time and older artifacts stay readable: for example `sourceGpus` carries GPU models next to the older `sourceGpuUuids`, and a manifest without it still restores.
+A value the agent could not read at capture is left out rather than written empty, so that it reads as unknown.
+Fields are added over time and older artifacts stay readable.
 
-On a successful capture the agent projects the manifest onto `PodSnapshotContent.status.source`: node name, architecture, and kernel, image and image digest, CPU and memory limits, driver version, and one entry per GPU model.
-That block is informational.
-Restore compares the manifest, never the status.
-Both views are produced from the same `CompatEnvironment` function so they cannot drift apart.
+When a capture succeeds, the agent copies part of the manifest onto `PodSnapshotContent.status.source`: the node, kernel, architecture, image and digest, resource limits, driver version, and GPU models.
+That block is for people and tooling to read.
+Restore compares the manifest, never the status, and both are produced by the same function so they cannot disagree.
 
-## Publishing
+## How an artifact is published
 
-No agent code writes to the final artifact path.
-Every capture runs inside a PageBroker transaction, and PageBroker alone publishes.
+The agent never writes to the final path.
+Every capture runs inside a **PageBroker transaction**: a directory PageBroker hands out, which it later publishes or deletes.
 
 ```mermaid
 sequenceDiagram
     participant A as Agent
     participant P as PageBroker
     participant V as Shared volume
-    A->>P: prepare
-    P-->>A: transaction directory
-    A->>A: Write manifest, GPU state, CRIU images, diff
-    A->>P: commit
-    P->>V: rename directory into place
-    P-->>A: committed
+    A->>P: Open a transaction
+    P-->>A: Transaction directory
+    A->>A: Write the manifest, GPU memory, CRIU images, archive
+    A->>P: Commit
+    P->>V: Rename the directory into place
+    P-->>A: Committed
 ```
 
-| Capture | Transaction directory | Commit |
-| --- | --- | --- |
-| Staged, the default for CPU-only and for native GPU captures | On the memory-backed `/pagebroker/staging` volume shared by the two containers | Copy to a sibling of the destination on the volume, then rename into place |
-| Direct, used for CustomStorage GPU captures | A temporary directory beside the destination on the volume | Rename into place |
+For a checkpoint whose GPU memory travels through CRIU, the transaction directory is on the memory-backed volume shared by the agent and PageBroker, and commit copies it to the shared volume beside the final location before renaming.
+For a CustomStorage checkpoint, the GPU memory is too large to stage in memory, so the transaction directory is created directly on the shared volume beside the final location, and commit is a plain rename.
 
 The rename is the commit point.
-Before it, nothing exists at the destination path.
+Before it, nothing exists at the final path.
 After it, the artifact is complete.
-This is what lets the agent treat the presence of the directory, together with a manifest naming the right content and container, as proof that a capture succeeded, which matters when the agent restarts between the commit and the `Ready` write.
+This is why the agent can treat the presence of the directory, with a manifest naming the right object, as proof that a capture succeeded, which it needs when it restarts between the commit and writing `Ready`.
 
-An aborted transaction deletes its directory, `dump.log` included.
-A failed capture therefore leaves nothing on the volume.
-Transactions that are neither committed nor aborted expire after about two hours.
+An aborted transaction is deleted, `dump.log` included, so a failed capture leaves nothing on the volume.
+A transaction that is neither committed nor aborted expires after about two hours.
 
-The staged path is bounded by memory.
-The kernel charges staging pages to the container that writes them, which is the agent during a dump, so `daemonset.resources.limits.memory` bounds the largest CPU image a node can capture.
-Direct GPU captures write device memory straight to the volume and are not bounded that way.
+Because the memory-backed path charges its pages to the process writing them, the agent container's memory limit bounds the largest CPU-side checkpoint a node can take.
+CustomStorage GPU payloads go straight to the volume and are not bounded that way.
 
-## Reading at restore
+## How an artifact is read
 
-Restore also runs inside a transaction, so PageBroker knows which artifacts are in use.
+A restore also runs inside a transaction, so that PageBroker knows which artifacts are in use.
 
-| `pageBroker.restoreMode` | What PageBroker does | What CRIU reads |
-| --- | --- | --- |
-| `direct`, the default | Opens and holds the artifact directory | The volume, through a read-only bind mount at `/tmp/checkpoint` |
-| `staged` | Copies the artifact, except `gpu/`, into `/pagebroker/staging/restore/<txn>` | Memory, through a bind mount at `/tmp/pagebroker` |
+In the default `direct` mode, PageBroker holds the artifact directory open, and CRIU reads it from the volume through a read-only bind mount at `/tmp/checkpoint` in the destination container.
+In `staged` mode, PageBroker first copies the artifact, except its `gpu/` directory, into its memory-backed staging area, and CRIU reads from a bind mount of that.
 
-GPU payloads written by CustomStorage are always read from the original artifact with `O_DIRECT`, whichever mode is set.
-The read bandwidth of the volume therefore bounds a large GPU restore, and the [benchmarks](../../development/benchmarks.md) show CRIU's bulk read as the largest stage for CPU images too.
+GPU memory written by CustomStorage is always read from the original artifact, in either mode, directly into the GPU with `O_DIRECT`.
+The volume's read bandwidth therefore bounds a large GPU restore, and the [benchmarks](../../development/benchmarks.md) show CRIU's read of the CPU images as the largest stage even without it.
 
 ## Compatibility checks
 
-A checkpoint is tied to the machine it was taken on.
-`api/compat` compares what the manifest recorded with what the destination offers, so an incompatible restore is refused up front with a reason, instead of failing deep inside CRIU with an error nobody can attribute.
-The node agent is the only caller, but the package lives in `api` because the check names are published verbatim on pod events and conditions, and integrators branch on them.
+A checkpoint is tied to the machine it came from.
+Rather than let an unsuitable restore fail somewhere inside CRIU with an error nobody can attribute, Snapshot compares what the manifest recorded with what the destination offers, and refuses up front with a reason.
+The rules live in `api/compat`.
+Only the agent evaluates them, but they live in the `api` module because their names appear on pod events and integrators match on them.
 
-The rules run at two gates, because they see different state:
+The rules run at two points, because different information is available at each.
+The **preflight** gate runs before the agent starts a restore, when only the manifest and the pod spec can be read.
+The **inspect** gate runs once the destination container exists, when its image, mounts, and GPUs can be read.
 
 | Check | Gate | Rule | Why |
 | --- | --- | --- | --- |
-| `cpu-arch` | preflight | Equal | CRIU cannot restore one architecture's register file on another |
-| `kernel-version` | preflight | Equal | Restores have broken on a kernel upgrade alone |
-| `kernel-minimum` | preflight | At least 5.13 | glibc's `rseq` use needs it, and newer glibc crashes below it |
-| `memory-limit` | preflight | At least the source | Restore faults the whole address space in, so less memory is an OOM kill mid-restore |
-| `cpu-limit` | preflight | At least the source | Less CPU restores fine and runs slower forever, with nothing to say so |
-| `image-digest` | inspect | Equal | The root filesystem diff assumes the same image contents. The reference is not compared, only the digest |
-| `mount` | inspect | Every externalized source mount exists | CRIU binds those paths from the destination |
-| `gpu-model` | inspect | Same multiset of product names | Device state is built for one architecture |
-| `gpu-count` | inspect | Equal | Each GPU's state has a rank that must land somewhere |
-| `driver-version` | inspect | Equal, to the build | Restores have failed between two patch builds of one driver |
-| `driver-minimum` | inspect | At least 580 | The oldest driver with CUDA checkpoint support |
+| `cpu-arch` | preflight | Must match | CRIU cannot restore one architecture's registers on another. |
+| `kernel-version` | preflight | Must match | Restores have broken on a kernel upgrade alone. |
+| `kernel-minimum` | preflight | At least 5.13 | glibc's use of `rseq` needs it, and newer glibc crashes below it. |
+| `memory-limit` | preflight | At least the source's | Restore faults the whole address space back in, so less memory is an OOM kill part way through. |
+| `cpu-limit` | preflight | At least the source's | Less CPU restores fine and then runs slower forever, with nothing to say why. |
+| `image-digest` | inspect | Must match | The root filesystem archive assumes the same image contents. The image reference is not compared, only its digest. |
+| `mount` | inspect | Every mount the source externalized must exist | CRIU binds those paths from the destination. |
+| `gpu-model` | inspect | Same models in the same quantities | Device state is built for one GPU architecture. |
+| `gpu-count` | inspect | Must match | Each GPU's state has to land on a GPU. |
+| `driver-version` | inspect | Must match, down to the build | Restores have failed between two patch builds of one driver. |
+| `driver-minimum` | inspect | At least 580 | The oldest driver with CUDA checkpoint support. |
 
-The **preflight** gate runs before the agent claims the restore, when only the manifest and the pod spec are readable.
-The **inspect** gate runs once the destination container exists, when its GPUs, image, and mounts can be read.
+Two rules apply to every row.
+A value missing on either side is unknown, and an unknown value never refuses, because a checkpoint taken before a field was recorded must stay restorable.
+Both gates produce the same refusal, reported as `RestoreIncompatible` with one `<check>: source <value>, target <value>` entry per failed rule.
 
-Two rules apply to the whole table.
-A value missing on either side is unknown, and unknown never refuses, because a checkpoint taken before a field existed must stay restorable.
-Both gates raise the same `IncompatibleError`, which the controller reports as `RestoreIncompatible` with one `<check>: source <value>, target <value>` entry per failed rule.
-
-The `nvidia.com/snapshot-skip-compat-check` pod annotation, or `restore.skipCompatCheck` in the agent configuration, turns the gates off.
-That is a debugging escape hatch: a restore that should have been refused then fails somewhere inside CRIU instead.
+The `nvidia.com/snapshot-skip-compat-check` pod annotation, or `restore.skipCompatCheck` in the agent's configuration, turns the gates off.
+That is for debugging: a restore that should have been refused then fails somewhere inside CRIU instead.
 The GPU count is compared even then.
 
-## Cleanup
+## How an artifact is deleted
 
 Artifacts are deleted by the operator, never by the agent.
-[Control plane](control-plane.md#artifact-cleanup) describes the queue.
-The storage-side rules are:
+[Control plane](control-plane.md#deleting-checkpoints) describes the queue that does it.
+The rules that keep deletion safe are:
 
-- A content carries the `nvidia.com/podsnapshotcontent-artifact-cleanup` finalizer from creation, so its artifact is removed before the object disappears, and a `PodSnapshot` deletion waits for that.
+- A `PodSnapshotContent` carries a cleanup finalizer from creation, so that its artifact is removed before the object can disappear. A `PodSnapshot` deletion waits for that.
 - Deletion removes `/checkpoints/artifacts/<uid>` and refuses anything that is a symlink or not a directory.
-- A periodic sweep enumerates the directories under `artifacts/` and then lists every content with a consistent, uncached list. A directory whose name is not a live content UID is an orphan and is removed, a bounded batch per sweep.
-- Deletion is idempotent and dropped work is rediscovered by the next sweep.
+- A periodic sweep lists the directories first and then lists every `PodSnapshotContent`, so that an artifact written in between is never mistaken for an orphan. A directory whose name is not a live UID is removed, a bounded number per sweep.
+- Every step can be repeated safely, and work that was dropped is found again by the next sweep.
 
-The process-local lock in `api/storage/coordination` keeps two maintenance workers in one operator from deleting the same artifact at once.
-It provides no exclusion against the agent.
-That safety comes from the UID-keyed layout, the finalizer, and the sweep ordering above.
+The lock in `api/storage/coordination` only keeps two cleanup workers in the same operator from deleting the same artifact at once.
+It does not coordinate with the agent.
+That safety comes from the UID-based layout, the finalizer, and the order of the sweep.
 
-Chart-created claims carry `helm.sh/resource-policy: keep`, so uninstalling Snapshot keeps every artifact.
+Claims the chart creates carry `helm.sh/resource-policy: keep`, so uninstalling Snapshot keeps every artifact.
 
-## Object storage
+## Identifying the store, and object storage
 
-The [S3 proposal](../../proposals/237-s3-storage/README.md) extends this model rather than replacing it.
-PageBroker gains an S3 backend behind the same transaction interface, publication becomes an upload followed by an index object written last, and a content becomes `Ready` only after PageBroker confirms publication.
-The operator's maintenance workers gain an S3 backend that lists and deletes under the same `artifacts/<uid>/` key layout.
-Restore stages the complete bundle before CRIU runs, since CRIU cannot read object storage directly.
+Today the only store is the shared volume.
+The chart renders a `storage.yaml` naming the claim and the path inside it, and the operator hashes those fields into a **store ID** of the form `store-v1-<sha256>`.
+A `PodSnapshotContent` can carry that ID in `spec.storage.storeID`.
+When it does, cleanup refuses to act on a content bound to a different store, so that a directory missing from the wrong volume is never counted as deleted.
+The operator does not set the field on the contents it creates today.
 
-Pieces of that design are already in the tree: `spec.storage` and `status.storage` on `PodSnapshotContent`, the store ID hash, the artifact identity triple, the S3 maintenance backend, and the artifact-addressed PageBroker requests.
-None of it is wired to a running configuration, and the chart rejects any `storage.type` other than `pvc`.
+The field exists for the [S3 proposal](../../proposals/237-s3-storage/README.md), which extends the model above rather than replacing it.
+PageBroker gains an S3 backend behind the same transaction interface, publishing becomes an upload with an index object written last, and a `PodSnapshotContent` becomes `Ready` only when PageBroker confirms publication.
+The operator's cleanup gains an S3 backend that lists and deletes under the same `artifacts/<uid>/` key layout.
+Restore copies the whole artifact to the node first, since CRIU cannot read object storage.
+
+Parts of that design are already in the tree: the `spec.storage` and `status.storage` fields, the store ID, the S3 cleanup backend, and the artifact-addressed PageBroker requests.
+None of it is reachable from a running configuration, and the chart rejects any `storage.type` other than `pvc`.

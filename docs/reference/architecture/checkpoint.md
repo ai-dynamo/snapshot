@@ -6,35 +6,33 @@ SPDX-License-Identifier: Apache-2.0
 # Checkpoint flow
 
 <!-- toc -->
-- [From PodSnapshot to work order](#from-podsnapshot-to-work-order)
-- [Preconditions on the node](#preconditions-on-the-node)
+- [Waiting for the right moment](#waiting-for-the-right-moment)
 - [Inspect](#inspect)
-  - [Mount policy](#mount-policy)
-- [Transaction](#transaction)
-- [Suspend](#suspend)
-- [Dump](#dump)
-- [Root filesystem diff](#root-filesystem-diff)
-- [Publish](#publish)
-- [Failure behavior](#failure-behavior)
-- [Failure reasons](#failure-reasons)
-- [Multi-GPU hooks](#multi-gpu-hooks)
+  - [What CRIU does with each mount](#what-criu-does-with-each-mount)
+- [Opening a transaction](#opening-a-transaction)
+- [Suspending the GPU](#suspending-the-gpu)
+- [Dumping](#dumping)
+- [Archiving the changed files](#archiving-the-changed-files)
+- [Publishing](#publishing)
+- [When it fails](#when-it-fails)
+- [Where multi-GPU differs](#where-multi-gpu-differs)
+- [Reference: checks and failure reasons](#reference-checks-and-failure-reasons)
 - [Invariants](#invariants)
 <!-- /toc -->
 
-This page is for contributors.
-It follows one checkpoint from a `PodSnapshot` to a committed artifact and a `Ready` condition.
-The [control plane](control-plane.md) page covers how the work order reaches the node, and the [node agent](node-agent.md) page describes the processes involved.
+This page follows one checkpoint from the moment a `PodSnapshotContent` reaches a node to the moment the checkpoint is published and reported `Ready`.
+The [control plane](control-plane.md) page covers how the `PodSnapshotContent` gets there, and the [node agent](node-agent.md) page describes the processes that appear below.
 To checkpoint a workload, follow [Checkpoint a replica](../../guides/checkpoint.md) instead.
 
-A checkpoint has four parts, performed on the node in this order:
+On the node, a checkpoint has four parts, in this order:
 
-1. **Inspect** the container and decide whether it can be captured. Nothing is changed.
-2. **Suspend** GPU state. Every CUDA process is locked and its device memory is moved off the GPU.
-3. **Dump** the process tree with CRIU, which terminates it, then archive the container's root filesystem changes.
-4. **Publish** the result with an atomic rename, and report `Ready`.
+1. **Inspect.** Look at the container and decide whether it can be captured. Nothing is changed.
+2. **Suspend the GPU.** Lock every CUDA process and move its device memory off the GPU.
+3. **Dump.** Have CRIU write the process tree to disk, which terminates it, then archive the files the container changed.
+4. **Publish.** Rename the finished directory into place and report `Ready`.
 
-Anything that fails in the first part leaves the workload running.
-Anything that fails later kills it.
+A failure in the first part leaves the workload running.
+A failure in any later part kills it, because a CUDA process that has been locked cannot be resumed.
 
 ```mermaid
 sequenceDiagram
@@ -44,229 +42,226 @@ sequenceDiagram
     participant C as CRIU
     participant W as Workload
     A->>W: Inspect processes, mounts, GPUs
-    A->>P: Prepare transaction
+    A->>P: Open a transaction
     A->>D: Lock and checkpoint each CUDA process
-    A->>C: Dump process tree
+    A->>C: Dump the process tree
     C->>W: Freeze, dump, terminate
-    A->>A: Archive root filesystem diff
+    A->>A: Archive the changed files
     A->>P: Commit
     P->>P: Rename into place
     A->>A: Write Ready
 ```
 
-With CustomStorage, PageBroker calls the CUDA driver in the agent's place.
+When the driver supports CustomStorage, PageBroker calls the CUDA driver in the agent's place.
 
-## From PodSnapshot to work order
+## Waiting for the right moment
 
-The operator reads the source pod's `spec.nodeName`, creates a `PodSnapshotContent` labelled with it, and records the binding on the `PodSnapshot`.
-The agent on that node sees the content through a label-filtered informer and queues it.
-[Control plane](control-plane.md#binding) covers the binding rules.
+The agent on the node learns about the `PodSnapshotContent` through an informer filtered to its node name.
+Before it does anything, it has to be sure the capture is wanted, possible, and timely.
 
-## Preconditions on the node
+It re-reads the `PodSnapshotContent` bypassing its cache and checks that it is for this node, is not being deleted, and has no final condition.
+It checks that the object names exactly one container, and it computes where the checkpoint will live on the shared volume.
+It reads the source pod and checks that the pod's UID is the one recorded in the `PodSnapshotContent`, so that a replacement pod with the same name is never captured in place of the original.
 
-`reconcileCapture` in `agent/internal/controller/podsnapshotcontent.go` runs every time the content or its source pod changes, and on a ten second resync.
-It checks, in order:
+Then it checks whether the checkpoint already exists.
+The dump kills the source, and the agent writes `Ready` only afterwards, so an agent that restarted in between would find a dead pod and a finished checkpoint.
+The checkpoint directory exists only once PageBroker has renamed it into place, so its presence, together with a manifest naming this `PodSnapshotContent` and container, is proof that the capture succeeded.
+In that case the agent writes `Ready` and stops.
+This check deliberately comes before any check that would fail the capture because the pod is gone.
 
-| Check | On failure |
-| --- | --- |
-| The content is for this node, is not deleting, and has no terminal condition | Ignore |
-| The content has a UID and exactly one target container, and the artifact path resolves | `Failed` with `MissingContentUID`, `InvalidTargetContainer`, or `InvalidDestination` |
-| The source pod exists | `Failed` with `SourcePodNotFound`, unless the artifact is already present, which means `Ready` |
-| The pod UID matches `spec.source.podRef.uid` | `Failed` with `StalePodReference` |
-| **The artifact is already present** with a matching manifest | `Ready` |
-| This content is the oldest non-terminal content for the pod | Wait |
-| No container in the pod has exited with a non-zero code | `Failed` with `CheckpointContainerFailed`, and the remaining containers are killed |
-| The pod is not deleting, `Succeeded`, or `Failed` | `Failed` with `SourcePodGone` |
-| The `nvidia.com/snapshot-multi-gpu` annotation, if present, is valid and the launcher prefix is in place | `Failed` with `CuInterposeMisconfigured` |
-| The target container is Ready | Wait |
-| The container resolves to a host PID through the runtime | `Failed` with `ContainerNotResolved` |
+Next it confirms that the pod is alive and intact.
+If any container in the pod has exited with a non-zero code, the capture fails and the agent kills the remaining containers.
+If the pod is being deleted or has reached a final phase, the capture fails.
+If the source opted into [multi-GPU](multi-gpu.md), the annotation and the launcher on the container's command are validated now, before anything irreversible happens.
 
-The artifact check comes before the liveness checks on purpose.
-The dump kills the source, so a dead pod with a committed artifact is a success whose `Ready` write has not happened yet, for example because the agent restarted in between.
-The artifact directory exists only after PageBroker's atomic rename, which is what makes its presence a safe commit marker.
+When several `PodSnapshotContent` objects name the same pod, only the oldest one still in progress acts on it.
+The others wait.
+This matters because the failure paths above kill containers.
 
+Finally the agent labels the pod `nvidia.com/snapshot-capture-eligible=true`, so that its pod informer begins delivering that pod's status changes, and waits for the target container to be Ready.
 The agent never reads `ready-for-snapshot` itself.
-The [workload contract](../workload-contract.md) has the workload write that sentinel once it is quiesced, and the source pod's readiness probe gates on the file.
-The agent waits for the container's `Ready` status, which closes the loop without the agent having to know anything about the workload.
+The [workload contract](../workload-contract.md) has the workload write that sentinel once it is quiesced, and the pod's readiness probe turns the file into the Ready condition.
+The agent therefore needs to know nothing about the workload.
 
-Before it waits for readiness, the agent labels the pod `nvidia.com/snapshot-capture-eligible=true`.
-Its source pod informer selects on that label, so from then on the pod's own status changes wake the capture instead of the ten second resync.
-Once the container is Ready and resolved, the agent calls the executor with a context bounded by `checkpointTimeoutSeconds`.
+When the container is Ready, the agent resolves it to a host PID through the container runtime and starts the capture, with a deadline of `checkpointTimeoutSeconds`.
 
 ## Inspect
 
-`inspectContainer` in `agent/internal/executor/checkpoint.go` collects everything the later steps need, without changing anything:
+The capture begins by collecting everything the later steps need, without changing anything.
+This happens in `inspectContainer` in `agent/internal/executor/checkpoint.go`.
 
-- The container's host PID and OCI spec, from the runtime.
-- Its image ID, for the compatibility checks at restore. An unreadable image ID is recorded as unknown.
-- Its cgroup v2 path, so CRIU can freeze it.
-- Its overlay upper directory, parsed from the `/` mount's superblock options. A container whose root is not an overlay cannot be captured.
-- Its mount table, classified against the OCI spec into the CRIU mount policy below.
-- Its network namespace, which CRIU is told to treat as external, and the pipes behind file descriptors 0 to 2, so restore can reconnect the process's output to the new container's log.
-- Its process tree, walked through `/proc/<pid>/task/*/children`.
-- Which of those processes are CUDA processes, by asking `cuda-checkpoint-helper --get-restore-tid` about each one. A CUDA process inside a further nested PID namespace is not supported.
-- If there are CUDA processes, the GPUs the container can see, in CUDA ordinal order, and the `/dev/nvidiaN` path for each UUID. A GPU container with no CUDA process is captured as CPU-only.
+From the container runtime it takes the container's init PID, its OCI spec, and its image ID.
+The image ID is recorded so that restore can refuse a destination built from a different image.
 
-GPU discovery tries the OCI environment's `NVIDIA_VISIBLE_DEVICES`, then Dynamic Resource Allocation claims, then the kubelet PodResources API, then `nvidia-smi` inside the container.
-A container that references resource claims fails closed if the claims cannot be resolved.
+From `/host/proc/<pid>` it reads the container's cgroup, which CRIU will freeze, and its mount table, which is classified as described below.
+It reads the container's overlay upper directory, the layer that holds every file the container has changed since it started.
+A container whose root filesystem is not an overlay cannot be captured, because there would be no way to find those files.
+It reads the network namespace, which CRIU will be told to treat as external, and the pipes behind file descriptors 0 to 2, so that restore can reconnect the process's output to the new container's log.
 
-### Mount policy
+It walks the process tree and asks `cuda-checkpoint-helper` about each process to find the ones that hold a CUDA context.
+A CUDA process inside a further nested PID namespace is not supported.
+If there are CUDA processes, it discovers which GPUs the container can see and records them in CUDA's own order, which may differ from the order Kubernetes allocated them in.
+Discovery tries the container's `NVIDIA_VISIBLE_DEVICES`, then Dynamic Resource Allocation (DRA) claims, then the kubelet's PodResources API, then `nvidia-smi` run inside the container.
+A GPU container with no CUDA process is captured as a CPU-only checkpoint.
 
-CRIU must know what to do with every mount in the container.
-`BuildMountPolicy` in `agent/internal/runtime/mounts.go` decides:
+### What CRIU does with each mount
 
-| Mount | Policy | Reason |
-| --- | --- | --- |
-| Submounts of `/proc`, `/sys`, `/run` not in the OCI spec | Skip | Virtual, or created by the runtime, and absent in a fresh container |
-| `/dev/shm` | Native | Dumped by CRIU, so its contents survive |
-| OCI masked files that exist | External, mapped to `/dev/null` | The runtime masks them again on restore |
-| Everything else | External, mapped to itself | The runtime recreates OCI mounts in the destination, and CRIU binds from there |
+CRIU must be told what to do with every mount in the container, and the policy is decided here.
+A mount can be **dumped**, meaning its contents go into the checkpoint, or **externalized**, meaning CRIU records that it was there and expects the restore side to provide it at the same path, or **skipped**.
 
-The keys of the external mount map are recorded in the manifest and become the `mount` compatibility check at restore: a volume the source had must also exist in the destination.
+Submounts of `/proc`, `/sys`, and `/run` that the OCI spec did not ask for are skipped.
+They are virtual or created by the runtime, and a fresh container will have its own.
+`/dev/shm` is dumped, so that its contents survive.
+Files the OCI spec masks are externalized to `/dev/null`, since the runtime masks them again.
+Everything else is externalized to itself: the runtime recreates the OCI mounts in the destination container, and CRIU binds from there.
 
-## Transaction
+The list of externalized mounts is recorded in the checkpoint's manifest.
+At restore it becomes a compatibility check: a volume the source had must also exist in the destination.
 
-A PageBroker transaction is a directory that PageBroker hands out and later either publishes or deletes.
-The executor opens one before anything destructive happens, and a deferred abort discards it if the function returns an error.
+## Opening a transaction
 
-| Capture kind | Request | Where CRIU writes |
-| --- | --- | --- |
-| No CUDA processes, or the driver lacks CustomStorage | `prepare_staged_checkpoint` | A directory on the staging volume, a memory-backed `emptyDir` shared by the agent and PageBroker containers |
-| CUDA processes with CustomStorage | `prepare_direct_checkpoint` | A temporary directory beside the destination on the shared volume |
+Nothing is written to the shared volume directly.
+The agent asks PageBroker for a **transaction**, a directory PageBroker hands out and later either publishes with a rename or deletes.
+If anything below fails, a deferred abort deletes it.
 
-Whether CustomStorage is used was decided once at agent startup from PageBroker's capabilities.
-In the staged case the agent's memory limit bounds the largest checkpoint, because the kernel charges the staging pages to the writer.
-[Storage](../../operations/storage.md#pagebroker-staging) covers sizing.
+Where that directory lives depends on how GPU memory will travel:
 
-After the transaction is open, two more non-destructive checks run.
-If the source opted into [multi-GPU](multi-gpu.md), the CuInterpose libraries are hashed in every CUDA process and the coordinator runs `--inspect`.
-Without CustomStorage, a CUDA capture stages the `cuda-checkpoint-job` file from the control directory, and a capture of more than one GPU without that file and without a CuInterpose coordinator is refused.
+- When there are no CUDA processes, or the driver lacks CustomStorage, the directory is on the memory-backed volume the agent and PageBroker share. CRIU writes the dump there, and PageBroker copies it to the shared volume on commit. The agent's memory limit therefore bounds the largest checkpoint a node can take, since the kernel charges those pages to the process that writes them.
+- When CUDA processes exist and the driver supports CustomStorage, the directory is a temporary one on the shared volume, next to the final location. GPU memory is too large to stage in RAM, so it is written straight to the volume.
 
-Then the agent builds the CRIU dump options and writes `manifest.yaml` into the transaction directory.
-The manifest is written before the dump so that it is complete whatever happens next.
+Two more checks run once the transaction is open, both still non-destructive.
+If the source uses [multi-GPU](multi-gpu.md), the CuInterpose libraries in every CUDA process are hashed and the coordinator is run in inspect mode.
+Without CustomStorage, a CUDA capture needs the `cuda-checkpoint-job` file that the driver's launch-job wrapper creates in the control directory, and a capture of more than one GPU without that file and without a CuInterpose coordinator is refused.
+
+Then the agent writes `manifest.yaml` into the transaction directory: everything about the source that a restore will need, from CRIU options to GPU UUIDs.
+It is written before the dump so that it is complete no matter how the dump ends.
 [Storage and artifacts](storage.md#the-manifest) lists its contents.
 
-## Suspend
+## Suspending the GPU
 
-GPU state must be quiesced before CRIU runs, because CRIU cannot see device memory.
-`captureGPU` runs:
+CRIU cannot see device memory, so GPU state has to be brought to the CPU side before CRIU runs.
+This is the first destructive step.
+From here on, any failure causes the agent to kill the source container.
 
-1. With a CuInterpose coordinator, `cuinterpose-coordinator --prepare`, which unmaps shared memory and writes `cuinterpose.state`.
-2. **CustomStorage:** one `checkpoint_gpu` request to PageBroker with a pidfd for every CUDA process. PageBroker locks each process, checkpoints it, and streams its device memory into `gpu/<pid>/` files in the transaction directory.
-3. **Otherwise:** `cuda-checkpoint-helper --action lock` for every CUDA process, then `--action checkpoint` for every CUDA process. Device memory is copied into the process's host memory, where CRIU will dump it. If a job file is in use, it is copied into the artifact again after the last checkpoint, because the driver rewrites it during the operation.
+With a CuInterpose coordinator, the coordinator's prepare step runs first.
+It unmaps the memory the processes share and writes `cuinterpose.state`.
 
-From this point on, any error is wrapped so that the controller kills the source container.
-A locked CUDA process cannot be resumed.
+Then, with CustomStorage, the agent sends PageBroker one request naming every CUDA process.
+PageBroker locks each process, checkpoints it, and streams its device memory into `gpu/<pid>/` files in the transaction directory.
 
-## Dump
+Without CustomStorage, the agent runs `cuda-checkpoint-helper` to lock every CUDA process, then to checkpoint every CUDA process.
+The driver copies each process's device memory into that process's host memory, where CRIU will find it.
+If a `cuda-checkpoint-job` file is in use, it is copied into the checkpoint again after the last process is checkpointed, because the driver rewrites it during the operation.
 
-`criu.ExecuteDump` runs CRIU in service worker mode as a child of the agent, with the transaction directory as its image directory.
-The important options:
+## Dumping
+
+The agent runs CRIU as a child process, with the transaction directory as CRIU's image directory, and tells it to dump the container's init process and everything under it.
+CRIU freezes the tree through its cgroup, writes every process's memory, registers, file descriptors, sockets, and namespaces to image files, and then kills the tree.
+There is no mode that leaves the source running.
+A CUDA process that has been checkpointed cannot resume, and the control plane treats the source's death as the normal outcome of a checkpoint.
+
+The options the agent sets are the ones a contributor is likely to ask about:
 
 | Option | Value | Why |
 | --- | --- | --- |
-| `leave_running` | always false | The dump terminates the source. There is no mode that resumes it. |
-| `root` | `/host/proc/<pid>/root` | Paths resolve in the container's mount namespace. |
-| `external` | the network namespace | Always externalized. Restore inherits the destination pod's namespace. |
-| `ext_mnt`, `skip_mnt` | from the mount policy | See above. |
-| `freeze_cgroup` | the container's cgroup | Freeze the whole tree at once. |
-| `manage_cgroups` | `soft` by default | At restore, CRIU places the tree under the destination container's cgroup root. |
+| `root` | `/host/proc/<pid>/root` | Paths resolve inside the container's mount namespace. |
+| `external` | the network namespace | Never dumped. Restore inherits the destination pod's namespace. |
+| `ext_mnt`, `skip_mnt` | from the mount policy above | |
+| `freeze_cgroup` | the container's cgroup | Freeze the whole tree in one step. |
+| `manage_cgroups` | `soft` | At restore, CRIU places the tree under the destination container's cgroup. |
 | `tcp_established` | on by default | Keep established connections. Restore rewrites their addresses. |
-| `ghost_limit` | 512 MiB by default | Deleted-but-open files up to this size are stored in the image. |
-| Plugin directory | the dedicated Snapshot directory | CRIU's own CUDA plugin must not load. |
+| `ghost_limit` | 512 MiB by default | A file that was deleted while a process still had it open is saved inside the image, up to this size. |
+| Plugin directory | Snapshot's own | So that CRIU's bundled CUDA plugin is never loaded. |
 
 CRIU writes `dump.log` next to the images.
-On failure the agent logs the tail of it, which matters because the transaction directory, log included, is deleted when the transaction aborts.
+On failure the agent logs the tail of it, which matters because the transaction, log included, is deleted when it aborts.
 
-CRIU freezes the tree, dumps it, and kills it.
-The container exits, the pod reports a failed container, and the `SnapshotJob` reconciler treats that exit as the expected outcome.
+## Archiving the changed files
 
-## Root filesystem diff
+CRIU restores an open file by reopening its path.
+Every file the container created or modified therefore has to exist in the destination container before CRIU runs there.
+The destination starts from the same image, which restore enforces by comparing image digests, so only the container's own changes need to travel.
 
-CRIU restores file descriptors by reopening paths, so files the source created or modified must exist in the destination.
-The destination starts from the same image, which the `image-digest` check enforces, so only the container's own writes need to travel.
+The agent archives the overlay upper directory into `rootfs-diff.tar`.
+It leaves out the paths in `config.overlay.exclusions`, the destinations of bind mounts, and `trusted.*` extended attributes, because overlay's opaque-directory markers would hide base image content when replayed.
+Before archiving, it decodes CRIU's own image files to find every regular file the dumped processes hold open or mapped, and adds those to the archive even when an exclusion matches them.
+A file CRIU will try to reopen must be there.
+Files the container deleted from its image are recorded in `deleted-files.json`.
 
-`captureOverlay` archives the overlay upper directory into `rootfs-diff.tar`, excluding `config.overlay.exclusions` and the destinations of bind mounts, and leaving out `trusted.*` extended attributes because overlay opaque markers would hide base image content when replayed.
-Before archiving, the agent decodes CRIU's own images to find every regular file the dumped processes hold open or mapped.
-Those files are appended to the archive even when an exclusion matches them, since CRIU will fail to reopen them otherwise.
-Whiteout entries in the upper directory are recorded in `deleted-files.json`.
+A failure to find CRIU's referenced files, or a referenced file missing from the archive, fails the checkpoint.
+Any other problem with the archive is logged and the checkpoint proceeds without that part.
 
-A failure to read CRIU's referenced files, or a referenced file missing from the archive, fails the checkpoint.
-Other diff problems are logged and the checkpoint proceeds without that part of the diff.
+## Publishing
 
-## Publish
+The agent asks PageBroker to commit.
+For a transaction on the memory-backed volume, PageBroker copies it to the shared volume next to the final location, then renames it into place.
+For a transaction already on the shared volume, it renames directly.
+If an older checkpoint exists at the destination, it is moved aside first and removed afterwards.
+The rename is the commit point: before it the destination path does not exist, and after it the checkpoint is complete.
 
-`commit` asks PageBroker to publish.
-For a staged capture it copies the staging directory to a sibling of the destination and renames it into place.
-For a direct capture it renames the temporary directory into place.
-If a previous artifact exists at the destination it is moved aside first and removed afterwards.
-The rename is the commit point: before it, the destination path does not exist, and after it, the artifact is complete.
+The agent confirms the directory exists, then patches the `PodSnapshotContent` with `Ready=True`, reason `Captured`, and a `status.source` block describing the machine the checkpoint was taken on, projected from the manifest.
+The patch uses optimistic locking.
+If a `Failed` condition got there first, it wins.
 
-Back in the controller, `executorCheckpoint` verifies that the artifact directory exists, then `markCheckpointReady` patches the content's status with `Ready=True`, reason `Captured`, and the `status.source` block projected from the manifest.
-The patch uses an optimistic lock and retries a handful of conflicts.
-If a `Failed` condition arrived first it wins.
-A content that reaches `Ready` emits no event.
+The agent logs a timing summary with the phases `gpu_device_map`, `cuda_checkpoint`, `criu_dump`, `overlay_capture`, and `remove_old_version_and_switch`, the last being the commit.
 
-The agent logs a timing summary with these phases: `gpu_device_map`, `cuda_checkpoint`, `criu_dump`, `overlay_capture`, and `remove_old_version_and_switch`, which is the publish step.
+## When it fails
 
-## Failure behavior
-
-Failure is terminal.
-`Failed` is written with a reason, the queue forgets the key, and nothing retries.
+A failure is final.
+The agent writes `Failed` with a reason, and nothing retries.
 A new capture needs a new `PodSnapshot`.
+The [capture retry proposal](../../proposals/394-capture-retry/README.md) describes in-place retry, which is not implemented.
 
-What happens to the source depends on where the failure occurred:
+What happens to the source depends on how far the capture got:
 
 | Failure point | Source process | Transaction |
 | --- | --- | --- |
-| Preconditions, inspect, transaction prepare, CuInterpose inspect, job file, manifest | Keeps running | Aborted |
-| CuInterpose prepare, GPU lock or checkpoint, CRIU dump, diff | Killed with `SIGKILL` | Aborted |
-| Commit | Killed, since the dump already terminated it | Aborted |
-| Artifact missing after commit | Killed | Already committed, treated as failure |
+| Any check before the first GPU lock, including inspect, the transaction, the CuInterpose inspect, and the manifest | Keeps running | Aborted |
+| CuInterpose prepare, GPU lock or checkpoint, CRIU dump, archiving | Killed | Aborted |
+| Commit | Already dead from the dump | Aborted |
+| Directory missing after commit | Killed | Treated as failure |
 
-The kill is a `SIGKILL` of the container's init PID.
-When a container exit, not the dump, ends the capture, the agent emits a `CheckpointFailed` warning event on the pod and writes `CheckpointContainerFailed` on the content.
+The kill is a `SIGKILL` of the container's init process.
+When it is a container exit rather than the dump that ends the capture, the agent also emits a `CheckpointFailed` warning event on the pod.
 
-Only operations that take a context observe `checkpointTimeoutSeconds`.
-The CRIU dump and the `tar` invocation do not, so a hung dump runs until CRIU gives up, and the timeout then fails the commit that follows.
+The capture deadline is a Go context.
+The CRIU dump and the `tar` invocation do not take one, so a hung dump runs until CRIU gives up, and the deadline then fails the commit that follows.
 
-The [capture retry proposal](../../proposals/394-capture-retry/README.md) describes in-place retry, which would repeat only the part that failed.
-It is not implemented.
+## Where multi-GPU differs
 
-## Failure reasons
+A CuInterpose capture adds these steps and nothing else:
 
-Reasons the agent writes on the `PodSnapshotContent`, which the operator mirrors onto the `PodSnapshot`:
+- The annotation and launcher are validated before the capture starts.
+- The libraries are hashed and the coordinator inspects shared memory after the transaction opens.
+- The coordinator prepares shared memory before the first GPU lock, writing `cuinterpose.state`.
+- The coordinator's sockets under `/tmp` are left out of the root filesystem archive.
+- A coordinator satisfies the multi-GPU rule that otherwise requires a `cuda-checkpoint-job` file.
 
-| Reason | Meaning |
+[Multi-GPU support](multi-gpu.md#capture) explains what inspect and prepare do.
+
+## Reference: checks and failure reasons
+
+Each reason the agent can write on a `PodSnapshotContent`, and the check that produces it.
+The operator copies the reason onto the `PodSnapshot`.
+
+| Reason | Produced when |
 | --- | --- |
-| `MissingContentUID`, `InvalidTargetContainer`, `InvalidDestination` | The work order itself is malformed. |
-| `SourcePodNotFound` | The pod is gone and no artifact exists. |
-| `StalePodReference` | The pod is a different incarnation from the one the content names. |
+| `MissingContentUID`, `InvalidTargetContainer`, `InvalidDestination` | The `PodSnapshotContent` has no UID, does not name exactly one container, or its checkpoint path is invalid. |
+| `SourcePodNotFound` | The pod does not exist and no checkpoint exists either. |
+| `StalePodReference` | The pod's UID is not the one recorded in the `PodSnapshotContent`. |
 | `CheckpointContainerFailed` | A container in the pod exited with a non-zero code before the capture. |
-| `SourcePodGone` | The pod was deleted or reached a terminal phase before the capture. |
-| `CuInterposeMisconfigured` | The multi-GPU annotation or launcher is wrong. |
-| `ContainerNotResolved` | The runtime could not resolve the container to a process. |
-| `CheckpointFailed` | Anything in the executor. The message carries the error. |
-
-## Multi-GPU hooks
-
-Where a CuInterpose capture differs from a single-GPU one:
-
-- The precondition check validates the `nvidia.com/snapshot-multi-gpu` annotation and the launcher prefix.
-- Inspect hashes the libraries and runs the coordinator's `--inspect`.
-- The job file rule accepts a coordinator in place of a `cuda-checkpoint-job` file.
-- `--prepare` runs before the first GPU lock and writes `cuinterpose.state`.
-- The coordinator sockets under `/tmp` are excluded from the root filesystem diff.
-
-[Multi-GPU support](multi-gpu.md#capture) explains what the coordinator does in those phases.
+| `SourcePodGone` | The pod is being deleted, or reached `Succeeded` or `Failed`, before the capture. |
+| `CuInterposeMisconfigured` | The multi-GPU annotation is invalid or the launcher is not on the container's command. |
+| `ContainerNotResolved` | The container runtime could not resolve the container to a process. |
+| `CheckpointFailed` | Anything in the capture itself. The message carries the error. |
 
 ## Invariants
 
-- Non-destructive steps precede destructive ones. Inspect, prepare, CuInterpose inspect, and the job file check all run before the first GPU lock.
-- The source is never resumed. `leave_running` is always false, and any failure after the first destructive step kills the source.
-- GPU state is quiesced before CRIU, by the helper or by PageBroker, and CRIU's own CUDA plugin is never loaded.
-- The manifest is written before the dump, and the artifact directory exists only after the commit rename.
-- Only the oldest non-terminal content may act on a pod, because the failure paths kill containers.
-- `Failed` is sticky, written under an optimistic lock, and never retried.
-- GPUs are recorded in CUDA ordinal order with their UUIDs and device paths, so restore can map them.
-- Host values that cannot be read are recorded as unknown, never as a failure.
+- Nothing destructive happens until every check that can run without side effects has passed.
+- The source is never resumed. Any failure after the first GPU lock kills it.
+- GPU state is brought to the CPU side before CRIU runs, by the helper or by PageBroker, and CRIU's own CUDA plugin is never loaded.
+- The manifest is written before the dump, and the checkpoint directory exists only after the commit rename. Its presence proves success.
+- Only the oldest in-progress `PodSnapshotContent` for a pod may act on it.
+- `Failed` is permanent, written under optimistic locking, and never retried.
+- GPUs are recorded in CUDA's order with their UUIDs and device paths, so that restore can map them onto other GPUs.
+- A value about the host that cannot be read is recorded as unknown, never treated as a failure.

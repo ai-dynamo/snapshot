@@ -6,237 +6,244 @@ SPDX-License-Identifier: Apache-2.0
 # Control plane
 
 <!-- toc -->
-- [Process and configuration](#process-and-configuration)
-- [PodSnapshot and PodSnapshotContent](#podsnapshot-and-podsnapshotcontent)
-  - [Binding](#binding)
-  - [Mirroring](#mirroring)
-  - [Deletion](#deletion)
+- [A checkpoint, from the operator's side](#a-checkpoint-from-the-operators-side)
+  - [Accepting a PodSnapshot](#accepting-a-podsnapshot)
+  - [Waiting and mirroring](#waiting-and-mirroring)
+  - [Deleting](#deleting)
 - [SnapshotJob](#snapshotjob)
-  - [Shaping the source pod](#shaping-the-source-pod)
-  - [Creating the PodSnapshot](#creating-the-podsnapshot)
-  - [Completion](#completion)
-- [Artifact cleanup](#artifact-cleanup)
-- [CRD installation](#crd-installation)
-- [snapshotctl](#snapshotctl)
-- [Failure reasons](#failure-reasons)
-- [Shared contracts in the api module](#shared-contracts-in-the-api-module)
+  - [What it adds to the pod](#what-it-adds-to-the-pod)
+  - [How it tracks progress](#how-it-tracks-progress)
+  - [How it finishes](#how-it-finishes)
+- [Deleting checkpoints](#deleting-checkpoints)
+- [Installing the CRDs](#installing-the-crds)
+- [The code](#the-code)
+  - [The shared api module](#the-shared-api-module)
+  - [snapshotctl](#snapshotctl)
+- [Reference: failure reasons](#reference-failure-reasons)
 - [Invariants](#invariants)
 <!-- /toc -->
 
-This page is for contributors.
-It describes the operator in the `operator/` module and the parts of the `api/` module it depends on.
-The [overview](README.md) places the operator among the other components.
+This page describes the operator, the control plane half of Snapshot.
+The [overview](README.md) introduces the pieces and the resources this page assumes.
 
-The operator is a single controller-runtime manager.
-It owns the Kubernetes side of a checkpoint: it decides which node captures what, publishes the result, runs the `SnapshotJob` workflow, and deletes artifacts.
-It never touches CRIU, CUDA, or a workload process.
-It also plays no part in restore, which the [node agent](node-agent.md) handles from pod annotations alone.
+The operator owns everything about a checkpoint that happens in the Kubernetes API and nothing that happens on a node.
+It accepts a `PodSnapshot`, works out which node must perform the capture, tells the agent there by creating a `PodSnapshotContent`, copies the agent's result back onto the `PodSnapshot`, runs the `SnapshotJob` workflow, and deletes a checkpoint's files when its `PodSnapshotContent` is deleted.
+It never runs CRIU, never calls CUDA, and never touches a workload process.
+It also takes no part in a restore, which the [node agent](node-agent.md) drives from a pod annotation alone.
 
-## Process and configuration
+## A checkpoint, from the operator's side
 
-The manager binary is `operator/cmd/manager`.
-It starts these components on one manager with leader election, so a second replica stands by without acting:
-
-| Component | Source | Watches |
-| --- | --- | --- |
-| `PodSnapshotReconciler` | `operator/internal/controller/podsnapshot_reconciler.go` | `PodSnapshot`, `PodSnapshotContent`, and pods |
-| `SnapshotJobReconciler` | `operator/internal/controller/snapshotjob_reconciler.go` | `SnapshotJob`, Jobs, and `PodSnapshot` |
-| Artifact cleanup controller | `operator/internal/controller/snapshotcontent_reconciler.go` | `PodSnapshotContent` |
-| Maintenance queue | `operator/internal/maintenance` | A timer and the controller above |
-
-The operator has no admission webhooks.
-Validation lives in the CRD schemas as CEL rules, and the reconcilers re-check the same rules defensively.
-
-All configuration arrives as flags, rendered by the Helm chart into the Deployment:
-
-| Flag | Purpose |
-| --- | --- |
-| `--snapshot-storage-config` | The resolved storage identity file, `storage.yaml`, which the chart also mounts into PageBroker. The operator derives the store ID from it. |
-| `--snapshot-storage-base-path` | Where the shared volume is mounted in the operator pod, `/checkpoints`. |
-| `--artifact-cleanup-*` | Sweep interval, batch size, worker count, list attempts, and per-task timeout for maintenance. |
-| `--cuinterpose-image` and `--cuinterpose-image-pull-policy` | The image whose CuInterpose payload a `SnapshotJob` installs into a multi-GPU source pod. The chart passes the agent image. |
-
-The manager runs as root with all capabilities dropped.
-Root is needed only so maintenance can delete CRIU image files that the privileged agent wrote.
-
-## PodSnapshot and PodSnapshotContent
-
-`PodSnapshotContent` is the work order.
-It is cluster scoped, named after the `PodSnapshot` UID, and labelled with the node that must perform the capture.
-The agent on that node selects it by label, and the operator never writes its status.
+The operator's job in a checkpoint is to turn a namespaced request into a cluster-scoped instruction for one node, then wait for the answer.
 
 ```mermaid
 sequenceDiagram
     participant C as Caller
     participant O as Operator
-    participant A as Agent on node
+    participant A as Agent on the pod's node
     C->>O: Create PodSnapshot
-    O->>O: Read source pod, take spec.nodeName
-    O->>A: Create PodSnapshotContent labelled nvidia.com/snapshot-node
-    O->>O: Write status.boundSnapshotContentName
+    O->>O: Read the source pod and its node
+    O->>A: Create PodSnapshotContent labelled with the node
+    O->>O: Record the binding on the PodSnapshot
     A->>A: Capture
-    A->>O: PodSnapshotContent Ready or Failed
-    O->>C: Mirror onto PodSnapshot conditions
+    A->>O: Write Ready or Failed on the PodSnapshotContent
+    O->>C: Copy the condition onto the PodSnapshot
 ```
 
-### Binding
+### Accepting a PodSnapshot
 
-The reconciler adds the `nvidia.com/podsnapshotcontent-cleanup` finalizer, then reads the source pod from its cache.
+When a `PodSnapshot` appears, the operator adds a finalizer to it and reads the pod it names.
+Three things can stop it here.
+If the pod does not exist, the `PodSnapshot` fails with `SourcePodNotFound`.
+If the pod has not been scheduled yet, the operator waits and retries, since it cannot pick a node before the scheduler has.
+If the `PodSnapshot` pins a pod UID in `spec.source.podRef.uid` and the live pod has a different UID, it fails with `StalePodReference`.
+The UID pin lets a caller say "this exact pod", so that a replacement pod with the same name is never captured by mistake.
 
-- A pod with no `spec.nodeName` is not yet schedulable work. The reconcile returns an error and retries with backoff until the pod lands.
-- A missing pod fails the `PodSnapshot` with reason `SourcePodNotFound`.
-- If the `PodSnapshot` pins `podRef.uid` and the live pod's UID differs, the reason is `StalePodReference`. The pin exists so that a same-named replacement pod is never captured in place of the one the caller meant.
-
-The content is built with the pod's node name in both `spec.source.nodeName` and the `nvidia.com/snapshot-node` label, the live pod UID in `spec.source.podRef.uid`, a back reference to the `PodSnapshot` including its UID, and the artifact cleanup finalizer.
-Its name is `podsnapshotcontent-<PodSnapshot UID>`.
-The UID-derived name follows the convention Kubernetes uses for a cluster-scoped object bound to a namespaced one, and it makes a retried create reach the same object instead of a duplicate.
+Otherwise the operator creates the `PodSnapshotContent`.
+It names it `podsnapshotcontent-<PodSnapshot UID>`, following the convention a dynamically provisioned PersistentVolume uses, so that a retry after a crash finds the object it already created instead of making a second one.
+It copies the pod's `spec.nodeName` into the content's spec and into the label `nvidia.com/snapshot-node`, which is how the right agent finds it.
+It records the live pod's UID, a reference back to the `PodSnapshot` including its UID, and a finalizer that will later keep the content alive until its files are deleted.
 
 The create is unconditional.
-If the object already exists, which happens when the operator crashed between the create and the status write, the reconciler adopts it only when its back reference names this `PodSnapshot` with a matching, non-empty UID.
-Anything else is `ContentConflict`.
-Binding is the single status write of `boundSnapshotContentName`.
+If the object already exists, which happens when the operator crashed after creating it but before recording it, the operator adopts it only if its back reference names this `PodSnapshot` with the same UID.
+Any other existing object is a `ContentConflict`.
+Finally the operator writes the content's name into `status.boundSnapshotContentName`.
+From then on the `PodSnapshot` is **bound**, and its state is whatever the content says.
 
-### Mirroring
+### Waiting and mirroring
 
-Once bound, the reconciler copies the content's `Ready` or `Failed` condition onto the `PodSnapshot`, reason and message included.
+A bound `PodSnapshot` follows its content.
+When the content reports `Ready` or `Failed`, the operator copies the condition, reason, and message onto the `PodSnapshot`.
 Success reasons therefore come from the agent.
-`Ready` is not treated as terminal, so the `PodSnapshot` keeps following the content.
-`Failed` is terminal and sticky.
+`Ready` is not treated as final, so the `PodSnapshot` keeps following, but `Failed` is final and never changes.
 
-While the content is still pending, the reconciler watches the source pod.
-A pod that is gone or terminal while the content is pending is suspicious but not conclusive, because a successful dump kills the source before the agent writes `Ready`.
-The reconciler therefore re-reads the pod and then the content through an uncached client, in that order, since the agent persists `Ready` before the source dies.
-If the content is still pending it classifies the pod:
+While the content is still pending, the operator also watches the source pod, because the agent reports nothing if it never gets to run.
+A source pod that has disappeared or finished is a strong hint that no capture is coming, but not proof: a successful dump kills the source, and the agent writes `Ready` only after that.
+So the operator first re-reads the pod and then the content, both bypassing its cache.
+Only if the content is still pending does it draw a conclusion from the pod:
 
-| Pod state | `PodSnapshot` reason |
-| --- | --- |
-| UID differs from the pinned one | `StalePodReference` |
-| Phase `Succeeded` | `SourceCompletedWithoutCapture` |
-| Phase `Failed`, or being deleted | `SourcePodGone`, after a five minute grace |
+- A pod with a different UID than the one pinned means `StalePodReference`.
+- A pod that exited successfully means `SourceCompletedWithoutCapture`.
+- A pod that failed or is being deleted means `SourcePodGone`, but only after a five minute grace period counted from when it stopped. That grace covers the gap between the dump killing the source and the agent writing `Ready`, and it is the backstop for an agent that never reports at all.
 
-The five minute grace, counted from the newest container finish time, is the backstop for an agent that never publishes a result.
-It is the only time-based failure the operator applies to a capture.
+### Deleting
 
-### Deletion
-
-Deleting a `PodSnapshot` deletes the bound content, polls until it is gone, and only then removes the `PodSnapshot` finalizer.
-The content carries the artifact cleanup finalizer, so the chain is: delete `PodSnapshot`, delete content, maintenance deletes the artifact, content disappears, `PodSnapshot` disappears.
-A `PodSnapshot` whose artifact cannot be deleted therefore stays in `Terminating`.
+Deleting a `PodSnapshot` deletes its content, waits until the content is gone, and only then drops the `PodSnapshot` finalizer.
+The content in turn waits for its files to be deleted from the shared volume, described under [Deleting checkpoints](#deleting-checkpoints).
+The full chain is: delete the `PodSnapshot`, the operator deletes the content, maintenance deletes the files, the content disappears, the `PodSnapshot` disappears.
+A `PodSnapshot` whose files cannot be deleted stays in `Terminating`.
 
 ## SnapshotJob
 
-`SnapshotJob` wraps the whole capture in one declarative object for callers that cannot track a running pod themselves.
-Its reconciler is in `operator/internal/controller/snapshotjob_*.go`.
+A `PodSnapshot` needs a pod that already exists and is ready.
+Callers that drive pods themselves, such as a serving platform, can provide that.
+Callers that cannot, such as a pipeline that submits work and walks away, use a `SnapshotJob`.
+It takes a pod template and does the whole thing: run the pod, wait until it is ready, checkpoint it, and clean up.
 
 ```mermaid
 flowchart LR
-    SJ["SnapshotJob"] -->|1| Job["batch/v1 Job"]
+    SJ["SnapshotJob"] -->|1. creates| Job["Job"]
     Job --> Pod["Source pod"]
-    SJ -->|2| PS["PodSnapshot"]
+    SJ -->|2. creates| PS["PodSnapshot"]
     PS --> PSC["PodSnapshotContent"]
     PSC -.->|Ready| SJ
     Job -.->|finished| SJ
 ```
 
-Each condition has one source of truth.
-`Captured` comes only from the `PodSnapshot`.
-Workload completion and failure come only from the Job.
-The source pod is read for identity and for helper container exit codes, never to infer a capture result.
-Every reconcile derives the complete status from those observations and patches it once.
+### What it adds to the pod
 
-### Shaping the source pod
+The operator wraps the template in a `batch/v1` Job and adds what the [workload contract](../workload-contract.md) requires but a caller might omit.
+The Job gets `restartPolicy: Never` and `backoffLimit: 0`, so the pod runs exactly once.
+Sidecar injection by Linkerd and Istio is disabled, since an injected sidecar would not know the contract.
+The pod gets the `block-iouring` seccomp profile that CRIU needs.
+The target container gets the control directory, the `SNAPSHOT_CONTROL_DIR` environment variable, and a readiness probe that checks for `ready-for-snapshot` every second.
+Any liveness or startup probe on the target is removed.
 
-The reconciler builds a Job from `spec.podTemplate` through `operator/internal/protocol`, the package that holds the operator's pod mutators.
-The names it uses, such as the volume, mount path, environment variables, and sentinel files, come from `api/podcontract`, so the operator and the agent share one vocabulary.
-The Job gets:
+When the template carries `nvidia.com/snapshot-multi-gpu: enabled`, the operator also adds an init container that copies the CuInterpose libraries from the agent image into a volume, and prefixes the target command with the CuInterpose launcher.
+[Multi-GPU support](multi-gpu.md#kubernetes-opt-in) explains why.
 
-- `restartPolicy: Never` and `backoffLimit: 0`, so the pod is never recreated.
-- The pod-level seccomp profile `profiles/block-iouring.json`.
-- Sidecar injection disabled for Linkerd and Istio.
-- On the target container: the `snapshot-control` `emptyDir` mounted with `subPath` equal to the container name, `SNAPSHOT_CONTROL_DIR` and its deprecated alias, and a readiness probe that runs `cat /snapshot-control/ready-for-snapshot` every second. Any liveness or startup probe on the target is removed.
-- `activeDeadlineSeconds` from the spec, default one hour.
+### How it tracks progress
 
-When the template carries `nvidia.com/snapshot-multi-gpu: enabled`, the reconciler also prepends the CuInterpose launcher to the target command and adds an init container that copies the CuInterpose libraries from the configured image into an `emptyDir`.
-[Multi-GPU support](multi-gpu.md#kubernetes-opt-in) describes that shape.
+Each `SnapshotJob` condition has exactly one source of truth.
+`Captured` comes from the `PodSnapshot` and nothing else.
+Completion and failure of the workload come from the Job and nothing else.
+The operator reads the source pod only to learn its identity and to check helper containers, never to infer whether a capture happened.
+Every reconcile derives the whole status from those observations and writes it once.
 
-The reconciler records the Job UID before it creates anything else.
-If the Job later disappears or is replaced, the `SnapshotJob` fails with `JobDeleted` or `JobNameConflict`.
-A `SnapshotJob` never runs its workload twice.
-
-### Creating the PodSnapshot
-
-As soon as the Job controls exactly one pod, the reconciler creates a `PodSnapshot` named after the `SnapshotJob`, with the pod's name and UID pinned.
+The operator records the Job's UID before creating anything else.
+Once the Job controls exactly one pod, the operator creates a `PodSnapshot` named after the `SnapshotJob`, pinning that pod's name and UID.
 It does not wait for the pod to be scheduled or ready.
-The `PodSnapshot` reconciler waits for a node, and the agent waits for container readiness, so the gating happens downstream.
+The operator's `PodSnapshot` logic waits for a node, and the agent waits for container readiness, so nothing is lost by creating it early.
 
 The `PodSnapshot` has no owner reference to the `SnapshotJob`.
-The artifact is meant to outlive the job that produced it, so deleting a `SnapshotJob` leaves the `PodSnapshot` in place.
-The `nvidia.com/snapshot-job` and `nvidia.com/snapshot-job-uid` labels record the relationship instead.
+The checkpoint is meant to outlive the job that produced it, so deleting a `SnapshotJob` leaves the `PodSnapshot` and its files in place.
+The labels `nvidia.com/snapshot-job` and `nvidia.com/snapshot-job-uid` record which `SnapshotJob` made it.
 
-### Completion
+### How it finishes
 
-Completion is a two-stage gate.
+Completion has two stages.
 A `Ready` `PodSnapshot` sets `Captured=True`.
-The reconciler then waits for the Job to finish before it sets `Completed=True` and deletes the Job.
+The operator then waits for the Job to finish before setting `Completed=True` and deleting the Job.
 
-The dump kills the target container, so after every successful capture the Job reports `Failed`.
-The reconciler treats that as success once it has confirmed that every helper container in the template exited with code zero.
-Native sidecars, init containers with `restartPolicy: Always`, only need to have stopped.
-Helpers that are still running are left alone, since deleting the Job would kill them mid-work.
+The dump kills the target container, so after every successful checkpoint the Job reports `Failed`.
+The operator treats that as the expected outcome, provided every other regular container in the template exited with code zero.
+Native sidecars, which are init containers with `restartPolicy: Always`, only need to have stopped.
+Helpers still running are left alone, since deleting the Job would kill them mid-work.
 
-A `SnapshotJob` fails on a failed capture, on `DeadlineExceeded`, or on a Job that failed before any `PodSnapshot` existed.
-A pending capture is never failed on the Job's word alone.
-The five minute grace in the `PodSnapshot` reconciler bounds that wait.
-A failed `SnapshotJob` keeps its Job for debugging.
+A `SnapshotJob` fails when the capture fails, when the Job exceeds `activeDeadlineSeconds`, or when the Job fails before any `PodSnapshot` exists.
+A pending capture is never failed on the Job's evidence alone, because of the same race as above.
+A failed `SnapshotJob` keeps its Job so that its pod can be inspected.
+A `SnapshotJob` is strictly one-shot: if its Job or `PodSnapshot` disappears or is replaced, it fails rather than starting over.
 
-## Artifact cleanup
+## Deleting checkpoints
 
-Cleanup runs inside the operator as a rate-limited work queue with a bounded worker pool, in `operator/internal/maintenance`.
-There are no per-task Jobs.
-The queue is leader elected along with the rest of the manager.
+Checkpoint files are deleted by the operator, not by the agent.
+The work runs inside the operator process as a rate-limited work queue with a fixed number of workers, and only on the leader.
 
-Two things produce work:
+Two things produce work.
+When a `PodSnapshotContent` carrying the cleanup finalizer begins deleting, a cleanup item for it is queued.
+And on a timer, a sweep runs that looks for files no `PodSnapshotContent` refers to any more.
 
-- **Content deletion.** The cleanup controller adds the `nvidia.com/podsnapshotcontent-artifact-cleanup` finalizer to any content that lacks it, and enqueues a `delete-content` item when a content with the finalizer starts deleting.
-- **A periodic sweep**, at startup and every scan interval. It also re-enqueues every deleting content that still carries the finalizer, which is how a dropped or repeatedly failed delete recovers.
+A cleanup item removes the directory named after the content's UID and then removes the finalizer.
+It is safe to repeat: a content that is gone, not deleting, or already cleaned is a no-op.
+If the content says it belongs to a different store than the one the operator is configured with, the item is refused, so that a missing directory on some other volume is never mistaken for a completed deletion.
 
-A `delete-content` item removes the artifact root for that content UID and then removes the finalizer.
-It is idempotent: a content that is gone, not deleting, or already cleaned is a no-op.
-A content whose `spec.storage` names a different store than the operator's is refused, so a missing artifact on some other volume never counts as a completed cleanup.
+A sweep lists the directories on the volume first, and only then lists every `PodSnapshotContent`, so a checkpoint written between the two steps can never look like an orphan.
+Any directory whose name is not a live content UID is removed, a bounded number per sweep.
+The sweep also re-queues any deleting content that still has the finalizer, which is how a cleanup that was dropped or kept failing eventually completes.
 
-A sweep enumerates artifact roots first, then lists every `PodSnapshotContent` through an uncached, paged, consistent list.
-Enumerating first means a content created between the two steps is never mistaken for an orphan.
-A root whose directory name is not the UID of any existing content is an orphan, and at most one batch of orphans is removed per sweep.
+Deletion is deliberately conservative.
+Anything that is a symlink or not a directory is refused rather than removed.
+The operator uses the same `agent/pkg/artifact` package as the agent to compute paths, so the two cannot disagree about where a checkpoint lives.
 
-The backend interface has `Delete` and `Candidates`.
-The PVC backend works on `<basePath>/artifacts/<contentUID>` through the same `agent/pkg/artifact` package the agent writes with, so the two cannot disagree about the layout.
-It refuses to delete anything that is a symlink or not a directory, and it skips unsafe entries rather than removing them.
-An S3 backend exists in the tree for the [S3 proposal](../../proposals/237-s3-storage/README.md), but the manager has no flags to configure it yet.
+## Installing the CRDs
 
-## CRD installation
+The three CRDs are generated from the Go types in `api/v1alpha1` by `controller-gen` and embedded in the `api` module.
+A copy is mirrored into `charts/snapshot/crds` so that Helm installs them on a fresh release, and `make verify-crds` fails when the two drift.
 
-The three CRDs are generated by `controller-gen` from the Go types in `api/v1alpha1` and embedded into the `api` module.
-A copy is mirrored into `charts/snapshot/crds` so Helm installs them on a fresh release, and `make verify-crds` fails when the two drift.
+Helm never upgrades CRDs it has already installed.
+The operator Deployment therefore runs a `crd-installer` init container, built from the same image as the manager.
+It server-side applies every embedded CRD and waits for each to report `Established`.
+If anything fails, the pod does not start, on purpose: an operator running against outdated definitions is worse than one that has not started.
+Because the installer and the manager ship together, a rollout converges the cluster on the definitions the running binary expects.
+There is only one API version, `v1alpha1`, and no conversion webhook.
 
-Helm never upgrades CRDs.
-The operator Deployment therefore runs `crd-installer` as an init container.
-It server-side applies every embedded CRD with a fixed field manager and forced ownership, then waits for each to report `Established`.
-Any failure stops the pod, on purpose: an operator running against outdated definitions is worse than one that has not started.
-Because the installer and the manager come from the same image, a rollout converges the cluster on the definitions the running binary expects.
+## The code
 
-There is no conversion webhook and only one API version, `v1alpha1`.
+The operator is a single controller-runtime manager in `operator/cmd/manager`.
+It runs with leader election, so a second replica stands by without acting.
+It registers:
 
-## snapshotctl
+| Component | Source | Watches |
+| --- | --- | --- |
+| `PodSnapshotReconciler` | `operator/internal/controller/podsnapshot_reconciler.go` | `PodSnapshot`, `PodSnapshotContent`, pods |
+| `SnapshotJobReconciler` | `operator/internal/controller/snapshotjob_*.go` | `SnapshotJob`, Jobs, `PodSnapshot` |
+| Cleanup controller and queue | `operator/internal/controller/snapshotcontent_reconciler.go`, `operator/internal/maintenance` | `PodSnapshotContent`, a timer |
 
-`operator/cmd/snapshotctl` is a manual and debugging CLI with two commands.
-`checkpoint` builds a source Job through the same `protocol.NewSourceJob` the `SnapshotJob` reconciler uses, creates a `PodSnapshot` for its pod, and waits for `Ready`.
-`restore` builds a restore pod through `podcontract.Build` and creates it.
-It bypasses `SnapshotJob`, so it gets none of its completion gating, and it is not part of any image or release.
-The [CLI reference](../cli.md) documents its use.
+There are no admission webhooks.
+Validation lives in the CRD schemas as CEL rules, and the reconcilers re-check the same rules in case an object predates them.
 
-## Failure reasons
+The pod mutations described under `SnapshotJob` live in `operator/internal/protocol`.
+The names they use, such as the volume, the environment variable, and the sentinel files, come from `api/podcontract`, so the operator and the agent share one definition of the contract.
 
-Reasons the operator itself originates on a `PodSnapshot`:
+Configuration arrives as flags, rendered by the Helm chart:
+
+| Flag | Purpose |
+| --- | --- |
+| `--snapshot-storage-config` | The `storage.yaml` the chart renders to identify the checkpoint store. PageBroker reads the same file. |
+| `--snapshot-storage-base-path` | Where the shared volume is mounted in the operator pod, `/checkpoints`. |
+| `--artifact-cleanup-*` | Sweep interval, batch size, worker count, list attempts, and per-item timeout. |
+| `--cuinterpose-image`, `--cuinterpose-image-pull-policy` | The image a `SnapshotJob` copies the CuInterpose libraries from. The chart passes the agent image. |
+
+The manager runs as root with every capability dropped.
+Root is needed only because the files it deletes were written by the privileged agent.
+
+### The shared api module
+
+`api/` is what both binaries and external integrators import.
+
+`api/v1alpha1` holds the CRD types, their conditions and reasons, and the embedded CRD manifests.
+
+`api/podcontract` holds the contract between Snapshot and a pod: the control directory and sentinel names, the restore annotations, the builder and validator for restore pods, and the classifier for the `nvidia.com/Restored` condition.
+`podcontract.Build` is the entry point for a controller that creates restore pods.
+It returns a modified deep copy, rejects conflicting annotations and mounts instead of overwriting them, and is idempotent.
+`podcontract.ClassifyRestoreOutcome` turns the condition into `Pending`, `Succeeded`, `Failed`, `PartiallySucceeded`, or `Unknown` without importing the CRD types.
+
+`api/compat` holds the rules that decide whether a node can run a checkpoint.
+Only the agent evaluates them, but they live here because their names are published on pod events and integrators match on them.
+
+`api/storage` holds the identity of a checkpoint store and the per-checkpoint lock the cleanup workers take.
+
+### snapshotctl
+
+`operator/cmd/snapshotctl` is a command line tool for trying Snapshot by hand.
+`checkpoint` builds a source Job with the same code the `SnapshotJob` reconciler uses, creates a `PodSnapshot` for its pod, and waits.
+`restore` builds a restore pod with `podcontract.Build` and creates it.
+It is not part of any image or release, and it bypasses `SnapshotJob`, so it gets none of its completion checks.
+The [CLI reference](../cli.md) documents it.
+
+## Reference: failure reasons
+
+Reasons the operator itself writes on a `PodSnapshot`:
 
 | Reason | Meaning |
 | --- | --- |
@@ -246,31 +253,16 @@ Reasons the operator itself originates on a `PodSnapshot`:
 | `SourcePodGone` | The source pod failed or was deleted while the capture was pending, and the grace period passed. |
 | `SourceCompletedWithoutCapture` | The source pod exited successfully before any capture. |
 
-Every other reason is mirrored from the agent.
-Those are listed under [Checkpoint flow](checkpoint.md#failure-reasons).
-`SnapshotJob` folds `ContentConflict`, `SourcePodNotFound`, and `StalePodReference` into `PodSnapshotFailed`, and every agent reason into `CaptureFailed`.
-
-## Shared contracts in the api module
-
-The `api` module is what external integrators and both binaries import.
-
-| Package | Contents | Who uses it |
-| --- | --- | --- |
-| `api/v1alpha1` | The CRD types, conditions, reasons, and the embedded CRD manifests. | Operator, agent, integrators |
-| `api/podcontract` | The restore pod builder and validator, the control volume and sentinel names, the restore annotations, and the `nvidia.com/Restored` condition classifier. | Operator, agent, integrators |
-| `api/compat` | The compatibility rules a restore target must pass. | Agent only, but the check names are published on pod events, so they live here |
-| `api/storage` | The store identity hash, the artifact identity triple, and the process-local lock maintenance takes per artifact. | Operator |
-
-`podcontract.Build` is the intended entry point for a controller that restores pods.
-It is a pure transformation that returns a deep copy, rejects conflicting annotations and mounts instead of overwriting them, and is idempotent.
-`podcontract.ClassifyRestoreOutcome` turns the `nvidia.com/Restored` condition into `Pending`, `Succeeded`, `Failed`, `PartiallySucceeded`, or `Unknown` without importing the CRD types.
+Every other reason is copied from the agent.
+They are listed under [Checkpoint flow](checkpoint.md#reference-checks-and-failure-reasons).
+On a `SnapshotJob`, the first three above become `PodSnapshotFailed` and every agent reason becomes `CaptureFailed`.
 
 ## Invariants
 
-- Every spec is immutable, enforced by CEL.
-- A `PodSnapshotContent` is one-to-one with a `PodSnapshot` incarnation. Its name is derived from the `PodSnapshot` UID, and adoption requires a matching back reference UID.
+- Every spec is immutable, enforced by CEL rules in the CRDs.
+- A `PodSnapshotContent` belongs to exactly one `PodSnapshot` incarnation. Its name derives from the `PodSnapshot` UID, and adopting an existing one requires a matching back reference UID.
 - The capture node is fixed when the content is created, from the live pod's `spec.nodeName`. The operator does no scheduling.
-- Irreversible decisions use uncached reads. Pending capture failure re-reads the pod and then the content. `SnapshotJob` confirms absence and helper state the same way.
-- `Failed` is sticky on every resource. `Ready` on a `PodSnapshot` keeps mirroring.
-- Artifacts outlive their producers. Nothing owns a `PodSnapshot` from above, and cleanup is tied to the content finalizer rather than to any controller's lifetime.
+- Irreversible decisions use reads that bypass the cache. Failing a pending capture re-reads the pod and then the content, and `SnapshotJob` confirms absence the same way.
+- `Failed` is permanent on every resource. `Ready` on a `PodSnapshot` keeps following the content.
+- Checkpoints outlive their producers. Nothing owns a `PodSnapshot` from above, and deletion of files is tied to the content's finalizer, not to any controller's lifetime.
 - The operator and the agent communicate only through the Kubernetes API. Spec and labels flow down, status flows up.

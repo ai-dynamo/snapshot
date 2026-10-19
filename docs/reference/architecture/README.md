@@ -6,233 +6,223 @@ SPDX-License-Identifier: Apache-2.0
 # Architecture
 
 <!-- toc -->
-- [How to read this section](#how-to-read-this-section)
-- [What Snapshot does](#what-snapshot-does)
-- [Terms used in this section](#terms-used-in-this-section)
-- [Components](#components)
-- [Resources](#resources)
-- [Checkpoint, in brief](#checkpoint-in-brief)
-- [Restore, in brief](#restore-in-brief)
-- [Storage, in brief](#storage-in-brief)
-- [Failure behavior](#failure-behavior)
-- [Where multi-GPU diverges](#where-multi-gpu-diverges)
-- [Security boundaries](#security-boundaries)
-- [Where to look](#where-to-look)
+- [The idea](#the-idea)
+- [The pieces](#the-pieces)
+- [The resources](#the-resources)
+- [How the workload takes part](#how-the-workload-takes-part)
+- [What happens in a checkpoint](#what-happens-in-a-checkpoint)
+- [What happens in a restore](#what-happens-in-a-restore)
+- [Where multi-GPU differs](#where-multi-gpu-differs)
+- [When things fail](#when-things-fail)
+- [Privilege and trust](#privilege-and-trust)
+- [Where to go next](#where-to-go-next)
+- [Vocabulary](#vocabulary)
 <!-- /toc -->
 
-This section is for contributors and for the people who integrate Snapshot into a scheduler, controller, or platform.
-It explains how Snapshot works inside.
-To use Snapshot, start with the [usage guides](../../guides/README.md) and the [API reference](../api.md) instead.
-
-This page is the overview.
-Each later page covers one part of the system in depth:
-
-| Page | What it covers |
-| --- | --- |
-| [Control plane](control-plane.md) | The operator: how `PodSnapshot`, `PodSnapshotContent`, and `SnapshotJob` are reconciled, and artifact cleanup. |
-| [Node agent](node-agent.md) | The agent pod on every GPU node: its processes, helper binaries, the PageBroker sidecar, and its footprint on the host. |
-| [Checkpoint flow](checkpoint.md) | From a ready source pod to a committed artifact. |
-| [Restore flow](restore.md) | From a pod with the `nvidia.com/restore-from` annotation to a running, restored process. |
-| [Storage and artifacts](storage.md) | The artifact layout, the manifest, the compatibility checks, and how artifacts are published and deleted. |
-| [Multi-GPU support](multi-gpu.md) | CuInterpose, the component that checkpoints and restores CUDA memory shared between processes. |
-
-## How to read this section
+This section explains how Snapshot works inside.
+It is written for contributors, and for people who integrate Snapshot into a scheduler, controller, or serving platform.
+It assumes you know Kubernetes and Linux and have never seen Snapshot.
+To use Snapshot rather than change it, start with the [usage guides](../../guides/README.md) and the [API reference](../api.md).
 
 Read this page first.
-It introduces the components, the resources, and the two flows, and it is enough to reason about where a change belongs.
+It introduces the pieces and the vocabulary that every later page uses.
 
-Then pick a path:
+## The idea
 
-- **Integrating Snapshot** into a controller or platform: [Control plane](control-plane.md) for the resource lifecycle, then the [restore flow](restore.md) for what your restore pods must look like and how their outcome is reported.
-- **Changing the agent**: [Node agent](node-agent.md) for the processes and binaries, then the [checkpoint flow](checkpoint.md) and [restore flow](restore.md), which follow one operation through them.
-- **Changing what is stored** or how compatibility is decided: [Storage and artifacts](storage.md).
-- **Working on multi-GPU workloads**: everything above applies unchanged, then [Multi-GPU support](multi-gpu.md). The section [Where multi-GPU diverges](#where-multi-gpu-diverges) says where the two paths part.
+Snapshot checkpoints one container of a running GPU pod and later restores that checkpoint into a new pod, on the same node or a compatible one.
+The restored process continues from the instruction it was stopped at.
+It does not start again from its entrypoint, so the minutes an inference server spends loading weights and warming up are paid once and then skipped.
 
-## What Snapshot does
+A checkpoint has to capture four things: the process tree with its memory and open files, the files the container wrote to its root filesystem, the state of every CUDA process on the GPU, and enough information about the machine to tell whether another node can run it.
+Two existing tools do most of that work.
+[CRIU](https://criu.org/), the Linux checkpoint and restore tool, handles the processes.
+The CUDA driver's checkpoint API handles the GPU state: it locks a CUDA process, moves its device memory off the GPU, and later moves it back.
 
-Snapshot checkpoints one container of a running GPU pod and restores that checkpoint into a new pod later, on the same node or a compatible one.
-A checkpoint holds the process tree, its CPU memory and open files, the changes the container made to its root filesystem, and the GPU state of every CUDA process in the container.
-A restored process continues from the instruction it was stopped at.
-It does not run its entrypoint again.
+Snapshot's own code decides when a capture is safe, runs those two tools in the right order inside the right namespaces, stores the result where another node can reach it, decides whether a destination can run it, and exposes all of this as Kubernetes resources.
 
-Two existing tools do most of the heavy lifting:
+## The pieces
 
-- [CRIU](https://criu.org/) dumps and restores the process tree and everything on the CPU side.
-- The CUDA driver's checkpoint API, called through `cuda-checkpoint-helper` or through PageBroker, locks each CUDA process, moves its device state to host memory, and later moves it back.
-
-Snapshot's own code sequences those two, decides what is safe to capture and restore, and exposes the whole thing as Kubernetes resources.
-
-## Terms used in this section
-
-| Term | Meaning |
-| --- | --- |
-| Source pod | The running pod whose container is checkpointed. |
-| Restore pod, destination container | A new pod that names a `PodSnapshot` to restore from, and the container in it that receives the restored process. |
-| Artifact | One checkpoint on the shared volume: CRIU images, GPU memory, the root filesystem diff, and a manifest. |
-| Work order | A `PodSnapshotContent`, which tells one node agent what to capture. |
-| Control directory | The per-container `snapshot-control` volume through which the workload and the agent exchange sentinel files such as `ready-for-snapshot` and `restore-complete`. |
-| Restore proxy | The small program the agent makes PID 1 of a destination container. It waits for the restore, then stands in for the restored process toward the kubelet. |
-| Bundle | The directory of tools the agent bind mounts into a destination container, because the workload image ships none of them. |
-| PageBroker transaction | PageBroker's unit of work: a directory it hands out for writing or reading, and later publishes, releases, or discards. |
-| CustomStorage | A CUDA driver feature that streams GPU memory to an external engine instead of into the process's host memory. PageBroker uses it when the driver supports it. |
-
-## Components
-
-Snapshot installs as one Helm release per cluster with two workloads.
+Snapshot installs as one Helm release per cluster.
+It runs two workloads and shares one volume between them.
 
 ```mermaid
 flowchart TB
     subgraph CP["Control plane"]
-        Op["Operator Deployment"]
+        Op["Operator"]
     end
     subgraph Node["Each GPU node"]
-        subgraph AgentPod["Agent DaemonSet pod"]
+        subgraph AgentPod["Agent pod"]
             Agent["agent"]
             PB["pagebroker"]
         end
-        Src["Source pod"]
-        Dst["Restore pod"]
+        Src["Pod being checkpointed"]
+        Dst["Pod being restored"]
     end
     API["Kubernetes API"]
-    PVC["Shared RWX volume"]
+    PVC["Shared volume"]
     Op <--> API
     Agent <--> API
     Agent --> Src
     Agent --> Dst
     Agent --> PB
     PB <--> PVC
-    Agent <--> PVC
     Op --> PVC
 ```
 
-| Component | Runs where | Responsibility |
-| --- | --- | --- |
-| Operator | One Deployment, leader elected | Turns a `PodSnapshot` into a `PodSnapshotContent` work order for one node, mirrors the result back, runs `SnapshotJob`, and deletes artifacts when their content is deleted. Installs the CRDs from an init container. |
-| Agent | Privileged DaemonSet container on every GPU node | Performs every checkpoint and restore on its node. Watches the `PodSnapshotContent` objects labelled with its node name and the restore pods scheduled to it. Registers a Node Resource Interface (NRI) plugin, a hook the container runtime calls as it creates each container, which restore depends on. |
-| PageBroker | Sidecar container in the agent pod | Owns the movement of checkpoint data between the node and the shared volume. Publishes a checkpoint atomically and pins or stages an artifact for restore. When the driver supports it, moves GPU memory directly between device and storage. |
-| Shared volume | One `ReadWriteMany` PersistentVolumeClaim | Holds every artifact. Mounted at `/checkpoints` by every agent, every PageBroker, and the operator. Workload pods never mount it. |
+The **operator** is a Deployment with one active replica.
+It watches Snapshot's custom resources, decides which node must perform each checkpoint, publishes results back to the resources, and deletes checkpoints from storage when their resources are deleted.
+It never touches a workload process.
 
-The operator and the agent never talk to each other directly.
-Capture requests flow down as `PodSnapshotContent` spec and labels.
-Results flow up as `PodSnapshotContent` status.
-Restore involves the agent alone.
-It is driven by pod annotations and reported on a pod condition.
+The **agent** is a privileged DaemonSet on every GPU node.
+It performs every checkpoint and every restore on its node, using CRIU and the CUDA checkpoint API against processes it does not own.
+That is why it needs the host's PID, IPC, and network namespaces.
+Workloads need no privileges of their own.
 
-Three Go modules make up the code: `api/` holds the CRD types and the contracts both sides share, `operator/` holds the control plane, and `agent/` holds the node agent, its helper binaries, and PageBroker.
-The [node agent](node-agent.md) page lists what is in the agent image.
+**PageBroker** is a second container in the agent pod.
+It is the process that writes checkpoints to the shared volume and reads them back.
+It publishes each checkpoint atomically, so a half-written one is never visible.
+When the GPU driver supports it, PageBroker also moves GPU memory straight between the device and storage without passing through the process's host memory.
 
-## Resources
+The **shared volume** is one `ReadWriteMany` PersistentVolumeClaim, mounted at `/checkpoints` by every agent, every PageBroker, and the operator.
+Every checkpoint lives on it.
+Workload pods never mount it.
 
-Snapshot's API is three custom resources and one pod annotation.
+The operator and the agent never communicate directly.
+The operator writes what it wants into a custom resource, the agent on the chosen node reads it, does the work, and writes the outcome into the same resource's status.
+Restore does not involve the operator at all.
+A pod asks for a restore through an annotation, and the agent on its node performs and reports it.
+
+## The resources
+
+Snapshot's API is three custom resources in the `nvidia.com` group and one pod annotation.
 The [API reference](../api.md) lists every field.
+
+A **`PodSnapshot`** is the request to checkpoint one container of a named pod, and later the thing a restore refers to.
+It is namespaced, like the pod.
+
+A **`PodSnapshotContent`** is the cluster-scoped record of one checkpoint.
+The operator creates it when it accepts a `PodSnapshot`, naming the pod, the container, and the node that must perform the capture.
+The agent on that node selects it by a label carrying the node name, and the checkpoint's location on the shared volume is derived from this object's UID.
+Callers never create one.
+The split between a namespaced request and a cluster-scoped record follows the pattern of PersistentVolumeClaim and PersistentVolume.
+
+A **`SnapshotJob`** runs a pod from a template, waits until it is ready, checkpoints it into a `PodSnapshot`, and tears it down.
+It is for callers that cannot track a running pod themselves.
+
+The **`nvidia.com/restore-from`** annotation on a new pod names the `PodSnapshot` to restore into it.
 
 ```mermaid
 flowchart LR
-    SJ["SnapshotJob"] -->|creates| Job["batch/v1 Job"]
+    SJ["SnapshotJob"] -->|creates| Job["Job"]
     SJ -->|creates| PS["PodSnapshot"]
-    Job -->|runs| Src["Source pod"]
+    Job -->|runs| Src["Pod"]
     PS -->|bound to| PSC["PodSnapshotContent"]
     PSC -->|names| Src
-    PSC -->|identifies| Art["Artifact"]
-    Dst["Restore pod"] -->|restore-from| PS
+    PSC -->|locates| Art["Checkpoint on the shared volume"]
+    Dst["New pod"] -->|restore-from| PS
 ```
 
-| Resource | Created by | Role |
-| --- | --- | --- |
-| `PodSnapshot` | The caller, or a `SnapshotJob` | A namespaced request to checkpoint one container of a named pod. Also the handle a restore pod names. |
-| `PodSnapshotContent` | The operator only | A cluster-scoped work order for one node agent, and the record of the resulting artifact. The artifact's path on the shared volume is derived from this object's UID. |
-| `SnapshotJob` | The caller | Runs a pod from a template, waits until it is ready, checkpoints it, and tears it down. |
-| `nvidia.com/restore-from` | The caller, on a new pod | Names the `PodSnapshot` to restore into that pod. The node agent does the rest. |
-
 Every `spec` is immutable after creation.
-A `PodSnapshot` ends `Ready` or `Failed`, and `Failed` is terminal.
-A restore pod carries the `nvidia.com/Restored` condition, written by the agent.
+A `PodSnapshot` ends `Ready` or `Failed`, and `Failed` is permanent.
 
-## Checkpoint, in brief
+## How the workload takes part
 
-1. The caller creates a `PodSnapshot` naming a running pod and one of its containers.
-2. The operator reads the pod's node and creates a `PodSnapshotContent` labelled with that node name.
-3. The agent on that node waits until the target container reports Ready, which the [workload contract](../workload-contract.md) ties to the `ready-for-snapshot` sentinel.
-4. The agent inspects the container, opens a PageBroker transaction, locks and checkpoints every CUDA process, dumps the process tree with CRIU, and archives the container's root filesystem changes.
-5. PageBroker renames the finished directory into place on the shared volume. This rename is the commit point.
-6. The agent writes `Ready` on the `PodSnapshotContent`, and the operator mirrors it to the `PodSnapshot`.
+Checkpointing a process at an arbitrary instant produces a checkpoint of whatever it was doing, which for an inference server is rarely what you want.
+So the workload cooperates, through a directory called the **control directory**.
+It is a per-pod `emptyDir` volume named `snapshot-control`, mounted at `/snapshot-control`, that the workload and the agent both see.
+They communicate by creating files in it, called **sentinels**.
 
-The dump always terminates the source process.
-A successful capture leaves the source container dead, which is why the resource reaches `Ready` while the source pod reports a failure.
-The [checkpoint flow](checkpoint.md) page covers each step.
+Before a checkpoint, the workload finishes in-flight requests and writes `ready-for-snapshot`.
+The pod's readiness probe checks for that file, so the pod reports Ready exactly when it is safe to capture, and the agent waits for Ready.
+After a restore, the agent writes `restore-complete`, and the workload, which has been waiting for it, resumes.
+The [workload contract](../workload-contract.md) specifies this in full.
 
-## Restore, in brief
+## What happens in a checkpoint
 
-1. The caller creates a pod with the `nvidia.com/restore-from` annotation, the `snapshot-control` volume, and the seccomp profile the [restore pod contract](../restore-pod-contract.md) requires.
-2. When the container runtime creates the destination container, the agent's NRI plugin replaces its command with the restore proxy, which becomes PID 1 and waits.
-3. The agent sees the pod, checks that the `PodSnapshot` is `Ready`, and runs the compatibility checks that need only the manifest and the pod spec.
-4. The agent bind mounts its tool bundle and the artifact into the container, then runs `nsrestore` inside the container's namespaces.
-5. `nsrestore` replays the root filesystem diff, restores the process tree with CRIU, restores and unlocks GPU state, and reports the restored PID.
-6. The agent writes `restore-complete` into the control directory. The proxy starts following the restored process, and the workload resumes.
+1. A caller creates a `PodSnapshot` naming a running pod and one of its containers.
+2. The operator reads the pod's node and creates a `PodSnapshotContent` labelled with it.
+3. The agent on that node sees the `PodSnapshotContent` and waits until the target container reports Ready.
+4. The agent inspects the container, asks PageBroker for a directory to write into, locks and checkpoints every CUDA process, dumps the process tree with CRIU, and archives the files the container changed.
+5. PageBroker renames the finished directory into its final place on the shared volume. The checkpoint exists from this moment.
+6. The agent writes `Ready` on the `PodSnapshotContent`, and the operator copies it to the `PodSnapshot`.
 
-The [benchmarks](../../development/benchmarks.md) report restore in four stages: agent setup, CRIU restore, CUDA restore, and wake and remap.
-The [restore flow](restore.md) page maps those stages to the code.
+The dump always terminates the process it dumped.
+A successful checkpoint therefore leaves the source container dead, and the resource reaches `Ready` while the pod reports a failed container.
+The [checkpoint flow](checkpoint.md) page follows each step.
 
-## Storage, in brief
+## What happens in a restore
 
-Every artifact lives at a path derived from the `PodSnapshotContent` UID and the container name, so a recreated object can never adopt a stale checkpoint.
-The agent writes CRIU images and GPU memory into a PageBroker transaction directory, and PageBroker publishes the result with an atomic rename.
-A `manifest.yaml` written before the dump records what the checkpoint was taken on.
-Restore reads the manifest to decide whether the destination can run the checkpoint.
+1. A caller creates a pod with the `nvidia.com/restore-from` annotation, the control directory, and a seccomp profile that CRIU needs.
+2. As the container runtime creates the destination container, the agent swaps its command for a small program called the **restore proxy**. The proxy becomes PID 1 of the container and waits.
+3. The agent sees the pod, checks that the `PodSnapshot` is `Ready`, and checks that this node can run the checkpoint.
+4. The agent bind mounts its own tools and the checkpoint into the container, then runs the rest of the restore inside the container's namespaces.
+5. Inside, it replays the changed files onto the container's root filesystem, restores the process tree with CRIU, and restores and unlocks the GPU state.
+6. The agent writes `restore-complete`. The proxy begins forwarding signals to the restored process and will exit with its exit code, so the container's lifecycle becomes the workload's. The workload resumes.
 
-The operator deletes an artifact when its `PodSnapshotContent` is deleted, and a periodic sweep removes directories that no longer belong to any content.
-The shared volume is the only storage backend today.
-The [S3 proposal](../../proposals/237-s3-storage/README.md) describes how object storage fits the same transaction model.
-See [Storage and artifacts](storage.md).
+The [restore flow](restore.md) page follows each step.
 
-## Failure behavior
+## Where multi-GPU differs
 
-A capture that fails is final.
-The agent writes `Failed` on the `PodSnapshotContent` with a reason, and nothing retries it.
-If the failure happened after the GPU lock or the CRIU dump started, the agent kills the source container, because a CUDA-locked process cannot be resumed.
-If the failure happened before that point, the source keeps running.
+Everything above applies to a single-GPU workload without additions.
+Each CUDA process owns its device memory, and the driver's checkpoint API handles it.
+
+A model served across several GPUs runs one process per GPU, and those processes share CUDA memory with each other.
+The driver's checkpoint API cannot recreate that sharing on restore.
+Snapshot adds a library, loaded into each CUDA process, that records how memory is shared, and a coordinator the agent runs at capture and restore to take the sharing apart and put it back together.
+That component is called CuInterpose, and [Multi-GPU support](multi-gpu.md) describes it.
+
+The flow is otherwise unchanged.
+The source pod opts in with an annotation, the agent runs the coordinator at two extra points during capture and one during restore, and the checkpoint carries one extra file.
+Each flow page marks those points.
+
+## When things fail
+
+A checkpoint that fails is final.
+The agent writes `Failed` with a reason, and nothing retries.
+If the failure came before the agent touched the GPU or the process, the workload keeps running.
+If it came after, the agent kills the source container, because a CUDA process that has been locked for checkpointing cannot be resumed.
 The [capture retry proposal](../../proposals/394-capture-retry/README.md) describes how in-place retry would work.
 
 A pod gets one restore.
-A restore that fails writes `restore-failed` into the control directory and kills the container, and the pod condition reports why.
-A restore refused by the compatibility checks leaves the container running, because restarting it would reach the same refusal.
-The reasons are listed under [Restore flow](restore.md#outcomes-and-reporting).
+If it fails, the agent records the failure in the control directory and kills the container.
+The pod's `nvidia.com/Restored` condition and its events say why.
+One case is treated differently: a restore that this node cannot run, for example because the GPU model differs, leaves the container running, since restarting it would only reach the same refusal.
 
-## Where multi-GPU diverges
+## Privilege and trust
 
-A single-GPU checkpoint needs nothing beyond the flows above.
-The CUDA driver's checkpoint API handles each process's own device state, and CRIU handles the rest.
+The agent and PageBroker are privileged because CRIU and the CUDA checkpoint API operate on other processes.
+Nothing else is.
+A workload needs only a seccomp profile that blocks `io_uring`, which CRIU cannot checkpoint.
 
-Workloads that spread one model across several GPUs share CUDA memory between processes, and the native checkpoint API cannot reconstruct that sharing.
-[CuInterpose](multi-gpu.md) adds a shim library inside each CUDA process and a coordinator that the agent runs at capture and restore.
-Everything else stays the same.
-The pages above mark each point where the multi-GPU path hooks in:
+What the agent puts into a workload container is tightly bounded.
+Every directory it mounts in goes through a small C helper whose allowed sources and destinations are compiled in, and the checkpoint is mounted read-only and `noexec`.
+CRIU, its plugins, and `tar` always come from the agent's own image, never from the checkpoint or the workload image.
+[Security](../../operations/security.md) describes what a cluster must allow.
 
-| Where | What differs |
+## Where to go next
+
+| Page | Read it when |
 | --- | --- |
-| Source pod | The `nvidia.com/snapshot-multi-gpu: enabled` annotation. A `SnapshotJob` then installs the libraries with an init container and prefixes the command with the launcher. See [Control plane](control-plane.md#shaping-the-source-pod). |
-| Capture | The agent hashes the libraries, runs the coordinator to inspect and then prepare shared memory before the first GPU lock, and records both in the manifest. See [Checkpoint flow](checkpoint.md#multi-gpu-hooks). |
-| Artifact | A `cuinterpose` section in the manifest and a `cuinterpose.state` file. See [Storage and artifacts](storage.md#artifact-layout). |
-| Restore | The bundle's libraries must hash to the same values, they are mounted into the container, and the coordinator rebuilds the sharing after GPU state is back. See [Restore flow](restore.md#multi-gpu-hooks). |
+| [Control plane](control-plane.md) | You are integrating Snapshot, or changing how `PodSnapshot`, `PodSnapshotContent`, or `SnapshotJob` behave. |
+| [Node agent](node-agent.md) | You are changing the agent, or want to know exactly what runs on a node and what it does to it. |
+| [Checkpoint flow](checkpoint.md) | You are changing how a checkpoint is taken, or debugging one that failed. |
+| [Restore flow](restore.md) | You are writing restore pods, changing restore, or debugging a restore. |
+| [Storage and artifacts](storage.md) | You are changing what a checkpoint contains, where it lives, or how compatibility is decided. |
+| [Multi-GPU support](multi-gpu.md) | You are working on workloads that share memory across GPUs. |
 
-## Security boundaries
+For a new inference framework, no architecture change is needed.
+See [Extending Snapshot](../../../CONTRIBUTING.md#extending-snapshot).
 
-The agent runs privileged with the host PID, IPC, and network namespaces, because CRIU and the CUDA checkpoint API operate on processes the agent does not own.
-PageBroker runs privileged as root for the same reason.
-Workloads need no privileges beyond a seccomp profile that blocks `io_uring`, which CRIU cannot checkpoint.
+## Vocabulary
 
-Every directory the agent mounts into a workload container goes through a small C helper with a compiled-in list of allowed sources and destinations.
-The checkpoint mount is read-only and `noexec`.
-CRIU, its plugins, and `tar` always come from the agent's own bundle, never from the checkpoint or the workload image.
-[Security](../../operations/security.md) covers what an operator must allow.
+These terms are Snapshot's own.
+Each is defined where it first appears above, and collected here for reference.
 
-## Where to look
-
-| Question | Start at |
-| --- | --- |
-| Why did my `PodSnapshot` fail? | [Control plane](control-plane.md#failure-reasons) and [Checkpoint flow](checkpoint.md#failure-reasons) |
-| Why was my restore refused? | [Storage and artifacts](storage.md#compatibility-checks) |
-| What does the agent do to my node? | [Node agent](node-agent.md#host-footprint) |
-| What is in an artifact directory? | [Storage and artifacts](storage.md#artifact-layout) |
-| How do I checkpoint a multi-GPU workload? | [Multi-GPU support](multi-gpu.md) |
-| How do I add a framework? | [CONTRIBUTING.md](../../../CONTRIBUTING.md#extending-snapshot) |
+- **Artifact.** One checkpoint as stored on the shared volume: CRIU images, GPU memory, the root filesystem changes, and a manifest describing them.
+- **Control directory.** The `snapshot-control` volume through which a workload and the agent exchange sentinel files.
+- **Sentinel.** A file whose existence is the message, such as `ready-for-snapshot` or `restore-complete`.
+- **Restore proxy.** The program the agent installs as PID 1 of a container being restored into.
+- **Bundle.** The directory of tools the agent mounts into a container being restored into.
+- **PageBroker transaction.** PageBroker's unit of work: a directory it hands out for writing or reading, and later publishes, releases, or discards.
+- **CustomStorage.** A CUDA driver feature that streams GPU memory to an external engine instead of into the process's own host memory.
+- **Source pod, destination container.** The pod a checkpoint is taken from, and the container a checkpoint is restored into.
