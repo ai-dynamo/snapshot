@@ -355,15 +355,24 @@ TEST(BrokerStartupTest, PreservesExternalTargetsOfStagingLinks)
 
 TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
 {
+  PosixCopyEngine engine(root_ / "storage");
+  StorageBackend destination;
+  const auto published = root_ / "storage" / "published";
+  destination.mutable_filesystem()->set_directory(published.string());
   for (const auto& id :
-       {std::string("../escape"), std::string("nested/name"), std::string("nested\\name"),
+       {std::string(), std::string("."), std::string(".."), std::string("../escape"),
+        std::string("nested/name"), std::string("nested\\name"),
         std::string("nul\0suffix", 10)}) {
+    SCOPED_TRACE(id);
     auto abort = RequestFor(id);
     abort.mutable_abort();
     const auto response = broker().HandleRequest(abort);
     EXPECT_TRUE(response.has_failure());
     EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+    EXPECT_THROW(engine.PrepareCheckpoint(destination, {}, id, TransferMode::Direct), std::invalid_argument);
   }
+  EXPECT_EQ(engine.PrepareCheckpoint(destination, {}, "valid-id", TransferMode::Direct),
+            Path(published.string() + ".pagebroker-tx-valid-id"));
 }
 
 TEST_P(FilesystemEngineTest, RejectsSymlinkInRestoreSource)

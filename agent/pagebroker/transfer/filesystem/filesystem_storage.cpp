@@ -286,8 +286,7 @@ PrepareCheckpoint(const StorageBackend& destination, const Path& storage_root,
   const Path published = DestinationPath(destination, storage_root);
   if (mode == TransferMode::Staged)
     return staging_directory;
-  if (transaction_id.empty() || transaction_id == "." || transaction_id == ".." ||
-      transaction_id.find_first_of("/\\") != std::string::npos || transaction_id.find('\0') != std::string::npos)
+  if (!IsSafePathComponent(transaction_id))
     throw std::invalid_argument("invalid transaction path component");
   return Path(published.string() + ".pagebroker-tx-" + transaction_id);
 }
