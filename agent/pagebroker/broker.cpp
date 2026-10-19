@@ -426,6 +426,21 @@ Broker::ReleaseStaging(uintmax_t bytes)
 }
 
 Response
+Broker::RejectBeforeOwnership(const Request& request, const TransactionHandle& transaction,
+    Failure::Code code, const std::string& message)
+{
+  // Existing holders must see ABORTED before the ID can be reused. Keep the
+  // registry entry if cleanup fails so the reaper can retry it.
+  transaction->set_state(Transaction::State::ABORTED);
+  std::error_code cleanup_error;
+  transaction->CleanupTransfer(cleanup_error);
+  if (cleanup_error)
+    return Fail(request, code, message + "; cleanup: " + cleanup_error.message());
+  EraseTransaction(request.transaction_id(), transaction);
+  return Fail(request, code, message);
+}
+
+Response
 Broker::AbortStaging(
     const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error)
 {
@@ -588,17 +603,8 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     // filesystem reservation covers concurrent copies and ends after copying,
     // when the staged files themselves consume the space reported by statvfs.
     transaction->Reserve(bytes);
-    if (!direct && !ReserveStaging(bytes)) {
-      // Waiters may still hold this transaction after its registry entry is removed.
-      transaction->set_state(Transaction::State::ABORTED);
-      std::error_code cleanup_error;
-      transaction->CleanupTransfer(cleanup_error);
-      if (cleanup_error)
-        return Fail(request, Failure::INSUFFICIENT_STORAGE,
-                    "insufficient tmpfs capacity; cleanup: " + cleanup_error.message());
-      EraseTransaction(request.transaction_id(), transaction);
-      return Fail(request, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
-    }
+    if (!direct && !ReserveStaging(bytes))
+      return RejectBeforeOwnership(request, transaction, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
     staging_reserved = !direct;
     if (!direct) {
       transaction->cancellation().ThrowIfCancelled();
@@ -625,14 +631,7 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     if (staging_conflict || (!artifact && !source_prepared && dynamic_cast<const std::invalid_argument*>(&error))) {
       const auto code = staging_conflict ? Failure::TRANSACTION_CONFLICT : Failure::INVALID_REQUEST;
       // Rejected staging paths and invalid sources must allow a fresh retry.
-      // Waiters holding this handle see ABORTED; only this map entry is removed.
-      transaction->set_state(Transaction::State::ABORTED);
-      std::error_code cleanup_error;
-      transaction->CleanupTransfer(cleanup_error);
-      if (cleanup_error)
-        return Fail(request, code, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
-      EraseTransaction(request.transaction_id(), transaction);
-      return Fail(request, code, error.what());
+      return RejectBeforeOwnership(request, transaction, code, error.what());
     }
     return AbortStaging(request, *transaction, owned ? staging_directory : Path{}, error);
   }
@@ -716,16 +715,9 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
       const bool invalid = dynamic_cast<const std::invalid_argument*>(&error) != nullptr;
       const auto* failure = dynamic_cast<const TransferError*>(&error);
       if (!artifact && !owned && (invalid || (failure && failure->code == Failure::TRANSACTION_CONFLICT))) {
-        // Preserve corrected legacy requests without claiming another writer's output.
-        // Waiters on this handle see ABORTED; only this map entry is removed.
-        transaction->set_state(Transaction::State::ABORTED);
-        std::error_code cleanup_error;
-        transaction->CleanupTransfer(cleanup_error);
-        if (cleanup_error)
-          return Fail(request, invalid ? Failure::INVALID_REQUEST : failure->code,
-              std::string(error.what()) + "; cleanup: " + cleanup_error.message());
-        EraseTransaction(request.transaction_id(), transaction);
-        return Fail(request, invalid ? Failure::INVALID_REQUEST : failure->code, error.what());
+        // Allow corrected filesystem-path requests without claiming another writer's output.
+        return RejectBeforeOwnership(request, transaction,
+            invalid ? Failure::INVALID_REQUEST : failure->code, error.what());
       }
       return AbortStaging(request, *transaction, owned ? output : Path{}, error);
     }

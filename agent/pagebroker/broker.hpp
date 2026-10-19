@@ -66,6 +66,9 @@ class Broker {
   void ReapTerminalTransactions(std::chrono::steady_clock::time_point now);
   bool ReserveStaging(uintmax_t bytes);
   void ReleaseStaging(uintmax_t bytes);
+  // Caller must hold transaction->mutex(); no capture directory has been acquired.
+  Response RejectBeforeOwnership(const Request& request, const TransactionHandle& transaction,
+      Failure::Code code, const std::string& message);
   Response AbortStaging(
       const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error);
   Response PrepareDirectCheckpoint(const Request& request);
