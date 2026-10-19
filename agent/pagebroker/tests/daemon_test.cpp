@@ -331,6 +331,54 @@ TEST_F(BrokerTest, RejectsPathsOutsideStorageRoot)
   EXPECT_EQ(broker().HandleRequest(root_destination).failure().code(), Failure::INVALID_REQUEST);
 }
 
+TEST_F(BrokerTest, RejectsUnsafeRestoreSourcePaths)
+{
+  unsigned sequence = 0;
+  for (const bool direct : {false, true}) {
+    for (const auto& source : {
+             source_.string() + "/", source_.string() + std::string("\0suffix", 7),
+             (root_ / "storage").string() + std::string("/\0suffix", 8),
+             (root_ / "storage").string(), (root_ / "outside").string()}) {
+      SCOPED_TRACE(::testing::Message() << "direct=" << direct << ", source=" << ::testing::PrintToString(source));
+      auto request = RequestFor("invalid-source-" + std::to_string(++sequence));
+      auto* storage = direct ? request.mutable_direct_restore()->mutable_source()
+                             : request.mutable_staged_restore()->mutable_source();
+      auto* engine = direct ? request.mutable_direct_restore()->mutable_io_engine()
+                            : request.mutable_staged_restore()->mutable_io_engine();
+      Configure(storage, engine, source);
+      const auto response = broker().HandleRequest(request);
+      EXPECT_TRUE(response.has_failure());
+      EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+    }
+  }
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+}
+
+TEST_F(BrokerTest, RejectsUnsafeCheckpointDestinationPaths)
+{
+  const auto destination = (root_ / "storage" / "checkpoint").string();
+  unsigned sequence = 0;
+  for (const bool direct : {false, true}) {
+    for (const auto& path : {
+             destination + "/", destination + std::string("\0suffix", 7),
+             (root_ / "storage").string() + std::string("/\0suffix", 8),
+             (root_ / "storage").string(), (root_ / "outside").string()}) {
+      SCOPED_TRACE(::testing::Message() << "direct=" << direct << ", destination=" << ::testing::PrintToString(path));
+      auto request = RequestFor("invalid-destination-" + std::to_string(++sequence));
+      auto* storage = direct ? request.mutable_prepare_direct_checkpoint()->mutable_destination()
+                             : request.mutable_prepare_staged_checkpoint()->mutable_destination();
+      auto* engine = direct ? request.mutable_prepare_direct_checkpoint()->mutable_io_engine()
+                            : request.mutable_prepare_staged_checkpoint()->mutable_io_engine();
+      Configure(storage, engine, path);
+      const auto response = broker().HandleRequest(request);
+      EXPECT_TRUE(response.has_failure());
+      EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+    }
+  }
+  EXPECT_FALSE(fs::exists(destination));
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+}
+
 TEST_F(BrokerTest, InsufficientStagingDoesNotReserveTransaction)
 {
   const fs::path large = root_ / "storage" / "large";
