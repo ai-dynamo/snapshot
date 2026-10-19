@@ -88,8 +88,8 @@ Before installing Snapshot, make sure the following are in place:
 - [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with MIG disabled
 - NVIDIA kernel-mode driver 580 or newer, and CUDA user-mode driver
   (`libcuda.so`) 615 or newer. With an older kernel-mode driver, point
-  `LD_LIBRARY_PATH` at a 615 `libcuda.so` in both the workload and the Snapshot
-  agent. Both must load the same `libcuda.so` version, or checkpoint can hang.
+  `LD_LIBRARY_PATH` at a 615 or newer `libcuda.so` in both the workload and
+  PageBroker.
 - A `ReadWriteMany` (RWX) storage class
 - The [Helm](https://helm.sh/docs/intro/install) CLI
 - A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
