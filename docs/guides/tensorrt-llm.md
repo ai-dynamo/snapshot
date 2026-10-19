@@ -105,9 +105,7 @@ offline from the model cache.
 The example uses one GPU, the PyTorch backend, and a maximum sequence length of
 512 tokens. Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
 `1024`), `TRTLLM_MAX_BATCH_SIZE` (default `1`), and
-`TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). The manifests leave the first
-two at their defaults and set the KV-cache fraction to `0.75`, as the GLM recipes
-do, for a more realistic serving setup. `app.py` sets
+`TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). `app.py` sets
 `trust_remote_code=False`; Qwen3 needs no custom model code. Add other `LLM`
 keyword arguments, such as `trust_remote_code` or `tensor_parallel_size`, to the
 same JSON object. Revalidate checkpoint and restore before changing the model,
