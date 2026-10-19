@@ -18,7 +18,7 @@ main(int argc, char** argv)
     std::cerr << "usage: pagebroker socket_path staging_directory storage_root "
                  "[--max-concurrent-requests count] [--custom-storage-engine on|off] "
                  "[--custom-storage-buffer-count count] [--custom-storage-chunk-bytes bytes] "
-                 "[--custom-storage-max-pinned-bytes bytes] [--transaction-lifetime seconds]\n"
+                 "[--custom-storage-max-pinned-bytes bytes]\n"
               << "pagebroker: " << error.what() << '\n';
     return static_cast<int>(ExitCode::INVALID_ARGUMENTS);
   }
