@@ -373,52 +373,41 @@ TEST_F(BrokerTransferTest, ExpirySkipsActiveTransfersUntilTheyDrain)
   EXPECT_EQ(resources->reserved, 0u);
 }
 
-TEST_F(BrokerTransferTest, AbortAfterDeadlineLeavesCleanupToTheReaper)
+TEST_F(BrokerTransferTest, ExpiredRequestsLeaveCleanupToTheReaper)
 {
-  Broker broker(staging_, storage_);
-  SetLifetime(broker, std::chrono::seconds(0));
-  const auto resources = Limit(broker);
-  auto transaction = SeedRestore(broker, Transaction::State::STAGED);
-  auto abort = RequestFor("seed");
-  abort.mutable_abort();
-  BlockCleanup();
-  EXPECT_EQ(broker.HandleRequest(abort).failure().code(), Failure::TRANSACTION_EXPIRED);
-  EXPECT_EQ(transaction->state(), Transaction::State::STAGED);
-  broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
-  EXPECT_EQ(transaction->state(), Transaction::State::ABORTING);
-  EXPECT_EQ(resources->active, 1u);
-  UnblockCleanup();
-  EXPECT_EQ(broker.HandleRequest(abort).failure().code(), Failure::TRANSACTION_EXPIRED);
-  EXPECT_TRUE(fs::exists(staging_ / "restore/seed/image"));
-  broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
-  EXPECT_EQ(broker.HandleRequest(abort).failure().code(), Failure::TRANSACTION_NOT_FOUND);
-  EXPECT_EQ(resources->active, 0u);
-  EXPECT_EQ(resources->reserved, 0u);
-  auto commit = RequestFor("seed");
-  commit.mutable_commit();
-  EXPECT_EQ(broker.HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
-}
+  for (const bool commit : {false, true}) {
+    SCOPED_TRACE(commit ? "commit" : "abort");
+    Broker broker(staging_, storage_);
+    SetLifetime(broker, std::chrono::seconds(0));
+    const auto resources = Limit(broker);
+    const auto transaction = SeedRestore(broker, Transaction::State::STAGED);
+    auto request = RequestFor("seed");
+    if (commit)
+      request.mutable_commit();
+    else
+      request.mutable_abort();
 
-TEST_F(BrokerTransferTest, ExpiredCommitLeavesCleanupAndItsRetriesToTheReaper)
-{
-  Broker broker(staging_, storage_);
-  SetLifetime(broker, std::chrono::seconds(0));
-  const auto resources = Limit(broker);
-  auto transaction = SeedRestore(broker, Transaction::State::STAGED);
-  auto commit = RequestFor("seed");
-  commit.mutable_commit();
-  BlockCleanup();
-  EXPECT_EQ(broker.HandleRequest(commit).failure().code(), Failure::TRANSACTION_EXPIRED);
-  EXPECT_EQ(transaction->state(), Transaction::State::STAGED);
-  broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
-  EXPECT_EQ(transaction->state(), Transaction::State::ABORTING);
-  EXPECT_EQ(resources->active, 1u);
-  EXPECT_EQ(Retained(broker), 0u);
-  UnblockCleanup();
-  broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
-  EXPECT_EQ(transaction->state(), Transaction::State::ABORTED);
-  EXPECT_EQ(resources->active, 0u);
-  EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
-  EXPECT_EQ(broker.HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+    BlockCleanup();
+    EXPECT_EQ(broker.HandleRequest(request).failure().code(), Failure::TRANSACTION_EXPIRED);
+    EXPECT_EQ(transaction->state(), Transaction::State::STAGED);
+    broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
+    EXPECT_EQ(transaction->state(), Transaction::State::ABORTING);
+    EXPECT_EQ(resources->active, 1u);
+    EXPECT_EQ(resources->reserved, 4u);
+    EXPECT_EQ(Retained(broker), 0u);
+
+    UnblockCleanup();
+    EXPECT_EQ(broker.HandleRequest(request).failure().code(), Failure::TRANSACTION_EXPIRED);
+    EXPECT_TRUE(fs::exists(staging_ / "restore/seed/image"));
+    broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
+    EXPECT_EQ(transaction->state(), Transaction::State::ABORTED);
+    EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
+    EXPECT_EQ(resources->active, 0u);
+    EXPECT_EQ(resources->reserved, 0u);
+    request.mutable_commit();
+    EXPECT_EQ(broker.HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+    request.mutable_abort();
+    EXPECT_EQ(broker.HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+  }
 }
 }  // namespace snapshot::pagebroker
