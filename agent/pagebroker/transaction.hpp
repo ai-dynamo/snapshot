@@ -87,7 +87,6 @@ class Transaction {
 
   void Reserve(uintmax_t bytes);
   Cancellation cancellation() const { return cancellation_.WithDeadline(deadline_); }
-  bool has_limits() const { return resources_ != nullptr; }
   CheckpointPublication* publication() { return publication_ ? &*publication_ : nullptr; }
   void CancelWork(); // Thread-safe; call before waiting for mutex().
   // Only the recorded directory may be removed. A matching empty path still releases reservations.
