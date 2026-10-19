@@ -329,7 +329,7 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
       std::error_code error;
       transaction->CleanupTransfer(error);
       if (!error)
-        RetainTerminalTransaction(id, transaction);
+        RetainTerminalTransactionLocked(id, transaction);
       continue;
     }
 
@@ -392,11 +392,11 @@ Broker::RetainTerminalTransaction(const std::string& transaction_id)
     return;
   std::unique_lock transaction_lock(transaction->mutex(), std::try_to_lock);
   if (transaction_lock.owns_lock())
-    RetainTerminalTransaction(transaction_id, transaction);
+    RetainTerminalTransactionLocked(transaction_id, transaction);
 }
 
 void
-Broker::RetainTerminalTransaction(const std::string& id, const TransactionHandle& transaction)
+Broker::RetainTerminalTransactionLocked(const std::string& id, const TransactionHandle& transaction)
 {
   if (!transaction->retain_terminal())
     return;
