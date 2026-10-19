@@ -613,7 +613,6 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     if (staging_reserved)
       ReleaseStaging(bytes);
     staging_reserved = false;
-    transaction->OwnDirectory(access.staging_directory);
     transaction->set_descriptor(RestoreTransactionDescriptor(access.staging_directory, std::move(access.source)));
     transaction->set_state(Transaction::State::STAGED);
   }
