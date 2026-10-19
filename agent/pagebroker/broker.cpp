@@ -4,7 +4,6 @@
 #include "broker.hpp"
 
 #include <sys/statvfs.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -607,10 +606,11 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     }
     staging_reserved = !direct;
     if (!direct) {
-      if (!fs::create_directory(staging_directory))
-        throw TransferError(Failure::TRANSACTION_CONFLICT, "restore staging directory already exists");
+      transaction->cancellation().ThrowIfCancelled();
+      filesystem_storage::CreateDirectoryExclusive(staging_directory, fs::perms::all);
       owned = true;
       transaction->OwnDirectory(staging_directory);
+      transaction->cancellation().ThrowIfCancelled();
     }
     access = engine.StageRestore(std::move(prepared), staging_directory, transaction->cancellation());
     // A final blocking copy may return after expiry or cancellation.
@@ -707,12 +707,8 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
       transaction->cancellation().ThrowIfCancelled();
       // Publication preserves this mode: staged captures use normal directory
       // permissions filtered by umask, while direct captures remain private.
-      const mode_t permissions = direct ? S_IRWXU : (S_IRWXU | S_IRWXG | S_IRWXO);
-      if (mkdir(output.c_str(), permissions)) {
-        if (errno == EEXIST)
-          throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
-        throw std::system_error(errno, std::generic_category(), "create checkpoint directory");
-      }
+      const auto permissions = direct ? fs::perms::owner_all : fs::perms::all;
+      filesystem_storage::CreateDirectoryExclusive(output, permissions);
       owned = true;
       transaction->OwnDirectory(output);
       // mkdir may have completed after the deadline or a concurrent Abort.
