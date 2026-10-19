@@ -44,10 +44,13 @@ struct FakeState {
   std::condition_variable changed;
   bool hold_end = false;
   bool hold_start = false;
+  bool hold_request = false;
   bool allow_responses = true;
   int allocation_error = 0;
   bool sparse_allocations = false;
   unsigned starts = 0;
+  unsigned allocations = 0;
+  unsigned requests_entered = 0;
   unsigned ends_entered = 0;
   unsigned ends = 0;
   unsigned submitted = 0;
@@ -62,10 +65,12 @@ class ModelStreamerSessionTest : public ::testing::Test {
   {
     state.hold_end = false;
     state.hold_start = false;
+    state.hold_request = false;
     state.allow_responses = true;
     state.allocation_error = 0;
     state.sparse_allocations = false;
     state.starts = state.ends_entered = state.ends = state.submitted = state.max_submissions = 0;
+    state.allocations = state.requests_entered = 0;
     state.fault = Fault::NONE;
     state.next_id = 0;
     char path[] = "/tmp/pagebroker-session-XXXXXX";
@@ -96,6 +101,16 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.hold_end = false;
     state.changed.notify_all();
   }
+  void ExpectCancellation(std::future<void>& result, CancellationError::Reason reason)
+  {
+    try {
+      result.get();
+      ADD_FAILURE() << "restore completed without cancellation";
+    }
+    catch (const CancellationError& error) {
+      EXPECT_EQ(error.reason, reason);
+    }
+  }
   Path root_;
 };
 }  // namespace
@@ -114,7 +129,13 @@ extern "C" int __wrap_posix_fallocate(int descriptor, off_t offset, off_t length
     if (state.sparse_allocations)
       return ftruncate(descriptor, offset + length) == 0 ? 0 : errno;
   }
-  return __real_posix_fallocate(descriptor, offset, length);
+  const int result = __real_posix_fallocate(descriptor, offset, length);
+  if (result == 0) {
+    std::lock_guard lock(state.mutex);
+    ++state.allocations;
+    state.changed.notify_all();
+  }
+  return result;
 }
 
 extern "C" int runai_file_streamer_start(void** value)
@@ -163,7 +184,10 @@ extern "C" int runai_file_streamer_request(
   EXPECT_EQ(device.type, RUNAI_FILE_STREAMER_DEVICE_CPU);
   EXPECT_EQ(device.id, 0);
   auto& session = *static_cast<Session*>(value);
-  std::lock_guard lock(state.mutex);
+  std::unique_lock lock(state.mutex);
+  ++state.requests_entered;
+  state.changed.notify_all();
+  state.changed.wait(lock, [] { return !state.hold_request; });
   *id = ++state.next_id;
   ++state.submitted;
   ++session.submissions;
@@ -428,7 +452,12 @@ TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator
   {
     std::unique_lock lock(state.mutex);
     EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.starts == 1; }));
-    stop.Cancel();
+  }
+  stop.Cancel();
+  EXPECT_EQ(cancelled.wait_for(2s), std::future_status::ready);
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.submitted, 0U);
     state.hold_start = false;
     state.changed.notify_all();
   }
@@ -438,6 +467,85 @@ TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator
   EXPECT_NO_THROW(restore.Stage(Plan(), root_ / "success"));
   EXPECT_EQ(state.submitted, 1U);
   EXPECT_EQ(state.starts, state.ends);
+}
+
+// Exercise explicit cancellation and deadline expiry while end() blocks the worker.
+class QueuedTeardownCancellationTest : public ModelStreamerSessionTest,
+                                       public ::testing::WithParamInterface<bool> {};
+
+TEST_P(QueuedTeardownCancellationTest, ReturnsBeforeTeardownAndNeverSubmitsCancelledBuffers)
+{
+  const bool deadline = GetParam();
+  state.hold_end = true;
+  ModelStreamerRestore restore;
+  auto active = std::async(std::launch::async, [&] { restore.Stage(Plan(), root_ / "active"); });
+  EXPECT_TRUE(WaitForEnd());
+
+  Cancellation control;
+  if (deadline)
+    control = control.WithDeadline(Cancellation::Clock::now() + 1s);
+  auto queued = std::async(std::launch::async, [&] { restore.Stage(Plan(), root_ / "queued", control); });
+  {
+    std::unique_lock lock(state.mutex);
+    // The final file's allocation follows the last preparation cancellation
+    // check. From here this batch proceeds to the submission wait.
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.allocations == 2; }));
+  }
+  if (!deadline)
+    control.Cancel();
+  const auto queued_status = queued.wait_for(2s);
+  EXPECT_EQ(queued_status, std::future_status::ready);
+  EXPECT_EQ(active.wait_for(0ms), std::future_status::timeout);
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.submitted, 1U);
+    EXPECT_EQ(state.ends, 0U);
+  }
+  // A ready result means Stage has unwound its mappings. Remove staging before
+  // allowing the worker to process B's event; its pointer targets are gone.
+  if (queued_status == std::future_status::ready) {
+    std::error_code error;
+    fs::remove_all(root_ / "queued", error);
+    EXPECT_FALSE(error);
+  }
+  ReleaseEnd();
+  EXPECT_NO_THROW(active.get());
+  ExpectCancellation(queued, deadline ? CancellationError::Reason::DEADLINE_EXCEEDED :
+                                       CancellationError::Reason::CANCELLED);
+  EXPECT_NO_THROW(restore.Stage(Plan(), root_ / "recovered"));
+  EXPECT_EQ(state.submitted, 2U);
+  EXPECT_FALSE(restore.Failed());
+}
+
+INSTANTIATE_TEST_SUITE_P(CancellationCauses, QueuedTeardownCancellationTest, ::testing::Bool());
+
+TEST_F(ModelStreamerSessionTest, CancellationDuringNativeRequestWaitsForTeardown)
+{
+  state.hold_request = true;
+  state.hold_end = true;
+  Cancellation control;
+  ModelStreamerRestore restore;
+  auto result = std::async(std::launch::async, [&] { restore.Stage(Plan(), root_ / "restore", control); });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.requests_entered == 1; }));
+    EXPECT_EQ(state.submitted, 0U);
+  }
+  control.Cancel();
+  EXPECT_EQ(result.wait_for(100ms), std::future_status::timeout);
+  {
+    std::lock_guard lock(state.mutex);
+    state.hold_request = false;
+    state.changed.notify_all();
+  }
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  ReleaseEnd();
+  ExpectCancellation(result, CancellationError::Reason::CANCELLED);
+  char data = 0;
+  std::ifstream(root_ / "restore" / "0").get(data);
+  EXPECT_EQ(data, 'e');
+  EXPECT_TRUE(restore.Failed());
 }
 
 TEST_F(ModelStreamerSessionTest, CoordinatorsWaitUntilPreviousNativeTeardownReturns)
