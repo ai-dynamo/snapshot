@@ -36,6 +36,11 @@ current Snapshot restore bundle requires, and mount `app.py` at
 `HF_HUB_DISABLE_XET=1` prevents the model downloader from leaving an open cache
 log that CRIU cannot reopen after restore.
 
+An init container downloads the selected model into the persistent
+[model cache](README.md#model-cache). The source application then loads that
+cache with `HF_HUB_OFFLINE=1`, so the checkpointed process has no open Hugging
+Face connections.
+
 The source and restore pods must mount the Snapshot control volume at
 `/snapshot-control`.
 
@@ -62,21 +67,27 @@ kubectl create configmap vllm-app \
 
 ## 2. Choose the model
 
-The container argument in the capture manifest is a JSON object of
-`AsyncEngineArgs` keyword arguments. The recipes already select their model, for
-example in [`capture/qwen3-0.6b.yaml`](vllm/capture/qwen3-0.6b.yaml):
+The recipes already select their model, for example in
+[`capture/qwen3-0.6b.yaml`](vllm/capture/qwen3-0.6b.yaml). The init container
+downloads it into the [model cache](README.md#model-cache), and the main
+container's last argument is a JSON object of `AsyncEngineArgs` keyword arguments:
 
 ```yaml
+initContainers:
+  - name: model-cache
+    args:
+      - <download script>
+      - Qwen/Qwen3-0.6B
 containers:
   - name: main
     args:
       - '{"model": "Qwen/Qwen3-0.6B"}'
 ```
 
-To run another model, edit this argument in a copy of the manifest. Other values
-include `TinyLlama/TinyLlama-1.1B-Chat-v1.0` or a mounted model path such as
-`/models/Qwen3-0.6B`. A mounted path must be available to both the source and
-restored containers.
+To run another model, change it in both places in a copy of the manifest, because
+the main container runs offline from the model cache. Other values include
+`TinyLlama/TinyLlama-1.1B-Chat-v1.0`. A model path mounted from elsewhere, such as
+`/models/Qwen3-0.6B`, must be available to both the source and restored containers.
 
 The example sizes the engine for a small single-GPU deployment through
 `VLLM_MAX_MODEL_LEN` (default `2048`) and `VLLM_GPU_MEMORY_UTILIZATION`
@@ -99,9 +110,8 @@ switches to `spawn` only if vLLM detects CUDA already initialized), which is
 unreliable across checkpoint/restore.
 
 **Eight-GPU recipes.** The JSON argument sets `tensor_parallel_size` to the GPU
-count, and the MoE recipes also set `enable_expert_parallel`. They load pinned
-model revisions from the [model cache](README.md#model-cache), where an init
-container downloads them on first use.
+count, and the MoE recipes also set `enable_expert_parallel`. Both places pin a
+`revision` of the model.
 
 ## 3. Deploy the source replica
 
@@ -135,7 +145,7 @@ model:
 ```bash
 kubectl rollout status \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  deployment/vllm-source \
+  deployment/vllm-qwen3-0-6b-source \
   --timeout=30m
 ```
 
@@ -144,7 +154,7 @@ List the generated Pod:
 ```bash
 kubectl get pods \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --selector app=vllm-source
+  --selector app=vllm-qwen3-0-6b-source
 ```
 
 Use that Pod name in the `PodSnapshot` created in the next stage. The

@@ -50,6 +50,11 @@ Move to the first 1.3.x GA once it is published.
 `OMPI_MCA_pml=ob1` and `OMPI_MCA_btl=tcp,self` keep MPI communication on TCP
 to avoid RDMA mappings that CRIU cannot restore.
 
+An init container downloads the selected model into the persistent
+[model cache](README.md#model-cache). The source application then loads that
+cache with `HF_HUB_OFFLINE=1`, so the checkpointed process has no open Hugging
+Face connections.
+
 The source and restore pods must use the same immutable image and mount the
 Snapshot control volume at `/snapshot-control`.
 
@@ -76,18 +81,26 @@ kubectl create configmap tensorrt-llm-app \
 
 ## 2. Choose the model
 
-The container argument in the capture manifest is a JSON object of `LLM` keyword
-arguments. The recipes already select their model, for example in
-[`capture/qwen3-0.6b.yaml`](tensorrt-llm/capture/qwen3-0.6b.yaml). To run another
-model, select one supported by the chosen TensorRT-LLM image in a copy of the
-manifest:
+The recipes already select their model, for example in
+[`capture/qwen3-0.6b.yaml`](tensorrt-llm/capture/qwen3-0.6b.yaml). The init
+container downloads it into the [model cache](README.md#model-cache), and the main
+container's last argument is a JSON object of `LLM` keyword arguments:
 
 ```yaml
+initContainers:
+  - name: model-cache
+    args:
+      - <download script>
+      - Qwen/Qwen3-0.6B
 containers:
   - name: main
     args:
       - '{"model": "Qwen/Qwen3-0.6B"}'
 ```
+
+To run another model, select one supported by the chosen TensorRT-LLM image and
+change it in both places in a copy of the manifest, because the main container runs
+offline from the model cache.
 
 The example uses one GPU, the PyTorch backend, and a maximum sequence length of
 512 tokens. Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
@@ -110,9 +123,7 @@ TensorRT-LLM image, GPU count, backend, or engine settings.
 `allreduce_strategy="NCCL"`. With the pinned engine, AUTO produced intermittent
 incorrect source answers before checkpointing in validation. NCCL passed source
 inference, KV release and resume, and three restored inference checks on the same
-eight B200 GPUs. The recipe loads a pinned model revision from the
-[model cache](README.md#model-cache), where an init container downloads it on
-first use.
+eight B200 GPUs. Both places pin a `revision` of the model.
 
 ## 3. Deploy the source replica
 
@@ -146,7 +157,7 @@ model:
 ```bash
 kubectl rollout status \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  deployment/tensorrt-llm-source \
+  deployment/tensorrt-llm-qwen3-0-6b-source \
   --timeout=30m
 ```
 
@@ -155,7 +166,7 @@ List the generated Pod:
 ```bash
 kubectl get pods \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --selector app=tensorrt-llm-source
+  --selector app=tensorrt-llm-qwen3-0-6b-source
 ```
 
 Use that Pod name in the `PodSnapshot` created in the next stage. The

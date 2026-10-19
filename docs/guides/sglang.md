@@ -65,10 +65,10 @@ kubectl create configmap sglang-app \
 
 ## 2. Choose the model
 
-The recipes already select their model in the capture manifest, for example
+The recipes already select their model, for example in
 [`capture/qwen3-0.6b.yaml`](sglang/capture/qwen3-0.6b.yaml). The init container
-downloads it, and the main container's last argument is a JSON object of
-`sglang.Engine` keyword arguments:
+downloads it into the [model cache](README.md#model-cache), and the main
+container's last argument is a JSON object of `sglang.Engine` keyword arguments:
 
 ```yaml
 initContainers:
@@ -84,9 +84,10 @@ containers:
       - '{"model_path": "Qwen/Qwen3-0.6B"}'
 ```
 
-To run another model, edit these arguments in a copy of the manifest. The
-example configures a context length of 10240 tokens for a 24 GiB NVIDIA A10
-GPU. Reduce `SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
+To run another model, change it in both places in a copy of the manifest, because
+the main container runs offline from the model cache. The example configures a
+context length of 10240 tokens for a 24 GiB NVIDIA A10 GPU. Reduce
+`SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
 validating the resulting memory use. The KV cache page size is set through
 `SGLANG_PAGE_SIZE` (default `16`).
 `app.py` sets `trust_remote_code=False`; Qwen3 needs no custom model code.
@@ -100,13 +101,9 @@ Add other `sglang.Engine` keyword arguments, such as `trust_remote_code` or
 > are supplied through SGLang's [environment variables](https://docs.sglang.ai/references/environment_variables.html)
 > set in the Deployment's Pod template.
 
-Every SGLang recipe reads its model from the `model-cache` PVC. Create it first,
-as [Model cache](README.md#model-cache) describes.
-
 **Eight-GPU recipes.** The JSON argument sets `tp_size` and `ep_size` to the GPU
-count. Set `dp_size` or `pp_size` in the same object for other layouts. The
-recipes load pinned model revisions from the same model cache, where the init
-container downloads them on first use.
+count. Set `dp_size` or `pp_size` in the same object for other layouts. Both places
+pin a `revision` of the model.
 
 ## 3. Deploy the source replica
 
@@ -143,7 +140,7 @@ model:
 ```bash
 kubectl rollout status \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  deployment/sglang-source \
+  deployment/sglang-qwen3-0-6b-source \
   --timeout=30m
 ```
 
@@ -152,7 +149,7 @@ List the generated Pod:
 ```bash
 kubectl get pods \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --selector app=sglang-source
+  --selector app=sglang-qwen3-0-6b-source
 ```
 
 Use that Pod name in the `PodSnapshot` created in the next stage. The
