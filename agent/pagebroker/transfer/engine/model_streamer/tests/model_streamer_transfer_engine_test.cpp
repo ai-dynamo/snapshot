@@ -262,8 +262,7 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
   next_submission_id = 0;
   fail_first_session = true;
 
-  const fs::path root = fs::temp_directory_path() / "pagebroker-model-streamer-recovery-test";
-  fs::remove_all(root);
+  const fs::path root = root_.path();
   const fs::path storage = root / "storage";
   const fs::path source = storage / "source";
   fs::create_directories(source);
@@ -284,7 +283,6 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
     EXPECT_EQ(starts, 2);
   }
   EXPECT_EQ(ends, 2);
-  fs::remove_all(root);
 }
 
 TEST_F(ModelStreamerTransferEngineTest, RejectsMissingStorageBeforeCreatingAnything)
