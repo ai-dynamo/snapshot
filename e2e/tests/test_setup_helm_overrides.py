@@ -76,8 +76,6 @@ def test_install_enables_bound_publications_for_the_lifecycle_suite(monkeypatch)
     )
 
     (command,) = commands
-    assert "pageBroker.artifactAddressing=true" in command
-    assert "operator.bindNewContents=true" in command
     assert command[-2:] == ["--set-json", "daemonset.imagePullSecrets=[]"]
 
 

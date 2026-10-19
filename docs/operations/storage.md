@@ -45,37 +45,19 @@ caller-supplied store ID nor an additional PVC namespace setting is required.
 `storage.pvc.basePath` retains its existing mount-path meaning.
 
 The operator validates this resolved identity at startup and uses it to check
-artifact cleanup against each content's recorded store. New captures use the
-legacy filesystem flow by default. Artifact addressing requires a compatible
-PageBroker image and the separate activation steps below. S3 remains unsupported.
+artifact cleanup against each content's recorded store. Every new capture is
+bound to that store; content created before the upgrade stays unbound and keeps
+using the legacy filesystem flow. S3 remains unsupported.
 
-### Enable artifact addressing
+### Upgrading an installation that is already capturing
 
-The operator Deployment and agent DaemonSet roll independently. Keep new content
-unbound while upgrading agents: an older agent cannot record a bound publication
-descriptor. Use two Helm upgrades when enabling this contract on an existing
-installation:
-
-1. Select matching agent/operator/PageBroker images that implement the artifact
-   contract, including the PageBroker PVC backend. Set
-   `pageBroker.artifactAddressing=true` and keep
-   `operator.bindNewContents=false`. This configures compatible brokers while
-   allowing legacy captures throughout the rollout. Wait for the agent DaemonSet
-   rollout to complete on every node before continuing.
-2. Set `operator.bindNewContents=true`, keeping
-   `pageBroker.artifactAddressing=true`. This changes only the operator's capture
-   activation; it does not roll the agents again. New contents now record the
-   configured store and require publication descriptors.
-
-Both settings default to `false`, so the chart adds no artifact-backend arguments
-until explicitly enabled. Agent and PageBroker images must still match. A fresh installation with compatible images may enable
-both settings together, provided no captures are submitted until all agents are
-ready. Existing unbound contents remain readable through the legacy path.
-
-Once bound content exists, keep a compatible broker with artifact addressing
-enabled for its reads and restores. Turning off `operator.bindNewContents` stops
-new bound captures while preserving support for existing ones; it does not
-convert their storage format or permit downgrading the agents to a legacy build.
+The operator Deployment restarts in seconds; the agent DaemonSet rolls one node
+at a time. While a node still runs the previous agent, a capture scheduled on it
+is recorded the legacy way and the new restore path cannot use it. Do not start
+captures until the agent DaemonSet rollout has completed on every node. Agent
+and PageBroker images must match. Once bound content exists, keep a compatible
+PageBroker for its reads and restores; downgrading the agents to a legacy build
+does not convert bound content back.
 
 If the cluster has no default storage class that can provision RWX, set one:
 
@@ -127,9 +109,9 @@ the sidecar:
   staging. Setting `pageBroker.restoreMode: staged` has PageBroker copy the
   artifact into staging first, and CRIU restores from memory instead.
 
-With `pageBroker.artifactAddressing=true`, the sidecar receives the resolved
-store configuration (`--storage-config /etc/snapshot/storage.yaml`) and derives
-the store identity from it at startup. Checkpoints bound to that store are addressed by
+The sidecar receives the resolved store configuration
+(`--storage-config /etc/snapshot/storage.yaml`) and derives the store identity
+from it at startup. Checkpoints bound to that store are addressed by
 identity rather than by path: the agent names the store, the content UID and
 the container, and PageBroker publishes the image at
 `artifacts/<contentUID>/containers/<name>/`, the same layout as before. A PVC
