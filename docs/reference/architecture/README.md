@@ -8,6 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 <!-- toc -->
 - [How to read this section](#how-to-read-this-section)
 - [What Snapshot does](#what-snapshot-does)
+- [Terms used in this section](#terms-used-in-this-section)
 - [Components](#components)
 - [Resources](#resources)
 - [Checkpoint, in brief](#checkpoint-in-brief)
@@ -61,6 +62,20 @@ Two existing tools do most of the heavy lifting:
 
 Snapshot's own code sequences those two, decides what is safe to capture and restore, and exposes the whole thing as Kubernetes resources.
 
+## Terms used in this section
+
+| Term | Meaning |
+| --- | --- |
+| Source pod | The running pod whose container is checkpointed. |
+| Restore pod, destination container | A new pod that names a `PodSnapshot` to restore from, and the container in it that receives the restored process. |
+| Artifact | One checkpoint on the shared volume: CRIU images, GPU memory, the root filesystem diff, and a manifest. |
+| Work order | A `PodSnapshotContent`, which tells one node agent what to capture. |
+| Control directory | The per-container `snapshot-control` volume through which the workload and the agent exchange sentinel files such as `ready-for-snapshot` and `restore-complete`. |
+| Restore proxy | The small program the agent makes PID 1 of a destination container. It waits for the restore, then stands in for the restored process toward the kubelet. |
+| Bundle | The directory of tools the agent bind mounts into a destination container, because the workload image ships none of them. |
+| PageBroker transaction | PageBroker's unit of work: a directory it hands out for writing or reading, and later publishes, releases, or discards. |
+| CustomStorage | A CUDA driver feature that streams GPU memory to an external engine instead of into the process's host memory. PageBroker uses it when the driver supports it. |
+
 ## Components
 
 Snapshot installs as one Helm release per cluster with two workloads.
@@ -93,7 +108,7 @@ flowchart TB
 | Component | Runs where | Responsibility |
 | --- | --- | --- |
 | Operator | One Deployment, leader elected | Turns a `PodSnapshot` into a `PodSnapshotContent` work order for one node, mirrors the result back, runs `SnapshotJob`, and deletes artifacts when their content is deleted. Installs the CRDs from an init container. |
-| Agent | Privileged DaemonSet container on every GPU node | Performs every checkpoint and restore on its node. Watches the `PodSnapshotContent` objects labelled with its node name and the restore pods scheduled to it. Registers an NRI plugin with the container runtime. |
+| Agent | Privileged DaemonSet container on every GPU node | Performs every checkpoint and restore on its node. Watches the `PodSnapshotContent` objects labelled with its node name and the restore pods scheduled to it. Registers a Node Resource Interface (NRI) plugin, a hook the container runtime calls as it creates each container, which restore depends on. |
 | PageBroker | Sidecar container in the agent pod | Owns the movement of checkpoint data between the node and the shared volume. Publishes a checkpoint atomically and pins or stages an artifact for restore. When the driver supports it, moves GPU memory directly between device and storage. |
 | Shared volume | One `ReadWriteMany` PersistentVolumeClaim | Holds every artifact. Mounted at `/checkpoints` by every agent, every PageBroker, and the operator. Workload pods never mount it. |
 

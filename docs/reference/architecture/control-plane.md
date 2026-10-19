@@ -19,7 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 - [CRD installation](#crd-installation)
 - [snapshotctl](#snapshotctl)
 - [Failure reasons](#failure-reasons)
-- [Shared contracts in <code>api/</code>](#shared-contracts-in-api)
+- [Shared contracts in the api module](#shared-contracts-in-the-api-module)
 - [Invariants](#invariants)
 <!-- /toc -->
 
@@ -91,7 +91,7 @@ The content is built with the pod's node name in both `spec.source.nodeName` and
 Its name is `podsnapshotcontent-<PodSnapshot UID>`.
 The UID-derived name follows the convention Kubernetes uses for a cluster-scoped object bound to a namespaced one, and it makes a retried create reach the same object instead of a duplicate.
 
-Create is blind.
+The create is unconditional.
 If the object already exists, which happens when the operator crashed between the create and the status write, the reconciler adopts it only when its back reference names this `PodSnapshot` with a matching, non-empty UID.
 Anything else is `ContentConflict`.
 Binding is the single status write of `boundSnapshotContentName`.
@@ -181,7 +181,7 @@ The reconciler then waits for the Job to finish before it sets `Completed=True` 
 
 The dump kills the target container, so after every successful capture the Job reports `Failed`.
 The reconciler treats that as success once it has confirmed that every helper container in the template exited with code zero.
-Native sidecars only need to have stopped.
+Native sidecars, init containers with `restartPolicy: Always`, only need to have stopped.
 Helpers that are still running are left alone, since deleting the Job would kill them mid-work.
 
 A `SnapshotJob` fails on a failed capture, on `DeadlineExceeded`, or on a Job that failed before any `PodSnapshot` existed.
@@ -250,7 +250,7 @@ Every other reason is mirrored from the agent.
 Those are listed under [Checkpoint flow](checkpoint.md#failure-reasons).
 `SnapshotJob` folds `ContentConflict`, `SourcePodNotFound`, and `StalePodReference` into `PodSnapshotFailed`, and every agent reason into `CaptureFailed`.
 
-## Shared contracts in `api/`
+## Shared contracts in the api module
 
 The `api` module is what external integrators and both binaries import.
 

@@ -36,6 +36,26 @@ A checkpoint has four parts, performed on the node in this order:
 Anything that fails in the first part leaves the workload running.
 Anything that fails later kills it.
 
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant P as PageBroker
+    participant D as CUDA driver
+    participant C as CRIU
+    participant W as Workload
+    A->>W: Inspect processes, mounts, GPUs
+    A->>P: Prepare transaction
+    A->>D: Lock and checkpoint each CUDA process
+    A->>C: Dump process tree
+    C->>W: Freeze, dump, terminate
+    A->>A: Archive root filesystem diff
+    A->>P: Commit
+    P->>P: Rename into place
+    A->>A: Write Ready
+```
+
+With CustomStorage, PageBroker calls the CUDA driver in the agent's place.
+
 ## From PodSnapshot to work order
 
 The operator reads the source pod's `spec.nodeName`, creates a `PodSnapshotContent` labelled with it, and records the binding on the `PodSnapshot`.
@@ -69,7 +89,9 @@ The agent never reads `ready-for-snapshot` itself.
 The [workload contract](../workload-contract.md) has the workload write that sentinel once it is quiesced, and the source pod's readiness probe gates on the file.
 The agent waits for the container's `Ready` status, which closes the loop without the agent having to know anything about the workload.
 
-Once the checks pass, the agent labels the pod `nvidia.com/snapshot-capture-eligible=true`, which is what lets its source-pod informer start delivering that pod's events, and calls the executor with a context bounded by `checkpointTimeoutSeconds`.
+Before it waits for readiness, the agent labels the pod `nvidia.com/snapshot-capture-eligible=true`.
+Its source pod informer selects on that label, so from then on the pod's own status changes wake the capture instead of the ten second resync.
+Once the container is Ready and resolved, the agent calls the executor with a context bounded by `checkpointTimeoutSeconds`.
 
 ## Inspect
 
@@ -80,9 +102,9 @@ Once the checks pass, the agent labels the pod `nvidia.com/snapshot-capture-elig
 - Its cgroup v2 path, so CRIU can freeze it.
 - Its overlay upper directory, parsed from the `/` mount's superblock options. A container whose root is not an overlay cannot be captured.
 - Its mount table, classified against the OCI spec into the CRIU mount policy below.
-- Its network namespace inode and the targets of file descriptors 0 to 2, which restore re-wires.
+- Its network namespace, which CRIU is told to treat as external, and the pipes behind file descriptors 0 to 2, so restore can reconnect the process's output to the new container's log.
 - Its process tree, walked through `/proc/<pid>/task/*/children`.
-- Which of those processes are CUDA processes, by asking `cuda-checkpoint-helper --get-restore-tid` about each one. Each CUDA process must sit at PID namespace depth two, host plus container.
+- Which of those processes are CUDA processes, by asking `cuda-checkpoint-helper --get-restore-tid` about each one. A CUDA process inside a further nested PID namespace is not supported.
 - If there are CUDA processes, the GPUs the container can see, in CUDA ordinal order, and the `/dev/nvidiaN` path for each UUID. A GPU container with no CUDA process is captured as CPU-only.
 
 GPU discovery tries the OCI environment's `NVIDIA_VISIBLE_DEVICES`, then Dynamic Resource Allocation claims, then the kubelet PodResources API, then `nvidia-smi` inside the container.
@@ -104,11 +126,12 @@ The keys of the external mount map are recorded in the manifest and become the `
 
 ## Transaction
 
-The executor opens a PageBroker transaction before anything destructive happens, and a deferred abort discards it if the function returns an error.
+A PageBroker transaction is a directory that PageBroker hands out and later either publishes or deletes.
+The executor opens one before anything destructive happens, and a deferred abort discards it if the function returns an error.
 
 | Capture kind | Request | Where CRIU writes |
 | --- | --- | --- |
-| No CUDA processes, or the driver lacks CustomStorage | `prepare_staged_checkpoint` | A directory on the memory-backed staging volume |
+| No CUDA processes, or the driver lacks CustomStorage | `prepare_staged_checkpoint` | A directory on the staging volume, a memory-backed `emptyDir` shared by the agent and PageBroker containers |
 | CUDA processes with CustomStorage | `prepare_direct_checkpoint` | A temporary directory beside the destination on the shared volume |
 
 Whether CustomStorage is used was decided once at agent startup from PageBroker's capabilities.
@@ -153,7 +176,7 @@ The important options:
 | Plugin directory | the dedicated Snapshot directory | CRIU's own CUDA plugin must not load. |
 
 CRIU writes `dump.log` next to the images.
-On failure the agent logs the last 16 KiB of it, which matters because the transaction directory, log included, is deleted when the transaction aborts.
+On failure the agent logs the tail of it, which matters because the transaction directory, log included, is deleted when the transaction aborts.
 
 CRIU freezes the tree, dumps it, and kills it.
 The container exits, the pod reports a failed container, and the `SnapshotJob` reconciler treats that exit as the expected outcome.
