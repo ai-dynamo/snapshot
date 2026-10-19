@@ -4,20 +4,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sglang-restored
+  name: vllm-1gpu-restored
 spec:
   replicas: 1
+  progressDeadlineSeconds: 1800
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: sglang-restored
+      app: vllm-1gpu-restored
   template:
     metadata:
       labels:
-        app: sglang-restored
+        app: vllm-1gpu-restored
       annotations:
-        nvidia.com/restore-from: sglang-snapshot
+        nvidia.com/restore-from: ${SNAPSHOT_NAME}
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -29,13 +30,12 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
+          image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
           # The source's command. Snapshot replaces it with its restore proxy,
           # which waits for the restore and then follows the restored process.
           command:
             - python3
-            - -u
             - /snapshot-app/app.py
           env:
             - name: SNAPSHOT_CONTROL_DIR
@@ -50,7 +50,7 @@ spec:
             exec:
               command:
                 - cat
-                - /snapshot-control/sglang-restore-ready
+                - /snapshot-control/vllm-restore-ready
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:
@@ -76,4 +76,4 @@ spec:
             sizeLimit: 1Gi
         - name: app
           configMap:
-            name: sglang-app
+            name: vllm-app

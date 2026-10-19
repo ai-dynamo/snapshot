@@ -4,18 +4,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sglang-source
+  name: sglang-qwen3-0-6b-source
 spec:
   replicas: 1
+  progressDeadlineSeconds: 1800
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: sglang-source
+      app: sglang-qwen3-0-6b-source
   template:
     metadata:
       labels:
-        app: sglang-source
+        app: sglang-qwen3-0-6b-source
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
