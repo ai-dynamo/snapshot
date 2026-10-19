@@ -127,14 +127,25 @@ A `PodSnapshot` ends `Ready` or `Failed`, and `Failed` is permanent.
 
 ## How the workload takes part
 
-Checkpointing a process at an arbitrary instant produces a checkpoint of whatever it was doing, which for an inference server is rarely what you want.
-So the workload cooperates, through a directory called the **control directory**.
-It is a per-pod `emptyDir` volume named `snapshot-control`, mounted at `/snapshot-control`, that the workload and the agent both see.
+Checkpointing a process at an arbitrary instant captures whatever it was doing, which for an inference server is rarely what you want.
+So the workload cooperates, through a directory called the **control directory**: a per-pod `emptyDir` volume named `snapshot-control`, mounted at `/snapshot-control`, that the workload and the agent both see.
 They communicate by creating files in it, called **sentinels**.
 
-Before a checkpoint, the workload finishes in-flight requests and writes `ready-for-snapshot`.
-The pod's readiness probe checks for that file, so the pod reports Ready exactly when it is safe to capture, and the agent waits for Ready.
-After a restore, the agent writes `restore-complete`, and the workload, which has been waiting for it, resumes.
+```mermaid
+sequenceDiagram
+    participant W as Workload
+    participant K as kubelet
+    participant A as Agent
+    W->>W: Finish in-flight work
+    W->>K: Write ready-for-snapshot
+    K->>A: Pod reports Ready
+    A->>W: Checkpoint
+    Note over W,A: Later, in a new pod
+    A->>W: Write restore-complete
+    W->>W: Resume
+```
+
+The pod's readiness probe checks for `ready-for-snapshot`, so the pod reports Ready exactly when it is safe to capture, and the agent needs to know nothing about the workload itself.
 The [workload contract](../workload-contract.md) specifies this in full.
 
 ## What happens in a checkpoint

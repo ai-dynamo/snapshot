@@ -47,42 +47,31 @@ flowchart TB
     Agent <--> PVC
 ```
 
-The pod has two long-running containers and one init container.
+The pod has one init container and two long-running containers:
 
-The **agent** container runs the Go program that does the work.
-It watches the Kubernetes API for checkpoints assigned to this node and for pods on this node that ask to be restored, and it carries each one out.
-
-The **pagebroker** container runs PageBroker, a C++ daemon that owns the movement of checkpoint data.
-The agent never writes a checkpoint to its final location itself.
-It asks PageBroker for a directory, writes into it, and asks PageBroker to publish it.
-On restore, PageBroker holds the checkpoint open or copies it into memory while CRIU reads it.
-When the GPU driver supports CustomStorage, PageBroker is also the process that calls the CUDA checkpoint API and streams GPU memory directly between the device and the volume.
-The two containers speak a private protocol over a Unix socket, so the chart requires them to run at the same image tag.
-
-The **deploy-seccomp** init container copies the `block-iouring.json` seccomp profile into the kubelet's seccomp directory on the host, so that workload pods can reference it.
+- **deploy-seccomp**, the init container, copies the `block-iouring.json` seccomp profile into the kubelet's seccomp directory on the host, so that workload pods can reference it.
+- **agent** runs the Go program that does the work. It watches the Kubernetes API for checkpoints assigned to this node and for pods on this node that ask to be restored, and carries each one out.
+- **pagebroker** runs PageBroker, a C++ daemon that owns the movement of checkpoint data. The agent never writes a checkpoint to its final location itself. It asks PageBroker for a directory, writes into it, and asks PageBroker to publish it. On restore, PageBroker holds the checkpoint open or copies it into memory while CRIU reads it. When the GPU driver supports CustomStorage, PageBroker is also the process that calls the CUDA checkpoint API and streams GPU memory between the device and the volume.
 
 The two main containers share the checkpoint volume at `/checkpoints` and a memory-backed `emptyDir` at `/pagebroker`.
-The second holds PageBroker's socket and its staging area, the place CRIU writes a dump before PageBroker publishes it.
+The second holds PageBroker's socket and its staging area, where CRIU writes a dump before PageBroker publishes it.
+The two containers speak a private protocol, so the chart requires them to run at the same image tag.
 
 ## How the agent receives work
 
 The agent is a controller built directly on client-go informers, not on controller-runtime.
-It runs three informers, each filtered to its own node.
+It runs three informers, each filtered to its own node:
 
-The first watches `PodSnapshotContent` objects labelled `nvidia.com/snapshot-node=<this node>`.
-Each one is a checkpoint this agent must take.
+- `PodSnapshotContent` objects labelled `nvidia.com/snapshot-node=<this node>`. Each is a checkpoint this agent must take.
+- Pods on this node labelled `nvidia.com/snapshot-capture-eligible=true`. The agent puts that label on a source pod once it has validated the matching `PodSnapshotContent`, so that the pod becoming Ready wakes the capture without waiting for a periodic resync.
+- Every pod on this node. Those carrying `nvidia.com/restore-from` are restores.
 
-The second watches pods on this node that carry the label `nvidia.com/snapshot-capture-eligible=true`.
-The agent puts that label on a source pod once it has validated the matching `PodSnapshotContent`, so that the pod's own status changes, in particular becoming Ready, wake the capture without waiting for a periodic resync.
+Captures and restores go onto two work queues keyed by object name:
 
-The third watches every pod on this node, and acts on those carrying `nvidia.com/restore-from`.
+- Each dequeued item runs in its own goroutine, so several captures and restores can run on one node at once. There is no node-wide limit.
+- The queue guarantees that one object is handled by one goroutine at a time. With exactly one agent per node, that is the only lock needed.
 
-Captures and restores go onto two work queues keyed by object name.
-Each dequeued item runs in its own goroutine, so several captures and restores can proceed on one node at once.
-There is no node-wide limit on concurrency.
-The queue guarantees that one object is handled by one goroutine at a time, and since there is exactly one agent per node, that is the only lock needed.
-
-The agent writes to the Kubernetes API in only three places: the status of a `PodSnapshotContent`, the `nvidia.com/Restored` condition and a finalizer on restore pods, and the eligibility label on source pods.
+The agent writes to the Kubernetes API in three places only: the status of a `PodSnapshotContent`, the `nvidia.com/Restored` condition and a finalizer on restore pods, and the eligibility label on source pods.
 It never modifies a `PodSnapshotContent` spec or a `PodSnapshot`.
 
 ## How the agent does the work
@@ -91,12 +80,15 @@ The capture and restore sequences live in `agent/internal/executor` as two long,
 The flow pages walk through them.
 
 Capture runs entirely in the agent container.
-CRIU is a child of the agent, and it reaches into the source container through `/host/proc/<pid>/root`.
+CRIU is a child of the agent and reaches into the source container through `/host/proc/<pid>/root`.
 
 Restore cannot work that way.
-CRIU must create the restored processes inside the destination container's namespaces, with the container's root filesystem, so that the processes land where the kubelet expects them.
-The agent therefore runs the second half of a restore as a separate program, `nsrestore`, entered into the container's mount, UTS, IPC, network, and PID namespaces with `nsenter`.
-The workload image contains none of the tools that program needs, so the agent brings them along in a directory called the **bundle**, which it bind mounts read-only into the container before starting `nsrestore`.
+CRIU must create the restored processes inside the destination container's namespaces, with the container's root filesystem, so that they land where the kubelet expects them.
+So the agent:
+
+1. Bind mounts a directory of tools, the **bundle**, read-only into the destination container, because the workload image contains none of them.
+2. Runs a separate program, `nsrestore`, inside the container's mount, UTS, IPC, network, and PID namespaces with `nsenter`.
+3. Lets `nsrestore` replay the changed files, run CRIU, and restore GPU state, then reads its result.
 
 ### What is in the image
 
@@ -104,11 +96,11 @@ The workload image contains none of the tools that program needs, so the agent b
 | --- | --- | --- |
 | `snapshot-agent` | Agent container | The controller and executors described above. |
 | `criu` | Agent container at capture, destination container at restore | CRIU, built from source at a pinned upstream commit. Snapshot ships one CRIU plugin of its own, `snapshot_inet_remap.so`, which rewrites IP addresses on restore. |
-| `cuda-checkpoint-helper` | Agent container at capture, destination container at restore | A small C program that calls the CUDA driver's checkpoint API: lock, checkpoint, restore, unlock, and two queries. It is used when the driver does not support CustomStorage. |
+| `cuda-checkpoint-helper` | Agent container at capture, destination container at restore | A small C program that calls the CUDA driver's checkpoint API: lock, checkpoint, restore, unlock, and two queries. Used when the driver does not support CustomStorage. |
 | `ns-bind-mount` | Agent container | The only way the agent mounts anything into another container. Its allowed sources, destinations, and mount flags are compiled in. |
-| `nsrestore` | Destination container | The in-container half of a restore: replays the root filesystem changes, runs CRIU, restores GPU state. Statically linked. |
+| `nsrestore` | Destination container | The in-container half of a restore. Statically linked. |
 | `snapshot-restore-proxy` | Destination container, as PID 1 | Waits for the restore, then forwards signals to the restored process and exits with its exit code. Statically linked. |
-| `tar`, `ip` | Destination container | `tar` unpacks the root filesystem changes. CRIU runs `ip` to restore addresses and routes. |
+| `tar`, `ip` | Destination container | `tar` unpacks the changed files. CRIU runs `ip` to restore addresses and routes. |
 | `cuinterpose-coordinator`, `cuinterpose-launch`, `libcuinterpose*.so` | Source and destination containers | The [multi-GPU](multi-gpu.md) components. |
 
 The bundle holds everything in the last four rows except the launcher, plus the shared libraries those programs need.
@@ -120,22 +112,41 @@ A CI job unpacks a checkpoint inside an older image to keep that true.
 
 PageBroker exists to make publication atomic and to keep GPU memory off the slow path.
 
-Every capture and every restore runs inside a **PageBroker transaction**: a directory PageBroker hands out, which it later publishes, releases, or discards.
-A capture writes its CRIU images into the transaction directory, and PageBroker publishes by renaming the directory into its final place.
+Every capture and every restore runs inside a **PageBroker transaction**:
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant P as PageBroker
+    A->>P: prepare, or a restore request
+    P-->>A: Transaction directory
+    A->>A: Write into it, or let CRIU read from it
+    alt Success
+        A->>P: commit
+        P->>P: Rename into place, or release
+    else Failure
+        A->>P: abort
+        P->>P: Delete, or release
+    end
+```
+
+For a capture, PageBroker publishes by renaming the transaction directory into its final place.
 Before the rename nothing exists at the final path, and after it the checkpoint is complete.
-An aborted or expired transaction is deleted.
-A restore's transaction holds the checkpoint directory open, or copies it into memory, for as long as CRIU reads it.
+For a restore, the transaction holds the checkpoint directory open, or copies it into memory, for as long as CRIU reads it.
+A transaction that is neither committed nor aborted expires and is cleaned up.
 
 **CustomStorage** is a CUDA driver feature that lets an external engine receive a process's GPU memory during checkpoint, instead of the driver copying it into the process's own host memory.
-Without it, GPU memory becomes part of the process image that CRIU dumps and restores, which means it is written and read twice.
-With it, PageBroker streams GPU memory between the device and the volume directly, through pinned host buffers it allocates at startup.
-PageBroker reports whether the node's driver supports CustomStorage when the agent starts, and the agent uses the same answer for the rest of its life.
+The two paths differ as follows:
+
+- **Without CustomStorage**, the driver copies GPU memory into the process's host memory. It becomes part of the image CRIU dumps and restores, so it is written and read twice, and `cuda-checkpoint-helper` makes the driver calls.
+- **With CustomStorage**, PageBroker makes the driver calls and streams GPU memory between the device and the volume directly, through pinned host buffers it allocates at startup.
+
+PageBroker reports whether the node's driver supports CustomStorage when the agent starts, and the agent uses that answer for the rest of its life.
 Each checkpoint records which path produced it, and restore follows the record.
 
 The protocol between the agent and PageBroker is length-prefixed protobuf over a Unix stream socket, with file descriptors passed through `SCM_RIGHTS`.
 It is not gRPC.
-The schema is `agent/pagebroker/v1/pagebroker.proto`.
-The requests are:
+The schema is `agent/pagebroker/v1/pagebroker.proto`, and the requests are:
 
 | Capture | Restore |
 | --- | --- |
@@ -151,10 +162,13 @@ The agent needs two things from the container runtime: to resolve a container to
 For the first, `agent/internal/runtime` speaks to containerd through its native client, or to CRI-O through the CRI with its verbose status, which carries the PID and the spec.
 Everything else the agent learns about a container, such as its mount table, cgroup, process tree, and overlay upper directory, it reads from `/host/proc/<pid>`, so it is the same for both runtimes.
 
-For the second, the agent registers a plugin with the runtime's **Node Resource Interface** (NRI).
-NRI lets a plugin adjust a container as the runtime creates it.
-Snapshot's plugin handles one hook, container creation, and only for pods carrying `nvidia.com/restore-from`.
-It copies the restore proxy into the container's control directory on the host and replaces the container's command with it.
+For the second, the agent registers a plugin with the runtime's **Node Resource Interface** (NRI), which lets a plugin adjust a container as the runtime creates it.
+Snapshot's plugin handles one hook, container creation, and only for pods carrying `nvidia.com/restore-from`:
+
+1. Determine whether this container is a restore destination.
+2. Copy the restore proxy into the container's control directory on the host.
+3. Replace the container's command with the proxy.
+
 It changes nothing else and never edits the Pod object.
 Changing a container's command requires NRI 0.10, which ships with containerd 2.2.
 On an older runtime the plugin refuses to register, and the agent restores without the proxy.
@@ -163,20 +177,21 @@ On an older runtime the plugin refuses to register, and the agent restores witho
 ## The restore proxy
 
 A container's PID 1 has to be something, and in a restore it cannot be the workload's own command, which would start the workload from scratch.
-The restore proxy fills that role.
+The restore proxy fills that role:
 
-It starts, checks the control directory, and exits with code 112 if `restore-complete` or `restore-failed` is already there.
-An `emptyDir` survives a container restart, so this is how a pod gets exactly one restore.
-Otherwise it waits for one of those files.
-When `restore-complete` appears it reads the restored process's PID from it, forwards `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, and `SIGUSR2` to that process, reaps orphaned children, and when the process exits, exits with its code, or 128 plus the signal that ended it.
-Code 113 means the proxy could not follow the process.
+1. On start, if `restore-complete` or `restore-failed` already exists in the control directory, exit with code 112. An `emptyDir` survives a container restart, so this is how a pod gets exactly one restore.
+2. Otherwise wait for one of those files.
+3. On `restore-failed`, exit 112.
+4. On `restore-complete`, read the restored process's PID from it.
+5. Forward `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, and `SIGUSR2` to that process, and reap orphaned children.
+6. When the process exits, exit with its code, or 128 plus the signal that ended it. Exit 113 if the process could not be followed.
 
 The proxy leaves file descriptors 0, 1, and 2 untouched.
 CRIU reconnects the restored process's original standard streams to whatever PID 1 holds on those descriptors, which is how the workload's output keeps reaching the container log.
 
 ## What the agent needs from the node
 
-The agent container mounts these host paths, each for one reason:
+The agent container mounts these host paths:
 
 | Host path | Why |
 | --- | --- |
@@ -213,7 +228,7 @@ These change behavior rather than tune it:
 | `restore.skipCompatCheck` | Turns off the checks that refuse a checkpoint this node cannot run, for every restore on the node. The per-pod form is the `nvidia.com/snapshot-skip-compat-check` annotation. |
 | `criu.tcpEstablished` | Keeps established TCP connections in the checkpoint. Restore then waits for the destination pod's IP and rewrites the addresses in every socket. |
 | `criu.libDir` | The directory CRIU loads plugins from. It must stay Snapshot's own directory, because CRIU's default directory contains CRIU's CUDA plugin, which would conflict with how Snapshot handles GPU state. |
-| `overlay.exclusions` | Paths left out of the root filesystem changes. A file the dumped processes hold open is kept regardless. |
+| `overlay.exclusions` | Paths left out of the archive of changed files. A file the dumped processes hold open is kept regardless. |
 
 ## Code map
 
