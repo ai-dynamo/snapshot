@@ -97,7 +97,15 @@ def test_restored_state_requires_every_remote_assertion_to_pass(
 
 @pytest.mark.parametrize(
     "failure",
-    [None, "securityfs", "empty-dir-not-mounted", "empty-dir-not-empty"],
+    [
+        None,
+        "securityfs",
+        "no-mountinfo",
+        "empty-dir-not-mounted",
+        "empty-dir-only-as-root",
+        "empty-dir-missing",
+        "empty-dir-not-empty",
+    ],
 )
 def test_restored_mounts_require_every_remote_assertion_to_pass(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None
@@ -107,16 +115,23 @@ def test_restored_mounts_require_every_remote_assertion_to_pass(
     restore_done.write_text("pid=42\n")
     proc = tmp_path / "proc"
     monkeypatch.setattr(lifecycle, "PROC_ROOT", str(proc))
-    own = proc / "42" / "root" / "own"
-    own.mkdir(parents=True)
+    (proc / "42" / "root").mkdir(parents=True)
+    if failure != "empty-dir-missing":
+        (proc / "42" / "root" / "own").mkdir()
     if failure == "empty-dir-not-empty":
-        (own / "apparmor").mkdir()
+        (proc / "42" / "root" / "own" / "apparmor").mkdir()
+    # Field 4 is the mount's root in its filesystem, field 5 its mount point.
     mounts = ["36 25 0:30 / / rw - overlay overlay rw"]
-    if failure != "empty-dir-not-mounted":
-        mounts.append("40 36 8:1 /own /own rw - ext4 /dev/sda1 rw")
+    if failure == "empty-dir-only-as-root":
+        mounts.append("40 36 8:1 /own /other rw - ext4 /dev/sda1 rw")
+    elif failure != "empty-dir-not-mounted":
+        mounts.append("40 36 8:1 /data /own rw - ext4 /dev/sda1 rw")
     if failure == "securityfs":
-        mounts.append("41 36 0:7 / /own ro - securityfs securityfs ro")
-    (proc / "42" / "mountinfo").write_text("\n".join(mounts) + "\n")
+        mounts.append("41 36 0:7 / /sys/kernel/security ro - securityfs securityfs ro")
+    if failure != "no-mountinfo":
+        (proc / "42" / "mountinfo").write_text("\n".join(mounts) + "\n")
+    # A missing mountinfo must fail even without the empty_dir checks.
+    empty_dir = None if failure in (None, "securityfs", "no-mountinfo") else "/own"
 
     def exec_command(namespace: str, pod: str, command: str, *, container: str | None = None) -> str:
         assert (namespace, pod, container) == ("test-ns", "restored-pod", "main")
@@ -129,9 +144,10 @@ def test_restored_mounts_require_every_remote_assertion_to_pass(
     if failure:
         with pytest.raises(AssertionError, match="restored mount check failed for test-ns/restored-pod"):
             lifecycle.assert_restored_workload_mounts(
-                "test-ns", "restored-pod", container="main", empty_dir="/own"
+                "test-ns", "restored-pod", container="main", empty_dir=empty_dir
             )
     else:
-        lifecycle.assert_restored_workload_mounts(
-            "test-ns", "restored-pod", container="main", empty_dir="/own"
-        )
+        for empty_dir in (None, "/own"):
+            lifecycle.assert_restored_workload_mounts(
+                "test-ns", "restored-pod", container="main", empty_dir=empty_dir
+            )

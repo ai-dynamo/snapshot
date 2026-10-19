@@ -1117,16 +1117,20 @@ def assert_restored_workload_mounts(
     have its own empty mount at that path.
     """
     success_marker = "__snapshot_restored_mounts_verified__"
+    # Each read is its own assignment, so set -e stops the script when the
+    # read fails. A failing read inside an if or a test would not.
     empty_dir_checks = f"""
-    grep -qF " {empty_dir} " "$mountinfo"
-    test -z "$(ls -A {PROC_ROOT}/$restored_pid/root{empty_dir})"
+    printf '%s\\n' "$mounts" | awk -v path={shlex.quote(empty_dir or "")} \\
+      '$5 == path {{ found = 1 }} END {{ exit !found }}'
+    entries="$(ls -A {PROC_ROOT}/$restored_pid/root{empty_dir})"
+    test -z "$entries"
     """
     command = f"""
     set -euo pipefail
     restored_pid="$(sed -n 's/^pid=//p' {RESTORE_DONE})"
     test -n "$restored_pid"
-    mountinfo={PROC_ROOT}/$restored_pid/mountinfo
-    if grep -F " - securityfs " "$mountinfo"; then
+    mounts="$(cat {PROC_ROOT}/$restored_pid/mountinfo)"
+    if printf '%s\\n' "$mounts" | grep -F " - securityfs "; then
       echo "the restored workload sees securityfs"
       exit 1
     fi
