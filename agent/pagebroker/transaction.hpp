@@ -73,7 +73,7 @@ class Transaction {
   void set_descriptor(Descriptor descriptor);
   void clear_descriptor();
   bool retain_terminal();
-  bool expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const;
+  bool expired(std::chrono::steady_clock::time_point now) const;
 
   // Admission and initial byte reservation share one resource lock when limits are enabled.
   void PrepareTransfer(std::shared_ptr<TransactionResources> resources, uintmax_t initial_bytes,
@@ -105,7 +105,6 @@ class Transaction {
   std::mutex mutex_;
   State state_ = State::NEW;
   Descriptor descriptor_;
-  std::chrono::steady_clock::time_point staging_started_at_;
   bool terminal_retained_ = false;
   Cancellation cancellation_;
   Cancellation::Clock::time_point deadline_ = Cancellation::Clock::time_point::max();
