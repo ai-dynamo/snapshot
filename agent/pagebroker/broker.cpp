@@ -647,7 +647,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
   if (transaction->state() != Transaction::State::NEW) {
     const auto* prepared = std::get_if<CheckpointTransactionDescriptor>(&transaction->descriptor());
     if (!direct || transaction->state() != Transaction::State::STAGED || !prepared ||
-        prepared->output() != mode || prepared->engine_type() != engine.type())
+        prepared->mode() != mode || prepared->engine_type() != engine.type())
       return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
     // Retries use the original control and never clean up an existing capture.
     transaction->cancellation().ThrowIfCancelled();
@@ -774,7 +774,7 @@ Broker::PublishCheckpoint(
       transaction.Reserve(plan.size_bytes());
     }
     engine.PublishCheckpoint(staging_directory, descriptor.destination_storage(), std::move(plan), publication,
-        transaction.cancellation(), descriptor.output());
+        transaction.cancellation(), descriptor.mode());
     // Publication succeeded; retaining the descriptor for cleanup does not fail the commit.
     (void)transaction.TryClearDescriptor();
     transaction.set_state(Transaction::State::COMMITTED);
