@@ -875,6 +875,40 @@ TEST_F(BrokerTransferTest, DirectCheckpointRetryKeepsDeadlineAndCaptureOnRejecti
   }
 }
 
+TEST_F(BrokerTransferTest, RestoreCommitCleanupFailureRetainsStateAndAllowsRetry)
+{
+  for (const bool limited : {false, true}) {
+    SCOPED_TRACE(limited);
+    Broker broker(staging_, storage_);
+    const auto resources = limited ? Limit(broker) : nullptr;
+    const auto transaction = Seed(broker, 0, Transaction::State::STAGED);
+    BlockCleanup();
+    auto request = RequestFor("seed");
+    request.mutable_commit();
+    const auto failed = broker.HandleRequest(request);
+    EXPECT_EQ(failed.failure().code(), Failure::STORAGE_ERROR);
+    EXPECT_EQ(transaction->state(), Transaction::State::STAGED);
+    EXPECT_TRUE(std::holds_alternative<RestoreTransactionDescriptor>(transaction->descriptor()));
+    EXPECT_EQ(Find(broker, "seed"), transaction);
+    EXPECT_EQ(Retained(broker), 0u);
+    if (limited) {
+      EXPECT_EQ(resources->active, 1u);
+      EXPECT_EQ(resources->reserved, 4u);
+    }
+
+    UnblockCleanup();
+    EXPECT_TRUE(broker.HandleRequest(request).has_commit_complete());
+    EXPECT_EQ(transaction->state(), Transaction::State::COMMITTED);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(transaction->descriptor()));
+    EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
+    EXPECT_EQ(Retained(broker), 1u);
+    if (limited) {
+      EXPECT_EQ(resources->active, 0u);
+      EXPECT_EQ(resources->reserved, 0u);
+    }
+  }
+}
+
 TEST_F(BrokerTransferTest, FailedCleanupCannotBeEvictedWithoutResourceLimits)
 {
   for (const auto state : {Transaction::State::COMMITTED, Transaction::State::ABORTED}) {
