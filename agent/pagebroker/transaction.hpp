@@ -18,6 +18,7 @@
 #include "cancellation.hpp"
 #include "restore_transaction_descriptor.hpp"
 #include "gpu/engine.hpp"
+#include "transaction_defaults.hpp"
 
 namespace snapshot::pagebroker {
 // Shared admission accounting. Transactions hold reservations until staging is removed.
@@ -80,7 +81,7 @@ class Transaction {
   // Admission and initial byte reservation share one resource lock when limits are enabled.
   void PrepareTransfer(std::shared_ptr<TransactionResources> resources, uintmax_t initial_bytes,
       const PublishedArtifact* artifact = nullptr,
-      std::chrono::steady_clock::duration lifetime = std::chrono::seconds{7500});
+      std::chrono::steady_clock::duration lifetime = kDefaultTransactionLifetime);
   // Records exclusive ownership after the capture directory has been created.
   void OwnDirectory(const Path& directory);
 
