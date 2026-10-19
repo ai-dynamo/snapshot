@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Architecture
 
 <!-- toc -->
+- [How to read this section](#how-to-read-this-section)
 - [What Snapshot does](#what-snapshot-does)
 - [Components](#components)
 - [Resources](#resources)
@@ -13,12 +14,13 @@ SPDX-License-Identifier: Apache-2.0
 - [Restore, in brief](#restore-in-brief)
 - [Storage, in brief](#storage-in-brief)
 - [Failure behavior](#failure-behavior)
+- [Where multi-GPU diverges](#where-multi-gpu-diverges)
 - [Security boundaries](#security-boundaries)
 - [Where to look](#where-to-look)
 <!-- /toc -->
 
 This section is for contributors and for the people who integrate Snapshot into a scheduler, controller, or platform.
-It explains how Snapshot works.
+It explains how Snapshot works inside.
 To use Snapshot, start with the [usage guides](../../guides/README.md) and the [API reference](../api.md) instead.
 
 This page is the overview.
@@ -32,6 +34,18 @@ Each later page covers one part of the system in depth:
 | [Restore flow](restore.md) | From a pod with the `nvidia.com/restore-from` annotation to a running, restored process. |
 | [Storage and artifacts](storage.md) | The artifact layout, the manifest, the compatibility checks, and how artifacts are published and deleted. |
 | [Multi-GPU support](multi-gpu.md) | CuInterpose, the component that checkpoints and restores CUDA memory shared between processes. |
+
+## How to read this section
+
+Read this page first.
+It introduces the components, the resources, and the two flows, and it is enough to reason about where a change belongs.
+
+Then pick a path:
+
+- **Integrating Snapshot** into a controller or platform: [Control plane](control-plane.md) for the resource lifecycle, then the [restore flow](restore.md) for what your restore pods must look like and how their outcome is reported.
+- **Changing the agent**: [Node agent](node-agent.md) for the processes and binaries, then the [checkpoint flow](checkpoint.md) and [restore flow](restore.md), which follow one operation through them.
+- **Changing what is stored** or how compatibility is decided: [Storage and artifacts](storage.md).
+- **Working on multi-GPU workloads**: everything above applies unchanged, then [Multi-GPU support](multi-gpu.md). The section [Where multi-GPU diverges](#where-multi-gpu-diverges) says where the two paths part.
 
 ## What Snapshot does
 
@@ -168,6 +182,23 @@ A pod gets one restore.
 A restore that fails writes `restore-failed` into the control directory and kills the container, and the pod condition reports why.
 A restore refused by the compatibility checks leaves the container running, because restarting it would reach the same refusal.
 The reasons are listed under [Restore flow](restore.md#outcomes-and-reporting).
+
+## Where multi-GPU diverges
+
+A single-GPU checkpoint needs nothing beyond the flows above.
+The CUDA driver's checkpoint API handles each process's own device state, and CRIU handles the rest.
+
+Workloads that spread one model across several GPUs share CUDA memory between processes, and the native checkpoint API cannot reconstruct that sharing.
+[CuInterpose](multi-gpu.md) adds a shim library inside each CUDA process and a coordinator that the agent runs at capture and restore.
+Everything else stays the same.
+The pages above mark each point where the multi-GPU path hooks in:
+
+| Where | What differs |
+| --- | --- |
+| Source pod | The `nvidia.com/snapshot-multi-gpu: enabled` annotation. A `SnapshotJob` then installs the libraries with an init container and prefixes the command with the launcher. See [Control plane](control-plane.md#shaping-the-source-pod). |
+| Capture | The agent hashes the libraries, runs the coordinator to inspect and then prepare shared memory before the first GPU lock, and records both in the manifest. See [Checkpoint flow](checkpoint.md#multi-gpu-hooks). |
+| Artifact | A `cuinterpose` section in the manifest and a `cuinterpose.state` file. See [Storage and artifacts](storage.md#artifact-layout). |
+| Restore | The bundle's libraries must hash to the same values, they are mounted into the container, and the coordinator rebuilds the sharing after GPU state is back. See [Restore flow](restore.md#multi-gpu-hooks). |
 
 ## Security boundaries
 
