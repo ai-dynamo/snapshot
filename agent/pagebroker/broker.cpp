@@ -765,10 +765,9 @@ Response
 Broker::CleanupRestore(const Request& request, Transaction& transaction, const RestoreTransactionDescriptor& descriptor)
 {
   if (!descriptor.staging_directory().empty()) {
-    std::error_code error;
-    transaction.RemoveStaging(descriptor.staging_directory(), error);
-    if (error)
-      return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
+    // Restore succeeded; the reaper retries failed staging cleanup without failing Commit.
+    std::error_code cleanup_error;
+    transaction.RemoveStaging(descriptor.staging_directory(), cleanup_error);
   }
   // Any remaining reservation defers clearing until the reaper finishes cleanup.
   (void)transaction.TryClearDescriptor();
