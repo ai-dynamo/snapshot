@@ -28,6 +28,9 @@ namespace {
 constexpr auto kGpuAbortTimeout = std::chrono::seconds{30};
 constexpr auto kTerminalTransactionRetention = std::chrono::hours(1);
 constexpr size_t kMaxRetainedTerminalTransactions = 1024;
+// Account for a checkpoint at admission before its size is known; publication
+// grows this reservation to the inspected size.
+constexpr uintmax_t kCheckpointAdmissionBytes = 1;
 
 // The caller holds the transaction mutex while checking ownership of staging.
 bool
@@ -592,7 +595,7 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
   RestoreAccess access;
   try {
     const bool metadata_only = request.has_get_artifact_metadata();
-    transaction->PrepareTransfer(direct ? nullptr : resources_, metadata_only ? Transaction::Kind::METADATA : Transaction::Kind::RESTORE,
+    transaction->PrepareTransfer(direct ? nullptr : resources_, 0,
         {}, nullptr, lifetime_);
     transaction->set_state(Transaction::State::PREPARING);
     // Preparation can scan storage; it shares the transfer's deadline and cancellation.
@@ -695,7 +698,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
     bool owned = false;
     try {
       // Admission precedes backend I/O; cleanup ownership starts only after mkdir succeeds.
-      transaction->PrepareTransfer(direct ? nullptr : resources_, Transaction::Kind::CHECKPOINT, {}, artifact, lifetime_);
+      transaction->PrepareTransfer(direct ? nullptr : resources_, kCheckpointAdmissionBytes, {}, artifact, lifetime_);
       transaction->set_state(Transaction::State::PREPARING);
       transaction->cancellation().ThrowIfCancelled();
       output = engine.PrepareCheckpoint(destination, staging_directory, request.transaction_id(), mode,
@@ -703,7 +706,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
       transaction->cancellation().ThrowIfCancelled();
       if (fs::exists(fs::symlink_status(output)))
         throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
-      if (transaction->has_limits() && !HasAvailableSpace(staging_root_, 1))
+      if (transaction->has_limits() && !HasAvailableSpace(staging_root_, kCheckpointAdmissionBytes))
         throw TransferError(Failure::INSUFFICIENT_STORAGE, "insufficient checkpoint staging capacity");
       transaction->cancellation().ThrowIfCancelled();
       fs::create_directories(output.parent_path());
