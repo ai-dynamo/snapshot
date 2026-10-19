@@ -19,6 +19,9 @@
 #include <poll.h>
 #include <span>
 #include <csignal>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 
 #include <fstream>
 #include <optional>
@@ -30,52 +33,70 @@
 #include "broker.hpp"
 #include "daemon.hpp"
 #include "gpu/storage_manifest.hpp"
-#include "posix_copy_engine.hpp"
+#include "tests/request_builder.hpp"
+#include "tests/temporary_directory.hpp"
+#include "transfer/engine/posix/posix_copy_engine.hpp"
 
 namespace fs = std::filesystem;
 using namespace snapshot::pagebroker;
 
 namespace {
 
-class RequestBuilder {
- public:
-  Request RequestFor(const std::string& transaction_id)
-  {
-    Request request;
-    request.set_request_id("request-" + transaction_id + "-" + std::to_string(++sequence_));
-    request.set_transaction_id(transaction_id);
-    return request;
-  }
+// Set only in the child, before RunDaemon starts its handler threads.
+int restore_started_fd = -1;
 
- private:
-  unsigned sequence_ = 0;
-};
+}  // namespace
 
-inline void
-Configure(StorageBackend* storage, IOEngine* engine, const std::filesystem::path& directory)
+// GNU ld wraps the C++ filesystem staging symbol only in the test executable.
+void RealStageRestore(const RestorePlan&, const fs::path&, Cancellation)
+    asm("__real__ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_11RestorePlanE"
+        "RKNSt10filesystem7__cxx114pathENS0_12CancellationE");
+void WrappedStageRestore(const RestorePlan&, const fs::path&, Cancellation)
+    asm("__wrap__ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_11RestorePlanE"
+        "RKNSt10filesystem7__cxx114pathENS0_12CancellationE");
+
+void WrappedStageRestore(const RestorePlan& plan, const fs::path& destination, Cancellation control)
 {
-  storage->mutable_filesystem()->set_directory(directory.string());
-  engine->mutable_posix_copy();
+  RealStageRestore(plan, destination, control);
+  if (restore_started_fd < 0)
+    return;
+  // The real copy is complete, but the request still owns staging and is active.
+  // Only transaction cancellation releases it; closing the listener is insufficient.
+  const char ready = 'R';
+  ssize_t sent;
+  do {
+    sent = write(restore_started_fd, &ready, 1);
+  } while (sent < 0 && errno == EINTR);
+  if (sent != 1)
+    throw std::runtime_error("signal active restore to shutdown test");
+  std::mutex mutex;
+  std::unique_lock lock(mutex);
+  std::condition_variable_any changed;
+  changed.wait_for(lock, control.Token(), std::chrono::seconds{10}, [] { return false; });
+  control.ThrowIfCancelled();
+  throw std::runtime_error("shutdown test timed out waiting for transfer cancellation");
 }
 
+namespace {
 
-class BrokerTest : public ::testing::Test, public RequestBuilder {
+using test::Configure;
+
+class BrokerTest : public ::testing::Test, public test::RequestBuilder {
  protected:
   void SetUp() override
   {
-    root_ = fs::temp_directory_path() / "pagebroker-daemon-tests" /
-            ::testing::UnitTest::GetInstance()->current_test_info()->name();
-    fs::remove_all(root_);
+    root_ = temporary_.path();
     source_ = root_ / "storage" / "source";
     fs::create_directories(source_);
     std::ofstream(source_ / "image") << "image";
     broker_.emplace(root_ / "tmpfs", root_ / "storage");
   }
 
-  void TearDown() override { fs::remove_all(root_); }
+  void TearDown() override { broker_.reset(); }
 
   Broker& broker() { return *broker_; }
 
+  test::TemporaryDirectory temporary_;
   fs::path root_;
   fs::path source_;
   std::optional<Broker> broker_;
@@ -189,17 +210,94 @@ TEST_F(BrokerTest, CleansStaleStagingOnStart)
   EXPECT_FALSE(fs::exists(stale));
 }
 
+TEST(BrokerStartupTest, RemovesReadonlyRestoreAndCheckpointStagingWithoutRecoveringTransactions)
+{
+  test::TemporaryDirectory root;
+  const auto storage = root.path() / "storage";
+  const auto source = storage / "published";
+  const auto staging = root.path() / "staging";
+  fs::create_directories(source / "nested");
+  std::ofstream(source / "nested/image") << "published checkpoint";
+  const auto readonly = fs::perms::owner_read | fs::perms::owner_exec;
+  fs::permissions(source / "nested", readonly);
+  fs::permissions(source, readonly);
+  test::RequestBuilder requests;
+  {
+    Broker broker(staging, storage);
+    auto restore = requests.RequestFor("interrupted-restore");
+    Configure(restore.mutable_staged_restore()->mutable_source(),
+              restore.mutable_staged_restore()->mutable_io_engine(), source);
+    ASSERT_TRUE(broker.HandleRequest(restore).has_staged_restore_directory());
+    auto checkpoint = requests.RequestFor("interrupted-checkpoint");
+    Configure(checkpoint.mutable_prepare_staged_checkpoint()->mutable_destination(),
+              checkpoint.mutable_prepare_staged_checkpoint()->mutable_io_engine(), storage / "next");
+    const auto prepared = broker.HandleRequest(checkpoint);
+    ASSERT_TRUE(prepared.has_staged_checkpoint_directory());
+    const fs::path directory(prepared.staged_checkpoint_directory().image_directory());
+    fs::create_directory(directory / "nested");
+    std::ofstream(directory / "nested/image") << "unfinished checkpoint";
+    fs::permissions(directory / "nested", fs::perms::none);
+    fs::permissions(directory, readonly);
+  }
+
+  // Unprivileged restart must remove read-only staging and forget transactions.
+  Broker restarted(staging, storage);
+  EXPECT_TRUE(fs::is_empty(staging / "restore"));
+  EXPECT_TRUE(fs::is_empty(staging / "checkpoint"));
+  for (const auto* id : {"interrupted-restore", "interrupted-checkpoint"}) {
+    auto commit = requests.RequestFor(id);
+    commit.mutable_commit();
+    EXPECT_EQ(restarted.HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+  }
+  EXPECT_EQ(fs::status(source).permissions(), readonly);
+  EXPECT_EQ(fs::status(source / "nested").permissions(), readonly);
+  EXPECT_EQ(fs::file_size(source / "nested/image"), 20u);
+  EXPECT_FALSE(fs::exists(storage / "next"));
+}
+
+TEST(BrokerStartupTest, PreservesExternalTargetsOfStagingLinks)
+{
+  test::TemporaryDirectory root;
+  const auto outside = root.path() / "published";
+  const auto staging = root.path() / "staging";
+  fs::create_directories(outside);
+  std::ofstream(outside / "image") << "published";
+  fs::permissions(outside, fs::perms::owner_read | fs::perms::owner_exec);
+  fs::permissions(outside / "image", fs::perms::owner_read);
+  fs::create_directories(staging / "checkpoint/stale");
+  fs::create_directory_symlink(outside, staging / "restore");
+  fs::create_directory_symlink(outside, staging / "checkpoint/stale/directory");
+  fs::create_symlink(outside / "image", staging / "checkpoint/stale/file");
+  fs::create_hard_link(outside / "image", staging / "checkpoint/stale/hard-link");
+  Broker restarted(staging, root.path());
+  EXPECT_TRUE(fs::is_empty(staging / "restore"));
+  EXPECT_TRUE(fs::is_empty(staging / "checkpoint"));
+  EXPECT_FALSE(fs::is_symlink(staging / "restore"));
+  EXPECT_EQ(fs::status(outside).permissions(), fs::perms::owner_read | fs::perms::owner_exec);
+  EXPECT_EQ(fs::status(outside / "image").permissions(), fs::perms::owner_read);
+  EXPECT_EQ(fs::file_size(outside / "image"), 9u);
+}
+
 TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
 {
+  PosixCopyEngine engine(root_ / "storage");
+  StorageBackend destination;
+  const auto published = root_ / "storage" / "published";
+  destination.mutable_filesystem()->set_directory(published.string());
   for (const auto& id :
-       {std::string("../escape"), std::string("nested/name"), std::string("nested\\name"),
+       {std::string(), std::string("."), std::string(".."), std::string("../escape"),
+        std::string("nested/name"), std::string("nested\\name"),
         std::string("nul\0suffix", 10)}) {
+    SCOPED_TRACE(id);
     auto abort = RequestFor(id);
     abort.mutable_abort();
     const auto response = broker().HandleRequest(abort);
     EXPECT_TRUE(response.has_failure());
     EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+    EXPECT_THROW(engine.PrepareCheckpoint(destination, {}, id, TransferMode::Direct), std::invalid_argument);
   }
+  EXPECT_EQ(engine.PrepareCheckpoint(destination, {}, "valid-id", TransferMode::Direct),
+            Path(published.string() + ".pagebroker-tx-valid-id"));
 }
 
 TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
@@ -260,6 +358,54 @@ TEST_F(BrokerTest, RejectsPathsOutsideStorageRoot)
       root_destination.mutable_prepare_staged_checkpoint()->mutable_destination(),
       root_destination.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage");
   EXPECT_EQ(broker().HandleRequest(root_destination).failure().code(), Failure::INVALID_REQUEST);
+}
+
+TEST_F(BrokerTest, RejectsUnsafeRestoreSourcePaths)
+{
+  unsigned sequence = 0;
+  for (const bool direct : {false, true}) {
+    for (const auto& source : {
+             source_.string() + "/", source_.string() + std::string("\0suffix", 7),
+             (root_ / "storage").string() + std::string("/\0suffix", 8),
+             (root_ / "storage").string(), (root_ / "outside").string()}) {
+      SCOPED_TRACE(::testing::Message() << "direct=" << direct << ", source=" << ::testing::PrintToString(source));
+      auto request = RequestFor("invalid-source-" + std::to_string(++sequence));
+      auto* storage = direct ? request.mutable_direct_restore()->mutable_source()
+                             : request.mutable_staged_restore()->mutable_source();
+      auto* engine = direct ? request.mutable_direct_restore()->mutable_io_engine()
+                            : request.mutable_staged_restore()->mutable_io_engine();
+      Configure(storage, engine, source);
+      const auto response = broker().HandleRequest(request);
+      EXPECT_TRUE(response.has_failure());
+      EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+    }
+  }
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+}
+
+TEST_F(BrokerTest, RejectsUnsafeCheckpointDestinationPaths)
+{
+  const auto destination = (root_ / "storage" / "checkpoint").string();
+  unsigned sequence = 0;
+  for (const bool direct : {false, true}) {
+    for (const auto& path : {
+             destination + "/", destination + std::string("\0suffix", 7),
+             (root_ / "storage").string() + std::string("/\0suffix", 8),
+             (root_ / "storage").string(), (root_ / "outside").string()}) {
+      SCOPED_TRACE(::testing::Message() << "direct=" << direct << ", destination=" << ::testing::PrintToString(path));
+      auto request = RequestFor("invalid-destination-" + std::to_string(++sequence));
+      auto* storage = direct ? request.mutable_prepare_direct_checkpoint()->mutable_destination()
+                             : request.mutable_prepare_staged_checkpoint()->mutable_destination();
+      auto* engine = direct ? request.mutable_prepare_direct_checkpoint()->mutable_io_engine()
+                            : request.mutable_prepare_staged_checkpoint()->mutable_io_engine();
+      Configure(storage, engine, path);
+      const auto response = broker().HandleRequest(request);
+      EXPECT_TRUE(response.has_failure());
+      EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+    }
+  }
+  EXPECT_FALSE(fs::exists(destination));
+  EXPECT_TRUE(fs::exists(source_ / "image"));
 }
 
 TEST_F(BrokerTest, InsufficientStagingDoesNotReserveTransaction)
@@ -348,7 +494,7 @@ TEST_F(BrokerTest, EvictsOldTerminalTransactionsButRetainsRecentCompletions)
   EXPECT_TRUE(broker().HandleRequest(reuse).has_staged_restore_directory());
 }
 
-TEST_F(BrokerTest, AbortsFailedCheckpointStaging)
+TEST_F(BrokerTest, RejectsUnownedCheckpointStaging)
 {
   const fs::path destination = root_ / "storage" / "published";
   const fs::path staging_directory = root_ / "tmpfs" / "checkpoint" / "checkpoint";
@@ -359,15 +505,50 @@ TEST_F(BrokerTest, AbortsFailedCheckpointStaging)
       prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), destination);
   const auto failed = broker().HandleRequest(prepare);
   ASSERT_TRUE(failed.has_failure());
-  EXPECT_EQ(failed.failure().code(), Failure::STORAGE_ERROR);
+  EXPECT_EQ(failed.failure().code(), Failure::TRANSACTION_CONFLICT);
 
   auto abort = RequestFor("checkpoint");
   abort.mutable_abort();
-  EXPECT_TRUE(broker().HandleRequest(abort).has_abort_complete());
+  EXPECT_EQ(broker().HandleRequest(abort).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+  EXPECT_TRUE(fs::is_symlink(staging_directory));
 
   const auto retry = broker().HandleRequest(prepare);
   ASSERT_TRUE(retry.has_failure());
   EXPECT_EQ(retry.failure().code(), Failure::TRANSACTION_CONFLICT);
+}
+
+TEST_F(BrokerTest, PublishedCheckpointRootPreservesCapturePermissions)
+{
+  // Use normal directory creation as the staged-mode reference without changing
+  // the process-wide umask while broker threads are running.
+  const auto reference = root_ / "reference";
+  ASSERT_TRUE(fs::create_directory(reference));
+  const auto staged_permissions = fs::status(reference).permissions();
+  for (const bool direct : {false, true}) {
+    SCOPED_TRACE(direct ? "direct" : "staged");
+    const std::string id = direct ? "direct-mode" : "staged-mode";
+    const auto destination = root_ / "storage" / id;
+    auto prepare = RequestFor(id);
+    auto* storage = direct ? prepare.mutable_prepare_direct_checkpoint()->mutable_destination()
+                           : prepare.mutable_prepare_staged_checkpoint()->mutable_destination();
+    auto* engine = direct ? prepare.mutable_prepare_direct_checkpoint()->mutable_io_engine()
+                          : prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine();
+    Configure(storage, engine, destination);
+    const auto prepared = broker().HandleRequest(prepare);
+    ASSERT_FALSE(prepared.has_failure()) << prepared.DebugString();
+    const fs::path capture = direct ? prepared.direct_checkpoint_directory().image_directory()
+                                    : prepared.staged_checkpoint_directory().image_directory();
+    const auto expected_permissions = direct ? fs::perms::owner_all : staged_permissions;
+    EXPECT_EQ(fs::status(capture).permissions(), expected_permissions);
+    std::ofstream(capture / "image") << "image";
+
+    auto commit = RequestFor(id);
+    commit.mutable_commit();
+    const auto published = broker().HandleRequest(commit);
+    ASSERT_TRUE(published.has_commit_complete()) << published.DebugString();
+    EXPECT_EQ(fs::status(destination).permissions(), expected_permissions);
+    EXPECT_TRUE(fs::exists(destination / "image"));
+  }
 }
 
 TEST_F(BrokerTest, PublishesCheckpoint)
@@ -453,26 +634,67 @@ TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
 
 TEST_F(BrokerTest, PreservesExistingPartialCheckpointDestination)
 {
-  const fs::path destination = root_ / "storage" / "blocked";
-  auto prepare = RequestFor("checkpoint");
-  Configure(
-      prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
-      prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), destination);
-  const auto output = broker().HandleRequest(prepare);
-  ASSERT_TRUE(output.has_staged_checkpoint_directory());
-  std::ofstream(fs::path(output.staged_checkpoint_directory().image_directory()) / "image") << "image";
-  const fs::path partial = destination.string() + ".pagebroker-partial";
-  std::ofstream(partial) << "keep";
-
-  auto commit = RequestFor("checkpoint");
-  commit.mutable_commit();
-  const auto response = broker().HandleRequest(commit);
-  ASSERT_TRUE(response.has_failure());
-  EXPECT_EQ(response.failure().code(), Failure::TRANSACTION_CONFLICT);
-  EXPECT_TRUE(fs::exists(partial));
-  std::string partial_contents;
-  std::ifstream(partial) >> partial_contents;
-  EXPECT_EQ(partial_contents, "keep");
+  for (const bool direct : {false, true}) {
+    for (const std::string kind : {"file", "directory", "symlink"}) {
+      for (const bool retry : {false, true}) {
+        const auto id = std::string(direct ? "direct-" : "staged-") + kind + (retry ? "-retry" : "-abort");
+        SCOPED_TRACE(id);
+        const fs::path destination = root_ / "storage" / id;
+        fs::create_directory(destination);
+        std::ofstream(destination / "old") << "old";
+        auto prepare = RequestFor(id);
+        if (direct) {
+          Configure(prepare.mutable_prepare_direct_checkpoint()->mutable_destination(),
+                    prepare.mutable_prepare_direct_checkpoint()->mutable_io_engine(), destination);
+        } else {
+          Configure(prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+                    prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), destination);
+        }
+        const auto output = broker().HandleRequest(prepare);
+        ASSERT_FALSE(output.has_failure()) << output.DebugString();
+        const fs::path directory = direct ? output.direct_checkpoint_directory().image_directory()
+                                         : output.staged_checkpoint_directory().image_directory();
+        std::ofstream(directory / "image") << "image";
+        const fs::path partial = destination.string() + ".pagebroker-partial";
+        if (kind == "directory") {
+          fs::create_directory(partial);
+          std::ofstream(partial / "other-writer") << "keep";
+        } else if (kind == "symlink") {
+          fs::create_symlink(root_ / "missing", partial);
+        } else {
+          std::ofstream(partial) << "keep";
+        }
+        auto commit = RequestFor(id);
+        commit.mutable_commit();
+        const auto response = broker().HandleRequest(commit);
+        ASSERT_TRUE(response.has_failure());
+        EXPECT_EQ(response.failure().code(), Failure::TRANSACTION_CONFLICT);
+        EXPECT_TRUE(fs::exists(directory / "image"));
+        EXPECT_TRUE(fs::exists(destination / "old"));
+        EXPECT_FALSE(fs::exists(destination / "image"));
+        if (kind == "symlink") {
+          EXPECT_EQ(fs::read_symlink(partial), root_ / "missing");
+        } else {
+          std::string contents;
+          std::ifstream(kind == "directory" ? partial / "other-writer" : partial) >> contents;
+          EXPECT_EQ(contents, "keep");
+        }
+        if (retry) {
+          fs::remove_all(partial);
+          EXPECT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+          EXPECT_TRUE(fs::exists(destination / "image"));
+          EXPECT_FALSE(fs::exists(destination / "old"));
+        } else {
+          auto abort = RequestFor(id);
+          abort.mutable_abort();
+          EXPECT_TRUE(broker().HandleRequest(abort).has_abort_complete());
+          EXPECT_TRUE(fs::exists(fs::symlink_status(partial)));
+          EXPECT_TRUE(fs::exists(destination / "old"));
+        }
+        EXPECT_FALSE(fs::exists(directory));
+      }
+    }
+  }
 }
 
 TEST_F(BrokerTest, AbortsRestore)
@@ -562,7 +784,9 @@ TEST_F(BrokerTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirector
   EXPECT_EQ(directory.parent_path(), destination.parent_path());
   EXPECT_FALSE(fs::exists(destination));
   std::ofstream(directory / "payload") << "GPU and CPU output";
-  request.set_request_id(RequestFor("direct-save").request_id());
+  const auto retry = RequestFor("direct-save");
+  ASSERT_NE(retry.request_id(), request.request_id());
+  request.set_request_id(retry.request_id());
   const auto repeated = broker().HandleRequest(request);
   ASSERT_TRUE(repeated.has_direct_checkpoint_directory()) << repeated.DebugString();
   EXPECT_EQ(repeated.direct_checkpoint_directory().image_directory(), directory.string());
@@ -632,11 +856,17 @@ TEST_F(BrokerTest, CpuStagingOmitsGpuPayloadsWithoutChangingTheSource)
   StorageBackend source;
   source.mutable_filesystem()->set_directory(source_.string());
   const auto cpu = root_ / "cpu";
-  engine.StageRestore(source, cpu);
+  const auto access = engine.StageRestore(engine.PrepareRestore(source), cpu);
+  EXPECT_EQ(access.image_directory, cpu);
+  EXPECT_EQ(access.staging_directory, cpu);
+  struct stat original{}, retained{};
+  ASSERT_EQ(stat(source_.c_str(), &original), 0);
+  ASSERT_EQ(fstat(access.source.get(), &retained), 0);
+  EXPECT_EQ(original.st_ino, retained.st_ino);
   EXPECT_TRUE(fs::exists(cpu / "image"));
   EXPECT_FALSE(fs::exists(cpu / gpu::kDataDirectory));
   EXPECT_TRUE(fs::exists(source_ / gpu::kDataDirectory / "1" / "extent"));
-  EXPECT_EQ(engine.RestoreSize(source), fs::file_size(source_ / "image"));
+  EXPECT_EQ(engine.PrepareRestore(source).plan.size_bytes(), fs::file_size(source_ / "image"));
 }
 
 TEST_F(BrokerTest, RejectsExistingDirectCheckpointOutput)
@@ -695,17 +925,17 @@ TEST(DaemonOptionsTest, RejectsInvalidOptions)
 }
 
 // Exercise the shipped listener and framing with real SCM_RIGHTS descriptors.
-class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
+class DaemonTransportTest : public ::testing::Test, public test::RequestBuilder {
  protected:
   void SetUp() override
   {
-    root_ = fs::temp_directory_path() / ("pagebroker-transport-" + std::to_string(getpid()));
-    fs::remove_all(root_);
+    root_ = temporary_.path();
     fs::create_directories(root_ / "storage");
     socket_path_ = root_ / "control.sock";
     server_ = fork();
     ASSERT_GE(server_, 0);
     if (server_ == 0) {
+      ConfigureChild();
       DaemonOptions options;
       options.socket_path = socket_path_;
       options.staging_directory = root_ / "staging";
@@ -726,8 +956,10 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
       kill(server_, SIGTERM);
       while (waitpid(server_, nullptr, 0) < 0 && errno == EINTR) {}
     }
-    fs::remove_all(root_);
+    // The temporary directory is removed after the daemon has exited.
   }
+
+  virtual void ConfigureChild() {}
 
   FileDescriptor Connect()
   {
@@ -856,10 +1088,86 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
     return false;
   }
 
+  test::TemporaryDirectory temporary_;
   pid_t server_ = -1;
   fs::path root_;
   fs::path socket_path_;
 };
+
+class DaemonActiveTransferTest : public DaemonTransportTest {
+ protected:
+  void SetUp() override
+  {
+    int ready[2];
+    ASSERT_EQ(pipe2(ready, O_CLOEXEC), 0);
+    ready_read_ = FileDescriptor(ready[0]);
+    ready_write_ = FileDescriptor(ready[1]);
+    ASSERT_NO_FATAL_FAILURE(DaemonTransportTest::SetUp());
+    ready_write_ = FileDescriptor(-1);
+  }
+
+  void ConfigureChild() override
+  {
+    ready_read_ = FileDescriptor(-1);
+    restore_started_fd = ready_write_.get();
+  }
+
+  void TearDown() override
+  {
+    // Successful tests reap explicitly. Failed assertions must not leave a child
+    // waiting for transfer cancellation or block the ordinary fixture teardown.
+    if (server_ > 0) {
+      kill(server_, SIGKILL);
+      while (waitpid(server_, nullptr, 0) < 0 && errno == EINTR) {}
+      server_ = -1;
+    }
+  }
+
+  FileDescriptor ready_read_{-1};
+  FileDescriptor ready_write_{-1};
+};
+
+TEST_F(DaemonActiveTransferTest, SigtermCancelsActiveRestoreBeforeWaitingForHandlers)
+{
+  const auto source = root_ / "storage/source";
+  fs::create_directory(source);
+  std::ofstream(source / "image") << "capture";
+  auto request = RequestFor("active");
+  Configure(request.mutable_staged_restore()->mutable_source(), request.mutable_staged_restore()->mutable_io_engine(), source);
+  auto connection = Connect();
+  const auto message = request.SerializeAsString();
+  const uint32_t size = htonl(message.size());
+  Send(connection.get(), &size, sizeof(size));
+  Send(connection.get(), message.data(), message.size());
+
+  pollfd ready{ready_read_.get(), POLLIN, 0};
+  ASSERT_EQ(poll(&ready, 1, 5000), 1) << "restore did not reach the staging boundary";
+  char signal = 0;
+  ASSERT_EQ(read(ready_read_.get(), &signal, 1), 1);
+  ASSERT_EQ(signal, 'R');
+  const auto staging = root_ / "staging/restore/active";
+  ASSERT_TRUE(fs::exists(staging / "image"));
+  FileDescriptor process(static_cast<int>(syscall(SYS_pidfd_open, server_, 0)));
+  ASSERT_GE(process.get(), 0);
+  ASSERT_EQ(kill(server_, SIGTERM), 0);
+
+  // Receive has a five-second socket timeout; process exit is independently bounded.
+  const auto response = Receive(connection.get());
+  ASSERT_TRUE(response.has_failure()) << response.DebugString();
+  EXPECT_EQ(response.failure().code(), Failure::INTERNAL_ERROR);
+  EXPECT_EQ(response.failure().message(), "operation cancelled");
+  pollfd exited{process.get(), POLLIN, 0};
+  ASSERT_EQ(poll(&exited, 1, 5000), 1) << "daemon did not exit after cancellation";
+  int status = 0;
+  ASSERT_EQ(waitpid(server_, &status, WNOHANG), server_);
+  server_ = -1;
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), static_cast<int>(ExitCode::SUCCESS));
+  EXPECT_FALSE(fs::exists(staging));
+  std::string contents;
+  std::ifstream(source / "image") >> contents;
+  EXPECT_EQ(contents, "capture");
+}
 
 TEST_F(DaemonTransportTest, PreparationPidfdIsOptInAndRejectsOtherProcess)
 {
@@ -1154,4 +1462,17 @@ TEST_F(BrokerTest, CommitAndAbortReportExpiredTransactions)
   broker().ReapExpiredTransactions(later);
   request.mutable_commit();
   EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}
+
+TEST(DaemonOptionsTest, RejectsTransactionLifetimeFlag)
+{
+  const std::array<std::string_view, 5> arguments{"socket", "staging", "storage", "--transaction-lifetime", "17"};
+  EXPECT_THROW(ParseDaemonOptions(arguments), std::invalid_argument);
+}
+
+TEST(DaemonOptionsTest, RejectsDuplicateFlags)
+{
+  const std::array<std::string_view, 7> duplicate{
+      "socket", "staging", "storage", "--max-concurrent-requests", "17", "--max-concurrent-requests", "18"};
+  EXPECT_THROW(ParseDaemonOptions(duplicate), std::invalid_argument);
 }

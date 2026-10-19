@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <system_error>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -17,22 +18,27 @@
 #include "pagebroker_types.hpp"
 #include "restore_transaction_descriptor.hpp"
 #include "transaction.hpp"
-#include "transfer_engine.hpp"
+#include "transaction_defaults.hpp"
+#include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class Broker {
  public:
-  Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine = nullptr);
+  Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine = nullptr,
+      std::chrono::seconds lifetime = kDefaultTransactionLifetime);
   ~Broker();
   Response HandleGpuRequest(const Request& request, CancellationPtr cancellation,
                             std::vector<FileDescriptor> target_descriptors);
-  void CancelGpuWork();
   Response HandleRequest(const Request& request);
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
   using Clock = std::function<std::chrono::steady_clock::time_point()>;
   void SetClock(Clock clock);
+  // Stops admission and signals transfer/GPU cancellation without taking transaction
+  // mutexes or waiting for work to finish. Safe to call repeatedly; callers drain handlers.
+  void Shutdown();
 
  private:
+  friend class BrokerTransferTest;
   using Engines = std::vector<std::unique_ptr<TransferEngine>>;
   using TransactionHandle = std::shared_ptr<Transaction>;
   using Transactions = std::unordered_map<std::string, TransactionHandle>;
@@ -46,12 +52,19 @@ class Broker {
   const TransferEngine& Engine(const IOEngine& engine) const;
   TransactionHandle CreateOrGetTransaction(const std::string& transaction_id);
   TransactionHandle FindTransaction(const std::string& transaction_id);
+  // Acquires transactions_mutex_ and removes only the matching transaction instance.
+  void EraseTransaction(const std::string& id, const TransactionHandle& transaction);
   std::vector<std::pair<std::string, TransactionHandle>> TransactionSnapshot();
-  std::error_code CleanupTransactionDirectory(const std::string& id, Transaction& transaction);
+  // Attempts retention without waiting for the transaction mutex. Caller must not hold it.
   void RetainTerminalTransaction(const std::string& transaction_id);
-  void ReapTerminalTransactions();
+  // Caller must hold transaction->mutex().
+  void RetainTerminalTransactionLocked(const std::string& id, const TransactionHandle& transaction);
+  void ReapTerminalTransactions(std::chrono::steady_clock::time_point now);
   bool ReserveStaging(uintmax_t bytes);
   void ReleaseStaging(uintmax_t bytes);
+  // Caller must hold transaction->mutex(); no capture directory has been acquired.
+  Response RejectBeforeOwnership(const Request& request, const TransactionHandle& transaction,
+      Failure::Code code, const std::string& message);
   Response AbortStaging(
       const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error);
   Response PrepareDirectCheckpoint(const Request& request);
@@ -59,9 +72,11 @@ class Broker {
                       std::unique_lock<std::mutex> lock);
   Response Restore(const Request& request);
   Response DirectRestore(const Request& request);
-  Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine);
+  Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine,
+      const PublishedArtifact* artifact = nullptr);
   Response PrepareCheckpoint(const Request& request);
-  Response StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine);
+  Response StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine,
+      const PublishedArtifact* artifact = nullptr);
   // The Snapshot Agent sends COMMIT after CRIU returns; the provider will send it directly later.
   Response Commit(const Request& request);
   Response CleanupRestore(
@@ -69,11 +84,14 @@ class Broker {
   Response PublishCheckpoint(
       const Request& request, Transaction& transaction, const CheckpointTransactionDescriptor& descriptor);
   Response Abort(const Request& request);
+  std::chrono::seconds lifetime_;
   Path staging_root_;
   Engines io_engines_;
   gpu::GpuEnginePtr gpu_engine_;
+  std::shared_ptr<TransactionResources> resources_;
   std::mutex transactions_mutex_;
   Transactions transactions_;
+  bool stopping_ = false;
   std::mutex terminal_transactions_mutex_;
   std::deque<TerminalTransaction> terminal_transactions_;
   uintmax_t reserved_staging_bytes_ = 0;

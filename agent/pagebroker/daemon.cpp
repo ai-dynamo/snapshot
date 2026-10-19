@@ -23,6 +23,8 @@
 #include <chrono>
 #include <charconv>
 #include <optional>
+#include <set>
+#include <limits>
 #include <stdexcept>
 #include <cstring>
 #include <filesystem>
@@ -683,7 +685,7 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
   }
   gpu_connections.Stop();
   listener = FileDescriptor(-1);
-  broker.CancelGpuWork();
+  broker.Shutdown();
   WaitForHandlers(handlers);
 }
 
@@ -711,8 +713,11 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
   options.socket_path = arguments[0];
   options.staging_directory = arguments[1];
   options.storage_root = arguments[2];
+  std::set<std::string_view> seen;
   for (size_t index = kPathArgumentCount; index < arguments.size(); ++index) {
     const auto option = arguments[index];
+    if (!seen.insert(option).second)
+      throw std::invalid_argument("duplicate option: " + std::string(option));
     if (++index == arguments.size()) {
       throw std::invalid_argument("missing value for " + std::string(option));
     }
