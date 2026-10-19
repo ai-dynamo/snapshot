@@ -165,19 +165,6 @@ sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" "$SOURCE_MANIFEST" | \
   kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
 ```
 
-The `sed` only fills in one line of the manifest, the image of the
-`snapshot-cuda-install` init container:
-
-```yaml
-initContainers:
-  - name: snapshot-cuda-install
-    image: ${SNAPSHOT_AGENT_IMAGE}
-```
-
-To do it by hand instead, copy the manifest, replace `${SNAPSHOT_AGENT_IMAGE}`
-with the agent image (for example `ghcr.io/ai-dynamo/snapshot/agent:v0.2.0`) and
-apply your copy with `kubectl apply --filename`.
-
 Then wait until the replica is ready to be checkpointed. The first run downloads
 the model, so this can take a while:
 
@@ -248,21 +235,6 @@ kubectl rollout status \
   deployment/"$RESTORED_NAME" \
   --timeout="$WAIT"
 ```
-
-The `sed` only fills in one line of the manifest, the annotation that names your
-checkpoint:
-
-```yaml
-template:
-  metadata:
-    annotations:
-      nvidia.com/restore-from: ${SNAPSHOT_NAME}
-```
-
-To do it by hand instead, copy the manifest, replace `${SNAPSHOT_NAME}` with the
-name of your checkpoint (for example `vllm-qwen3-0-6b-snapshot`), apply your copy
-with `kubectl apply --filename`, then wait with the `kubectl rollout status`
-command above.
 
 The Deployment becomes Ready once the restore completes, because its readiness
 waits for the restored workload to signal that it is serving again. To confirm
