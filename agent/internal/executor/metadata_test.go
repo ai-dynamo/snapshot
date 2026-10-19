@@ -41,7 +41,7 @@ func TestMetadataAbortHasIndependentDeadline(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				_, err := fetchArtifactMetadata(ctx, pagebroker.Client{ControlSocketPath: listener.Addr().String()},
-					pagebroker.FilesystemArtifact("store", "content", "main"))
+					&pagebroker.PublishedArtifact{StoreId: "store", ArtifactHandle: "artifacts/content/containers/main"})
 				done <- err
 			}()
 			select {

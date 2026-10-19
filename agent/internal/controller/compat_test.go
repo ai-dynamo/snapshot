@@ -75,7 +75,7 @@ func TestPreflightCompatibilityComparesTheRecordedEnvironment(t *testing.T) {
 // gets the same preflight scrutiny as a legacy one.
 func TestPreflightCompatibilityFetchesTheManifestForBoundContentFromPageBroker(t *testing.T) {
 	r := newGatedRestore(t)
-	artifact := pagebroker.FilesystemArtifact("store-a", "mounted-content", gatedRestoreContainer)
+	artifact := &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer}
 	manifest := &types.CheckpointManifest{
 		Artifact: types.ArtifactManifest{ContentUID: "mounted-content", ContainerName: gatedRestoreContainer},
 		CRIUDump: types.CRIUDumpManifest{
@@ -114,7 +114,7 @@ func TestPreflightCompatibilityRefusesBoundContentOnMismatch(t *testing.T) {
 
 	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
 		SourceContainerName: gatedRestoreContainer,
-		PublishedArtifact:   pagebroker.FilesystemArtifact("store-a", "mounted-content", gatedRestoreContainer),
+		PublishedArtifact:   &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer},
 	}, gatedRestoreMappings(), false)
 
 	var incompatible *compat.IncompatibleError
@@ -133,7 +133,7 @@ func TestPreflightCompatibilityAllowsAnUnreachableBoundManifest(t *testing.T) {
 
 	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
 		SourceContainerName: gatedRestoreContainer,
-		PublishedArtifact:   pagebroker.FilesystemArtifact("store-a", "mounted-content", gatedRestoreContainer),
+		PublishedArtifact:   &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer},
 	}, gatedRestoreMappings(), false)
 
 	require.NoError(t, err)
