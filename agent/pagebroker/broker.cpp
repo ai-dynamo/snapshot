@@ -568,6 +568,13 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     // when the staged files themselves consume the space reported by statvfs.
     transaction->Reserve(bytes);
     if (!direct && !ReserveStaging(bytes)) {
+      // Waiters may still hold this transaction after its registry entry is removed.
+      transaction->set_state(Transaction::State::ABORTED);
+      std::error_code cleanup_error;
+      transaction->CleanupTransfer(cleanup_error);
+      if (cleanup_error)
+        return Fail(request, Failure::INSUFFICIENT_STORAGE,
+                    "insufficient tmpfs capacity; cleanup: " + cleanup_error.message());
       std::lock_guard transactions_lock(transactions_mutex_);
       const auto current = transactions_.find(request.transaction_id());
       if (current != transactions_.end() && current->second == transaction)
