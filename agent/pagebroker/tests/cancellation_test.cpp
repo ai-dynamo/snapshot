@@ -115,13 +115,17 @@ TEST(CancellationTest, ParentStopWakesChildTimedWait)
   auto waiter = std::async(std::launch::async, [&] {
     std::unique_lock lock(mutex);
     started.count_down();
-    changed.wait_until(lock, child.Token(), Cancellation::Clock::now() + 1h,
+    changed.wait_until(lock, child.Token(), Cancellation::Clock::now() + 5s,
         [&] { return child.IsCancelled(); });
     return child.IsCancelled();
   });
   started.wait();
   root.Cancel();
-  EXPECT_EQ(waiter.wait_for(2s), std::future_status::ready);
-  EXPECT_TRUE(waiter.get());
+  const auto status = waiter.wait_for(2s);
+  if (status != std::future_status::ready)
+    child.Cancel();  // Release the waiter if parent propagation failed.
+  const bool cancelled = waiter.get();
+  EXPECT_EQ(status, std::future_status::ready);
+  EXPECT_TRUE(cancelled);
 }
 }  // namespace snapshot::pagebroker
