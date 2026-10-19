@@ -99,10 +99,10 @@ switches to `spawn` only if vLLM detects CUDA already initialized), which is
 unreliable across checkpoint/restore.
 
 **Eight-GPU recipes.** The JSON argument sets `tensor_parallel_size` to the GPU
-count, and the MoE recipes also set `enable_expert_parallel`. They load pinned
-model revisions from the shared `snapshot-model-cache` PVC created in
-[Eight-GPU recipes](README.md#eight-gpu-recipes). An init container downloads
-the model on first use.
+count, and the MoE recipes also set `enable_expert_parallel`. They read pinned
+model revisions from the `snapshot-model-cache` PVC created in
+[Eight-GPU recipes](README.md#eight-gpu-recipes), where an init container
+downloads them on first use.
 
 ## 3. Deploy the source replica
 
