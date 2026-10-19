@@ -46,6 +46,18 @@ using test::Configure;
 namespace {
 enum class Boundary { PrepareRestore, StageRestore, ValidateCheckpoint, InspectCheckpoint, PublishCheckpoint };
 
+const char* BoundaryName(Boundary boundary)
+{
+  switch (boundary) {
+    case Boundary::PrepareRestore: return "PrepareRestore";
+    case Boundary::StageRestore: return "StageRestore";
+    case Boundary::ValidateCheckpoint: return "ValidateCheckpoint";
+    case Boundary::InspectCheckpoint: return "InspectCheckpoint";
+    case Boundary::PublishCheckpoint: return "PublishCheckpoint";
+  }
+  return "UnknownBoundary";
+}
+
 // Real filesystem operations with deterministic interruption at engine boundaries.
 class InterruptingEngine : public TransferEngine {
  public:
@@ -396,7 +408,7 @@ TEST_F(BrokerTransferTest, PreservesFailureCodesAcrossRequestAndTransferBoundari
     SCOPED_TRACE(Failure::Code_Name(failure.code));
     for (const auto boundary : {Boundary::PrepareRestore, Boundary::StageRestore, Boundary::ValidateCheckpoint,
                                Boundary::InspectCheckpoint, Boundary::PublishCheckpoint}) {
-      SCOPED_TRACE(static_cast<int>(boundary));
+      SCOPED_TRACE(BoundaryName(boundary));
       Broker broker(staging_, storage_);
       Intercept(broker, [&](Boundary current, Cancellation) {
         if (current == boundary)
