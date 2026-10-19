@@ -32,12 +32,12 @@ spec:
         - name: main
           image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
-          # The source's command. Snapshot replaces it with its restore proxy,
-          # which waits for the restore and then follows the restored process.
+          # Inert placeholder: the agent restores the checkpointed process into
+          # this container, so app.py must not run here.
           command:
-            - python3
-            - -u
-            - /snapshot-app/app.py
+            - /bin/sh
+            - -c
+            - exec sleep infinity
           env:
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control

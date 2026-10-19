@@ -24,8 +24,8 @@ generation to initialize vLLM, and then calls `pause_generation()` and
 `release_kv_cache_memory()`. This discards the KV cache and keeps weights on
 the GPU for capture, without a CPU copy of the weights. It writes
 `ready-for-snapshot` only when the process is safe to checkpoint. In a restore
-container, Snapshot runs its restore proxy in place of the program and restores
-the checkpointed process. That process calls `wake_up()` and `resume_generation()`, runs another
+container, the agent restores the checkpointed process beside an inert
+placeholder command. That process calls `wake_up()` and `resume_generation()`, runs another
 generation, starts an API on port 8000, and writes `vllm-restore-ready` when the API is
 listening. [Restore](restore.md#4-verify-the-restored-replica) sends it a request.
 

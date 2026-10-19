@@ -32,11 +32,12 @@ spec:
         - name: main
           image: vllm/vllm-openai:v0.31.0-ubuntu2404@sha256:3fb023cc987cc7c2bca7ca14c1e0aff5ae06bd9431bf07773731ce7e8a682460
           imagePullPolicy: IfNotPresent
-          # The source's command. Snapshot replaces it with its restore proxy,
-          # which waits for the restore and then follows the restored process.
+          # Inert placeholder: the agent restores the checkpointed process into
+          # this container, so app.py must not run here.
           command:
-            - python3
-            - /snapshot-app/app.py
+            - /bin/sh
+            - -c
+            - exec sleep infinity
           env:
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control

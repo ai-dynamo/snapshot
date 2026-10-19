@@ -59,23 +59,14 @@ kubectl rollout status \
   --timeout=30m
 ```
 
-Snapshot replaces the container's command with its restore proxy, as the
-[restore Pod contract](../reference/restore-pod-contract.md) describes, so the
-application does not start from scratch. The proxy waits for the restore, then
-follows the restored process: the container ends when the restored process
-does. Readiness waits on the framework's post-restore sentinel —
-`vllm-restore-ready` and its equivalents — not the `ready-for-snapshot` file the
-source pod writes.
+The container starts as an inert `sleep infinity` placeholder, as the
+[restore Pod contract](../reference/restore-pod-contract.md) requires: the agent
+restores the checkpointed process into the container as a sibling, so running
+the application there would only load a second copy of the model. Readiness
+waits on the framework's post-restore sentinel — `vllm-restore-ready` and its
+equivalents — not the `ready-for-snapshot` file the source pod writes.
 
-On nodes without NRI v0.10 or newer, there is no restore proxy. Before applying
-the profile, edit it to change the container's command to
-`["sleep", "infinity"]`, remove its `args`, and add a liveness probe on the
-framework's API. See
-[Nodes without the restore proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
-
-A Pod gets one restore. The guides use a Deployment, which restarts containers,
-so if the restored process exits, the container ends in `CrashLoopBackOff`
-instead of starting again. Delete the Pod to restore a new replica.
+A Pod gets one restore. Delete the Pod to restore a new replica.
 
 ## 4. Verify the restored replica
 
