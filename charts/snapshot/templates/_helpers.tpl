@@ -79,8 +79,9 @@ Use the same agent image for the DaemonSet and cuinterpose installer.
 {{- end }}
 
 {{/*
-Convert a Kubernetes quantity to bytes. An unparseable value fails rather than
-yielding zero, which would silently disable the check below.
+Convert a Kubernetes quantity to bytes, or empty when it is not a form we
+parse. Callers treat empty as "cannot compare" and leave the value alone, so an
+exotic-but-valid quantity still installs.
 */}}
 {{- define "snapshot.quantityBytes" -}}
 {{- $q := . | toString -}}
@@ -93,32 +94,34 @@ yielding zero, which would silently disable the check below.
 {{- else if hasSuffix "G" $q }}{{ mulf (trimSuffix "G" $q | float64) 1000000000 | int64 }}
 {{- else if hasSuffix "T" $q }}{{ mulf (trimSuffix "T" $q | float64) 1000000000000 | int64 }}
 {{- else if regexMatch "^[0-9]+$" $q }}{{ $q }}
-{{- else }}{{ fail (printf "cannot parse memory quantity %q" $q) }}
 {{- end }}
 {{- end }}
 
 {{/*
-Refuse a staging cap the agent cannot survive filling. Rationale and sizing
-are in docs/operations/storage.md. Called once from daemonset.yaml.
-*/}}
-{{- define "snapshot.validateStagingHeadroom" -}}
-{{- $staging := include "snapshot.quantityBytes" (include "snapshot.stagingSizeLimit" .) | int64 -}}
-{{- $limit := (((.Values.daemonset).resources).limits).memory -}}
-{{- if $limit }}
-{{- $limitBytes := include "snapshot.quantityBytes" $limit | int64 -}}
-{{- if ge $staging $limitBytes }}
-{{- fail (printf "pageBroker.staging.sizeLimit (%v) must be smaller than daemonset.resources.limits.memory (%v): staging pages are charged to the agent container, so the agent is OOM-killed before the volume fills, taking every capture and restore on the node with it. Lower pageBroker.staging.sizeLimit or raise daemonset.resources.limits.memory, leaving headroom for the agent process and CRIU. See docs/operations/storage.md" (include "snapshot.stagingSizeLimit" .) $limit) }}
-{{- end }}
-{{- end }}
-{{- end }}
+The staging sizeLimit, capped so the agent survives filling it. Staging pages
+are charged to the agent's cgroup, so a cap at or above the container memory
+limit lets the agent be OOM-killed before the volume fills. The cap is lowered
+to fit rather than rejected: refusing to render would break installs that work
+today. Sizing is in docs/operations/storage.md.
 
-{{/*
-The staging sizeLimit. Falls back even when pageBroker.staging is explicitly
-null, as helm upgrade --reuse-values leaves it for a release predating the key:
-an absent sizeLimit is an unbounded volume, not a safe default.
+Falls back even when pageBroker.staging is explicitly null, as helm upgrade
+--reuse-values leaves it for a release predating the key: an absent sizeLimit
+is an unbounded volume, not a safe default.
 */}}
 {{- define "snapshot.stagingSizeLimit" -}}
-{{- ((.Values.pageBroker).staging | default dict).sizeLimit | default "56Gi" -}}
+{{- $configured := ((.Values.pageBroker).staging | default dict).sizeLimit | default "56Gi" -}}
+{{- $limit := (((.Values.daemonset).resources).limits).memory -}}
+{{- $limitBytes := "" -}}
+{{- if $limit }}{{- $limitBytes = include "snapshot.quantityBytes" $limit -}}{{- end -}}
+{{- $configuredBytes := include "snapshot.quantityBytes" $configured -}}
+{{- if or (not $limitBytes) (not $configuredBytes) -}}
+{{- $configured -}}
+{{- else -}}
+{{- /* Reserve 8Gi for the agent process and CRIU, or an eighth of a smaller limit. */ -}}
+{{- $reserve := min (include "snapshot.quantityBytes" "8Gi" | int64) (div (int64 $limitBytes) 8) -}}
+{{- $maxBytes := sub (int64 $limitBytes) $reserve -}}
+{{- if le (int64 $configuredBytes) $maxBytes }}{{ $configured }}{{ else }}{{ $maxBytes }}{{ end -}}
+{{- end -}}
 {{- end }}
 
 {{/*

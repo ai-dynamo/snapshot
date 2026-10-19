@@ -111,24 +111,24 @@ process and CRIU's working set: if the two are equal, they can together reach
 the container's limit while the volume is still under its cap, and the kernel
 OOM-kills the agent — taking every capture and restore on that node with it.
 
-**The chart enforces this.** Rendering fails if `sizeLimit` is greater than or
-equal to the agent memory limit, so a release cannot be installed in the
-configuration that OOM-kills. The defaults leave an 8Gi reserve (`56Gi`
-staging against a `64Gi` limit); raise both together to keep it.
+**The chart enforces this.** A `sizeLimit` that does not leave room is lowered
+to one that does — to the agent memory limit less a reserve of 8Gi, or an
+eighth of a smaller limit. Nothing is rejected: a chart that refuses to render
+would break installs that work today, so the cap is made safe instead.
 
-**Upgrading.** A release that only ever used chart defaults upgrades cleanly,
-and so does one carried forward with `--reuse-values` from before
-`pageBroker.staging.sizeLimit` existed. Two configurations stop rendering, and
-both are ones that could already OOM-kill the agent:
+The defaults already fit, so a release on chart defaults renders `56Gi`
+unchanged, as does any configuration that leaves its own headroom. A lowered
+cap appears in the rendered manifest as a byte count, which is where to look if
+a capture fails with less staging than expected.
 
-- `sizeLimit` pinned to the previous `64Gi` default while the agent memory
-  limit is also `64Gi`.
-- The agent memory limit lowered below the staging cap without lowering the
-  cap with it.
+Two configurations are affected, and both could previously OOM-kill the agent:
 
-Neither was safe before; the upgrade now says so instead of waiting for a
-checkpoint large enough to kill the agent. The error names both values and the
-two ways to resolve it.
+- `sizeLimit` at or above the agent memory limit — lowered to fit.
+- The agent memory limit lowered without lowering the cap with it, including
+  small test clusters that only set the limit — the cap follows the limit down.
+
+To keep a specific staging size, raise `daemonset.resources.limits.memory`
+above it rather than raising the cap alone.
 
 The staging-space check (`INSUFFICIENT_STORAGE`) only rejects a transfer that
 would exceed `sizeLimit`; it does not guarantee protection from an OOM kill,

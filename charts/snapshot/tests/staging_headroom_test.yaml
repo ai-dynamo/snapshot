@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Staging is a memory-backed emptyDir written from the agent container, so its
-# pages are charged to the agent's cgroup alongside the agent's own
-# allocations. If sizeLimit reaches the container memory limit the agent is
-# OOM-killed before the volume fills, taking every capture and restore on the
-# node with it. These tests pin the gap. See SNEP-394.
+# Staging pages are charged to the agent's cgroup, so a cap at or above the
+# container memory limit lets the agent be OOM-killed before the volume fills.
+# The cap is lowered to fit rather than rejected, so no configuration that
+# installs today stops installing. See SNEP-394.
 suite: PageBroker staging headroom
 templates:
   - templates/daemonset.yaml
@@ -35,40 +34,56 @@ tests:
           path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
           value: 56Gi
 
-  - it: refuses a sizeLimit equal to the agent memory limit
+  # 2Gi is what the CPU e2e cluster sets, and it never touches staging: the
+  # chart has to install there rather than reject the combination.
+  - it: lowers the cap when the agent memory limit is smaller than the default
+    set:
+      daemonset.resources.limits.memory: 2Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "1879048192" # 2Gi less an eighth
+
+  - it: lowers a cap equal to the agent memory limit
     set:
       pageBroker.staging.sizeLimit: 64Gi
     asserts:
-      - failedTemplate:
-          errorPattern: must be smaller than daemonset.resources.limits.memory
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "60129542144" # 56Gi
 
-  - it: refuses a sizeLimit above the agent memory limit
+  - it: lowers a cap above the agent memory limit
     set:
       pageBroker.staging.sizeLimit: 128Gi
     asserts:
-      - failedTemplate:
-          errorPattern: must be smaller than daemonset.resources.limits.memory
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "60129542144" # 56Gi
 
   - it: compares across mixed units rather than string-matching suffixes
     set:
       pageBroker.staging.sizeLimit: 65536Mi
       daemonset.resources.limits.memory: 64Gi
     asserts:
-      - failedTemplate:
-          errorPattern: must be smaller than daemonset.resources.limits.memory
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "60129542144" # 56Gi, not the 65536Mi asked for
 
-  - it: accepts a raised limit that preserves the gap
+  - it: leaves a cap that already fits alone
     set:
-      pageBroker.staging.sizeLimit: 120Gi
-      daemonset.resources.limits.memory: 128Gi
+      pageBroker.staging.sizeLimit: 200Gi
+      daemonset.resources.limits.memory: 224Gi
     asserts:
       - equal:
           path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
-          value: 120Gi
+          value: 200Gi
 
-  - it: rejects a memory quantity it cannot parse rather than skipping the check
+  # Capping is best-effort: a quantity the chart cannot compare is honoured
+  # rather than rejected, since refusing to render would break the install.
+  - it: honours a quantity it cannot parse
     set:
-      pageBroker.staging.sizeLimit: plenty
+      pageBroker.staging.sizeLimit: "64e9"
     asserts:
-      - failedTemplate:
-          errorPattern: cannot parse memory quantity
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "64e9"
