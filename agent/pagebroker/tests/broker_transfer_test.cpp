@@ -247,6 +247,11 @@ class BrokerTransferTest : public ::testing::Test {
     return broker.CreateOrGetTransaction(id);
   }
 
+  void Erase(Broker& broker, const std::string& id, const std::shared_ptr<Transaction>& transaction)
+  {
+    broker.EraseTransaction(id, transaction);
+  }
+
   void SetReservedStaging(Broker& broker, uintmax_t bytes)
   {
     std::lock_guard lock(broker.transactions_mutex_);
@@ -1158,6 +1163,27 @@ TEST_F(BrokerTransferTest, FailedCleanupCannotBeEvictedWithoutResourceLimits)
     broker.ReapExpiredTransactions(sweep);
     EXPECT_EQ(Find(broker, "seed"), nullptr);
   }
+}
+
+TEST_F(BrokerTransferTest, TerminalEvictionPreservesReusedTransactionID)
+{
+  Broker broker(staging_, storage_);
+  const auto original = Seed(broker, 0, Transaction::State::STAGED);
+  auto commit = RequestFor("seed");
+  commit.mutable_commit();
+  ASSERT_TRUE(broker.HandleRequest(commit).has_commit_complete());
+  ASSERT_EQ(Retained(broker), 1u);
+
+  // Retention still holds the old instance after its registry entry is replaced.
+  Erase(broker, "seed", original);
+  ASSERT_EQ(Find(broker, "seed"), nullptr);
+  const auto replacement = Unprepared(broker, "seed");
+  ASSERT_NE(replacement, original);
+
+  broker.ReapExpiredTransactions(std::chrono::steady_clock::now() + std::chrono::hours(2));
+  EXPECT_EQ(Retained(broker), 0u);
+  EXPECT_EQ(Find(broker, "seed"), replacement);
+  EXPECT_EQ(replacement->state(), Transaction::State::NEW);
 }
 
 TEST_F(BrokerTransferTest, PeriodicSweepRetainsMissedCompletionsAndEvictsThemWithoutRequests)
