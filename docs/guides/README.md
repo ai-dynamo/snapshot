@@ -107,8 +107,9 @@ export WAIT=$([ "$GPUS" = 1 ] && echo 30m || echo 120m)
 
 If you chose a recipe with eight GPUs, also read the agent image from the
 installed Snapshot agent. The source replica needs it to prepare itself for
-multi-GPU capture. Use the namespace Snapshot is installed in (`snapshot` in the
-README's install command):
+multi-GPU capture, and you use it in step 2, Option A. A `SnapshotJob` needs
+nothing. Use the namespace Snapshot is installed in (`snapshot` in the README's
+install command):
 
 ```bash
 export SNAPSHOT_AGENT_IMAGE=$(kubectl get daemonset snapshot-agent \
@@ -149,13 +150,25 @@ There are two ways to take the checkpoint. Pick one:
 
 ### Option A: `PodSnapshot`
 
-Start the source replica and wait until it is ready to be checkpointed. The first
-run downloads the model, so this can take a while:
+Start the source replica:
+
+```bash
+kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename "$SOURCE_MANIFEST"
+```
+
+**Multi-GPU recipes:** the source manifest has a placeholder for the agent image
+that you read earlier. Run this command instead of the one above, to fill it in
+as you apply the manifest:
 
 ```bash
 sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" "$SOURCE_MANIFEST" | \
   kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
+```
 
+Then wait until the replica is ready to be checkpointed. The first run downloads
+the model, so this can take a while:
+
+```bash
 kubectl rollout status \
   --namespace "$WORKLOAD_NAMESPACE" \
   deployment/"$SOURCE_NAME" \
