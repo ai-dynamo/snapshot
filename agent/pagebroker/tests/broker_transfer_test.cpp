@@ -246,6 +246,12 @@ class BrokerTransferTest : public ::testing::Test {
     return broker.CreateOrGetTransaction(id);
   }
 
+  void SetReservedStaging(Broker& broker, uintmax_t bytes)
+  {
+    std::lock_guard lock(broker.transactions_mutex_);
+    broker.reserved_staging_bytes_ = bytes;
+  }
+
   void SetLifetime(Broker& broker, std::chrono::seconds lifetime)
   {
     broker.lifetime_ = lifetime;
@@ -668,6 +674,56 @@ TEST_F(BrokerTransferTest, InvalidPreparationReleasesAdmissionAndAllowsCorrected
   EXPECT_TRUE(broker.HandleRequest(request).has_abort_complete());
   EXPECT_EQ(resources->active, 0u);
   EXPECT_EQ(resources->reserved, 0u);
+}
+
+TEST_F(BrokerTransferTest, SpaceRejectionAbortsHeldTransactionAndReleasesAdmission)
+{
+  std::ofstream(source_ / "image") << "data";
+  for (const bool limited : {false, true}) {
+    SCOPED_TRACE(limited);
+    Broker broker(staging_, storage_);
+    const auto resources = limited ? Limit(broker) : nullptr;
+    std::shared_ptr<Transaction> rejected;
+    Intercept(broker, [&](Boundary boundary, Cancellation) {
+      if (boundary == Boundary::PrepareRestore && !rejected)
+        rejected = Find(broker, "restore");
+    });
+    // Simulate space promised to other copies without filling the filesystem.
+    SetReservedStaging(broker, fs::space(staging_).capacity);
+    const auto response = broker.HandleRequest(Restore());
+    ASSERT_TRUE(response.has_failure()) << response.DebugString();
+    EXPECT_EQ(response.failure().code(), Failure::INSUFFICIENT_STORAGE);
+    ASSERT_NE(rejected, nullptr);
+    {
+      std::lock_guard lock(rejected->mutex());
+      EXPECT_EQ(rejected->state(), Transaction::State::ABORTED);
+    }
+    EXPECT_EQ(Find(broker, "restore"), nullptr);
+    if (resources) {
+      EXPECT_EQ(resources->active, 0u);
+      EXPECT_EQ(resources->reserved, 0u);
+    }
+    EXPECT_FALSE(fs::exists(staging_ / "restore/restore"));
+    EXPECT_EQ(fs::file_size(source_ / "image"), 4u);
+
+    // The same ID can be admitted while a waiter still owns the rejected handle.
+    SetReservedStaging(broker, 0);
+    const auto retry = broker.HandleRequest(Restore());
+    ASSERT_TRUE(retry.has_staged_restore_directory()) << retry.DebugString();
+    EXPECT_NE(Find(broker, "restore"), rejected);
+    rejected.reset();
+    if (resources) {
+      EXPECT_EQ(resources->active, 1u);
+      EXPECT_EQ(resources->reserved, 4u);
+    }
+    auto abort = RequestFor("restore");
+    abort.mutable_abort();
+    ASSERT_TRUE(broker.HandleRequest(abort).has_abort_complete());
+    if (resources) {
+      EXPECT_EQ(resources->active, 0u);
+      EXPECT_EQ(resources->reserved, 0u);
+    }
+  }
 }
 
 TEST_F(BrokerTransferTest, CompletionRejectsExpiryAndCancellationAfterTransfer)
