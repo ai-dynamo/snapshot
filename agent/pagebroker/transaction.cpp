@@ -27,8 +27,6 @@ Transaction::set_state(State state)
   if ((state == State::COMMITTED || state == State::ABORTED) && gpu_operation) {
     gpu_operation->target_descriptors.clear();
   }
-  if (state == State::PREPARING)
-    staging_started_at_ = std::chrono::steady_clock::now();
   ReleaseAbortedDestination();
 }
 
@@ -79,11 +77,11 @@ Transaction::retain_terminal()
 }
 
 bool
-Transaction::expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const
+Transaction::expired(std::chrono::steady_clock::time_point now) const
 {
-  if (deadline_ != Cancellation::Clock::time_point::max())
-    return state_ != State::COMMITTED && state_ != State::ABORTED && (transfer_expired_ || now >= deadline_);
-  return (state_ == State::STAGED || state_ == State::ABORTING) && now - staging_started_at_ >= lifetime;
+  return deadline_ != Cancellation::Clock::time_point::max() &&
+         state_ != State::COMMITTED && state_ != State::ABORTED &&
+         (transfer_expired_ || now >= deadline_);
 }
 
 Transaction::~Transaction()
@@ -215,7 +213,7 @@ Transaction::CleanupTransfer(std::error_code& error)
 bool
 Transaction::ExpireTransfer(std::chrono::steady_clock::time_point now)
 {
-  if (!expired(now, std::chrono::seconds{7500}))
+  if (!expired(now))
     return false;
   transfer_expired_ = true;
   CancelWork();
