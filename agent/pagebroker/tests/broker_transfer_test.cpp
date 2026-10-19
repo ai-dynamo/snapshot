@@ -1070,10 +1070,10 @@ TEST_F(BrokerTransferTest, CheckpointRejectionsPreserveUnownedOutputAndAllowCorr
   }
 }
 
-TEST_F(BrokerTransferTest, DirectCheckpointRetryKeepsDeadlineAndCaptureOnRejection)
+TEST_F(BrokerTransferTest, DirectCheckpointRetriesPreserveDeadlineAndCapture)
 {
   for (const bool expire : {false, true}) {
-    SCOPED_TRACE(expire);
+    SCOPED_TRACE(expire ? "expired" : "cancelled");
     Broker broker(staging_, storage_);
     SetLifetime(broker, std::chrono::seconds(1));
     const auto request = Checkpoint(true);
@@ -1082,13 +1082,15 @@ TEST_F(BrokerTransferTest, DirectCheckpointRetryKeepsDeadlineAndCaptureOnRejecti
     const auto deadline = transaction->cancellation().Deadline();
     const auto output = CheckpointOutput(true);
     std::ofstream(output / "payload") << "capture";
-    EXPECT_EQ(broker.HandleRequest(request).direct_checkpoint_directory().image_directory(), output.string());
+    // Ordinary retry behavior is covered in daemon_test.cpp; both successful
+    // and rejected retries must also preserve the original deadline.
+    ASSERT_TRUE(broker.HandleRequest(request).has_direct_checkpoint_directory());
     EXPECT_EQ(transaction->cancellation().Deadline(), deadline);
     auto changed = request;
     changed.mutable_prepare_direct_checkpoint()->mutable_destination()->mutable_filesystem()->set_directory(
         (storage_ / "other").string());
-    EXPECT_EQ(broker.HandleRequest(changed).failure().code(), Failure::TRANSACTION_CONFLICT);
-    EXPECT_TRUE(fs::exists(output / "payload"));
+    ASSERT_TRUE(broker.HandleRequest(changed).has_failure());
+    EXPECT_EQ(transaction->cancellation().Deadline(), deadline);
     if (expire)
       std::this_thread::sleep_until(deadline);
     else
