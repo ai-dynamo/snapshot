@@ -50,12 +50,8 @@ spec:
           args:
             - '{"model": "Qwen/Qwen3-0.6B"}'
           env:
-            - name: TRTLLM_MAX_NUM_TOKENS
-              value: "1024"
-            - name: TRTLLM_MAX_BATCH_SIZE
-              value: "1"
             - name: TRTLLM_FREE_GPU_MEMORY_FRACTION
-              value: "0.10"
+              value: "0.75"
             - name: HF_HUB_DISABLE_XET
               value: "1"
             - name: HF_HOME
