@@ -192,6 +192,11 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `storage.pvc.storageClass` | `""`           | Storage class; empty uses the cluster default. Must support `ReadWriteMany`.                              |
 | `storage.pvc.basePath`     | `/checkpoints` | Fixed agent mount path; cannot be changed.                                                                |
 
+The storage class must support `ReadWriteMany`; a node-local `ReadWriteOnce`
+claim is supported only for a single-GPU-node install. See
+[Single-node (node-local) stores](../operations/storage.md#single-node-node-local-stores)
+in the storage guide.
+
 ### PageBroker GPU engine
 
 PageBroker runs in a persistent container in the agent DaemonSet. Its GPU engine

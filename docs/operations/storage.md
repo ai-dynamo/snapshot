@@ -17,6 +17,30 @@ agents on multiple GPU nodes mount it concurrently, it must support
 `ReadWriteMany` (RWX). The chart provisions one PVC per cluster by default and
 mounts it at `/checkpoints` in every agent.
 
+### Single-node (node-local) stores
+
+A node-local `ReadWriteOnce` (RWO) store is supported for a single-GPU-node
+install. It needs all of the following:
+
+- **Use an existing RWO claim.** Chart-created claims always request RWX. Set
+  `storage.pvc.create=false` and `storage.pvc.name` to the existing claim. PVC
+  access modes are immutable, so a claim cannot be converted in place.
+- **Run the operator on the node that holds the claim.** The operator pod mounts
+  the checkpoint PVC, because artifact cleanup runs in the operator. Set
+  `operator.nodeSelector` and `operator.tolerations` so the operator pod lands on
+  that node and tolerates its taints. An operator pod that cannot mount the store
+  cannot finish cleanup, so finalizers stay on the content objects.
+- **Keep agents off other nodes.** Every agent pod mounts the claim. With an RWO
+  claim, agent pods on other nodes stay `Pending` because they cannot mount it.
+  Use a cluster with exactly one GPU node, or pin the DaemonSet with
+  `daemonset.nodeSelector` or `daemonset.affinity`.
+- **Restore on that node.** The agent that runs the restore reads the artifact
+  from the store it mounts, so the workload restores on the node that holds the
+  claim. Single-node workloads are the supported case.
+
+Any other setup — an RWO store with more than one GPU node, or agents that are
+not pinned to the node — is not supported. Use an RWX store.
+
 ## Configuration
 
 The chart's `storage.pvc` values control the PVC:
@@ -64,7 +88,9 @@ helm install snapshot ... \
 
 The named claim must support `ReadWriteMany`. Access modes are immutable, so a
 `ReadWriteOnce` claim cannot be converted in place — create a new RWX claim and, if
-the existing checkpoints are needed, copy them over once.
+the existing checkpoints are needed, copy them over once. A `ReadWriteOnce` claim
+is supported only for a single-node install; see
+[Single-node (node-local) stores](#single-node-node-local-stores).
 
 ## PageBroker staging
 
