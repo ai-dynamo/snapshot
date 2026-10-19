@@ -143,14 +143,6 @@ outlives PageBroker's fixed 2h5m lifetime fails Commit with
 `TRANSACTION_EXPIRED` and is cleaned up. Legacy path-addressed requests are
 unchanged, and content without a store binding keeps using them.
 
-If a bound checkpoint's Commit reply is lost, the agent records Ready as Unknown
-with reason `CheckpointCommitPending` and probes the durable publication. It
-does not dump the source again. A matching publication becomes Ready. Missing or
-unavailable evidence keeps the outcome pending: the transaction lifetime does
-not prove that an in-progress publication has stopped. An unresolved outcome
-requires operator investigation of the broker and storage; it is not
-automatically recaptured.
-
 Because the staging volume is RAM, size the agent pod for it:
 
 | Value                                | Purpose                                                                                        | Default      |
