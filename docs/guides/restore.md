@@ -5,18 +5,18 @@ restored pods carry the `nvidia.com/restore-from` annotation, naming the
 `PodSnapshot` to restore from; the node agent restores the checkpointed state into
 the container during pod startup.
 
-## Prerequisites
+This is stage 3 of the [usage guides](README.md). It starts from the ready
+`PodSnapshot` that [checkpoint](checkpoint.md) produced:
 
-- A ready `PodSnapshot` exists (see [Checkpoint a replica](checkpoint.md)).
-- The restored replica reuses the source's snapshot-ready pod spec, provided as a
-  manifest under `restore/` for [each framework](#example).
+```bash
+kubectl get podsnapshot --namespace "$SNAPSHOT_NAMESPACE"
+```
 
-## Example
+## 1. Choose the restore profile
 
-Restore takes the same steps for single-GPU and multi-GPU snapshots. Only the
-Pod profile differs. Each framework guide ships model-specific manifests under
-`capture/` and two restore profiles under `restore/`. Choose the profile that
-matches the source's GPU count:
+The restored replica reuses the source's snapshot-ready pod spec. Each framework
+ships two restore profiles under `restore/`. Choose the one that matches the
+source's GPU count:
 
 | Framework | Single GPU | Eight GPUs |
 |-----------|------------|------------|
@@ -26,30 +26,44 @@ matches the source's GPU count:
 
 A profile works for every model of its framework and GPU count, because the
 model configuration comes from the checkpoint. It also works for captures made
-with or without SnapshotJob. The profile carries the `nvidia.com/restore-from`
-annotation naming the `PodSnapshot` to restore from.
+with or without `SnapshotJob`. Keep the container `image` the same as the
+source's.
 
-Set the namespace where the restored replica will run — the same one holding the
-`PodSnapshot`:
+## 2. Set the snapshot to restore from
 
-```bash
-export SNAPSHOT_NAMESPACE=<namespace>
-kubectl get namespace "$SNAPSHOT_NAMESPACE"
-```
+The profile carries the `nvidia.com/restore-from` annotation naming the
+`PodSnapshot` to restore from. Whichever method you used, that is your recipe's
+snapshot name from the [recipe table](README.md#pick-a-recipe): the `SnapshotJob`'s
+name, which its `PodSnapshot` shares, or the name you gave the `PodSnapshot` in
+[Checkpoint, Option 1](checkpoint.md#option-1--podsnapshot-checkpoint-a-running-replica).
 
-In the manifest, use the same container `image` as the source and set
-the `restore-from` annotation to the `PodSnapshot` name, then apply it and watch the
-rollout (the Deployment is named `<framework>-restored`). For eight GPUs, use
-`restore/8-gpu.yaml` and Deployment `<framework>-8gpu-restored`:
+- The single-GPU profiles already carry it — `vllm-snapshot`, `sglang-snapshot`,
+  or `tensorrt-llm-snapshot` — so there is nothing to change.
+- The eight-GPU profiles carry the placeholder `<snapshot-name>`. Replace it with
+  your recipe's snapshot name. For example, for the vLLM GLM 5.3 recipe, in
+  `vllm/restore/8-gpu.yaml`:
+
+  ```yaml
+  annotations:
+    nvidia.com/restore-from: vllm-glm-5-3-snapshot
+  ```
+
+If you named your `PodSnapshot` something else, use that name instead.
+
+## 3. Restore
+
+Apply the profile and watch the rollout. The Deployment is named
+`<framework>-restored`, or `<framework>-8gpu-restored` for the eight-GPU profile
+(see the [recipe table](README.md#pick-a-recipe)):
 
 ```bash
 kubectl apply \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --filename restore/single-gpu.yaml
+  --filename vllm/restore/single-gpu.yaml
 
 kubectl rollout status \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  deployment/<framework>-restored \
+  deployment/vllm-restored \
   --timeout=30m
 ```
 
@@ -62,7 +76,7 @@ does. Readiness waits on the framework's post-restore sentinel —
 source pod writes.
 
 On nodes without NRI v0.10 or newer, there is no restore proxy. Before applying
-`restore-deployment.yaml`, change the container's command to
+the profile, change the container's command to
 `["sleep", "infinity"]`, remove its `args`, and add a liveness probe on the
 framework's API. See
 [Nodes without the restore proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
@@ -71,15 +85,31 @@ A Pod gets one restore. The guides use a Deployment, which restarts containers,
 so if the restored process exits, the container ends in `CrashLoopBackOff`
 instead of starting again. Delete the Pod to restore a new replica.
 
-The node agent adds a `nvidia.com/Restored` condition to the pod once the restore
-completes — watch it, along with pod readiness, to confirm. If the restored
-workload serves an API, sending a request is a good end-to-end check that it
-resumed correctly.
+## 4. Verify the restored replica
 
-The restored process resumes from the checkpointed state, skipping model loading
-and warm-up. In practice, higher-level systems create these restored Deployments
-rather than applying them by hand. To generate restore pods programmatically —
-from a controller, operator, or serving platform — implement the
+The node agent adds a `nvidia.com/Restored` condition to the pod once the restore
+completes — watch it, along with pod readiness, to confirm. Sending a request is a
+good end-to-end check that the workload resumed correctly. Forward the API port of
+your profile's Deployment, then send a prompt from a second terminal:
+
+```bash
+kubectl port-forward \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  deployment/vllm-restored 8000:8000
+```
+
+```bash
+curl --silent --request POST http://localhost:8000/generate \
+  --header 'Content-Type: application/json' \
+  --data '{"prompt": "What is the capital of Italy?"}'
+```
+
+The restored process resumed from the checkpointed state, skipping model loading
+and warm-up, so it answers with generated text in a `text` field.
+
+In practice, higher-level systems create these restored Deployments rather than
+applying them by hand. To generate restore pods programmatically — from a
+controller, operator, or serving platform — implement the
 [restore Pod contract](../reference/restore-pod-contract.md), which specifies the
 required annotations, control volume, and `SNAPSHOT_CONTROL_DIR`, plus the
 optional startup gate and seccomp profile a restored pod may carry.
