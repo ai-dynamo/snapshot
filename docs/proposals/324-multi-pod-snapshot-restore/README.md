@@ -20,6 +20,7 @@ SPDX-License-Identifier: Apache-2.0
   - [The coordination session](#the-coordination-session)
   - [Communication paths](#communication-paths)
   - [Phases at a glance](#phases-at-a-glance)
+  - [Workload contract](#workload-contract)
   - [Group checkpoint](#group-checkpoint)
   - [Group restore](#group-restore)
   - [cuInterpose across nodes](#cuinterpose-across-nodes)
@@ -121,8 +122,9 @@ by a single session that follows the attempt it serves.
   work.
 - Rolling back after the point of no return, retrying a failed member in place,
   or changing the size of a set between checkpoint and restore.
-- Keeping an attempt alive across a coordinator failure, which this SNEP treats
-  as a failure of that attempt.
+- Keeping an attempt alive across a coordinator restart in alpha, which this
+  SNEP treats as a failure of that attempt, although its protocol lets a later
+  version do so without changing any client.
 - Assigning ranks or identities to library processes, which remains the
   libraries' concern, and judging application health, which remains the owner's.
 - Moving shared GPU memory between fabric domains, and preserving connections
@@ -157,7 +159,8 @@ The boundaries are equally explicit. Snapshot's workload contract does not
 change, since a workload still reports `ready-for-snapshot` once quiescent and
 stays parked until `restore-complete`, although for a set that second rule
 becomes load-bearing: it is what keeps a restored member from acting before its
-peers are reconstructed, so a workload that cannot honor it is not supported.
+peers are reconstructed, so a workload that cannot honor it is not supported,
+and [Workload contract](#workload-contract) defines which threads it covers.
 The owner must not delete or replace a source until its member is captured, and
 set restore Pods must carry the existing restore startup probe. Placement stays
 with the owner, but Snapshot refuses a restore that cannot work, for example one
@@ -198,9 +201,11 @@ rendezvous server those platforms provide.
 | --- | --- |
 | Every restore keeps the original set size and GPU count per member, and a set whose members share GPU memory across nodes must restore within one fabric domain. | The owner places the Pods, and admission verifies these constraints before CRIU runs, so a misplaced restore is refused without side effects. |
 | Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, the commit time is recorded, and member results report partial outcomes truthfully, so the owner can retire the set and retry with a new attempt. |
-| Snapshot does not freeze restored processes until release, because CUDA and cuInterpose need them running. | Release relies on the existing workload contract, under which the application stays parked until `restore-complete`; this SNEP states it as a requirement and leaves an enforced hold to future work. |
+| Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; workloads launched through a wrapper that gates on the contract's signals satisfy it, and an enforced hold is left to future work. |
+| Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
 | Holds that protect preserved connections pause their traffic while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
-| The coordinator is a single point of failure for attempts in flight. | Failure is fail-stop and reported as `CoordinatorLost`, and a standby replica serves new attempts; replicating sessions is deferred until operational evidence justifies it. |
+| The capture-side freeze holds only TCP connections between members, so traffic on other channels, such as RDMA, datagrams, shared volumes, or external services, is not held while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
+| The coordinator is a single point of failure for attempts in flight, because sessions live only in its memory. | Failure is fail-stop and reported as `CoordinatorLost`, a standby replica serves new attempts, and a broken stream that reconnects does not fail an attempt; the protocol is resumable, so persisting or replicating sessions later changes only the coordinator. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
 | Importing GPU memory shared from another node after a native CUDA restore depends on a driver fix, and cuInterpose currently infers the kind of an imported FABRIC handle from its opaque contents. | Cross-node sharing in alpha requires a driver with the fix, and a public query for the handle kind is a beta prerequisite. |
 | CUDA Checkpoint's communication-library interface is not released yet. | NCCL Checkpoint works today through a compatibility endpoint, which the CUDA integration replaces once it is available. |
@@ -275,8 +280,9 @@ Two properties of these operations shape the rest of the design. Reads block on
 the server rather than polling, so a waiting `Get` completes the moment its key
 is inserted, and when the session fails, every pending read and barrier
 completes with `ABORTED`, which means no member waits out its own timeout after
-a peer has already failed. Requests also carry identifiers and may complete out
-of order, so a blocked read never stalls other requests on the same stream, and
+a peer has already failed. Requests also carry identifiers, which make a retried
+request idempotent and let requests complete out of order, so a blocked read
+never stalls other requests on the same stream, and
 the agent can coalesce identical reads from the processes of one Pod into a
 single upstream request.
 
@@ -364,6 +370,46 @@ parallel with CUDA restore and the cuInterpose rounds. Figures 5 and 6 expand
 both columns into complete sequences, in which every shaded band labeled "round"
 is one instance of Figure 3, drawn with the same messages so that each round can
 be traced from the leader's command to the replies it collects.
+
+### Workload contract
+
+Snapshot and the workload hand control to each other at exactly two points, and
+a set depends on every member honoring both, because the work between them is
+collective. The handshake is the one that single-Pod Snapshot already uses, so a
+set asks for no new application signal; what it changes is how much of the
+restore happens while the workload waits, and therefore how strictly waiting
+must be read.
+
+| Signal | Written by | What it promises for a set |
+| --- | --- | --- |
+| `ready-for-snapshot` | The workload, through its readiness probe | The member has drained its GPU work and starts no new work on memory shared across Pods, on communicators, or on connections to peers. Until CUDA Checkpoint's library interface drives NCCL, the application must also have called NCCL Checkpoint's prepare itself. Capture admission waits for this signal from every member. |
+| `restore-complete` | The agent, after the `release` barrier | Every member is reconstructed: shared GPU memory is back at its original addresses, preserved connections are open on the new IPs, and libraries that restore in CUDA's resume phase have reconnected. The file names the attempt. |
+
+Between CRIU restore and `restore-complete`, a restored member passes through two
+windows that differ in what its threads may do.
+
+| Window | CUDA | What Snapshot does | What the workload may do |
+| --- | --- | --- | --- |
+| From CRIU restore to CUDA unlock | Locked, so a CUDA call blocks until the unlock | Restores and unlocks CUDA inside the Pod without any coordination, exactly as for a single Pod | Nothing; a thread that calls CUDA simply blocks |
+| From CUDA unlock to release | Usable | Rebuilds shared memory through the cuInterpose rounds, lifts the TCP hold, and runs CUDA's resume phase, in which libraries reconnect | Wait: no access to memory shared across Pods, no use of a communicator, and no traffic on a preserved connection |
+
+The second window is the one that a set lengthens, since it now spans cross-node
+rounds and two barriers, and it is also the one in which a running thread could
+observe a half-rebuilt state, such as an imported allocation that does not yet
+map its creator's memory or a communicator whose peers are still reconnecting.
+Waiting therefore applies to every thread that could touch such state,
+including background threads such as communicator watchdogs and progress
+threads, and not only to the application's main loop. A library that Snapshot
+does not drive yet, such as NCCL until CUDA Checkpoint's library interface
+ships, restores only when the application calls it, so the application calls
+NCCL Checkpoint's restore after release and before it uses any communicator.
+Snapshot cannot verify any of this from outside
+the process, so the SNEP makes it a requirement of set membership: integrations
+that launch the workload through a wrapper gating on both signals, as Dynamo's
+already does, satisfy it without application changes, while an explicit
+application interface for both transitions and an enforced hold remain open in
+[Appendix A](#a-open-questions). Figures 5 and 6 show both signals and the
+waiting period on the workload's lifeline.
 
 ### Group checkpoint
 
@@ -572,6 +618,17 @@ time every peer socket exists; new connections, including library bootstrap
 traffic, are never affected. At capture, the `net-freeze` barrier applies the
 same narrow hold before any member is dumped.
 
+The freeze covers only TCP connections between members, because they are the
+only cross-Pod channels whose state one member's dump can break for another.
+Every other channel must already be quiet when a member reports
+`ready-for-snapshot`: datagrams are lossy by contract, RDMA transports cannot be
+dumped and are torn down by their libraries before the dump, and files on
+shared volumes or calls to external services reflect whatever the application
+did before it quiesced. The freeze therefore protects what the
+[workload contract](#workload-contract) cannot, namely kernel traffic on
+connections that the application has stopped using, without replacing that
+contract.
+
 Holding traffic does not stop the kernel's TCP timers, so keepalive,
 retransmission, and user timeouts keep running while a peer is dumped or
 restored, and a long interruption can still break a preserved connection
@@ -590,13 +647,17 @@ irreversible has happened, so relays return the shims to their active phase and
 agents leave sources running or restore Pods untouched; after it, a failure is
 fail-stop as in SNEP-295, so the coordinator completes every pending operation
 with `ABORTED`, every relay and CUDA phase exits with an error, and every agent
-terminates its source or fails its restore.
+terminates its source or fails its restore. Failing a restore terminates the
+member's restored processes, including threads blocked on the CUDA lock or
+waiting for `restore-complete`, so no process outlives a failed attempt in
+either window of the [workload contract](#workload-contract).
 
 | Event | Before commit | After commit | After release |
 | --- | --- | --- | --- |
 | Validation refusal, placement mismatch, or short probe budget | Abort with `Refused` or `GateBudgetTooShort`; workloads keep running | Not applicable | Not applicable |
 | Member error during a phase, including a Pod IP or container change | Abort | Every member fails with `MemberFailed` or `PodIPChanged` | The rendezvous ends; workloads keep running |
-| Agent stream lost or coordinator restart | Abort | Every member fails with `MemberFailed` or `CoordinatorLost` | The rendezvous ends |
+| Agent stream broken while the agent and the coordinator keep running | The agent reattaches within a grace period of a few seconds and re-issues its pending requests, and the attempt continues | Same as before the commit | Same as before the commit |
+| Agent stream not restored within the grace period, or coordinator restart | Abort | Every member fails with `MemberFailed` or `CoordinatorLost` | The rendezvous ends |
 | Deadline expires | Abort with `DeadlineExceeded` | Every member fails with `DeadlineExceeded` | The session closes |
 | Set resource deleted | Abort with `Cancelled` | A finalizer waits for the attempt to end | The session closes |
 
@@ -622,6 +683,27 @@ agent, such as `nsrestore` or a relay, lose their inherited sockets and stop at
 their next step, and failing the member terminates whatever they restored.
 During capture, a restart before the commit aborts the attempt and a restart
 after it fails the member, as an agent restart does today.
+
+The coordinator, by contrast, keeps sessions only in memory, so in alpha its
+restart fails every attempt in flight with `CoordinatorLost`, and the owner
+retries with a new attempt, which for a restore means fresh Pods. The protocol
+does not depend on that choice, however. Every mutating request carries an ID
+that the session remembers, so re-issuing it is harmless; a barrier records
+which members posted rather than how many; and the epoch in `Welcome`
+identifies the coordinator incarnation that holds the session. An agent whose
+stream breaks therefore reattaches and re-issues its pending requests, which
+already lets an attempt survive a transient disconnection, and only a reattach
+that finds the session unknown or under a new epoch reports `CoordinatorLost`.
+Surviving a coordinator restart thus needs only a coordinator that can reload
+its sessions, either by writing every mutation to Kubernetes objects before
+acknowledging it, or by replicating sessions to the standby in memory, and
+neither changes a client. Writing through would cost one API request per
+mutation and keep fabric handles and bootstrap identifiers in etcd for the
+lifetime of an attempt, in Secrets rather than ConfigMaps because they are
+sensitive, owned by the set resource so that they disappear with it, and it
+would help only when a takeover completes well within the hold, probe, and
+library timeouts that keep running meanwhile, so this SNEP leaves the choice to
+operational evidence ([Appendix A](#a-open-questions)).
 
 ### Deadlines
 
@@ -767,10 +849,14 @@ configuration change.
 
 Coordination is cheap relative to the data that capture and restore move. A
 capture adds five cuInterpose rounds and three barriers, and a restore eight
-rounds and four barriers, each costing a few in-cluster round trips. The largest
-payloads are cuInterpose's topology records, which reach at most 32 MiB per
-member and are gathered only to rank 0, whereas handle tables grow by about 128
-bytes per recreated handle and NCCL identifiers take 128 bytes per communicator.
+rounds and four barriers, each costing a few in-cluster round trips. The session
+carries only metadata, never allocation bytes, which stay on their creator's
+node. The largest payloads are cuInterpose's records, which consist mostly of
+64-byte fabric handles, so with the thousand or so shared allocations of a
+typical workload a member's records stay well under a MiB, far below the 32 MiB
+cap on Snapshot's values, and they are gathered only to rank 0; the handle table
+grows by 128 bytes per recreated handle, one old and one new, and NCCL
+identifiers take 128 bytes per communicator.
 Blocking reads and per-node coalescing keep library traffic to about one
 upstream request per key per node, which comfortably supports at least 100
 concurrent library clients per session with per-operation latency well under 100
@@ -785,8 +871,8 @@ sets of 2 to 16 Pods, and larger sets are measured before beta.
 `Refused`, `DeadlineExceeded`, `GateBudgetTooShort`, `PodIPChanged`,
 `ArtifactUnavailable`, `MemberFailed`, `CoordinatorLost`, and `Cancelled`, while
 each member's phase shows how far it progressed. The operator emits events at
-every transition, agents log each phase with its attempt, member, and duration,
-and the coordinator exports metrics for active sessions, operation latency,
+every transition, agents log each phase with its attempt, member, and duration
+and export the duration of both restore windows, and the coordinator exports metrics for active sessions, operation latency,
 barrier wait time, and failures by reason.
 
 ### Dependencies
@@ -808,7 +894,8 @@ barrier wait time, and failures by reason.
 
 Unit tests cover the coordinator's operations against the semantics in the
 session table, including blocking reads, atomics, barriers posted before their
-creation, abort fan-out, namespace isolation, and authorization by node; the set
+creation, abort fan-out, idempotent re-issue after a broken stream, namespace
+isolation, and authorization by node; the set
 controllers' validation, identity pinning, aggregation, artifact withdrawal, and
 cancellation; the agents' phase sequencing, including concurrent members on one
 node, members without cuInterpose, and a restart at every phase, in particular
@@ -820,7 +907,9 @@ Integration tests extend the existing end-to-end suite on CPU-only nodes. A
 two-Pod set with TCP and ZeroMQ connections is captured and restored onto
 swapped nodes, the same set without the group IP map serves as a negative
 control, a refusal during admission and a short probe budget must leave both
-Pods running, and a failure injected after the commit must terminate both. The
+Pods running, and a failure injected after the commit must terminate both,
+whereas a dropped agent stream that reconnects must not fail the attempt and a
+coordinator restart must fail it with `CoordinatorLost`. The
 same harness delays one member's dump and restore to measure how long preserved
 connections survive the hold. A multi-process fake of a CUDA Checkpoint client
 exercises the rendezvous endpoint, and NCCL Checkpoint's Redis client exercises
@@ -832,6 +921,10 @@ uses shared GPU memory and a multicast team spanning both nodes; they restore
 TensorRT-LLM at tensor parallelism 8 across two Pods, using NCCL Checkpoint and
 MPI, onto other nodes and require identical outputs for fixed prompts; and they
 kill a member during a destructive phase to confirm that every member fails.
+The same runs measure, for every member, the time from CRIU restore to CUDA
+unlock and from CUDA unlock to release, with a background thread that calls
+CUDA throughout, and inject a failure into each window to confirm that no
+process is left blocked.
 
 ### Graduation Criteria
 
@@ -839,8 +932,9 @@ kill a member during a destructive phase to confirm that every member fails.
 for NCCL Checkpoint, in-set TCP connections, and GPU memory shared across nodes
 including multicast, with admission refusals and fail-stop behavior tested;
 evidence that a restarted agent never replays CRIU and never kills a released
-member; measured limits for how long preserved connections survive a hold; and
-an unchanged result for the existing single-Pod suite.
+member; measured limits for how long preserved connections survive a hold;
+measured durations of both restore windows, with fail-stop verified in each;
+and an unchanged result for the existing single-Pod suite.
 
 **Beta** requires integration with CUDA Checkpoint's communication-library
 interface, with the NCCL compatibility endpoint deprecated; a released driver
@@ -867,10 +961,11 @@ evidence; and an API review that settles the open questions in
 | --- | --- |
 | Coordination inside rank 0's cuInterpose coordinator, as prototyped | It exits before libraries restore, listens on the Pod network behind a shared secret, collides with the TCP hold, and serves only cuInterpose. |
 | Coordination inside the operator | It saves a component, but operator upgrades and leader changes would fail restores in flight and data-plane traffic would cross the control plane; building the coordinator as a library keeps this option open. |
+| The CRIU project's [criu-coordinator](https://github.com/checkpoint-restore/criu-coordinator) | It synchronizes CRIU's dump and restore hooks across processes, containers, or Pods through a server that every participant reaches over TCP, which matches the `net-freeze` and dump barriers, but it sees only CRIU's steps, not CUDA's phases, cuInterpose's rounds, or library rendezvous, and it would add a second coordination server; the session's barriers provide the same synchronization at points the agents already control, while its hook points remain a useful reference. |
 | Coordination hosted by an elected agent | It ties every attempt to one node's health and requires agent-to-agent TLS on the host network as well as an election. |
 | Redis or etcd as the store | It adds a stateful service to secure and operate, still leaves membership and failure handling to Snapshot, and stores fabric handles where any client of the store can read them. |
 | Pods connect to the coordinator directly | It requires credentials inside Pods and possibly inside CRIU images, NetworkPolicy changes in every workload namespace, and exemptions from the TCP hold. |
-| A Session custom resource | Writing every operation through etcd would be slow and would persist fabric handles and bootstrap identifiers. |
+| A Session custom resource, or Secrets that persist each session from alpha | It would let an attempt survive a coordinator restart, but every operation would become an API write, fabric handles and bootstrap identifiers would sit in etcd, and a takeover helps only if it beats the hold, probe, and library timeouts; the resumable protocol keeps this open as a change to the coordinator alone. |
 | cuInterpose as a CUDA Checkpoint client | CUDA does not order callbacks across clients and offers no store during checkpoint, whereas cuInterpose must rebuild memory before libraries run and exchange records larger than CUDA's value limit. |
 | Every member validates all cuInterpose records, with no leader | It treats every rank alike, but every member then receives every other member's records, up to 32 MiB each, and every coordinator must reach the same verdict; a single validator in rank 0 is simpler to reason about and already proven by the prototype. |
 | Agents write member reports into the set's status | It gives one place to read, but it adds a status with many writers, whereas agents already report on `PodSnapshotContent` and the restore Pod and the operator can aggregate those. |
@@ -890,16 +985,21 @@ evidence; and an API review that settles the open questions in
 2. **NCCL Checkpoint.** Until NCCL moves onto CUDA Checkpoint, would it accept a
    Unix-socket endpoint, and does every key receive exactly one `SET` per
    restore?
-3. **Execution hold.** Should a later version enforce the hold before release
-   instead of relying on the workload contract, and how, given that CUDA and
-   cuInterpose need the restored processes running?
+3. **Execution hold.** Should applications acknowledge both transitions of the
+   [workload contract](#workload-contract) through an explicit interface, such
+   as SNEP-411's application contracts, and should a later version enforce the
+   hold before release, given that CUDA, cuInterpose, and library threads need
+   the restored processes running?
 4. **Source lifetime.** What must survive of a source that has finished its dump
    while its peers are still capturing, beyond the owner not deleting it?
 5. **Naming.** Should the kinds be called `PodSet` or `PodGroup`?
 6. **Cross-namespace restore.** Would restoring a set into another namespace
    justify a cluster-scoped, set-level content resource?
-7. **Availability.** Which evidence would justify replicating sessions instead
-   of failing attempts when the coordinator restarts?
+7. **Availability.** Which evidence, such as the observed rate of
+   `CoordinatorLost` and the measured takeover time against the hold and probe
+   budgets, would justify keeping attempts alive across a coordinator restart,
+   and should sessions then be written through to Secrets or replicated to the
+   standby in memory?
 
 ### B. Changes from the prototype
 

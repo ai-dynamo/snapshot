@@ -304,7 +304,8 @@ CHECKPOINT = (
     [
         ("m", "O", "A", "member PodSnapshotContent, owned through its PodSnapshot by the set"),
         ("s", "A", "read rank, size, and UID from the parent PodSetSnapshot"),
-        ("s", "W", "finish GPU work, park"),
+        ("s", "W", "quiesce: no new work on shared memory, communicators, or peers; until CUDA Checkpoint drives NCCL, "
+                   "the app also calls NCCL Checkpoint's prepare"),
         ("m", "W", "A", "ready-for-snapshot (readiness probe)"),
         ("m", "A", "C", "Attach(session UID, member ID) with a Pod-bound token"),
         ("m", "C", "A", "Welcome {epoch, rank, size, members, deadline}", 1),
@@ -383,12 +384,13 @@ RESTORE = (
         ("m", "A", "N", "nsrestore with the IP map, session socket, progress pipe"),
         ("s", "N", "CRIU restore, kept peer sockets, group IP remap"),
         ("m", "N", "A", "progress: processes restored", 1),
+        ("s", "W", "wait for restore-complete: no shared memory, communicator, or peer use"),
         ("g", "par"),
         ("m", "A", "C", "barrier snapshot/sockets-restored"),
         ("m", "C", "A", "every rank restored its sockets", 1),
         ("m", "A", "W", "lift the hold"),
         ("e", "and"),
-        ("s", "N", "CUDA restore and unlock"),
+        ("s", "N", "CUDA restore, then unlock; until then a CUDA call blocks"),
         ("m", "N", "L", "run the relay in restore mode"),
         ("m", "N", "R", "run the relays in restore mode"),
         ("r", "round 1 · INSPECT"),
@@ -419,6 +421,7 @@ RESTORE = (
         ("m", "A", "C", "barrier snapshot/release"),
         ("m", "C", "A", "every rank reconstructed, release allowed", 1),
         ("m", "A", "W", "write restore-complete with the attempt ID"),
+        ("s", "W", "resume; until CUDA Checkpoint drives NCCL, the app first calls NCCL Checkpoint's restore"),
         ("m", "A", "C", "Leave(restored): the session closes and drops its keys"),
     ],
 )
@@ -468,7 +471,7 @@ FAILURES = (
         ("s", "L", "exit failed"),
         ("n", "AA", "AB", "every agent terminates its source or fails its restore"),
         ("e", "else · agent stream lost or deadline passed"),
-        ("s", "C", "rank 1's stream dropped, or ranks missing at the deadline"),
+        ("s", "C", "rank 1's stream not back within the grace period, or ranks missing at the deadline"),
         ("m", "C", "AA", "event SessionFailed naming rank 1", 1),
         ("n", "AA", "AB", "handled as above: abort before the commit, fail-stop after it"),
         ("x",),
@@ -553,7 +556,7 @@ def phases():
     the commit line, and the restore fork where the sockets-restored barrier
     runs alongside CUDA restore and the cuInterpose rounds."""
     b = []
-    W, w, H40, H56, gap = 750, 330, 40, 56, 16
+    W, w, H40, H56, gap = 790, 330, 40, 56, 16
 
     def commit(x, y):
         b.append(T(x, y, "commit", "tm", 12, anchor="start"))
@@ -576,6 +579,7 @@ def phases():
 
     # Checkpoint: every step in sequence.
     ck_bottom, _ = column(30, "Checkpoint", [
+        ("g", "Workload quiesces: ready-for-snapshot"),
         ("p", "Admission: all-gather"),
         ("t", "Round: inspect, validate"),
         ("p", "Barrier: prepare"),
@@ -611,15 +615,27 @@ def phases():
     y3 = y2 + H56 + gap + 8
     b.append(line(lcx, left_bottom, lcx, y3 - 2))
     b.append(line(rcx, right_bottom, rcx, y3 - 2))
+    wait_top = y - gap                   # bottom of the CRIU restore box
     prev = None
     for k, label in (("p", "Endpoint, barrier: resume"),
                      ("a", "CUDA resume: libraries rendezvous"),
-                     ("p", "Barrier: release, restore-complete")):
+                     ("p", "Barrier: release, restore-complete"),
+                     ("g", "Workload resumes")):
         if prev is not None:
             b.append(line(x + w / 2, prev, x + w / 2, y3 - 2))
         b.extend(box(x, y3, w, H40, k, label))
+        if label.startswith("Barrier: release"):
+            wait_bottom = y3 + H40
         prev = y3 + H40
         y3 += H40 + gap
+
+    # The workload waits from CRIU restore until restore-complete.
+    bx = x + w + 14
+    b.append(f'<path class="frm" d="M{bx - 6} {wait_top + 2} L{bx} {wait_top + 2} L{bx} {wait_bottom - 2} '
+             f'L{bx - 6} {wait_bottom - 2}" fill="none" stroke-width="1.2"/>')
+    mid = (wait_top + wait_bottom) / 2
+    b.append(f'<g transform="rotate(90 {bx + 14:.1f} {mid:.1f})">'
+             + T(bx + 14, mid, "workload waits for restore-complete", "tm", 12) + "</g>")
 
     ly = max(ck_bottom, y3) + 8
     for i, (k, label) in enumerate((("p", "Session step"), ("t", "cuInterpose rounds"),
@@ -628,11 +644,12 @@ def phases():
         b.append(f'<rect class="k-{k}" x="{lx2}" y="{ly}" width="12" height="12" rx="2" stroke-width="0.8"/>')
         b.append(T(lx2 + 18, ly + 6, label, "tm", 12, anchor="start"))
     svg("phases.svg", W, ly + 34, "Phases of a group checkpoint and a group restore",
-        "Checkpoint: admission all-gather, an INSPECT round, prepare barrier, CUDA prepare, a revalidation round, "
-        "commit, destructive cuInterpose rounds, CUDA lock and checkpoint, hold and net-freeze barrier, CRIU dump. "
-        "Restore: admission, commit, CRIU restore under a narrow hold, then in parallel the sockets-restored barrier "
-        "and CUDA restore with the cuInterpose rounds, then the endpoint and resume barrier, CUDA resume, and the "
-        "release barrier.", b)
+        "Checkpoint: the workload quiesces and reports ready-for-snapshot, admission all-gather, an INSPECT round, "
+        "prepare barrier, CUDA prepare, a revalidation round, commit, destructive cuInterpose rounds, CUDA lock and "
+        "checkpoint, hold and net-freeze barrier, CRIU dump. Restore: admission, commit, CRIU restore under a narrow "
+        "hold, then in parallel the sockets-restored barrier and CUDA restore with the cuInterpose rounds, then the "
+        "endpoint and resume barrier, CUDA resume, and the release barrier, after which the workload resumes; the "
+        "workload waits from CRIU restore until restore-complete.", b)
 
 
 def main():
@@ -647,7 +664,8 @@ def main():
              "three destructive rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU dump.", *CHECKPOINT, width=960)
     sequence("restore.svg", "Group restore up to release",
              "Admission, commit, CRIU restore under a narrow hold, sockets-restored barrier in parallel with CUDA "
-             "restore and the cuInterpose rounds, resume barrier and CUDA resume, release barrier.", *RESTORE, width=1000)
+             "restore and the cuInterpose rounds, resume barrier and CUDA resume, release barrier; the workload waits "
+             "from CRIU restore until restore-complete.", *RESTORE, width=1000)
     sequence("library-rendezvous.svg", "Library rendezvous through the session",
              "During CUDA resume, rank 0 of a communicator inserts a new unique ID that the other ranks read through "
              "their agents.", *LIBRARIES, width=860)
