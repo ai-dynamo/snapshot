@@ -19,13 +19,6 @@ up and ready without cold-starting.
 > API as part of its own control loop — `kubectl` here is just for illustration and
 > for trying things out by hand.
 
-> [!NOTE]
-> These guides describe the current `main` branch. Their restore profiles rely on
-> the restore proxy, which Snapshot 0.2.0 does not include, so install a build
-> newer than 0.2.0. If you run Snapshot 0.2.0, use the
-> [guides on the `release/0.2` branch](https://github.com/ai-dynamo/snapshot/tree/release/0.2/docs/guides)
-> instead.
-
 ## Before you start
 
 1. **Install Snapshot.** The cluster [prerequisites](../../README.md#prerequisites)
