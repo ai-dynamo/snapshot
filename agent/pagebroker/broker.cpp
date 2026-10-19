@@ -345,11 +345,7 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
     if (!TryAbortTransactionLocked(*transaction, transaction_lock, AbortWait::NoWait, cleanup_error)) {
       continue;
     }
-    std::lock_guard transactions_lock(transactions_mutex_);
-    const auto current = transactions_.find(id);
-    if (current != transactions_.end() && current->second == transaction) {
-      transactions_.erase(current);
-    }
+    EraseTransaction(id, transaction);
   }
   ReapTerminalTransactions(now);
 }
@@ -370,6 +366,15 @@ Broker::FindTransaction(const std::string& transaction_id)
   std::lock_guard lock(transactions_mutex_);
   const auto iterator = transactions_.find(transaction_id);
   return iterator == transactions_.end() ? nullptr : iterator->second;
+}
+
+void
+Broker::EraseTransaction(const std::string& id, const TransactionHandle& transaction)
+{
+  std::lock_guard lock(transactions_mutex_);
+  const auto current = transactions_.find(id);
+  if (current != transactions_.end() && current->second == transaction)
+    transactions_.erase(current);
 }
 
 void
@@ -406,12 +411,8 @@ Broker::ReapTerminalTransactions(std::chrono::steady_clock::time_point now)
     }
   }
 
-  std::lock_guard lock(transactions_mutex_);
-  for (const auto& item : expired) {
-    const auto iterator = transactions_.find(item.id);
-    if (iterator != transactions_.end() && iterator->second == item.transaction)
-      transactions_.erase(iterator);
-  }
+  for (const auto& item : expired)
+    EraseTransaction(item.id, item.transaction);
 }
 
 bool
@@ -575,10 +576,7 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
       if (cleanup_error)
         return Fail(request, Failure::INSUFFICIENT_STORAGE,
                     "insufficient tmpfs capacity; cleanup: " + cleanup_error.message());
-      std::lock_guard transactions_lock(transactions_mutex_);
-      const auto current = transactions_.find(request.transaction_id());
-      if (current != transactions_.end() && current->second == transaction)
-        transactions_.erase(current);
+      EraseTransaction(request.transaction_id(), transaction);
       return Fail(request, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
     }
     staging_reserved = !direct;
@@ -614,10 +612,7 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
       transaction->CleanupTransfer(cleanup_error);
       if (cleanup_error)
         return Fail(request, code, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
-      std::lock_guard transactions_lock(transactions_mutex_);
-      const auto current = transactions_.find(request.transaction_id());
-      if (current != transactions_.end() && current->second == transaction)
-        transactions_.erase(current);
+      EraseTransaction(request.transaction_id(), transaction);
       return Fail(request, code, error.what());
     }
     return AbortStaging(request, *transaction, owned ? staging_directory : Path{}, error);
@@ -701,10 +696,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
         if (cleanup_error)
           return Fail(request, invalid ? Failure::INVALID_REQUEST : failure->code,
               std::string(error.what()) + "; cleanup: " + cleanup_error.message());
-        std::lock_guard transactions_lock(transactions_mutex_);
-        const auto current = transactions_.find(request.transaction_id());
-        if (current != transactions_.end() && current->second == transaction)
-          transactions_.erase(current);
+        EraseTransaction(request.transaction_id(), transaction);
         return Fail(request, invalid ? Failure::INVALID_REQUEST : failure->code, error.what());
       }
       return AbortStaging(request, *transaction, owned ? output : Path{}, error);
