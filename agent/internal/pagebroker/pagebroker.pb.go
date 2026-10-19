@@ -1225,6 +1225,9 @@ func (x *PrepareDirectCheckpointRequest) GetIoEngine() *IOEngine {
 }
 
 // Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
+// Success does not guarantee that temporary staging has been deleted. PageBroker retries failed cleanup,
+// retaining staging ownership and any admission reservations until deletion succeeds. Transactions awaiting
+// cleanup are not eligible for terminal eviction.
 // Repeating Commit returns the same retained result, including any PublishedArtifact.
 // Commit for a transaction PageBroker still remembers but whose deadline has passed returns
 // TRANSACTION_EXPIRED. Commit for an aborted, reaped, or unknown transaction returns TRANSACTION_NOT_FOUND.
