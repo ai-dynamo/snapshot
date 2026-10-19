@@ -139,34 +139,5 @@ image and deploy it:
 
 - [Restore a replica](restore.md)
 
-## Clean up and run again
-
-The names above are fixed, so a recipe cannot run twice in one namespace until
-the first run is deleted. A `SnapshotJob` fails with `PodSnapshotNameConflict` when
-a `PodSnapshot` of its name already exists, which is what Option 1 and any earlier
-`SnapshotJob` leave behind. Delete a run's resources with the restored replica
-first, using your recipe's names from the table. The commands skip what the
-other capture lane never created:
-
-```bash
-kubectl delete deployment vllm-1gpu-restored --namespace "$SNAPSHOT_NAMESPACE" --ignore-not-found
-kubectl delete deployment vllm-qwen3-0-6b-source --namespace "$SNAPSHOT_NAMESPACE" --ignore-not-found
-kubectl delete snapshotjob vllm-qwen3-0-6b-snapshot --namespace "$SNAPSHOT_NAMESPACE" --ignore-not-found
-kubectl delete podsnapshot vllm-qwen3-0-6b-snapshot --namespace "$SNAPSHOT_NAMESPACE" --ignore-not-found
-```
-
-Deleting a `SnapshotJob` keeps its `PodSnapshot`, so a checkpoint outlives the job.
-Deleting a `PodSnapshot` deletes its checkpoint from the checkpoint volume. Keep the
-ConfigMap and the model cache for the next run, which saves the download. When you
-are done with every recipe, and no Pod mounts it any more, delete the model cache
-with `kubectl delete pvc model-cache`.
-
-## If a step fails
-
-Describe the resource that stalled, such as `kubectl describe podsnapshot <name>`,
-`kubectl describe snapshotjob <name>` or `kubectl describe pod <pod>`, then see
-[Troubleshooting](../operations/troubleshooting.md) for the agent logs and the
-common causes.
-
 See [Installation](../operations/install.md) for installing and uninstalling
 Snapshot and the [API reference](../reference/api.md) for full resource detail.

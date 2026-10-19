@@ -90,8 +90,7 @@ curl --silent --request POST http://localhost:8000/generate \
 The restored process resumed from the checkpointed state, skipping model loading
 and warm-up, so it answers with generated text in a `text` field.
 
-To run another recipe or repeat this one, first
-[clean up](README.md#clean-up-and-run-again). If the restore does not complete, see
+If the restore does not complete, see
 [Troubleshooting](../operations/troubleshooting.md).
 
 In practice, higher-level systems create these restored Deployments rather than
