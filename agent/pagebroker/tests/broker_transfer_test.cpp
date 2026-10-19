@@ -14,6 +14,7 @@
 #include <system_error>
 #include <thread>
 
+#include "tests/request_builder.hpp"
 #include "tests/temporary_directory.hpp"
 #include "transfer/engine/posix/posix_copy_engine.hpp"
 #include "transfer/filesystem/filesystem_storage.hpp"
@@ -41,6 +42,7 @@ extern "C" int __wrap_mkdir(const char* path, mode_t mode)
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
+using test::Configure;
 namespace {
 enum class Boundary { PrepareRestore, StageRestore, ValidateCheckpoint, InspectCheckpoint, PublishCheckpoint };
 
@@ -92,15 +94,6 @@ class InterruptingEngine : public TransferEngine {
   PosixCopyEngine posix_;
   Callback callback_;
 };
-
-Request
-RequestFor(const char* id)
-{
-  Request request;
-  request.set_request_id(std::string("request-") + id);
-  request.set_transaction_id(id);
-  return request;
-}
 }  // namespace
 
 TEST(FilesystemStorageTest, ExclusiveCreationPreservesEveryExistingEntry)
@@ -192,7 +185,7 @@ TEST(FilesystemStorageTest, AppliesOnlyKnownRestorePermissions)
   }
 }
 
-class BrokerTransferTest : public ::testing::Test {
+class BrokerTransferTest : public ::testing::Test, public test::RequestBuilder {
  protected:
   void SetUp() override
   {
@@ -209,8 +202,8 @@ class BrokerTransferTest : public ::testing::Test {
   Request Restore()
   {
     auto request = RequestFor("restore");
-    request.mutable_staged_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
-    request.mutable_staged_restore()->mutable_io_engine()->mutable_posix_copy();
+    Configure(request.mutable_staged_restore()->mutable_source(), request.mutable_staged_restore()->mutable_io_engine(),
+        source_);
     return request;
   }
 
@@ -221,8 +214,7 @@ class BrokerTransferTest : public ::testing::Test {
                                : request.mutable_prepare_staged_checkpoint()->mutable_destination();
     auto* engine = direct ? request.mutable_prepare_direct_checkpoint()->mutable_io_engine()
                           : request.mutable_prepare_staged_checkpoint()->mutable_io_engine();
-    destination->mutable_filesystem()->set_directory((storage_ / "published").string());
-    engine->mutable_posix_copy();
+    Configure(destination, engine, storage_ / "published");
     return request;
   }
 
@@ -312,8 +304,8 @@ TEST_F(BrokerTransferTest, DirectRestoreUsesGenericPreparationAndBorrowsItsSourc
   std::vector<Boundary> calls;
   Intercept(broker, [&](Boundary boundary, Cancellation) { calls.push_back(boundary); });
   auto request = RequestFor("direct");
-  request.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
-  request.mutable_direct_restore()->mutable_io_engine()->mutable_posix_copy();
+  Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(),
+      source_);
   ASSERT_TRUE(broker.HandleRequest(request).has_direct_restore_ready());
   EXPECT_EQ(calls, (std::vector<Boundary>{Boundary::PrepareRestore, Boundary::StageRestore}));
   EXPECT_EQ(resources->reserved, 0u);
@@ -346,8 +338,7 @@ TEST_F(BrokerTransferTest, BothCheckpointModesUseGenericPreparationAndPublicatio
                                : request.mutable_prepare_staged_checkpoint()->mutable_destination();
     auto* engine = direct ? request.mutable_prepare_direct_checkpoint()->mutable_io_engine()
                           : request.mutable_prepare_staged_checkpoint()->mutable_io_engine();
-    destination->mutable_filesystem()->set_directory((storage_ / "saved").string());
-    engine->mutable_posix_copy();
+    Configure(destination, engine, storage_ / "saved");
     const auto prepared = broker.HandleRequest(request);
     ASSERT_FALSE(prepared.has_failure()) << prepared.DebugString();
     const auto output = direct ? prepared.direct_checkpoint_directory().image_directory()
@@ -370,8 +361,8 @@ TEST_F(BrokerTransferTest, FailedDirectRestoreNeverRemovesBorrowedData)
       throw std::runtime_error("access failed");
   });
   auto request = RequestFor("direct-failure");
-  request.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
-  request.mutable_direct_restore()->mutable_io_engine()->mutable_posix_copy();
+  Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(),
+      source_);
   EXPECT_EQ(broker.HandleRequest(request).failure().code(), Failure::STORAGE_ERROR);
   request.mutable_abort();
   EXPECT_TRUE(broker.HandleRequest(request).has_abort_complete());
@@ -405,10 +396,7 @@ TEST_F(BrokerTransferTest, PreservesFailureCodesAcrossRequestAndTransferBoundari
         EXPECT_EQ(response.failure().code(), failure.code);
         EXPECT_FALSE(fs::exists(staging_ / "restore" / "restore"));
       } else {
-        auto prepare = RequestFor("checkpoint");
-        prepare.mutable_prepare_staged_checkpoint()->mutable_destination()->mutable_filesystem()->set_directory(
-            (storage_ / "published").string());
-        prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine()->mutable_posix_copy();
+        auto prepare = Checkpoint(false);
         auto response = broker.HandleRequest(prepare);
         if (boundary != Boundary::ValidateCheckpoint) {
           ASSERT_TRUE(response.has_staged_checkpoint_directory()) << response.DebugString();
@@ -522,8 +510,8 @@ TEST_F(BrokerTransferTest, ShutdownCancelsActiveRestoreAndRemovesStaging)
 TEST_F(BrokerTransferTest, PreparationUsesBrokerLifetimeWithOrWithoutLimits)
 {
   auto direct_restore = RequestFor("restore");
-  direct_restore.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
-  direct_restore.mutable_direct_restore()->mutable_io_engine()->mutable_posix_copy();
+  Configure(direct_restore.mutable_direct_restore()->mutable_source(),
+      direct_restore.mutable_direct_restore()->mutable_io_engine(), source_);
   for (const auto& request : {Restore(), direct_restore, Checkpoint(false), Checkpoint(true)}) {
     SCOPED_TRACE(request.DebugString());
     for (const bool limited : {false, true}) {
@@ -545,7 +533,7 @@ TEST_F(BrokerTransferTest, PreparationUsesBrokerLifetimeWithOrWithoutLimits)
       const auto response = broker.HandleRequest(request);
       ASSERT_FALSE(response.has_failure()) << response.DebugString();
       EXPECT_TRUE(prepared);
-      auto abort = RequestFor(request.transaction_id().c_str());
+      auto abort = RequestFor(request.transaction_id());
       abort.mutable_abort();
       ASSERT_TRUE(broker.HandleRequest(abort).has_abort_complete());
     }
@@ -586,7 +574,10 @@ TEST_F(BrokerTransferTest, AbortAndShutdownCancelPreparation)
         resumed.wait();
       }
     });
-    auto restore = std::async(std::launch::async, [&] { return broker.HandleRequest(Restore()); });
+    const auto restore_request = Restore();
+    auto abort_request = RequestFor("restore");
+    abort_request.mutable_abort();
+    auto restore = std::async(std::launch::async, [&] { return broker.HandleRequest(restore_request); });
     preparing.get_future().wait();
     std::stop_callback on_stop(token, [&] { cancelled.set_value(); });
     auto cancel = std::async(std::launch::async, [&] {
@@ -594,9 +585,7 @@ TEST_F(BrokerTransferTest, AbortAndShutdownCancelPreparation)
         broker.Shutdown();
         return Response{};
       }
-      auto request = RequestFor("restore");
-      request.mutable_abort();
-      return broker.HandleRequest(request);
+      return broker.HandleRequest(abort_request);
     });
     // Always release the worker, including on failure, so the test cannot deadlock.
     EXPECT_EQ(stopped.wait_for(std::chrono::seconds(1)), std::future_status::ready);
@@ -692,11 +681,12 @@ TEST_F(BrokerTransferTest, DuplicateRestorePreservesRegisteredStagedTransaction)
 {
   Broker broker(staging_, storage_);
   const auto resources = Limit(broker, 16);
-  ASSERT_TRUE(broker.HandleRequest(Restore()).has_staged_restore_directory());
+  const auto request = Restore();
+  ASSERT_TRUE(broker.HandleRequest(request).has_staged_restore_directory());
   const auto transaction = Find(broker, "restore");
   ASSERT_NE(transaction, nullptr);
 
-  EXPECT_EQ(broker.HandleRequest(Restore()).failure().code(), Failure::TRANSACTION_CONFLICT);
+  EXPECT_EQ(broker.HandleRequest(request).failure().code(), Failure::TRANSACTION_CONFLICT);
   EXPECT_EQ(Find(broker, "restore"), transaction);
   EXPECT_EQ(transaction->state(), Transaction::State::STAGED);
   EXPECT_EQ(fs::file_size(staging_ / "restore/restore/image"), 5u);
@@ -872,7 +862,10 @@ TEST_F(BrokerTransferTest, CheckpointPreparationObservesAbortAndShutdown)
           resumed.wait();
         }
       });
-      auto prepare = std::async(std::launch::async, [&] { return broker.HandleRequest(Checkpoint(direct)); });
+      const auto prepare_request = Checkpoint(direct);
+      auto abort_request = RequestFor("checkpoint");
+      abort_request.mutable_abort();
+      auto prepare = std::async(std::launch::async, [&] { return broker.HandleRequest(prepare_request); });
       preparing.get_future().wait();
       std::stop_callback on_stop(token, [&] { cancelled.set_value(); });
       auto cancel = std::async(std::launch::async, [&] {
@@ -880,9 +873,7 @@ TEST_F(BrokerTransferTest, CheckpointPreparationObservesAbortAndShutdown)
           broker.Shutdown();
           return Response{};
         }
-        auto request = RequestFor("checkpoint");
-        request.mutable_abort();
-        return broker.HandleRequest(request);
+        return broker.HandleRequest(abort_request);
       });
       EXPECT_EQ(stopped.wait_for(std::chrono::seconds(1)), std::future_status::ready);
       // Release the worker even when cancellation was not propagated.
