@@ -35,11 +35,13 @@ answers a request without cold-starting.
    ```
 
 3. **Pick the namespace** where the workload runs, creating it if it does not
-   exist. The guides read it from `SNAPSHOT_NAMESPACE`:
+   exist. This is your own namespace for the replicas, not the one Snapshot is
+   installed in (`snapshot` in the README's install command). The guides read it
+   from `WORKLOAD_NAMESPACE`:
 
    ```bash
-   export SNAPSHOT_NAMESPACE=<namespace>
-   kubectl get namespace "$SNAPSHOT_NAMESPACE" || kubectl create namespace "$SNAPSHOT_NAMESPACE"
+   export WORKLOAD_NAMESPACE=<namespace>
+   kubectl get namespace "$WORKLOAD_NAMESPACE" || kubectl create namespace "$WORKLOAD_NAMESPACE"
    ```
 
 4. **Create the model cache.** Every recipe reads its model from it, as the
@@ -63,7 +65,7 @@ which holds all three models. Set `storageClassName` in
 
 ```bash
 kubectl apply \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --filename model-cache-pvc.yaml
 ```
 
@@ -129,7 +131,7 @@ resumes it after restore, implementing the
 
 ```bash
 kubectl create configmap "$FRAMEWORK-app" \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --from-file=app.py="$FRAMEWORK/app.py"
 ```
 
@@ -152,10 +154,10 @@ run downloads the model, so this can take a while:
 
 ```bash
 sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" "$SOURCE_MANIFEST" | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
 
 kubectl rollout status \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   deployment/"$SOURCE_NAME" \
   --timeout="$WAIT"
 ```
@@ -164,10 +166,10 @@ Then ask Snapshot to checkpoint that replica, and wait until the checkpoint is
 ready:
 
 ```bash
-POD=$(kubectl get pods --namespace "$SNAPSHOT_NAMESPACE" \
+POD=$(kubectl get pods --namespace "$WORKLOAD_NAMESPACE" \
   --selector app="$SOURCE_NAME" --output jsonpath='{.items[0].metadata.name}')
 
-kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename - <<EOF
+kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename - <<EOF
 apiVersion: nvidia.com/v1alpha1
 kind: PodSnapshot
 metadata:
@@ -180,7 +182,7 @@ spec:
         - main
 EOF
 
-kubectl wait --namespace "$SNAPSHOT_NAMESPACE" \
+kubectl wait --namespace "$WORKLOAD_NAMESPACE" \
   --for=condition=Ready podsnapshot/"$SNAPSHOT_NAME" \
   --timeout="$WAIT"
 ```
@@ -190,9 +192,9 @@ The source replica keeps running and serving.
 ### Option B: `SnapshotJob`
 
 ```bash
-kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename "$SNAPSHOTJOB_MANIFEST"
+kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename "$SNAPSHOTJOB_MANIFEST"
 
-kubectl wait --namespace "$SNAPSHOT_NAMESPACE" \
+kubectl wait --namespace "$WORKLOAD_NAMESPACE" \
   --for=condition=Completed snapshotjob/"$SNAPSHOT_NAME" \
   --timeout="$WAIT"
 ```
@@ -213,10 +215,10 @@ loading the model:
 
 ```bash
 sed "s|\${SNAPSHOT_NAME}|$SNAPSHOT_NAME|" "$RESTORE_MANIFEST" | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
 
 kubectl rollout status \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   deployment/"$RESTORED_NAME" \
   --timeout="$WAIT"
 ```
@@ -225,7 +227,7 @@ Then send it a request. In one terminal, forward its port:
 
 ```bash
 kubectl port-forward \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   deployment/"$RESTORED_NAME" 8000:8000
 ```
 

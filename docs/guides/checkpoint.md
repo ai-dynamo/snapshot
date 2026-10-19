@@ -42,11 +42,11 @@ spec:
 
 ```bash
 kubectl apply \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --filename vllm-qwen3-0-6b-snapshot.yaml
 
 kubectl wait \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --for=condition=Ready podsnapshot/vllm-qwen3-0-6b-snapshot \
   --timeout=30m
 ```
@@ -99,17 +99,17 @@ and wait for it to complete:
 
 ```bash
 kubectl apply \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --filename vllm/capture/qwen3-0.6b-snapshotjob.yaml
 
 kubectl wait \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --for=condition=Completed snapshotjob/vllm-qwen3-0-6b-snapshot \
   --timeout=60m
 
 # the resulting PodSnapshot to restore from:
 kubectl get snapshotjob vllm-qwen3-0-6b-snapshot \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --output jsonpath='{.status.podSnapshotName}'
 ```
 
