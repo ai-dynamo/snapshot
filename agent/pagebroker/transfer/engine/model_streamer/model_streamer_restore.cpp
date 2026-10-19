@@ -453,6 +453,21 @@ ModelStreamerRestore::AcceptEntry(StreamerEntry& entry, const StreamerResponse& 
 void
 ModelStreamerRestore::FailEntry(StreamerEntry& entry, std::exception_ptr error) noexcept
 {
+  // A shared session can fail because a different request was cancelled.
+  // Only this entry's control can establish its own cancellation reason.
+  try {
+    if (const auto reason = entry.control.Reason())
+      throw CancellationError(*reason);
+    try {
+      std::rethrow_exception(error);
+    }
+    catch (const CancellationError&) {
+      throw std::runtime_error("Model Streamer session interrupted by another submission's cancellation");
+    }
+  }
+  catch (...) {
+    error = std::current_exception();
+  }
   try {
     entry.completion.set_exception(std::move(error));
   }

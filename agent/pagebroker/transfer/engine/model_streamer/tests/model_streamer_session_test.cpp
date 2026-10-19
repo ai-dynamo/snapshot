@@ -439,6 +439,66 @@ TEST_F(ModelStreamerSessionTest, ActiveCancellationWaitsForNativeTeardown)
   EXPECT_TRUE(restore.Failed());
 }
 
+class SharedSessionCancellationTest : public ModelStreamerSessionTest,
+                                      public ::testing::WithParamInterface<bool> {};
+
+TEST_P(SharedSessionCancellationTest, ReportsEachRequestsOwnCancellationAfterDrain)
+{
+  const bool deadline = GetParam();
+  state.allow_responses = false;
+  state.hold_end = true;
+  Cancellation trigger;
+  if (deadline)
+    trigger = trigger.WithDeadline(Cancellation::Clock::now() + 1s);
+  Cancellation cancelled_peer;
+  ModelStreamerRestore restore;
+  auto first = std::async(std::launch::async, [&] { restore.Stage(Plan(), root_ / "first", trigger); });
+  auto live = std::async(std::launch::async, [&] { restore.Stage(Plan(), root_ / "live"); });
+  auto cancelled = std::async(std::launch::async, [&] {
+    restore.Stage(Plan(), root_ / "cancelled", cancelled_peer);
+  });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted == 3; }));
+  }
+  if (!deadline)
+    trigger.Cancel();
+  const bool ending = WaitForEnd();
+  EXPECT_TRUE(ending);
+  EXPECT_EQ(first.wait_for(0ms), std::future_status::timeout);
+  EXPECT_EQ(live.wait_for(0ms), std::future_status::timeout);
+  EXPECT_EQ(cancelled.wait_for(0ms), std::future_status::timeout);
+  cancelled_peer.Cancel();
+
+  const auto expect_session_failure = [](auto&& operation) {
+    try {
+      operation();
+      ADD_FAILURE() << "restore completed despite shared session failure";
+    }
+    catch (const CancellationError&) {
+      ADD_FAILURE() << "restore inherited another request's cancellation";
+    }
+    catch (const std::runtime_error& error) {
+      EXPECT_STREQ(error.what(), "Model Streamer session interrupted by another submission's cancellation");
+    }
+  };
+  // Post rejects new work with the event loop's retained exception while end
+  // is blocked. It must apply the same per-request attribution as active work.
+  if (ending)
+    expect_session_failure([&] { restore.Stage(Plan(), root_ / "late"); });
+  ReleaseEnd();
+  ExpectCancellation(first, deadline ? CancellationError::Reason::DEADLINE_EXCEEDED :
+                                      CancellationError::Reason::CANCELLED);
+  expect_session_failure([&] { live.get(); });
+  ExpectCancellation(cancelled, CancellationError::Reason::CANCELLED);
+  EXPECT_TRUE(restore.Failed());
+  EXPECT_EQ(state.submitted, 3U);
+  EXPECT_EQ(state.ends, 1U);
+}
+
+INSTANTIATE_TEST_SUITE_P(CancellationCauses, SharedSessionCancellationTest, ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "Deadline" : "ExplicitStop"; });
+
 TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator)
 {
   state.hold_start = true;
