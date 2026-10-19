@@ -30,6 +30,7 @@
 #include "broker.hpp"
 #include "daemon.hpp"
 #include "gpu/storage_manifest.hpp"
+#include "tests/request_builder.hpp"
 #include "tests/temporary_directory.hpp"
 #include "transfer/engine/posix/posix_copy_engine.hpp"
 
@@ -38,29 +39,9 @@ using namespace snapshot::pagebroker;
 
 namespace {
 
-class RequestBuilder {
- public:
-  Request RequestFor(const std::string& transaction_id)
-  {
-    Request request;
-    request.set_request_id("request-" + transaction_id + "-" + std::to_string(++sequence_));
-    request.set_transaction_id(transaction_id);
-    return request;
-  }
+using test::Configure;
 
- private:
-  unsigned sequence_ = 0;
-};
-
-inline void
-Configure(StorageBackend* storage, IOEngine* engine, const std::filesystem::path& directory)
-{
-  storage->mutable_filesystem()->set_directory(directory.string());
-  engine->mutable_posix_copy();
-}
-
-
-class BrokerTest : public ::testing::Test, public RequestBuilder {
+class BrokerTest : public ::testing::Test, public test::RequestBuilder {
  protected:
   void SetUp() override
   {
@@ -200,7 +181,7 @@ TEST(BrokerStartupTest, RemovesReadonlyRestoreAndCheckpointStagingWithoutRecover
   const auto readonly = fs::perms::owner_read | fs::perms::owner_exec;
   fs::permissions(source / "nested", readonly);
   fs::permissions(source, readonly);
-  RequestBuilder requests;
+  test::RequestBuilder requests;
   {
     Broker broker(staging, storage);
     auto restore = requests.RequestFor("interrupted-restore");
@@ -763,7 +744,9 @@ TEST_F(BrokerTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirector
   EXPECT_EQ(directory.parent_path(), destination.parent_path());
   EXPECT_FALSE(fs::exists(destination));
   std::ofstream(directory / "payload") << "GPU and CPU output";
-  request.set_request_id(RequestFor("direct-save").request_id());
+  const auto retry = RequestFor("direct-save");
+  ASSERT_NE(retry.request_id(), request.request_id());
+  request.set_request_id(retry.request_id());
   const auto repeated = broker().HandleRequest(request);
   ASSERT_TRUE(repeated.has_direct_checkpoint_directory()) << repeated.DebugString();
   EXPECT_EQ(repeated.direct_checkpoint_directory().image_directory(), directory.string());
@@ -902,7 +885,7 @@ TEST(DaemonOptionsTest, RejectsInvalidOptions)
 }
 
 // Exercise the shipped listener and framing with real SCM_RIGHTS descriptors.
-class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
+class DaemonTransportTest : public ::testing::Test, public test::RequestBuilder {
  protected:
   void SetUp() override
   {
