@@ -13,8 +13,8 @@ import (
 
 const metadataRequestTimeout = 2 * time.Minute
 
-// PrepareArtifactCheckpoint validates the bound destination before capture.
-// A nil engine uses the broker's default without changing the store.
+// PrepareArtifactCheckpoint validates a bound destination before capture. A nil
+// engine selects the broker's configured default; it never changes the store.
 func (c Client) PrepareArtifactCheckpoint(ctx context.Context, transactionID string, target *ArtifactTarget, engine *IOEngine) (string, error) {
 	if err := validateArtifactTarget(target); err != nil {
 		return "", err
@@ -31,9 +31,10 @@ func (c Client) PrepareArtifactCheckpoint(ctx context.Context, transactionID str
 	return imageDirectory(response.GetStagedCheckpointDirectory().GetImageDirectory())
 }
 
-// CommitCheckpoint retries with the same transaction ID and returns the artifact.
-// Missing results never authorize recapture.
-// Filesystem-path checkpoints and restore cleanup use Commit.
+// CommitCheckpoint returns the descriptor of a target-addressed checkpoint.
+// Retries preserve the transaction ID and result. Filesystem-path checkpoints
+// and restore cleanup use Commit. A missing result never authorizes another
+// capture attempt.
 func (c Client) CommitCheckpoint(ctx context.Context, transactionID string) (*PublishedArtifact, error) {
 	result, err := c.commitWithRetry(ctx, transactionID)
 	if err != nil {
