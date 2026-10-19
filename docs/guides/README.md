@@ -6,12 +6,12 @@ guides take you through it once, end to end:
 
 1. **Prepare** the workload.
 2. **Checkpoint** a running replica.
-3. **Restore** a new replica from the checkpoint and send it a request.
+3. **Restore** a new replica from the checkpoint.
 
 The commands are the same for every inference engine (vLLM, SGLang and
 TensorRT-LLM) and every recipe. You choose your recipe once, [below](#choose-your-recipe),
-and every later command uses that choice. You are done when the restored replica
-answers a request without cold-starting.
+and every later command uses that choice. You are done when a restored replica is
+up and ready without cold-starting.
 
 > [!NOTE]
 > These guides use `kubectl` to show the resources and the flow. In production, a
@@ -223,25 +223,19 @@ kubectl rollout status \
   --timeout="$WAIT"
 ```
 
-Then send it a request. In one terminal, forward its port:
+The Deployment becomes Ready once the restore completes, because its readiness
+waits for the restored workload to signal that it is serving again. To confirm
+that the replica was restored rather than started from scratch, check the pod's
+`nvidia.com/Restored` condition, which the node agent adds when the restore
+completes:
 
 ```bash
-kubectl port-forward \
-  --namespace "$WORKLOAD_NAMESPACE" \
-  deployment/"$RESTORED_NAME" 8000:8000
+kubectl get pods --namespace "$WORKLOAD_NAMESPACE" \
+  --selector app="$RESTORED_NAME" \
+  --output jsonpath='{.items[0].status.conditions[?(@.type=="nvidia.com/Restored")].status}'
 ```
 
-and in a second terminal, ask it a question:
-
-```bash
-curl --silent --request POST http://localhost:8000/generate \
-  --header 'Content-Type: application/json' \
-  --data '{"prompt": "What is the capital of Italy?"}'
-```
-
-It answers with generated text in a `text` field, without loading the model
-again. The pod also carries a `nvidia.com/Restored` condition once the restore
-completes. If the restore does not complete, see
+It prints `True`. If the restore does not complete, see
 [Troubleshooting](../operations/troubleshooting.md).
 
 In practice, higher-level systems create these restored Deployments rather than

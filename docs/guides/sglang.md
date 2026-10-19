@@ -33,7 +33,7 @@ After restore, the checkpointed process calls
 `TokenizerManager.continue_generation()`. It runs another generation and
 starts an API on port 8000. It writes `sglang-restore-ready` only after the
 generation succeeds and the API is listening.
-[Restore](restore.md#4-verify-the-restored-replica) sends it a request.
+[Restore](restore.md#4-verify-the-restored-replica) shows how to confirm the restore.
 
 The capture manifests run the tested SGLang image unmodified, and mount `app.py`
 at `/snapshot-app` from the `sglang-app` ConfigMap created in step 1.
