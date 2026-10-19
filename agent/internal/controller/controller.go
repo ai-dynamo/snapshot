@@ -1356,9 +1356,7 @@ func (w *NodeController) runCaptureQueue(ctx context.Context) {
 func (w *NodeController) processCaptureQueueItem(ctx context.Context, name string) {
 	defer w.captureQueue.Done(name)
 	// A panic here would otherwise kill the agent and with it every unrelated
-	// capture and restore on this node. The work order is failed terminally
-	// instead of requeued: a panic is deterministic, so retrying it would just
-	// panic again.
+	// capture and restore on this node.
 	defer recoverPanic(w.log, "capture work order", func(err error) {
 		w.failCaptureAfterPanic(ctx, name, err)
 	}, "content", name)
