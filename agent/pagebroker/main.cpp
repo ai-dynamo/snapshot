@@ -20,7 +20,7 @@ main(int argc, char** argv)
                  "[--max-concurrent-requests count] [--custom-storage-engine on|off] "
                  "[--custom-storage-buffer-count count] [--custom-storage-chunk-bytes bytes] "
                  "[--custom-storage-max-pinned-bytes bytes] "
-                 "[--storage-config path] [--transaction-lifetime seconds]\n"
+                 "[--storage-config path]\n"
               << "pagebroker: " << error.what() << '\n';
     return static_cast<int>(ExitCode::INVALID_ARGUMENTS);
   }
