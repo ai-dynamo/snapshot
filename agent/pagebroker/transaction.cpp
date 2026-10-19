@@ -96,24 +96,24 @@ Transaction::~Transaction()
 }
 
 void
-Transaction::PrepareTransfer(std::shared_ptr<TransactionResources> resources, Kind kind,
+Transaction::PrepareTransfer(std::shared_ptr<TransactionResources> resources, uintmax_t initial_bytes,
     const Path& directory, const PublishedArtifact* artifact, std::chrono::steady_clock::duration lifetime)
 {
-  kind_ = kind;
   transfer_directory_ = directory;
   deadline_ = Cancellation::Clock::now() + (resources ? resources->lifetime : lifetime);
   if (!resources)
     return;
-  if (kind == Kind::CHECKPOINT && artifact)
+  if (artifact)
     publication_ = CheckpointPublication{*artifact, {}, false};
   std::lock_guard lock(resources->mutex);
-  if (resources->active >= resources->transaction_limit || resources->reserved >= resources->byte_limit)
+  if (resources->active >= resources->transaction_limit || resources->reserved >= resources->byte_limit ||
+      initial_bytes > resources->byte_limit - resources->reserved)
     throw TransferError(Failure::INSUFFICIENT_STORAGE, "staging admission limit reached");
   if (publication_ && !resources->destinations.insert(publication_->artifact.artifact_handle()).second)
     throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint ID is already owned by a transaction");
   resources_ = std::move(resources);
   ++resources_->active;
-  reserved_ = kind == Kind::CHECKPOINT ? 1 : 0;
+  reserved_ = initial_bytes;
   resources_->reserved += reserved_;
 }
 
