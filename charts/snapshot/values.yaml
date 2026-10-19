@@ -123,8 +123,8 @@ pageBroker:
   restoreMode: direct
   maxConcurrentRequests: 16
   staging:
-    # Must stay below daemonset.resources.limits.memory; the chart refuses to
-    # render otherwise. Sizing is in docs/operations/storage.md.
+    # Lowered to fit when it does not leave the agent room; see
+    # docs/operations/storage.md.
     sizeLimit: 56Gi
   # Allocate and register the full ring before accepting GPU work.
   # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.

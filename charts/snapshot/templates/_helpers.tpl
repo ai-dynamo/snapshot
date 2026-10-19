@@ -79,9 +79,7 @@ Use the same agent image for the DaemonSet and cuinterpose installer.
 {{- end }}
 
 {{/*
-Convert a Kubernetes quantity to bytes, or empty when it is not a form we
-parse. Callers treat empty as "cannot compare" and leave the value alone, so an
-exotic-but-valid quantity still installs.
+Convert a Kubernetes quantity to bytes, or empty when it is not a form we parse.
 */}}
 {{- define "snapshot.quantityBytes" -}}
 {{- $q := . | toString -}}
@@ -98,15 +96,9 @@ exotic-but-valid quantity still installs.
 {{- end }}
 
 {{/*
-The staging sizeLimit, capped so the agent survives filling it. Staging pages
-are charged to the agent's cgroup, so a cap at or above the container memory
-limit lets the agent be OOM-killed before the volume fills. The cap is lowered
-to fit rather than rejected: refusing to render would break installs that work
-today. Sizing is in docs/operations/storage.md.
-
-Falls back even when pageBroker.staging is explicitly null, as helm upgrade
---reuse-values leaves it for a release predating the key: an absent sizeLimit
-is an unbounded volume, not a safe default.
+The staging sizeLimit, lowered to leave the agent room to survive filling it.
+Sizing is in docs/operations/storage.md. Falls back when pageBroker.staging is
+explicitly null, as helm upgrade --reuse-values leaves it.
 */}}
 {{- define "snapshot.stagingSizeLimit" -}}
 {{- $configured := ((.Values.pageBroker).staging | default dict).sizeLimit | default "56Gi" -}}

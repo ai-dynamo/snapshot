@@ -1,10 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Staging pages are charged to the agent's cgroup, so a cap at or above the
-# container memory limit lets the agent be OOM-killed before the volume fills.
-# The cap is lowered to fit rather than rejected, so no configuration that
-# installs today stops installing. See SNEP-394.
+# A cap at or above the agent memory limit is lowered to fit, never rejected,
+# so no configuration that installs today stops installing. See SNEP-394.
 suite: PageBroker staging headroom
 templates:
   - templates/daemonset.yaml
@@ -34,8 +32,7 @@ tests:
           path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
           value: 56Gi
 
-  # 2Gi is what the CPU e2e cluster sets, and it never touches staging: the
-  # chart has to install there rather than reject the combination.
+  # What the CPU e2e cluster sets, with staging untouched.
   - it: lowers the cap when the agent memory limit is smaller than the default
     set:
       daemonset.resources.limits.memory: 2Gi
@@ -78,8 +75,6 @@ tests:
           path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
           value: 200Gi
 
-  # Capping is best-effort: a quantity the chart cannot compare is honoured
-  # rather than rejected, since refusing to render would break the install.
   - it: honours a quantity it cannot parse
     set:
       pageBroker.staging.sizeLimit: "64e9"
