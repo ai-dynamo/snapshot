@@ -727,14 +727,6 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
         throw std::invalid_argument("invalid value for --custom-storage-engine: " + std::string(input));
       }
       options.enable_gpu = input == "on";
-    } else if (option == "--transaction-lifetime") {
-      const auto seconds = ParseSize(option, input, false);
-      // Leave room for adding the duration to the monotonic clock.
-      const auto maximum = std::chrono::duration_cast<std::chrono::seconds>(
-          std::chrono::steady_clock::duration::max() / 2).count();
-      if (seconds > static_cast<uint64_t>(maximum))
-        throw std::invalid_argument("transaction lifetime exceeds clock range");
-      options.transaction_lifetime = std::chrono::seconds(seconds);
     } else if (option == "--max-concurrent-requests") {
       options.max_concurrent_requests = ParseSize(option, input, false);
     } else if (option == "--custom-storage-buffer-count") {
@@ -784,7 +776,7 @@ RunDaemon(const DaemonOptions& options)
     return Fail("protect control socket", {errno, std::generic_category()});
   }
   try {
-    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine), options.transaction_lifetime);
+    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine));
     Serve(listener, broker, options.max_concurrent_requests);
   } catch (const std::exception& failure) {
     std::cerr << "PageBroker: " << failure.what() << '\n';
