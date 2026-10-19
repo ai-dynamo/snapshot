@@ -675,8 +675,6 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
       transaction->cancellation().ThrowIfCancelled();
       if (fs::exists(fs::symlink_status(output)))
         throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
-      if (transaction->has_limits() && !HasAvailableSpace(staging_root_, kCheckpointAdmissionBytes))
-        throw TransferError(Failure::INSUFFICIENT_STORAGE, "insufficient checkpoint staging capacity");
       transaction->cancellation().ThrowIfCancelled();
       fs::create_directories(output.parent_path());
       transaction->cancellation().ThrowIfCancelled();
