@@ -32,6 +32,32 @@ Two parts of the agent do, independently:
 - The **NRI plugin** acts when the container runtime creates the destination container, before it starts. It makes the restore proxy PID 1.
 - The **node controller** acts once the pod is running on the node. It validates, restores, and reports.
 
+```mermaid
+sequenceDiagram
+    participant K as Container runtime
+    participant N as NRI plugin
+    participant X as Restore proxy
+    participant A as Agent controller
+    participant P as PageBroker
+    participant R as nsrestore
+    participant C as CRIU
+    K->>N: Create container
+    N->>N: Install proxy, set command
+    K->>X: Start as PID 1
+    X->>X: Wait for restore-complete
+    A->>A: Preflight and compatibility checks
+    A->>A: Mount bundle and artifact into container
+    A->>P: Open restore transaction
+    A->>R: Run inside container namespaces
+    R->>R: Replay root filesystem diff
+    R->>C: Restore process tree
+    R->>R: Restore and unlock GPU state
+    R-->>A: Restored PID
+    A->>P: Commit
+    A->>X: Write restore-complete
+    X->>X: Follow restored process
+```
+
 The [benchmarks](../../development/benchmarks.md) divide a restore into four stages.
 They map onto this page as follows:
 
@@ -98,7 +124,7 @@ A pod that already carries a terminal `Restored` condition, for example after an
 Its finalizer is removed and an informational event records that the restore was already complete.
 
 When preflight passes, the agent adds the `snapshot/restore-protection` finalizer, writes `Restored=False` with reason `RestoreInProgress`, and starts one worker per destination container.
-Each worker resolves its container ID from the pod status, polling the runtime for up to thirty seconds if the status has not caught up, emits a `RestoreRequested` event, and calls `executor.Restore` under `restoreTimeoutSeconds`.
+Each worker resolves its container ID from the pod status, polling the runtime briefly if the pod status has not caught up, emits a `RestoreRequested` event, and calls `executor.Restore` under `restoreTimeoutSeconds`.
 
 ## Inspect and compatibility
 
@@ -213,7 +239,7 @@ Back in the agent, after `nsrestore` returns:
 
 1. The restore source mount is removed and PageBroker's transaction is committed, which releases the pin or the staging directory. The bundle mount is removed. The CuInterpose mount is kept, since restored processes load from it later.
 2. The restored PID is checked to be alive and not a zombie.
-3. `restore-complete`, containing `pid=<restored PID>`, is written atomically into the container's control directory through `openat2` with symlink resolution disabled.
+3. `restore-complete`, containing `pid=<restored PID>`, is written atomically into the container's control directory, with symlink resolution disabled so that nothing inside the container can redirect the write.
 
 The proxy sees the file, reads the PID, logs the restored command line, and starts following the process.
 If the pod has the startup gate, `cat /snapshot-control/restore-complete` now succeeds and the kubelet begins running the workload's own readiness probe.

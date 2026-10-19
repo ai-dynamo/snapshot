@@ -36,7 +36,7 @@ It has an init container and two long-running containers.
 | Container | Image | Privilege | Role |
 | --- | --- | --- | --- |
 | `deploy-seccomp` (init) | busybox | none | Copies the `block-iouring.json` seccomp profile into the kubelet's seccomp directory on the host. |
-| `agent` | `snapshot/agent` | privileged | The Go agent. Watches work, runs CRIU and the CUDA checkpoint helper, registers the NRI plugin. |
+| `agent` | `snapshot/agent` | privileged | The Go agent. Watches work, runs CRIU and the CUDA checkpoint helper, and registers the Node Resource Interface (NRI) plugin that restore depends on. |
 | `pagebroker` | `snapshot/pagebroker` | privileged, root | The C++ data mover. Publishes and stages artifacts and, when supported, moves GPU memory. |
 
 The two containers share two volumes: the checkpoint PVC at `/checkpoints`, and a memory-backed `emptyDir` at `/pagebroker` that holds PageBroker's control socket and its staging area.
@@ -52,7 +52,7 @@ The agent container mounts these host paths:
 | `/var/run/nri` | The NRI socket, so the agent can register as a plugin. A directory rather than a socket mount, so the pod starts on nodes without NRI. |
 | `/sys/kernel/security`, read-only | CRIU records AppArmor and SELinux labels at dump time only when securityfs is visible. |
 | The runtime storage directory, read-only, at the same path as on the host | To read a container's overlay upper directory for the root filesystem diff. |
-| `/var/lib/kubelet/pods`, read-only, and `/var/lib/kubelet/pod-resources` | To discover pod volumes and the GPUs the kubelet allocated to a container. |
+| `/var/lib/kubelet/pods`, read-only, and `/var/lib/kubelet/pod-resources` | To locate a pod's volumes on the host, and to read which GPUs the kubelet allocated to a container. |
 
 ## Binaries in the agent image
 
