@@ -31,17 +31,6 @@ constexpr size_t kMaxRetainedTerminalTransactions = 1024;
 // grows this reservation to the inspected size.
 constexpr uintmax_t kCheckpointAdmissionBytes = 1;
 
-// The caller holds the transaction mutex while checking ownership of staging.
-bool
-HasStagingConflict(const Transaction& transaction, const Path& directory, bool artifact)
-{
-  if (transaction.state() != Transaction::State::NEW)
-    return true;
-  if (fs::exists(directory))
-    return true;
-  return artifact && fs::is_symlink(directory);
-}
-
 Response
 Reply(const Request& request)
 {
@@ -556,7 +545,7 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
   const Path staging_directory = direct ? Path{} : TransactionDirectory(restore_root, request.transaction_id());
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());
-  if (HasStagingConflict(*transaction, staging_directory, artifact != nullptr))
+  if (transaction->state() != Transaction::State::NEW)
     return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
   bool staging_reserved = false;
   bool source_prepared = false;
@@ -564,6 +553,8 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
   bool owned = false;
   RestoreAccess access;
   try {
+    if (fs::exists(staging_directory) || (artifact && fs::is_symlink(staging_directory)))
+      throw TransferError(Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
     const bool metadata_only = request.has_get_artifact_metadata();
     transaction->PrepareTransfer(direct ? nullptr : resources_, 0, nullptr, lifetime_);
     transaction->set_state(Transaction::State::PREPARING);
@@ -604,19 +595,23 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
   catch (const std::exception& error) {
     if (staging_reserved)
       ReleaseStaging(bytes);
-    if (!artifact && !source_prepared && dynamic_cast<const std::invalid_argument*>(&error)) {
-      // Preserve invalid-source retries without leaving an admission reservation.
+    const auto* failure = dynamic_cast<const TransferError*>(&error);
+    const bool staging_conflict = transaction->state() == Transaction::State::NEW &&
+        failure && failure->code == Failure::TRANSACTION_CONFLICT;
+    if (staging_conflict || (!artifact && !source_prepared && dynamic_cast<const std::invalid_argument*>(&error))) {
+      const auto code = staging_conflict ? Failure::TRANSACTION_CONFLICT : Failure::INVALID_REQUEST;
+      // Rejected staging paths and invalid sources must allow a fresh retry.
       // Waiters holding this handle see ABORTED; only this map entry is removed.
       transaction->set_state(Transaction::State::ABORTED);
       std::error_code cleanup_error;
       transaction->CleanupTransfer(cleanup_error);
       if (cleanup_error)
-        return Fail(request, Failure::INVALID_REQUEST, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
+        return Fail(request, code, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
       std::lock_guard transactions_lock(transactions_mutex_);
       const auto current = transactions_.find(request.transaction_id());
       if (current != transactions_.end() && current->second == transaction)
         transactions_.erase(current);
-      return Fail(request, Failure::INVALID_REQUEST, error.what());
+      return Fail(request, code, error.what());
     }
     return AbortStaging(request, *transaction, owned ? staging_directory : Path{}, error);
   }
