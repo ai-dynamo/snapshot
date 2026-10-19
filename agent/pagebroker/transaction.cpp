@@ -42,13 +42,14 @@ Transaction::set_descriptor(Descriptor descriptor)
   descriptor_ = std::move(descriptor);
 }
 
-void
-Transaction::clear_descriptor()
+bool
+Transaction::TryClearDescriptor()
 {
   // Failed cleanup must remain retryable, including without admission limits.
   if (HasPendingCleanup())
-    return;
+    return false;
   descriptor_ = std::monostate();
+  return true;
 }
 
 bool
@@ -179,7 +180,7 @@ Transaction::RemoveStaging(const Path& directory)
   transfer_directory_.clear();
   ReleaseAbortedDestination();
   if (state_ == State::COMMITTED || state_ == State::ABORTED)
-    clear_descriptor();
+    TryClearDescriptor();
 }
 
 void
