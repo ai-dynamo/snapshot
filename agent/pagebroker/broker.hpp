@@ -36,7 +36,9 @@ class Broker {
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
   using Clock = std::function<std::chrono::steady_clock::time_point()>;
   void SetClock(Clock clock);
-  void CancelActiveTransactions();
+  // Stops admission and signals transfer/GPU cancellation without taking transaction
+  // mutexes or waiting for work to finish. Safe to call repeatedly; callers drain handlers.
+  void Shutdown();
 
  private:
   friend class BrokerTransferTest;
@@ -56,8 +58,6 @@ class Broker {
   TransactionHandle CreateOrGetTransaction(const std::string& transaction_id);
   TransactionHandle FindTransaction(const std::string& transaction_id);
   std::vector<std::pair<std::string, TransactionHandle>> TransactionSnapshot();
-  std::error_code CleanupTransactionDirectory(const std::string& id, Transaction& transaction);
-  bool CleanupExpiredTransaction(const std::string& id, Transaction& transaction);
   // Attempts retention without waiting for the transaction mutex. Caller must not hold it.
   void RetainTerminalTransaction(const std::string& transaction_id);
   // Caller must hold transaction->mutex().
