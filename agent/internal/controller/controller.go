@@ -436,8 +436,7 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 			w.restoreQueue.AddAfter(key, restoreSafetyRequeueInterval)
 		}
 	}()
-	// Registered after the Done defer so it runs first and leaves requeue
-	// false: a panic is deterministic, so redelivering would repeat it.
+	// Registered after the Done defer so it runs first, leaving requeue false.
 	defer recoverPanic(w.log, "restore work order", nil, "pod", key.String())
 
 	pod, err := w.restorePodLister.Pods(key.Namespace).Get(key.Name)
@@ -1355,8 +1354,8 @@ func (w *NodeController) runCaptureQueue(ctx context.Context) {
 // meanwhile collapse into one redelivery after Done.
 func (w *NodeController) processCaptureQueueItem(ctx context.Context, name string) {
 	defer w.captureQueue.Done(name)
-	// A panic here would otherwise kill the agent and with it every unrelated
-	// capture and restore on this node.
+	// A panic here would otherwise kill every other capture and restore on
+	// this node.
 	defer recoverPanic(w.log, "capture work order", func(err error) {
 		w.failCaptureAfterPanic(ctx, name, err)
 	}, "content", name)

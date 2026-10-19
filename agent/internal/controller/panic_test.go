@@ -43,8 +43,6 @@ func TestRecoverPanicIsInertWithoutAPanic(t *testing.T) {
 	}
 }
 
-// A panic must not escape the worker: the agent serves every capture and
-// restore on its node, so one work order may not take the process down.
 func TestRecoverPanicContainsThePanic(t *testing.T) {
 	survived := false
 	func() {
@@ -61,8 +59,6 @@ func TestRecoveredPanicStackIsBounded(t *testing.T) {
 	huge := strings.Repeat("x", stackLimit*3)
 	got := truncateStack(huge)
 	if len(got) <= stackLimit {
-		// truncateStack appends a marker, so the result is slightly longer
-		// than the limit but nowhere near the input.
 		t.Fatalf("truncated stack length %d, want just over %d", len(got), stackLimit)
 	}
 	if len(got) > stackLimit+64 {

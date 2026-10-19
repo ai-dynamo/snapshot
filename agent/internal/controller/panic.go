@@ -18,8 +18,8 @@ import (
 // stackLimit caps the stack recorded for a recovered panic.
 const stackLimit = 4096
 
-// recoveredPanicError carries a recovered panic as an error so the normal
-// failure paths can report it like any other.
+// recoveredPanicError carries a panic as an error, so the normal failure
+// paths can report it.
 type recoveredPanicError struct {
 	value any
 	stack string
@@ -32,8 +32,7 @@ func (e *recoveredPanicError) Error() string {
 // Stack returns the captured stack, truncated to stackLimit.
 func (e *recoveredPanicError) Stack() string { return e.stack }
 
-// recoverPanic turns a panic in a worker goroutine into an error handed to
-// onPanic, and logs it with its stack.
+// recoverPanic hands a panic to onPanic as an error and logs it with its stack.
 func recoverPanic(log logr.Logger, operation string, onPanic func(error), keysAndValues ...any) {
 	r := recover()
 	if r == nil {
@@ -55,9 +54,8 @@ func truncateStack(stack string) string {
 	return stack[:stackLimit] + "\n...<truncated>"
 }
 
-// failCaptureAfterPanic records a recovered panic as a terminal failure on the
-// work order, so a capture whose goroutine died does not sit pending until its
-// lease expires.
+// failCaptureAfterPanic fails the work order, so a capture whose goroutine
+// died does not sit pending until its lease expires.
 func (w *NodeController) failCaptureAfterPanic(ctx context.Context, name string, cause error) {
 	defer recoverPanic(w.log, "capture panic cleanup", nil, "content", name)
 
