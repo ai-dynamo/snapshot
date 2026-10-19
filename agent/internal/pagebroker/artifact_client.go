@@ -32,7 +32,8 @@ func (c Client) PrepareArtifactCheckpoint(ctx context.Context, transactionID str
 }
 
 // CommitCheckpoint retries with the same transaction ID and returns the artifact.
-// Missing results never authorize recapture; legacy and restore cleanup use Commit.
+// Missing results never authorize recapture.
+// Filesystem-path checkpoints and restore cleanup use Commit.
 func (c Client) CommitCheckpoint(ctx context.Context, transactionID string) (*PublishedArtifact, error) {
 	result, err := c.commitWithRetry(ctx, transactionID)
 	if err != nil {
