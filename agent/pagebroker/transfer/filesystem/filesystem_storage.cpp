@@ -95,7 +95,7 @@ class RestorePreviousOnFailure {
   {
     if (!cancelled_) {
       std::error_code error;
-      std::filesystem::rename(previous_, published_, error);
+      fs::rename(previous_, published_, error);
     }
   }
 
