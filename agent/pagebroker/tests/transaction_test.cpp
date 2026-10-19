@@ -18,7 +18,7 @@ ExpectDestinationConflict(const std::shared_ptr<TransactionResources>& resources
 {
   Transaction contender;
   try {
-    contender.PrepareTransfer(resources, 1, {}, &artifact);
+    contender.PrepareTransfer(resources, 1, &artifact);
     FAIL() << "destination reservation was released too early";
   }
   catch (const TransferError& error) {
@@ -34,7 +34,7 @@ TEST(TransactionTest, InitialReservationRespectsRemainingBudgetWithoutClaimingDe
 {
   auto resources = std::make_shared<TransactionResources>(4, 3);
   Transaction first;
-  first.PrepareTransfer(resources, 3, {});
+  first.PrepareTransfer(resources, 3);
   EXPECT_EQ(first.publication(), nullptr);
   PublishedArtifact artifact;
   artifact.set_artifact_handle(std::string(64, 'a'));
@@ -42,7 +42,7 @@ TEST(TransactionTest, InitialReservationRespectsRemainingBudgetWithoutClaimingDe
     SCOPED_TRACE(initial_bytes);
     Transaction rejected;
     try {
-      rejected.PrepareTransfer(resources, initial_bytes, {}, &artifact);
+      rejected.PrepareTransfer(resources, initial_bytes, &artifact);
       FAIL() << "initial reservation exceeded the available budget";
     }
     catch (const TransferError& error) {
@@ -56,13 +56,13 @@ TEST(TransactionTest, InitialReservationRespectsRemainingBudgetWithoutClaimingDe
   EXPECT_TRUE(resources->destinations.empty());
 
   Transaction exact_fit;
-  ASSERT_NO_THROW(exact_fit.PrepareTransfer(resources, 1, {}, &artifact));
+  ASSERT_NO_THROW(exact_fit.PrepareTransfer(resources, 1, &artifact));
   EXPECT_EQ(resources->active, 2u);
   EXPECT_EQ(resources->reserved, 4u);
   EXPECT_EQ(resources->destinations.count(artifact.artifact_handle()), 1u);
   // A full byte budget still rejects zero-byte admission, as before.
   Transaction blocked;
-  EXPECT_THROW(blocked.PrepareTransfer(resources, 0, {}), TransferError);
+  EXPECT_THROW(blocked.PrepareTransfer(resources, 0), TransferError);
   first.CleanupTransfer();
   EXPECT_EQ(resources->active, 1u);
   EXPECT_EQ(resources->reserved, 1u);
@@ -76,7 +76,7 @@ TEST(TransactionTest, ZeroInitialReservationCanClaimPublicationAndReleasesOnlyIt
   Transaction next;
   {
     Transaction transaction;
-    transaction.PrepareTransfer(resources, 0, {}, &artifact);
+    transaction.PrepareTransfer(resources, 0, &artifact);
     ASSERT_NE(transaction.publication(), nullptr);
     EXPECT_EQ(resources->active, 1u);
     EXPECT_EQ(resources->reserved, 0u);
@@ -86,7 +86,7 @@ TEST(TransactionTest, ZeroInitialReservationCanClaimPublicationAndReleasesOnlyIt
     EXPECT_EQ(resources->active, 0u);
     EXPECT_EQ(resources->reserved, 0u);
     EXPECT_TRUE(resources->destinations.empty());
-    ASSERT_NO_THROW(next.PrepareTransfer(resources, 1, {}, &artifact));
+    ASSERT_NO_THROW(next.PrepareTransfer(resources, 1, &artifact));
     transaction.CleanupTransfer();
   }
   EXPECT_EQ(resources->active, 1u);
@@ -100,7 +100,7 @@ TEST(TransactionTest, RestoreKeepsStagingBudgetUntilConsumerCleanup)
   auto resources = std::make_shared<TransactionResources>(100, 2);
   Transaction restore;
   const auto staged = root.path() / "restored";
-  restore.PrepareTransfer(resources, 0, {});
+  restore.PrepareTransfer(resources, 0);
   restore.Reserve(80);
   fs::create_directory(staged);
   restore.OwnDirectory(staged);
@@ -108,7 +108,7 @@ TEST(TransactionTest, RestoreKeepsStagingBudgetUntilConsumerCleanup)
   EXPECT_EQ(restore.publication(), nullptr);
 
   Transaction next;
-  next.PrepareTransfer(resources, 0, root.path() / "next");
+  next.PrepareTransfer(resources, 0);
   EXPECT_THROW(next.Reserve(21), TransferError);
   restore.RemoveStaging(staged);
   EXPECT_FALSE(fs::exists(staged));
@@ -130,7 +130,7 @@ TEST(TransactionTest, UnownedCleanupPreservesDirectoriesAndPendingState)
     Transaction restore;
     const auto owned = root.path() / "owned";
     const auto borrowed = root.path() / "borrowed";
-    restore.PrepareTransfer(limited ? resources : nullptr, 0, {});
+    restore.PrepareTransfer(limited ? resources : nullptr, 0);
     fs::create_directory(owned);
     fs::create_directory(borrowed);
     std::ofstream(owned / "marker") << "owned";
@@ -172,7 +172,7 @@ TEST(TransactionTest, EmptyOwnedDirectoryReleasesReservation)
     SCOPED_TRACE(with_error);
     auto resources = std::make_shared<TransactionResources>(100, 1);
     Transaction restore;
-    restore.PrepareTransfer(resources, 0, {});
+    restore.PrepareTransfer(resources, 0);
     restore.Reserve(80);
     restore.set_descriptor(RestoreTransactionDescriptor({}));
     restore.set_state(Transaction::State::ABORTED);
@@ -203,10 +203,13 @@ TEST(TransactionTest, FailedCleanupRetainsReservationAndDescriptor)
   const auto staged = parent / "staged";
   auto resources = std::make_shared<TransactionResources>(100, 2);
   Transaction restore;
-  restore.PrepareTransfer(resources, 0, staged);
+  restore.PrepareTransfer(resources, 0);
+  fs::create_directories(staged);
+  restore.OwnDirectory(staged);
   restore.Reserve(80);
   restore.set_descriptor(RestoreTransactionDescriptor(staged));
   restore.set_state(Transaction::State::COMMITTED);
+  fs::remove_all(parent);
   std::ofstream(parent) << "blocks cleanup";
   std::error_code error;
   restore.CleanupTransfer(error);
@@ -216,7 +219,7 @@ TEST(TransactionTest, FailedCleanupRetainsReservationAndDescriptor)
   EXPECT_FALSE(restore.retain_terminal());
 
   Transaction next;
-  next.PrepareTransfer(resources, 0, root.path() / "next");
+  next.PrepareTransfer(resources, 0);
   EXPECT_THROW(next.Reserve(21), TransferError);
   fs::remove(parent);
   fs::create_directories(staged);
@@ -235,10 +238,12 @@ TEST(TransactionTest, PublicationAndDestinationOutliveStaging)
   artifact.set_artifact_handle(std::string(64, 'a'));
   auto checkpoint = std::make_unique<Transaction>();
   const auto staged = root.path() / "checkpoint";
-  checkpoint->PrepareTransfer(resources, 1, staged, &artifact);
+  checkpoint->PrepareTransfer(resources, 1, &artifact);
+  fs::create_directory(staged);
+  checkpoint->OwnDirectory(staged);
   {
     Transaction reader;
-    EXPECT_THROW(reader.PrepareTransfer(resources, 0, root.path() / "reader"), TransferError);
+    EXPECT_THROW(reader.PrepareTransfer(resources, 0), TransferError);
   }
   checkpoint->publication()->pending_index = "saved publication bytes";
   checkpoint->publication()->published = true;
@@ -251,15 +256,15 @@ TEST(TransactionTest, PublicationAndDestinationOutliveStaging)
   // Failed contenders must not release the original writer's destination.
   for (unsigned attempt = 0; attempt < 2; ++attempt) {
     Transaction duplicate;
-    EXPECT_THROW(duplicate.PrepareTransfer(resources, 1, root.path() / "duplicate", &artifact), TransferError);
+    EXPECT_THROW(duplicate.PrepareTransfer(resources, 1, &artifact), TransferError);
   }
   {
     Transaction reader;
-    EXPECT_NO_THROW(reader.PrepareTransfer(resources, 0, root.path() / "reader"));
+    EXPECT_NO_THROW(reader.PrepareTransfer(resources, 0));
   }
   checkpoint.reset();
   Transaction replacement;
-  EXPECT_NO_THROW(replacement.PrepareTransfer(resources, 1, staged, &artifact));
+  EXPECT_NO_THROW(replacement.PrepareTransfer(resources, 1, &artifact));
 }
 
 TEST(TransactionTest, AbortedDestinationCanBeReusedBeforeTransactionDestruction)
@@ -273,9 +278,11 @@ TEST(TransactionTest, AbortedDestinationCanBeReusedBeforeTransactionDestruction)
       artifact.set_artifact_handle(std::string(64, 'a'));
       auto checkpoint = std::make_unique<Transaction>();
       const Path staged = has_staging ? root.path() / "checkpoint" : Path{};
-      checkpoint->PrepareTransfer(resources, 1, staged, &artifact);
-      if (has_staging)
+      checkpoint->PrepareTransfer(resources, 1, &artifact);
+      if (has_staging) {
         fs::create_directory(staged);
+        checkpoint->OwnDirectory(staged);
+      }
       checkpoint->set_state(Transaction::State::ABORTING);
       if (cleanup_first)
         checkpoint->CleanupTransfer();
@@ -289,7 +296,7 @@ TEST(TransactionTest, AbortedDestinationCanBeReusedBeforeTransactionDestruction)
       ASSERT_TRUE(checkpoint->retain_terminal());
 
       Transaction replacement;
-      ASSERT_NO_THROW(replacement.PrepareTransfer(resources, 1, {}, &artifact));
+      ASSERT_NO_THROW(replacement.PrepareTransfer(resources, 1, &artifact));
       // Repeated cleanup and destruction of the retained result cannot erase the new owner.
       checkpoint->CleanupTransfer();
       checkpoint->set_state(Transaction::State::ABORTED);
@@ -311,8 +318,11 @@ TEST(TransactionTest, AbortedDestinationRemainsReservedUntilCleanupSucceeds)
   PublishedArtifact artifact;
   artifact.set_artifact_handle(std::string(64, 'a'));
   Transaction checkpoint;
-  checkpoint.PrepareTransfer(resources, 1, staged, &artifact);
+  checkpoint.PrepareTransfer(resources, 1, &artifact);
+  fs::create_directories(staged);
+  checkpoint.OwnDirectory(staged);
   checkpoint.set_state(Transaction::State::ABORTED);
+  fs::remove_all(parent);
   std::ofstream(parent) << "blocks cleanup even when running as root";
   std::error_code error;
   checkpoint.CleanupTransfer(error);
@@ -327,15 +337,14 @@ TEST(TransactionTest, AbortedDestinationRemainsReservedUntilCleanupSucceeds)
   EXPECT_FALSE(fs::exists(staged));
   EXPECT_TRUE(checkpoint.retain_terminal());
   Transaction replacement;
-  EXPECT_NO_THROW(replacement.PrepareTransfer(resources, 1, {}, &artifact));
+  EXPECT_NO_THROW(replacement.PrepareTransfer(resources, 1, &artifact));
 }
 
 TEST(TransactionTest, DeadlineAndCancellationCoverTheWholeOperation)
 {
-  test::TemporaryDirectory root;
   auto resources = std::make_shared<TransactionResources>(100, 1);
   Transaction restore;
-  restore.PrepareTransfer(resources, 0, root.path() / "restore", nullptr, std::chrono::minutes(1));
+  restore.PrepareTransfer(resources, 0, nullptr, std::chrono::minutes(1));
   const auto control = restore.cancellation();
   restore.set_state(Transaction::State::PREPARING);
   restore.set_state(Transaction::State::STAGED);
@@ -348,7 +357,7 @@ TEST(TransactionTest, CancellationBeforePreparationIsNotLost)
 {
   Transaction transaction;
   transaction.CancelWork();
-  transaction.PrepareTransfer(nullptr, 0, {}, nullptr, std::chrono::minutes{1});
+  transaction.PrepareTransfer(nullptr, 0, nullptr, std::chrono::minutes{1});
   EXPECT_TRUE(transaction.cancellation().Token().stop_requested());
   EXPECT_EQ(transaction.cancellation().Reason(), CancellationError::Reason::CANCELLED);
 }
@@ -356,7 +365,7 @@ TEST(TransactionTest, CancellationBeforePreparationIsNotLost)
 TEST(TransactionTest, GpuRequestAndTransactionStopIndependently)
 {
   Transaction transaction;
-  transaction.PrepareTransfer(nullptr, 0, {});
+  transaction.PrepareTransfer(nullptr, 0);
   Cancellation old_request, new_request;
   auto old_operation = Cancellation::Join(transaction.cancellation(), old_request);
   old_request.Cancel();
@@ -385,7 +394,7 @@ TEST(TransactionTest, TerminalTransactionsDoNotExpire)
   for (const auto state : {Transaction::State::COMMITTED, Transaction::State::ABORTED}) {
     SCOPED_TRACE(static_cast<int>(state));
     Transaction transaction;
-    transaction.PrepareTransfer(nullptr, 0, {});
+    transaction.PrepareTransfer(nullptr, 0);
     transaction.set_state(state);
     const auto after_deadline = transaction.cancellation().Deadline() + std::chrono::hours{1};
     EXPECT_FALSE(transaction.expired(after_deadline));
@@ -398,7 +407,7 @@ TEST(TransactionTest, TerminalTransactionsDoNotExpire)
 TEST(TransactionTest, ExpiryRemainsLatchedWhileAborting)
 {
   Transaction transaction;
-  transaction.PrepareTransfer(nullptr, 0, {});
+  transaction.PrepareTransfer(nullptr, 0);
   transaction.set_state(Transaction::State::STAGED);
   const auto deadline = transaction.cancellation().Deadline();
   const auto before_deadline = deadline - std::chrono::seconds{1};
@@ -423,7 +432,7 @@ TEST(TransactionTest, DeadlineStartsAtPrepareAndIsNotExtendedWithOrWithoutLimits
     Transaction transaction;
     const auto lifetime = std::chrono::seconds{17};
     const auto started = Cancellation::Clock::now();
-    transaction.PrepareTransfer(resources, 1, {}, nullptr, lifetime);
+    transaction.PrepareTransfer(resources, 1, nullptr, lifetime);
     const auto deadline = transaction.cancellation().Deadline();
     EXPECT_GE(deadline, started + lifetime);
     EXPECT_LE(deadline, Cancellation::Clock::now() + lifetime);

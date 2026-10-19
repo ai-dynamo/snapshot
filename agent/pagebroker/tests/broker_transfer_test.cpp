@@ -193,9 +193,10 @@ class BrokerTransferTest : public ::testing::Test {
   {
     auto transaction = broker.CreateOrGetTransaction("seed");
     std::lock_guard lock(transaction->mutex());
-    transaction->PrepareTransfer(broker.resources_, initial_bytes, staging_ / "restore/seed", nullptr, broker.lifetime_);
+    transaction->PrepareTransfer(broker.resources_, initial_bytes, nullptr, broker.lifetime_);
     transaction->Reserve(4);
     fs::create_directory(staging_ / "restore/seed");
+    transaction->OwnDirectory(staging_ / "restore/seed");
     std::ofstream(staging_ / "restore/seed/image") << "data";
     transaction->set_descriptor(RestoreTransactionDescriptor(staging_ / "restore/seed"));
     transaction->set_state(state);
@@ -835,7 +836,7 @@ TEST_F(BrokerTransferTest, ExpiryReclaimsReservationsAndRestoresAdmission)
     EXPECT_EQ(resources->active, 0u);
     EXPECT_EQ(Retained(broker), 0u);
     Transaction next;
-    ASSERT_NO_THROW(next.PrepareTransfer(resources, initial_bytes, staging_ / "next"));
+    ASSERT_NO_THROW(next.PrepareTransfer(resources, initial_bytes));
     EXPECT_NO_THROW(next.Reserve(4));
     auto abort = RequestFor("seed");
     abort.mutable_abort();
@@ -862,7 +863,7 @@ TEST_F(BrokerTransferTest, PeriodicCleanupRetriesKeepCapacityUntilRemovalSucceed
       EXPECT_EQ(resources->reserved, 4u);
       EXPECT_EQ(Retained(broker), 0u);
       Transaction next;
-      EXPECT_THROW(next.PrepareTransfer(resources, 0, staging_ / "next"), TransferError);
+      EXPECT_THROW(next.PrepareTransfer(resources, 0), TransferError);
     }
     UnblockCleanup();
     broker.ReapExpiredTransactions(sweep);
