@@ -64,7 +64,7 @@ Create the ConfigMap that the capture manifests mount `app.py` from:
 
 ```bash
 kubectl create configmap tensorrt-llm-app \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --from-file=app.py=tensorrt-llm/app.py
 ```
 
@@ -73,10 +73,10 @@ after editing `app.py`, use `apply` instead:
 
 ```bash
 kubectl create configmap tensorrt-llm-app \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --from-file=app.py=tensorrt-llm/app.py \
   --dry-run=client --output yaml | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
 ```
 
 ## 2. Choose the model
@@ -135,7 +135,7 @@ Deploy the source Deployment of your recipe:
 
 ```bash
 kubectl apply \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --filename tensorrt-llm/capture/qwen3-0.6b.yaml
 ```
 
@@ -145,7 +145,7 @@ example, GLM 5.3:
 
 ```bash
 sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" tensorrt-llm/capture/glm-5.3.yaml | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
 ```
 
 Wait until the TensorRT-LLM replica finishes initialization and becomes safe to
@@ -156,7 +156,7 @@ model:
 
 ```bash
 kubectl rollout status \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   deployment/tensorrt-llm-qwen3-0-6b-source \
   --timeout=30m
 ```
@@ -165,7 +165,7 @@ List the generated Pod:
 
 ```bash
 kubectl get pods \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --selector app=tensorrt-llm-qwen3-0-6b-source
 ```
 

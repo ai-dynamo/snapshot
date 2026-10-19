@@ -9,7 +9,7 @@ This is stage 3 of the [usage guides](README.md). It starts from the ready
 `PodSnapshot` that [checkpoint](checkpoint.md) produced:
 
 ```bash
-kubectl get podsnapshot --namespace "$SNAPSHOT_NAMESPACE"
+kubectl get podsnapshot --namespace "$WORKLOAD_NAMESPACE"
 ```
 
 ## 1. Choose the restore profile
@@ -51,10 +51,10 @@ is named `<framework>-1gpu-restored` or `<framework>-8gpu-restored`, as the
 
 ```bash
 sed "s|\${SNAPSHOT_NAME}|$SNAPSHOT_NAME|" vllm/restore/1-gpu.yaml | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
 
 kubectl rollout status \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   deployment/vllm-1gpu-restored \
   --timeout=30m
 ```
@@ -77,7 +77,7 @@ your profile's Deployment, then send a prompt from a second terminal:
 
 ```bash
 kubectl port-forward \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   deployment/vllm-1gpu-restored 8000:8000
 ```
 

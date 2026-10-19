@@ -50,7 +50,7 @@ Create the ConfigMap that the capture manifests mount `app.py` from:
 
 ```bash
 kubectl create configmap vllm-app \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --from-file=app.py=vllm/app.py
 ```
 
@@ -59,10 +59,10 @@ after editing `app.py`, use `apply` instead:
 
 ```bash
 kubectl create configmap vllm-app \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --from-file=app.py=vllm/app.py \
   --dry-run=client --output yaml | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
 ```
 
 ## 2. Choose the model
@@ -123,7 +123,7 @@ Deploy the source Deployment of your recipe:
 
 ```bash
 kubectl apply \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --filename vllm/capture/qwen3-0.6b.yaml
 ```
 
@@ -133,7 +133,7 @@ example, GLM 5.3:
 
 ```bash
 sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" vllm/capture/glm-5.3.yaml | \
-  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
 ```
 
 Wait until the vLLM replica finishes initialization and becomes safe to
@@ -144,7 +144,7 @@ model:
 
 ```bash
 kubectl rollout status \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   deployment/vllm-qwen3-0-6b-source \
   --timeout=30m
 ```
@@ -153,7 +153,7 @@ List the generated Pod:
 
 ```bash
 kubectl get pods \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$WORKLOAD_NAMESPACE" \
   --selector app=vllm-qwen3-0-6b-source
 ```
 
