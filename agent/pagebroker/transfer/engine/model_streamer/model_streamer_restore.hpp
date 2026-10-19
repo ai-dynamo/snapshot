@@ -144,7 +144,7 @@ class ModelStreamerRestore {
   void FinishSession();
   // Applies one response to an entry and reports whether the submission finished.
   bool AcceptEntry(StreamerEntry& entry, const StreamerResponse& response);
-  // Completes one entry with an exception without allowing failure to escape.
+  // Completes a failed entry using its own cancellation reason, if interrupted.
   void FailEntry(StreamerEntry& entry, std::exception_ptr error) noexcept;
   // Polls for one response and dispatches it to the matching active entry.
   void ReceiveAndDispatch();
@@ -154,7 +154,7 @@ class ModelStreamerRestore {
   void StopStreamer() noexcept;
   // Stops native access and fails active work after an event-loop failure.
   void HandleFailure(std::exception_ptr error) noexcept;
-  // Completes every active entry with the supplied exception and clears state.
+  // Fails active and pending entries through FailEntry, then clears state.
   void FailAll(std::exception_ptr error) noexcept;
 
   std::once_flag start_once_;

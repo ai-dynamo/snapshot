@@ -47,6 +47,9 @@ struct FakeState {
   bool hold_request = false;
   bool allow_responses = true;
   int allocation_error = 0;
+  int start_status = 0;
+  bool return_start_handle = true;
+  int credential_status = 0;
   bool sparse_allocations = false;
   unsigned starts = 0;
   unsigned allocations = 0;
@@ -68,6 +71,8 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.hold_request = false;
     state.allow_responses = true;
     state.allocation_error = 0;
+    state.start_status = state.credential_status = 0;
+    state.return_start_handle = true;
     state.sparse_allocations = false;
     state.starts = state.ends_entered = state.ends = state.submitted = state.max_submissions = 0;
     state.allocations = state.requests_entered = 0;
@@ -140,17 +145,17 @@ extern "C" int __wrap_posix_fallocate(int descriptor, off_t offset, off_t length
 
 extern "C" int runai_file_streamer_start(void** value)
 {
-  *value = new Session;
   std::unique_lock lock(state.mutex);
+  *value = state.return_start_handle ? new Session : nullptr;
   ++state.starts;
   state.changed.notify_all();
   state.changed.wait(lock, [] { return !state.hold_start; });
-  return RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
+  return state.start_status;
 }
 
 extern "C" int runai_file_streamer_set_credentials(void*, const char**, const char**, unsigned)
 {
-  return RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
+  return state.credential_status;
 }
 
 extern "C" int runai_file_streamer_set_fs_strategy(void*, const char*)
@@ -252,6 +257,53 @@ TEST_F(ModelStreamerSessionTest, AllocationFailureDoesNotSubmitNativeWritesAndAl
   EXPECT_NO_THROW(restore.Stage(Plan(), root_ / "retry"));
   EXPECT_EQ(state.submitted, 1U);
 }
+
+enum class StartupFault { ErrorWithHandle, ErrorWithoutHandle, MissingHandle, Configuration };
+class ModelStreamerStartupFailureTest : public ModelStreamerSessionTest,
+                                       public ::testing::WithParamInterface<StartupFault> {};
+
+TEST_P(ModelStreamerStartupFailureTest, ReleasesHandleAndPermitBeforeReportingFailure)
+{
+  const auto fault = GetParam();
+  state.return_start_handle = fault == StartupFault::ErrorWithHandle || fault == StartupFault::Configuration;
+  const unsigned expected_ends = state.return_start_handle ? 1 : 0;
+  if (fault == StartupFault::ErrorWithHandle || fault == StartupFault::ErrorWithoutHandle)
+    state.start_status = RUNAI_FILE_STREAMER_RESPONSE_UNKNOWN_ERROR;
+  if (fault == StartupFault::Configuration)
+    state.credential_status = RUNAI_FILE_STREAMER_RESPONSE_UNKNOWN_ERROR;
+  ModelStreamerSessionOptions options;
+  options.region = "test-region";
+  {
+    ModelStreamerRestore restore(options);
+    EXPECT_THROW(restore.Stage(Plan(), root_ / "failed"), std::runtime_error);
+    EXPECT_TRUE(restore.Failed());
+    EXPECT_EQ(state.ends, expected_ends);
+    EXPECT_EQ(state.requests_entered, 0U);
+    state.start_status = state.credential_status = 0;
+    state.return_start_handle = true;
+    // Keep the failed coordinator alive: the replacement must not depend on
+    // its destructor to release the process-wide native-session permit.
+    ModelStreamerRestore replacement(options);
+    EXPECT_NO_THROW(replacement.Stage(Plan(), root_ / "retry",
+        Cancellation(Cancellation::Clock::now() + 2s)));
+    EXPECT_EQ(state.starts, 2U);
+    EXPECT_EQ(state.submitted, 1U);
+  }
+  EXPECT_EQ(state.ends, expected_ends + 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(StartupFaults, ModelStreamerStartupFailureTest,
+    ::testing::Values(StartupFault::ErrorWithHandle, StartupFault::ErrorWithoutHandle,
+        StartupFault::MissingHandle, StartupFault::Configuration),
+    [](const ::testing::TestParamInfo<StartupFault>& info) {
+      switch (info.param) {
+        case StartupFault::ErrorWithHandle: return "ErrorWithHandle";
+        case StartupFault::ErrorWithoutHandle: return "ErrorWithoutHandle";
+        case StartupFault::MissingHandle: return "MissingHandle";
+        case StartupFault::Configuration: return "Configuration";
+      }
+      return "Unknown";
+    });
 
 TEST_F(ModelStreamerSessionTest, KeepsSuccessfulDestinationsAliveUntilEndReturns)
 {
@@ -438,6 +490,66 @@ TEST_F(ModelStreamerSessionTest, ActiveCancellationWaitsForNativeTeardown)
   EXPECT_THROW(result.get(), CancellationError);
   EXPECT_TRUE(restore.Failed());
 }
+
+class SharedSessionCancellationTest : public ModelStreamerSessionTest,
+                                      public ::testing::WithParamInterface<bool> {};
+
+TEST_P(SharedSessionCancellationTest, ReportsEachRequestsOwnCancellationAfterDrain)
+{
+  const bool deadline = GetParam();
+  state.allow_responses = false;
+  state.hold_end = true;
+  Cancellation trigger;
+  if (deadline)
+    trigger = trigger.WithDeadline(Cancellation::Clock::now() + 1s);
+  Cancellation cancelled_peer;
+  ModelStreamerRestore restore;
+  auto first = std::async(std::launch::async, [&] { restore.Stage(Plan(), root_ / "first", trigger); });
+  auto live = std::async(std::launch::async, [&] { restore.Stage(Plan(), root_ / "live"); });
+  auto cancelled = std::async(std::launch::async, [&] {
+    restore.Stage(Plan(), root_ / "cancelled", cancelled_peer);
+  });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted == 3; }));
+  }
+  if (!deadline)
+    trigger.Cancel();
+  const bool ending = WaitForEnd();
+  EXPECT_TRUE(ending);
+  EXPECT_EQ(first.wait_for(0ms), std::future_status::timeout);
+  EXPECT_EQ(live.wait_for(0ms), std::future_status::timeout);
+  EXPECT_EQ(cancelled.wait_for(0ms), std::future_status::timeout);
+  cancelled_peer.Cancel();
+
+  const auto expect_session_failure = [](auto&& operation) {
+    try {
+      operation();
+      ADD_FAILURE() << "restore completed despite shared session failure";
+    }
+    catch (const CancellationError&) {
+      ADD_FAILURE() << "restore inherited another request's cancellation";
+    }
+    catch (const std::runtime_error& error) {
+      EXPECT_STREQ(error.what(), "Model Streamer session interrupted by another submission's cancellation");
+    }
+  };
+  // Post rejects new work with the event loop's retained exception while end
+  // is blocked. It must apply the same per-request attribution as active work.
+  if (ending)
+    expect_session_failure([&] { restore.Stage(Plan(), root_ / "late"); });
+  ReleaseEnd();
+  ExpectCancellation(first, deadline ? CancellationError::Reason::DEADLINE_EXCEEDED :
+                                      CancellationError::Reason::CANCELLED);
+  expect_session_failure([&] { live.get(); });
+  ExpectCancellation(cancelled, CancellationError::Reason::CANCELLED);
+  EXPECT_TRUE(restore.Failed());
+  EXPECT_EQ(state.submitted, 3U);
+  EXPECT_EQ(state.ends, 1U);
+}
+
+INSTANTIATE_TEST_SUITE_P(CancellationCauses, SharedSessionCancellationTest, ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "Deadline" : "ExplicitStop"; });
 
 TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator)
 {
