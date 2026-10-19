@@ -36,17 +36,4 @@ Path TransferEngine::PrepareCheckpoint(const StorageBackend&, const Path&, const
 void TransferEngine::ValidateCheckpointDestination(const StorageBackend&, const PublishedArtifact*, Cancellation) const { UnsupportedOperation(); }
 RestorePlan TransferEngine::InspectCheckpoint(const Path&, const PublishedArtifact*, Cancellation) const { UnsupportedOperation(); }
 void TransferEngine::PublishCheckpoint(const Path&, const StorageBackend&, RestorePlan, CheckpointPublication*, Cancellation, TransferMode) const { UnsupportedOperation(); }
-
-
-PublishedArtifact
-TransferEngine::ResolveArtifactTarget(const ArtifactTarget&) const
-{
-  throw std::invalid_argument("transfer engine does not support artifacts");
-}
-
-void
-TransferEngine::ValidateArtifact(const PublishedArtifact&) const
-{
-  throw std::invalid_argument("transfer engine does not support artifacts");
-}
 }  // namespace snapshot::pagebroker
