@@ -39,7 +39,7 @@ which can inherit CUDA device mappings that prevent CRIU capture.
 After restore, the process recreates KV cache, calls `LLM.generate()` again,
 and starts an API on port 8000. It writes `trtllm-restore-ready` only after
 that generation succeeds and the API is listening.
-[Restore](restore.md#4-verify-the-restored-replica) sends it a request.
+[Restore](restore.md#4-verify-the-restored-replica) shows how to confirm the restore.
 
 The capture manifests run the TensorRT-LLM `1.3.0rc24` release image, pinned by
 digest, unmodified, and mount `app.py` at `/snapshot-app` from the

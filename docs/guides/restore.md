@@ -80,26 +80,15 @@ instead of starting again. Delete the Pod to restore a new replica.
 ## 4. Verify the restored replica
 
 The node agent adds a `nvidia.com/Restored` condition to the pod once the restore
-completes — watch it, along with pod readiness, to confirm. Sending a request is a
-good end-to-end check that the workload resumed correctly. Forward the API port of
-your profile's Deployment, then send a prompt from a second terminal:
+completes — watch it, along with pod readiness, to confirm:
 
 ```bash
-kubectl port-forward \
-  --namespace "$WORKLOAD_NAMESPACE" \
-  deployment/vllm-1gpu-restored 8000:8000
+kubectl get pods --namespace "$WORKLOAD_NAMESPACE" \
+  --selector app=vllm-1gpu-restored \
+  --output jsonpath='{.items[0].status.conditions[?(@.type=="nvidia.com/Restored")].status}'
 ```
 
-```bash
-curl --silent --request POST http://localhost:8000/generate \
-  --header 'Content-Type: application/json' \
-  --data '{"prompt": "What is the capital of Italy?"}'
-```
-
-The restored process resumed from the checkpointed state, skipping model loading
-and warm-up, so it answers with generated text in a `text` field.
-
-If the restore does not complete, see
+It prints `True`. If the restore does not complete, see
 [Troubleshooting](../operations/troubleshooting.md).
 
 In practice, higher-level systems create these restored Deployments rather than

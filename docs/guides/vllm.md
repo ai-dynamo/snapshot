@@ -27,7 +27,7 @@ the GPU for capture, without a CPU copy of the weights. It writes
 container, Snapshot runs its restore proxy in place of the program and restores
 the checkpointed process. That process calls `wake_up()` and `resume_generation()`, runs another
 generation, starts an API on port 8000, and writes `vllm-restore-ready` when the API is
-listening. [Restore](restore.md#4-verify-the-restored-replica) sends it a request.
+listening. [Restore](restore.md#4-verify-the-restored-replica) shows how to confirm the restore.
 
 The capture manifests run vLLM's own Ubuntu 24.04 build of the 0.31.0 image
 (`v0.31.0-ubuntu2404`) unmodified, which already matches the glibc floor the
