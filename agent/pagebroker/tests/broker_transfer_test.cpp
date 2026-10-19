@@ -773,7 +773,7 @@ TEST_F(BrokerTransferTest, FailedCleanupCannotBeEvictedWithoutResourceLimits)
     } else {
       EXPECT_EQ(response.failure().code(), Failure::STORAGE_ERROR);
     }
-    transaction->clear_descriptor();
+    EXPECT_FALSE(transaction->TryClearDescriptor());
     EXPECT_TRUE(std::holds_alternative<RestoreTransactionDescriptor>(transaction->descriptor()));
     EXPECT_EQ(Retained(broker), 0u);
     const auto sweep = std::chrono::steady_clock::now() + std::chrono::hours(2);

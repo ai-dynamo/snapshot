@@ -121,6 +121,28 @@ TEST(TransactionTest, RestoreKeepsStagingBudgetUntilConsumerCleanup)
   EXPECT_EQ(fs::file_size(staged / "new-owner"), 4u);
 }
 
+TEST(TransactionTest, DescriptorClearingSucceedsAfterCleanupAndIsIdempotent)
+{
+  for (const bool limited : {false, true}) {
+    SCOPED_TRACE(limited);
+    auto resources = limited ? std::make_shared<TransactionResources>(100, 1) : nullptr;
+    Transaction transaction;
+    transaction.PrepareTransfer(resources, 0);
+    transaction.set_state(Transaction::State::STAGED);
+    transaction.set_descriptor(RestoreTransactionDescriptor({}));
+    if (limited) {
+      EXPECT_FALSE(transaction.TryClearDescriptor());
+    }
+    transaction.CleanupTransfer();
+    // Cleanup leaves nonterminal descriptors for the caller to clear.
+    ASSERT_TRUE(std::holds_alternative<RestoreTransactionDescriptor>(transaction.descriptor()));
+    EXPECT_TRUE(transaction.TryClearDescriptor());
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(transaction.descriptor()));
+    EXPECT_TRUE(transaction.TryClearDescriptor());
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(transaction.descriptor()));
+  }
+}
+
 TEST(TransactionTest, UnownedCleanupPreservesDirectoriesAndPendingState)
 {
   for (bool limited : {false, true}) {
@@ -146,7 +168,7 @@ TEST(TransactionTest, UnownedCleanupPreservesDirectoriesAndPendingState)
     EXPECT_FALSE(error);
     EXPECT_EQ(fs::file_size(owned / "marker"), 5u);
     EXPECT_EQ(fs::file_size(borrowed / "marker"), 8u);
-    restore.clear_descriptor();
+    EXPECT_FALSE(restore.TryClearDescriptor());
     EXPECT_TRUE(std::holds_alternative<RestoreTransactionDescriptor>(restore.descriptor()));
     EXPECT_FALSE(restore.retain_terminal());
     if (limited) {
@@ -158,6 +180,7 @@ TEST(TransactionTest, UnownedCleanupPreservesDirectoriesAndPendingState)
     EXPECT_FALSE(fs::exists(owned));
     EXPECT_TRUE(fs::exists(borrowed / "marker"));
     EXPECT_TRUE(std::holds_alternative<std::monostate>(restore.descriptor()));
+    EXPECT_TRUE(restore.TryClearDescriptor());
     EXPECT_TRUE(restore.retain_terminal());
     if (limited) {
       EXPECT_EQ(resources->active, 0u);
@@ -176,6 +199,8 @@ TEST(TransactionTest, EmptyOwnedDirectoryReleasesReservation)
     restore.Reserve(80);
     restore.set_descriptor(RestoreTransactionDescriptor({}));
     restore.set_state(Transaction::State::ABORTED);
+    EXPECT_FALSE(restore.TryClearDescriptor());
+    EXPECT_TRUE(std::holds_alternative<RestoreTransactionDescriptor>(restore.descriptor()));
     ASSERT_EQ(resources->active, 1u);
     ASSERT_EQ(resources->reserved, 80u);
 
@@ -214,7 +239,7 @@ TEST(TransactionTest, FailedCleanupRetainsReservationAndDescriptor)
   std::error_code error;
   restore.CleanupTransfer(error);
   ASSERT_TRUE(error);
-  restore.clear_descriptor();
+  EXPECT_FALSE(restore.TryClearDescriptor());
   EXPECT_TRUE(std::holds_alternative<RestoreTransactionDescriptor>(restore.descriptor()));
   EXPECT_FALSE(restore.retain_terminal());
 
@@ -225,6 +250,7 @@ TEST(TransactionTest, FailedCleanupRetainsReservationAndDescriptor)
   fs::create_directories(staged);
   restore.CleanupTransfer(error);
   ASSERT_FALSE(error);
+  EXPECT_TRUE(restore.TryClearDescriptor());
   EXPECT_TRUE(restore.retain_terminal());
   EXPECT_TRUE(std::holds_alternative<std::monostate>(restore.descriptor()));
   EXPECT_NO_THROW(next.Reserve(100));
