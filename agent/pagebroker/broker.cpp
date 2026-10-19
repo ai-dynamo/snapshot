@@ -576,6 +576,9 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     transaction->cancellation().ThrowIfCancelled();
     source_prepared = true;
     bytes = prepared.plan.size_bytes();
+    // The configured budget remains reserved until staging cleanup. The separate
+    // filesystem reservation covers concurrent copies and ends after copying,
+    // when the staged files themselves consume the space reported by statvfs.
     transaction->Reserve(bytes);
     if (!direct && !ReserveStaging(bytes)) {
       std::lock_guard transactions_lock(transactions_mutex_);
