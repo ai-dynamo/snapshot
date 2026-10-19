@@ -47,6 +47,9 @@ struct FakeState {
   bool hold_request = false;
   bool allow_responses = true;
   int allocation_error = 0;
+  int start_status = 0;
+  bool return_start_handle = true;
+  int credential_status = 0;
   bool sparse_allocations = false;
   unsigned starts = 0;
   unsigned allocations = 0;
@@ -68,6 +71,8 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.hold_request = false;
     state.allow_responses = true;
     state.allocation_error = 0;
+    state.start_status = state.credential_status = 0;
+    state.return_start_handle = true;
     state.sparse_allocations = false;
     state.starts = state.ends_entered = state.ends = state.submitted = state.max_submissions = 0;
     state.allocations = state.requests_entered = 0;
@@ -140,17 +145,17 @@ extern "C" int __wrap_posix_fallocate(int descriptor, off_t offset, off_t length
 
 extern "C" int runai_file_streamer_start(void** value)
 {
-  *value = new Session;
   std::unique_lock lock(state.mutex);
+  *value = state.return_start_handle ? new Session : nullptr;
   ++state.starts;
   state.changed.notify_all();
   state.changed.wait(lock, [] { return !state.hold_start; });
-  return RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
+  return state.start_status;
 }
 
 extern "C" int runai_file_streamer_set_credentials(void*, const char**, const char**, unsigned)
 {
-  return RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
+  return state.credential_status;
 }
 
 extern "C" int runai_file_streamer_set_fs_strategy(void*, const char*)
@@ -252,6 +257,53 @@ TEST_F(ModelStreamerSessionTest, AllocationFailureDoesNotSubmitNativeWritesAndAl
   EXPECT_NO_THROW(restore.Stage(Plan(), root_ / "retry"));
   EXPECT_EQ(state.submitted, 1U);
 }
+
+enum class StartupFault { ErrorWithHandle, ErrorWithoutHandle, MissingHandle, Configuration };
+class ModelStreamerStartupFailureTest : public ModelStreamerSessionTest,
+                                       public ::testing::WithParamInterface<StartupFault> {};
+
+TEST_P(ModelStreamerStartupFailureTest, ReleasesHandleAndPermitBeforeReportingFailure)
+{
+  const auto fault = GetParam();
+  state.return_start_handle = fault == StartupFault::ErrorWithHandle || fault == StartupFault::Configuration;
+  const unsigned expected_ends = state.return_start_handle ? 1 : 0;
+  if (fault == StartupFault::ErrorWithHandle || fault == StartupFault::ErrorWithoutHandle)
+    state.start_status = RUNAI_FILE_STREAMER_RESPONSE_UNKNOWN_ERROR;
+  if (fault == StartupFault::Configuration)
+    state.credential_status = RUNAI_FILE_STREAMER_RESPONSE_UNKNOWN_ERROR;
+  ModelStreamerSessionOptions options;
+  options.region = "test-region";
+  {
+    ModelStreamerRestore restore(options);
+    EXPECT_THROW(restore.Stage(Plan(), root_ / "failed"), std::runtime_error);
+    EXPECT_TRUE(restore.Failed());
+    EXPECT_EQ(state.ends, expected_ends);
+    EXPECT_EQ(state.requests_entered, 0U);
+    state.start_status = state.credential_status = 0;
+    state.return_start_handle = true;
+    // Keep the failed coordinator alive: the replacement must not depend on
+    // its destructor to release the process-wide native-session permit.
+    ModelStreamerRestore replacement(options);
+    EXPECT_NO_THROW(replacement.Stage(Plan(), root_ / "retry",
+        Cancellation(Cancellation::Clock::now() + 2s)));
+    EXPECT_EQ(state.starts, 2U);
+    EXPECT_EQ(state.submitted, 1U);
+  }
+  EXPECT_EQ(state.ends, expected_ends + 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(StartupFaults, ModelStreamerStartupFailureTest,
+    ::testing::Values(StartupFault::ErrorWithHandle, StartupFault::ErrorWithoutHandle,
+        StartupFault::MissingHandle, StartupFault::Configuration),
+    [](const ::testing::TestParamInfo<StartupFault>& info) {
+      switch (info.param) {
+        case StartupFault::ErrorWithHandle: return "ErrorWithHandle";
+        case StartupFault::ErrorWithoutHandle: return "ErrorWithoutHandle";
+        case StartupFault::MissingHandle: return "MissingHandle";
+        case StartupFault::Configuration: return "Configuration";
+      }
+      return "Unknown";
+    });
 
 TEST_F(ModelStreamerSessionTest, KeepsSuccessfulDestinationsAliveUntilEndReturns)
 {
