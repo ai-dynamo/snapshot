@@ -54,8 +54,17 @@ class ModelStreamerRestore {
   void Stage(const RestorePlan& plan, const Path& destination, Cancellation control = {});
 
  private:
+  enum class Admission { Pending, Claimed, Cancelled };
+
+  // Shared by the caller and worker until one wins admission or cancellation.
+  // Claimed grants permission to submit; the completion future ends ownership.
+  struct SubmissionAdmission {
+    std::atomic<Admission> state{Admission::Pending};
+  };
+
   // Owns one submission's ABI arrays, response progress, and completion signal.
-  // Its pointer targets remain alive in the calling Stage operation.
+  // A cancelled entry can outlive its pointer targets. Only a successful claim
+  // permits native access to the calling Stage operation's buffers and paths.
   struct StreamerEntry {
     // Collects the parallel argument arrays passed to the Model Streamer API.
     struct Request {
@@ -71,6 +80,7 @@ class ModelStreamerRestore {
     std::size_t responses_received = 0;
     std::string first_error;
     std::promise<void> completion;
+    std::shared_ptr<SubmissionAdmission> admission;
     std::chrono::steady_clock::time_point deadline;
     Cancellation control;
   };
@@ -118,6 +128,9 @@ class ModelStreamerRestore {
   void Start();
   // Restores files in byte-bounded submissions and then applies their permissions.
   void RestoreFiles(const RestorePlan& plan, const Path& destination, Cancellation control);
+  // Allows cancellation before admission; claimed buffers wait for completion.
+  static void WaitForSubmission(
+      std::future<void>& completion, SubmissionAdmission& admission, const Cancellation& control);
   // Queues an entry until the current native session can admit it.
   void Submit(std::unique_ptr<StreamerEntry>& entry);
   // Admits a bounded group of queued submissions into one native session.
