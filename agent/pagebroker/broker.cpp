@@ -569,8 +569,7 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
   RestoreAccess access;
   try {
     const bool metadata_only = request.has_get_artifact_metadata();
-    transaction->PrepareTransfer(direct ? nullptr : resources_, 0,
-        {}, nullptr, lifetime_);
+    transaction->PrepareTransfer(direct ? nullptr : resources_, 0, nullptr, lifetime_);
     transaction->set_state(Transaction::State::PREPARING);
     // Preparation can scan storage; it shares the transfer's deadline and cancellation.
     auto prepared = engine.PrepareRestore(source, transaction->cancellation(), artifact, metadata_only, mode);
@@ -663,7 +662,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
     bool owned = false;
     try {
       // Admission precedes backend I/O; cleanup ownership starts only after mkdir succeeds.
-      transaction->PrepareTransfer(direct ? nullptr : resources_, kCheckpointAdmissionBytes, {}, artifact, lifetime_);
+      transaction->PrepareTransfer(direct ? nullptr : resources_, kCheckpointAdmissionBytes, artifact, lifetime_);
       transaction->set_state(Transaction::State::PREPARING);
       transaction->cancellation().ThrowIfCancelled();
       output = engine.PrepareCheckpoint(destination, staging_directory, request.transaction_id(), mode,
