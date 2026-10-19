@@ -19,19 +19,11 @@ namespace snapshot::pagebroker::filesystem_storage {
 namespace fs = std::filesystem;
 namespace {
 bool
-IsContainedRelativePath(const Path& relative)
-{
-  if (relative.empty() || relative == ".")
-    return false;
-  return relative != ".." && !relative.string().starts_with("../");
-}
-
-bool
 IsPathWithinStorageRoot(const Path& path, const Path& relative)
 {
   if (!path.is_absolute() || path.lexically_normal() != path)
     return false;
-  return IsContainedRelativePath(relative);
+  return IsSafeRelativePath(relative);
 }
 
 void
@@ -220,7 +212,7 @@ BuildPlan(const Path& source, Cancellation control, std::size_t limit, bool cpu_
     }
 
     const Path relative = entry.path().lexically_relative(source);
-    if (!IsContainedRelativePath(relative))
+    if (!IsSafeRelativePath(relative))
       throw std::runtime_error("checkpoint contains invalid path");
     if (fs::is_directory(status)) {
       plan.directories.push_back(RestoreDirectory{relative, status.permissions()});
