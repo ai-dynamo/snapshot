@@ -42,7 +42,7 @@ A published artifact contains:
 | File | Written by | Present |
 | --- | --- | --- |
 | `manifest.yaml` | The agent, before the dump | Always |
-| `criu.conf` | The agent | Always in practice. It carries the CRIU options that cannot be passed any other way. |
+| `criu.conf` | The agent | Always |
 | `dump.log` and the CRIU image files | CRIU | Always |
 | `rootfs-diff.tar` | The agent, after the dump | Unless archiving failed in a way that is not fatal |
 | `deleted-files.json` | The agent | When the container deleted files from its image |
@@ -50,13 +50,8 @@ A published artifact contains:
 | `cuinterpose.state` | The CuInterpose coordinator | For [multi-GPU](multi-gpu.md) checkpoints |
 | `gpu/<pid>/manifest.txt` and `gpu/<pid>/device-NNNN.bin` | PageBroker | For GPU checkpoints taken with CustomStorage |
 
-While a capture is in flight, sibling directories can appear next to the final one:
-
-- `<name>.pagebroker-tx-<id>`, a transaction being written directly on the volume.
-- `<name>.pagebroker-partial`, a transaction being copied in from memory.
-- `<name>.pagebroker-previous`, an older artifact being replaced.
-
-None of them survives a committed or aborted transaction.
+While a capture is in flight, PageBroker's temporary directories appear beside the final one with `.pagebroker-` suffixes.
+None survives a committed or aborted transaction.
 
 ## The manifest
 
@@ -109,7 +104,6 @@ After it, the artifact is complete.
 This is why the agent can treat the presence of the directory, with a manifest naming the right object, as proof that a capture succeeded, which it needs when it restarts between the commit and writing `Ready`.
 
 An aborted transaction is deleted, `dump.log` included, so a failed capture leaves nothing on the volume.
-A transaction that is neither committed nor aborted expires after about two hours.
 
 Because the memory-backed path charges its pages to the process writing them, the agent container's memory limit bounds the largest CPU-side checkpoint a node can take.
 CustomStorage GPU payloads go straight to the volume and are not bounded that way.

@@ -104,9 +104,7 @@ So the agent:
 | `cuinterpose-coordinator`, `cuinterpose-launch`, `libcuinterpose*.so` | Source and destination containers | The [multi-GPU](multi-gpu.md) components. |
 
 The bundle holds everything in the last four rows except the launcher, plus the shared libraries those programs need.
-It does not carry glibc, because a program exec'd directly always runs under the loader of the image it runs in.
-`tar` is the one exception: it is started through a loader and glibc that ship in the bundle as a matched pair, so that it works in images whose glibc is older than the agent's.
-A CI job unpacks a checkpoint inside an older image to keep that true.
+It carries no glibc, since a program exec'd directly runs under the image's own loader, except that `tar` ships with a matched loader and glibc so that it works in images whose glibc is older than the agent's.
 
 ## PageBroker
 
@@ -183,7 +181,7 @@ The restore proxy fills that role:
 2. Otherwise wait for one of those files.
 3. On `restore-failed`, exit 112.
 4. On `restore-complete`, read the restored process's PID from it.
-5. Forward `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, and `SIGUSR2` to that process, and reap orphaned children.
+5. Forward termination and user signals to that process, and reap orphaned children.
 6. When the process exits, exit with its code, or 128 plus the signal that ended it. Exit 113 if the process could not be followed.
 
 The proxy leaves file descriptors 0, 1, and 2 untouched.
@@ -224,7 +222,6 @@ These change behavior rather than tune it:
 | --- | --- |
 | `pageBroker.restoreMode` | `direct` lets CRIU read the checkpoint from the volume. `staged` copies it to memory first. |
 | `checkpoint.checkpointTimeoutSeconds` | Bounds a capture. A running CRIU dump is not interrupted by it. |
-| `restore.restoreTimeoutSeconds` | Bounds a restore. |
 | `restore.skipCompatCheck` | Turns off the checks that refuse a checkpoint this node cannot run, for every restore on the node. The per-pod form is the `nvidia.com/snapshot-skip-compat-check` annotation. |
 | `criu.tcpEstablished` | Keeps established TCP connections in the checkpoint. Restore then waits for the destination pod's IP and rewrites the addresses in every socket. |
 | `criu.libDir` | The directory CRIU loads plugins from. It must stay Snapshot's own directory, because CRIU's default directory contains CRIU's CUDA plugin, which would conflict with how Snapshot handles GPU state. |

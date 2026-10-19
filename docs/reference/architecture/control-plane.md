@@ -126,7 +126,7 @@ The template is wrapped in a `batch/v1` Job with the additions the [workload con
 - The `block-iouring` seccomp profile on the pod.
 - On the target container: the control directory, the `SNAPSHOT_CONTROL_DIR` environment variable, and a readiness probe that checks for `ready-for-snapshot` every second.
 - Any liveness or startup probe on the target removed.
-- `activeDeadlineSeconds` from the spec, one hour by default.
+- `activeDeadlineSeconds` from the spec.
 
 With `nvidia.com/snapshot-multi-gpu: enabled` on the template, the operator also adds an init container that copies the CuInterpose libraries from the agent image into a volume, and prefixes the target command with the CuInterpose launcher.
 [Multi-GPU support](multi-gpu.md#kubernetes-opt-in) explains why.
@@ -142,10 +142,9 @@ Each condition has exactly one source of truth:
 Every reconcile derives the whole status from those observations and writes it once.
 In order:
 
-1. Record the Job's UID before creating anything else.
-2. Once the Job controls exactly one pod, create a `PodSnapshot` named after the `SnapshotJob`, pinning that pod's name and UID. The pod need not be scheduled or ready yet. The `PodSnapshot` logic waits for a node, and the agent waits for container readiness.
-3. When the `PodSnapshot` is `Ready`, set `Captured=True`.
-4. When the Job finishes, decide the outcome as described next.
+1. Once the Job controls exactly one pod, create a `PodSnapshot` named after the `SnapshotJob`, pinning that pod's name and UID. The pod need not be scheduled or ready yet. The `PodSnapshot` logic waits for a node, and the agent waits for container readiness.
+2. When the `PodSnapshot` is `Ready`, set `Captured=True`.
+3. When the Job finishes, decide the outcome as described next.
 
 The `PodSnapshot` has no owner reference to the `SnapshotJob`, because the checkpoint is meant to outlive the job that produced it.
 Deleting a `SnapshotJob` leaves the `PodSnapshot` and its files in place.
@@ -162,7 +161,7 @@ The operator reads the Job's outcome as follows:
 - Job failed while the capture is still pending: wait. The `PodSnapshot` logic above resolves it within the grace period.
 
 A `SnapshotJob` is strictly one-shot.
-If its Job or `PodSnapshot` disappears or is replaced, it fails with `JobDeleted`, `JobNameConflict`, `PodSnapshotDeleted`, or `PodSnapshotNameConflict` rather than starting over.
+If its Job or `PodSnapshot` disappears or is replaced, it fails rather than starting over.
 
 ## Deleting checkpoints
 
@@ -222,14 +221,7 @@ Validation lives in the CRD schemas as CEL rules, and the reconcilers re-check t
 The pod mutations described under `SnapshotJob` live in `operator/internal/protocol`.
 The names they use, such as the volume, the environment variable, and the sentinel files, come from `api/podcontract`, so the operator and the agent share one definition of the contract.
 
-Configuration arrives as flags, rendered by the Helm chart:
-
-| Flag | Purpose |
-| --- | --- |
-| `--snapshot-storage-config` | The `storage.yaml` the chart renders to identify the checkpoint store. PageBroker reads the same file. |
-| `--snapshot-storage-base-path` | Where the shared volume is mounted in the operator pod, `/checkpoints`. |
-| `--artifact-cleanup-*` | Sweep interval, batch size, worker count, list attempts, and per-item timeout. |
-| `--cuinterpose-image`, `--cuinterpose-image-pull-policy` | The image a `SnapshotJob` copies the CuInterpose libraries from. The chart passes the agent image. |
+Configuration arrives as command line flags rendered by the Helm chart: the storage identity file, the volume mount path, the cleanup queue limits, and the image to copy the CuInterpose libraries from.
 
 The manager runs as root with every capability dropped.
 Root is needed only because the files it deletes were written by the privileged agent.
