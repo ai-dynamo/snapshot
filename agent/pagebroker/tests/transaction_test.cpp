@@ -60,12 +60,55 @@ TEST(TransactionTest, InitialReservationRespectsRemainingBudgetWithoutClaimingDe
   EXPECT_EQ(resources->active, 2u);
   EXPECT_EQ(resources->reserved, 4u);
   EXPECT_EQ(resources->destinations.count(artifact.artifact_handle()), 1u);
-  // A full byte budget still rejects zero-byte admission, as before.
-  Transaction blocked;
-  EXPECT_THROW(blocked.PrepareTransfer(resources, 0), TransferError);
   first.CleanupTransfer();
   EXPECT_EQ(resources->active, 1u);
   EXPECT_EQ(resources->reserved, 1u);
+}
+
+TEST(TransactionTest, FullByteBudgetRejectsAdmissionWithSlotsAvailable)
+{
+  auto resources = std::make_shared<TransactionResources>(4, 2);
+  Transaction first;
+  first.PrepareTransfer(resources, 4);
+  ASSERT_LT(resources->active, resources->transaction_limit);
+  Transaction blocked;
+  try {
+    // Zero initial bytes isolate the full-budget check from reservation growth.
+    blocked.PrepareTransfer(resources, 0);
+    FAIL() << "full byte budget admitted another transaction";
+  }
+  catch (const TransferError& error) {
+    EXPECT_EQ(error.code, Failure::INSUFFICIENT_STORAGE);
+  }
+  EXPECT_EQ(resources->active, 1u);
+  EXPECT_EQ(resources->reserved, 4u);
+
+  first.CleanupTransfer();
+  Transaction replacement;
+  ASSERT_NO_THROW(replacement.PrepareTransfer(resources, 0));
+  EXPECT_NO_THROW(replacement.Reserve(4));
+}
+
+TEST(TransactionTest, FullSlotBudgetRejectsAdmissionWithBytesAvailable)
+{
+  auto resources = std::make_shared<TransactionResources>(100, 1);
+  Transaction first;
+  first.PrepareTransfer(resources, 0);
+  ASSERT_LT(resources->reserved, resources->byte_limit);
+  Transaction blocked;
+  try {
+    blocked.PrepareTransfer(resources, 0);
+    FAIL() << "full slot budget admitted another transaction";
+  }
+  catch (const TransferError& error) {
+    EXPECT_EQ(error.code, Failure::INSUFFICIENT_STORAGE);
+  }
+  EXPECT_EQ(resources->active, 1u);
+  EXPECT_EQ(resources->reserved, 0u);
+
+  first.CleanupTransfer();
+  Transaction replacement;
+  EXPECT_NO_THROW(replacement.PrepareTransfer(resources, 0));
 }
 
 TEST(TransactionTest, ZeroInitialReservationCanClaimPublicationAndReleasesOnlyItsOwnResources)
@@ -114,11 +157,40 @@ TEST(TransactionTest, RestoreKeepsStagingBudgetUntilConsumerCleanup)
   EXPECT_FALSE(fs::exists(staged));
   fs::create_directory(staged);
   std::ofstream(staged / "new-owner") << "keep";
-  restore.RemoveStaging(staged); // Cleanup retries cannot release the reservation twice.
+  restore.RemoveStaging(staged); // Repeated cleanup must preserve a new owner's directory.
   EXPECT_NO_THROW(next.Reserve(100));
   EXPECT_EQ(resources->active, 1u);
   EXPECT_EQ(resources->reserved, 100u);
   EXPECT_EQ(fs::file_size(staged / "new-owner"), 4u);
+}
+
+TEST(TransactionTest, CleanupThenDestructionReleasesReservationOnce)
+{
+  test::TemporaryDirectory root;
+  auto resources = std::make_shared<TransactionResources>(100, 2);
+  {
+    Transaction restore;
+    restore.PrepareTransfer(resources, 0);
+    restore.Reserve(80);
+    const auto staged = root.path() / "restored";
+    fs::create_directory(staged);
+    restore.OwnDirectory(staged);
+    restore.set_state(Transaction::State::STAGED);
+    restore.CleanupTransfer();
+    EXPECT_FALSE(fs::exists(staged));
+    EXPECT_EQ(resources->active, 0u);
+    EXPECT_EQ(resources->reserved, 0u);
+  }
+  // The destructor must not release the already-cleaned reservation again.
+  EXPECT_EQ(resources->active, 0u);
+  EXPECT_EQ(resources->reserved, 0u);
+  Transaction first, second;
+  ASSERT_NO_THROW(first.PrepareTransfer(resources, 0));
+  ASSERT_NO_THROW(second.PrepareTransfer(resources, 0));
+  EXPECT_NO_THROW(first.Reserve(50));
+  EXPECT_NO_THROW(second.Reserve(50));
+  EXPECT_EQ(resources->active, 2u);
+  EXPECT_EQ(resources->reserved, 100u);
 }
 
 TEST(TransactionTest, DescriptorClearingSucceedsAfterCleanupAndIsIdempotent)
@@ -295,41 +367,59 @@ TEST(TransactionTest, PublicationRetryDataSurvivesFailedCleanup)
   EXPECT_FALSE(fs::exists(staged));
 }
 
-TEST(TransactionTest, PublicationAndDestinationOutliveStaging)
+TEST(TransactionTest, CommittedPublicationSurvivesStagingCleanup)
 {
   test::TemporaryDirectory root;
   auto resources = std::make_shared<TransactionResources>(100, 1);
   PublishedArtifact artifact;
   artifact.set_artifact_handle(std::string(64, 'a'));
-  auto checkpoint = std::make_unique<Transaction>();
+  Transaction checkpoint;
   const auto staged = root.path() / "checkpoint";
+  checkpoint.PrepareTransfer(resources, 1, &artifact);
+  fs::create_directory(staged);
+  checkpoint.OwnDirectory(staged);
+  checkpoint.publication()->published = true;
+  checkpoint.set_state(Transaction::State::COMMITTED);
+  checkpoint.CleanupTransfer();
+  EXPECT_FALSE(fs::exists(staged));
+  ASSERT_NE(checkpoint.publication(), nullptr);
+  EXPECT_TRUE(checkpoint.publication()->published);
+  EXPECT_EQ(checkpoint.publication()->artifact.artifact_handle(), artifact.artifact_handle());
+}
+
+TEST(TransactionTest, CommittedDestinationRemainsReservedUntilDestruction)
+{
+  test::TemporaryDirectory root;
+  auto resources = std::make_shared<TransactionResources>(100, 4);
+  PublishedArtifact artifact;
+  artifact.set_artifact_handle(std::string(64, 'a'));
+  auto checkpoint = std::make_unique<Transaction>();
   checkpoint->PrepareTransfer(resources, 1, &artifact);
+  const auto staged = root.path() / "checkpoint";
   fs::create_directory(staged);
   checkpoint->OwnDirectory(staged);
-  {
-    Transaction reader;
-    EXPECT_THROW(reader.PrepareTransfer(resources, 0), TransferError);
-  }
-  checkpoint->publication()->pending_index = "saved publication bytes";
-  checkpoint->publication()->published = true;
   checkpoint->set_state(Transaction::State::COMMITTED);
-  checkpoint->RemoveStaging(staged);
-  ASSERT_NE(checkpoint->publication(), nullptr);
-  EXPECT_TRUE(checkpoint->publication()->published);
-  EXPECT_EQ(checkpoint->publication()->artifact.artifact_handle(), artifact.artifact_handle());
-  EXPECT_TRUE(checkpoint->publication()->pending_index.empty());
-  // Failed contenders must not release the original writer's destination.
-  for (unsigned attempt = 0; attempt < 2; ++attempt) {
-    Transaction duplicate;
-    EXPECT_THROW(duplicate.PrepareTransfer(resources, 1, &artifact), TransferError);
-  }
-  {
-    Transaction reader;
-    EXPECT_NO_THROW(reader.PrepareTransfer(resources, 0));
-  }
+  checkpoint->CleanupTransfer();
+  ASSERT_EQ(resources->active, 0u);
+  ASSERT_EQ(resources->reserved, 0u);
+  ExpectDestinationConflict(resources, artifact);
   checkpoint.reset();
   Transaction replacement;
   EXPECT_NO_THROW(replacement.PrepareTransfer(resources, 1, &artifact));
+}
+
+TEST(TransactionTest, FailedContendersDoNotReleaseDestination)
+{
+  auto resources = std::make_shared<TransactionResources>(100, 4);
+  PublishedArtifact artifact;
+  artifact.set_artifact_handle(std::string(64, 'a'));
+  Transaction checkpoint;
+  checkpoint.PrepareTransfer(resources, 1, &artifact);
+  for (unsigned attempt = 0; attempt < 2; ++attempt) {
+    SCOPED_TRACE(attempt);
+    ExpectDestinationConflict(resources, artifact);
+  }
+  EXPECT_EQ(resources->destinations.count(artifact.artifact_handle()), 1u);
 }
 
 TEST(TransactionTest, AbortedDestinationCanBeReusedBeforeTransactionDestruction)
