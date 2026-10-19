@@ -241,6 +241,11 @@ class BrokerTransferTest : public ::testing::Test {
     return broker.FindTransaction(id);
   }
 
+  std::shared_ptr<Transaction> Unprepared(Broker& broker, const std::string& id)
+  {
+    return broker.CreateOrGetTransaction(id);
+  }
+
   void SetLifetime(Broker& broker, std::chrono::seconds lifetime)
   {
     broker.lifetime_ = lifetime;
@@ -577,6 +582,73 @@ TEST_F(BrokerTransferTest, CheckpointReservesInitialByteBeforeBackendPreparation
   next.set_transaction_id("retry");
   ASSERT_TRUE(broker.HandleRequest(next).has_staged_checkpoint_directory());
   EXPECT_EQ(preparations, 2u);
+}
+
+TEST_F(BrokerTransferTest, ExistingRestoreStagingRejectsWithoutRegisteringTransaction)
+{
+  Broker broker(staging_, storage_);
+  const auto resources = Limit(broker, 16);
+  // Create the conflict after broker startup, which cleans old staging trees.
+  const Path directory = staging_ / "restore/restore";
+  fs::create_directory(directory);
+  std::ofstream(directory / "marker") << "keep";
+  const auto permissions = fs::status(directory).permissions();
+  Intercept(broker, [](Boundary, Cancellation) { ADD_FAILURE() << "conflict reached the transfer engine"; });
+
+  const auto response = broker.HandleRequest(Restore());
+  ASSERT_TRUE(response.has_failure());
+  EXPECT_EQ(response.failure().code(), Failure::TRANSACTION_CONFLICT);
+  EXPECT_EQ(Find(broker, "restore"), nullptr);
+  EXPECT_EQ(fs::file_size(directory / "marker"), 4u);
+  EXPECT_EQ(fs::status(directory).permissions(), permissions);
+  EXPECT_EQ(resources->active, 0u);
+  EXPECT_EQ(resources->reserved, 0u);
+}
+
+TEST_F(BrokerTransferTest, RestoreStagingConflictAbortsOldHandleAndAllowsFreshRetry)
+{
+  Broker broker(staging_, storage_);
+  // Model another request that obtained the same handle before rejection.
+  const auto rejected = Unprepared(broker, "restore");
+  const Path directory = staging_ / "restore/restore";
+  fs::create_directory(directory);
+  EXPECT_EQ(broker.HandleRequest(Restore()).failure().code(), Failure::TRANSACTION_CONFLICT);
+  {
+    std::lock_guard lock(rejected->mutex());
+    EXPECT_EQ(rejected->state(), Transaction::State::ABORTED);
+  }
+  EXPECT_EQ(Find(broker, "restore"), nullptr);
+
+  fs::remove(directory);
+  ASSERT_TRUE(broker.HandleRequest(Restore()).has_staged_restore_directory());
+  const auto replacement = Find(broker, "restore");
+  ASSERT_NE(replacement, nullptr);
+  EXPECT_NE(replacement, rejected);
+  EXPECT_EQ(replacement->state(), Transaction::State::STAGED);
+  EXPECT_EQ(rejected->state(), Transaction::State::ABORTED);
+  EXPECT_EQ(fs::file_size(directory / "image"), 5u);
+}
+
+TEST_F(BrokerTransferTest, DuplicateRestorePreservesRegisteredStagedTransaction)
+{
+  Broker broker(staging_, storage_);
+  const auto resources = Limit(broker, 16);
+  ASSERT_TRUE(broker.HandleRequest(Restore()).has_staged_restore_directory());
+  const auto transaction = Find(broker, "restore");
+  ASSERT_NE(transaction, nullptr);
+
+  EXPECT_EQ(broker.HandleRequest(Restore()).failure().code(), Failure::TRANSACTION_CONFLICT);
+  EXPECT_EQ(Find(broker, "restore"), transaction);
+  EXPECT_EQ(transaction->state(), Transaction::State::STAGED);
+  EXPECT_EQ(fs::file_size(staging_ / "restore/restore/image"), 5u);
+  EXPECT_EQ(resources->active, 1u);
+  EXPECT_EQ(resources->reserved, 5u);
+
+  auto commit = RequestFor("restore");
+  commit.mutable_commit();
+  EXPECT_TRUE(broker.HandleRequest(commit).has_commit_complete());
+  EXPECT_EQ(resources->active, 0u);
+  EXPECT_EQ(resources->reserved, 0u);
 }
 
 TEST_F(BrokerTransferTest, InvalidPreparationReleasesAdmissionAndAllowsCorrectedRequest)
