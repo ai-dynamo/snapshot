@@ -12,9 +12,8 @@ pull request, without a cluster:
   relies on (control volume at /snapshot-control with subPath main,
   the apps' default control directory, io_uring seccomp profile, nvidia
   RuntimeClass, one GPU);
-- the restore pod keeps the source's command, which the restore proxy
-  replaces, or idles on nodes without the proxy, and restores this run's
-  PodSnapshot;
+- the restore pod is an inert placeholder (an explicit sleep command) that
+  restores this run's PodSnapshot;
 - the model the guide deploys is the one the tests expect;
 - the image tag is content-addressed and deterministic.
 """
@@ -129,8 +128,8 @@ def test_restore_pod_also_mounts_the_app_configmap(
     spec: frameworks.FrameworkSpec,
 ) -> None:
     # CRIU recreates every mount from the source container's mount
-    # namespace, including this one, even though the restore container's own
-    # command never runs.
+    # namespace, including this one, even though the placeholder's own
+    # command never reads it.
     _, restore, _ = pods(spec)
     main = fw.main_container(restore)
     volumes = {volume["name"]: volume for volume in restore["spec"]["volumes"]}
@@ -151,62 +150,20 @@ def test_app_configmap_matches_the_guide_program(
 
 
 @pytest.mark.workload
-def test_restore_pod_restores_this_run(
-    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("SNAPSHOT_E2E_RESTORE_PROXY", raising=False)
-    source, restore, run = pods(spec)
+def test_restore_pod_is_standby_placeholder_for_this_run(spec: frameworks.FrameworkSpec) -> None:
+    _, restore, run = pods(spec)
     main = fw.main_container(restore)
-    source_main = fw.main_container(source)
-    # The restore container keeps the engine's command, which Snapshot
-    # replaces with the restore proxy. Model arguments come from the checkpoint.
-    assert main["command"] == source_main["command"]
+    # The guide manifests keep the placeholder inert with an explicit sleep
+    # command; without it the guide program would load a model into the GPU
+    # while the agent restores into the same container.
+    assert main["command"] == ["/bin/sh", "-c", "exec sleep infinity"]
+    assert "args" not in main
     assert fw.env_value(main, "SNAPSHOT_RESTORE_STANDBY") is None
     assert restore["metadata"]["annotations"] == {fw.RESTORE_FROM_ANNOTATION: run.snapshot_name}
     node_terms = restore["spec"]["affinity"]["nodeAffinity"][
         "requiredDuringSchedulingIgnoredDuringExecution"
     ]["nodeSelectorTerms"]
     assert node_terms[0]["matchFields"][0]["values"] == ["gpu-node-0"]
-
-
-@pytest.mark.workload
-def test_restore_pod_idles_without_the_proxy(
-    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "false")
-    _, restore, _ = pods(spec)
-    main = fw.main_container(restore)
-    # The source's command would load a second model beside the restored one.
-    assert main["command"] == workloads.INERT_COMMAND
-    assert "args" not in main
-
-
-@pytest.mark.workload
-@pytest.mark.parametrize(
-    ("agent_log", "proxy"),
-    [
-        ("... Registered with the container runtime ...", True),
-        ("... Restoring without the restore proxy ...", False),
-    ],
-)
-def test_restore_pod_follows_the_agent_in_auto_mode(
-    monkeypatch: pytest.MonkeyPatch, agent_log: str, proxy: bool
-) -> None:
-    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "auto")
-    monkeypatch.setattr(fw.lifecycle, "checkpoint_agent_pod", lambda config, node: "agent-0")
-    monkeypatch.setattr(fw.lifecycle.k8s, "pod_logs", lambda *args, **kwargs: agent_log)
-    _, restore, _ = pods(frameworks.FRAMEWORKS["vllm"])
-    idles = fw.main_container(restore)["command"] == workloads.INERT_COMMAND
-    assert idles is not proxy
-
-
-@pytest.mark.workload
-def test_auto_mode_fails_when_the_agent_says_neither(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "auto")
-    monkeypatch.setattr(fw.lifecycle, "checkpoint_agent_pod", lambda config, node: "agent-0")
-    monkeypatch.setattr(fw.lifecycle.k8s, "pod_logs", lambda *args, **kwargs: "starting")
-    with pytest.raises(AssertionError, match="logged neither"):
-        pods(frameworks.FRAMEWORKS["vllm"])
 
 
 @pytest.mark.workload
@@ -331,8 +288,8 @@ def test_multi_gpu_recipe_preserves_capture_restore_contract(
         assert main["resources"]["limits"]["nvidia.com/gpu"] == "8"
     restore_main = fw.main_container(restore)
     assert fw.env_value(restore_main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
-    # The restore profile keeps the workload command the source runs under the
-    # launcher. Snapshot replaces it with the restore proxy.
-    restore_command = restore_main["command"]
-    assert fw.main_container(source)["command"][-len(restore_command):] == restore_command
+    # The restore profile keeps the placeholder inert, as the single-GPU one does:
+    # the agent restores the workload beside it.
+    assert restore_main["command"] == ["/bin/sh", "-c", "exec sleep infinity"]
+    assert "args" not in restore_main
     assert restore["metadata"]["annotations"][fw.RESTORE_FROM_ANNOTATION] == run.snapshot_name
