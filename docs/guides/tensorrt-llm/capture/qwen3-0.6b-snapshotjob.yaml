@@ -4,8 +4,9 @@
 apiVersion: nvidia.com/v1alpha1
 kind: SnapshotJob
 metadata:
-  name: tensorrt-llm-snapshot
+  name: tensorrt-llm-qwen3-0-6b-snapshot
 spec:
+  activeDeadlineSeconds: 3600
   podSnapshotTemplate:
     targetContainers:
       - main
@@ -13,8 +14,32 @@ spec:
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       nodeSelector:
         nvidia.com/gpu.present: "true"
+      initContainers:
+        - name: model-cache
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import sys
+              from huggingface_hub import snapshot_download
+              snapshot_download(repo_id=sys.argv[1])
+            - Qwen/Qwen3-0.6B
+          env:
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
       containers:
         - name: main
           image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
@@ -33,6 +58,10 @@ spec:
               value: "0.10"
             - name: HF_HUB_DISABLE_XET
               value: "1"
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
             - name: OMPI_MCA_pml
               value: ob1
             - name: OMPI_MCA_btl
@@ -44,12 +73,17 @@ spec:
             limits:
               nvidia.com/gpu: "1"
           volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
             - name: shm
               mountPath: /dev/shm
             - name: app
               mountPath: /snapshot-app
               readOnly: true
       volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
         - name: shm
           emptyDir:
             medium: Memory

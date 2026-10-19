@@ -4,7 +4,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: tensorrt-llm-restored
+  name: sglang-1gpu-restored
 spec:
   replicas: 1
   progressDeadlineSeconds: 1800
@@ -12,19 +12,17 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: tensorrt-llm-restored
+      app: sglang-1gpu-restored
   template:
     metadata:
       labels:
-        app: tensorrt-llm-restored
+        app: sglang-1gpu-restored
       annotations:
-        nvidia.com/restore-from: tensorrt-llm-snapshot
+        nvidia.com/restore-from: ${SNAPSHOT_NAME}
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
       securityContext:
-        fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: Localhost
           localhostProfile: profiles/block-iouring.json
@@ -32,12 +30,13 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          image: lmsysorg/sglang:v0.5.21@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469
           imagePullPolicy: IfNotPresent
           # The source's command. Snapshot replaces it with its restore proxy,
           # which waits for the restore and then follows the restored process.
           command:
             - python3
+            - -u
             - /snapshot-app/app.py
           env:
             - name: SNAPSHOT_CONTROL_DIR
@@ -52,10 +51,12 @@ spec:
             exec:
               command:
                 - cat
-                - /snapshot-control/trtllm-restore-ready
+                - /snapshot-control/sglang-restore-ready
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
@@ -65,6 +66,9 @@ spec:
               mountPath: /snapshot-app
               readOnly: true
       volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
         - name: snapshot-control
           emptyDir: {}
         - name: shm
@@ -73,4 +77,4 @@ spec:
             sizeLimit: 1Gi
         - name: app
           configMap:
-            name: tensorrt-llm-app
+            name: sglang-app

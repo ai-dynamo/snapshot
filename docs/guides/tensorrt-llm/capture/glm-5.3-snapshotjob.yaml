@@ -17,6 +17,9 @@ spec:
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       nodeSelector:
         nvidia.com/gpu.product: NVIDIA-B200
       initContainers:

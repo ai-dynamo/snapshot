@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: SnapshotJob
 metadata:
-  name: vllm-deepseek-v4.1-flash-snapshot
+  name: vllm-deepseek-v4-1-flash-snapshot
 spec:
   activeDeadlineSeconds: 7200
   podSnapshotTemplate:

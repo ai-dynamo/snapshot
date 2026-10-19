@@ -56,7 +56,7 @@ class FrameworkSpec:
     # traceback. The restored process keeps the dead source container's stdout,
     # so this file is the only place such a failure is visible.
     restore_error_file: str
-    # Guide PVC manifest for a persistent model cache, if the guide uses one.
+    # The guides' model cache PVC manifest, relative to manifest_dir.
     model_cache_manifest: str | None = None
     # Overrides RESTORE_TIMEOUT_SECONDS for this framework's restore-condition
     # and restore-outcome waits.
@@ -79,7 +79,7 @@ class FrameworkSpec:
 
     @property
     def restore_deployment_manifest(self) -> Path:
-        filename = "8-gpu.yaml" if self.recipe else "single-gpu.yaml"
+        filename = "8-gpu.yaml" if self.recipe else "1-gpu.yaml"
         return self.manifest_dir / "restore" / filename
 
     @property
@@ -99,8 +99,8 @@ class FrameworkSpec:
         return self.manifest_dir / self.model_cache_manifest
 
 
-# The model cache PVC shared by every guide that uses one, relative to the
-# framework's manifest directory.
+# The model cache PVC every recipe mounts, relative to the framework's manifest
+# directory.
 MODEL_CACHE_PVC_MANIFEST = "../model-cache-pvc.yaml"
 
 FRAMEWORKS: dict[str, FrameworkSpec] = {
@@ -109,6 +109,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         model="Qwen/Qwen3-0.6B",
         restore_ready_file="/snapshot-control/vllm-restore-ready",
         restore_error_file="/snapshot-control/vllm-restore-error",
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
     ),
     "sglang": FrameworkSpec(
         name="sglang",
@@ -126,6 +127,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         model="Qwen/Qwen3-0.6B",
         restore_ready_file="/snapshot-control/trtllm-restore-ready",
         restore_error_file="/snapshot-control/trtllm-restore-error",
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
     ),
 }
 
