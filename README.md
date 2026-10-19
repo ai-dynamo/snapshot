@@ -145,7 +145,8 @@ The [API reference](docs/reference/api.md) covers the resources and the
 checkpoint/restore lifecycle.
 
 Once Snapshot is installed, follow the **[usage guides](docs/guides/README.md)**
-to checkpoint and restore a pod.
+from a workload to a restored replica: pick an inference framework and model on
+one or eight GPUs, make the workload snapshot-ready, checkpoint it, and restore it.
 
 ## Limitations
 

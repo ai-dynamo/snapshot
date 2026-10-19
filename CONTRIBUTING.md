@@ -96,7 +96,8 @@ under `docs/guides/<framework>/`:
 | `restore/single-gpu.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
 
 Plus `docs/guides/<framework>.md` walking through it, and an entry in the
-[guides index](docs/guides/README.md).
+[guides index](docs/guides/README.md) with a row in its recipe table for each
+model you add.
 
 The contract your entrypoint has to honor — the control volume, the startup
 gate, the `SNAPSHOT_CONTROL_DIR` environment variable, and the seccomp profile

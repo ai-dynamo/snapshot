@@ -154,6 +154,63 @@ annotation, the source's command (Snapshot replaces it with its restore proxy),
 Producing them programmatically is the
 [Restore Pod contract](restore-pod-contract.md).
 
+## Multi-GPU workloads
+
+A workload that uses several GPUs meets the same contract, with its GPUs on a
+single node; multi-node workloads are not supported. The source pod also enables
+multi-GPU support with the `nvidia.com/snapshot-multi-gpu: enabled` annotation.
+What else it carries depends on what creates it:
+
+- **A `SnapshotJob`** needs only the annotation, on
+  `spec.podTemplate.metadata.annotations`. The controller prepares the source Pod
+  for multi-GPU capture.
+- **A pod that Snapshot does not create** — such as a Deployment checkpointed
+  through a `PodSnapshot` — must prepare itself. It copies the multi-GPU
+  libraries from the Snapshot agent image with an init container, and starts the
+  workload through the launcher those libraries include:
+
+  ```yaml
+  template:
+    metadata:
+      annotations:
+        nvidia.com/snapshot-multi-gpu: enabled
+    spec:
+      initContainers:
+        - name: snapshot-cuda-install
+          image: ${SNAPSHOT_AGENT_IMAGE}
+          command:
+            - /bin/cp
+          args:
+            - --preserve=mode
+            - --
+            - /usr/local/lib/snapshot/libcuinterpose.so
+            - /usr/local/lib/snapshot/libcuinterpose_core.so
+            - /usr/local/bin/cuinterpose-launch
+            - /tmp/snapshot-cuda/
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+      containers:
+        - name: main
+          command:
+            - /tmp/snapshot-cuda/cuinterpose-launch
+            - --library
+            - /tmp/snapshot-cuda/libcuinterpose.so
+            - --
+            - python3
+            - /snapshot-app/app.py
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+              readOnly: true
+      volumes:
+        - name: snapshot-cuda
+          emptyDir: {}
+  ```
+
+The eight-GPU recipes in the [usage guides](../guides/README.md#eight-gpu-recipes)
+are complete examples of both.
+
 ## Runtime compatibility
 
 CRIU restores a process only if everything in it is checkpointable, so the
