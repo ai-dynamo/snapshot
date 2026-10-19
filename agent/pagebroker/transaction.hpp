@@ -38,7 +38,6 @@ class Transaction {
   ~Transaction();
   Transaction(const Transaction&) = delete;
   Transaction& operator=(const Transaction&) = delete;
-  enum class Kind { CHECKPOINT, RESTORE, METADATA };
   enum class State { NEW, PREPARING, STAGED, ABORTING, COMMITTED, ABORTED };
   using Descriptor = std::variant<std::monostate, RestoreTransactionDescriptor, CheckpointTransactionDescriptor>;
 
@@ -77,7 +76,8 @@ class Transaction {
   bool retain_terminal();
   bool expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const;
 
-  void PrepareTransfer(std::shared_ptr<TransactionResources> resources, Kind kind,
+  // Admission and initial byte reservation share one resource lock when limits are enabled.
+  void PrepareTransfer(std::shared_ptr<TransactionResources> resources, uintmax_t initial_bytes,
       const Path& directory, const PublishedArtifact* artifact = nullptr,
       std::chrono::steady_clock::duration lifetime = std::chrono::seconds{7500});
   // Records exclusive ownership after the capture directory has been created.
@@ -86,7 +86,6 @@ class Transaction {
   void Reserve(uintmax_t bytes);
   Cancellation cancellation() const { return cancellation_.WithDeadline(deadline_); }
   bool has_limits() const { return resources_ != nullptr; }
-  Kind kind() const { return kind_; }
   CheckpointPublication* publication() { return publication_ ? &*publication_ : nullptr; }
   void CancelWork(); // Thread-safe; call before waiting for mutex().
   // Only the recorded directory may be removed. A matching empty path still releases reservations.
@@ -110,7 +109,6 @@ class Transaction {
   std::chrono::steady_clock::time_point staging_started_at_;
   bool terminal_retained_ = false;
   Cancellation cancellation_;
-  Kind kind_ = Kind::RESTORE;
   Cancellation::Clock::time_point deadline_ = Cancellation::Clock::time_point::max();
   std::shared_ptr<TransactionResources> resources_;
   uintmax_t reserved_ = 0;
