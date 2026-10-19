@@ -355,6 +355,23 @@ TEST_F(BrokerTransferTest, PreservesFailureCodesAcrossRequestAndTransferBoundari
   }
 }
 
+TEST_F(BrokerTransferTest, ShutdownRejectsNewTransactionsAsUnavailable)
+{
+  Broker broker(staging_, storage_);
+  broker.CancelActiveTransactions();
+  for (const auto& request : {Restore(), Checkpoint(false), Checkpoint(true)}) {
+    SCOPED_TRACE(request.DebugString());
+    const auto response = broker.HandleRequest(request);
+    ASSERT_TRUE(response.has_failure()) << response.DebugString();
+    EXPECT_EQ(response.failure().code(), Failure::UNAVAILABLE);
+    EXPECT_EQ(response.failure().message(), "PageBroker is shutting down");
+    EXPECT_EQ(Find(broker, request.transaction_id()), nullptr);
+  }
+  EXPECT_TRUE(fs::is_empty(staging_ / "restore"));
+  EXPECT_TRUE(fs::is_empty(staging_ / "checkpoint"));
+  EXPECT_FALSE(fs::exists(CheckpointOutput(true)));
+}
+
 TEST_F(BrokerTransferTest, ShutdownCancelsActiveRestoreAndRemovesStaging)
 {
   Broker broker(staging_, storage_);
