@@ -127,7 +127,7 @@ main container then starts SGLang from the offline cache.
 example, GLM 5.3:
 
 ```bash
-envsubst '${SNAPSHOT_AGENT_IMAGE}' < sglang/capture/glm-5.3.yaml | \
+sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" sglang/capture/glm-5.3.yaml | \
   kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
 ```
 
