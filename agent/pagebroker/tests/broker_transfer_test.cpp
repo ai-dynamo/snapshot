@@ -173,10 +173,9 @@ class BrokerTransferTest : public ::testing::Test {
     return direct ? storage_ / "published.pagebroker-tx-checkpoint" : staging_ / "checkpoint/checkpoint";
   }
 
-  std::shared_ptr<TransactionResources> Limit(Broker& broker, std::chrono::steady_clock::duration lifetime,
-      uintmax_t bytes = 4, unsigned transactions = 1)
+  std::shared_ptr<TransactionResources> Limit(Broker& broker, uintmax_t bytes = 4, unsigned transactions = 1)
   {
-    broker.resources_ = std::make_shared<TransactionResources>(bytes, transactions, lifetime);
+    broker.resources_ = std::make_shared<TransactionResources>(bytes, transactions);
     return broker.resources_;
   }
 
@@ -194,7 +193,7 @@ class BrokerTransferTest : public ::testing::Test {
   {
     auto transaction = broker.CreateOrGetTransaction("seed");
     std::lock_guard lock(transaction->mutex());
-    transaction->PrepareTransfer(broker.resources_, initial_bytes, staging_ / "restore/seed");
+    transaction->PrepareTransfer(broker.resources_, initial_bytes, staging_ / "restore/seed", nullptr, broker.lifetime_);
     transaction->Reserve(4);
     fs::create_directory(staging_ / "restore/seed");
     std::ofstream(staging_ / "restore/seed/image") << "data";
@@ -232,7 +231,8 @@ class BrokerTransferTest : public ::testing::Test {
 TEST_F(BrokerTransferTest, DirectRestoreUsesGenericPreparationAndBorrowsItsSource)
 {
   Broker broker(staging_, storage_);
-  auto resources = Limit(broker, std::chrono::hours(1));
+  SetLifetime(broker, std::chrono::hours(1));
+  auto resources = Limit(broker);
   ASSERT_EQ(mkfifo((source_ / "unscanned").c_str(), 0600), 0);
   std::vector<Boundary> calls;
   Intercept(broker, [&](Boundary boundary, Cancellation) { calls.push_back(boundary); });
@@ -396,6 +396,39 @@ TEST_F(BrokerTransferTest, ShutdownCancelsActiveRestoreAndRemovesStaging)
   EXPECT_FALSE(fs::exists(staging_ / "restore" / "restore"));
 }
 
+TEST_F(BrokerTransferTest, PreparationUsesBrokerLifetimeWithOrWithoutLimits)
+{
+  auto direct_restore = RequestFor("restore");
+  direct_restore.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
+  direct_restore.mutable_direct_restore()->mutable_io_engine()->mutable_posix_copy();
+  for (const auto& request : {Restore(), direct_restore, Checkpoint(false), Checkpoint(true)}) {
+    SCOPED_TRACE(request.DebugString());
+    for (const bool limited : {false, true}) {
+      SCOPED_TRACE(limited);
+      Broker broker(staging_, storage_);
+      if (limited)
+        Limit(broker, 100);
+      const auto lifetime = std::chrono::seconds{17};
+      SetLifetime(broker, lifetime);
+      const auto started = Cancellation::Clock::now();
+      bool prepared = false;
+      Intercept(broker, [&](Boundary boundary, Cancellation control) {
+        if (boundary != Boundary::PrepareRestore && boundary != Boundary::ValidateCheckpoint)
+          return;
+        prepared = true;
+        EXPECT_GE(control.Deadline(), started + lifetime);
+        EXPECT_LE(control.Deadline(), Cancellation::Clock::now() + lifetime);
+      });
+      const auto response = broker.HandleRequest(request);
+      ASSERT_FALSE(response.has_failure()) << response.DebugString();
+      EXPECT_TRUE(prepared);
+      auto abort = RequestFor(request.transaction_id().c_str());
+      abort.mutable_abort();
+      ASSERT_TRUE(broker.HandleRequest(abort).has_abort_complete());
+    }
+  }
+}
+
 TEST_F(BrokerTransferTest, PreparationUsesTheTransactionDeadline)
 {
   Broker broker(staging_, storage_);
@@ -459,7 +492,8 @@ TEST_F(BrokerTransferTest, AbortAndShutdownCancelPreparation)
 TEST_F(BrokerTransferTest, CheckpointReservesInitialByteBeforeBackendPreparation)
 {
   Broker broker(staging_, storage_);
-  const auto resources = Limit(broker, std::chrono::minutes(1), 1, 2);
+  SetLifetime(broker, std::chrono::minutes(1));
+  const auto resources = Limit(broker, 1, 2);
   unsigned preparations = 0;
   Intercept(broker, [&](Boundary boundary, Cancellation) {
     if (boundary != Boundary::ValidateCheckpoint)
@@ -490,7 +524,8 @@ TEST_F(BrokerTransferTest, InvalidPreparationReleasesAdmissionAndAllowsCorrected
 {
   std::ofstream(source_ / "image") << "data";
   Broker broker(staging_, storage_);
-  const auto resources = Limit(broker, std::chrono::minutes(1));
+  SetLifetime(broker, std::chrono::minutes(1));
+  const auto resources = Limit(broker);
   auto request = Restore();
   request.mutable_staged_restore()->mutable_source()->mutable_filesystem()->set_directory("relative");
   EXPECT_EQ(broker.HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
@@ -626,7 +661,8 @@ TEST_F(BrokerTransferTest, CheckpointInterruptedCleanupRemainsRetryable)
   for (const bool direct : {false, true}) {
     SCOPED_TRACE(direct);
     Broker broker(staging_, storage_);
-    const auto resources = Limit(broker, std::chrono::minutes(1));
+    SetLifetime(broker, std::chrono::minutes(1));
+    const auto resources = Limit(broker);
     const auto output = CheckpointOutput(direct);
     const auto parent = output.parent_path();
     const auto held = root_.path() / "held-checkpoint";
@@ -660,7 +696,8 @@ TEST_F(BrokerTransferTest, CheckpointRejectionsPreserveUnownedOutputAndAllowCorr
   for (const bool direct : {false, true}) {
     SCOPED_TRACE(direct);
     Broker broker(staging_, storage_);
-    const auto resources = Limit(broker, std::chrono::minutes(1));
+    SetLifetime(broker, std::chrono::minutes(1));
+    const auto resources = Limit(broker);
     auto request = Checkpoint(direct);
     auto* destination = direct ? request.mutable_prepare_direct_checkpoint()->mutable_destination()
                                : request.mutable_prepare_staged_checkpoint()->mutable_destination();
@@ -781,7 +818,8 @@ TEST_F(BrokerTransferTest, ExpiryReclaimsReservationsAndRestoresAdmission)
   for (const uintmax_t initial_bytes : {0u, 1u}) {
     SCOPED_TRACE(initial_bytes);
     Broker broker(staging_, storage_);
-    const auto resources = Limit(broker, std::chrono::minutes(1));
+    SetLifetime(broker, std::chrono::minutes(1));
+    const auto resources = Limit(broker);
     auto transaction = Seed(broker, initial_bytes, Transaction::State::STAGED);
     const auto sweep = std::chrono::steady_clock::now() + std::chrono::minutes(2);
     broker.ReapExpiredTransactions(sweep);
@@ -811,7 +849,8 @@ TEST_F(BrokerTransferTest, PeriodicCleanupRetriesKeepCapacityUntilRemovalSucceed
   for (const auto state : {Transaction::State::STAGED, Transaction::State::COMMITTED, Transaction::State::ABORTED}) {
     SCOPED_TRACE(static_cast<int>(state));
     Broker broker(staging_, storage_);
-    const auto resources = Limit(broker, std::chrono::minutes(1));
+    SetLifetime(broker, std::chrono::minutes(1));
+    const auto resources = Limit(broker);
     auto transaction = Seed(broker, 0, state);
     BlockCleanup();
     const auto sweep = std::chrono::steady_clock::now() + std::chrono::minutes(2);
@@ -838,7 +877,8 @@ TEST_F(BrokerTransferTest, PeriodicCleanupRetriesKeepCapacityUntilRemovalSucceed
 TEST_F(BrokerTransferTest, ExpiryWaitsForGpuDrainBeforeRemovingStaging)
 {
   Broker broker(staging_, storage_);
-  const auto resources = Limit(broker, std::chrono::minutes(1));
+  SetLifetime(broker, std::chrono::minutes(1));
+  const auto resources = Limit(broker);
   auto transaction = Seed(broker, 0, Transaction::State::STAGED);
   auto operation = std::make_shared<Transaction::GpuOperation>();
   operation->state = Transaction::GpuOperation::State::Running;
@@ -869,7 +909,8 @@ TEST_F(BrokerTransferTest, ExpiryWaitsForGpuDrainBeforeRemovingStaging)
 TEST_F(BrokerTransferTest, ShutdownSignalsGpuWithoutWaitingForTransactionMutex)
 {
   Broker broker(staging_, storage_);
-  Limit(broker, std::chrono::minutes(1));
+  SetLifetime(broker, std::chrono::minutes(1));
+  Limit(broker);
   auto transaction = Seed(broker, 0, Transaction::State::STAGED);
   auto operation = std::make_shared<Transaction::GpuOperation>();
   operation->state = Transaction::GpuOperation::State::Running;
@@ -892,7 +933,8 @@ TEST_F(BrokerTransferTest, ExpirySkipsActiveTransfersUntilTheyDrain)
 {
   std::ofstream(source_ / "image") << "data";
   Broker broker(staging_, storage_);
-  const auto resources = Limit(broker, std::chrono::minutes(1));
+  SetLifetime(broker, std::chrono::minutes(1));
+  const auto resources = Limit(broker);
   std::promise<void> staged, resume;
   Intercept(broker, [&](Boundary boundary, Cancellation) {
     if (boundary == Boundary::StageRestore) {
@@ -919,7 +961,8 @@ TEST_F(BrokerTransferTest, ExpirySkipsActiveTransfersUntilTheyDrain)
 TEST_F(BrokerTransferTest, AbortAfterDeadlineLeavesCleanupToTheReaper)
 {
   Broker broker(staging_, storage_);
-  const auto resources = Limit(broker, std::chrono::seconds(0));
+  SetLifetime(broker, std::chrono::seconds(0));
+  const auto resources = Limit(broker);
   auto transaction = Seed(broker, 0, Transaction::State::STAGED);
   auto abort = RequestFor("seed");
   abort.mutable_abort();
@@ -944,7 +987,8 @@ TEST_F(BrokerTransferTest, AbortAfterDeadlineLeavesCleanupToTheReaper)
 TEST_F(BrokerTransferTest, ExpiredCommitLeavesCleanupAndItsRetriesToTheReaper)
 {
   Broker broker(staging_, storage_);
-  const auto resources = Limit(broker, std::chrono::seconds(0));
+  SetLifetime(broker, std::chrono::seconds(0));
+  const auto resources = Limit(broker);
   auto transaction = Seed(broker, 0, Transaction::State::STAGED);
   auto commit = RequestFor("seed");
   commit.mutable_commit();
