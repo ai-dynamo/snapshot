@@ -516,9 +516,6 @@ Broker::HandleRequest(const Request& request)
         break;
     }
   }
-  catch (const TransferError& error) {
-    response = Fail(request, error.code, error.what());
-  }
   catch (const std::invalid_argument& error) {
     response = Fail(request, Failure::INVALID_REQUEST, error.what());
   }
