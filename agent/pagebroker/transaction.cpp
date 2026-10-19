@@ -141,8 +141,6 @@ Transaction::ReleaseReservation() noexcept
 {
   if (!resources_ || released_)
     return;
-  if (publication_)
-    std::string().swap(publication_->pending_index);
   std::lock_guard lock(resources_->mutex);
   resources_->reserved -= reserved_;
   --resources_->active;
@@ -176,6 +174,9 @@ Transaction::RemoveStaging(const Path& directory)
   if (!directory.empty())
     filesystem_storage::RemoveStaging(directory);
 
+  // Release publication retry data once staging cleanup succeeds.
+  if (publication_)
+    std::string().swap(publication_->pending_index);
   ReleaseReservation();
   transfer_directory_.clear();
   ReleaseAbortedDestination();

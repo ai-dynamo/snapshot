@@ -256,6 +256,45 @@ TEST(TransactionTest, FailedCleanupRetainsReservationAndDescriptor)
   EXPECT_NO_THROW(next.Reserve(100));
 }
 
+TEST(TransactionTest, PublicationRetryDataSurvivesFailedCleanup)
+{
+  test::TemporaryDirectory root;
+  const auto parent = root.path() / "parent";
+  const auto held = root.path() / "held";
+  const auto staged = parent / "checkpoint";
+  auto resources = std::make_shared<TransactionResources>(100, 1);
+  PublishedArtifact artifact;
+  artifact.set_artifact_handle(std::string(64, 'a'));
+  Transaction checkpoint;
+  checkpoint.PrepareTransfer(resources, 1, &artifact);
+  fs::create_directories(staged);
+  checkpoint.OwnDirectory(staged);
+  const std::string index = "saved publication retry bytes";
+  checkpoint.publication()->pending_index = index;
+  checkpoint.publication()->published = true;
+  checkpoint.set_state(Transaction::State::COMMITTED);
+
+  checkpoint.RemoveStaging(root.path() / "unowned");
+  EXPECT_EQ(checkpoint.publication()->pending_index, index);
+  fs::rename(parent, held);
+  std::ofstream(parent) << "blocks cleanup even when running as root";
+  std::error_code error;
+  checkpoint.CleanupTransfer(error);
+  ASSERT_TRUE(error);
+  ASSERT_NE(checkpoint.publication(), nullptr);
+  EXPECT_EQ(checkpoint.publication()->pending_index, index);
+
+  fs::remove(parent);
+  fs::rename(held, parent);
+  checkpoint.CleanupTransfer(error);
+  ASSERT_FALSE(error);
+  ASSERT_NE(checkpoint.publication(), nullptr);
+  EXPECT_TRUE(checkpoint.publication()->pending_index.empty());
+  EXPECT_TRUE(checkpoint.publication()->published);
+  EXPECT_EQ(checkpoint.publication()->artifact.artifact_handle(), artifact.artifact_handle());
+  EXPECT_FALSE(fs::exists(staged));
+}
+
 TEST(TransactionTest, PublicationAndDestinationOutliveStaging)
 {
   test::TemporaryDirectory root;
