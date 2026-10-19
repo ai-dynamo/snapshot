@@ -286,42 +286,35 @@ void
 ModelStreamerRestore::Start()
 {
   const int response = runai_file_streamer_start(&value_);
-  if (response != 0) {
-    StopStreamer();
+  if (response != 0)
     throw std::runtime_error("start Model Streamer: " + StreamerError(response));
-  }
   if (value_ == nullptr)
     throw std::runtime_error("Model Streamer started without returning a handle");
 
-  try {
-    if (options_.filesystem_strategy) {
-      const int status = runai_file_streamer_set_fs_strategy(value_, options_.filesystem_strategy->c_str());
-      if (status != 0)
-        throw std::runtime_error("configure Model Streamer filesystem strategy: " + StreamerError(status));
-    }
-    std::vector<const char*> keys;
-    std::vector<const char*> values;
-    const auto append = [&](const char* key, const std::string& value) {
-      if (!value.empty()) {
-        keys.push_back(key);
-        values.push_back(value.c_str());
-      }
-    };
-    append("region", options_.region);
-    append("endpoint", options_.endpoint);
-    append("access_key_id", options_.access_key_id);
-    append("secret_access_key", options_.secret_access_key);
-    append("session_token", options_.session_token);
-    if (!keys.empty()) {
-      const int status = runai_file_streamer_set_credentials(
-          value_, keys.data(), values.data(), static_cast<unsigned>(keys.size()));
-      if (status != 0)
-        throw std::runtime_error("configure Model Streamer session: " + StreamerError(status));
-    }
+  // The event-loop failure handler owns teardown, including partial startup.
+  if (options_.filesystem_strategy) {
+    const int status = runai_file_streamer_set_fs_strategy(value_, options_.filesystem_strategy->c_str());
+    if (status != 0)
+      throw std::runtime_error("configure Model Streamer filesystem strategy: " + StreamerError(status));
   }
-  catch (...) {
-    StopStreamer();
-    throw;
+  std::vector<const char*> keys;
+  std::vector<const char*> values;
+  const auto append = [&](const char* key, const std::string& value) {
+    if (!value.empty()) {
+      keys.push_back(key);
+      values.push_back(value.c_str());
+    }
+  };
+  append("region", options_.region);
+  append("endpoint", options_.endpoint);
+  append("access_key_id", options_.access_key_id);
+  append("secret_access_key", options_.secret_access_key);
+  append("session_token", options_.session_token);
+  if (!keys.empty()) {
+    const int status = runai_file_streamer_set_credentials(
+        value_, keys.data(), values.data(), static_cast<unsigned>(keys.size()));
+    if (status != 0)
+      throw std::runtime_error("configure Model Streamer session: " + StreamerError(status));
   }
 }
 
@@ -458,6 +451,21 @@ ModelStreamerRestore::AcceptEntry(StreamerEntry& entry, const StreamerResponse& 
 void
 ModelStreamerRestore::FailEntry(StreamerEntry& entry, std::exception_ptr error) noexcept
 {
+  // A shared session can fail because a different request was cancelled.
+  // Only this entry's control can establish its own cancellation reason.
+  try {
+    if (const auto reason = entry.control.Reason())
+      throw CancellationError(*reason);
+    try {
+      std::rethrow_exception(error);
+    }
+    catch (const CancellationError&) {
+      throw std::runtime_error("Model Streamer session interrupted by another submission's cancellation");
+    }
+  }
+  catch (...) {
+    error = std::current_exception();
+  }
   try {
     entry.completion.set_exception(std::move(error));
   }
