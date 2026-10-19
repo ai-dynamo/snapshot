@@ -10,6 +10,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <string>
 #include <system_error>
 #include <thread>
 
@@ -420,6 +421,53 @@ TEST_F(BrokerTransferTest, PreservesFailureCodesAcrossRequestAndTransferBoundari
         ASSERT_TRUE(response.has_failure()) << response.DebugString();
         EXPECT_EQ(response.failure().code(), failure.code);
         EXPECT_FALSE(fs::exists(storage_ / "published"));
+      }
+    }
+  }
+}
+
+TEST_F(BrokerTransferTest, CleanupFailurePreservesTransferErrorAndRetainsReservation)
+{
+  std::ofstream(source_ / "image") << "data";
+  for (const auto code : {Failure::TRANSACTION_EXPIRED, Failure::TRANSACTION_CONFLICT}) {
+    SCOPED_TRACE(Failure::Code_Name(code));
+    for (const bool limited : {false, true}) {
+      SCOPED_TRACE(limited);
+      Broker broker(staging_, storage_);
+      const auto resources = limited ? Limit(broker) : nullptr;
+      Intercept(broker, [&](Boundary boundary, Cancellation) {
+        if (boundary != Boundary::StageRestore)
+          return;
+        BlockCleanup();
+        if (code == Failure::TRANSACTION_EXPIRED)
+          throw CancellationError(CancellationError::Reason::DEADLINE_EXCEEDED);
+        throw TransferError(code, "destination conflict");
+      });
+      const auto response = broker.HandleRequest(Restore());
+      ASSERT_TRUE(response.has_failure()) << response.DebugString();
+      EXPECT_EQ(response.failure().code(), code);
+      const std::string prefix = code == Failure::TRANSACTION_EXPIRED
+          ? "operation deadline exceeded; cleanup: " : "destination conflict; cleanup: ";
+      EXPECT_TRUE(response.failure().message().starts_with(prefix)) << response.DebugString();
+      EXPECT_GT(response.failure().message().size(), prefix.size());
+      const auto transaction = Find(broker, "restore");
+      ASSERT_NE(transaction, nullptr);
+      EXPECT_EQ(transaction->state(), Transaction::State::ABORTED);
+      EXPECT_TRUE(fs::is_directory(staging_ / "held/restore"));
+      if (resources) {
+        EXPECT_EQ(resources->active, 1u);
+        EXPECT_EQ(resources->reserved, 4u);
+      }
+
+      UnblockCleanup();
+      broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
+      EXPECT_FALSE(fs::exists(staging_ / "restore/restore"));
+      EXPECT_EQ(transaction->state(), Transaction::State::ABORTED);
+      EXPECT_EQ(Retained(broker), 1u);
+      EXPECT_EQ(fs::file_size(source_ / "image"), 4u);
+      if (resources) {
+        EXPECT_EQ(resources->active, 0u);
+        EXPECT_EQ(resources->reserved, 0u);
       }
     }
   }
@@ -950,7 +998,11 @@ TEST_F(BrokerTransferTest, CheckpointInterruptedCleanupRemainsRetryable)
       fs::rename(parent, held);
       std::ofstream(parent) << "blocks cleanup";
     });
-    EXPECT_EQ(broker.HandleRequest(Checkpoint(direct)).failure().code(), Failure::STORAGE_ERROR);
+    const auto response = broker.HandleRequest(Checkpoint(direct));
+    ASSERT_TRUE(response.has_failure()) << response.DebugString();
+    EXPECT_EQ(response.failure().code(), Failure::INTERNAL_ERROR);
+    EXPECT_TRUE(response.failure().message().starts_with("operation cancelled; cleanup: "))
+        << response.DebugString();
     const auto transaction = Find(broker, "checkpoint");
     ASSERT_NE(transaction, nullptr);
     EXPECT_FALSE(transaction->retain_terminal());
