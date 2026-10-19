@@ -150,6 +150,7 @@ const (
 	containerResolveAttemptTimeout     = 1 * time.Second
 	restoreContainerResolveInterval    = 50 * time.Millisecond
 	restoreContainerResolveTimeout     = 30 * time.Second
+	restorePreflightManifestTimeout    = 30 * time.Second
 	restoreAlreadyCompletedReason      = "RestoreAlreadyCompleted"
 	restoreAlreadyPartialReason        = "RestoreAlreadyPartiallySucceeded"
 	restoreAlreadyFailedReason         = "RestoreAlreadyFailed"

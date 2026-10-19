@@ -184,7 +184,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	switchStart := time.Now()
 	if bound {
-		artifact, err = broker.CommitCheckpoint(ctx, transactionID)
+		artifact, err = broker.CommitCheckpoint(ctx, transactionID, req.StoreID)
 		if err != nil {
 			return nil, fmt.Errorf("commit PageBroker checkpoint: %w", err)
 		}

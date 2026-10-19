@@ -163,7 +163,7 @@ func TestCheckpointCommitRetainsDescriptorAcrossLostReply(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	for range 2 { // A later explicit Commit sees the same immutable descriptor too.
-		got, err := client.CommitCheckpoint(ctx, "tx")
+		got, err := client.CommitCheckpoint(ctx, "tx", artifact.GetStoreId())
 		if err != nil || !proto.Equal(got, artifact) {
 			t.Fatalf("CommitCheckpoint() = %v, %v", got, err)
 		}
@@ -182,6 +182,9 @@ func TestArtifactResponsesRejectInvalidResults(t *testing.T) {
 		{"missing descriptor", func(r *Response) { r.GetCommitComplete().PublishedArtifact = nil }},
 		{"missing store", func(r *Response) { r.GetCommitComplete().PublishedArtifact.StoreId = "" }},
 		{"missing handle", func(r *Response) { r.GetCommitComplete().PublishedArtifact.ArtifactHandle = "" }},
+		{"another store", func(r *Response) {
+			r.GetCommitComplete().PublishedArtifact.StoreId = "store-v1-" + strings.Repeat("b", 64)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := artifactTestServer(t, func(connection net.Conn, request *Request) error {
@@ -191,7 +194,7 @@ func TestArtifactResponsesRejectInvalidResults(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			if result, err := client.CommitCheckpoint(ctx, "tx"); err == nil || result != nil {
+			if result, err := client.CommitCheckpoint(ctx, "tx", testPublication().GetStoreId()); err == nil || result != nil {
 				t.Fatalf("accepted invalid result: %v, %v", result, err)
 			}
 		})
@@ -213,7 +216,7 @@ func TestStorageFailuresRemainTypedAndAreNotRetried(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			_, err := client.CommitCheckpoint(ctx, "tx")
+			_, err := client.CommitCheckpoint(ctx, "tx", testPublication().GetStoreId())
 			var failure *FailureError
 			if !errors.As(err, &failure) || failure.Code() != failureCode(code) {
 				t.Fatalf("classification lost: %v", err)
@@ -238,7 +241,7 @@ func TestOversizedFailureMessageKeepsCode(t *testing.T) {
 			}))
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_, err := client.CommitCheckpoint(ctx, "tx")
+		_, err := client.CommitCheckpoint(ctx, "tx", testPublication().GetStoreId())
 		cancel()
 		var failure *FailureError
 		if !errors.As(err, &failure) || failure.Code() != code {
@@ -382,7 +385,7 @@ func TestCheckpointCommitRejectsInvalidWireWithoutRetry(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			if _, err := client.CommitCheckpoint(ctx, "tx"); err == nil || errors.Is(err, context.DeadlineExceeded) {
+			if _, err := client.CommitCheckpoint(ctx, "tx", testPublication().GetStoreId()); err == nil || errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("expected immediate protocol error: %v", err)
 			}
 		})

@@ -31,10 +31,11 @@ func (c Client) PrepareArtifactCheckpoint(ctx context.Context, transactionID str
 	return imageDirectory(response.GetStagedCheckpointDirectory().GetImageDirectory())
 }
 
-// CommitCheckpoint returns the descriptor of a target-addressed checkpoint.
-// Retries preserve the transaction ID and result. Legacy checkpoints and restore
-// cleanup use Commit. A missing result never authorizes another capture attempt.
-func (c Client) CommitCheckpoint(ctx context.Context, transactionID string) (*PublishedArtifact, error) {
+// CommitCheckpoint returns the descriptor of a target-addressed checkpoint,
+// which must name the store the checkpoint was prepared for. Retries preserve
+// the transaction ID and result. Legacy checkpoints and restore cleanup use
+// Commit. A missing result never authorizes another capture attempt.
+func (c Client) CommitCheckpoint(ctx context.Context, transactionID, storeID string) (*PublishedArtifact, error) {
 	result, err := c.commitWithRetry(ctx, transactionID)
 	if err != nil {
 		return nil, err
@@ -42,6 +43,9 @@ func (c Client) CommitCheckpoint(ctx context.Context, transactionID string) (*Pu
 	artifact := result.GetPublishedArtifact()
 	if err := validatePublishedArtifact(artifact); err != nil {
 		return nil, fmt.Errorf("invalid PageBroker checkpoint Commit result: %w", err)
+	}
+	if artifact.GetStoreId() != storeID {
+		return nil, fmt.Errorf("PageBroker checkpoint Commit result names store %q, want %q", artifact.GetStoreId(), storeID)
 	}
 	return artifact, nil
 }

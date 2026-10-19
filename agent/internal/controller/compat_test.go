@@ -8,6 +8,7 @@ import (
 	"errors"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -98,6 +99,27 @@ func TestPreflightCompatibilityFetchesTheManifestForBoundContentFromPageBroker(t
 	require.Len(t, r.comparison.calls, 1)
 	assert.Equal(t, compat.GatePreflight, r.comparison.calls[0].gate)
 	assert.Equal(t, []string{"/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
+}
+
+// A broker that accepts the metadata request and never answers must not hold
+// the restore worker: the preflight fetch runs under its own deadline.
+func TestPreflightCompatibilityBoundsTheManifestFetch(t *testing.T) {
+	r := newGatedRestore(t)
+	var deadline time.Time
+	var hasDeadline bool
+	r.controller.fetchManifestFn = func(ctx context.Context, _ *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return nil, errors.New("no reply from PageBroker")
+	}
+
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+		SourceContainerName: gatedRestoreContainer,
+		PublishedArtifact:   &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer},
+	}, gatedRestoreMappings(), false)
+
+	require.NoError(t, err)
+	require.True(t, hasDeadline)
+	assert.WithinDuration(t, time.Now().Add(restorePreflightManifestTimeout), deadline, 5*time.Second)
 }
 
 // This is the regression the gate exists to catch: a bound capture restored

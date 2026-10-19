@@ -153,7 +153,9 @@ func (w *NodeController) preflightManifest(ctx context.Context, artifact *restor
 		if w.fetchManifestFn == nil {
 			return nil, location, fmt.Errorf("no manifest fetcher configured for bound restore")
 		}
-		manifest, err := w.fetchManifestFn(ctx, artifact.PublishedArtifact)
+		fetchCtx, cancel := context.WithTimeout(ctx, restorePreflightManifestTimeout)
+		defer cancel()
+		manifest, err := w.fetchManifestFn(fetchCtx, artifact.PublishedArtifact)
 		return manifest, location, err
 	}
 	manifest, err := types.ReadManifest(artifact.Path)
