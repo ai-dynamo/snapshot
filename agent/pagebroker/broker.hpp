@@ -18,13 +18,14 @@
 #include "pagebroker_types.hpp"
 #include "restore_transaction_descriptor.hpp"
 #include "transaction.hpp"
+#include "transaction_defaults.hpp"
 #include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class Broker {
  public:
   Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine = nullptr,
-      std::chrono::seconds lifetime = std::chrono::seconds{7500});
+      std::chrono::seconds lifetime = kDefaultTransactionLifetime);
   ~Broker();
   Response HandleGpuRequest(const Request& request, CancellationPtr cancellation,
                             std::vector<FileDescriptor> target_descriptors);
