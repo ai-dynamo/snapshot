@@ -19,6 +19,7 @@
 #include "gpu/checkpoint.hpp"
 #include "transfer/engine/posix/posix_copy_engine.hpp"
 #include "transfer/filesystem/filesystem_storage.hpp"
+#include "transfer/restore_plan.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -76,13 +77,6 @@ AbortSucceeded(const Request& request)
   auto response = Reply(request);
   response.mutable_abort_complete();
   return response;
-}
-
-bool
-IsSafePathComponent(const std::string& value)
-{
-  return !value.empty() && value != "." && value != ".." && value.find('/') == std::string::npos &&
-         value.find('\\') == std::string::npos && value.find('\0') == std::string::npos;
 }
 
 const StorageBackend&
