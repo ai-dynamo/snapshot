@@ -22,8 +22,8 @@ namespaces. Workload pods never mount checkpoint storage.
 - NVIDIA GPU Operator 26.3 or newer
 - NVIDIA kernel-mode driver 580 or newer, and CUDA user-mode driver
   (`libcuda.so`) 615 or newer. With an older kernel-mode driver, point
-  `LD_LIBRARY_PATH` at a 615 `libcuda.so` in both the workload and the Snapshot
-  agent. Both must load the same `libcuda.so` version, or checkpoint can hang.
+  `LD_LIBRARY_PATH` at a 615 or newer `libcuda.so` in both the workload and
+  PageBroker.
 - **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
 
