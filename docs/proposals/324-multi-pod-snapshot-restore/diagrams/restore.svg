@@ -120,8 +120,8 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <rect class="k-t" x="525.7" y="1214.0" width="222.9" height="44" rx="5" stroke-width="0.8"/>
 <text x="637.1" y="1228.0" class="k-t-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">match restored processes to the</text>
 <text x="637.1" y="1244.0" class="k-t-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">saved records, validate</text>
-<text x="568.6" y="1318.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">Insert the round command with the handle</text>
-<text x="568.6" y="1334.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">table</text>
+<text x="568.6" y="1318.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">Insert the step and its arguments (expected</text>
+<text x="568.6" y="1334.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">bytes or handle table)</text>
 <line class="arw" x1="637.1" y1="1346.0" x2="502.0" y2="1346.0" stroke-width="1.2" marker-end="url(#ah)"/>
 <text x="637.1" y="1366.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">command</text>
 <line class="arw" x1="500.0" y1="1378.0" x2="772.3" y2="1378.0" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ah)"/>
