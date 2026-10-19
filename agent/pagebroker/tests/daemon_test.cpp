@@ -1363,16 +1363,15 @@ TEST_F(BrokerTest, CommitAndAbortReportExpiredTransactions)
   EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
 }
 
-TEST(DaemonOptionsTest, ValidatesTransactionLifetimeAndDuplicateFlags)
+TEST(DaemonOptionsTest, RejectsTransactionLifetimeFlag)
 {
-  const std::array<std::string_view, 3> defaults{"socket", "staging", "storage"};
-  EXPECT_EQ(ParseDaemonOptions(defaults).transaction_lifetime, std::chrono::seconds{7500});
-  const std::array<std::string_view, 5> custom{"socket", "staging", "storage", "--transaction-lifetime", "17"};
-  EXPECT_EQ(ParseDaemonOptions(custom).transaction_lifetime, std::chrono::seconds{17});
-  for (const auto value : {"0", "-1", "1s", "18446744073709551615"}) {
-    const std::array<std::string_view, 5> invalid{"socket", "staging", "storage", "--transaction-lifetime", value};
-    EXPECT_THROW(ParseDaemonOptions(invalid), std::invalid_argument);
-  }
-  const std::array<std::string_view, 7> duplicate{"socket", "staging", "storage", "--transaction-lifetime", "17", "--transaction-lifetime", "18"};
+  const std::array<std::string_view, 5> arguments{"socket", "staging", "storage", "--transaction-lifetime", "17"};
+  EXPECT_THROW(ParseDaemonOptions(arguments), std::invalid_argument);
+}
+
+TEST(DaemonOptionsTest, RejectsDuplicateFlags)
+{
+  const std::array<std::string_view, 7> duplicate{
+      "socket", "staging", "storage", "--max-concurrent-requests", "17", "--max-concurrent-requests", "18"};
   EXPECT_THROW(ParseDaemonOptions(duplicate), std::invalid_argument);
 }

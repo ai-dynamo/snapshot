@@ -1301,9 +1301,9 @@ type Request struct {
 	// Snapshot assigns an ID to each request.
 	RequestId *string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3,oneof" json:"request_id,omitempty"`
 	// Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
-	// After two hours and five minutes, the transaction expires. This cancels GPU
-	// work. Expiry cleanup waits for active GPU transfers to stop.
-	// Retries never extend a transaction's lifetime.
+	// The lifetime starts at transfer preparation and includes backend work.
+	// Active transactions expire after the broker's configured lifetime; retries do not extend it.
+	// Expiry cancels active work. Cleanup waits for active GPU transfers to stop.
 	TransactionId *string `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3,oneof" json:"transaction_id,omitempty"`
 	// Requests a pidfd for the serving PageBroker on a successful storage
 	// preparation response. GPU clients retain it to bind later execution and
