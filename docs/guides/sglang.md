@@ -23,8 +23,8 @@ both operations succeed.
 
 The program enables SGLang's memory saver and disables CPU weight backup.
 Weights are captured directly from GPU memory without a CPU backup copy. An init
-container downloads the selected model into a persistent cache. The source
-application then loads that cache with `HF_HUB_OFFLINE=1` so the checkpointed
+container downloads the selected model onto a persistent volume. The source
+application then loads it from there with `HF_HUB_OFFLINE=1` so the checkpointed
 process has no open Hugging Face connections.
 
 After restore, the checkpointed process calls
@@ -38,8 +38,8 @@ The capture manifests run the tested SGLang image unmodified, and mount `app.py`
 at `/snapshot-app` from the `sglang-app` ConfigMap created in step 1.
 
 The source and restore pods must use the same immutable image, mount the
-Snapshot control volume at `/snapshot-control`, and mount the same model cache
-at `/hf-cache`.
+Snapshot control volume at `/snapshot-control`, and mount the same volume of
+model files at `/hf-cache`.
 
 ## 1. Create the app.py ConfigMap
 
@@ -99,7 +99,7 @@ Add other `sglang.Engine` keyword arguments, such as `trust_remote_code` or
 > are supplied through SGLang's [environment variables](https://docs.sglang.ai/references/environment_variables.html)
 > set in the Deployment's Pod template.
 
-Create the persistent model cache that the Qwen3 recipe mounts:
+Create the PVC that holds the Qwen3 recipe's model files:
 
 ```bash
 kubectl apply \
@@ -109,9 +109,9 @@ kubectl apply \
 
 **Eight-GPU recipes.** The JSON argument sets `tp_size` and `ep_size` to the GPU
 count. Set `dp_size` or `pp_size` in the same object for other layouts. The
-recipes load pinned model revisions from the shared `snapshot-model-cache` PVC
-created in [Eight-GPU recipes](README.md#eight-gpu-recipes), instead of
-`sglang-model-cache`. The init container downloads the model on first use.
+recipes read pinned model revisions from the `snapshot-model-cache` PVC created
+in [Eight-GPU recipes](README.md#eight-gpu-recipes), instead of
+`sglang-model-cache`. The init container downloads them there on first use.
 
 ## 3. Deploy the source replica
 
@@ -127,8 +127,8 @@ kubectl apply \
   --filename sglang/capture/qwen3-0.6b.yaml
 ```
 
-The init container reuses cached model files and downloads missing files. The
-main container then starts SGLang from the offline cache.
+The init container reuses model files already on the PVC and downloads any
+missing ones. The main container then loads them offline.
 
 **Eight-GPU recipes.** Substitute the agent image from
 [Eight-GPU recipes](README.md#eight-gpu-recipes) as you apply the manifest. For

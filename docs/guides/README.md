@@ -72,11 +72,14 @@ up the following once, before the first stage:
   multi-node is on the roadmap. The node has the GPU count, CPU, and memory the
   manifests request. The manifests select eight B200 GPUs. Change `nodeSelector`
   and the parallelism settings for other GPUs.
-- **A shared model cache.** The recipes load pinned model revisions from the
-  `snapshot-model-cache` PVC, so that the source and the restored Pods read the
-  same files. It requests 2 TiB with `ReadWriteMany` access from the default
-  storage class. Set `storageClassName` in [`model-cache-pvc.yaml`](model-cache-pvc.yaml)
-  if the default does not support `ReadWriteMany`, then create it:
+- **A PVC for the model files.** These recipes keep the model on a PVC named
+  `snapshot-model-cache` instead of in the container's own filesystem, so the
+  source and the restored Pods read the same files. An init container downloads
+  the model onto it on first use. It is a plain Kubernetes volume, separate from
+  the [checkpoint volume](../operations/storage.md) that Snapshot installs. It
+  requests 2 TiB with `ReadWriteMany` access from the default storage class. Set
+  `storageClassName` in [`model-cache-pvc.yaml`](model-cache-pvc.yaml) if the
+  default does not support `ReadWriteMany`, then create it:
 
   ```bash
   kubectl apply \
