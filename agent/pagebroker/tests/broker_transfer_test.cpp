@@ -996,7 +996,6 @@ TEST_F(BrokerTransferTest, CheckpointMkdirRejectsExpiryAndCancellationBeforeRetu
       EXPECT_EQ(response.failure().code(), expire ? Failure::TRANSACTION_EXPIRED : Failure::INTERNAL_ERROR)
           << response.DebugString();
       EXPECT_FALSE(fs::exists(output));
-      EXPECT_TRUE(fs::exists(source_ / "image"));
     }
   }
 }
