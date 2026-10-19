@@ -131,7 +131,7 @@ Transaction::Reserve(uintmax_t bytes)
     return;
   const auto additional = bytes - reserved_;
   if (additional > resources_->byte_limit - resources_->reserved)
-    throw TransferError(Failure::INSUFFICIENT_STORAGE, "checkpoint exceeds staging budget");
+    throw TransferError(Failure::INSUFFICIENT_STORAGE, "transfer exceeds staging budget");
   resources_->reserved += additional;
   reserved_ = bytes;
 }
