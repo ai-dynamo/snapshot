@@ -182,15 +182,18 @@ StageRestore(const RestorePlan& plan, const Path& destination, Cancellation cont
     control.ThrowIfCancelled();
     fs::copy_file(file.source_locator, destination / file.relative_path);
     control.ThrowIfCancelled();
-    fs::permissions(destination / file.relative_path, file.permissions);
+    if (file.permissions != fs::perms::unknown)
+      fs::permissions(destination / file.relative_path, file.permissions);
   }
   // Apply directory modes only after all children have been populated.
   for (auto directory = plan.directories.rbegin(); directory != plan.directories.rend(); ++directory) {
     control.ThrowIfCancelled();
-    fs::permissions(destination / directory->relative_path, directory->permissions);
+    if (directory->permissions != fs::perms::unknown)
+      fs::permissions(destination / directory->relative_path, directory->permissions);
   }
   control.ThrowIfCancelled();
-  fs::permissions(destination, plan.root_permissions);
+  if (plan.root_permissions != fs::perms::unknown)
+    fs::permissions(destination, plan.root_permissions);
   control.ThrowIfCancelled();
 }
 
