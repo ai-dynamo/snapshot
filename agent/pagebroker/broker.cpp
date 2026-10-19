@@ -327,7 +327,7 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
       continue;
     }
 
-    if (!transaction->expired(now, lifetime_)) {
+    if (!transaction->expired(now)) {
       continue;
     }
     transaction->ExpireTransfer(now);
@@ -756,7 +756,7 @@ Broker::Commit(const Request& request)
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::ABORTED) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   }
-  if (transaction->expired(now_(), lifetime_)) {
+  if (transaction->expired(now_())) {
     return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
   }
   if (transaction->state() == Transaction::State::PREPARING) {
@@ -842,7 +842,7 @@ Broker::Abort(const Request& request)
     transaction->CleanupTransfer();
     return AbortSucceeded(request);
   }
-  if (transaction->expired(now_(), lifetime_)) {
+  if (transaction->expired(now_())) {
     return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
   }
   BeginAbort(*transaction);
