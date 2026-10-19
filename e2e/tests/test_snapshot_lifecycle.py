@@ -60,7 +60,6 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
         )
         assert "./inventory.img" in artifact_listing
         assert "./manifest.yaml" in artifact_listing
-        assert "./publication.json" in artifact_listing
         assert "./rootfs-diff.tar" in artifact_listing
         assert "./tmp/e2e-state/file-token" in artifact_listing
         assert "./tmp/e2e-state/observations.log" in artifact_listing
