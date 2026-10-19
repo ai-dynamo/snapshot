@@ -32,7 +32,7 @@ ExpectDestinationConflict(const std::shared_ptr<TransactionResources>& resources
 
 TEST(TransactionTest, InitialReservationRespectsRemainingBudgetWithoutClaimingDestinationOnFailure)
 {
-  auto resources = std::make_shared<TransactionResources>(4, 3, std::chrono::minutes(1));
+  auto resources = std::make_shared<TransactionResources>(4, 3);
   Transaction first;
   first.PrepareTransfer(resources, 3, {});
   EXPECT_EQ(first.publication(), nullptr);
@@ -70,7 +70,7 @@ TEST(TransactionTest, InitialReservationRespectsRemainingBudgetWithoutClaimingDe
 
 TEST(TransactionTest, ZeroInitialReservationCanClaimPublicationAndReleasesOnlyItsOwnResources)
 {
-  auto resources = std::make_shared<TransactionResources>(4, 2, std::chrono::minutes(1));
+  auto resources = std::make_shared<TransactionResources>(4, 2);
   PublishedArtifact artifact;
   artifact.set_artifact_handle(std::string(64, 'a'));
   Transaction next;
@@ -97,7 +97,7 @@ TEST(TransactionTest, ZeroInitialReservationCanClaimPublicationAndReleasesOnlyIt
 TEST(TransactionTest, RestoreKeepsStagingBudgetUntilConsumerCleanup)
 {
   test::TemporaryDirectory root;
-  auto resources = std::make_shared<TransactionResources>(100, 2, std::chrono::minutes(1));
+  auto resources = std::make_shared<TransactionResources>(100, 2);
   Transaction restore;
   const auto staged = root.path() / "restored";
   restore.PrepareTransfer(resources, 0, {});
@@ -126,7 +126,7 @@ TEST(TransactionTest, UnownedCleanupPreservesDirectoriesAndPendingState)
   for (bool limited : {false, true}) {
     SCOPED_TRACE(limited);
     test::TemporaryDirectory root;
-    auto resources = std::make_shared<TransactionResources>(100, 1, std::chrono::minutes(1));
+    auto resources = std::make_shared<TransactionResources>(100, 1);
     Transaction restore;
     const auto owned = root.path() / "owned";
     const auto borrowed = root.path() / "borrowed";
@@ -170,7 +170,7 @@ TEST(TransactionTest, EmptyOwnedDirectoryReleasesReservation)
 {
   for (bool with_error : {false, true}) {
     SCOPED_TRACE(with_error);
-    auto resources = std::make_shared<TransactionResources>(100, 1, std::chrono::minutes(1));
+    auto resources = std::make_shared<TransactionResources>(100, 1);
     Transaction restore;
     restore.PrepareTransfer(resources, 0, {});
     restore.Reserve(80);
@@ -201,7 +201,7 @@ TEST(TransactionTest, FailedCleanupRetainsReservationAndDescriptor)
   test::TemporaryDirectory root;
   const auto parent = root.path() / "parent";
   const auto staged = parent / "staged";
-  auto resources = std::make_shared<TransactionResources>(100, 2, std::chrono::minutes(1));
+  auto resources = std::make_shared<TransactionResources>(100, 2);
   Transaction restore;
   restore.PrepareTransfer(resources, 0, staged);
   restore.Reserve(80);
@@ -230,7 +230,7 @@ TEST(TransactionTest, FailedCleanupRetainsReservationAndDescriptor)
 TEST(TransactionTest, PublicationAndDestinationOutliveStaging)
 {
   test::TemporaryDirectory root;
-  auto resources = std::make_shared<TransactionResources>(100, 1, std::chrono::minutes(1));
+  auto resources = std::make_shared<TransactionResources>(100, 1);
   PublishedArtifact artifact;
   artifact.set_artifact_handle(std::string(64, 'a'));
   auto checkpoint = std::make_unique<Transaction>();
@@ -268,7 +268,7 @@ TEST(TransactionTest, AbortedDestinationCanBeReusedBeforeTransactionDestruction)
     for (const bool cleanup_first : {false, true}) {
       SCOPED_TRACE(::testing::Message() << "has_staging=" << has_staging << ", cleanup_first=" << cleanup_first);
       test::TemporaryDirectory root;
-      auto resources = std::make_shared<TransactionResources>(100, 4, std::chrono::minutes(1));
+      auto resources = std::make_shared<TransactionResources>(100, 4);
       PublishedArtifact artifact;
       artifact.set_artifact_handle(std::string(64, 'a'));
       auto checkpoint = std::make_unique<Transaction>();
@@ -307,7 +307,7 @@ TEST(TransactionTest, AbortedDestinationRemainsReservedUntilCleanupSucceeds)
   test::TemporaryDirectory root;
   const auto parent = root.path() / "parent";
   const auto staged = parent / "checkpoint";
-  auto resources = std::make_shared<TransactionResources>(100, 4, std::chrono::minutes(1));
+  auto resources = std::make_shared<TransactionResources>(100, 4);
   PublishedArtifact artifact;
   artifact.set_artifact_handle(std::string(64, 'a'));
   Transaction checkpoint;
@@ -333,9 +333,9 @@ TEST(TransactionTest, AbortedDestinationRemainsReservedUntilCleanupSucceeds)
 TEST(TransactionTest, DeadlineAndCancellationCoverTheWholeOperation)
 {
   test::TemporaryDirectory root;
-  auto resources = std::make_shared<TransactionResources>(100, 1, std::chrono::minutes(1));
+  auto resources = std::make_shared<TransactionResources>(100, 1);
   Transaction restore;
-  restore.PrepareTransfer(resources, 0, root.path() / "restore");
+  restore.PrepareTransfer(resources, 0, root.path() / "restore", nullptr, std::chrono::minutes(1));
   const auto control = restore.cancellation();
   restore.set_state(Transaction::State::PREPARING);
   restore.set_state(Transaction::State::STAGED);
@@ -369,17 +369,25 @@ TEST(TransactionTest, GpuRequestAndTransactionStopIndependently)
   EXPECT_FALSE(new_request.IsCancelled());
 }
 
-TEST(TransactionTest, LegacyDirectDeadlineStartsAtPrepareAndIsNotExtended)
+TEST(TransactionTest, DeadlineStartsAtPrepareAndIsNotExtendedWithOrWithoutLimits)
 {
-  Transaction transaction;
-  transaction.PrepareTransfer(nullptr, 1, {}, nullptr, std::chrono::seconds{17});
-  const auto deadline = transaction.cancellation().Deadline();
-  transaction.set_state(Transaction::State::PREPARING);
-  EXPECT_FALSE(transaction.expired(deadline - std::chrono::seconds{1}, {}));
-  transaction.set_state(Transaction::State::STAGED);
-  EXPECT_EQ(transaction.cancellation().Deadline(), deadline);
-  EXPECT_TRUE(transaction.expired(deadline, {}));
-  transaction.set_state(Transaction::State::COMMITTED);
-  EXPECT_FALSE(transaction.expired(deadline + std::chrono::hours{1}, {}));
+  for (const bool limited : {false, true}) {
+    SCOPED_TRACE(limited);
+    auto resources = limited ? std::make_shared<TransactionResources>(100, 1) : nullptr;
+    Transaction transaction;
+    const auto lifetime = std::chrono::seconds{17};
+    const auto started = Cancellation::Clock::now();
+    transaction.PrepareTransfer(resources, 1, {}, nullptr, lifetime);
+    const auto deadline = transaction.cancellation().Deadline();
+    EXPECT_GE(deadline, started + lifetime);
+    EXPECT_LE(deadline, Cancellation::Clock::now() + lifetime);
+    transaction.set_state(Transaction::State::PREPARING);
+    EXPECT_FALSE(transaction.expired(deadline - std::chrono::seconds{1}, {}));
+    transaction.set_state(Transaction::State::STAGED);
+    EXPECT_EQ(transaction.cancellation().Deadline(), deadline);
+    EXPECT_TRUE(transaction.expired(deadline, {}));
+    transaction.set_state(Transaction::State::COMMITTED);
+    EXPECT_FALSE(transaction.expired(deadline + std::chrono::hours{1}, {}));
+  }
 }
 }  // namespace snapshot::pagebroker

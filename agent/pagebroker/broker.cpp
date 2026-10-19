@@ -267,7 +267,7 @@ Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engin
     : lifetime_(config ? config->transaction_lifetime : lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
   if (config) {
-    resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions, config->transaction_lifetime);
+    resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions);
     staging_root_ /= "s3";
     io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config)));
   } else {
