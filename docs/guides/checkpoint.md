@@ -10,9 +10,8 @@ are two ways to do it, depending on the use case:
 
 This is stage 2 of the [usage guides](README.md). It continues from
 [stage 1](README.md#1-make-the-workload-snapshot-ready): a `PodSnapshot` needs the
-source replica that stage deployed, and a `SnapshotJob` needs only what that stage
-created before the Deployment: the ConfigMap and, for recipes that use one, the
-[model cache](README.md#model-cache).
+source replica that stage deployed, and a `SnapshotJob` needs only the ConfigMap it
+created and the [model cache](README.md#model-cache).
 
 ## Option 1 — `PodSnapshot` (checkpoint a running replica)
 
@@ -24,19 +23,19 @@ requires, and a readiness gate on `/snapshot-control/ready-for-snapshot`. The
 source Deployment of every recipe does.
 
 Save a `PodSnapshot` naming the pod and the container to checkpoint as
-`vllm-snapshot.yaml`. Give it the name of your recipe's `SnapshotJob` from the
-[recipe table](README.md#pick-a-recipe), so that the restore profiles find it
+`vllm-qwen3-0-6b-snapshot.yaml`. Give it the name of your recipe's `SnapshotJob`
+from the [recipe table](README.md#pick-a-recipe), so that the restore step finds it
 whichever method you use:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: PodSnapshot
 metadata:
-  name: vllm-snapshot
+  name: vllm-qwen3-0-6b-snapshot
 spec:
   source:
     podRef:
-      name: vllm-source-<pod-id>
+      name: vllm-qwen3-0-6b-source-<pod-id>
       containers:
         - main
 ```
@@ -44,11 +43,11 @@ spec:
 ```bash
 kubectl apply \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --filename vllm-snapshot.yaml
+  --filename vllm-qwen3-0-6b-snapshot.yaml
 
 kubectl wait \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --for=condition=Ready podsnapshot/vllm-snapshot \
+  --for=condition=Ready podsnapshot/vllm-qwen3-0-6b-snapshot \
   --timeout=30m
 ```
 
@@ -82,7 +81,7 @@ Each recipe ships a ready-to-apply `SnapshotJob`. Its shape is:
 apiVersion: nvidia.com/v1alpha1
 kind: SnapshotJob
 metadata:
-  name: vllm-snapshot
+  name: vllm-qwen3-0-6b-snapshot
 spec:
   podSnapshotTemplate:
     targetContainers:
@@ -105,11 +104,11 @@ kubectl apply \
 
 kubectl wait \
   --namespace "$SNAPSHOT_NAMESPACE" \
-  --for=condition=Completed snapshotjob/vllm-snapshot \
+  --for=condition=Completed snapshotjob/vllm-qwen3-0-6b-snapshot \
   --timeout=60m
 
 # the resulting PodSnapshot to restore from:
-kubectl get snapshotjob vllm-snapshot \
+kubectl get snapshotjob vllm-qwen3-0-6b-snapshot \
   --namespace "$SNAPSHOT_NAMESPACE" \
   --output jsonpath='{.status.podSnapshotName}'
 ```
@@ -133,6 +132,9 @@ The first run downloads the model, so allow `--timeout=120m`.
 
 Because the source replica is deleted, every serving replica — including the
 first — is brought up via [restore](restore.md).
+
+If a checkpoint does not become Ready, see
+[Troubleshooting](../operations/troubleshooting.md#a-checkpoint-never-becomes-ready).
 
 ## Next steps
 
