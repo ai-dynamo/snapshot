@@ -316,12 +316,24 @@ TEST_F(BrokerTransferTest, DirectRestoreUsesGenericPreparationAndBorrowsItsSourc
   ASSERT_EQ(stat(source_.c_str(), &original), 0);
   ASSERT_EQ(fstat(access.source_fd(), &retained), 0);
   EXPECT_EQ(original.st_ino, retained.st_ino);
-  // Matching names are not ownership: direct restore never created these trees.
-  fs::create_directory(staging_ / "restore/direct");
-  fs::create_directory(staging_ / "checkpoint/direct");
   request.mutable_abort();
   ASSERT_TRUE(broker.HandleRequest(request).has_abort_complete());
   EXPECT_TRUE(fs::exists(source_ / "image"));
+}
+
+TEST_F(BrokerTransferTest, DirectRestoreAbortPreservesUnownedDirectories)
+{
+  Broker broker(staging_, storage_);
+  auto request = RequestFor("direct");
+  Configure(request.mutable_direct_restore()->mutable_source(), request.mutable_direct_restore()->mutable_io_engine(),
+      source_);
+  ASSERT_TRUE(broker.HandleRequest(request).has_direct_restore_ready());
+
+  // Matching names are not ownership: direct restore never created these trees.
+  ASSERT_TRUE(fs::create_directory(staging_ / "restore/direct"));
+  ASSERT_TRUE(fs::create_directory(staging_ / "checkpoint/direct"));
+  request.mutable_abort();
+  ASSERT_TRUE(broker.HandleRequest(request).has_abort_complete());
   EXPECT_TRUE(fs::exists(staging_ / "restore/direct"));
   EXPECT_TRUE(fs::exists(staging_ / "checkpoint/direct"));
 }
