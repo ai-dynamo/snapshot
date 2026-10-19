@@ -4,8 +4,10 @@
 #include "filesystem_storage.hpp"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -135,6 +137,17 @@ Path
 DestinationPath(const StorageBackend& destination, const Path& storage_root)
 {
   return StoragePath(destination, storage_root, "destination");
+}
+
+void
+CreateDirectoryExclusive(const Path& directory, fs::perms permissions)
+{
+  if (mkdir(directory.c_str(), static_cast<mode_t>(permissions)) == 0)
+    return;
+  const int error = errno;
+  if (error == EEXIST)
+    throw TransferError(Failure::TRANSACTION_CONFLICT, "transaction directory already exists");
+  throw std::system_error(error, std::generic_category(), "create transaction directory");
 }
 
 void
