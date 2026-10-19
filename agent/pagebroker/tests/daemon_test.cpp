@@ -583,6 +583,40 @@ TEST_F(BrokerTest, RejectsUnownedCheckpointStaging)
   EXPECT_EQ(retry.failure().code(), Failure::TRANSACTION_CONFLICT);
 }
 
+TEST_P(FilesystemEngineTest, PublishedCheckpointRootPreservesCapturePermissions)
+{
+  // Use normal directory creation as the staged-mode reference without changing
+  // the process-wide umask while broker threads are running.
+  const auto reference = root_ / "reference";
+  ASSERT_TRUE(fs::create_directory(reference));
+  const auto staged_permissions = fs::status(reference).permissions();
+  for (const bool direct : {false, true}) {
+    SCOPED_TRACE(direct ? "direct" : "staged");
+    const std::string id = direct ? "direct-mode" : "staged-mode";
+    const auto destination = root_ / "storage" / id;
+    auto prepare = RequestFor(id);
+    auto* storage = direct ? prepare.mutable_prepare_direct_checkpoint()->mutable_destination()
+                           : prepare.mutable_prepare_staged_checkpoint()->mutable_destination();
+    auto* engine = direct ? prepare.mutable_prepare_direct_checkpoint()->mutable_io_engine()
+                          : prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine();
+    Configure(storage, engine, destination);
+    const auto prepared = broker().HandleRequest(prepare);
+    ASSERT_FALSE(prepared.has_failure()) << prepared.DebugString();
+    const fs::path capture = direct ? prepared.direct_checkpoint_directory().image_directory()
+                                    : prepared.staged_checkpoint_directory().image_directory();
+    const auto expected_permissions = direct ? fs::perms::owner_all : staged_permissions;
+    EXPECT_EQ(fs::status(capture).permissions(), expected_permissions);
+    std::ofstream(capture / "image") << "image";
+
+    auto commit = RequestFor(id);
+    commit.mutable_commit();
+    const auto published = broker().HandleRequest(commit);
+    ASSERT_TRUE(published.has_commit_complete()) << published.DebugString();
+    EXPECT_EQ(fs::status(destination).permissions(), expected_permissions);
+    EXPECT_TRUE(fs::exists(destination / "image"));
+  }
+}
+
 TEST_P(FilesystemEngineTest, PublishesCheckpoint)
 {
   const fs::path published = root_ / "storage" / "published";

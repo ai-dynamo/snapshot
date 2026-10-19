@@ -683,7 +683,10 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
       transaction->cancellation().ThrowIfCancelled();
       fs::create_directories(output.parent_path());
       transaction->cancellation().ThrowIfCancelled();
-      if (mkdir(output.c_str(), S_IRWXU)) {
+      // Publication preserves this mode: staged captures use normal directory
+      // permissions filtered by umask, while direct captures remain private.
+      const mode_t permissions = direct ? S_IRWXU : (S_IRWXU | S_IRWXG | S_IRWXO);
+      if (mkdir(output.c_str(), permissions)) {
         if (errno == EEXIST)
           throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
         throw std::system_error(errno, std::generic_category(), "create checkpoint directory");
