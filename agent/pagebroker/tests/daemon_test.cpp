@@ -68,16 +68,14 @@ class BrokerTest : public ::testing::Test, public RequestBuilder {
  protected:
   void SetUp() override
   {
-    root_ = fs::temp_directory_path() / "pagebroker-daemon-tests" /
-            ::testing::UnitTest::GetInstance()->current_test_info()->name();
-    fs::remove_all(root_);
+    root_ = temporary_.path();
     source_ = root_ / "storage" / "source";
     fs::create_directories(source_);
     std::ofstream(source_ / "image") << "image";
     broker_.emplace(root_ / "tmpfs", root_ / "storage");
   }
 
-  void TearDown() override { fs::remove_all(root_); }
+  void TearDown() override { broker_.reset(); }
 
   void Configure(
       StorageBackend* storage,
@@ -94,6 +92,7 @@ class BrokerTest : public ::testing::Test, public RequestBuilder {
 
   Broker& broker() { return *broker_; }
 
+  test::TemporaryDirectory temporary_;
   fs::path root_;
   fs::path source_;
   std::optional<Broker> broker_;
@@ -186,8 +185,8 @@ TEST_F(BrokerTest, ModelStreamerRestoresFilesystemTreeDataAndPermissions)
 
 TEST(ModelStreamerRestoreTest, RejectsUnsafeOrIncompleteRestorePlans)
 {
-  const fs::path root = fs::temp_directory_path() / "pagebroker-model-streamer-plan-tests";
-  fs::remove_all(root);
+  test::TemporaryDirectory temporary;
+  const fs::path root = temporary.path() / "destination";
   for (const auto& unsafe : {fs::path("../escape"), fs::path("/absolute"), fs::path("nested/../escape")}) {
     RestorePlan plan;
     plan.files.push_back(RestoreFile{"unused", unsafe, 0});
@@ -1065,8 +1064,7 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
  protected:
   void SetUp() override
   {
-    root_ = fs::temp_directory_path() / ("pagebroker-transport-" + std::to_string(getpid()));
-    fs::remove_all(root_);
+    root_ = temporary_.path();
     fs::create_directories(root_ / "storage");
     socket_path_ = root_ / "control.sock";
     server_ = fork();
@@ -1092,7 +1090,7 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
       kill(server_, SIGTERM);
       while (waitpid(server_, nullptr, 0) < 0 && errno == EINTR) {}
     }
-    fs::remove_all(root_);
+    // The temporary directory is removed after the daemon has exited.
   }
 
   FileDescriptor Connect()
@@ -1222,6 +1220,7 @@ class DaemonTransportTest : public ::testing::Test, public RequestBuilder {
     return false;
   }
 
+  test::TemporaryDirectory temporary_;
   pid_t server_ = -1;
   fs::path root_;
   fs::path socket_path_;
