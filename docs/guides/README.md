@@ -25,13 +25,13 @@ You are done when a restored replica answers a request without cold-starting.
 1. **Install Snapshot.** The cluster [prerequisites](../../README.md#prerequisites)
    and [installation](../../README.md#installation) steps are in the README.
    Nothing else in these guides repeats them.
-2. **Get the example files.** The manifests and entrypoints live in this
-   directory. Every command in the guides runs from it. The commands use
-   `envsubst` to fill in `${...}` variables, which comes with `gettext-base` on
-   Debian and Ubuntu.
+2. **Download the example files.** The guides use ready-made Kubernetes
+   manifests and small entrypoint programs. They all live in the `docs/guides`
+   folder of the Snapshot repository. Clone it and open that folder: every
+   command in the guides is written to run from there.
 
    ```bash
-   git clone https://github.com/ai-dynamo/snapshot.git
+   git clone --branch release/0.2 https://github.com/ai-dynamo/snapshot.git
    cd snapshot/docs/guides
    ```
 

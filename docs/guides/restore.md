@@ -50,7 +50,7 @@ is named `<framework>-1gpu-restored` or `<framework>-8gpu-restored`, as the
 [recipe table](README.md#pick-a-recipe) lists:
 
 ```bash
-envsubst '${SNAPSHOT_NAME}' < vllm/restore/1-gpu.yaml | \
+sed "s|\${SNAPSHOT_NAME}|$SNAPSHOT_NAME|" vllm/restore/1-gpu.yaml | \
   kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
 
 kubectl rollout status \
