@@ -52,6 +52,8 @@ class Broker {
   const TransferEngine& Engine(const IOEngine& engine) const;
   TransactionHandle CreateOrGetTransaction(const std::string& transaction_id);
   TransactionHandle FindTransaction(const std::string& transaction_id);
+  // Acquires transactions_mutex_ and removes only the matching transaction instance.
+  void EraseTransaction(const std::string& id, const TransactionHandle& transaction);
   std::vector<std::pair<std::string, TransactionHandle>> TransactionSnapshot();
   // Attempts retention without waiting for the transaction mutex. Caller must not hold it.
   void RetainTerminalTransaction(const std::string& transaction_id);
