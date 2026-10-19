@@ -157,9 +157,7 @@ The options a contributor is most likely to ask about:
 | `external` | the network namespace | Never dumped. Restore inherits the destination pod's namespace. |
 | `ext_mnt`, `skip_mnt` | from the mount policy above | |
 | `freeze_cgroup` | the container's cgroup | Freeze the whole tree in one step. |
-| `manage_cgroups` | `soft` | At restore, CRIU places the tree under the destination container's cgroup. |
 | `tcp_established` | on by default | Keep established connections. Restore rewrites their addresses. |
-| `ghost_limit` | 512 MiB by default | A file deleted while a process still had it open is saved in the image, up to this size. |
 | Plugin directory | Snapshot's own | So that CRIU's bundled CUDA plugin is never loaded. |
 
 CRIU writes `dump.log` next to the images.
@@ -181,12 +179,9 @@ Any other problem is logged and the checkpoint proceeds without that part.
 ## Publishing
 
 1. The agent asks PageBroker to commit.
-2. For a transaction on the memory-backed volume, PageBroker copies it to the shared volume next to the final location. For one already on the shared volume, nothing is copied.
-3. If an older checkpoint exists at the destination, PageBroker moves it aside.
-4. PageBroker renames the new directory into place. This is the commit point: before it the destination path does not exist, after it the checkpoint is complete.
-5. PageBroker removes the older checkpoint, if any.
-6. The agent confirms the directory exists.
-7. The agent patches the `PodSnapshotContent` with `Ready=True`, reason `Captured`, and a `status.source` block describing the source machine, projected from the manifest. The patch uses optimistic locking, and a `Failed` condition that got there first wins.
+2. If the transaction directory is in memory, PageBroker copies it to the shared volume next to the final location.
+3. PageBroker renames it into place, replacing any older checkpoint there. This is the commit point: before it the destination path does not exist, after it the checkpoint is complete.
+4. The agent confirms the directory exists and patches the `PodSnapshotContent` with `Ready=True`, reason `Captured`, and a `status.source` block describing the source machine, projected from the manifest. The patch uses optimistic locking, and a `Failed` condition that got there first wins.
 
 The agent logs a timing summary with the phases `gpu_device_map`, `cuda_checkpoint`, `criu_dump`, `overlay_capture`, and `remove_old_version_and_switch`, the last being the commit.
 

@@ -140,10 +140,10 @@ For each mount, the helper clones the source, applies the flags, enters the cont
 
 | Source in the agent | Destination in the container | Flags |
 | --- | --- | --- |
-| The bundle, `/snapshot-binaries` | `/tmp/snapshot-binaries` | read-only, `nosuid`, `nodev` |
-| The CuInterpose libraries | `/tmp/snapshot-cuda` | the same, only for CuInterpose checkpoints |
-| The checkpoint directory | `/tmp/checkpoint` | read-only, `nosuid`, `nodev`, `noexec` |
-| PageBroker's staging directory | `/tmp/pagebroker` | the same, only in staged mode |
+| The bundle, `/snapshot-binaries` | `/tmp/snapshot-binaries` | read-only |
+| The CuInterpose libraries | `/tmp/snapshot-cuda` | read-only, only for CuInterpose checkpoints |
+| The checkpoint directory | `/tmp/checkpoint` | read-only, `noexec` |
+| PageBroker's staging directory | `/tmp/pagebroker` | read-only, `noexec`, only in staged mode |
 
 The agent then opens a PageBroker transaction for the restore:
 
@@ -154,9 +154,8 @@ The agent then opens a PageBroker transaction for the restore:
 ## Inside the container
 
 Everything from here to the GPU unlock happens inside the destination container's namespaces.
-The agent runs its `nsrestore` program there by entering the container's mount, UTS, IPC, network, and PID namespaces and its root filesystem.
-The program is passed as an open file descriptor so that it can execute after the root changes, and the mount namespace is held open through another descriptor so that it survives even if the proxy exits.
-Inside, `PATH` and `LD_LIBRARY_PATH` point at the bundle, and `nsrestore` reports its result as JSON on stdout.
+The agent enters the container's mount, UTS, IPC, network, and PID namespaces and its root filesystem with `nsenter`, and runs `nsrestore` there with `PATH` and `LD_LIBRARY_PATH` pointing at the bundle.
+`nsrestore` reports its result as JSON on stdout.
 
 `RestoreInNamespace` in `agent/internal/executor/nsrestore.go` runs these steps in order:
 
@@ -164,15 +163,14 @@ Inside, `PATH` and `LD_LIBRARY_PATH` point at the bundle, and `nsrestore` report
 2. **Place the CUDA job file**, if the checkpoint has one, at `/snapshot-control/cuda-checkpoint-job`.
 3. **Alias GPU device paths.** Where the destination GPU has a different `/dev/nvidiaN` path, bind mount the destination device over the source path, so that CRIU reopens the right device.
 4. **Unmount `/dev/shm`**, so that CRIU recreates it with the checkpointed contents.
-5. **Remount `/proc/sys` writable** for the duration of the CRIU restore.
-6. **Open the helper programs now.** Open `cuda-checkpoint-helper` and the CuInterpose coordinator as file descriptors, because the mount namespace CRIU builds for the restored tree will not contain the bundle.
-7. **Remove stale state.** Remove old sentinels from the control directory, and any `/run/criu.kdat` the archive carried over from the source node, so that CRIU probes this kernel's features itself.
-8. **Make securityfs visible** if the destination has an AppArmor label and it is not, and hide it again just before CRIU creates the first process.
-9. **Run CRIU.** CRIU rebuilds the process tree and reports the root process's PID as seen inside the container.
-10. **Match PIDs.** Match the CUDA processes recorded in the manifest to the restored processes.
-11. **Restore native GPU paths** inside each restored process's mount namespace, undoing step 3.
-12. **Restore GPU state.** Described below.
-13. **Run the CuInterpose coordinator**, if the checkpoint has one, to rebuild the shared memory.
+5. **Open the helper programs now.** Open `cuda-checkpoint-helper` and the CuInterpose coordinator as file descriptors, because the mount namespace CRIU builds for the restored tree will not contain the bundle.
+6. **Remove stale state.** Remove old sentinels from the control directory, and any `/run/criu.kdat` the archive carried over from the source node, so that CRIU probes this kernel's features itself.
+7. **Make securityfs visible** if the destination has an AppArmor label and it is not, and hide it again just before CRIU creates the first process.
+8. **Run CRIU.** CRIU rebuilds the process tree and reports the root process's PID as seen inside the container.
+9. **Match PIDs.** Match the CUDA processes recorded in the manifest to the restored processes.
+10. **Restore native GPU paths** inside each restored process's mount namespace, undoing step 3.
+11. **Restore GPU state.** Described below.
+12. **Run the CuInterpose coordinator**, if the checkpoint has one, to rebuild the shared memory.
 
 ### How CRIU is run
 
@@ -187,7 +185,6 @@ On top of those, a few options only make sense on the destination:
 | Inherited file descriptors 0 to 2 | the proxy's | The restored process's standard streams reach the container log. |
 | `cgroup_root` | the destination's cgroup | Restored processes are accounted where the kubelet expects. |
 | `lsm_profile` | the destination's label | The AppArmor or SELinux label comes from the destination, never from the checkpoint. |
-| `network_lock` | skip | The destination namespace is fresh, so there is nothing to unlock, and skipping avoids a dependency on `iptables-restore`. |
 | Plugin directory, binary, configuration | from the bundle, generated fresh | Nothing executable or configurable comes from the checkpoint. |
 
 Before CRIU starts, the agent rewrites one image file, `files.img`, and attaches the rewritten copy over the original.
@@ -273,7 +270,7 @@ The [benchmarks](../../development/benchmarks.md) report restore time in four st
 | Stage | Sections above |
 | --- | --- |
 | Agent setup | Checking that the restore can proceed, inspecting the destination, bringing in the tools and the checkpoint |
-| CRIU restore | Inside the container, up to and including step 9 |
+| CRIU restore | Inside the container, up to and including step 8 |
 | CUDA restore | Restoring GPU state |
 | Wake and remap | The address rewrite, the device map, and completing |
 
