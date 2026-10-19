@@ -138,11 +138,34 @@ using GpuRequest = Transaction::GpuRequest;
 using GpuOperation = Transaction::GpuOperation;
 using GpuState = GpuOperation::State;
 
-void
-BeginAbort(Transaction& transaction)
+enum class AbortWait { NoWait, WaitForGpu };
+
+// Caller owns lock on transaction.mutex(). False with no error means GPU work
+// is still running; false with an error means staging cleanup needs a retry.
+bool
+TryAbortTransactionLocked(Transaction& transaction, std::unique_lock<std::mutex>& lock,
+    AbortWait wait, std::error_code& cleanup_error)
 {
+  cleanup_error.clear();
   transaction.set_state(Transaction::State::ABORTING);
   transaction.CancelWork();
+  if (const auto operation = transaction.gpu_operation) {
+    if (wait == AbortWait::NoWait) {
+      // The accept loop must not wait for GPU I/O. A later sweep finishes cleanup.
+      if (operation->state == GpuState::Running)
+        return false;
+    } else if (!operation->completed.wait_for(lock, kGpuAbortTimeout,
+                   [&] { return operation->state != GpuState::Running; })) {
+      return false;
+    }
+    operation->artifact.reset();
+  }
+  transaction.CleanupTransfer(cleanup_error);
+  if (cleanup_error)
+    return false;
+  transaction.TryClearDescriptor();
+  transaction.set_state(Transaction::State::ABORTED);
+  return true;
 }
 
 std::string
@@ -284,7 +307,7 @@ Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engin
 
 Broker::~Broker()
 {
-  CancelActiveTransactions();
+  Shutdown();
 }
 
 std::vector<std::pair<std::string, Broker::TransactionHandle>>
@@ -295,20 +318,12 @@ Broker::TransactionSnapshot()
 }
 
 void
-Broker::CancelActiveTransactions()
+Broker::Shutdown()
 {
   std::lock_guard lock(transactions_mutex_);
   stopping_ = true;
   for (const auto& [id, transaction] : transactions_)
     transaction->CancelWork();
-}
-
-std::error_code
-Broker::CleanupTransactionDirectory(const std::string&, Transaction& transaction)
-{
-  std::error_code error;
-  transaction.CleanupTransfer(error);
-  return error;
 }
 
 void
@@ -337,7 +352,8 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
       continue;
     }
     transaction->ExpireTransfer(now);
-    if (!CleanupExpiredTransaction(id, *transaction)) {
+    std::error_code cleanup_error;
+    if (!TryAbortTransactionLocked(*transaction, transaction_lock, AbortWait::NoWait, cleanup_error)) {
       continue;
     }
     std::lock_guard transactions_lock(transactions_mutex_);
@@ -347,23 +363,6 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
     }
   }
   ReapTerminalTransactions(now);
-}
-
-bool
-Broker::CleanupExpiredTransaction(const std::string& id, Transaction& transaction)
-{
-  BeginAbort(transaction);
-  if (const auto& operation = transaction.gpu_operation) {
-    // The accept loop must not wait for I/O. A later sweep finishes cleanup.
-    if (operation->state == GpuState::Running)
-      return false;
-    operation->artifact.reset();
-  }
-  if (CleanupTransactionDirectory(id, transaction))
-    return false;
-  transaction.TryClearDescriptor();
-  transaction.set_state(Transaction::State::ABORTED);
-  return true;
 }
 
 Broker::TransactionHandle
@@ -609,7 +608,9 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
       // Preserve invalid-source retries without leaving an admission reservation.
       // Waiters holding this handle see ABORTED; only this map entry is removed.
       transaction->set_state(Transaction::State::ABORTED);
-      if (const auto cleanup_error = CleanupTransactionDirectory(request.transaction_id(), *transaction))
+      std::error_code cleanup_error;
+      transaction->CleanupTransfer(cleanup_error);
+      if (cleanup_error)
         return Fail(request, Failure::INVALID_REQUEST, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
       std::lock_guard transactions_lock(transactions_mutex_);
       const auto current = transactions_.find(request.transaction_id());
@@ -695,7 +696,9 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
         // Preserve corrected legacy requests without claiming another writer's output.
         // Waiters on this handle see ABORTED; only this map entry is removed.
         transaction->set_state(Transaction::State::ABORTED);
-        if (const auto cleanup_error = CleanupTransactionDirectory(request.transaction_id(), *transaction))
+        std::error_code cleanup_error;
+        transaction->CleanupTransfer(cleanup_error);
+        if (cleanup_error)
           return Fail(request, invalid ? Failure::INVALID_REQUEST : failure->code,
               std::string(error.what()) + "; cleanup: " + cleanup_error.message());
         std::lock_guard transactions_lock(transactions_mutex_);
@@ -815,25 +818,21 @@ Broker::Abort(const Request& request)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   }
   if (transaction->state() == Transaction::State::ABORTED) {
-    if (const auto error = CleanupTransactionDirectory(request.transaction_id(), *transaction))
+    std::error_code error;
+    transaction->CleanupTransfer(error);
+    if (error)
       return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
     return AbortSucceeded(request);
   }
   if (transaction->expired(now_())) {
     return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
   }
-  BeginAbort(*transaction);
-  if (const auto operation = transaction->gpu_operation) {
-    if (!operation->completed.wait_for(lock, kGpuAbortTimeout, [&] { return operation->state != GpuState::Running; })) {
-      return Fail(request, Failure::INTERNAL_ERROR, "GPU cleanup is still running");
-    }
-    operation->artifact.reset();
+  std::error_code error;
+  if (!TryAbortTransactionLocked(*transaction, lock, AbortWait::WaitForGpu, error)) {
+    if (error)
+      return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
+    return Fail(request, Failure::INTERNAL_ERROR, "GPU cleanup is still running");
   }
-  if (const auto error = CleanupTransactionDirectory(request.transaction_id(), *transaction)) {
-    return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
-  }
-  transaction->TryClearDescriptor();
-  transaction->set_state(Transaction::State::ABORTED);
   return AbortSucceeded(request);
 }
 

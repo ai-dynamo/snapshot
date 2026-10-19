@@ -417,7 +417,8 @@ TEST_F(BrokerTransferTest, PreservesFailureCodesAcrossRequestAndTransferBoundari
 TEST_F(BrokerTransferTest, ShutdownRejectsNewTransactionsAsUnavailable)
 {
   Broker broker(staging_, storage_);
-  broker.CancelActiveTransactions();
+  broker.Shutdown();
+  broker.Shutdown(); // Serve and the destructor may both initiate shutdown.
   for (const auto& request : {Restore(), Checkpoint(false), Checkpoint(true)}) {
     SCOPED_TRACE(request.DebugString());
     const auto response = broker.HandleRequest(request);
@@ -445,7 +446,7 @@ TEST_F(BrokerTransferTest, ShutdownCancelsActiveRestoreAndRemovesStaging)
   const auto request = Restore();
   auto restore = std::async(std::launch::async, [&] { return broker.HandleRequest(request); });
   staged.get_future().wait();
-  broker.CancelActiveTransactions();
+  broker.Shutdown();
   resume.set_value();
   const auto response = restore.get();
   ASSERT_TRUE(response.has_failure()) << response.DebugString();
@@ -526,7 +527,7 @@ TEST_F(BrokerTransferTest, AbortAndShutdownCancelPreparation)
     std::stop_callback on_stop(token, [&] { cancelled.set_value(); });
     auto cancel = std::async(std::launch::async, [&] {
       if (shutdown) {
-        broker.CancelActiveTransactions();
+        broker.Shutdown();
         return Response{};
       }
       auto request = RequestFor("restore");
@@ -668,7 +669,7 @@ TEST_F(BrokerTransferTest, CheckpointPreparationObservesAbortAndShutdown)
       std::stop_callback on_stop(token, [&] { cancelled.set_value(); });
       auto cancel = std::async(std::launch::async, [&] {
         if (shutdown) {
-          broker.CancelActiveTransactions();
+          broker.Shutdown();
           return Response{};
         }
         auto request = RequestFor("checkpoint");
@@ -739,7 +740,7 @@ TEST_F(BrokerTransferTest, RestoreMkdirRejectsExpiryAndCancellationWithoutLeakin
       if (expire)
         std::this_thread::sleep_until(Find(broker, "restore")->cancellation().Deadline());
       else
-        broker.CancelActiveTransactions();
+        broker.Shutdown();
     });
     const auto response = broker.HandleRequest(Restore());
     EXPECT_EQ(response.failure().code(), expire ? Failure::TRANSACTION_EXPIRED : Failure::INTERNAL_ERROR)
@@ -766,7 +767,7 @@ TEST_F(BrokerTransferTest, CheckpointMkdirRejectsExpiryAndCancellationBeforeRetu
         if (expire)
           std::this_thread::sleep_until(Find(broker, "checkpoint")->cancellation().Deadline());
         else
-          broker.CancelActiveTransactions();
+          broker.Shutdown();
       });
       const auto response = broker.HandleRequest(Checkpoint(direct));
       EXPECT_EQ(response.failure().code(), expire ? Failure::TRANSACTION_EXPIRED : Failure::INTERNAL_ERROR)
@@ -1029,6 +1030,88 @@ TEST_F(BrokerTransferTest, PeriodicCleanupRetriesKeepCapacityUntilRemovalSucceed
   }
 }
 
+TEST_F(BrokerTransferTest, AbortCleanupFailureRetainsStateAndAllowsRetry)
+{
+  for (const bool limited : {false, true}) {
+    for (const auto state : {Transaction::State::STAGED, Transaction::State::ABORTED}) {
+      SCOPED_TRACE(limited);
+      SCOPED_TRACE(static_cast<int>(state));
+      Broker broker(staging_, storage_);
+      const auto resources = limited ? Limit(broker) : nullptr;
+      const auto transaction = Seed(broker, 0, state);
+      BlockCleanup();
+      auto request = RequestFor("seed");
+      request.mutable_abort();
+      const auto response = broker.HandleRequest(request);
+      EXPECT_EQ(response.failure().code(), Failure::STORAGE_ERROR);
+      EXPECT_EQ(transaction->state(), state == Transaction::State::STAGED ? Transaction::State::ABORTING : state);
+      EXPECT_TRUE(std::holds_alternative<RestoreTransactionDescriptor>(transaction->descriptor()));
+      EXPECT_EQ(Retained(broker), 0u);
+      if (limited) {
+        EXPECT_EQ(resources->active, 1u);
+        EXPECT_EQ(resources->reserved, 4u);
+      }
+      UnblockCleanup();
+      EXPECT_TRUE(broker.HandleRequest(request).has_abort_complete());
+      EXPECT_EQ(transaction->state(), Transaction::State::ABORTED);
+      EXPECT_TRUE(std::holds_alternative<std::monostate>(transaction->descriptor()));
+      EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
+      EXPECT_EQ(Retained(broker), 1u);
+      if (limited) {
+        EXPECT_EQ(resources->active, 0u);
+        EXPECT_EQ(resources->reserved, 0u);
+      }
+    }
+  }
+}
+
+TEST_F(BrokerTransferTest, AbortWaitsForGpuDrainBeforeRemovingStaging)
+{
+  Broker broker(staging_, storage_);
+  const auto resources = Limit(broker);
+  const auto transaction = Seed(broker, 0, Transaction::State::STAGED);
+  const auto operation = std::make_shared<Transaction::GpuOperation>();
+  operation->state = Transaction::GpuOperation::State::Running;
+  operation->cancellation = std::make_shared<Cancellation>(Cancellation::ChildOf(transaction->cancellation()));
+  transaction->gpu_operation = operation;
+  auto request = RequestFor("seed");
+  request.mutable_abort();
+  auto abort = std::async(std::launch::async, [&] { return broker.HandleRequest(request); });
+
+  // Observe the wait while owning the same mutex GPU completion needs. The
+  // deadline bounds the observation; always finish the fake operation below.
+  std::unique_lock lock(transaction->mutex(), std::defer_lock);
+  bool waiting = false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (lock.try_lock()) {
+      if (transaction->state() == Transaction::State::ABORTING) {
+        waiting = true;
+        break;
+      }
+      lock.unlock();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_TRUE(waiting);
+  if (!lock.owns_lock())
+    lock.lock(); // A broken wait can hold it only until the production timeout.
+  EXPECT_EQ(abort.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+  EXPECT_TRUE(operation->cancellation->IsCancelled());
+  EXPECT_TRUE(fs::exists(staging_ / "restore/seed/image"));
+  EXPECT_EQ(resources->active, 1u);
+  EXPECT_EQ(resources->reserved, 4u);
+  operation->state = Transaction::GpuOperation::State::Finished;
+  operation->completed.notify_all();
+  lock.unlock();
+  const auto response = abort.get();
+  EXPECT_TRUE(response.has_abort_complete()) << response.DebugString();
+  EXPECT_EQ(transaction->state(), Transaction::State::ABORTED);
+  EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
+  EXPECT_EQ(resources->active, 0u);
+  EXPECT_EQ(resources->reserved, 0u);
+}
+
 TEST_F(BrokerTransferTest, ExpiryWaitsForGpuDrainBeforeRemovingStaging)
 {
   Broker broker(staging_, storage_);
@@ -1040,7 +1123,16 @@ TEST_F(BrokerTransferTest, ExpiryWaitsForGpuDrainBeforeRemovingStaging)
   operation->cancellation = std::make_shared<Cancellation>(Cancellation::ChildOf(transaction->cancellation()));
   transaction->gpu_operation = operation;
   const auto sweep = std::chrono::steady_clock::now() + std::chrono::minutes(2);
-  broker.ReapExpiredTransactions(sweep);
+  auto reap = std::async(std::launch::async, [&] { broker.ReapExpiredTransactions(sweep); });
+  const auto ready = reap.wait_for(std::chrono::seconds(2));
+  if (ready != std::future_status::ready) {
+    // Release a regressed GPU wait before reporting the failure.
+    std::lock_guard lock(transaction->mutex());
+    operation->state = Transaction::GpuOperation::State::Finished;
+    operation->completed.notify_all();
+  }
+  reap.get();
+  ASSERT_EQ(ready, std::future_status::ready);
   EXPECT_TRUE(operation->cancellation->IsCancelled());
   EXPECT_EQ(transaction->state(), Transaction::State::ABORTING);
   EXPECT_TRUE(fs::exists(staging_ / "restore/seed/image"));
@@ -1072,7 +1164,10 @@ TEST_F(BrokerTransferTest, ShutdownSignalsGpuWithoutWaitingForTransactionMutex)
   operation->cancellation = std::make_shared<Cancellation>(Cancellation::ChildOf(transaction->cancellation()));
   transaction->gpu_operation = operation;
   std::unique_lock lock(transaction->mutex());
-  auto shutdown = std::async(std::launch::async, [&] { broker.CancelActiveTransactions(); });
+  auto shutdown = std::async(std::launch::async, [&] {
+    broker.Shutdown();
+    broker.Shutdown();
+  });
   const auto signalled = shutdown.wait_for(std::chrono::seconds(2));
   lock.unlock();
   shutdown.get();
