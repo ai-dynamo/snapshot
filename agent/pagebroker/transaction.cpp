@@ -95,9 +95,8 @@ Transaction::~Transaction()
 
 void
 Transaction::PrepareTransfer(std::shared_ptr<TransactionResources> resources, uintmax_t initial_bytes,
-    const Path& directory, const PublishedArtifact* artifact, std::chrono::steady_clock::duration lifetime)
+    const PublishedArtifact* artifact, std::chrono::steady_clock::duration lifetime)
 {
-  transfer_directory_ = directory;
   deadline_ = Cancellation::Clock::now() + lifetime;
   if (!resources)
     return;
