@@ -32,26 +32,24 @@ source's.
 ## 2. Set the snapshot to restore from
 
 Every profile carries the annotation `nvidia.com/restore-from: ${SNAPSHOT_NAME}`,
-naming the `PodSnapshot` to restore from. Set the variable to your recipe's
-snapshot name from the [recipe table](README.md#choose-your-recipe). Whichever method you
-used, that is the `SnapshotJob`'s name, which its `PodSnapshot` shares, or the name
-you gave the `PodSnapshot` in
+a placeholder for the `PodSnapshot` to restore from. Open your profile and replace
+`${SNAPSHOT_NAME}` with your recipe's snapshot name from the
+[recipe table](README.md#choose-your-recipe), then save the file. Whichever method
+you used, that is the `SnapshotJob`'s name, which its `PodSnapshot` shares, or the
+name you gave the `PodSnapshot` in
 [Checkpoint, Option 1](checkpoint.md#option-1--podsnapshot-checkpoint-a-running-replica).
 If you named your `PodSnapshot` something else, use that name instead.
 
-```bash
-export SNAPSHOT_NAME=vllm-qwen3-0-6b-snapshot
-```
-
 ## 3. Restore
 
-Fill the name into the profile and apply it, then watch the rollout. The Deployment
+Apply the profile you edited, then watch the rollout. The Deployment
 is named `<framework>-1gpu-restored` or `<framework>-8gpu-restored`, as the
 [recipe table](README.md#choose-your-recipe) lists:
 
 ```bash
-sed "s|\${SNAPSHOT_NAME}|$SNAPSHOT_NAME|" vllm/restore/1-gpu.yaml | \
-  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
+kubectl apply \
+  --namespace "$WORKLOAD_NAMESPACE" \
+  --filename vllm/restore/1-gpu.yaml
 
 kubectl rollout status \
   --namespace "$WORKLOAD_NAMESPACE" \

@@ -150,19 +150,23 @@ There are two ways to take the checkpoint. Pick one:
 
 ### Option A: `PodSnapshot`
 
-Start the source replica:
+Start the source replica.
+
+**Multi-GPU recipes: edit the manifest first.** In `$SOURCE_MANIFEST`, find the
+init container `snapshot-cuda-install` and replace `${SNAPSHOT_AGENT_IMAGE}` with
+the agent image you read earlier (`echo "$SNAPSHOT_AGENT_IMAGE"` prints it). Save
+the file. The line to change is:
+
+```yaml
+initContainers:
+  - name: snapshot-cuda-install
+    image: ${SNAPSHOT_AGENT_IMAGE}   # replace with your agent image
+```
+
+Then apply the manifest:
 
 ```bash
 kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename "$SOURCE_MANIFEST"
-```
-
-**Multi-GPU recipes:** the source manifest has a placeholder for the agent image
-that you read earlier. Run this command instead of the one above, to fill it in
-as you apply the manifest:
-
-```bash
-sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" "$SOURCE_MANIFEST" | \
-  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
 ```
 
 Then wait until the replica is ready to be checkpointed. The first run downloads
@@ -224,11 +228,24 @@ If the checkpoint does not become Ready, see
 Start a new replica from the checkpoint. It is a new Deployment whose pods carry
 the `nvidia.com/restore-from` annotation naming your checkpoint, and it starts in
 seconds, because the node agent restores the saved state into it instead of
-loading the model:
+loading the model.
+
+**First, point the manifest at your checkpoint.** In `$RESTORE_MANIFEST`, replace
+`${SNAPSHOT_NAME}` in the `nvidia.com/restore-from` annotation with the name of
+your checkpoint (`echo "$SNAPSHOT_NAME"` prints it, for example
+`vllm-qwen3-0-6b-snapshot`). Save the file. The line to change is:
+
+```yaml
+template:
+  metadata:
+    annotations:
+      nvidia.com/restore-from: ${SNAPSHOT_NAME}   # replace with your checkpoint's name
+```
+
+**Then start the replica** and wait for it:
 
 ```bash
-sed "s|\${SNAPSHOT_NAME}|$SNAPSHOT_NAME|" "$RESTORE_MANIFEST" | \
-  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
+kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename "$RESTORE_MANIFEST"
 
 kubectl rollout status \
   --namespace "$WORKLOAD_NAMESPACE" \
