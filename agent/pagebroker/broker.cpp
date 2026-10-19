@@ -375,7 +375,7 @@ Broker::CreateOrGetTransaction(const std::string& transaction_id)
 {
   std::lock_guard lock(transactions_mutex_);
   if (stopping_)
-    throw TransferError(Failure::STORAGE_UNAVAILABLE, "PageBroker is shutting down");
+    throw TransferError(Failure::UNAVAILABLE, "PageBroker is shutting down");
   auto [iterator, inserted] = transactions_.try_emplace(transaction_id, std::make_shared<Transaction>());
   return iterator->second;
 }
