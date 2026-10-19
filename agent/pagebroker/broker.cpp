@@ -443,7 +443,7 @@ Broker::AbortStaging(
   std::error_code cleanup_error;
   transaction.RemoveStaging(staging_directory, cleanup_error);
   if (cleanup_error)
-    return Fail(request, Failure::STORAGE_ERROR, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
+    return Fail(request, TransferFailureCode(error), std::string(error.what()) + "; cleanup: " + cleanup_error.message());
   return Fail(request, TransferFailureCode(error), error.what());
 }
 
