@@ -95,21 +95,18 @@ produces, and `<framework>-<1|8>gpu-restored` for the restored Deployment.
 The framework guides and the stages below use the Qwen3 0.6B recipe in their
 commands. For another recipe, use its manifests and names from this table.
 
-### Eight-GPU recipes
+### Multi-GPU recipes
 
-An eight-GPU recipe runs one model across all eight GPUs of a single node. Set up
-the following once, before the first stage:
+A multi-GPU recipe runs one model across several GPUs of a single node;
+multi-node is not supported yet. The GLM 5.3 and DeepSeek V4.1 Flash recipes use
+all eight GPUs of a B200 node. For other GPUs, change `nodeSelector` and the
+parallelism settings. Before the first stage:
 
-- **A node that fits the recipe.** All GPUs of the workload are on one node;
-  multi-node is on the roadmap. The node has the GPU count, CPU, and memory the
-  manifests request. The manifests select eight B200 GPUs. Change `nodeSelector`
-  and the parallelism settings for other GPUs.
-- **The agent image, for the source Deployments only.** A Deployment prepares
-  its own Pod for multi-GPU capture with an init container that copies the
-  multi-GPU libraries from the Snapshot agent image. Read the image from the
-  installed agent, in the namespace Snapshot is installed in (`snapshot` in the
-  README's install command), and substitute it into the Deployment manifest when
-  you apply it.
+- **A Deployment source needs the agent image.** An init container copies the
+  multi-GPU libraries out of it. Read the image from the installed agent, in the
+  namespace Snapshot is installed in (`snapshot` in the README's install
+  command), and substitute it as you apply the manifest, as the framework guides
+  show:
 
   ```bash
   export SNAPSHOT_AGENT_IMAGE=$(kubectl get daemonset snapshot-agent \
@@ -117,10 +114,14 @@ the following once, before the first stage:
     --output jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}')
   ```
 
-  A `SnapshotJob` needs no substitution: the controller prepares its source Pod.
-- **Time for the first run.** The model download dominates it. The manifests
-  allow one hour for a Deployment to become ready and two for a `SnapshotJob`.
-  On a slow link, raise `progressDeadlineSeconds` or `activeDeadlineSeconds`.
+  A `SnapshotJob` needs nothing: the controller prepares its source Pod.
+- **Allow time for the first run.** The model download dominates it. The
+  manifests allow one hour for a Deployment to become ready and two for a
+  `SnapshotJob`. On a slow link, raise `progressDeadlineSeconds` or
+  `activeDeadlineSeconds`.
+
+See [Multi-GPU workloads](../reference/workload-contract.md#multi-gpu-workloads)
+for what the extra configuration does.
 
 ## 1. Make the workload snapshot-ready
 

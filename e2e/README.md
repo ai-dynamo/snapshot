@@ -347,7 +347,7 @@ SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapsho
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
-To test an [eight-GPU recipe](../docs/guides/README.md#eight-gpu-recipes),
+To test an [eight-GPU recipe](../docs/guides/README.md#multi-gpu-recipes),
 set `SNAPSHOT_E2E_RECIPE` to its manifest filename without `.yaml`:
 
 ```bash

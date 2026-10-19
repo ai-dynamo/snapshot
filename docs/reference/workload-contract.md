@@ -208,7 +208,7 @@ What else it carries depends on what creates it:
           emptyDir: {}
   ```
 
-The eight-GPU recipes in the [usage guides](../guides/README.md#eight-gpu-recipes)
+The eight-GPU recipes in the [usage guides](../guides/README.md#multi-gpu-recipes)
 are complete examples of both.
 
 ## Runtime compatibility
