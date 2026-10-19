@@ -121,7 +121,6 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	broker := pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
 	committed := false
 	preparationAttempted := false
-	// Set once CRIU has produced a complete image in staging.
 	dumpComplete := false
 	var gpu *pagebroker.CustomStorageExecution
 	defer func() {
@@ -131,10 +130,8 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		if !preparationAttempted || committed {
 			return
 		}
-		// A complete image is the only copy of a capture that already cost a
-		// dump, so a commit that can still be retried keeps its staging. The
-		// GPU path always releases: gpu.Abort is that execution's teardown as
-		// well as the transaction's, and nothing else tears it down.
+		// gpu.Abort is also that execution's teardown, so the GPU path always
+		// releases.
 		if gpu == nil && dumpComplete && !pagebroker.TransactionGone(retErr) {
 			return
 		}

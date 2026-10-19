@@ -9,10 +9,7 @@ import (
 	"testing"
 )
 
-// A commit failure after a good dump leaves the staged image as the only copy
-// of work that already cost a CUDA suspend and a CRIU dump. Callers release
-// that staging only when the broker proves it is holding nothing, so this
-// predicate decides whether recoverable data is destroyed.
+// Decides whether a failed commit destroys recoverable staged data.
 func TestTransactionGone(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -37,7 +34,6 @@ func TestTransactionGone(t *testing.T) {
 	}
 }
 
-// Callers wrap the commit error before it reaches the release decision.
 func TestTransactionGoneSeesThroughWrapping(t *testing.T) {
 	wrapped := fmt.Errorf("commit PageBroker checkpoint: %w", &FailureError{code: Failure_TRANSACTION_EXPIRED})
 	if !TransactionGone(wrapped) {
@@ -45,9 +41,6 @@ func TestTransactionGoneSeesThroughWrapping(t *testing.T) {
 	}
 }
 
-// Abort asks the broker to stop holding a transaction, so a broker that is not
-// holding it has already satisfied the request. This also makes Abort
-// idempotent, which a retry loop depends on.
 func TestIgnoreAlreadyReleased(t *testing.T) {
 	if err := ignoreAlreadyReleased(&FailureError{code: Failure_TRANSACTION_NOT_FOUND}); err != nil {
 		t.Errorf("TRANSACTION_NOT_FOUND should be success, got %v", err)

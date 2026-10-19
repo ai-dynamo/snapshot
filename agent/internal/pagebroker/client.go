@@ -32,8 +32,6 @@ const (
 
 var commitRetryLimit = 30 * time.Second
 
-// Far shorter than commitRetryLimit: cleanup is not worth stalling every
-// failure path behind it.
 var abortRetryLimit = 2 * time.Second
 
 // Client speaks the local PageBroker protocol. Filesystem operations run against
@@ -135,8 +133,7 @@ func (c Client) commit(ctx context.Context, transactionID string) (*CommitComple
 }
 
 // Abort releases a live transaction, retrying transport errors. A transaction
-// the broker no longer has counts as success, which also makes Abort
-// idempotent.
+// the broker no longer has counts as success.
 func (c Client) Abort(ctx context.Context, transactionID string) error {
 	err := c.abort(ctx, transactionID)
 	if isRetryableTransportError(err) {
@@ -145,8 +142,6 @@ func (c Client) Abort(ctx context.Context, transactionID string) error {
 	return ignoreAlreadyReleased(err)
 }
 
-// retryAbort reports the failure that started the retry, not the deadline that
-// ended it.
 func (c Client) retryAbort(ctx context.Context, transactionID string, first error) error {
 	retryCtx, cancel := context.WithTimeout(ctx, abortRetryLimit)
 	defer cancel()
@@ -158,7 +153,6 @@ func (c Client) retryAbort(ctx context.Context, transactionID string, first erro
 		}
 		err := c.abort(retryCtx, transactionID)
 		if retryCtx.Err() != nil {
-			// err is the deadline, not anything the broker said.
 			return first
 		}
 		if !isRetryableTransportError(err) {

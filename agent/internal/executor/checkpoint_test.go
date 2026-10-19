@@ -312,16 +312,10 @@ func TestCheckpointPreparationFailure(t *testing.T) {
 				case "confirmed":
 					assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
 				case "not-found":
-					// A broker that is not holding the transaction has already
-					// done what Abort asked, so it is not reported as a cleanup
-					// failure. This also makes Abort idempotent for the retry
-					// loop, which may release a transaction twice.
+					// Already what Abort asked for, so not a cleanup failure.
 					assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
 					assert.NotContains(t, err.Error(), "TRANSACTION_NOT_FOUND")
 				default:
-					// A transport failure is retried briefly and then reported
-					// as the error that started the retry, not the deadline
-					// that ended it.
 					assert.ErrorContains(t, err, fmt.Sprintf("abort PageBroker checkpoint %q: read PageBroker response: EOF", transactionID))
 					assert.ErrorIs(t, err, io.EOF)
 				}

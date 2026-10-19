@@ -51,8 +51,8 @@ func (e *FailureError) Error() string {
 // Code returns a known wire failure code; unknown codes map to UNSPECIFIED.
 func (e *FailureError) Code() Failure_Code { return e.code }
 
-// TransactionGone reports whether the broker is not holding the transaction:
-// it never had it, or it expired.
+// TransactionGone reports whether the broker never had the transaction or it
+// expired.
 func TransactionGone(err error) bool {
 	var failure *FailureError
 	if !errors.As(err, &failure) {
