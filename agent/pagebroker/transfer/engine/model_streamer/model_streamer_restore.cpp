@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <exception>
@@ -33,6 +34,7 @@ namespace {
 // 40 GB read-ahead budget. A single larger file is submitted on its own.
 constexpr uintmax_t kSubmissionByteBudget = 10'000'000'000;
 constexpr unsigned kResponsePollTimeoutMs = 25;
+constexpr auto kCancellationPollInterval = std::chrono::milliseconds(25);
 // A completed submission retains its mappings until its entire native session
 // ends. Bound admission and stop admitting on the first completion, so steady
 // arrivals cannot keep an old destination alive indefinitely.
@@ -391,6 +393,12 @@ ModelStreamerRestore::SubmitNative(std::unique_ptr<StreamerEntry>& entry)
     FailEntry(*entry, std::current_exception());
     return;
   }
+  // Startup may block without using this entry's pointers. Claim only here,
+  // before native access, so the caller can cancel throughout startup.
+  auto expected = Admission::Pending;
+  if (!entry->admission->state.compare_exchange_strong(expected, Admission::Claimed))
+    return;  // The caller cancelled and may already have released its buffers.
+
   auto& request = entry->request;
   RunaiFileStreamerSubmissionId submission_id = 0;
   const int response = runai_file_streamer_request(
@@ -564,6 +572,27 @@ ModelStreamerRestore::FailAll(std::exception_ptr error) noexcept
 }
 
 void
+ModelStreamerRestore::WaitForSubmission(
+    std::future<void>& completion, SubmissionAdmission& admission, const Cancellation& control)
+{
+  while (completion.wait_for(std::chrono::milliseconds::zero()) != std::future_status::ready) {
+    if (const auto reason = control.Reason()) {
+      auto expected = Admission::Pending;
+      if (admission.state.compare_exchange_strong(expected, Admission::Cancelled))
+        throw CancellationError(*reason);
+      // The worker won admission. Native access must end before unwinding the
+      // caller's mappings, even if its cancellation deadline has passed.
+      break;
+    }
+    if (admission.state.load() == Admission::Claimed)
+      break;
+    completion.wait_until(std::min(
+        control.Deadline(), Cancellation::Clock::now() + kCancellationPollInterval));
+  }
+  completion.get();
+}
+
+void
 ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destination, Cancellation control)
 {
   for (auto file = plan.files.begin(); file != plan.files.end();) {
@@ -591,9 +620,11 @@ ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destinat
       if (batch.size() > std::numeric_limits<unsigned>::max())
         throw std::runtime_error("too many files in one Model Streamer submission");
 
-      // The request contains raw pointers into batch. Completion is released
-      // only after the native session ends, including on terminal failures.
+      // The request contains raw pointers into batch. A caller that wins queued
+      // cancellation can release them; otherwise completion fences native access.
+      auto admission = std::make_shared<SubmissionAdmission>();
       auto entry = std::make_unique<StreamerEntry>();
+      entry->admission = admission;
       entry->bytes = batch_bytes;
       entry->control = control;
       entry->request.paths.reserve(batch.size());
@@ -609,7 +640,7 @@ ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destinat
       }
       auto completion = entry->completion.get_future();
       event_loop_.Post(std::make_unique<SubmitEvent>(*this, std::move(entry)));
-      completion.get();
+      WaitForSubmission(completion, *admission, control);
     }
 
     for (const auto& file : batch) {
