@@ -162,12 +162,20 @@ ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 
 FROM build-dependencies AS build
 WORKDIR /src
-COPY . .
-# Run CPU tests and compile GPU tests. GPU tests run separately.
-RUN make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
+RUN useradd --create-home --user-group pagebroker-test \
+    && chown pagebroker-test:pagebroker-test /src
+COPY --chown=pagebroker-test:pagebroker-test . .
+USER pagebroker-test
+# Run CPU tests unprivileged so directory permissions are enforced. GPU tests
+# are compiled here and run separately.
+RUN test "$(id -u)" -ne 0 \
+    && make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
     && make build/gpu-checkpoint-test build/gpu-transfer-test CUDA_ROOT=/opt/cuda CUDA_LIBRARY_DIR=/opt/cuda/lib64/stubs \
     && make daemon CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
     && make s3-test-build CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
+
+# Packaging below needs root to collect libraries and corresponding sources.
+USER root
 
 # The CLI remains usable without a driver. CUDA is loaded only for capability
 # detection, and no build-time driver stub is shipped in the runtime image.
