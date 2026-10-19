@@ -39,8 +39,7 @@ cause is what the tool at that step reported. The sections below are organised
 by step.
 
 For a restore, the message is on the pod's `nvidia.com/Restored` condition and
-on a `RestoreWorkerFailed` event, one entry per destination container, and ends
-with the node whose agent holds the full detail:
+on a `RestoreWorkerFailed` event, one entry per destination container:
 
 ```bash
 kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="nvidia.com/Restored")].message}'
@@ -54,16 +53,26 @@ with reason `CheckpointFailed`:
 kubectl get podsnapshotcontent <name> -o jsonpath='{.status.conditions[?(@.type=="Failed")].message}'
 ```
 
-The agent logs the same failure with a structured `step` key, so one filter
-shows every failure at a given step:
+The agent on the node where the pod ran logs the same failure with a
+structured `step` key, so one filter shows every failure at a given step. The
+agent runs in the Snapshot release namespace, one pod per node, so find that
+node's pod first rather than reading the DaemonSet, which picks an arbitrary
+pod:
 
 ```bash
-kubectl logs daemonset/snapshot-agent -n <ns> -c agent | grep '"step"'
+node=$(kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.spec.nodeName}')
+agent=$(kubectl get pods -n <snapshot-ns> -l app.kubernetes.io/component=snapshot-agent \
+  --field-selector spec.nodeName=$node -o name)
+kubectl logs $agent -n <snapshot-ns> -c agent | grep '"step"'
 ```
 
-Raise `agent.logLevel` in the chart values when you need more than the error
-lines. A restore that failed inside the placeholder also leaves nsrestore's
-stderr and the key lines of CRIU's `restore.log` in the agent log.
+For a checkpoint, take the node from the source pod instead. The PageBroker
+commands below assume the same `$agent`.
+
+Raise `daemonset.snapshotLogLevel` in the chart values when you need more than
+the error lines; it sets the level for the agent and for nsrestore. A restore
+that failed inside the placeholder also leaves nsrestore's stderr and the key
+lines of CRIU's `restore.log` in the agent log.
 
 ## Restore fails at a step
 
@@ -142,6 +151,11 @@ at checkpoint does not match the devices allocated now.
 
 Check `NVIDIA_VISIBLE_DEVICES` and the GPU resource request on the restore pod.
 
+A checkpoint reports the same step when the agent builds the context from the
+source container's CUDA processes and GPUs. Check that the source pod still
+holds its GPU allocation and that its CUDA processes are running; a process
+that exited between the capture request and the dump leaves nothing to map.
+
 ### mounting agent bundle into placeholder
 
 The agent bind-mounts its binaries into the placeholder's mount namespace so
@@ -170,7 +184,7 @@ in the agent configuration does not match; the storage backend holding the
 artifact is unavailable or rejects the credentials.
 
 ```bash
-kubectl logs daemonset/snapshot-agent -n <ns> -c pagebroker
+kubectl logs $agent -n <snapshot-ns> -c pagebroker
 ```
 
 ### mounting PageBroker restore source
@@ -193,9 +207,12 @@ state. The cause tells you which of those stopped:
   the agent image itself is missing the binary. Check the agent image tag.
 - `CRIU restore failed: ...`: the last error CRIU logged. The agent log holds
   the key lines of `restore.log`.
-- `nsrestore was killed (signal: killed) after the restore timeout expired`:
-  the restore ran past `agent.restore.restoreTimeoutSeconds`. Raise it, or find
-  what stalled in the agent log.
+- `...; the restore timeout expired`: the restore ran past
+  `config.restore.restoreTimeoutSeconds`. The cause before the semicolon is
+  what was running when time ran out, often `CRIU restore failed: context
+  canceled`. Raise the timeout, or find what stalled in the agent log.
+- `...; the restore was cancelled`: the restore was withdrawn or the agent
+  shut down before nsrestore finished.
 
 ### committing PageBroker restore
 
@@ -258,8 +275,8 @@ Likely causes: the `pagebroker` container is not ready; the checkpoint volume
 is full or unavailable.
 
 ```bash
-kubectl logs daemonset/snapshot-agent -n <ns> -c pagebroker
-kubectl get pvc -n <ns>
+kubectl logs $agent -n <snapshot-ns> -c pagebroker
+kubectl get pvc -n <snapshot-ns>
 ```
 
 ### inspecting cuinterpose
@@ -323,5 +340,5 @@ Likely causes: the final destination ran out of space or became unavailable;
 PageBroker restarted (`TRANSACTION_NOT_FOUND`); the transaction expired.
 
 ```bash
-kubectl logs daemonset/snapshot-agent -n <ns> -c pagebroker
+kubectl logs $agent -n <snapshot-ns> -c pagebroker
 ```
