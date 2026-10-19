@@ -331,11 +331,12 @@ built from the session operations rather than added to them:
 
 A cuInterpose round combines the first two patterns, and because every phase of
 cuInterpose is one such round, Figure 3 is the unit from which the checkpoint
-and restore flows below are assembled. The leader inserts one command that every
-relay reads, every rank executes it at the same time, and each relay inserts one
-reply that the leader collects; the leader therefore never addresses a single
-rank, since the command carries the expected values for every rank and each
-relay keeps its own.
+and restore flows below are assembled. The leader inserts one command, naming a
+step and its arguments, that every relay reads; every rank executes it at the
+same time; and each relay inserts one reply that the leader collects. The leader
+therefore never addresses a single rank, because any value meant for one rank
+travels inside the shared arguments, keyed by rank, and each relay keeps its
+own.
 
 ![One cuInterpose round](diagrams/round.svg)
 
@@ -470,24 +471,46 @@ Every Pod that uses cuInterpose keeps a short-lived relay that fans each command
 out to its processes over their per-process sockets, and rank 0's relay also
 acts as the leader. The leader gathers every Pod's records, makes process
 identities unique by prefixing them with the rank, resolves importers to
-creators through the recorded handles, validates multicast teams whose devices
-span Pods, and then drives each phase as a round of Figure 3, in which the
-command carries the operation, the expected carrier bytes for every rank, and
-the current handle table, and each reply carries the new handles that the
-relay's creators exported. Members without cuInterpose run no relay, and since
-admission tells the leader which ranks run one, its gathers wait only for those.
-A Pod that is not part of a set keeps today's behavior and never opens a
+creators through the recorded handles, and validates multicast teams whose
+devices span Pods. It keeps the result as the group state, together with the
+expected carrier bytes of each process, which is the amount of shared memory
+that process must copy to or from its host carrier, and, during restore, the
+handle table, which maps every old fabric handle to the one its creator exported
+after re-creating the memory. Members without cuInterpose run no relay, and
+since admission tells the leader which ranks run one, its gathers wait only for
+those. A Pod that is not part of a set keeps today's behavior and never opens a
 session.
 
-The barrier between adding every device of a multicast team and binding memory
-on any of them must be global, because the driver waits for the whole team
-before a bind or a mapping completes, and the round deadline doubles as the
-watchdog for a team that never forms. cuInterpose deliberately does not register
-as a CUDA Checkpoint client: CUDA does not order callbacks across clients, so
-nothing would guarantee that cuInterpose rebuilds memory before NCCL uses it,
-CUDA's store does not exist during checkpoint when cuInterpose needs lockstep
-teardown, and topology records exceed its value limit. Running between CUDA's
-phases, under the agent's control, provides that ordering instead.
+Each phase then runs as a round of Figure 3 through one generic envelope: the
+command names the step and carries arguments that the leader derives from the
+group state, and each reply carries a status and a step-specific result that the
+leader folds back into it. Relays never see the plan, because they only dispatch
+each command to the local handler that its step names, so a capture and a
+restore are simply two lists of steps, and a new phase costs one row in the
+table below and one handler in the shim.
+
+| Step | Arguments | Result |
+| --- | --- | --- |
+| `INSPECT`, `BEGIN_CHECKPOINT` | None | Records describing allocations, fabric handles, and multicast teams |
+| `SAVE_ALLOCATIONS`, `LOAD_ALLOCATIONS` | Expected carrier bytes, so each relay checks that its shims copied every shared allocation in full | Bytes copied and, at restore, the new handles of re-created allocations |
+| `RESTORE_MULTICAST_CREATORS` | None | The new handles of re-created multicast objects |
+| `RESTORE_UNICAST`, `RESTORE_MULTICAST_IMPORTERS`, `RESTORE_MULTICAST_DEVICES`, `RESTORE_MULTICAST_BINDINGS` | The handle table, so each importer finds the new handle from the old one it recorded | Status only |
+| `PREPARE_MULTICAST`, `PREPARE_UNICAST` | None | Status only |
+
+Only three step boundaries need the whole group to finish before the next step
+starts: after `LOAD_ALLOCATIONS` and after `RESTORE_MULTICAST_CREATORS`, because
+importers need the new handles, and after `RESTORE_MULTICAST_DEVICES`, because
+the driver waits for the whole multicast team before a bind or a mapping
+completes. The other boundaries are kept for uniformity and easier debugging,
+since a round costs well under a millisecond, and the round deadline doubles as
+the watchdog for a multicast team that never forms.
+
+cuInterpose deliberately does not register as a CUDA Checkpoint client: CUDA
+does not order callbacks across clients, so nothing would guarantee that
+cuInterpose rebuilds memory before NCCL uses it, CUDA's store does not exist
+during checkpoint when cuInterpose needs lockstep teardown, and topology records
+exceed its value limit. Running between CUDA's phases, under the agent's
+control, provides that ordering instead.
 
 ### Communication libraries
 
@@ -883,13 +906,13 @@ evidence; and an API review that settles the open questions in
 The prototype validated the shim and coordinator mechanics on hardware, and this
 SNEP keeps them while changing how members find each other. The brain moves out
 of rank 0's coordinator into the coordinator service, leaving rank 0's relay
-with only cuInterpose's leader logic, and its commands become pure broadcasts
-because they now carry the expected bytes for every rank. Group parameters come
-from the resources instead of Pod annotations, which removes the shared secret,
-and the per-Pod inspection becomes a group admission, without which every
-multi-node workload would be refused. Finally, the TCP hold drops only preserved
-connections and lifts at `sockets-restored`, which removes the prototype's
-conflict between the hold and its own coordination traffic.
+with only cuInterpose's leader logic, and its commands become a generic, pure
+broadcast of a step and its arguments. Group parameters come from the resources
+instead of Pod annotations, which removes the shared secret, and the per-Pod
+inspection becomes a group admission, without which every multi-node workload
+would be refused. Finally, the TCP hold drops only preserved connections and
+lifts at `sockets-restored`, which removes the prototype's conflict between the
+hold and its own coordination traffic.
 
 ### C. Diagram sources
 
