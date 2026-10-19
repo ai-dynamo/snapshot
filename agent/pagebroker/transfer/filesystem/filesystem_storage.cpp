@@ -326,7 +326,11 @@ PublishCheckpoint(const Path& source, const StorageBackend& destination, const P
     ReplaceDirectory(partial, published);
   }
   catch (...) {
-    try { RemoveStaging(partial); } catch (const fs::filesystem_error&) {}
+    try {
+      RemoveStaging(partial);
+    } catch (...) {
+      // Cleanup must not replace the original publication failure.
+    }
     throw;
   }
 }
