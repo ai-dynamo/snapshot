@@ -77,7 +77,7 @@ class Transaction {
 
   // Admission and initial byte reservation share one resource lock when limits are enabled.
   void PrepareTransfer(std::shared_ptr<TransactionResources> resources, uintmax_t initial_bytes,
-      const Path& directory, const PublishedArtifact* artifact = nullptr,
+      const PublishedArtifact* artifact = nullptr,
       std::chrono::steady_clock::duration lifetime = std::chrono::seconds{7500});
   // Records exclusive ownership after the capture directory has been created.
   void OwnDirectory(const Path& directory);
