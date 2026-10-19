@@ -15,7 +15,7 @@ missing_file=$(mktemp)
 trap 'rm -f "$missing_file"' EXIT
 
 sed -n 's/^[[:space:]]*Step[A-Za-z0-9]*[[:space:]]*Step = "\(.*\)"$/\1/p' "$steps_file" | while IFS= read -r step; do
-	if ! grep -Fq "### $step" "$doc_file"; then
+	if ! grep -Fxq "### $step" "$doc_file"; then
 		printf '%s\n' "$step" >> "$missing_file"
 	fi
 done
