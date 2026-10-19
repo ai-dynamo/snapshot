@@ -9,7 +9,7 @@ are two ways to do it, depending on the use case:
 | **`SnapshotJob`** | The running pod cannot be tracked directly — for example, in a pipeline that submits the work | Snapshot runs the whole flow: it creates the replica, checkpoints it, and tears it down. Self-contained, but the source is discarded, so every replica (including the first) comes up via [restore](restore.md). |
 
 This is stage 2 of the [usage guides](README.md). It continues from
-[stage 1](README.md#1-make-the-workload-snapshot-ready): a `PodSnapshot` needs the
+[stage 1](README.md#1-prepare-the-workload): a `PodSnapshot` needs the
 source replica that stage deployed, and a `SnapshotJob` needs only the ConfigMap it
 created and the [model cache](README.md#model-cache).
 
@@ -24,7 +24,7 @@ source Deployment of every recipe does.
 
 Save a `PodSnapshot` naming the pod and the container to checkpoint as
 `vllm-qwen3-0-6b-snapshot.yaml`. Give it the name of your recipe's `SnapshotJob`
-from the [recipe table](README.md#pick-a-recipe), so that the restore step finds it
+from the [recipe table](README.md#choose-your-recipe), so that the restore step finds it
 whichever method you use:
 
 ```yaml
@@ -94,7 +94,7 @@ spec:
           # resources, and the volumes it mounts, such as the app.py ConfigMap.
 ```
 
-Apply the `SnapshotJob` of your recipe from the [recipe table](README.md#pick-a-recipe)
+Apply the `SnapshotJob` of your recipe from the [recipe table](README.md#choose-your-recipe)
 and wait for it to complete:
 
 ```bash

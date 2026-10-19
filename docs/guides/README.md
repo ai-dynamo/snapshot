@@ -1,18 +1,17 @@
 # Usage guides
 
-Using Snapshot is a three-stage flow:
+Snapshot saves a running inference replica as a checkpoint, so a new replica
+starts from it in seconds instead of loading the model from scratch. These
+guides take you through it once, end to end:
 
-1. **Make the workload snapshot-ready** — the per-framework guides below run
-   the framework's runtime image unmodified and mount an entrypoint into it
-   from a ConfigMap, implementing the
-   [workload contract](../reference/workload-contract.md).
-2. **Checkpoint** the running replica — with a `PodSnapshot` or a `SnapshotJob`.
-3. **Restore** into new pods — with the `nvidia.com/restore-from` annotation.
+1. **Prepare** the workload.
+2. **Checkpoint** a running replica.
+3. **Restore** a new replica from the checkpoint and send it a request.
 
-The flow is the same for every framework and for single-GPU and eight-GPU
-workloads. The [recipe](#pick-a-recipe) you pick decides which manifests you
-apply, and each stage calls out the few steps where an eight-GPU recipe differs.
-You are done when a restored replica answers a request without cold-starting.
+The commands are the same for every inference engine (vLLM, SGLang and
+TensorRT-LLM) and every recipe. You choose your recipe once, [below](#choose-your-recipe),
+and every later command uses that choice. You are done when the restored replica
+answers a request without cold-starting.
 
 > [!NOTE]
 > These guides use `kubectl` to show the resources and the flow. In production, a
@@ -68,77 +67,200 @@ kubectl apply \
   --filename model-cache-pvc.yaml
 ```
 
-## Pick a recipe
+## Choose your recipe
 
-A recipe is one inference framework serving one model on a fixed number of GPUs.
-Each recipe ships a source Deployment and a `SnapshotJob` for
-[checkpointing](checkpoint.md), and its framework ships a restore profile for the
-GPU count. Each name below links to its manifest, and the guides use these names
-in their `kubectl` commands.
+A recipe is one inference engine serving one model on a fixed number of GPUs.
+Pick a row and set the three values from it:
 
-| Framework | Model | GPUs | Source Deployment | `SnapshotJob` | Restore Deployment |
-|-----------|-------|------|-------------------|---------------|--------------------|
-| [vLLM](vllm.md) | Qwen3 0.6B | 1 | [`vllm-qwen3-0-6b-source`](vllm/capture/qwen3-0.6b.yaml) | [`vllm-qwen3-0-6b-snapshot`](vllm/capture/qwen3-0.6b-snapshotjob.yaml) | [`vllm-1gpu-restored`](vllm/restore/1-gpu.yaml) |
-| [vLLM](vllm.md) | GLM 5.3 NVFP4 | 8 | [`vllm-glm-5-3-source`](vllm/capture/glm-5.3.yaml) | [`vllm-glm-5-3-snapshot`](vllm/capture/glm-5.3-snapshotjob.yaml) | [`vllm-8gpu-restored`](vllm/restore/8-gpu.yaml) |
-| [vLLM](vllm.md) | DeepSeek V4.1 Flash | 8 | [`vllm-deepseek-v4-1-flash-source`](vllm/capture/deepseek-v4.1-flash.yaml) | [`vllm-deepseek-v4-1-flash-snapshot`](vllm/capture/deepseek-v4.1-flash-snapshotjob.yaml) | [`vllm-8gpu-restored`](vllm/restore/8-gpu.yaml) |
-| [SGLang](sglang.md) | Qwen3 0.6B | 1 | [`sglang-qwen3-0-6b-source`](sglang/capture/qwen3-0.6b.yaml) | [`sglang-qwen3-0-6b-snapshot`](sglang/capture/qwen3-0.6b-snapshotjob.yaml) | [`sglang-1gpu-restored`](sglang/restore/1-gpu.yaml) |
-| [SGLang](sglang.md) | GLM 5.3 NVFP4 | 8 | [`sglang-glm-5-3-source`](sglang/capture/glm-5.3.yaml) | [`sglang-glm-5-3-snapshot`](sglang/capture/glm-5.3-snapshotjob.yaml) | [`sglang-8gpu-restored`](sglang/restore/8-gpu.yaml) |
-| [SGLang](sglang.md) | DeepSeek V4.1 Flash | 8 | [`sglang-deepseek-v4-1-flash-source`](sglang/capture/deepseek-v4.1-flash.yaml) | [`sglang-deepseek-v4-1-flash-snapshot`](sglang/capture/deepseek-v4.1-flash-snapshotjob.yaml) | [`sglang-8gpu-restored`](sglang/restore/8-gpu.yaml) |
-| [TensorRT-LLM](tensorrt-llm.md) | Qwen3 0.6B | 1 | [`tensorrt-llm-qwen3-0-6b-source`](tensorrt-llm/capture/qwen3-0.6b.yaml) | [`tensorrt-llm-qwen3-0-6b-snapshot`](tensorrt-llm/capture/qwen3-0.6b-snapshotjob.yaml) | [`tensorrt-llm-1gpu-restored`](tensorrt-llm/restore/1-gpu.yaml) |
-| [TensorRT-LLM](tensorrt-llm.md) | GLM 5.3 NVFP4 | 8 | [`tensorrt-llm-glm-5-3-source`](tensorrt-llm/capture/glm-5.3.yaml) | [`tensorrt-llm-glm-5-3-snapshot`](tensorrt-llm/capture/glm-5.3-snapshotjob.yaml) | [`tensorrt-llm-8gpu-restored`](tensorrt-llm/restore/8-gpu.yaml) |
+| Recipe | `FRAMEWORK` | `MODEL` | `GPUS` |
+|--------|-------------|---------|--------|
+| vLLM, Qwen3 0.6B | `vllm` | `qwen3-0.6b` | `1` |
+| vLLM, GLM 5.3 NVFP4 | `vllm` | `glm-5.3` | `8` |
+| vLLM, DeepSeek V4.1 Flash | `vllm` | `deepseek-v4.1-flash` | `8` |
+| SGLang, Qwen3 0.6B | `sglang` | `qwen3-0.6b` | `1` |
+| SGLang, GLM 5.3 NVFP4 | `sglang` | `glm-5.3` | `8` |
+| SGLang, DeepSeek V4.1 Flash | `sglang` | `deepseek-v4.1-flash` | `8` |
+| TensorRT-LLM, Qwen3 0.6B | `tensorrt-llm` | `qwen3-0.6b` | `1` |
+| TensorRT-LLM, GLM 5.3 NVFP4 | `tensorrt-llm` | `glm-5.3` | `8` |
 
-The names follow one pattern, with the dots of a model's name turned into
-hyphens: `<framework>-<model>-source` for the source Deployment,
-`<framework>-<model>-snapshot` for the `SnapshotJob` and the `PodSnapshot` it
-produces, and `<framework>-<1|8>gpu-restored` for the restored Deployment.
+```bash
+export FRAMEWORK=vllm
+export MODEL=qwen3-0.6b
+export GPUS=1
+```
 
-The framework guides and the stages below use the Qwen3 0.6B recipe in their
-commands. For another recipe, use its manifests and names from this table.
+Then paste this block as it is. It works out the files and resource names for
+your recipe from those three values, so nothing in it needs editing:
 
-### Multi-GPU recipes
+```bash
+NAME="$FRAMEWORK-${MODEL//./-}"
+export SOURCE_MANIFEST="$FRAMEWORK/capture/$MODEL.yaml"
+export SNAPSHOTJOB_MANIFEST="$FRAMEWORK/capture/$MODEL-snapshotjob.yaml"
+export RESTORE_MANIFEST="$FRAMEWORK/restore/$GPUS-gpu.yaml"
+export SOURCE_NAME="$NAME-source"
+export SNAPSHOT_NAME="$NAME-snapshot"
+export RESTORED_NAME="$FRAMEWORK-${GPUS}gpu-restored"
+export WAIT=$([ "$GPUS" = 1 ] && echo 30m || echo 120m)
+```
 
-A multi-GPU recipe runs one model across several GPUs of a single node;
-multi-node is not supported yet. The GLM 5.3 and DeepSeek V4.1 Flash recipes use
-all eight GPUs of a B200 node. For other GPUs, change `nodeSelector` and the
-parallelism settings. Before the first stage:
+If you chose a recipe with eight GPUs, also read the agent image from the
+installed Snapshot agent. The source replica needs it to prepare itself for
+multi-GPU capture. Use the namespace Snapshot is installed in (`snapshot` in the
+README's install command):
 
-- **A Deployment source needs the agent image.** An init container copies the
-  multi-GPU libraries out of it. Read the image from the installed agent, in the
-  namespace Snapshot is installed in (`snapshot` in the README's install
-  command), and substitute it as you apply the manifest, as the framework guides
-  show:
+```bash
+export SNAPSHOT_AGENT_IMAGE=$(kubectl get daemonset snapshot-agent \
+  --namespace snapshot \
+  --output jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}')
+```
 
-  ```bash
-  export SNAPSHOT_AGENT_IMAGE=$(kubectl get daemonset snapshot-agent \
-    --namespace snapshot \
-    --output jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}')
-  ```
+A multi-GPU recipe runs one model across the GPUs of a single node;
+multi-node is not supported yet. The manifests select eight B200 GPUs, so change
+`nodeSelector` and the parallelism settings for other GPUs. See
+[Multi-GPU workloads](../reference/workload-contract.md#multi-gpu-workloads) for
+what the extra configuration does.
 
-  A `SnapshotJob` needs nothing: the controller prepares its source Pod.
-- **Allow time for the first run.** The model download dominates it. The
-  manifests allow one hour for a Deployment to become ready and two for a
-  `SnapshotJob`. On a slow link, raise `progressDeadlineSeconds` or
-  `activeDeadlineSeconds`.
+## 1. Prepare the workload
 
-See [Multi-GPU workloads](../reference/workload-contract.md#multi-gpu-workloads)
-for what the extra configuration does.
+Each engine runs its unmodified runtime image and mounts a small program,
+`app.py`, from a ConfigMap. The program prepares the engine for checkpoint and
+resumes it after restore, implementing the
+[workload contract](../reference/workload-contract.md). Create the ConfigMap:
 
-## 1. Make the workload snapshot-ready
+```bash
+kubectl create configmap "$FRAMEWORK-app" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --from-file=app.py="$FRAMEWORK/app.py"
+```
 
-Per inference framework, mount an entrypoint into the framework's runtime
-image and deploy it:
-
-- [vLLM](vllm.md)
-- [SGLang](sglang.md)
-- [TensorRT-LLM](tensorrt-llm.md)
+The engine guides explain how each program works and how to change the model:
+[vLLM](vllm.md), [SGLang](sglang.md) and [TensorRT-LLM](tensorrt-llm.md).
 
 ## 2. Checkpoint
 
-- [Checkpoint a replica](checkpoint.md)
+There are two ways to take the checkpoint. Pick one:
+
+| | Choose it when… |
+|---|---|
+| **Option A: `PodSnapshot`** | You run the replica yourself and checkpoint it while it keeps serving. |
+| **Option B: `SnapshotJob`** | You want Snapshot to run the replica, checkpoint it and remove it. |
+
+### Option A: `PodSnapshot`
+
+Start the source replica and wait until it is ready to be checkpointed. The first
+run downloads the model, so this can take a while:
+
+```bash
+sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" "$SOURCE_MANIFEST" | \
+  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+
+kubectl rollout status \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  deployment/"$SOURCE_NAME" \
+  --timeout="$WAIT"
+```
+
+Then ask Snapshot to checkpoint that replica, and wait until the checkpoint is
+ready:
+
+```bash
+POD=$(kubectl get pods --namespace "$SNAPSHOT_NAMESPACE" \
+  --selector app="$SOURCE_NAME" --output jsonpath='{.items[0].metadata.name}')
+
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename - <<EOF
+apiVersion: nvidia.com/v1alpha1
+kind: PodSnapshot
+metadata:
+  name: $SNAPSHOT_NAME
+spec:
+  source:
+    podRef:
+      name: $POD
+      containers:
+        - main
+EOF
+
+kubectl wait --namespace "$SNAPSHOT_NAMESPACE" \
+  --for=condition=Ready podsnapshot/"$SNAPSHOT_NAME" \
+  --timeout="$WAIT"
+```
+
+The source replica keeps running and serving.
+
+### Option B: `SnapshotJob`
+
+```bash
+kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename "$SNAPSHOTJOB_MANIFEST"
+
+kubectl wait --namespace "$SNAPSHOT_NAMESPACE" \
+  --for=condition=Completed snapshotjob/"$SNAPSHOT_NAME" \
+  --timeout="$WAIT"
+```
+
+Snapshot runs the replica, checkpoints it and removes it, so every replica,
+including the first, comes up by restore. The checkpoint is a `PodSnapshot` with
+the same name as the job.
+
+If the checkpoint does not become Ready, see
+[Troubleshooting](../operations/troubleshooting.md#a-checkpoint-never-becomes-ready).
 
 ## 3. Restore
 
-- [Restore a replica](restore.md)
+Start a new replica from the checkpoint. It is a new Deployment whose pods carry
+the `nvidia.com/restore-from` annotation naming your checkpoint, and it starts in
+seconds, because the node agent restores the saved state into it instead of
+loading the model:
+
+```bash
+sed "s|\${SNAPSHOT_NAME}|$SNAPSHOT_NAME|" "$RESTORE_MANIFEST" | \
+  kubectl apply --namespace "$SNAPSHOT_NAMESPACE" --filename -
+
+kubectl rollout status \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  deployment/"$RESTORED_NAME" \
+  --timeout="$WAIT"
+```
+
+Then send it a request. In one terminal, forward its port:
+
+```bash
+kubectl port-forward \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  deployment/"$RESTORED_NAME" 8000:8000
+```
+
+and in a second terminal, ask it a question:
+
+```bash
+curl --silent --request POST http://localhost:8000/generate \
+  --header 'Content-Type: application/json' \
+  --data '{"prompt": "What is the capital of Italy?"}'
+```
+
+It answers with generated text in a `text` field, without loading the model
+again. The pod also carries a `nvidia.com/Restored` condition once the restore
+completes. If the restore does not complete, see
+[Troubleshooting](../operations/troubleshooting.md).
+
+In practice, higher-level systems create these restored Deployments rather than
+applying them by hand. See the
+[restore Pod contract](../reference/restore-pod-contract.md) to generate restore
+pods from a controller, operator or serving platform.
+
+## Use your own engine or image
+
+The recipes above show three engines, but Snapshot works with any inference
+engine whose workload meets the
+[workload contract](../reference/workload-contract.md): how it prepares for a
+checkpoint, how it resumes after a restore, and what its pod must carry.
+
+- To package an engine the way these guides do, with the runtime image
+  unmodified and a small program mounted from a ConfigMap, or to bake the
+  program into your own image, see
+  [Packaging methods](../reference/workload-contract.md#packaging-methods).
+- To add support for an engine that is not covered here, follow
+  [Support a new inference server](../reference/workload-contract.md#support-a-new-inference-server).
+  The [engine guides](vllm.md) are worked examples of the same contract.
 
 See [Installation](../operations/install.md) for installing and uninstalling
 Snapshot and the [API reference](../reference/api.md) for full resource detail.
