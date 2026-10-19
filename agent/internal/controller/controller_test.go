@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -768,33 +767,13 @@ func TestRestoreTallyVerdictCoversEveryOutcome(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			verdict := test.tally.verdict("snapshot-a", "")
+			verdict := test.tally.verdict("snapshot-a")
 
 			assert.Equal(t, test.wantStatus, verdict.status)
 			assert.Equal(t, test.wantReason, verdict.reason)
 			assert.Equal(t, test.wantMessage, verdict.message)
 		})
 	}
-}
-
-func TestRestoreVerdictPointsAtAgentLogs(t *testing.T) {
-	const hint = ". See the snapshot agent logs on node node-a"
-
-	failed := restoreTally{total: 1, failed: []string{"engine-0"}, failureReasons: []string{"engine-0: while running nsrestore: boom"}}
-	assert.Equal(t, "Restore failed for all 1 destination container(s) from PodSnapshot snapshot-a: engine-0: while running nsrestore: boom"+hint,
-		failed.verdict("snapshot-a", "node-a").message)
-
-	partial := restoreTally{total: 2, succeeded: []string{"engine-0"}, failed: []string{"engine-1"}, failureReasons: []string{"engine-1: boom"}}
-	assert.True(t, strings.HasSuffix(partial.verdict("snapshot-a", "node-a").message, hint))
-
-	mixed := restoreTally{total: 2, failed: []string{"engine-0"}, failureReasons: []string{"engine-0: boom"}, incompatible: []string{"engine-1"}}
-	assert.True(t, strings.HasSuffix(mixed.verdict("snapshot-a", "node-a").message, hint))
-
-	refused := restoreTally{total: 1, incompatible: []string{"engine-0"}, incompatibilityReasons: []string{"gpu-count: source 1, target 0"}}
-	assert.NotContains(t, refused.verdict("snapshot-a", "node-a").message, "agent logs")
-
-	succeeded := restoreTally{total: 1, succeeded: []string{"engine-0"}}
-	assert.NotContains(t, succeeded.verdict("snapshot-a", "node-a").message, "agent logs")
 }
 
 func TestPreflightRestoreRejectsInvalidMappingBeforeExecution(t *testing.T) {

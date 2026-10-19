@@ -797,7 +797,7 @@ type restoreVerdict struct {
 // in the current pass has returned.
 func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, results []restoreResult) bool {
 	tally := tallyRestoreResults(results)
-	verdict := tally.verdict(artifact.SnapshotName, pod.Spec.NodeName)
+	verdict := tally.verdict(artifact.SnapshotName)
 	if len(tally.pending) != 0 {
 		// The pass is not over, so a write that fails is reported and dropped
 		// rather than retried: the next pass publishes again.
@@ -844,19 +844,9 @@ func logWithStep(log logr.Logger, err error) logr.Logger {
 	return log
 }
 
-// agentLogsHint points a failed restore's condition at the one place holding
-// the full detail: this node's agent log.
-func agentLogsHint(nodeName string) string {
-	if nodeName == "" {
-		return ""
-	}
-	return fmt.Sprintf(". See the snapshot agent logs on node %s", nodeName)
-}
-
 // verdict concludes one pass, still in progress or terminal, from the counts
-// alone. nodeName, when known, is appended to failure messages as a pointer to
-// the agent logs.
-func (t restoreTally) verdict(snapshotName, nodeName string) restoreVerdict {
+// alone.
+func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 	switch {
 	case len(t.pending) != 0:
 		return restoreVerdict{
@@ -878,7 +868,7 @@ func (t restoreTally) verdict(snapshotName, nodeName string) restoreVerdict {
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonPartiallySucceeded,
 			message: fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; not restored: %s",
-				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, "; ")) + agentLogsHint(nodeName),
+				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, "; ")),
 		}
 	case len(t.failed) == 0:
 		return restoreVerdict{
@@ -891,14 +881,14 @@ func (t restoreTally) verdict(snapshotName, nodeName string) restoreVerdict {
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonFailed,
 			message: fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s: %s",
-				len(t.failed), len(t.incompatible), snapshotName, strings.Join(t.failureReasons, "; ")) + agentLogsHint(nodeName),
+				len(t.failed), len(t.incompatible), snapshotName, strings.Join(t.failureReasons, "; ")),
 		}
 	default:
 		return restoreVerdict{
 			status: corev1.ConditionFalse,
 			reason: podcontract.RestoreReasonFailed,
 			message: fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s",
-				len(t.failed), snapshotName, strings.Join(t.failureReasons, "; ")) + agentLogsHint(nodeName),
+				len(t.failed), snapshotName, strings.Join(t.failureReasons, "; ")),
 		}
 	}
 }
