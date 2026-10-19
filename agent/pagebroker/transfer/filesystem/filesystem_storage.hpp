@@ -20,6 +20,10 @@ Path SourcePath(const StorageBackend& source, const Path& storage_root);
 // Returns a destination beneath storage_root, rejecting symlink components.
 Path DestinationPath(const StorageBackend& destination, const Path& storage_root);
 
+// Creates a new directory with permissions filtered by umask; parents must exist.
+// Any existing final entry, including a symlink, is a transaction conflict.
+void CreateDirectoryExclusive(const Path& directory, std::filesystem::perms permissions);
+
 // Removes an owned staging tree, restoring directory access without following links.
 void RemoveStaging(const Path& directory);
 

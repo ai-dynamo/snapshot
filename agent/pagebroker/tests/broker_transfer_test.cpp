@@ -10,6 +10,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <system_error>
 #include <thread>
 
 #include "tests/temporary_directory.hpp"
@@ -17,14 +18,14 @@
 #include "transfer/filesystem/filesystem_storage.hpp"
 
 namespace {
-// Interrupt the broker's real mkdir without changing production code. Each
+// Interrupt transaction directory creation without changing production code. Each
 // worker owns its hook; unrelated filesystem operations remain unchanged.
-thread_local std::function<void(const char*)> checkpoint_mkdir_hook;
-class ScopedCheckpointMkdirHook {
+thread_local std::function<void(const char*)> mkdir_hook;
+class ScopedMkdirHook {
  public:
-  explicit ScopedCheckpointMkdirHook(std::function<void(const char*)> hook)
-  { checkpoint_mkdir_hook = std::move(hook); }
-  ~ScopedCheckpointMkdirHook() { checkpoint_mkdir_hook = {}; }
+  explicit ScopedMkdirHook(std::function<void(const char*)> hook)
+  { mkdir_hook = std::move(hook); }
+  ~ScopedMkdirHook() { mkdir_hook = {}; }
 };
 }  // namespace
 
@@ -32,8 +33,8 @@ extern "C" int __real_mkdir(const char*, mode_t);
 extern "C" int __wrap_mkdir(const char* path, mode_t mode)
 {
   const int result = __real_mkdir(path, mode);
-  if (result == 0 && checkpoint_mkdir_hook)
-    checkpoint_mkdir_hook(path);
+  if (result == 0 && mkdir_hook)
+    mkdir_hook(path);
   return result;
 }
 
@@ -100,6 +101,62 @@ RequestFor(const char* id)
   return request;
 }
 }  // namespace
+
+TEST(FilesystemStorageTest, ExclusiveCreationPreservesEveryExistingEntry)
+{
+  test::TemporaryDirectory root;
+  fs::create_directory(root.path() / "directory");
+  std::ofstream(root.path() / "directory/marker") << "keep";
+  std::ofstream(root.path() / "file") << "keep";
+  fs::create_directory_symlink(root.path() / "directory", root.path() / "live");
+  fs::create_directory_symlink(root.path() / "missing", root.path() / "dangling");
+  for (const auto* name : {"directory", "file", "live", "dangling"}) {
+    SCOPED_TRACE(name);
+    const auto path = root.path() / name;
+    const auto before = fs::symlink_status(path);
+    try {
+      filesystem_storage::CreateDirectoryExclusive(path, fs::perms::owner_all);
+      FAIL() << "existing entry was accepted";
+    }
+    catch (const TransferError& error) {
+      EXPECT_EQ(error.code, Failure::TRANSACTION_CONFLICT);
+    }
+    EXPECT_EQ(fs::symlink_status(path).type(), before.type());
+    EXPECT_EQ(fs::symlink_status(path).permissions(), before.permissions());
+  }
+  EXPECT_EQ(fs::file_size(root.path() / "directory/marker"), 4u);
+  EXPECT_EQ(fs::file_size(root.path() / "file"), 4u);
+  EXPECT_EQ(fs::read_symlink(root.path() / "live"), root.path() / "directory");
+  EXPECT_EQ(fs::read_symlink(root.path() / "dangling"), root.path() / "missing");
+  EXPECT_FALSE(fs::exists(root.path() / "missing"));
+}
+
+TEST(FilesystemStorageTest, ExclusiveCreationRespectsRequestedPermissionsAndUmask)
+{
+  for (const auto permissions : {fs::perms::all, fs::perms::owner_all}) {
+    SCOPED_TRACE(static_cast<unsigned>(permissions));
+    test::TemporaryDirectory root;
+    fs::create_directory(root.path() / "reference");
+    const auto expected = fs::status(root.path() / "reference").permissions() & permissions;
+    filesystem_storage::CreateDirectoryExclusive(root.path() / "created", permissions);
+    EXPECT_TRUE(fs::is_directory(root.path() / "created"));
+    EXPECT_EQ(fs::status(root.path() / "created").permissions() & fs::perms::all, expected);
+  }
+}
+
+TEST(FilesystemStorageTest, ExclusiveCreationPreservesNonConflictErrors)
+{
+  test::TemporaryDirectory root;
+  try {
+    filesystem_storage::CreateDirectoryExclusive(root.path() / "missing/child", fs::perms::all);
+    FAIL() << "missing parent was accepted";
+  }
+  catch (const std::system_error& error) {
+    EXPECT_EQ(error.code(), std::errc::no_such_file_or_directory);
+    EXPECT_EQ(TransferFailureCode(error), Failure::STORAGE_ERROR);
+  }
+  EXPECT_FALSE(fs::exists(root.path() / "missing"));
+}
 
 TEST(FilesystemStorageTest, AppliesOnlyKnownRestorePermissions)
 {
@@ -631,6 +688,69 @@ TEST_F(BrokerTransferTest, CheckpointPreparationObservesAbortAndShutdown)
   }
 }
 
+TEST_F(BrokerTransferTest, RestoreCreationRejectsEntriesAppearingDuringPreparation)
+{
+  for (const auto* kind : {"directory", "file", "live", "dangling"}) {
+    SCOPED_TRACE(kind);
+    Broker broker(staging_, storage_);
+    const auto resources = Limit(broker, 100);
+    const auto output = staging_ / "restore/restore";
+    Intercept(broker, [&](Boundary boundary, Cancellation) {
+      if (boundary != Boundary::PrepareRestore)
+        return;
+      if (std::string(kind) == "directory") {
+        fs::create_directory(output);
+        std::ofstream(output / "marker") << "keep";
+      } else if (std::string(kind) == "file") {
+        std::ofstream(output) << "keep";
+      } else {
+        fs::create_directory_symlink(std::string(kind) == "live" ? source_ : storage_ / "missing", output);
+      }
+    });
+    const auto response = broker.HandleRequest(Restore());
+    EXPECT_EQ(response.failure().code(), Failure::TRANSACTION_CONFLICT) << response.DebugString();
+    EXPECT_EQ(resources->active, 0u);
+    EXPECT_EQ(resources->reserved, 0u);
+    broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
+    if (std::string(kind) == "directory") {
+      EXPECT_EQ(fs::file_size(output / "marker"), 4u);
+    } else if (std::string(kind) == "file") {
+      EXPECT_EQ(fs::file_size(output), 4u);
+    } else {
+      EXPECT_EQ(fs::read_symlink(output), std::string(kind) == "live" ? source_ : storage_ / "missing");
+    }
+    EXPECT_EQ(fs::file_size(source_ / "image"), 5u);
+    EXPECT_FALSE(fs::exists(storage_ / "missing"));
+    fs::remove_all(output);
+  }
+}
+
+TEST_F(BrokerTransferTest, RestoreMkdirRejectsExpiryAndCancellationWithoutLeakingStaging)
+{
+  for (const bool expire : {false, true}) {
+    SCOPED_TRACE(expire);
+    Broker broker(staging_, storage_);
+    SetLifetime(broker, std::chrono::seconds(1));
+    const auto resources = Limit(broker, 100);
+    const auto output = staging_ / "restore/restore";
+    ScopedMkdirHook hook([&](const char* path) {
+      if (Path(path) != output)
+        return;
+      if (expire)
+        std::this_thread::sleep_until(Find(broker, "restore")->cancellation().Deadline());
+      else
+        broker.CancelActiveTransactions();
+    });
+    const auto response = broker.HandleRequest(Restore());
+    EXPECT_EQ(response.failure().code(), expire ? Failure::TRANSACTION_EXPIRED : Failure::INTERNAL_ERROR)
+        << response.DebugString();
+    EXPECT_FALSE(fs::exists(output));
+    EXPECT_EQ(resources->active, 0u);
+    EXPECT_EQ(resources->reserved, 0u);
+    EXPECT_EQ(fs::file_size(source_ / "image"), 5u);
+  }
+}
+
 TEST_F(BrokerTransferTest, CheckpointMkdirRejectsExpiryAndCancellationBeforeReturningReady)
 {
   for (const bool direct : {false, true}) {
@@ -640,7 +760,7 @@ TEST_F(BrokerTransferTest, CheckpointMkdirRejectsExpiryAndCancellationBeforeRetu
       Broker broker(staging_, storage_);
       SetLifetime(broker, std::chrono::seconds(1));
       const auto output = CheckpointOutput(direct);
-      ScopedCheckpointMkdirHook hook([&](const char* path) {
+      ScopedMkdirHook hook([&](const char* path) {
         if (Path(path) != output)
           return;
         if (expire)
@@ -667,7 +787,7 @@ TEST_F(BrokerTransferTest, CheckpointInterruptedCleanupRemainsRetryable)
     const auto output = CheckpointOutput(direct);
     const auto parent = output.parent_path();
     const auto held = root_.path() / "held-checkpoint";
-    ScopedCheckpointMkdirHook hook([&](const char* path) {
+    ScopedMkdirHook hook([&](const char* path) {
       if (Path(path) != output)
         return;
       Find(broker, "checkpoint")->CancelWork();
