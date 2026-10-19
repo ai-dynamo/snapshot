@@ -103,7 +103,7 @@ spec:
             sizeLimit: 64Gi
         - name: model-cache
           persistentVolumeClaim:
-            claimName: snapshot-model-cache
+            claimName: model-cache
         - name: app
           configMap:
             name: sglang-app

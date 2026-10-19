@@ -90,7 +90,7 @@ spec:
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: snapshot-model-cache
+            claimName: model-cache
         - name: shm
           emptyDir:
             medium: Memory

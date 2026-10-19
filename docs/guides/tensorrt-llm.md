@@ -110,10 +110,9 @@ TensorRT-LLM image, GPU count, backend, or engine settings.
 `allreduce_strategy="NCCL"`. With the pinned engine, AUTO produced intermittent
 incorrect source answers before checkpointing in validation. NCCL passed source
 inference, KV release and resume, and three restored inference checks on the same
-eight B200 GPUs. The recipe reads a pinned model revision from the
-`snapshot-model-cache` PVC created in
-[Eight-GPU recipes](README.md#eight-gpu-recipes), where an init container
-downloads it on first use.
+eight B200 GPUs. The recipe loads a pinned model revision from the
+[model cache](README.md#model-cache), where an init container downloads it on
+first use.
 
 ## 3. Deploy the source replica
 

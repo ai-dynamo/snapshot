@@ -37,7 +37,7 @@ CONFIG = k8s.E2EConfig(
 IMAGE = "framework-under-test:local"
 AGENT_IMAGE = "snapshot-agent:test"
 CACHE = frameworks.SharedModelCache(
-    server="nfs.example.internal", path="/exports/models", pvc_name="model-cache"
+    server="nfs.example.internal", path="/exports/models", pvc_name="shared-model-cache"
 )
 
 
@@ -269,7 +269,7 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         assert volumes[frameworks.MODEL_CACHE_VOLUME]["persistentVolumeClaim"] == {
             "claimName": CACHE.pvc_name
         }
-        # The guide's own claim (SGLang's sglang-model-cache) must not linger.
+        # The guide's own model-cache claim must not linger.
         assert sum(1 for v in pod_spec["volumes"] if v["name"] == frameworks.MODEL_CACHE_VOLUME) == 1
         main = fw.main_container(pod)
         assert {

@@ -84,7 +84,7 @@ spec:
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: sglang-model-cache
+            claimName: model-cache
         - name: shm
           emptyDir:
             medium: Memory

@@ -76,7 +76,7 @@ spec:
             sizeLimit: 64Gi
         - name: model-cache
           persistentVolumeClaim:
-            claimName: snapshot-model-cache
+            claimName: model-cache
         - name: snapshot-control
           emptyDir: {}
         - name: app
