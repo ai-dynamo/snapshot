@@ -145,13 +145,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	preparationAttempted = true
 	var tmpDir string
-	if bound && executionContext != nil {
-		tmpDir, gpu, err = broker.PrepareGPUArtifactCheckpoint(ctx, transactionID, target, nil, executionContext)
-	} else if bound {
-		tmpDir, err = broker.PrepareArtifactCheckpoint(ctx, transactionID, target, nil)
-	} else {
-		tmpDir, gpu, err = prepareCheckpoint(ctx, broker, transactionID, finalDir, executionContext)
-	}
+	tmpDir, gpu, err = prepareCheckpointTarget(ctx, broker, transactionID, bound, target, finalDir, executionContext)
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
 		return nil, fmt.Errorf("prepare PageBroker checkpoint: %w", err)
@@ -183,12 +177,8 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	switchStart := time.Now()
-	if bound {
-		artifact, err = broker.CommitCheckpoint(ctx, transactionID, req.StoreID)
-		if err != nil {
-			return nil, fmt.Errorf("commit PageBroker checkpoint: %w", err)
-		}
-	} else if err := broker.Commit(ctx, transactionID); err != nil {
+	artifact, err = commitCheckpointArtifact(ctx, broker, transactionID, bound, req.StoreID)
+	if err != nil {
 		return nil, fmt.Errorf("commit PageBroker checkpoint: %w", err)
 	}
 	committed = true
@@ -545,6 +535,29 @@ func prepareCheckpoint(ctx context.Context, broker pagebroker.Client, transactio
 		return directory, nil, err
 	}
 	return broker.PrepareGPUCheckpoint(ctx, transactionID, destination, gpuContext)
+}
+
+// prepareCheckpointTarget prepares the PageBroker transaction for a bound (artifact-addressed)
+// or legacy (filesystem) checkpoint destination.
+func prepareCheckpointTarget(ctx context.Context, broker pagebroker.Client, transactionID string, bound bool, target *pagebroker.ArtifactTarget, destination string, gpuContext *pagebroker.GpuContext) (string, *pagebroker.CustomStorageExecution, error) {
+	switch {
+	case bound && gpuContext != nil:
+		return broker.PrepareGPUArtifactCheckpoint(ctx, transactionID, target, nil, gpuContext)
+	case bound:
+		directory, err := broker.PrepareArtifactCheckpoint(ctx, transactionID, target, nil)
+		return directory, nil, err
+	default:
+		return prepareCheckpoint(ctx, broker, transactionID, destination, gpuContext)
+	}
+}
+
+// commitCheckpointArtifact commits the PageBroker transaction, publishing an artifact for a
+// bound checkpoint or finalizing the legacy filesystem destination otherwise.
+func commitCheckpointArtifact(ctx context.Context, broker pagebroker.Client, transactionID string, bound bool, storeID string) (*pagebroker.PublishedArtifact, error) {
+	if bound {
+		return broker.CommitCheckpoint(ctx, transactionID, storeID)
+	}
+	return nil, broker.Commit(ctx, transactionID)
 }
 
 func logGPUResult(log logr.Logger, result *pagebroker.GpuComplete) {

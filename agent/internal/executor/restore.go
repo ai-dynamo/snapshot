@@ -320,20 +320,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	direct := !bound && req.PageBrokerRestoreMode != "staged"
 	var staged string
 	preparationAttempted = true
-	switch {
-	case bound && usePageBrokerGPU:
-		staged, gpu, err = broker.PrepareGPUStagedArtifactRestore(ctx, transactionID, req.PublishedArtifact, nil, gpuContext)
-	case bound:
-		staged, err = broker.StagedArtifactRestore(ctx, transactionID, req.PublishedArtifact, nil)
-	case usePageBrokerGPU && direct:
-		gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
-	case usePageBrokerGPU:
-		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
-	case direct:
-		err = broker.DirectRestore(ctx, transactionID, artifactPath)
-	default:
-		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
-	}
+	staged, gpu, err = prepareRestoreSource(ctx, broker, transactionID, bound, usePageBrokerGPU, direct, req.PublishedArtifact, artifactPath, gpuContext)
 	pageBrokerStageDuration = time.Since(stageStart)
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
@@ -429,6 +416,41 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	)
 
 	return RestoreResult{PlaceholderHostPID: snap.PlaceholderPID, RestoredPID: result.RestoredPID}, nil
+}
+
+// prepareRestoreSource starts the PageBroker transaction that stages (or, for legacy
+// direct restores, opens in place) the checkpoint this restore reads from. Bound
+// restore always stages, since artifact-addressed restore has no direct mode at the
+// protocol level; legacy restore keeps its existing direct/staged choice.
+func prepareRestoreSource(ctx context.Context, broker pagebroker.Client, transactionID string, bound, usePageBrokerGPU, direct bool, publishedArtifact *pagebroker.PublishedArtifact, artifactPath string, gpuContext *pagebroker.GpuContext) (staged string, gpu *pagebroker.CustomStorageExecution, err error) {
+	if bound {
+		if usePageBrokerGPU {
+			// Bound GPU restore.
+			staged, gpu, err = broker.PrepareGPUStagedArtifactRestore(ctx, transactionID, publishedArtifact, nil, gpuContext)
+			return staged, gpu, err
+		}
+		// Bound CPU restore.
+		staged, err = broker.StagedArtifactRestore(ctx, transactionID, publishedArtifact, nil)
+		return staged, nil, err
+	}
+	if usePageBrokerGPU {
+		if direct {
+			// Legacy GPU restore, direct from the filesystem artifact.
+			gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
+			return "", gpu, err
+		}
+		// Legacy GPU restore, staged through PageBroker.
+		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
+		return staged, gpu, err
+	}
+	if direct {
+		// Legacy CPU restore, direct from the filesystem artifact.
+		err = broker.DirectRestore(ctx, transactionID, artifactPath)
+		return "", nil, err
+	}
+	// Legacy CPU restore, staged through PageBroker.
+	staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
+	return staged, nil, err
 }
 
 // mountRestoreSource mounts the direct artifact or the PageBroker-staged copy into
