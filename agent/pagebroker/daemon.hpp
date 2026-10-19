@@ -9,6 +9,7 @@
 #include <span>
 #include <string_view>
 #include "gpu/engine.hpp"
+#include "transaction_defaults.hpp"
 
 enum class ExitCode { SUCCESS = 0, FAILURE = 1, INVALID_ARGUMENTS = 2 };
 
@@ -21,7 +22,7 @@ struct DaemonOptions {
   size_t max_concurrent_requests = kDefaultMaxConcurrentRequests;
   snapshot::pagebroker::gpu::EngineOptions gpu;
   bool enable_gpu = true;
-  std::chrono::seconds transaction_lifetime{7500};
+  std::chrono::seconds transaction_lifetime = snapshot::pagebroker::kDefaultTransactionLifetime;
   std::filesystem::path storage_config;
   std::filesystem::path model_streamer_config;
 };
