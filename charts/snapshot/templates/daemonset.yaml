@@ -245,8 +245,6 @@ spec:
         - name: pagebroker
           emptyDir:
             medium: Memory
-            # Must stay below daemonset.resources.limits.memory; the helper
-            # owns the default and validateStagingHeadroom enforces the gap.
             sizeLimit: {{ include "snapshot.stagingSizeLimit" . | quote }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)

@@ -79,10 +79,8 @@ Use the same agent image for the DaemonSet and cuinterpose installer.
 {{- end }}
 
 {{/*
-Convert a Kubernetes quantity to bytes. Supports binary (Ki/Mi/Gi/Ti) and
-decimal (k/M/G/T) suffixes and plain byte counts; anything else fails loudly
-rather than being silently treated as zero, which would disable the headroom
-check below.
+Convert a Kubernetes quantity to bytes. An unparseable value fails rather than
+yielding zero, which would silently disable the check below.
 */}}
 {{- define "snapshot.quantityBytes" -}}
 {{- $q := . | toString -}}
@@ -100,14 +98,8 @@ check below.
 {{- end }}
 
 {{/*
-Staging is a memory-backed emptyDir written from the agent container, so its
-pages are charged to that container's cgroup alongside the agent's own
-allocations. A sizeLimit equal to the memory limit therefore still lets the two
-together reach the limit while the volume is under its cap, and the kernel
-OOM-kills the agent — taking every capture and restore on the node with it.
-The volume must fill first, so it needs strictly less than the limit, with
-enough left over for the agent process and CRIU's working set. See SNEP-394.
-Called once from daemonset.yaml.
+Refuse a staging cap the agent cannot survive filling. Rationale and sizing
+are in docs/operations/storage.md. Called once from daemonset.yaml.
 */}}
 {{- define "snapshot.validateStagingHeadroom" -}}
 {{- $staging := include "snapshot.quantityBytes" (include "snapshot.stagingSizeLimit" .) | int64 -}}
@@ -115,16 +107,15 @@ Called once from daemonset.yaml.
 {{- if $limit }}
 {{- $limitBytes := include "snapshot.quantityBytes" $limit | int64 -}}
 {{- if ge $staging $limitBytes }}
-{{- fail (printf "pageBroker.staging.sizeLimit (%v) must be smaller than daemonset.resources.limits.memory (%v), with headroom for the agent process and CRIU; staging pages are charged to the agent container, so an equal or larger sizeLimit lets the agent be OOM-killed before the volume fills" (include "snapshot.stagingSizeLimit" .) $limit) }}
+{{- fail (printf "pageBroker.staging.sizeLimit (%v) must be smaller than daemonset.resources.limits.memory (%v): staging pages are charged to the agent container, so the agent is OOM-killed before the volume fills, taking every capture and restore on the node with it. Lower pageBroker.staging.sizeLimit or raise daemonset.resources.limits.memory, leaving headroom for the agent process and CRIU. See docs/operations/storage.md" (include "snapshot.stagingSizeLimit" .) $limit) }}
 {{- end }}
 {{- end }}
 {{- end }}
 
 {{/*
-The staging sizeLimit, with the chart default applied. Falls back even when
-pageBroker.staging is explicitly null (e.g. helm upgrade --reuse-values from a
-release predating this key): an absent sizeLimit is an unbounded memory-backed
-volume, not a safe default.
+The staging sizeLimit. Falls back even when pageBroker.staging is explicitly
+null, as helm upgrade --reuse-values leaves it for a release predating the key:
+an absent sizeLimit is an unbounded volume, not a safe default.
 */}}
 {{- define "snapshot.stagingSizeLimit" -}}
 {{- ((.Values.pageBroker).staging | default dict).sizeLimit | default "56Gi" -}}

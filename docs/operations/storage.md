@@ -116,6 +116,20 @@ equal to the agent memory limit, so a release cannot be installed in the
 configuration that OOM-kills. The defaults leave an 8Gi reserve (`56Gi`
 staging against a `64Gi` limit); raise both together to keep it.
 
+**Upgrading.** A release that only ever used chart defaults upgrades cleanly,
+and so does one carried forward with `--reuse-values` from before
+`pageBroker.staging.sizeLimit` existed. Two configurations stop rendering, and
+both are ones that could already OOM-kill the agent:
+
+- `sizeLimit` pinned to the previous `64Gi` default while the agent memory
+  limit is also `64Gi`.
+- The agent memory limit lowered below the staging cap without lowering the
+  cap with it.
+
+Neither was safe before; the upgrade now says so instead of waiting for a
+checkpoint large enough to kill the agent. The error names both values and the
+two ways to resolve it.
+
 The staging-space check (`INSUFFICIENT_STORAGE`) only rejects a transfer that
 would exceed `sizeLimit`; it does not guarantee protection from an OOM kill,
 and it has no way to know the size of a checkpoint before CRIU writes it — the
