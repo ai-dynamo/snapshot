@@ -12,7 +12,7 @@ This is stage 2 of the [usage guides](README.md). It continues from
 [stage 1](README.md#1-make-the-workload-snapshot-ready): a `PodSnapshot` needs the
 source replica that stage deployed, and a `SnapshotJob` needs only what that stage
 created before the Deployment: the ConfigMap and, for recipes that use one, the
-PVC for the model files.
+[model cache](README.md#model-cache).
 
 ## Option 1 — `PodSnapshot` (checkpoint a running replica)
 

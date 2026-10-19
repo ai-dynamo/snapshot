@@ -63,30 +63,35 @@ in their `kubectl` commands.
 The framework guides and the stages below use the Qwen3 0.6B recipe in their
 commands. For another recipe, use its manifests and names from this table.
 
+### Model cache
+
+The SGLang recipe and the eight-GPU recipes read their model from a model cache:
+a PVC named `model-cache`, mounted at `/hf-cache`, so that the source and the
+restored Pods read the same files. An init container downloads the model into it
+on first use. It is a plain Kubernetes volume, separate from the
+[checkpoint volume](../operations/storage.md) that Snapshot installs. The vLLM and
+TensorRT-LLM Qwen3 recipes need no model cache: they download the model inside the
+container.
+
+The PVC requests 2 TiB with `ReadWriteMany` access from the default storage class.
+Set `storageClassName` in [`model-cache-pvc.yaml`](model-cache-pvc.yaml) if the
+default does not support `ReadWriteMany`, then create it once:
+
+```bash
+kubectl apply \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename model-cache-pvc.yaml
+```
+
 ### Eight-GPU recipes
 
-An eight-GPU recipe runs one model across all eight GPUs of a single node. Set
-up the following once, before the first stage:
+An eight-GPU recipe runs one model across all eight GPUs of a single node. Besides
+the [model cache](#model-cache), set up the following once, before the first stage:
 
 - **A node that fits the recipe.** All GPUs of the workload are on one node;
   multi-node is on the roadmap. The node has the GPU count, CPU, and memory the
   manifests request. The manifests select eight B200 GPUs. Change `nodeSelector`
   and the parallelism settings for other GPUs.
-- **A PVC for the model files.** These recipes keep the model on a PVC named
-  `snapshot-model-cache` instead of in the container's own filesystem, so the
-  source and the restored Pods read the same files. An init container downloads
-  the model onto it on first use. It is a plain Kubernetes volume, separate from
-  the [checkpoint volume](../operations/storage.md) that Snapshot installs. It
-  requests 2 TiB with `ReadWriteMany` access from the default storage class. Set
-  `storageClassName` in [`model-cache-pvc.yaml`](model-cache-pvc.yaml) if the
-  default does not support `ReadWriteMany`, then create it:
-
-  ```bash
-  kubectl apply \
-    --namespace "$SNAPSHOT_NAMESPACE" \
-    --filename model-cache-pvc.yaml
-  ```
-
 - **The agent image, for the source Deployments only.** A Deployment prepares
   its own Pod for multi-GPU capture with an init container that copies the
   multi-GPU libraries from the Snapshot agent image. Read the image from the
