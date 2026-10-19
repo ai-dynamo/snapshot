@@ -754,6 +754,33 @@ TEST_F(BrokerTransferTest, CompletionRejectsExpiryAndCancellationAfterTransfer)
   }
 }
 
+TEST_F(BrokerTransferTest, StagedCheckpointRecreatesMissingStagingRoot)
+{
+  for (const bool limited : {false, true}) {
+    SCOPED_TRACE(limited);
+    Broker broker(staging_, storage_);
+    const auto resources = limited ? Limit(broker) : nullptr;
+    fs::remove_all(staging_);
+
+    const auto response = broker.HandleRequest(Checkpoint(false));
+    ASSERT_TRUE(response.has_staged_checkpoint_directory()) << response.DebugString();
+    EXPECT_TRUE(fs::is_directory(CheckpointOutput(false)));
+    if (resources) {
+      EXPECT_EQ(resources->active, 1u);
+      EXPECT_EQ(resources->reserved, 1u);
+    }
+
+    auto abort = RequestFor("checkpoint");
+    abort.mutable_abort();
+    ASSERT_TRUE(broker.HandleRequest(abort).has_abort_complete());
+    EXPECT_FALSE(fs::exists(CheckpointOutput(false)));
+    if (resources) {
+      EXPECT_EQ(resources->active, 0u);
+      EXPECT_EQ(resources->reserved, 0u);
+    }
+  }
+}
+
 TEST_F(BrokerTransferTest, CheckpointPreparationUsesTheTransactionDeadline)
 {
   for (const bool direct : {false, true}) {
