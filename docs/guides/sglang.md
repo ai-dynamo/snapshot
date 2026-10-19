@@ -122,13 +122,15 @@ kubectl apply \
 The init container reuses cached model files and downloads missing files. The
 main container then starts SGLang from the offline cache.
 
-**Eight-GPU recipes.** Substitute the agent image from
-[Multi-GPU recipes](README.md#choose-your-recipe) as you apply the manifest. For
-example, GLM 5.3:
+**Eight-GPU recipes.** First set the agent image in the manifest, as
+[Multi-GPU recipes](README.md#choose-your-recipe) describes: replace
+`${SNAPSHOT_AGENT_IMAGE}` in the `snapshot-cuda-install` init container. Then
+apply it. For example, GLM 5.3:
 
 ```bash
-sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" sglang/capture/glm-5.3.yaml | \
-  kubectl apply --namespace "$WORKLOAD_NAMESPACE" --filename -
+kubectl apply \
+  --namespace "$WORKLOAD_NAMESPACE" \
+  --filename sglang/capture/glm-5.3.yaml
 ```
 
 Wait until the SGLang replica finishes initialization and becomes safe to
