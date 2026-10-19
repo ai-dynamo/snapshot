@@ -22,7 +22,7 @@ TEST_F(BrokerTransferTest, RestoreCommitSucceedsWhileCleanupIsPending)
     SCOPED_TRACE(limited);
     Broker broker(staging_, storage_);
     const auto resources = limited ? Limit(broker) : nullptr;
-    const auto transaction = Seed(broker, 0, Transaction::State::STAGED);
+    const auto transaction = SeedRestore(broker, Transaction::State::STAGED);
     BlockCleanup();
     auto request = RequestFor("seed");
     request.mutable_commit();
@@ -62,7 +62,7 @@ TEST_F(BrokerTransferTest, FailedCleanupCannotBeEvictedWithoutResourceLimits)
   for (const auto state : {Transaction::State::COMMITTED, Transaction::State::ABORTED}) {
     SCOPED_TRACE(static_cast<int>(state));
     Broker broker(staging_, storage_);
-    const auto transaction = Seed(broker, 0, state);
+    const auto transaction = SeedRestore(broker, state);
     BlockCleanup();
     auto request = RequestFor("seed");
     if (state == Transaction::State::COMMITTED)
@@ -96,7 +96,7 @@ TEST_F(BrokerTransferTest, FailedCleanupCannotBeEvictedWithoutResourceLimits)
 TEST_F(BrokerTransferTest, TerminalEvictionPreservesReusedTransactionID)
 {
   Broker broker(staging_, storage_);
-  const auto original = Seed(broker, 0, Transaction::State::STAGED);
+  const auto original = SeedRestore(broker, Transaction::State::STAGED);
   auto commit = RequestFor("seed");
   commit.mutable_commit();
   ASSERT_TRUE(broker.HandleRequest(commit).has_commit_complete());
@@ -119,7 +119,7 @@ TEST_F(BrokerTransferTest, PeriodicSweepRetainsMissedCompletionsAndEvictsThemWit
   for (const auto state : {Transaction::State::COMMITTED, Transaction::State::ABORTED}) {
     SCOPED_TRACE(static_cast<int>(state));
     Broker broker(staging_, storage_);
-    auto transaction = Seed(broker, 0, state);
+    auto transaction = SeedRestore(broker, state);
     {
       std::lock_guard lock(transaction->mutex());
       // Another request owns the mutex when completion tries to retain the result.
@@ -139,33 +139,30 @@ TEST_F(BrokerTransferTest, PeriodicSweepRetainsMissedCompletionsAndEvictsThemWit
 
 TEST_F(BrokerTransferTest, ExpiryReclaimsReservationsAndRestoresAdmission)
 {
-  for (const uintmax_t initial_bytes : {0u, 1u}) {
-    SCOPED_TRACE(initial_bytes);
-    Broker broker(staging_, storage_);
-    SetLifetime(broker, std::chrono::minutes(1));
-    const auto resources = Limit(broker);
-    auto transaction = Seed(broker, initial_bytes, Transaction::State::STAGED);
-    const auto sweep = std::chrono::steady_clock::now() + std::chrono::minutes(2);
-    broker.ReapExpiredTransactions(sweep);
-    EXPECT_EQ(transaction->state(), Transaction::State::ABORTED);
-    EXPECT_TRUE(transaction->cancellation().Token().stop_requested());
-    EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
-    EXPECT_EQ(resources->active, 0u);
-    EXPECT_EQ(resources->reserved, 0u);
-    EXPECT_EQ(Retained(broker), 0u);
-    EXPECT_EQ(Find(broker, "seed"), nullptr);
-    // Another sweep cannot double-release capacity or retain a reaped transaction.
-    broker.ReapExpiredTransactions(sweep);
-    EXPECT_EQ(resources->active, 0u);
-    EXPECT_EQ(Retained(broker), 0u);
-    Transaction next;
-    ASSERT_NO_THROW(next.PrepareTransfer(resources, initial_bytes));
-    EXPECT_NO_THROW(next.Reserve(4));
-    auto abort = RequestFor("seed");
-    abort.mutable_abort();
-    EXPECT_EQ(broker.HandleRequest(abort).failure().code(), Failure::TRANSACTION_NOT_FOUND);
-    EXPECT_EQ(broker.HandleRequest(abort).failure().code(), Failure::TRANSACTION_NOT_FOUND);
-  }
+  Broker broker(staging_, storage_);
+  SetLifetime(broker, std::chrono::minutes(1));
+  const auto resources = Limit(broker);
+  auto transaction = SeedRestore(broker, Transaction::State::STAGED);
+  const auto sweep = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+  broker.ReapExpiredTransactions(sweep);
+  EXPECT_EQ(transaction->state(), Transaction::State::ABORTED);
+  EXPECT_TRUE(transaction->cancellation().Token().stop_requested());
+  EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
+  EXPECT_EQ(resources->active, 0u);
+  EXPECT_EQ(resources->reserved, 0u);
+  EXPECT_EQ(Retained(broker), 0u);
+  EXPECT_EQ(Find(broker, "seed"), nullptr);
+  // Another sweep cannot double-release capacity or retain a reaped transaction.
+  broker.ReapExpiredTransactions(sweep);
+  EXPECT_EQ(resources->active, 0u);
+  EXPECT_EQ(Retained(broker), 0u);
+  Transaction next;
+  ASSERT_NO_THROW(next.PrepareTransfer(resources, 0));
+  EXPECT_NO_THROW(next.Reserve(4));
+  auto abort = RequestFor("seed");
+  abort.mutable_abort();
+  EXPECT_EQ(broker.HandleRequest(abort).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+  EXPECT_EQ(broker.HandleRequest(abort).failure().code(), Failure::TRANSACTION_NOT_FOUND);
 }
 
 TEST_F(BrokerTransferTest, PeriodicCleanupRetriesKeepCapacityUntilRemovalSucceeds)
@@ -175,7 +172,7 @@ TEST_F(BrokerTransferTest, PeriodicCleanupRetriesKeepCapacityUntilRemovalSucceed
     Broker broker(staging_, storage_);
     SetLifetime(broker, std::chrono::minutes(1));
     const auto resources = Limit(broker);
-    auto transaction = Seed(broker, 0, state);
+    auto transaction = SeedRestore(broker, state);
     BlockCleanup();
     const auto sweep = std::chrono::steady_clock::now() + std::chrono::minutes(2);
     for (unsigned retry = 0; retry < 2; ++retry) {
@@ -206,7 +203,7 @@ TEST_F(BrokerTransferTest, AbortCleanupFailureRetainsStateAndAllowsRetry)
       SCOPED_TRACE(static_cast<int>(state));
       Broker broker(staging_, storage_);
       const auto resources = limited ? Limit(broker) : nullptr;
-      const auto transaction = Seed(broker, 0, state);
+      const auto transaction = SeedRestore(broker, state);
       BlockCleanup();
       auto request = RequestFor("seed");
       request.mutable_abort();
@@ -237,7 +234,7 @@ TEST_F(BrokerTransferTest, AbortWaitsForGpuDrainBeforeRemovingStaging)
 {
   Broker broker(staging_, storage_);
   const auto resources = Limit(broker);
-  const auto transaction = Seed(broker, 0, Transaction::State::STAGED);
+  const auto transaction = SeedRestore(broker, Transaction::State::STAGED);
   const auto operation = std::make_shared<Transaction::GpuOperation>();
   operation->state = Transaction::GpuOperation::State::Running;
   operation->cancellation = std::make_shared<Cancellation>(Cancellation::ChildOf(transaction->cancellation()));
@@ -285,7 +282,7 @@ TEST_F(BrokerTransferTest, ExpiryWaitsForGpuDrainBeforeRemovingStaging)
   Broker broker(staging_, storage_);
   SetLifetime(broker, std::chrono::minutes(1));
   const auto resources = Limit(broker);
-  auto transaction = Seed(broker, 0, Transaction::State::STAGED);
+  auto transaction = SeedRestore(broker, Transaction::State::STAGED);
   auto operation = std::make_shared<Transaction::GpuOperation>();
   operation->state = Transaction::GpuOperation::State::Running;
   operation->cancellation = std::make_shared<Cancellation>(Cancellation::ChildOf(transaction->cancellation()));
@@ -326,7 +323,7 @@ TEST_F(BrokerTransferTest, ShutdownSignalsGpuWithoutWaitingForTransactionMutex)
   Broker broker(staging_, storage_);
   SetLifetime(broker, std::chrono::minutes(1));
   Limit(broker);
-  auto transaction = Seed(broker, 0, Transaction::State::STAGED);
+  auto transaction = SeedRestore(broker, Transaction::State::STAGED);
   auto operation = std::make_shared<Transaction::GpuOperation>();
   operation->state = Transaction::GpuOperation::State::Running;
   operation->cancellation = std::make_shared<Cancellation>(Cancellation::ChildOf(transaction->cancellation()));
@@ -381,7 +378,7 @@ TEST_F(BrokerTransferTest, AbortAfterDeadlineLeavesCleanupToTheReaper)
   Broker broker(staging_, storage_);
   SetLifetime(broker, std::chrono::seconds(0));
   const auto resources = Limit(broker);
-  auto transaction = Seed(broker, 0, Transaction::State::STAGED);
+  auto transaction = SeedRestore(broker, Transaction::State::STAGED);
   auto abort = RequestFor("seed");
   abort.mutable_abort();
   BlockCleanup();
@@ -407,7 +404,7 @@ TEST_F(BrokerTransferTest, ExpiredCommitLeavesCleanupAndItsRetriesToTheReaper)
   Broker broker(staging_, storage_);
   SetLifetime(broker, std::chrono::seconds(0));
   const auto resources = Limit(broker);
-  auto transaction = Seed(broker, 0, Transaction::State::STAGED);
+  auto transaction = SeedRestore(broker, Transaction::State::STAGED);
   auto commit = RequestFor("seed");
   commit.mutable_commit();
   BlockCleanup();

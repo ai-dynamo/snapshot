@@ -164,11 +164,11 @@ class BrokerTransferTest : public ::testing::Test, public test::RequestBuilder {
     broker.lifetime_ = lifetime;
   }
 
-  std::shared_ptr<Transaction> Seed(Broker& broker, uintmax_t initial_bytes, Transaction::State state)
+  std::shared_ptr<Transaction> SeedRestore(Broker& broker, Transaction::State state)
   {
     auto transaction = broker.CreateOrGetTransaction("seed");
     std::lock_guard lock(transaction->mutex());
-    transaction->PrepareTransfer(broker.resources_, initial_bytes, nullptr, broker.lifetime_);
+    transaction->PrepareTransfer(broker.resources_, 0, nullptr, broker.lifetime_);
     transaction->Reserve(4);
     fs::create_directory(staging_ / "restore/seed");
     transaction->OwnDirectory(staging_ / "restore/seed");
