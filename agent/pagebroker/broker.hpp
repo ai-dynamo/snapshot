@@ -58,9 +58,10 @@ class Broker {
   std::vector<std::pair<std::string, TransactionHandle>> TransactionSnapshot();
   std::error_code CleanupTransactionDirectory(const std::string& id, Transaction& transaction);
   bool CleanupExpiredTransaction(const std::string& id, Transaction& transaction);
+  // Attempts retention without waiting for the transaction mutex. Caller must not hold it.
   void RetainTerminalTransaction(const std::string& transaction_id);
-  // The caller holds the transaction mutex for this overload.
-  void RetainTerminalTransaction(const std::string& id, const TransactionHandle& transaction);
+  // Caller must hold transaction->mutex().
+  void RetainTerminalTransactionLocked(const std::string& id, const TransactionHandle& transaction);
   void ReapTerminalTransactions(std::chrono::steady_clock::time_point now);
   bool ReserveStaging(uintmax_t bytes);
   void ReleaseStaging(uintmax_t bytes);
