@@ -39,6 +39,9 @@ func TestProcessOutputDetail(t *testing.T) {
 		{name: "stdout follows stderr", stdout: " out ", stderr: "err\n", want: "err; stdout: out"},
 		{name: "stdout alone", stdout: "out", want: "stdout: out"},
 		{name: "long lines are cut", stderr: long + "\n", want: long[:processDetailBytes] + "..."},
+		{name: "cause line without a trailing newline", stderr: "log\nnsenter: no", prefixes: []string{"nsenter:"}, want: "nsenter: no"},
+		{name: "cause line survives a tail overflow", stderr: "panic: boom\n" + strings.Repeat("frame\n", 2*processStderrTailBytes/6), prefixes: []string{"panic:"}, want: "panic: boom"},
+		{name: "long cause line is cut", stderr: "panic: " + long + "\nframe\n", prefixes: []string{"panic:"}, want: ("panic: " + long)[:processDetailBytes] + "..."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -46,6 +49,24 @@ func TestProcessOutputDetail(t *testing.T) {
 				t.Fatalf("Detail() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestProcessOutputCauseLineAcrossWrites(t *testing.T) {
+	output := NewProcessOutput(io.Discard, "nsenter:")
+	for _, chunk := range []string{"log line\nnsen", "ter: failed to exe", "cute\nafter\n"} {
+		if _, err := output.stderr.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := output.CauseLine(); got != "nsenter: failed to execute" {
+		t.Fatalf("CauseLine() = %q", got)
+	}
+	if got := output.LastStderrLine(); got != "after" {
+		t.Fatalf("LastStderrLine() = %q", got)
+	}
+	if got := output.DetailFrom("chosen"); got != "chosen" {
+		t.Fatalf("DetailFrom() = %q", got)
 	}
 }
 
