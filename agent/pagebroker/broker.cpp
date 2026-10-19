@@ -609,7 +609,8 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
       // Preserve invalid-source retries without leaving an admission reservation.
       // Waiters holding this handle see ABORTED; only this map entry is removed.
       transaction->set_state(Transaction::State::ABORTED);
-      transaction->CleanupTransfer();
+      if (const auto cleanup_error = CleanupTransactionDirectory(request.transaction_id(), *transaction))
+        return Fail(request, Failure::INVALID_REQUEST, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
       std::lock_guard transactions_lock(transactions_mutex_);
       const auto current = transactions_.find(request.transaction_id());
       if (current != transactions_.end() && current->second == transaction)
@@ -694,7 +695,9 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
         // Preserve corrected legacy requests without claiming another writer's output.
         // Waiters on this handle see ABORTED; only this map entry is removed.
         transaction->set_state(Transaction::State::ABORTED);
-        transaction->CleanupTransfer();
+        if (const auto cleanup_error = CleanupTransactionDirectory(request.transaction_id(), *transaction))
+          return Fail(request, invalid ? Failure::INVALID_REQUEST : failure->code,
+              std::string(error.what()) + "; cleanup: " + cleanup_error.message());
         std::lock_guard transactions_lock(transactions_mutex_);
         const auto current = transactions_.find(request.transaction_id());
         if (current != transactions_.end() && current->second == transaction)
@@ -758,8 +761,12 @@ Broker::Commit(const Request& request)
 Response
 Broker::CleanupRestore(const Request& request, Transaction& transaction, const RestoreTransactionDescriptor& descriptor)
 {
-  if (!descriptor.staging_directory().empty())
-    transaction.RemoveStaging(descriptor.staging_directory());
+  if (!descriptor.staging_directory().empty()) {
+    std::error_code error;
+    transaction.RemoveStaging(descriptor.staging_directory(), error);
+    if (error)
+      return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
+  }
   // Any remaining reservation defers clearing until the reaper finishes cleanup.
   (void)transaction.TryClearDescriptor();
   transaction.set_state(Transaction::State::COMMITTED);
@@ -808,7 +815,8 @@ Broker::Abort(const Request& request)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   }
   if (transaction->state() == Transaction::State::ABORTED) {
-    transaction->CleanupTransfer();
+    if (const auto error = CleanupTransactionDirectory(request.transaction_id(), *transaction))
+      return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
     return AbortSucceeded(request);
   }
   if (transaction->expired(now_())) {
