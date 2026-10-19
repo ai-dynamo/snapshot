@@ -29,8 +29,6 @@ IsSafeRelativePath(const Path& path)
 {
   if (path.empty() || path.is_absolute())
     return false;
-  if (path.has_root_name() || path.has_root_directory())
-    return false;
   if (path.native().find('\0') != std::string::npos)
     return false;
   if (path.lexically_normal().native() != path.native())
