@@ -355,7 +355,7 @@ Broker::CleanupExpiredTransaction(const std::string& id, Transaction& transactio
   }
   if (CleanupTransactionDirectory(id, transaction))
     return false;
-  transaction.clear_descriptor();
+  transaction.TryClearDescriptor();
   transaction.set_state(Transaction::State::ABORTED);
   return true;
 }
@@ -441,7 +441,8 @@ Response
 Broker::AbortStaging(
     const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error)
 {
-  transaction.clear_descriptor();
+  // Pending cleanup retains the descriptor until RemoveStaging succeeds.
+  (void)transaction.TryClearDescriptor();
   transaction.set_state(Transaction::State::ABORTED);
   std::error_code cleanup_error;
   transaction.RemoveStaging(staging_directory, cleanup_error);
@@ -792,7 +793,8 @@ Broker::CleanupRestore(const Request& request, Transaction& transaction, const R
 {
   if (!descriptor.staging_directory().empty())
     transaction.RemoveStaging(descriptor.staging_directory());
-  transaction.clear_descriptor();
+  // Any remaining reservation defers clearing until the reaper finishes cleanup.
+  (void)transaction.TryClearDescriptor();
   transaction.set_state(Transaction::State::COMMITTED);
   return CommitSucceeded(request);
 }
@@ -814,7 +816,8 @@ Broker::PublishCheckpoint(
     }
     engine.PublishCheckpoint(staging_directory, descriptor.destination_storage(), std::move(plan), publication,
         transaction.cancellation(), descriptor.output());
-    transaction.clear_descriptor();
+    // Publication succeeded; retaining the descriptor for cleanup does not fail the commit.
+    (void)transaction.TryClearDescriptor();
     transaction.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;
     transaction.RemoveStaging(staging_directory, cleanup_error);
@@ -854,7 +857,7 @@ Broker::Abort(const Request& request)
   if (const auto error = CleanupTransactionDirectory(request.transaction_id(), *transaction)) {
     return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
   }
-  transaction->clear_descriptor();
+  transaction->TryClearDescriptor();
   transaction->set_state(Transaction::State::ABORTED);
   return AbortSucceeded(request);
 }
