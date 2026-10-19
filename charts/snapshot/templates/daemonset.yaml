@@ -215,11 +215,8 @@ spec:
             - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
             - --custom-storage-max-pinned-bytes
             - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
-            {{- if .Values.pageBroker.artifactAddressing }}
-            # Enable only with a broker implementing the PVC artifact backend.
             - --storage-config
             - /etc/snapshot/storage.yaml
-            {{- end }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:

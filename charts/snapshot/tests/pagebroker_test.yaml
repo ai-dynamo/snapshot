@@ -75,11 +75,11 @@ tests:
             - "134217728"
             - --custom-storage-max-pinned-bytes
             - "0"
+            - --storage-config
+            - /etc/snapshot/storage.yaml
 
-  - it: passes store identity when the artifact backend is explicitly enabled
+  - it: passes store identity to PageBroker
     template: templates/daemonset.yaml
-    set:
-      pageBroker.artifactAddressing: true
     asserts:
       - equal:
           path: spec.template.spec.containers[1].args
@@ -240,6 +240,8 @@ tests:
             - "134217728"
             - --custom-storage-max-pinned-bytes
             - "0"
+            - --storage-config
+            - /etc/snapshot/storage.yaml
 
 
   - it: applies the configured pinned-memory budget to the owning process

@@ -987,10 +987,6 @@ def snapshot_chart_command(
             f"storage.pvc.name={pvc_name}",
             "--set",
             "operator.artifactCleanup.scanInterval=5s",
-            "--set",
-            "pageBroker.artifactAddressing=true",
-            "--set",
-            "operator.bindNewContents=true",
             "--set-json",
             "daemonset.imagePullSecrets=[]",
         ]
