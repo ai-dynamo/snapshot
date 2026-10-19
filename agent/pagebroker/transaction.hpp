@@ -71,7 +71,8 @@ class Transaction {
   void set_state(State state);
   const Descriptor& descriptor() const;
   void set_descriptor(Descriptor descriptor);
-  void clear_descriptor();
+  // Returns false while cleanup is pending; otherwise leaves the descriptor empty.
+  bool TryClearDescriptor();
   bool retain_terminal();
   bool expired(std::chrono::steady_clock::time_point now) const;
 
