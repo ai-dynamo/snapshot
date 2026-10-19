@@ -876,7 +876,7 @@ TEST_F(BrokerTransferTest, DirectCheckpointRetryKeepsDeadlineAndCaptureOnRejecti
   }
 }
 
-TEST_F(BrokerTransferTest, RestoreCommitCleanupFailureRetainsStateAndAllowsRetry)
+TEST_F(BrokerTransferTest, RestoreCommitSucceedsWhileCleanupIsPending)
 {
   for (const bool limited : {false, true}) {
     SCOPED_TRACE(limited);
@@ -886,9 +886,13 @@ TEST_F(BrokerTransferTest, RestoreCommitCleanupFailureRetainsStateAndAllowsRetry
     BlockCleanup();
     auto request = RequestFor("seed");
     request.mutable_commit();
-    const auto failed = broker.HandleRequest(request);
-    EXPECT_EQ(failed.failure().code(), Failure::STORAGE_ERROR);
-    EXPECT_EQ(transaction->state(), Transaction::State::STAGED);
+    EXPECT_TRUE(broker.HandleRequest(request).has_commit_complete());
+    EXPECT_EQ(transaction->state(), Transaction::State::COMMITTED);
+    EXPECT_TRUE(broker.HandleRequest(request).has_commit_complete());
+    broker.ReapExpiredTransactions(std::chrono::steady_clock::now() + std::chrono::hours(3));
+    EXPECT_EQ(transaction->state(), Transaction::State::COMMITTED);
+    EXPECT_FALSE(transaction->TryClearDescriptor());
+    EXPECT_TRUE(fs::exists(staging_ / "held/seed/image"));
     EXPECT_TRUE(std::holds_alternative<RestoreTransactionDescriptor>(transaction->descriptor()));
     EXPECT_EQ(Find(broker, "seed"), transaction);
     EXPECT_EQ(Retained(broker), 0u);
@@ -898,10 +902,13 @@ TEST_F(BrokerTransferTest, RestoreCommitCleanupFailureRetainsStateAndAllowsRetry
     }
 
     UnblockCleanup();
-    EXPECT_TRUE(broker.HandleRequest(request).has_commit_complete());
+    broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
     EXPECT_EQ(transaction->state(), Transaction::State::COMMITTED);
     EXPECT_TRUE(std::holds_alternative<std::monostate>(transaction->descriptor()));
     EXPECT_FALSE(fs::exists(staging_ / "restore/seed"));
+    EXPECT_EQ(Retained(broker), 1u);
+    EXPECT_TRUE(broker.HandleRequest(request).has_commit_complete());
+    broker.ReapExpiredTransactions(std::chrono::steady_clock::now());
     EXPECT_EQ(Retained(broker), 1u);
     if (limited) {
       EXPECT_EQ(resources->active, 0u);
