@@ -340,7 +340,7 @@ TEST(TransactionTest, DeadlineAndCancellationCoverTheWholeOperation)
   restore.set_state(Transaction::State::PREPARING);
   restore.set_state(Transaction::State::STAGED);
   EXPECT_EQ(restore.cancellation().Deadline(), control.Deadline());
-  EXPECT_TRUE(restore.expired(control.Deadline(), {}));
+  EXPECT_TRUE(restore.expired(control.Deadline()));
   restore.CancelWork();
   EXPECT_THROW(control.ThrowIfCancelled(), CancellationError);
 }
@@ -369,6 +369,52 @@ TEST(TransactionTest, GpuRequestAndTransactionStopIndependently)
   EXPECT_FALSE(new_request.IsCancelled());
 }
 
+TEST(TransactionTest, UnpreparedTransactionDoesNotExpire)
+{
+  Transaction transaction;
+  for (const auto now : {Cancellation::Clock::now(), Cancellation::Clock::time_point::max()}) {
+    EXPECT_FALSE(transaction.expired(now));
+    EXPECT_FALSE(transaction.ExpireTransfer(now));
+    EXPECT_EQ(transaction.state(), Transaction::State::NEW);
+    EXPECT_FALSE(transaction.cancellation().Token().stop_requested());
+  }
+}
+
+TEST(TransactionTest, TerminalTransactionsDoNotExpire)
+{
+  for (const auto state : {Transaction::State::COMMITTED, Transaction::State::ABORTED}) {
+    SCOPED_TRACE(static_cast<int>(state));
+    Transaction transaction;
+    transaction.PrepareTransfer(nullptr, 0, {});
+    transaction.set_state(state);
+    const auto after_deadline = transaction.cancellation().Deadline() + std::chrono::hours{1};
+    EXPECT_FALSE(transaction.expired(after_deadline));
+    EXPECT_FALSE(transaction.ExpireTransfer(after_deadline));
+    EXPECT_EQ(transaction.state(), state);
+    EXPECT_FALSE(transaction.cancellation().Token().stop_requested());
+  }
+}
+
+TEST(TransactionTest, ExpiryRemainsLatchedWhileAborting)
+{
+  Transaction transaction;
+  transaction.PrepareTransfer(nullptr, 0, {});
+  transaction.set_state(Transaction::State::STAGED);
+  const auto deadline = transaction.cancellation().Deadline();
+  const auto before_deadline = deadline - std::chrono::seconds{1};
+  EXPECT_FALSE(transaction.ExpireTransfer(before_deadline));
+  EXPECT_EQ(transaction.state(), Transaction::State::STAGED);
+  EXPECT_FALSE(transaction.cancellation().Token().stop_requested());
+  EXPECT_TRUE(transaction.ExpireTransfer(deadline));
+  EXPECT_EQ(transaction.state(), Transaction::State::ABORTING);
+  EXPECT_TRUE(transaction.cancellation().Token().stop_requested());
+  // Expiry stays recorded even if a later caller supplies an earlier time.
+  EXPECT_TRUE(transaction.expired(before_deadline));
+  EXPECT_TRUE(transaction.ExpireTransfer(before_deadline));
+  transaction.set_state(Transaction::State::ABORTED);
+  EXPECT_FALSE(transaction.expired(deadline));
+}
+
 TEST(TransactionTest, DeadlineStartsAtPrepareAndIsNotExtendedWithOrWithoutLimits)
 {
   for (const bool limited : {false, true}) {
@@ -382,12 +428,10 @@ TEST(TransactionTest, DeadlineStartsAtPrepareAndIsNotExtendedWithOrWithoutLimits
     EXPECT_GE(deadline, started + lifetime);
     EXPECT_LE(deadline, Cancellation::Clock::now() + lifetime);
     transaction.set_state(Transaction::State::PREPARING);
-    EXPECT_FALSE(transaction.expired(deadline - std::chrono::seconds{1}, {}));
+    EXPECT_FALSE(transaction.expired(deadline - std::chrono::seconds{1}));
     transaction.set_state(Transaction::State::STAGED);
     EXPECT_EQ(transaction.cancellation().Deadline(), deadline);
-    EXPECT_TRUE(transaction.expired(deadline, {}));
-    transaction.set_state(Transaction::State::COMMITTED);
-    EXPECT_FALSE(transaction.expired(deadline + std::chrono::hours{1}, {}));
+    EXPECT_TRUE(transaction.expired(deadline));
   }
 }
 }  // namespace snapshot::pagebroker
