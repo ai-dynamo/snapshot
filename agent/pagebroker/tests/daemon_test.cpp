@@ -19,6 +19,9 @@
 #include <poll.h>
 #include <span>
 #include <csignal>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 
 #include <fstream>
 #include <iterator>
@@ -40,6 +43,43 @@
 
 namespace fs = std::filesystem;
 using namespace snapshot::pagebroker;
+
+namespace {
+
+// Set only in the child, before RunDaemon starts its handler threads.
+int restore_started_fd = -1;
+
+}  // namespace
+
+// GNU ld wraps the C++ filesystem staging symbol only in the test executable.
+void RealStageRestore(const RestorePlan&, const fs::path&, Cancellation)
+    asm("__real__ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_11RestorePlanE"
+        "RKNSt10filesystem7__cxx114pathENS0_12CancellationE");
+void WrappedStageRestore(const RestorePlan&, const fs::path&, Cancellation)
+    asm("__wrap__ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_11RestorePlanE"
+        "RKNSt10filesystem7__cxx114pathENS0_12CancellationE");
+
+void WrappedStageRestore(const RestorePlan& plan, const fs::path& destination, Cancellation control)
+{
+  RealStageRestore(plan, destination, control);
+  if (restore_started_fd < 0)
+    return;
+  // The real copy is complete, but the request still owns staging and is active.
+  // Only transaction cancellation releases it; closing the listener is insufficient.
+  const char ready = 'R';
+  ssize_t sent;
+  do {
+    sent = write(restore_started_fd, &ready, 1);
+  } while (sent < 0 && errno == EINTR);
+  if (sent != 1)
+    throw std::runtime_error("signal active restore to shutdown test");
+  std::mutex mutex;
+  std::unique_lock lock(mutex);
+  std::condition_variable_any changed;
+  changed.wait_for(lock, control.Token(), std::chrono::seconds{10}, [] { return false; });
+  control.ThrowIfCancelled();
+  throw std::runtime_error("shutdown test timed out waiting for transfer cancellation");
+}
 
 namespace {
 
@@ -1053,6 +1093,7 @@ class DaemonTransportTest : public ::testing::Test, public test::RequestBuilder 
     server_ = fork();
     ASSERT_GE(server_, 0);
     if (server_ == 0) {
+      ConfigureChild();
       DaemonOptions options;
       options.socket_path = socket_path_;
       options.staging_directory = root_ / "staging";
@@ -1075,6 +1116,8 @@ class DaemonTransportTest : public ::testing::Test, public test::RequestBuilder 
     }
     // The temporary directory is removed after the daemon has exited.
   }
+
+  virtual void ConfigureChild() {}
 
   FileDescriptor Connect()
   {
@@ -1208,6 +1251,81 @@ class DaemonTransportTest : public ::testing::Test, public test::RequestBuilder 
   fs::path root_;
   fs::path socket_path_;
 };
+
+class DaemonActiveTransferTest : public DaemonTransportTest {
+ protected:
+  void SetUp() override
+  {
+    int ready[2];
+    ASSERT_EQ(pipe2(ready, O_CLOEXEC), 0);
+    ready_read_ = FileDescriptor(ready[0]);
+    ready_write_ = FileDescriptor(ready[1]);
+    ASSERT_NO_FATAL_FAILURE(DaemonTransportTest::SetUp());
+    ready_write_ = FileDescriptor(-1);
+  }
+
+  void ConfigureChild() override
+  {
+    ready_read_ = FileDescriptor(-1);
+    restore_started_fd = ready_write_.get();
+  }
+
+  void TearDown() override
+  {
+    // Successful tests reap explicitly. Failed assertions must not leave a child
+    // waiting for transfer cancellation or block the ordinary fixture teardown.
+    if (server_ > 0) {
+      kill(server_, SIGKILL);
+      while (waitpid(server_, nullptr, 0) < 0 && errno == EINTR) {}
+      server_ = -1;
+    }
+  }
+
+  FileDescriptor ready_read_{-1};
+  FileDescriptor ready_write_{-1};
+};
+
+TEST_F(DaemonActiveTransferTest, SigtermCancelsActiveRestoreBeforeWaitingForHandlers)
+{
+  const auto source = root_ / "storage/source";
+  fs::create_directory(source);
+  std::ofstream(source / "image") << "capture";
+  auto request = RequestFor("active");
+  Configure(request.mutable_staged_restore()->mutable_source(), request.mutable_staged_restore()->mutable_io_engine(), source);
+  auto connection = Connect();
+  const auto message = request.SerializeAsString();
+  const uint32_t size = htonl(message.size());
+  Send(connection.get(), &size, sizeof(size));
+  Send(connection.get(), message.data(), message.size());
+
+  pollfd ready{ready_read_.get(), POLLIN, 0};
+  ASSERT_EQ(poll(&ready, 1, 5000), 1) << "restore did not reach the staging boundary";
+  char signal = 0;
+  ASSERT_EQ(read(ready_read_.get(), &signal, 1), 1);
+  ASSERT_EQ(signal, 'R');
+  const auto staging = root_ / "staging/restore/active";
+  ASSERT_TRUE(fs::exists(staging / "image"));
+  FileDescriptor process(static_cast<int>(syscall(SYS_pidfd_open, server_, 0)));
+  ASSERT_GE(process.get(), 0);
+  ASSERT_EQ(kill(server_, SIGTERM), 0);
+
+  // Receive has a five-second socket timeout; process exit is independently bounded.
+  const auto response = Receive(connection.get());
+  ASSERT_TRUE(response.has_failure()) << response.DebugString();
+  EXPECT_EQ(response.failure().code(), Failure::INTERNAL_ERROR);
+  EXPECT_EQ(response.failure().message(), "operation cancelled");
+  pollfd exited{process.get(), POLLIN, 0};
+  ASSERT_EQ(poll(&exited, 1, 5000), 1) << "daemon did not exit after cancellation";
+  int status = 0;
+  ASSERT_EQ(waitpid(server_, &status, WNOHANG), server_);
+  server_ = -1;
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), static_cast<int>(ExitCode::SUCCESS));
+  EXPECT_FALSE(fs::exists(staging));
+  std::string contents;
+  std::ifstream(source / "image") >> contents;
+  EXPECT_EQ(contents, "capture");
+}
 
 TEST_F(DaemonTransportTest, PreparationPidfdIsOptInAndRejectsOtherProcess)
 {
