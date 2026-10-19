@@ -123,7 +123,7 @@ The init container reuses cached model files and downloads missing files. The
 main container then starts SGLang from the offline cache.
 
 **Eight-GPU recipes.** Substitute the agent image from
-[Eight-GPU recipes](README.md#eight-gpu-recipes) as you apply the manifest. For
+[Multi-GPU recipes](README.md#multi-gpu-recipes) as you apply the manifest. For
 example, GLM 5.3:
 
 ```bash
