@@ -33,7 +33,7 @@ source's.
 
 Every profile carries the annotation `nvidia.com/restore-from: ${SNAPSHOT_NAME}`,
 naming the `PodSnapshot` to restore from. Set the variable to your recipe's
-snapshot name from the [recipe table](README.md#pick-a-recipe). Whichever method you
+snapshot name from the [recipe table](README.md#choose-your-recipe). Whichever method you
 used, that is the `SnapshotJob`'s name, which its `PodSnapshot` shares, or the name
 you gave the `PodSnapshot` in
 [Checkpoint, Option 1](checkpoint.md#option-1--podsnapshot-checkpoint-a-running-replica).
@@ -47,7 +47,7 @@ export SNAPSHOT_NAME=vllm-qwen3-0-6b-snapshot
 
 Fill the name into the profile and apply it, then watch the rollout. The Deployment
 is named `<framework>-1gpu-restored` or `<framework>-8gpu-restored`, as the
-[recipe table](README.md#pick-a-recipe) lists:
+[recipe table](README.md#choose-your-recipe) lists:
 
 ```bash
 sed "s|\${SNAPSHOT_NAME}|$SNAPSHOT_NAME|" vllm/restore/1-gpu.yaml | \

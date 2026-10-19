@@ -11,7 +11,7 @@ agent injects the restore tooling at runtime.
 
 This is stage 1 of the [usage guides](README.md). Complete
 [Before you start](README.md#before-you-start) and
-[pick a recipe](README.md#pick-a-recipe) first. The commands run from
+[pick a recipe](README.md#choose-your-recipe) first. The commands run from
 `docs/guides`.
 
 > [!NOTE]
@@ -140,7 +140,7 @@ kubectl apply \
 ```
 
 **Eight-GPU recipes.** Substitute the agent image from
-[Multi-GPU recipes](README.md#multi-gpu-recipes) as you apply the manifest. For
+[Multi-GPU recipes](README.md#choose-your-recipe) as you apply the manifest. For
 example, GLM 5.3:
 
 ```bash
@@ -150,7 +150,7 @@ sed "s|\${SNAPSHOT_AGENT_IMAGE}|$SNAPSHOT_AGENT_IMAGE|" tensorrt-llm/capture/glm
 
 Wait until the TensorRT-LLM replica finishes initialization and becomes safe to
 checkpoint. For another recipe, use its Deployment name from the
-[recipe table](README.md#pick-a-recipe) here and in the next command. Allow
+[recipe table](README.md#choose-your-recipe) here and in the next command. Allow
 `--timeout=60m` for an eight-GPU recipe, because its first run downloads the
 model:
 
