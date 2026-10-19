@@ -11,17 +11,17 @@ class CheckpointTransactionDescriptor {
  public:
   CheckpointTransactionDescriptor(
       Path staging_directory, StorageBackend destination_storage, IoEngine engine_type,
-      TransferMode output);
+      TransferMode mode);
 
   const Path& staging_directory() const;
   const StorageBackend& destination_storage() const;
   IoEngine engine_type() const;
-  TransferMode output() const { return output_; }
+  TransferMode mode() const { return mode_; }
 
  private:
   Path staging_directory_;
   StorageBackend destination_storage_;
   IoEngine engine_type_;
-  TransferMode output_;
+  TransferMode mode_;
 };
 }  // namespace snapshot::pagebroker
