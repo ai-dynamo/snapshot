@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import pytest
 from kubernetes import client
@@ -373,6 +374,9 @@ def test_one_cpu_snapshot_restores_into_two_containers(
             )
             assert f"source_token={run.source_token}" in output
             assert f"restore_token={restore_tokens[destination]}" in output
+            snap.assert_restored_workload_mounts(
+                config.namespace, run.restore_pod, container=destination
+            )
 
         assert_restore_events(
             config.namespace,
@@ -441,6 +445,50 @@ def test_restored_workload_logs_and_exit_reach_kubernetes(
 
         pod = snap.wait_for(f"pod {run.restore_pod} to fail", failed, timeout=60, poll_interval=2)
         assert pod.status.container_statuses[0].restart_count == 0
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_restored_workload_keeps_its_own_mount_at_the_securityfs_path(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # The agent mounts securityfs for CRIU at this path while it restores. A
+    # workload with its own mount there must get that mount back, not
+    # securityfs.
+    path = "/sys/kernel/security"
+    try:
+        k8s.create_pod(
+            with_empty_dir(snap.source_pod(config=config, run=run, gpu=False), path)
+        )
+        source = snap.wait_for_pod_ready(config.namespace, run.source_pod)
+        snap.wait_for_file(config.namespace, run.source_pod, snap.SOURCE_READY)
+        snap.create_podsnapshot(
+            config.namespace, run.snapshot_name, run.source_pod, source.metadata.uid
+        )
+        snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            with_empty_dir(
+                snap.restore_pod(
+                    config=config, run=run, gpu=False, source_node=source.spec.node_name
+                ),
+                path,
+            )
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+        snap.assert_restored_workload_mounts(
+            config.namespace, run.restore_pod, empty_dir=path
+        )
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -860,6 +908,15 @@ def create_ready_source(
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)
     snap.wait_for_file(config.namespace, run.source_pod, snap.SOURCE_READY)
     return pod, pod.spec.node_name
+
+
+def with_empty_dir(pod: dict[str, Any], path: str) -> dict[str, Any]:
+    # An emptyDir at path in the Pod's first container.
+    pod["spec"]["volumes"].append({"name": "own-mount", "emptyDir": {}})
+    pod["spec"]["containers"][0]["volumeMounts"].append(
+        {"name": "own-mount", "mountPath": path}
+    )
+    return pod
 
 
 def snapshot_annotations(pod: object) -> dict[str, str]:

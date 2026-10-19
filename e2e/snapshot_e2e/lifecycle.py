@@ -1103,6 +1103,43 @@ def assert_restored_state(
     return output
 
 
+def assert_restored_workload_mounts(
+    namespace: str,
+    pod: str,
+    *,
+    container: str | None = None,
+    empty_dir: str | None = None,
+) -> None:
+    """Check the restored workload's mount table, not the container's.
+
+    The agent mounts securityfs for CRIU while it restores, and the restored
+    workload must not see it. With empty_dir, the workload must also still
+    have its own empty mount at that path.
+    """
+    success_marker = "__snapshot_restored_mounts_verified__"
+    empty_dir_checks = f"""
+    grep -qF " {empty_dir} " "$mountinfo"
+    test -z "$(ls -A {PROC_ROOT}/$restored_pid/root{empty_dir})"
+    """
+    command = f"""
+    set -euo pipefail
+    restored_pid="$(sed -n 's/^pid=//p' {RESTORE_DONE})"
+    test -n "$restored_pid"
+    mountinfo={PROC_ROOT}/$restored_pid/mountinfo
+    if grep -F " - securityfs " "$mountinfo"; then
+      echo "the restored workload sees securityfs"
+      exit 1
+    fi
+    {empty_dir_checks if empty_dir else ""}
+    echo {success_marker}
+    """
+    output = k8s.exec_command(namespace, pod, command, container=container)
+    # As in assert_restored_state, only the final marker proves every check ran.
+    assert success_marker in output.splitlines(), (
+        f"restored mount check failed for {namespace}/{pod}:\n{output}"
+    )
+
+
 def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:
     print("\n--- snapshot e2e debug ---")
     print(f"namespace={config.namespace} test={run.suffix}")

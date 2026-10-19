@@ -93,3 +93,45 @@ def test_restored_state_requires_every_remote_assertion_to_pass(
     else:
         output = lifecycle.assert_restored_state("test-ns", "restored-pod", **kwargs)
         assert "source_token=source-state restore_token=restore-state" in output
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [None, "securityfs", "empty-dir-not-mounted", "empty-dir-not-empty"],
+)
+def test_restored_mounts_require_every_remote_assertion_to_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None
+) -> None:
+    restore_done = tmp_path / "restore_done"
+    monkeypatch.setattr(lifecycle, "RESTORE_DONE", str(restore_done))
+    restore_done.write_text("pid=42\n")
+    proc = tmp_path / "proc"
+    monkeypatch.setattr(lifecycle, "PROC_ROOT", str(proc))
+    own = proc / "42" / "root" / "own"
+    own.mkdir(parents=True)
+    if failure == "empty-dir-not-empty":
+        (own / "apparmor").mkdir()
+    mounts = ["36 25 0:30 / / rw - overlay overlay rw"]
+    if failure != "empty-dir-not-mounted":
+        mounts.append("40 36 8:1 /own /own rw - ext4 /dev/sda1 rw")
+    if failure == "securityfs":
+        mounts.append("41 36 0:7 / /own ro - securityfs securityfs ro")
+    (proc / "42" / "mountinfo").write_text("\n".join(mounts) + "\n")
+
+    def exec_command(namespace: str, pod: str, command: str, *, container: str | None = None) -> str:
+        assert (namespace, pod, container) == ("test-ns", "restored-pod", "main")
+        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=5)
+        assert (result.returncode != 0) is (failure is not None)
+        # Match Kubernetes' preloaded stream: nonzero exit does not raise.
+        return result.stdout + result.stderr
+
+    monkeypatch.setattr(lifecycle.k8s, "exec_command", exec_command)
+    if failure:
+        with pytest.raises(AssertionError, match="restored mount check failed for test-ns/restored-pod"):
+            lifecycle.assert_restored_workload_mounts(
+                "test-ns", "restored-pod", container="main", empty_dir="/own"
+            )
+    else:
+        lifecycle.assert_restored_workload_mounts(
+            "test-ns", "restored-pod", container="main", empty_dir="/own"
+        )
