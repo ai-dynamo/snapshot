@@ -21,11 +21,10 @@
 namespace snapshot::pagebroker {
 // Shared admission accounting. Transactions hold reservations until staging is removed.
 struct TransactionResources {
-  TransactionResources(uintmax_t bytes, unsigned transactions, std::chrono::steady_clock::duration lifetime)
-      : byte_limit(bytes), transaction_limit(transactions), lifetime(lifetime) {}
+  TransactionResources(uintmax_t bytes, unsigned transactions)
+      : byte_limit(bytes), transaction_limit(transactions) {}
   const uintmax_t byte_limit;
   const unsigned transaction_limit;
-  const std::chrono::steady_clock::duration lifetime;
   std::mutex mutex;
   uintmax_t reserved = 0;
   unsigned active = 0;
