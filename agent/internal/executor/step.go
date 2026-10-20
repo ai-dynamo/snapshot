@@ -36,6 +36,7 @@ const (
 	StepConfigureCheckpoint   Step = "configuring CRIU dump and writing checkpoint manifest"
 	StepCheckpointGPU         Step = "checkpointing GPU state"
 	StepDumpCRIU              Step = "dumping with CRIU"
+	StepCaptureOverlay        Step = "capturing rootfs diff"
 	StepCommitCheckpoint      Step = "committing PageBroker checkpoint"
 )
 
