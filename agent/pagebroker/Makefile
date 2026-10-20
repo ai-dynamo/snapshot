@@ -10,8 +10,16 @@ NVTX_ROOT ?= /usr/local
 CPPFLAGS := -I. -Igpu -I$(CUDA_INCLUDE_DIR) -isystem $(NVTX_ROOT)/include
 PROTO := v1/pagebroker.proto
 GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
-BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp
-COMMON_SOURCES := file_descriptor.cpp
+BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp transfer/engine/posix/posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer/engine/transfer_engine.cpp
+BROKER_TEST_SOURCES := tests/broker_transfer_test.cpp tests/broker_checkpoint_test.cpp tests/broker_cleanup_test.cpp tests/broker_transfer_fixture.cpp tests/broker_gpu_test.cpp
+# Wrap mkdir for broker directory-creation hooks and StageRestore to hold a
+# filesystem transfer until cancellation in the daemon SIGTERM test. GPU wrappers
+# inject execution failures for broker response tests without requiring CUDA.
+BROKER_TEST_WRAP_FLAGS := -Wl,--wrap=mkdir \
+	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine10CheckpointERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE \
+	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine7RestoreERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE \
+	-Wl,--wrap=_ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_11RestorePlanERKNSt10filesystem7__cxx114pathENS0_12CancellationE
+COMMON_SOURCES := file_descriptor.cpp transfer/filesystem/filesystem_storage.cpp
 IO_SOURCES := io_engine.cpp
 GPU_SOURCES := gpu/engine.cpp gpu/checkpoint.cpp gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp
 PAGEBROKER_SOURCES := $(BROKER_SOURCES) $(COMMON_SOURCES) $(IO_SOURCES) $(GPU_SOURCES)
@@ -38,24 +46,28 @@ daemon: generate
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DAEMON_SOURCES) v1/pagebroker.pb.cc \
 		-Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(NIXL_FLAGS) -ldl -o pagebroker
 
-test: generate build/gpu-cuda-driver.o build/gpu-engine-test | build
+test: generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test | build
+	./build/cancellation-test
 	./build/gpu-engine-test
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp daemon_test.cpp storage_contract_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) -ldl -o build/pagebroker-test
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp tests/daemon_test.cpp $(BROKER_TEST_SOURCES) tests/filesystem_storage_test.cpp tests/storage_contract_test.cpp tests/transaction_test.cpp tests/temporary_directory_test.cpp v1/pagebroker.pb.cc $(BROKER_TEST_WRAP_FLAGS) -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) -ldl -o build/pagebroker-test
 	./build/pagebroker-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/storage_manifest.cpp gpu/storage_manifest_test.cpp -o build/gpu-storage-test
 	./build/gpu-storage-test
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(IO_SOURCES) transfer_engine.cpp file_descriptor.cpp \
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(IO_SOURCES) transfer/engine/transfer_engine.cpp $(COMMON_SOURCES) \
 		io_engine_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) -ldl -o build/io-engine-test
 	./build/io-engine-test
 
 # Compile the optional driver loader without requiring a CUDA library.
+build/cancellation-test: tests/cancellation_test.cpp cancellation.hpp fatal_cleanup.hpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(GTEST_FLAGS) -o $@
+
 build/gpu-cuda-driver.o: gpu/cuda_driver.cpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 # These tests use real files and validate the engine without initializing CUDA.
-build/gpu-engine-test: generate transfer_engine.cpp gpu/engine_test.cpp gpu/engine.cpp gpu/engine.hpp gpu/checkpoint.cpp gpu/checkpoint.hpp gpu/transfer.cpp gpu/transfer.hpp gpu/storage_manifest.cpp gpu/storage_manifest.hpp gpu/cuda_driver.cpp gpu/errors.hpp $(COMMON_SOURCES) $(IO_SOURCES) io_engine.hpp file_descriptor.hpp cancellation.hpp | build
+build/gpu-engine-test: generate transfer/engine/transfer_engine.cpp gpu/engine_test.cpp gpu/engine.cpp gpu/engine.hpp gpu/checkpoint.cpp gpu/checkpoint.hpp gpu/transfer.cpp gpu/transfer.hpp gpu/storage_manifest.cpp gpu/storage_manifest.hpp gpu/cuda_driver.cpp gpu/errors.hpp $(COMMON_SOURCES) $(IO_SOURCES) io_engine.hpp file_descriptor.hpp cancellation.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/engine_test.cpp gpu/engine.cpp gpu/checkpoint.cpp \
-		gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer_engine.cpp v1/pagebroker.pb.cc \
+		gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer/engine/transfer_engine.cpp v1/pagebroker.pb.cc \
 		$(GTEST_FLAGS) -lprotobuf $(NIXL_FLAGS) -ldl -o $@
 
 # Run manually with the host driver and one visible GPU.
@@ -69,6 +81,6 @@ build/gpu-checkpoint-test: generate $(GPU_TEST_SOURCES) gpu/checkpoint_test.cpp 
 		gpu/checkpoint_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) \
 		-Wl,--wrap=cuMemcpyHtoDAsync_v2,--wrap=cuCheckpointProcessUnlock -L$(CUDA_LIBRARY_DIR) -lcuda -ldl -o $@
 
-build/gpu-transfer-test: generate transfer_engine.cpp gpu/transfer.cpp gpu/transfer.hpp gpu/transfer_test.cpp cancellation.hpp $(COMMON_SOURCES) $(IO_SOURCES) file_descriptor.hpp io_engine.hpp | build
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/transfer.cpp gpu/transfer_test.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer_engine.cpp v1/pagebroker.pb.cc \
+build/gpu-transfer-test: generate transfer/engine/transfer_engine.cpp gpu/transfer.cpp gpu/transfer.hpp gpu/transfer_test.cpp cancellation.hpp $(COMMON_SOURCES) $(IO_SOURCES) file_descriptor.hpp io_engine.hpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/transfer.cpp gpu/transfer_test.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer/engine/transfer_engine.cpp v1/pagebroker.pb.cc \
 		$(GTEST_FLAGS) -lprotobuf $(NIXL_FLAGS) -L$(CUDA_LIBRARY_DIR) -lcuda -ldl -o $@
