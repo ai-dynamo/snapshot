@@ -105,14 +105,6 @@ class BrokerTest : public ::testing::Test, public test::RequestBuilder {
   std::optional<Broker> broker_;
 };
 
-TEST_SUITE_P(
-    TransferEngines,
-    FilesystemEngineTest,
-    ::testing::Values(IoEngine::POSIX_COPY, IoEngine::MODEL_STREAMER),
-    [](const ::testing::TestParamInfo<IoEngine>& info) {
-      return info.param == IoEngine::POSIX_COPY ? "PosixCopy" : "ModelStreamer";
-    });
-
 class PosixFilesystemTest : public BrokerTest {};
 
 TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
@@ -180,11 +172,9 @@ TEST_F(BrokerTest, StagesIndependentRestoresConcurrently)
   auto first = RequestFor("first");
   auto second = RequestFor("second");
   Configure(
-      first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_,
-      IoEngine::MODEL_STREAMER);
+      first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_);
   Configure(
-      second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_,
-      IoEngine::MODEL_STREAMER);
+      second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_);
 
   Response first_response;
   Response second_response;
