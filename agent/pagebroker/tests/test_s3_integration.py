@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import contextlib
+import io
 import os
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from moto import mock_aws
 
@@ -63,11 +65,127 @@ class S3FixtureTest(unittest.TestCase):
             stack.enter_context(patch.object(s3_integration, "create_session", return_value=session))
             failure = RuntimeError("native restore failed")
             stack.enter_context(patch.object(s3_integration, "run_native", side_effect=failure))
-            args = SimpleNamespace(tls=False, image=None, binary="unused-test-binary")
+            args = SimpleNamespace(tls=False, resources=False, image=None, binary="unused-test-binary")
             with self.assertRaises(RuntimeError) as raised:
                 s3_integration.run(args, environment)
             self.assertIs(raised.exception, failure)
             self.assertFalse(Path(environment["PAGEBROKER_S3_TEST_FIXTURE"]).parent.exists())
+
+
+class FaultServiceTest(unittest.TestCase):
+    def test_abort_failure_requires_an_abort_after_creation(self):
+        service = s3_integration.FaultService(Mock())
+        client = Mock()
+        client.list_multipart_uploads.return_value = {"Uploads": [{"UploadId": "test-upload"}]}
+        service.counts["abort-failure", "create"] = 1
+        with self.assertRaises(AssertionError):
+            service.verify(client, "test-bucket")
+        service.counts["abort-failure", "abort"] = 1
+        service.verify(client, "test-bucket")
+        client.list_multipart_uploads.assert_called_once_with(
+            Bucket="test-bucket", Prefix="roundtrip/abort-failure/")
+
+    def test_slot_owner_barrier_holds_response_until_release(self):
+        def backend(environment, start_response):
+            start_response("200 OK", [("Content-Length", "0")])
+            return [b""]
+
+        service = s3_integration.FaultService(backend)
+        key = "roundtrip/slot-owner/data"
+        statuses = []
+        owner = threading.Thread(target=lambda: service(
+            {"PATH_INFO": "/bucket/" + key, "QUERY_STRING": "", "REQUEST_METHOD": "PUT"},
+            lambda status, headers: statuses.append(status)))
+        owner.start()
+        with service.changed:
+            held = service.changed.wait_for(lambda: key in service.first_parts, timeout=2)
+        still_running = owner.is_alive()
+        service({"PATH_INFO": "/bucket/roundtrip/release/slot-owner", "QUERY_STRING": "",
+                 "REQUEST_METHOD": "HEAD"}, lambda status, headers: None)
+        owner.join(timeout=2)
+        self.assertTrue(held)
+        self.assertTrue(still_running)
+        self.assertFalse(owner.is_alive())
+        self.assertEqual(statuses, ["200 OK"])
+
+    def test_partial_tree_fault_allows_first_object_and_only_denies_bad_put(self):
+        forwarded = []
+
+        def backend(environment, start_response):
+            forwarded.append((environment["REQUEST_METHOD"], environment["PATH_INFO"]))
+            start_response("200 OK", [("Content-Length", "2")])
+            return [b"ok"]
+
+        service = s3_integration.FaultService(backend)
+        statuses = []
+        for method, name in (("PUT", "first"), ("PUT", "bad"), ("HEAD", "first")):
+            service({"PATH_INFO": "/bucket/roundtrip/engine-partial/" + name,
+                     "QUERY_STRING": "", "REQUEST_METHOD": method},
+                    lambda status, headers: statuses.append(status))
+        self.assertEqual(statuses, ["200 OK", "403 Forbidden", "200 OK"])
+        self.assertEqual(forwarded, [("PUT", "/bucket/roundtrip/engine-partial/first"),
+                                     ("HEAD", "/bucket/roundtrip/engine-partial/first")])
+
+    def test_retries_are_scoped_to_the_native_test_prefix(self):
+        forwarded = []
+
+        def backend(environment, start_response):
+            forwarded.append(environment["PATH_INFO"])
+            start_response("200 OK", [("Content-Length", "2")])
+            return [b"ok"]
+
+        service = s3_integration.FaultService(backend)
+        statuses = []
+        for key in ("fixture/retry", "roundtrip/retry/data", "roundtrip/retry/data", "roundtrip/retry/data"):
+            environment = {"PATH_INFO": "/bucket/" + key, "QUERY_STRING": "", "REQUEST_METHOD": "PUT",
+                           "wsgi.input": io.BytesIO(b"")}
+            service(environment, lambda status, headers: statuses.append(status))
+        self.assertEqual(statuses, ["200 OK", "503 Service Unavailable", "503 Service Unavailable", "200 OK"])
+        self.assertEqual(forwarded, ["/bucket/fixture/retry", "/bucket/roundtrip/retry/data"])
+
+    def test_lost_response_happens_after_backend_completion(self):
+        accepted = []
+
+        def backend(environment, start_response):
+            accepted.append(True)
+            start_response("200 OK", [("Content-Length", "2")])
+            return [b"ok"]
+
+        service = s3_integration.FaultService(backend)
+        statuses = []
+        body = service({"PATH_INFO": "/bucket/roundtrip/lost-complete/data", "QUERY_STRING": "uploadId=test-id",
+                        "REQUEST_METHOD": "POST"}, lambda status, headers: statuses.append(status))
+        self.assertEqual(accepted, [True])
+        self.assertEqual(statuses, ["503 Service Unavailable"])
+        self.assertIn(b"ServiceUnavailable", b"".join(body))
+
+    def test_expected_cancelled_body_does_not_hide_unrelated_backend_errors(self):
+        for during_iteration in (False, True):
+            for message in ("Invalid chunk header", "unrelated backend error"):
+                with self.subTest(during_iteration=during_iteration, message=message):
+                    def body():
+                        yield b"partial body"
+                        raise OSError(message)
+
+                    def backend(environment, start_response):
+                        if during_iteration:
+                            start_response("200 OK", [])
+                            return body()
+                        raise OSError(message)
+
+                    service = s3_integration.FaultService(backend)
+                    environment = {"PATH_INFO": "/bucket/roundtrip/source-truncated/data", "QUERY_STRING": "",
+                                   "REQUEST_METHOD": "PUT"}
+                    statuses = []
+                    if message == "Invalid chunk header":
+                        service(environment, lambda status, headers: statuses.append(status))
+                        self.assertEqual(statuses, ["408 Request Timeout"])
+                    else:
+                        with self.assertRaises(OSError):
+                            service(environment, lambda status, headers: None)
+                    environment["PATH_INFO"] = "/bucket/roundtrip/ordinary/data"
+                    with self.assertRaises(OSError):
+                        service(environment, lambda status, headers: None)
 
 
 if __name__ == "__main__":

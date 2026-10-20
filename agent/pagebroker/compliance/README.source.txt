@@ -18,6 +18,21 @@ Source for PageBroker and the third-party components distributed in this image:
 This image also ships the pinned Model Streamer core and S3 native libraries,
 with their SDK license and release metadata in /legal/model-streamer/.
 The S3 plugin license is also in /legal/model-streamer-s3/.
+OpenSSL libcrypto supports the AWS SDK; its attribution
+is in /legal/openssl/copyright. The uploader uses the S3 CRT client from AWS SDK for C++ 1.11.584,
+source commit bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3:
+
+  https://github.com/aws/aws-sdk-cpp/tree/bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3
+
+The SDK build applies patches/aws-sdk-crt-cancellation.patch to retain requests
+until queued cancellation finishes. The patch is also in /legal/aws-sdk/.
+The SDK uses the CRT HTTP client, without the libcurl dependency chain.
+The SDK and its pinned CRT submodule notices are in /legal/aws-sdk/. Its
+remaining dynamically linked TLS/compression dependencies come from Ubuntu 24.04 packages;
+their copyright files are in /legal/packages/. Package copyright files identify
+their upstream sources and license terms. These dependencies are copied from
+the same build stage as the SDK, not from the host.
+
 The base image
 contains third-party components of its own -- glibc, libstdc++ and libgcc,
 which this binary links dynamically. Source for the base image's own contents
