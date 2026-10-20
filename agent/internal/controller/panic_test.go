@@ -4,12 +4,21 @@
 package controller
 
 import (
+	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
+
+	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 func TestRecoverPanicHandsTheCauseToTheHandler(t *testing.T) {
@@ -74,4 +83,39 @@ func TestRecoverPanicContainsAWaitGroupWorker(t *testing.T) {
 		panic("restore blew up")
 	})
 	workers.Wait() // re-panics, and so fails the run, without the recover above
+}
+
+// failCaptureAfterPanicOn runs the cleanup against a work order that has not
+// reached a terminal condition, as it would be while its capture is running.
+func failCaptureAfterPanicOn(t *testing.T, committed bool) *snapshotv1alpha1.PodSnapshotContent {
+	t.Helper()
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	if committed {
+		path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(path, 0o700))
+		require.NoError(t, snapshottypes.WriteManifest(path, &snapshottypes.CheckpointManifest{
+			Artifact: snapshottypes.ArtifactManifest{ContentUID: string(content.UID), ContainerName: "main"},
+		}))
+	}
+
+	w.failCaptureAfterPanic(context.Background(), content.Name, errors.New("panic: boom"))
+
+	return getContent(t, w, content.Name)
+}
+
+func TestFailCaptureAfterPanicPromotesACommittedCapture(t *testing.T) {
+	got := failCaptureAfterPanicOn(t, true)
+
+	assert.True(t, isContentReady(got), "a committed capture must survive the panic")
+	assert.False(t, isContentFailed(got))
+}
+
+func TestFailCaptureAfterPanicFailsWhenNothingCommitted(t *testing.T) {
+	got := failCaptureAfterPanicOn(t, false)
+
+	require.True(t, isContentFailed(got))
+	assert.Equal(t, "AgentPanic",
+		meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
 }

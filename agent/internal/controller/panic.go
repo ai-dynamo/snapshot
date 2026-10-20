@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -43,6 +44,10 @@ func recoverPanic(log logr.Logger, operation string, onPanic func(error), keysAn
 
 // failCaptureAfterPanic fails the work order, so a capture whose goroutine
 // died does not sit pending until its lease expires.
+//
+// A panic can land after the capture committed but before Ready is written, so
+// a committed artifact is promoted first: AgentPanic is terminal, and a
+// terminal work order never reaches recovery again.
 func (w *NodeController) failCaptureAfterPanic(ctx context.Context, name string, cause error) {
 	defer recoverPanic(w.log, "capture panic cleanup", nil, "content", name)
 
@@ -55,6 +60,9 @@ func (w *NodeController) failCaptureAfterPanic(ctx context.Context, name string,
 		if isContentTerminal(content) {
 			return
 		}
+		if w.recoverCommittedCaptureAfterPanic(ctx, content, name) {
+			return
+		}
 		err := w.setSnapshotContentFailed(ctx, content, "AgentPanic", errors.New(cause.Error()))
 		if err == nil {
 			return
@@ -63,6 +71,27 @@ func (w *NodeController) failCaptureAfterPanic(ctx context.Context, name string,
 			w.log.Error(err, "Failed to record recovered panic on work order", "content", name)
 		}
 	}
+}
+
+// recoverCommittedCaptureAfterPanic reports whether the capture had already
+// committed, promoting it to Ready when it had. Bound content publishes through
+// PageBroker rather than the shared filesystem, so it has no such check here
+// and is left to the recovery the store itself provides.
+func (w *NodeController) recoverCommittedCaptureAfterPanic(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, name string) bool {
+	contentUID := string(content.UID)
+	containerName, err := singleTargetContainer(content.Spec.Source.PodRef.Containers)
+	if contentUID == "" || err != nil {
+		return false
+	}
+	artifactPath, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
+	if err != nil {
+		return false
+	}
+	recovered, err := w.recoverCommittedArtifact(ctx, content, contentUID, containerName, artifactPath)
+	if err != nil {
+		w.log.Error(err, "Failed to promote a committed capture after recovered panic", "content", name)
+	}
+	return recovered
 }
 
 // failRestoreAfterPanic records a recovered panic on the restore pod. Without
