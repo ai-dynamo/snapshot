@@ -357,8 +357,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err := lastMount.point.Unmount(ctx); err != nil {
 		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", lastMount.action, err))
 		unmountFailed = true
+	} else {
+		// Only drop it once unmounted: the deferred cleanup below retries
+		// whatever is still in activeMounts, so a failed unmount must stay
+		// tracked or it leaks until the restored container exits on its own.
+		activeMounts = activeMounts[:len(activeMounts)-1]
 	}
-	activeMounts = activeMounts[:len(activeMounts)-1]
 	if unmountFailed {
 		// Staging may still be in use; don't Commit or Abort. Leave the
 		// transaction for expiry to reclaim.
