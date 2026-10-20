@@ -476,6 +476,8 @@ Broker::Engine(const IOEngine& engine) const
 {
   if (engine.has_posix_copy())
     return Engine(IoEngine::POSIX_COPY);
+  if (engine.has_model_streamer())
+    return Engine(IoEngine::MODEL_STREAMER);
   throw std::invalid_argument("unsupported I/O engine");
 }
 
