@@ -169,10 +169,65 @@ tests:
       - failedTemplate:
           errorMessage: storage.pvc.name is required
 
-  - it: does not activate S3
+  - it: rejects an unsupported storage type
+    template: templates/configmap.yaml
+    set:
+      storage.type: oci
+    asserts:
+      - failedTemplate:
+          errorPattern: only pvc and s3 are currently implemented
+
+  - it: rejects S3 activation without required fields
     template: templates/configmap.yaml
     set:
       storage.type: s3
     asserts:
       - failedTemplate:
-          errorPattern: only pvc is currently implemented
+          errorMessage: storage.s3.endpoint is required
+
+  - it: renders the S3 backend block when S3 is configured
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.prefix: containers
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: |-
+            (?s)s3:\s*
+              endpoint: "https://s3.example.com"\s*
+              region: "us-east-1"\s*
+              bucket: "snapshot-bucket"\s*
+              prefix: "containers"
+      - notMatchRegex:
+          path: data["storage.yaml"]
+          pattern: "pvc:"
+
+  - it: tells the operator where to write PageBroker's S3 configuration and drops the PVC mount
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pagebroker-s3-config-namespace=storage-ns
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pagebroker-s3-config-name=snapshot-pagebroker-storage-config
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: checkpoints
+            mountPath: /checkpoints
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: checkpoints
+            persistentVolumeClaim:
+              claimName: snapshot-pvc

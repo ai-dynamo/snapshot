@@ -6,11 +6,13 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -30,11 +32,20 @@ func main() {
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
 	bindNewContents := flag.Bool("bind-new-contents", false,
 		"Bind new content to the configured store after all agents support artifact addressing")
+	pageBrokerS3ConfigNamespace := flag.String("pagebroker-s3-config-namespace", "",
+		"Namespace of the ConfigMap PageBroker reads its S3 configuration from")
+	pageBrokerS3ConfigName := flag.String("pagebroker-s3-config-name", "",
+		"Name of the ConfigMap PageBroker reads its S3 configuration from")
 	flag.Parse()
-	storeID := mustStoreID(*storageConfigPath)
+	storageCfg, storeID := mustStorageConfig(*storageConfigPath)
 	captureStoreID, err := newContentStoreID(storeID, *bindNewContents)
 	if err != nil {
 		ctrl.Log.Error(err, "invalid content binding configuration")
+		os.Exit(1)
+	}
+	if storageCfg.S3 != nil && (*pageBrokerS3ConfigNamespace == "" || *pageBrokerS3ConfigName == "") {
+		ctrl.Log.Error(fmt.Errorf("missing flag"),
+			"pagebroker-s3-config-namespace and pagebroker-s3-config-name are required with an S3 storage configuration")
 		os.Exit(1)
 	}
 	artifactCleanupConfig.StoreID = storeID
@@ -49,7 +60,7 @@ func main() {
 
 	ctrl.Log.Info("starting snapshot operator", "version", version)
 	if storeID != "" {
-		ctrl.Log.Info("configured PVC store", "storeID", storeID)
+		ctrl.Log.Info("configured storage store", "storeID", storeID)
 	}
 
 	scheme := runtime.NewScheme()
@@ -81,6 +92,21 @@ func main() {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		ctrl.Log.Error(err, "unable to set up ready check")
 		os.Exit(1)
+	}
+
+	if storageCfg.S3 != nil {
+		// A direct (non-cached) client: this runs once at startup, before the
+		// manager's cache is started, and writes rather than watches.
+		directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: scheme})
+		if err != nil {
+			ctrl.Log.Error(err, "unable to construct client for PageBroker S3 configuration")
+			os.Exit(1)
+		}
+		if err := ensurePageBrokerS3Config(context.Background(), directClient,
+			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, *storageCfg.S3, storeID); err != nil {
+			ctrl.Log.Error(err, "unable to write PageBroker S3 configuration")
+			os.Exit(1)
+		}
 	}
 
 	podSnapshotReconciler := &controller.PodSnapshotReconciler{

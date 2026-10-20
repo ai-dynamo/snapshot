@@ -361,3 +361,61 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "maxConcurrentRequests"
+
+  - it: points PageBroker at its own S3 configuration and drops the PVC mount
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          content: --storage-config
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          content: /etc/snapshot-s3/pagebroker-s3-config.json
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: pagebroker-s3-config
+            mountPath: /etc/snapshot-s3
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: checkpoints
+            mountPath: /checkpoints
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: pagebroker-s3-config
+            configMap:
+              name: RELEASE-NAME-snapshot-pagebroker-storage-config
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: checkpoints
+            persistentVolumeClaim:
+              claimName: snapshot-pvc
+
+  - it: injects S3 credentials into the agent and PageBroker containers
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: snapshot-s3-credentials
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].envFrom
+          content:
+            secretRef:
+              name: snapshot-s3-credentials
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].envFrom
+          content:
+            secretRef:
+              name: snapshot-s3-credentials

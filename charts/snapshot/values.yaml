@@ -92,7 +92,7 @@ openshift:
 # the operator and PageBroker; backend details are not part of the agent API.
 storage:
   # Storage type stays snapshot-owned for future backend expansion.
-  # Only pvc is implemented today.
+  # pvc and s3 are implemented today.
   type: pvc
 
   # PVC configuration (when type=pvc)
@@ -110,9 +110,22 @@ storage:
     # use the claim root (/); the privileged helper enforces this local mount.
     basePath: /checkpoints
 
-  # Reserved for future snapshot-owned backends. Unsupported today.
+  # S3-compatible object storage (when type=s3). Requires a PageBroker image
+  # implementing the S3 backend (see #416). Endpoint, region, bucket and
+  # prefix are identity inputs: see api/storage.S3.StoreID.
   s3:
-    uri: ""
+    # S3-compatible endpoint, an absolute http(s) URL with no path, query or
+    # userinfo, e.g. "https://s3.us-east-1.amazonaws.com".
+    endpoint: ""
+    region: ""
+    bucket: ""
+    # Key prefix inside the bucket. Empty identifies the bucket root.
+    prefix: ""
+    # Secret with standard AWS credential env vars (AWS_ACCESS_KEY_ID,
+    # AWS_SECRET_ACCESS_KEY, optionally AWS_SESSION_TOKEN), injected into the
+    # agent and PageBroker containers. Leave empty to rely on another
+    # provider in the AWS SDK's default chain (e.g. IRSA).
+    credentialsSecretRef: ""
 
   # Reserved for future snapshot-owned backends. Unsupported today.
   oci:
