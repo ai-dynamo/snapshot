@@ -98,37 +98,67 @@ Because the staging volume is RAM, size the agent pod for it:
 
 | Value                                | Purpose                                                                                        | Default      |
 |---------------------------------------|--------------------------------------------------------------------------------------------------|--------------|
-| `pageBroker.staging.sizeLimit`       | Cap on the shared staging volume, used for checkpoint and staged restore                        | `56Gi`       |
+| `pageBroker.staging.sizeLimit`       | Cap on the RAM-backed staging volume shared by checkpoint and staged restore; unbounded without it | `56Gi`       |
 | `daemonset.resources.limits.memory`  | Bounds the largest checkpoint image, since CRIU writes staging from the agent container         | `64Gi`       |
 | `pageBroker.resources.limits.memory` | Bounds staged-restore prefetch, since PageBroker fills staging only in staged restore mode       | `256Gi`      |
 | `pageBroker.resources.requests`      | GPU transfer rings and process memory; added to the agent's requests when scheduling            | 8 CPU / 32Gi |
 
-Pages written to the staging volume are charged to the container that wrote
-them (the agent during checkpoint, PageBroker during staged restore), not to
-the volume. `sizeLimit` must therefore stay strictly below
-`daemonset.resources.limits.memory`, with enough left over for the agent's own
-process and CRIU's working set: if the two are equal, they can together reach
-the container's limit while the volume is still under its cap, and the kernel
-OOM-kills the agent — taking every capture and restore on that node with it.
+### Why the staging volume needs a cap
+
+Staging is an `emptyDir` with `medium: Memory`: a tmpfs living in the node's
+RAM, where a checkpoint is written before it is committed to the checkpoint
+store, and where an artifact is prefetched before CRIU restores from it. It is
+not accounted like a disk. A memory-backed `emptyDir` has no size of its own,
+so **without a `sizeLimit` it grows until the node runs out of memory**, and
+its pages are charged to the cgroup of whichever container wrote them — not to
+the volume, and not to the pod as a whole.
+
+Two containers write it, each against its own limit:
+
+| Writer | When | Charged to |
+|---|---|---|
+| agent | checkpoint — CRIU writes the image | `daemonset.resources.limits.memory` |
+| PageBroker | staged restore — prefetching the artifact | `pageBroker.resources.limits.memory` |
+
+So one oversized request is enough to exceed a container's limit, and the
+kernel OOM-kills **that container**, not the request. The agent or PageBroker
+restarts, and every other capture and restore in flight on that node dies with
+it — including other tenants'. A single workload too large to stage therefore
+takes checkpointing and restore off the whole node rather than failing its own
+request.
+
+A `sizeLimit` converts that into an ordinary failure. The tmpfs fills before
+the cgroup does, the write fails with `ENOSPC`, and the request fails while the
+node keeps serving everything else.
+
+### How the cap is chosen
+
+The limit has to leave room rather than merely match: the volume's pages and
+the writing container's own allocations share one cgroup, so a cap equal to the
+container limit lets the two together reach it while the volume is still under
+its cap.
 
 **The chart enforces this.** A `sizeLimit` that does not leave room is lowered
-to one that does — to the agent memory limit less a reserve of 8Gi, or an
-eighth of a smaller limit. Nothing is rejected: a chart that refuses to render
-would break installs that work today, so the cap is made safe instead.
+to one that does — the **smaller** of the two writers' memory limits, less a
+reserve of 8Gi or an eighth of a smaller limit. The smaller limit is what
+matters because either container can be the one that fills the volume. Nothing
+is rejected: a chart that refuses to render would break installs that work
+today, so the cap is made safe instead.
 
 The defaults already fit, so a release on chart defaults renders `56Gi`
 unchanged, as does any configuration that leaves its own headroom. A lowered
 cap appears in the rendered manifest as a byte count, which is where to look if
 a capture fails with less staging than expected.
 
-Two configurations are affected, and both could previously OOM-kill the agent:
+Configurations the chart lowers, all of which could otherwise OOM-kill a
+container:
 
-- `sizeLimit` at or above the agent memory limit — lowered to fit.
-- The agent memory limit lowered without lowering the cap with it, including
-  small test clusters that only set the limit — the cap follows the limit down.
+- `sizeLimit` at or above either writer's memory limit.
+- Either memory limit lowered without lowering the cap with it, including small
+  test clusters that only set the limits.
 
-To keep a specific staging size, raise `daemonset.resources.limits.memory`
-above it rather than raising the cap alone.
+To keep a specific staging size, raise **both** writers' memory limits above it
+rather than raising the cap alone — the cap follows whichever is smaller.
 
 The staging-space check (`INSUFFICIENT_STORAGE`) only rejects a transfer that
 would exceed `sizeLimit`; it does not guarantee protection from an OOM kill,

@@ -32,6 +32,16 @@ tests:
           path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
           value: 56Gi
 
+  # PageBroker writes this volume on staged restore, charged to its own limit,
+  # so the smaller of the two has to hold.
+  - it: follows the PageBroker memory limit when it is the smaller one
+    set:
+      pageBroker.resources.limits.memory: 8Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "7516192768" # 8Gi less an eighth
+
   # What the CPU e2e cluster sets, with staging untouched.
   - it: lowers the cap when the agent memory limit is smaller than the default
     set:

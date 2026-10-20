@@ -102,9 +102,18 @@ explicitly null, as helm upgrade --reuse-values leaves it.
 */}}
 {{- define "snapshot.stagingSizeLimit" -}}
 {{- $configured := ((.Values.pageBroker).staging | default dict).sizeLimit | default "56Gi" -}}
-{{- $limit := (((.Values.daemonset).resources).limits).memory -}}
+{{- /* Both containers write this volume — the agent on checkpoint, PageBroker
+       on staged restore — and the pages charge to whichever wrote them, so the
+       smaller limit is the one that has to hold. */ -}}
 {{- $limitBytes := "" -}}
-{{- if $limit }}{{- $limitBytes = include "snapshot.quantityBytes" $limit -}}{{- end -}}
+{{- range $container := list (((.Values.daemonset).resources).limits).memory (((.Values.pageBroker).resources).limits).memory -}}
+{{- if $container -}}
+{{- $bytes := include "snapshot.quantityBytes" $container -}}
+{{- if $bytes -}}
+{{- if or (not $limitBytes) (lt (int64 $bytes) (int64 $limitBytes)) }}{{- $limitBytes = $bytes -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $configuredBytes := include "snapshot.quantityBytes" $configured -}}
 {{- if or (not $limitBytes) (not $configuredBytes) -}}
 {{- $configured -}}
