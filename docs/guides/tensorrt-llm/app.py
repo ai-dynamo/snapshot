@@ -17,8 +17,8 @@ import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-if benchmark_token:
-    os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+# Forked compiler workers can inherit CUDA mappings that CRIU cannot restore.
+os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 from tensorrt_llm import LLM, SamplingParams
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))

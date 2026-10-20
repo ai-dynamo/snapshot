@@ -156,6 +156,35 @@ GPU and driver identities, engine version, storage class and placement.
 Schema-1 results remain readable, under their original timing definitions;
 the report separates them from the new startup-to-ready measurements.
 
+## Known measurement limits
+
+The published TRT-LLM cold starts allowed FlashInfer kernel artifact downloads.
+A follow-up used the same pinned engine image with 11 pre-staged, checksum-verified
+artifacts, `FLASHINFER_NO_DOWNLOAD=1` and a separate read-only
+`FLASHINFER_CUBIN_DIR`. Generated JIT/autotune caches started empty; OS and storage
+caches were not cleared.
+
+| Model | Parallelism | Published cold start (s) | Pre-staged artifacts (s) | Difference (s) |
+| --- | --- | --- | --- | --- |
+| Qwen3-0.6B | TP1 | 121.26 | 117.94 | -3.32 |
+| Qwen3-14B | TP1 | 127.02 | 124.14 | -2.89 |
+| Qwen3-14B | TP2 | 158.66 | 130.22 | -28.44 |
+| gpt-oss-120b | TP1 | 200.55 | 198.10 | -2.45 |
+| gpt-oss-120b | TP4 | 223.96 | 191.33 | -32.63 |
+
+The multi-GPU differences were mainly in attention warmup. Logged fetch windows
+covered only 2.81 seconds on Qwen3-14B TP2, so the full difference cannot be
+attributed to downloads. Original-download controls took 158.39 seconds for that
+configuration and 221.88 seconds for GPT-OSS TP4. The first offline GPT-OSS TP4
+attempt failed output validation and is excluded; the table uses its successful
+repeat. All five selected configurations passed output checks, capture and three
+restores. The published tables retain the original measurements.
+
+Published cold starts include instrumentation overhead. The runner limits
+constructor timing to startup modules and omits the
+unused import profiling output. These changes reduce instrumentation overhead;
+the published measurements have not been rerun with these changes.
+
 ## Cleanup and verification
 
 The original cleanup path removes this run's pods, ConfigMap, PodSnapshot and

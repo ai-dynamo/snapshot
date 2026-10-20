@@ -3,9 +3,10 @@
 These benchmarks compare cold start with Snapshot restore for 22 configurations of vLLM, SGLang and TensorRT-LLM on one to eight B200 GPUs. Both timings end when the engine is ready, before inference.
 
 > [!TIP]
-> To reproduce the measurements or inspect the exact workload configurations, see the
+> To run the benchmarks and select a workload, see the
 > [benchmark guide](benchmarks-guide.md). The [benchmark directory](../../benchmarks/README.md)
-> includes the scripts and machine-readable results behind all three tables.
+> contains the runner. Published results are the Markdown tables below; new runs
+> save their own machine-readable results and logs locally.
 
 Cold start loads weights, creates workers, initializes device memory, compiles and tunes kernels, and captures CUDA graphs. Snapshot restores a process that has already completed that work. The tables show the total time and the time spent in each stage.
 
@@ -108,7 +109,7 @@ All times are seconds. Speedup is cold-start time divided by the first restore t
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 64.42 | 95.14 | 64.87 | 684.05 | 908.48 |
 | DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 59.41 | 913.59 | 41.59 | 428.64 | 1443.23 |
 
-These columns divide elapsed time between phases. They count overlapping work across GPU workers once. Small untimed intervals are spread proportionally across the columns. These additions are estimates; the archived measurement records keep the raw timings and gaps. Some kernel JIT occurs during Startup and is included there.
+These columns divide elapsed time between phases. They count overlapping work across GPU workers once. Small untimed intervals are spread proportionally across the columns. These additions are estimates. The runner saves raw timings and gaps in each new run's local evidence. Some kernel JIT occurs during Startup and is included there.
 
 ### Where the restore time goes
 

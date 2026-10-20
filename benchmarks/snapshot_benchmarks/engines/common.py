@@ -50,7 +50,7 @@ class GuideEngine:
             kind="Pod",
             spec=spec,
             metadata=dict(
-                template.get("metadata", {}),
+                annotations=dict(template.get("metadata", {}).get("annotations", {})),
                 name=name,
                 namespace=namespace,
             ),

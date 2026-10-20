@@ -118,10 +118,10 @@ def instrument(profile):
                             visit(node.body, prefix + node.name + ".")
                         elif isinstance(node, ast.FunctionDef):
                             name = prefix + node.name
-                            select = startup.search(node.name) or (
-                                node.name == "__init__"
-                                and any(s in relative for s in INIT_MODULES)
-                            )
+                            if node.name == "__init__":
+                                select = any(s in relative for s in INIT_MODULES)
+                            else:
+                                select = startup.search(node.name)
                             if not select:
                                 continue
                             # Generator execution starts at iteration, not function call.

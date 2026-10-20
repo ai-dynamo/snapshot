@@ -50,7 +50,6 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
         HF_HUB_DISABLE_XET="1",
         HF_MODULES_CACHE="/compile-cache/hf-modules",
         PYTHONPATH="/snapshot-app",
-        PYTHONPROFILEIMPORTTIME="1",
         PYTHONUNBUFFERED="1",
         XDG_CACHE_HOME="/compile-cache/xdg",
         TORCHINDUCTOR_CACHE_DIR="/compile-cache/torchinductor",

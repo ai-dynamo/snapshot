@@ -148,6 +148,58 @@ def cluster():
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_patcher_limits_constructor_timers_to_startup_modules(self):
+        path = Path(__file__).parents[1] / "instrumentation/patch_sources_common.py"
+        spec = importlib.util.spec_from_file_location("test_patch_sources", path)
+        patcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(patcher)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("model_runner.py", "quantization.py"):
+                (root / name).write_text(
+                    "class Model:\n    def __init__(self): pass\n    def load_weights(self): pass\n"
+                )
+            with (
+                patch.object(patcher, "PACKAGES", ["test_engine"]),
+                patch.object(
+                    patcher.importlib.util,
+                    "find_spec",
+                    return_value=SimpleNamespace(submodule_search_locations=[tmp]),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                patcher.instrument("base")
+            for name, timed_init in (
+                ("model_runner.py", True),
+                ("quantization.py", False),
+            ):
+                methods = {
+                    n.name: n
+                    for n in ast.parse((root / name).read_text()).body[-1].body
+                }
+                self.assertEqual(bool(methods["__init__"].decorator_list), timed_init)
+                self.assertTrue(methods["load_weights"].decorator_list)
+
+    def test_trt_guide_serializes_compilation_without_benchmark_hooks(self):
+        path = Path(__file__).parents[2] / "docs/guides/tensorrt-llm/app.py"
+        nodes = ast.parse(path.read_text()).body
+        stop = next(
+            i
+            for i, n in enumerate(nodes)
+            if isinstance(n, ast.ImportFrom) and n.module == "tensorrt_llm"
+        )
+        for token in (None, "benchmark-token"):
+            with patch.dict(os.environ, TORCHINDUCTOR_COMPILE_THREADS="9"):
+                exec(
+                    compile(
+                        ast.Module(body=nodes[:stop], type_ignores=[]),
+                        str(path),
+                        "exec",
+                    ),
+                    {"benchmark_token": token},
+                )
+                self.assertEqual(os.environ["TORCHINDUCTOR_COMPILE_THREADS"], "1")
+
     def test_sglang_guide_keeps_kv_only_policy(self):
         path = Path(__file__).parents[2] / "docs/guides/sglang/app.py"
         fn = next(
@@ -368,6 +420,9 @@ class BenchmarkTests(unittest.TestCase):
                         restore=True,
                     )
                     for pod in (source, restore):
+                        self.assertEqual(
+                            pod["metadata"]["labels"], {"snapshot-benchmark": "run"}
+                        )
                         spec = pod["spec"]
                         self.assertEqual(spec["runtimeClassName"], "nvidia")
                         self.assertEqual(
@@ -394,6 +449,9 @@ class BenchmarkTests(unittest.TestCase):
                                     for m in main["volumeMounts"]
                                 )
                             )
+                        self.assertNotIn(
+                            "PYTHONPROFILEIMPORTTIME", {e["name"] for e in main["env"]}
+                        )
                         constructor = json.loads(main["args"][0])
                         if engine.name == "sglang":
                             self.assertEqual(
