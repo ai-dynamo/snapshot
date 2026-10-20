@@ -18,9 +18,9 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
     - [Backward compatibility and migration](#backward-compatibility-and-migration)
 - [Design Details](#design-details)
   - [API](#api)
-    - [Application contract binding](#application-contract-binding)
+    - [Per-container configuration](#per-container-configuration)
     - [SnapshotJob](#snapshotjob)
-    - [ClusterApplicationContract](#clusterapplicationcontract)
+    - [Application contract](#application-contract)
     - [Checkpoint metadata](#checkpoint-metadata)
   - [Capture and restore execution](#capture-and-restore-execution)
   - [Security](#security)
@@ -29,6 +29,7 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
   - [Configuration](#configuration)
   - [Monitoring](#monitoring)
   - [Test Plan](#test-plan)
+- [Alternatives](#alternatives)
 - [Appendix](#appendix)
   - [References](#references)
 <!-- /toc -->
@@ -36,8 +37,9 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
 ## Summary
 
 Application contracts define how Snapshot checks capture readiness and notifies
-an application after restore. Administrators install contracts; users select them
-in PodSnapshot or SnapshotJob.
+an application after restore. Users configure each captured container in
+PodSnapshot or SnapshotJob. Snapshot saves that configuration with the checkpoint
+and uses it for every restore.
 
 ## Motivation
 
@@ -46,38 +48,43 @@ After restore, Snapshot must tell the application it may recover connections
 and other resources before serving requests.
 
 Today, this exchange uses files on a shared control volume. This proposal adds
-HTTP support. Contracts let users select an engine integration without repeating
-file paths, endpoints, and timing settings.
+HTTP support and per-container configuration for file paths, endpoints, and
+timing settings.
 
 ### Goals
 
 - Configure both PodSnapshot and SnapshotJob through the same contract API.
-- Record per-container contract names for resolution at capture and restore.
-- Provide the existing file integration as an installed, configurable default contract.
+- Preserve each captured container’s contract with its checkpoint for all restores.
+- Preserve the existing file integration when no contract is configured.
 
 ### Non-Goals
 
-- Requesting application preparation, draining, or quiescence.
+- Asking the application to stop accepting requests or prepare for capture.
 - Continuing the source application after capture.
 - Defining application serving-readiness checks or engine recovery steps.
 - Running arbitrary commands or general-purpose hook sequences.
 
 ## Proposal
 
-A `ClusterApplicationContract` defines two optional actions: `quiesceProbe` checks
-capture readiness; `restoreRelease` notifies the application after process and
-GPU restoration. The application owns capture safety, recovery, and serving
-readiness. Users select a contract by name for each captured container.
+Each container can define an `applicationContract` directly in its settings:
+
+- `quiesceProbe` checks whether the application is safe to capture.
+- `restoreRelease` tells the application it may resume after Snapshot restores
+  its process and GPU state.
+
+Both actions are optional. The application decides when it is safe to capture,
+how to recover after restore, and when it is ready to serve requests.
 
 ### Defaults and user probes
 
-Containers without a binding use the administrator-configured default contract,
-initially `snapshot-files`. A missing contract blocks the operation; it never
-causes fallback to another contract.
+Leaving out `applicationContract` keeps the existing file behavior. When a
+contract is provided, each missing action has its own behavior:
 
-An empty contract is valid. An omitted `quiesceProbe` waits for the whole Pod's
-`Ready` condition, including sidecars and readiness gates. An omitted
-`restoreRelease` sends no application notification.
+- No `quiesceProbe`: wait for the selected container to be ready. As before,
+  this does not wait for other containers or Pod readiness gates.
+- No `restoreRelease`: do not notify the application after restore.
+
+An empty contract (`applicationContract: {}`) uses both of these behaviors.
 
 Preserve user-defined readiness, startup, and liveness probes on source and
 destination containers. When a probe is not configured, retain Snapshot's
@@ -85,28 +92,29 @@ existing default probe logic.
 
 ### Limitations, Risks, and Mitigations
 
-Capture is limited to one container per PodSnapshot. An HTTP control endpoint
+Snapshot currently captures one container per PodSnapshot. The API allows
+settings for multiple containers so it can support them later. An HTTP control endpoint
 must work before release, including after restore at a new Pod IP.
 
 | Risk | Required handling |
 | --- | --- |
-| Premature capture readiness | The application stays safe until capture; integration tests verify recovery and inference. |
-| Recreated contract name | Administrators validate compatibility or publish a new name. |
-| Lost release response | Applications handle duplicate delivery; deadline expiry can terminate an already released application. |
-| Custom probes during recovery | Workload owners configure probes to tolerate recovery. |
+| Application reports ready too early | The application must remain safe to capture after reporting readiness. Integration tests must verify restore and inference. |
+| Incorrect saved contract | Fix the settings and capture again. Existing checkpoints keep their saved settings; this proposal does not add restore overrides. |
+| Lost release response | Applications must handle repeated notifications. If the deadline expires, Snapshot may terminate an application that already received the notification. |
+| Custom probes during recovery | Workload owners must allow enough time for recovery and keep readiness false until the application can serve. |
 | Shared HTTP endpoint | Containers in a Pod share its IP. If they use the same port and path, release requests carry no container identity. The application must coordinate which restored containers may resume. |
 | Unprotected HTTP listener | The deployment restricts endpoint access. |
 
 #### Backward compatibility and migration
 
-Artifacts without contract metadata retain legacy release behavior regardless of
-the cluster default. Two capture changes may require workload updates:
+Checkpoints without saved contract settings keep the old release behavior,
+regardless of the cluster default. Two capture changes may require workload updates:
 
 - User probes are preserved. Workloads that relied on Snapshot replacing or
   removing them must adjust their probes.
 - The default file contract checks `ready-for-snapshot` directly, independently
-  of Pod readiness. Workloads that need Pod readiness instead must select a
-  contract without `quiesceProbe`.
+  of container readiness. An explicit contract without `quiesceProbe` uses
+  selected-container readiness instead.
 
 Upgrade participating agents before enabling contracts: older agents ignore the
 new fields.
@@ -118,46 +126,32 @@ new fields.
 All resources use `nvidia.com/v1alpha1`. Existing structs below show only the
 added fields.
 
-#### Application contract binding
+#### Per-container configuration
 
-PodSnapshot selects contracts through `spec.applicationContract.containers`, a
-list keyed by source container name:
+`spec.source.podRef.containers` selects which containers to capture.
+`PodSnapshot.spec.containers` is a separate list of settings, matched by container name.
 
 ```go
-// +kubebuilder:validation:XValidation:rule="!has(self.applicationContract) || self.applicationContract.containers.all(c, c.name in self.source.podRef.containers)",message="bindings must name selected source containers"
+// +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.source.podRef.containers)",message="settings must name selected source containers"
 type PodSnapshotSpec struct {
 	// +optional
-	ApplicationContract *ApplicationContractBinding `json:"applicationContract,omitempty"`
-}
-
-type ApplicationContractBinding struct {
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MaxItems=1
 	// +listType=map
 	// +listMapKey=name
-	Containers []ContainerApplicationContractBinding `json:"containers"`
+	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
 }
 
-type ContainerApplicationContractBinding struct {
+type ContainerSnapshotConfig struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
-	// +kubebuilder:validation:Required
-	ContractRef ApplicationContractReference `json:"contractRef"`
-}
-
-type ApplicationContractReference struct {
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
-	Name string `json:"name"`
+	// +optional
+	ApplicationContract *ApplicationContract `json:"applicationContract,omitempty"`
 }
 ```
 
-Each `name` must match a container in `spec.source.podRef.containers`.
-`contractRef.name` must be a nonempty Kubernetes resource name. Bindings are
-immutable with the existing PodSnapshot or SnapshotJob spec validation.
+Each `name` must match a selected source container. The existing spec validation
+prevents changing these settings after creation. The HTTP paths below are examples.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -169,23 +163,31 @@ spec:
     podRef:
       name: model-source
       containers: [main]
-  applicationContract:
-    containers:
-      - name: main
-        contractRef:
-          name: cooperative-http-v1
+  containers:
+    - name: main
+      applicationContract:
+        quiesceProbe:
+          httpGet:
+            path: /checkpoint/status
+            port: 8000
+        restoreRelease:
+          httpPost:
+            path: /checkpoint/resume
+            port: 8000
 ```
 
 #### SnapshotJob
 
-Add `applicationContract` to `SnapshotJob.spec.podSnapshotTemplate`. The controller
-copies it into the generated PodSnapshot. Each entry must name a target container.
+Add `containers` to `SnapshotJob.spec.podSnapshotTemplate`. The controller copies
+these settings into the generated PodSnapshot. Each entry must name a target container.
 
 ```go
-// +kubebuilder:validation:XValidation:rule="!has(self.applicationContract) || self.applicationContract.containers.all(c, c.name in self.targetContainers)",message="bindings must name target containers"
+// +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.targetContainers)",message="settings must name target containers"
 type PodSnapshotTemplate struct {
 	// +optional
-	ApplicationContract *ApplicationContractBinding `json:"applicationContract,omitempty"`
+	// +listType=map
+	// +listMapKey=name
+	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
 }
 ```
 
@@ -193,23 +195,22 @@ type PodSnapshotTemplate struct {
 spec:
   podSnapshotTemplate:
     targetContainers: [main]
-    applicationContract:
-      containers:
-        - name: main
-          contractRef:
-            name: cooperative-http-v1
+    containers:
+      - name: main
+        applicationContract:
+          restoreRelease:
+            httpPost:
+              path: /checkpoint/resume
+              port: 8000
 ```
 
-#### ClusterApplicationContract
+#### Application contract
 
-ClusterApplicationContract is cluster-scoped with an immutable spec. Administrators
-can publish a new name or delete and recreate an existing one. Contracts are
-referenced by name, including in saved checkpoints.
+Each container defines its contract using the following types.
 
 ```go
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 // +kubebuilder:validation:XValidation:rule="!(has(self.quiesceProbe) && has(self.quiesceProbe.file) && has(self.restoreRelease) && has(self.restoreRelease.file)) || self.quiesceProbe.file.path != self.restoreRelease.file.path",message="probe and release file paths must differ"
-type ClusterApplicationContractSpec struct {
+type ApplicationContract struct {
 	// +optional
 	QuiesceProbe *QuiesceProbe `json:"quiesceProbe,omitempty"`
 	// +optional
@@ -289,13 +290,15 @@ When present, `quiesceProbe` requires exactly one of `file` or `httpGet`, and
 `restoreRelease` requires exactly one of `file` or `httpPost`.
 
 Defaults are `initialDelaySeconds: 0`, `periodSeconds: 1`,
-`timeoutSeconds: 1`, and `successThreshold: 1`. The initial delay is nonnegative;
-other values must be positive. Period and timeout defaults apply to both actions.
-`timeoutSeconds` bounds one call, not the total operation.
+`timeoutSeconds: 1`, and `successThreshold: 1`. The initial delay can be zero;
+other values must be positive. For both actions, `periodSeconds` sets the interval
+between attempts and `timeoutSeconds` limits each attempt. The probe requires
+`successThreshold` consecutive successes.
 
-There is no `failureThreshold`: a failed check resets the success count and keeps
-waiting without restarting the container. Reset the count when the source container
-restarts or is replaced; measure initial delay from that container's start time.
+There is no `failureThreshold`. After a failed check, reset the success count
+and keep waiting without restarting the container. Also reset the count if the
+source container restarts or is replaced. Count the initial delay from that
+container's start time.
 
 File and HTTP paths are limited to 4096 characters.
 File paths must be absolute within the selected container's filesystem; they
@@ -305,9 +308,9 @@ reserved; the default contract's readiness and release markers are allowed.
 The agent enforces reserved paths and filesystem isolation at runtime.
 The application must provide the release file's parent directory.
 
-HTTP paths must begin with `/` and contain no authority, query, or fragment.
-Ports range from 1 through 65535. Only HTTP is supported, and the agent derives
-the host from the target Pod IP. Host overrides, custom headers, and request
+HTTP paths must begin with `/` and cannot include a host, query string, or
+fragment. Ports range from 1 through 65535. Only HTTP is supported; the agent
+sends requests to the target Pod IP. Host overrides, custom headers, and request
 bodies are not part of this API.
 
 **Transport behavior**
@@ -317,43 +320,37 @@ bodies are not part of this API.
 | File probe | The marker exists as a regular file. |
 | HTTP probe | GET returns `200`. |
 | File release | The agent atomically publishes the marker at the configured path in the restored container. |
-| HTTP release | POST with an empty body returns `200` or `204`, acknowledging acceptance. Recovery may continue asynchronously. |
+| HTTP release | POST with an empty body returns `200` or `204`. This means the application accepted the notification; recovery may still be running. |
 
 GET and POST response bodies are ignored; no attempt ID is sent. All unsuccessful
 HTTP release requests, including connection failures, are retried until the
 restore deadline. Shared HTTP endpoints receive no container identifier and must
 coordinate the required releases.
 
-Example HTTP contract (illustrative endpoints):
-
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: ClusterApplicationContract
-metadata:
-  name: cooperative-http-v1
-spec:
-  quiesceProbe:
-    httpGet:
-      path: /snapshot/quiesced
-      port: 9001
-    timeoutSeconds: 2
-  restoreRelease:
-    httpPost:
-      path: /snapshot/restored
-      port: 9001
-    timeoutSeconds: 2
-```
-
 #### Checkpoint metadata
 
-Add optional `applicationContract` to `PodSnapshotContentSpec` and checkpoint metadata.
-Before capture, the operator fills missing bindings with the configured default
-and saves all selected names in the immutable content spec. The agent includes
-these bindings in the checkpoint; contract definitions are not stored there.
-Changing the default affects only captures whose bindings are not yet saved.
+Add `containers` to `PodSnapshotContent.spec`. Before capture, fill in missing
+contracts and timing values from the defaults. Save the resulting settings for
+every selected container in the content spec, where they cannot be changed.
+The agent also saves these settings in the checkpoint metadata.
 
-Restore maps source bindings to destination containers. Destination Pods do not
-select contracts, and restore does not consult the cluster default.
+```go
+type PodSnapshotContentSpec struct {
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
+}
+```
+
+For new checkpoints, every entry contains an `applicationContract`. Use `{}`
+when neither action is needed. When importing a checkpoint, keep its saved
+settings. Checkpoints without this metadata use the old release behavior.
+
+During restore, match each source container's saved settings to its destination
+container. Each restored copy uses those settings with its own Pod IP and
+container filesystem. Restore reads the contract from the checkpoint, not from
+the destination Pod, current defaults, or the original PodSnapshot.
 
 ### Capture and restore execution
 
@@ -361,17 +358,17 @@ select contracts, and restore does not consult the cluster default.
 
 ```mermaid
 flowchart TD
-    A[Resolve explicit or default contract] --> B{Contract has quiesceProbe?}
-    B -->|Yes| C[Poll until successThreshold is reached]
-    B -->|No| D[Wait for whole-Pod Ready]
-    C --> E[Revalidate source identity]
+    A[Fill in defaults and save each contract] --> B{Contract has quiesceProbe?}
+    B -->|Yes| C[Check until successThreshold consecutive successes]
+    B -->|No| D[Wait for selected container readiness]
+    C --> E[Check that the source has not changed]
     D --> E
     E --> F[Capture process and GPU state]
 ```
 
-The agent saves the resolved definition for capture retries and restarts. The
-application must clear stale readiness markers before initialization and remain
-safe after reporting capture readiness.
+Capture retries and restarts use the saved configuration. The application must
+remove old readiness markers before initialization and stay safe to capture
+after reporting readiness.
 
 **Restore and release**
 
@@ -383,52 +380,51 @@ flowchart TD
     B -->|No| E[Complete restore without notification]
 ```
 
-New restore attempts use current definitions; active attempts keep saved definitions
-across retries and restarts, even if the contract is deleted or recreated. Release
-must be idempotent because delivery may repeat. Success acknowledges the
-notification, not serving readiness; application recovery may continue asynchronously.
+All restore attempts use the checkpoint's saved settings. The application must
+handle repeated release notifications without repeating their effects
+(idempotence). A successful response means the notification was accepted.
+The application may still need time to recover before it can serve requests.
 
-**Deadlines.** SnapshotJob's `activeDeadlineSeconds` bounds its source lifecycle.
+**Deadlines.** SnapshotJob's `activeDeadlineSeconds` limits its source lifecycle.
 A direct PodSnapshot waits for capture readiness, request deletion, or source
 termination.
 
-The restore timeout covers runtime restoration and release. Its absolute deadline
-survives retries and restarts. If release completion is not recorded in time,
-fail and clean up, even if the application received a notification whose response
+The restore timeout covers both restoring the process and sending the release
+notification. Retries and restarts do not extend the deadline. If Snapshot has
+not recorded successful release by then, it fails the restore and cleans up.
+This also applies when the application received the notification but its response
 was lost.
 
 ### Security
 
 #### RBAC
 
-Kubernetes RBAC controls who can manage contracts and create snapshot requests.
-Selecting a contract invokes actions on a Pod without changing its spec.
-Authorization must therefore cover the target Pod as well as the request.
+Kubernetes RBAC controls who can create snapshot requests. A contract can read
+or write files and call HTTP endpoints in the target Pod without changing its
+spec. Permission checks must cover access to that Pod as well as the request.
 
 #### Transport isolation
 
-HTTP calls use the target Pod IP without redirects or environment proxies.
+HTTP calls go directly to the target Pod IP. They do not follow redirects or
+use proxies configured through environment variables.
 HTTP actions do not support host-network Pods. Deployments must restrict listener
 access; containers in the same Pod share its network.
 
-Resolve file paths in the target container, never the host root. Reject symlinks
-and traversal, and account for writes through shared mounts when authorizing
-access. Protect agent-owned metadata; exclude response bodies and application
-memory from logs and Events.
+Resolve file paths inside the target container, never from the host root.
+Reject symlinks and paths that escape the container. Permission checks must
+account for writes to mounts shared with other workloads. Protect the agent's
+metadata, and keep response bodies and application memory out of logs and Events.
 
 **Open question:** should HTTP authentication be supported initially, and how
 should capture and restore obtain credentials? The API has no credential fields.
 
 ### Configuration
 
-Snapshot installs this contract using the existing control-volume paths:
+When `applicationContract` is omitted, use the existing file integration with
+these settings:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: ClusterApplicationContract
-metadata:
-  name: snapshot-files
-spec:
+applicationContract:
   quiesceProbe:
     file:
       path: /snapshot-control/ready-for-snapshot
@@ -437,46 +433,52 @@ spec:
       path: /snapshot-control/restore-complete
 ```
 
-This Helm setting selects the cluster default for PodSnapshot and SnapshotJob:
+A supplied contract replaces the whole default contract. Missing actions stay
+unset. Fill in defaults before capture and save the result with the checkpoint,
+so later changes to defaults do not affect its restores.
 
-```yaml
-operator:
-  defaultApplicationContract: snapshot-files
-```
-
-To change it, install another ClusterApplicationContract, set its name here, and apply
-with `helm upgrade`. Empty values are invalid. Omit a container's binding to use
-this default; an explicit `contractRef` takes precedence.
+**Open question:** how should administrators configure the installation default
+now that contracts are inline? This proposal does not yet define that mechanism.
 
 ### Monitoring
 
-Report waiting for quiescence and release failures in snapshot and restore
-status. Add Events for missing contracts, invalid configuration, and release failures.
+Report waiting for capture readiness and release failures in snapshot and restore
+status. Add Events for invalid configuration and release failures.
 Log routine unsuccessful probe polls only at debug level.
 
 ### Test Plan
 
 - **API:** validate optional actions, empty contracts, exclusive handlers, timing
-  defaults, immutable specs, unique container names, and target membership.
-  Check binding propagation from SnapshotJob through checkpoint metadata.
+  defaults, rejection of spec changes, unique names, and names that match selected containers.
+  Check that each container’s settings reach the checkpoint from SnapshotJob.
 - **Capture:** test success thresholds, source restarts, cancellation, deadlines,
-  and Pod readiness fallback. Verify user probe preservation and existing default
-  probe behavior when probes are omitted, alongside direct file checks.
-- **Contracts:** test installation, default changes, explicit precedence, and
-  persisted bindings. Missing contracts block new attempts; recreation unblocks
-  them. Active attempts keep their definitions across deletion and agent restart.
+  and selected-container readiness fallback. Verify user probe preservation and
+  existing default probe behavior when probes are omitted, alongside direct file checks.
+- **Contracts:** test omitted versus empty contracts, resolved defaults, and
+  saved settings that cannot be changed. Verify imported content and repeated restores
+  use the artifact's settings even after defaults change or the original request
+  is deleted. Check per-container mapping and reuse across restored copies.
   Old artifacts retain legacy release behavior regardless of the default.
 - **Recovery:** inject failures around runtime restore, release, persistence,
-  and startup-marker publication. Verify the original deadline, release retries,
-  repair after recorded success, and no repeated CRIU restore. Cover concurrent
+  and writing the startup marker. Verify that retries keep the original deadline,
+  repair state after recorded success, and do not repeat CRIU restore. Cover concurrent
   agents, omitted release, and legacy marker recovery.
 - **Transports:** test status codes, ignored bodies, retries, redirect/proxy and
   host-network rejection, absolute file paths outside the control directory,
   symlink/traversal rejection, and stale markers. Verify target-container path
   resolution, shared-mount effects, and shared-HTTP coordination.
-- **Integrations:** validate file and HTTP with inference after restore. Cover new Pod IPs, release before serving, asynchronous
-  recovery, and custom probes. Advertise only validated combinations and document
+- **Integrations:** validate file and HTTP with inference after restore. Cover
+  new Pod IPs, release before serving, recovery that continues after release,
+  and custom probes. Advertise only validated combinations and document
   supported engine versions, topologies, and required application settings.
+
+## Alternatives
+
+A shared contract CRD would let deployments reuse settings, but adds a resource
+to manage and look up. Start with contracts defined directly in container settings.
+Later, an `applicationContractRef` field could let users reference a shared
+contract instead. Users could set at most one of the two fields; Snapshot would
+not merge them.
 
 ## Appendix
 
