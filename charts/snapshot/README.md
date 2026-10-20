@@ -212,6 +212,9 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
 
+Filesystem checkpoint and restore use POSIX. Remove the former
+`pageBroker.transferEngine` setting; it is rejected rather than silently ignored.
+
 PageBroker handles every capture and restore. GPU capture uses CustomStorage
 when the driver supports it, otherwise it uses the driver-managed format.
 Restore follows the saved artifact format.
