@@ -330,6 +330,22 @@ record; missing ptrace permission.
 The agent log carries the CRIU error. Check the source pod against the
 [framework guides](../guides/README.md).
 
+### capturing rootfs diff
+
+After the dump, the agent records the container's upper directory as a rootfs
+diff, keeping every file the dump references even when an exclusion pattern
+matches it. Other diff problems are logged and the checkpoint goes on without
+them; the dump has already stopped the source, so a failure here means
+re-taking the checkpoint from a fresh replica.
+
+Likely causes: the dump's image files cannot be read back from the staging
+directory; a file the dump references is missing from the upper directory, for
+example one deleted or replaced between the dump and the capture.
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'rootfs diff'
+```
+
 ### committing PageBroker checkpoint
 
 PageBroker publishes the staged artifact to its final location. The dump has
