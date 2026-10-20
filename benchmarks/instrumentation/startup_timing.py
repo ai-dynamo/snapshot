@@ -25,22 +25,23 @@ def emit(event, **fields):
         monotonic_ns=time.monotonic_ns(),
         **fields,
     )
-    fd = 1
+    data = (
+        "STARTUP_SPAN " + json.dumps(payload, separators=(",", ":")) + "\n"
+    ).encode()
     directory = os.environ.get("STARTUP_SPAN_DIRECTORY")
-    if directory:
-        identity = (payload["pid"], payload["tid"])
-        if getattr(_local, "log_identity", None) != identity:
-            _local.log_file = open(
-                f"{directory}/{identity[0]}-{identity[1]}-{next(_files)}.jsonl",
-                "xb",
-                buffering=0,
-            )
-            _local.log_identity = identity
-        fd = _local.log_file.fileno()
-    os.write(
-        fd,
-        ("STARTUP_SPAN " + json.dumps(payload, separators=(",", ":")) + "\n").encode(),
-    )
+    if not directory:
+        os.write(1, data)
+        return
+    identity = (payload["pid"], payload["tid"])
+    if getattr(_local, "log_identity", None) != identity:
+        _local.log_path = (
+            f"{directory}/{identity[0]}-{identity[1]}-{next(_files)}.jsonl"
+        )
+        _local.log_identity = identity
+    # Open descriptors become checkpoint state. Close each write so later
+    # restores can append without invalidating CRIU's saved file sizes.
+    with open(_local.log_path, "ab", buffering=0) as stream:
+        stream.write(data)
 
 
 def phase(name):

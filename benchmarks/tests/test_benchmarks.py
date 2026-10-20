@@ -6,6 +6,9 @@ import ast
 import datetime
 import gc
 import io
+import importlib.util
+import itertools
+import threading
 import json
 import os
 from pathlib import Path
@@ -214,6 +217,31 @@ class BenchmarkTests(unittest.TestCase):
                 calls = [c.args[0] for c in llm._collective_rpc.call_args_list]
                 self.assertEqual(calls, ["sleep", "wakeup"])
                 self.assertEqual(factory.call_args.kwargs["dtype"], "auto")
+
+    def test_startup_trace_keeps_no_file_descriptors_between_writes(self):
+        path = Path(__file__).parents[1] / "instrumentation/startup_timing.py"
+        spec = importlib.util.spec_from_file_location("test_startup_timing", path)
+        timing = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(timing)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, STARTUP_SPAN_DIRECTORY=tmp),
+        ):
+            for repetition in range(3):
+                timing.emit("begin", span=str(repetition))
+                for descriptor in Path("/proc/self/fd").iterdir():
+                    try:
+                        target = os.readlink(descriptor)
+                    except FileNotFoundError:
+                        continue
+                    self.assertFalse(target.startswith(tmp + "/"), target)
+            # A restored process can create a thread with a reused identity/counter.
+            timing._local = threading.local()
+            timing._files = itertools.count()
+            timing.emit("begin", span="new-thread-after-restore")
+            files = list(Path(tmp).glob("*.jsonl"))
+            self.assertEqual(len(files), 1)
+            self.assertEqual(len(files[0].read_text().splitlines()), 4)
 
     def test_source_analysis_counts_overlapping_ranks_once_and_excludes_inference(self):
         lines = []
