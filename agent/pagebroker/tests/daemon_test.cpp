@@ -743,7 +743,7 @@ TEST_P(FilesystemEngineTest, DirectPublicationRejectsConflictWithoutChangingEith
   StorageBackend destination;
   destination.mutable_filesystem()->set_directory(published.string());
   try {
-    engine->PublishCheckpoint(source_, destination, engine->InspectCheckpoint(source_));
+    engine->PublishCheckpoint(source_, destination, engine->InspectCheckpoint(source_), nullptr, {}, TransferMode::Direct);
     FAIL() << "publication should reject an existing partial";
   }
   catch (const TransferError& error) {
@@ -930,7 +930,7 @@ TEST_F(BrokerTest, DirectRestoreExpiresFromPreparationTime)
   EXPECT_TRUE(fs::exists(source_ / "image"));
 }
 
-TEST_F(BrokerTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirectory)
+TEST_P(FilesystemEngineTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirectory)
 {
   const auto destination = root_ / "storage" / "nested" / "checkpoint";
   auto request = RequestFor("direct-save");
