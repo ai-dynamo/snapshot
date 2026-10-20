@@ -113,6 +113,8 @@ TEST_SUITE_P(
       return info.param == IoEngine::POSIX_COPY ? "PosixCopy" : "ModelStreamer";
     });
 
+class PosixFilesystemTest : public BrokerTest {};
+
 TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
 {
   auto restore = RequestFor("restore");
@@ -345,7 +347,7 @@ TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
             Path(published.string() + ".pagebroker-tx-valid-id"));
 }
 
-TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
+TEST_F(PosixFilesystemTest, RejectsSymlinkInRestoreSource)
 {
   fs::create_symlink(root_ / "storage" / "elsewhere", source_ / "link");
   auto restore = RequestFor("symlink");
@@ -357,7 +359,7 @@ TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
   EXPECT_EQ(response.failure().code(), Failure::STORAGE_ERROR);
 }
 
-TEST_F(BrokerTest, InvalidRestoreDoesNotReserveTransaction)
+TEST_F(PosixFilesystemTest, InvalidRestoreDoesNotReserveTransaction)
 {
   auto invalid = RequestFor("restore");
   Configure(
@@ -372,7 +374,7 @@ TEST_F(BrokerTest, InvalidRestoreDoesNotReserveTransaction)
   EXPECT_TRUE(broker().HandleRequest(restore).has_staged_restore_directory());
 }
 
-TEST_F(BrokerTest, RejectsPathsOutsideStorageRoot)
+TEST_F(PosixFilesystemTest, RejectsPathsOutsideStorageRoot)
 {
   const fs::path outside = root_ / "outside";
   fs::create_directories(outside);
@@ -562,7 +564,7 @@ TEST_F(BrokerTest, RejectsUnownedCheckpointStaging)
   EXPECT_EQ(retry.failure().code(), Failure::TRANSACTION_CONFLICT);
 }
 
-TEST_F(BrokerTest, PublishedCheckpointRootPreservesCapturePermissions)
+TEST_F(PosixFilesystemTest, PublishedCheckpointRootPreservesCapturePermissions)
 {
   // Use normal directory creation as the staged-mode reference without changing
   // the process-wide umask while broker threads are running.
@@ -596,7 +598,7 @@ TEST_F(BrokerTest, PublishedCheckpointRootPreservesCapturePermissions)
   }
 }
 
-TEST_F(BrokerTest, PublishesCheckpoint)
+TEST_F(PosixFilesystemTest, PublishesCheckpoint)
 {
   const fs::path published = root_ / "storage" / "published";
   auto prepare = RequestFor("checkpoint");
@@ -617,7 +619,7 @@ TEST_F(BrokerTest, PublishesCheckpoint)
   EXPECT_FALSE(fs::exists(staging_directory));
 }
 
-TEST_F(BrokerTest, ReplacesExistingCheckpoint)
+TEST_F(PosixFilesystemTest, ReplacesExistingCheckpoint)
 {
   for (const bool direct : {false, true}) {
     SCOPED_TRACE(direct ? "direct" : "staged");
@@ -654,7 +656,7 @@ TEST_F(BrokerTest, ReplacesExistingCheckpoint)
   }
 }
 
-TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
+TEST_F(PosixFilesystemTest, PreservesExistingCheckpointWhenReplacementFails)
 {
   const fs::path published = root_ / "storage" / "published";
   const fs::path previous = published.string() + ".pagebroker-previous";
@@ -677,7 +679,7 @@ TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
   EXPECT_TRUE(fs::exists(previous));
 }
 
-TEST_F(BrokerTest, DirectPublicationRejectsConflictWithoutChangingEitherTree)
+TEST_F(PosixFilesystemTest, DirectPublicationRejectsConflictWithoutChangingEitherTree)
 {
   auto engine = std::make_unique<PosixCopyEngine>(root_ / "storage");
   const auto published = root_ / "storage/published";
@@ -704,7 +706,7 @@ TEST_F(BrokerTest, DirectPublicationRejectsConflictWithoutChangingEitherTree)
   EXPECT_EQ(contents, "keep");
 }
 
-TEST_F(BrokerTest, PreservesExistingPartialCheckpointDestination)
+TEST_F(PosixFilesystemTest, PreservesExistingPartialCheckpointDestination)
 {
   const fs::path destination = root_ / "storage" / "blocked";
   auto prepare = RequestFor("checkpoint");
@@ -876,7 +878,7 @@ TEST_F(BrokerTest, DirectRestoreExpiresFromPreparationTime)
   EXPECT_TRUE(fs::exists(source_ / "image"));
 }
 
-TEST_F(BrokerTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirectory)
+TEST_F(PosixFilesystemTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirectory)
 {
   const auto destination = root_ / "storage" / "nested" / "checkpoint";
   auto request = RequestFor("direct-save");
