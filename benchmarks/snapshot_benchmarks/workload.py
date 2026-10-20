@@ -82,7 +82,12 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
         extra.update(model_path=model.hf_id_or_path, tp_size=model.tp)
     else:
         extra["moe_expert_parallel_size"] = model.ep
-        values.update(OMPI_MCA_pml="ob1", OMPI_MCA_btl="tcp,self")
+        values.update(
+            OMPI_MCA_pml="ob1",
+            OMPI_MCA_btl="tcp,self",
+            # Loaded/deleted extension files must survive independently per restore.
+            FLASHINFER_WORKSPACE_BASE="/snapshot-flashinfer-cache",
+        )
         extra.update(model=model.hf_id_or_path, tensor_parallel_size=model.tp)
     main["args"] = [json.dumps(extra)]
     for key, value in values.items():

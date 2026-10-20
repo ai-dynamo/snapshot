@@ -147,7 +147,10 @@ restore time. The report uses attempt 1 for both total and phase values;
 attempts 2 and 3 remain in the local results. Missing wake events fail the run;
 readiness and first generation are not substituted as timing endpoints.
 
-Each source uses fresh compiler-cache directories. The runner does not clear
+Each source uses fresh compiler-cache directories. TRT-LLM's FlashInfer workspace
+stays in the container rootfs and is included in the checkpoint. Its loaded,
+deleted extension files must be restored independently; sharing them through
+NFS can break repeated restores. The runner does not clear
 Linux page cache or storage-server caches. Metadata includes capture/restore
 GPU and driver identities, engine version, storage class and placement.
 Schema-1 results remain readable, under their original timing definitions;

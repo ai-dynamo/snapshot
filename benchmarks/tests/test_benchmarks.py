@@ -380,6 +380,20 @@ class BenchmarkTests(unittest.TestCase):
                             spec["nodeSelector"]["kubernetes.io/hostname"], "gpu-node"
                         )
                         main = spec["containers"][0]
+                        if engine.name == "trtllm":
+                            env = {e["name"]: e["value"] for e in main["env"]}
+                            self.assertEqual(
+                                env["FLASHINFER_WORKSPACE_BASE"],
+                                "/snapshot-flashinfer-cache",
+                            )
+                            self.assertFalse(
+                                any(
+                                    m["mountPath"].startswith(
+                                        "/snapshot-flashinfer-cache"
+                                    )
+                                    for m in main["volumeMounts"]
+                                )
+                            )
                         constructor = json.loads(main["args"][0])
                         if engine.name == "sglang":
                             self.assertEqual(
