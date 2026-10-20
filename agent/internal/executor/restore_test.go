@@ -930,6 +930,47 @@ func (m *cleanupMounter) MountArtifact(context.Context, nsmount.MountPoint, stri
 	return nil, errors.New("unexpected artifact mount")
 }
 
+// failingUnmountMount always fails Unmount, so a test can verify the caller
+// keeps retrying it (via the deferred cleanup) instead of dropping it after
+// one failed attempt.
+type failingUnmountMount struct {
+	count  *int
+	events chan<- string
+	name   string
+}
+
+func (m failingUnmountMount) Unmount(context.Context) error {
+	*m.count++
+	m.events <- "unmount " + m.name
+	return fmt.Errorf("unmount %s failed", m.name)
+}
+
+func (m failingUnmountMount) NsFd() *os.File { return nil }
+
+func (m failingUnmountMount) Release() error { return nil }
+
+// failingStagingMounter mounts the bundle normally but returns a staging
+// mount whose Unmount always fails.
+type failingStagingMounter struct {
+	bundle, staging int
+	events          chan<- string
+}
+
+func (m *failingStagingMounter) MountBundle(context.Context, int) (nsmount.MountPoint, error) {
+	m.bundle++
+	return cleanupMount{&m.bundle, m.events, "bundle"}, nil
+}
+func (m *failingStagingMounter) MountCuInterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return nil, errors.New("unexpected cuinterpose mount")
+}
+func (m *failingStagingMounter) MountPageBroker(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	m.staging++
+	return failingUnmountMount{&m.staging, m.events, "staging"}, nil
+}
+func (m *failingStagingMounter) MountArtifact(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return nil, errors.New("unexpected artifact mount")
+}
+
 func TestRestoreSkipsAbortAfterFailedConnection(t *testing.T) {
 	base := t.TempDir()
 	artifact, err := nsmount.ResolveArtifactPath(base, "content", "main")
@@ -1437,6 +1478,199 @@ func TestRestoreSuccessfulCPURestoreUnmountsBeforeCommitAndSkipsAbort(t *testing
 	want := []string{"unmount staging", "commit request received", "unmount bundle"}
 	if !reflect.DeepEqual(observed, want) {
 		t.Fatalf("event order = %v, want %v (source unmounted before Commit, Abort never sent)", observed, want)
+	}
+}
+
+// TestRestoreFailedSourceUnmountSkipsCommitAndKeepsRetrying covers the branch
+// CodeRabbit flagged: a failed source unmount must stay in activeMounts for
+// the deferred cleanup to retry, and must not reach Commit or Abort.
+func TestRestoreFailedSourceUnmountSkipsCommitAndKeepsRetrying(t *testing.T) {
+	base := t.TempDir()
+	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan string, 8)
+	originalExec := execNSRestoreFunc
+	t.Cleanup(func() { execNSRestoreFunc = originalExec })
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+		return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
+	}
+	originalValidate := validateRestoredProcessFunc
+	t.Cleanup(func() { validateRestoredProcessFunc = originalValidate })
+	validateRestoredProcessFunc = func(string, int, logr.Logger) error { return nil }
+
+	listener := listenPageBroker(t)
+	server := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			server <- err
+			return
+		}
+		request, err := readPageBrokerTestRequest(connection)
+		if err == nil && request.GetStagedRestore() == nil {
+			err = errors.New("expected StagedRestore")
+		}
+		response := &pagebroker.Response{
+			Result: &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}},
+		}
+		if err == nil {
+			err = replyPageBrokerTest(connection, request, response)
+		}
+		connection.Close()
+		// No further request (Commit or Abort) should ever arrive: the failed
+		// unmount must leave the transaction alone for expiry to reclaim.
+		server <- err
+	}()
+
+	mounts := &failingStagingMounter{events: events}
+	ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+	defer cancel()
+	restored, err := Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		PageBrokerControlSocketPath: listener.Addr().String(),
+		PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
+	}, mounts)
+
+	var cleanupErr *RestoreCleanupError
+	if !errors.As(err, &cleanupErr) {
+		t.Fatalf("restore error = %v, want a *RestoreCleanupError wrapping the failed unmount", err)
+	}
+	if !strings.Contains(err.Error(), "unmount staging failed") {
+		t.Fatalf("restore error = %v, want it to carry the unmount failure", err)
+	}
+	if restored.RestoredPID != 4242 {
+		t.Fatalf("restore result = %+v, want the successful restore's PID preserved despite the cleanup error", restored)
+	}
+
+	waitPageBrokerTest(t, server)
+	close(events)
+	var observed []string
+	for event := range events {
+		observed = append(observed, event)
+	}
+	// The explicit unmount attempt fails, then the deferred cleanup retries
+	// it (in reverse mount order) before unmounting the bundle.
+	want := []string{"unmount staging", "unmount staging", "unmount bundle"}
+	if !reflect.DeepEqual(observed, want) {
+		t.Fatalf("event order = %v, want %v (failed unmount retried by cleanup, Commit never sent)", observed, want)
+	}
+}
+
+// TestRestoreCommitFailureAfterSuccessfulUnmountReturnsCleanupError covers
+// the branch CodeRabbit flagged: a Commit failure after a successful source
+// unmount must still surface as a *RestoreCleanupError, not be dropped.
+func TestRestoreCommitFailureAfterSuccessfulUnmountReturnsCleanupError(t *testing.T) {
+	base := t.TempDir()
+	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan string, 8)
+	originalExec := execNSRestoreFunc
+	t.Cleanup(func() { execNSRestoreFunc = originalExec })
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+		return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
+	}
+	originalValidate := validateRestoredProcessFunc
+	t.Cleanup(func() { validateRestoredProcessFunc = originalValidate })
+	validateRestoredProcessFunc = func(string, int, logr.Logger) error { return nil }
+
+	listener := listenPageBroker(t)
+	server := make(chan error, 1)
+	go func() {
+		for _, step := range []string{"stage", "commit", "abort"} {
+			connection, err := listener.Accept()
+			if err != nil {
+				server <- err
+				return
+			}
+			request, err := readPageBrokerTestRequest(connection)
+			if err != nil {
+				connection.Close()
+				server <- err
+				return
+			}
+			response := &pagebroker.Response{}
+			switch step {
+			case "stage":
+				if request.GetStagedRestore() == nil {
+					err = errors.New("expected StagedRestore")
+				}
+				response.Result = &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}}
+			case "commit":
+				if request.GetCommit() == nil {
+					err = errors.New("expected Commit")
+				}
+				events <- "commit request received"
+				code := pagebroker.Failure_STORAGE_ERROR
+				response.Result = &pagebroker.Response_Failure{Failure: &pagebroker.Failure{Code: &code, Message: proto.String("commit failed")}}
+			case "abort":
+				if request.GetAbort() == nil {
+					err = errors.New("expected Abort")
+				}
+				response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+			}
+			if err == nil {
+				err = replyPageBrokerTest(connection, request, response)
+			}
+			connection.Close()
+			if err != nil {
+				server <- err
+				return
+			}
+		}
+		server <- nil
+	}()
+
+	mounts := &cleanupMounter{events: events}
+	ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+	defer cancel()
+	restored, err := Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		PageBrokerControlSocketPath: listener.Addr().String(),
+		PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
+	}, mounts)
+
+	var cleanupErr *RestoreCleanupError
+	if !errors.As(err, &cleanupErr) {
+		t.Fatalf("restore error = %v, want a *RestoreCleanupError wrapping the Commit failure", err)
+	}
+	if !strings.Contains(err.Error(), "commit PageBroker restore") {
+		t.Fatalf("restore error = %v, want it to carry the Commit failure", err)
+	}
+	if restored.RestoredPID != 4242 {
+		t.Fatalf("restore result = %+v, want the successful restore's PID preserved despite the cleanup error", restored)
+	}
+
+	waitPageBrokerTest(t, server)
+	close(events)
+	var observed []string
+	for event := range events {
+		observed = append(observed, event)
+	}
+	want := []string{"unmount staging", "commit request received", "unmount bundle"}
+	if !reflect.DeepEqual(observed, want) {
+		t.Fatalf("event order = %v, want %v (source unmounted, Commit attempted and failed)", observed, want)
 	}
 }
 
