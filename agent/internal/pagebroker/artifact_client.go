@@ -32,8 +32,9 @@ func (c Client) PrepareArtifactCheckpoint(ctx context.Context, transactionID str
 }
 
 // CommitCheckpoint returns the descriptor of a target-addressed checkpoint.
-// Retries preserve the transaction ID and result. Legacy checkpoints and restore
-// cleanup use Commit. A missing result never authorizes another capture attempt.
+// Retries preserve the transaction ID and result. Filesystem-path checkpoints
+// and restore cleanup use Commit. A missing result never authorizes another
+// capture attempt.
 func (c Client) CommitCheckpoint(ctx context.Context, transactionID string) (*PublishedArtifact, error) {
 	result, err := c.commitWithRetry(ctx, transactionID)
 	if err != nil {

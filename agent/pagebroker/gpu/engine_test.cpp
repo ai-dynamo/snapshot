@@ -75,8 +75,8 @@ TEST(EngineValidation, PreservesInheritedCancellationReason)
 {
   for (bool deadline : {false, true}) {
     Cancellation parent(deadline ? Cancellation::Clock::now() : Cancellation::Clock::time_point::max());
-    Cancellation child(&parent);
-    Cancellation grandchild(&child);
+    Cancellation child = Cancellation::ChildOf(parent);
+    Cancellation grandchild = Cancellation::ChildOf(child);
     if (!deadline) {
       EXPECT_NO_THROW(grandchild.ThrowIfCancelled());
       parent.Cancel();
