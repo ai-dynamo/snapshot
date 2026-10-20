@@ -7,6 +7,7 @@
 #include <string>
 
 #include "pagebroker_types.hpp"
+#include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker::test {
 // Construct requests on the test thread before starting workers.
@@ -26,9 +27,13 @@ class RequestBuilder {
 };
 
 inline void
-Configure(StorageBackend* storage, IOEngine* engine, const std::filesystem::path& directory)
+Configure(StorageBackend* storage, IOEngine* engine, const std::filesystem::path& directory,
+    IoEngine engine_type = IoEngine::POSIX_COPY)
 {
   storage->mutable_filesystem()->set_directory(directory.string());
-  engine->mutable_posix_copy();
+  if (engine_type == IoEngine::MODEL_STREAMER)
+    engine->mutable_model_streamer();
+  else
+    engine->mutable_posix_copy();
 }
 }  // namespace snapshot::pagebroker::test

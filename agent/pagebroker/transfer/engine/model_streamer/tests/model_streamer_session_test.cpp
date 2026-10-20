@@ -10,7 +10,6 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -21,6 +20,8 @@
 #include <vector>
 
 #include <streamer/streamer.h>
+
+#include "tests/temporary_directory.hpp"
 
 using namespace snapshot::pagebroker;
 using namespace std::chrono_literals;
@@ -78,12 +79,8 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.allocations = state.requests_entered = 0;
     state.fault = Fault::NONE;
     state.next_id = 0;
-    char path[] = "/tmp/pagebroker-session-XXXXXX";
-    const char* created = mkdtemp(path);
-    ASSERT_NE(created, nullptr);
-    root_ = created;
+    root_ = temporary_.path();
   }
-  void TearDown() override { fs::remove_all(root_); }
 
   RestorePlan Plan(unsigned files = 1) const
   {
@@ -116,6 +113,7 @@ class ModelStreamerSessionTest : public ::testing::Test {
       EXPECT_EQ(error.reason, reason);
     }
   }
+  test::TemporaryDirectory temporary_;
   Path root_;
 };
 }  // namespace
