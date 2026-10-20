@@ -10,9 +10,8 @@ import (
 	"os"
 )
 
-// bindTestHookFlags reads test-only failures. Production binaries ignore the
-// environment variable, so a chart value cannot add an unsupported CLI flag.
-func bindTestHookFlags(*flag.FlagSet) *string {
+// bindTestHookFlags reads the test-only failure hook in snapshot_e2e builds.
+func bindTestHookFlags(*flag.FlagSet) (*string, error) {
 	value := os.Getenv("SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION")
-	return &value
+	return &value, nil
 }

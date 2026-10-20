@@ -98,14 +98,19 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if !sj.GetDeletionTimestamp().IsZero() {
+		r.acknowledgeE2EReconcile(sj)
 		return ctrl.Result{}, nil
 	}
-	r.acknowledgeE2EReconcile(sj)
 	if snapshotv1alpha1.IsSnapshotJobFailed(sj) {
+		r.acknowledgeE2EReconcile(sj)
 		return ctrl.Result{}, nil
 	}
 	if snapshotv1alpha1.IsSnapshotJobCompleted(sj) {
-		return r.ensureJobDeleted(ctx, sj)
+		result, err := r.ensureJobDeleted(ctx, sj)
+		if err == nil {
+			r.acknowledgeE2EReconcile(sj)
+		}
+		return result, err
 	}
 
 	observed, result, err := r.reconcileResources(ctx, sj)
@@ -126,8 +131,13 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// even though sj is the pre-patch object returned by the original Get.
 		completed := sj.DeepCopy()
 		completed.Status = desiredStatus
-		return r.ensureJobDeleted(ctx, completed)
+		result, err := r.ensureJobDeleted(ctx, completed)
+		if err == nil {
+			r.acknowledgeE2EReconcile(sj)
+		}
+		return result, err
 	}
+	r.acknowledgeE2EReconcile(sj)
 	return result, nil
 }
 

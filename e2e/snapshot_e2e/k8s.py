@@ -222,7 +222,7 @@ def restart_snapshot_operator(namespace: str, release: str, timeout: int = 180) 
 
 
 def snapshot_operator_test_hook_enabled(namespace: str, release: str) -> bool:
-    """Return whether the operator was configured with the test capture hook."""
+    """Return whether the deployment supplies the E2E hook input."""
     deployments = client.AppsV1Api().list_namespaced_deployment(
         namespace, label_selector=snapshot_selector(release, "operator")
     ).items

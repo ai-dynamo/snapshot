@@ -7,15 +7,19 @@ package main
 
 import (
 	"flag"
+	"strings"
 	"testing"
 )
 
 func TestBindTestHookFlagsIgnoresE2EEnvironmentInReleaseBuild(t *testing.T) {
 	t.Setenv("SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION", "snapshot-e2e.nvidia.com/fail-capture")
 
-	value := bindTestHookFlags(flag.NewFlagSet("test", flag.ContinueOnError))
+	_, err := bindTestHookFlags(flag.NewFlagSet("test", flag.ContinueOnError))
 
-	if got := *value; got != "" {
-		t.Fatalf("bindTestHookFlags() = %q, want empty", got)
+	if err == nil {
+		t.Fatal("bindTestHookFlags() error = nil, want explicit snapshot_e2e build diagnostic")
+	}
+	if got, want := err.Error(), "requires an operator built with -tags snapshot_e2e"; !strings.Contains(got, want) {
+		t.Fatalf("bindTestHookFlags() error = %q, want substring %q", got, want)
 	}
 }

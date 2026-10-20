@@ -28,7 +28,11 @@ func main() {
 	storageConfigPath := flag.String("snapshot-storage-config", "", "Path to resolved storage configuration shared with PageBroker")
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
-	testFailureAnnotation := bindTestHookFlags(flag.CommandLine)
+	testFailureAnnotation, err := bindTestHookFlags(flag.CommandLine)
+	if err != nil {
+		ctrl.Log.Error(err, "invalid E2E test hook configuration")
+		os.Exit(1)
+	}
 	flag.Parse()
 	storeID := mustStoreID(*storageConfigPath)
 	artifactCleanupConfig.StoreID = storeID

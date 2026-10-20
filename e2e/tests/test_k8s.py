@@ -106,6 +106,32 @@ def test_acknowledge_snapshotjob_reconcile_patches_and_waits(monkeypatch) -> Non
     assert waited == [("snapshot-e2e", "job", "test-token", 7)]
 
 
+def test_snapshot_operator_hook_uses_configured_input(monkeypatch) -> None:
+    deployment = SimpleNamespace(
+        spec=SimpleNamespace(
+            template=SimpleNamespace(
+                spec=SimpleNamespace(
+                    containers=[
+                        SimpleNamespace(
+                            env=[
+                                SimpleNamespace(
+                                    name="SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION",
+                                    value="snapshot-e2e.nvidia.com/fail-capture",
+                                )
+                            ]
+                        )
+                    ]
+                )
+            )
+        )
+    )
+    apps = SimpleNamespace(
+        list_namespaced_deployment=lambda *_, **__: SimpleNamespace(items=[deployment])
+    )
+    monkeypatch.setattr(k8s.client, "AppsV1Api", lambda: apps)
+    assert k8s.snapshot_operator_test_hook_enabled("snapshot-e2e", "snapshot")
+
+
 def test_file_present_executes_in_requested_container(monkeypatch) -> None:
     calls = []
 
