@@ -17,7 +17,9 @@ its own report; it does not update those tables.
 - An engine image that supports the selected guide application's APIs.
 - A read-only model PVC, populated before the run, mounted at `/hf-cache`.
 - A writable work PVC for fresh compiler caches and timing files.
-- The Snapshot installation's checkpoint PVC, passed with `--pvc-name`.
+- The Snapshot installation's filesystem checkpoint PVC, passed with `--pvc-name`.
+  The artifact inventory reads this mounted filesystem; bound or remote stores
+  are outside this runner's scope.
 
 The guide templates require the NVIDIA runtime class, `/dev/net/tun` and the
 node's `profiles/block-iouring.json` seccomp profile. The runner does not install
@@ -117,8 +119,8 @@ intervals are distributed proportionally for display; those additions are
 estimates. Raw intervals and gaps remain in the local evidence.
 
 **Checkpoint** uses the agent's measured capture duration. The application
-pauses requests and releases KV memory before capture. vLLM restores weights
-before capture; SGLang requests KV-only release without a CPU weight backup;
+pauses requests and releases KV memory before capture. vLLM retains weights
+on the GPU; SGLang requests KV-only release without a CPU weight backup;
 TRT-LLM uses its KV sleep/wakeup RPC. A release call does not prove that every
 engine allocation was freed. In particular, the published SGLang GPT-OSS runs
 retained KV allocations, which increased their checkpoint sizes.
