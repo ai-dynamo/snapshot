@@ -3,12 +3,10 @@
 These benchmarks compare cold start with Snapshot restore for 22 configurations of vLLM, SGLang and TensorRT-LLM on one to eight B200 GPUs. Both timings end when the engine is ready, before inference.
 
 > [!TIP]
-> To run the benchmarks and select a workload, see the
-> [benchmark guide](benchmarks-guide.md). The [benchmark directory](../../benchmarks/README.md)
-> contains the runner. Published results are the Markdown tables below; new runs
-> save their own machine-readable results and logs locally.
+> See the [benchmark guide](benchmarks-guide.md) for setup and commands, and the
+> [runner README](../../benchmarks/README.md) for the code layout.
 
-Cold start loads weights, creates workers, initializes device memory, compiles and tunes kernels, and captures CUDA graphs. Snapshot restores a process that has already completed that work. The tables show the total time and the time spent in each stage.
+Cold start loads weights, creates workers, initializes device memory, compiles and tunes kernels, and captures CUDA graphs. Snapshot restores a process that has already completed that work.
 
 ## Benchmarking Setup
 

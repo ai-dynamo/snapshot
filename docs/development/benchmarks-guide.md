@@ -2,12 +2,10 @@
 
 The tool in [`benchmarks/`](../../benchmarks) measures startup, checkpoints the
 initialized engine and restores it three times. It supports vLLM, SGLang and
-TensorRT-LLM on one node. It extends the original runner and reuses the e2e
-Kubernetes and PodSnapshot helpers, the guide deployment templates and the guide
-applications. Benchmark hooks record timing and verify that state survives.
+TensorRT-LLM on one node, using the engine guide applications and templates.
 
-The [published results](benchmarks.md) remain Markdown tables. A new run writes
-its own report; it does not update those tables.
+Each run writes a report. The [published results](benchmarks.md) are maintained
+separately.
 
 ## Prerequisites
 
@@ -90,12 +88,11 @@ and set the engine's download controls in the model's `env` settings. FlashInfer
 controls for the image you use; offline model loading does not disable every
 library's artifact downloads.
 
-The original `--model-label` selection from `models.yaml` and the `sweep`
-command remain available. That file is an editable example list, not the
-22-case published matrix. Entries can set `tp`, `ep`, `engine_args` and `env`.
+Use `--model-label` to select an entry from `models.yaml`, or `sweep` to run
+the list. Entries can set `tp`, `ep`, `engine_args` and `env`.
 Use the same cluster, image and PVC flags with `sweep`, plus `--models FILE` for
-your own list. `--tp` and `--ep` override the list's values. Additional node
-tolerations use the existing repeatable `--toleration key=value:effect` flag.
+your own list. `--tp` and `--ep` override the list's values. Add node
+tolerations with the repeatable `--toleration key=value:effect` flag.
 
 Each invocation writes under `benchmarks/results/<date>-<git-sha>-<id>/`.
 The top-level JSON files contain complete results. Subdirectories retain
@@ -180,14 +177,13 @@ attempt failed output validation and is excluded; the table uses its successful
 repeat. All five selected configurations passed output checks, capture and three
 restores. The published tables retain the original measurements.
 
-Published cold starts include instrumentation overhead. The runner limits
-constructor timing to startup modules and omits the
-unused import profiling output. These changes reduce instrumentation overhead;
-the published measurements have not been rerun with these changes.
+Published cold starts include instrumentation overhead. The runner now limits
+constructor timers to startup modules and disables unused import profiling.
+The published measurements have not been rerun with these fixes.
 
 ## Cleanup and verification
 
-The original cleanup path removes this run's pods, ConfigMap, PodSnapshot and
+Cleanup removes this run's pods, ConfigMap, PodSnapshot and
 PodSnapshotContent. Failed runs retain local evidence and still clean owned
 cluster resources. Cleanup errors stop a sweep. `--keep` retains resources for
 debugging; earlier restore pods are removed to free GPUs between repetitions.
@@ -197,10 +193,11 @@ after copying the evidence. Model files and PVCs are never deleted.
 Local tests cover guide contracts, explicit topology, cache isolation,
 failed-run cleanup, precise timing and reports.
 
-Live validation used Qwen3-0.6B at TP2 on B200 GPUs with Snapshot v0.2.0-rc.2,
-vLLM 0.31.0, SGLang 0.5.21 and TensorRT-LLM 1.3.0rc24. Each engine passed
+Live validation at `13e4935f` used Qwen3-0.6B at TP2 on B200 GPUs with
+Snapshot v0.2.0-rc.2, vLLM 0.31.0, SGLang 0.5.21 and TensorRT-LLM 1.3.0rc24.
+Each engine passed
 one capture and three restores from that checkpoint. Each restore preserved
 the source process token and passed three inference checks. Checkpoint payloads
 were deleted afterward. Model weights were cached; FlashInfer artifact downloads
-were permitted. This smoke test validates the runner; the published model matrix
-was measured separately.
+were permitted. The published configurations were measured separately. GPU runs
+were not repeated after the timing and isolation fixes in `b40e8c73`.
