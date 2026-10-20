@@ -5,6 +5,10 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
+
+#include "s3_config.hpp"
+#include "transfer/s3/s3_storage_backend.hpp"
 
 #include "model_streamer_restore.hpp"
 #include "transfer/engine/transfer_engine.hpp"
@@ -15,15 +19,21 @@ class ModelStreamerTransferEngine final : public TransferEngine {
   // Retains the storage root used to validate filesystem locations.
   explicit ModelStreamerTransferEngine(Path storage_root);
 
+  // Configures native transfers with explicit S3 connection settings.
+  ModelStreamerTransferEngine(Path storage_root, S3TransferOptions options);
+
+  // Binds artifact operations to the configured S3 store.
+  explicit ModelStreamerTransferEngine(S3Config config);
+
   // Identifies the Model Streamer transfer implementation.
   IoEngine type() const override;
 
-  // Validates the source and prepares direct access or a CPU staging plan.
+  // Delegates source validation and planning to the configured storage backend.
   PreparedRestore PrepareRestore(const StorageBackend& source, Cancellation control = {},
       const PublishedArtifact* artifact = nullptr, bool metadata_only = false,
       TransferMode mode = TransferMode::Staged) const override;
 
-  // Returns direct access or streams CPU files into owned staging.
+  // Returns direct access or streams the prepared files into owned staging.
   RestoreAccess StageRestore(PreparedRestore preparation, const Path& destination,
       Cancellation control = {}) const override;
 
@@ -32,7 +42,7 @@ class ModelStreamerTransferEngine final : public TransferEngine {
       const std::string& transaction_id, TransferMode mode = TransferMode::Staged,
       const PublishedArtifact* artifact = nullptr, Cancellation control = {}) const override;
 
-  // Rejects unsupported artifacts and destinations outside the storage root.
+  // Validates the destination through the configured storage backend.
   void ValidateCheckpointDestination(const StorageBackend& destination,
       const PublishedArtifact* artifact = nullptr, Cancellation control = {}) const override;
 
@@ -40,18 +50,32 @@ class ModelStreamerTransferEngine final : public TransferEngine {
   RestorePlan InspectCheckpoint(const Path& source, const PublishedArtifact* artifact = nullptr,
       Cancellation control = {}) const override;
 
-  // Publishes checkpoint output using the filesystem strategy for its mode.
+  // Delegates checkpoint publication and retry state to the storage backend.
   void PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
       CheckpointPublication* publication = nullptr, Cancellation control = {},
       TransferMode mode = TransferMode::Staged) const override;
 
+  // Resolves a logical artifact target in the configured S3 store.
+  PublishedArtifact ResolveArtifactTarget(const ArtifactTarget& target) const override;
+
+  // Validates the store identity and handle of an S3 publication descriptor.
+  void ValidateArtifact(const PublishedArtifact& artifact) const override;
+
  private:
+  // Checks that upload and restore use consistent S3 connection settings.
+  void ValidateS3Configuration() const;
+
+  // Returns the configured artifact backend after validating its settings.
+  const S3StorageBackend& ArtifactStorage() const;
+
   // Creates a coordinator for native restore submissions.
   std::shared_ptr<ModelStreamerRestore> CreateRestore() const;
 
   // Reuses a healthy coordinator or replaces a failed native session.
   std::shared_ptr<ModelStreamerRestore> AcquireRestore() const;
   Path storage_root_;
+  const std::optional<S3TransferOptions> s3_options_;
+  std::unique_ptr<S3StorageBackend> store_;
   mutable std::mutex restore_mutex_;
   mutable std::shared_ptr<ModelStreamerRestore> restore_;
 };

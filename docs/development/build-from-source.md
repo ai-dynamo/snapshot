@@ -119,6 +119,8 @@ sign-off.
 ### PageBroker native S3 upload and restore tests
 
 These tests exercise CRT-managed AWS SDK uploads and native Model Streamer S3 reads.
+See the [S3 storage contract](../../agent/pagebroker/S3.md) for configuration,
+ownership, integrity and failure behavior.
 
 Local native builds require a C++20 compiler, protobuf, GoogleTest, OpenSSL,
 the pinned AWS SDK for C++ S3 CRT component, and both pinned Streamer libraries.
@@ -139,7 +141,7 @@ applies the same patch automatically.
 Build the patched revision with `BUILD_ONLY=s3-crt`, shared
 libraries, and `CMAKE_INSTALL_LIBDIR=lib`. Run
 `make -C agent/pagebroker test daemon MODEL_STREAMER_LIB_DIR=/path/to/libraries AWS_SDK_PREFIX=/path/to/aws-sdk`
-for filesystem, session-recovery, and S3 client tests. These tests need no S3
+for filesystem, artifact-identity, session-recovery, and S3 client tests. These tests need no S3
 endpoint or credentials.
 
 To exercise S3 in the distroless runtime, build the dedicated image target;
@@ -175,3 +177,24 @@ the endpoint when that CA is missing. Moto does not enforce IAM policies.
 For a locally built executable, use `make -C agent/pagebroker s3-test` with the
 Python dependencies installed. The runner also accepts `--binary`; both paths
 use the same disposable local service.
+
+### PageBroker S3 checkpoint tests
+
+Build the `s3-test` image and install the Python dependencies as above. The image
+also contains the production PageBroker daemon. Build the Go test client and
+run the local checkpoint fixture:
+
+```bash
+go test -c ./agent/internal/pagebroker -o /tmp/pagebroker-checkpoint-client.test
+/tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/checkpoint_integration.py \
+  --image local/pagebroker:s3-test --client /tmp/pagebroker-checkpoint-client.test
+/tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/checkpoint_integration.py --tls \
+  --image local/pagebroker:s3-test --client /tmp/pagebroker-checkpoint-client.test
+```
+
+The fixture runs native daemons against disposable Moto storage using fake
+credentials. It exercises the real Go client, checkpoint publication, full
+and metadata-only restore, lost responses, retries without payload rewrites,
+active Abort, staging ownership, expiry, restart and startup credential
+resolution. It validates protocol behavior and credential selection; deployment
+integration and production IAM policies require separate validation.

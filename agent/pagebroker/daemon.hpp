@@ -20,6 +20,7 @@ struct DaemonOptions {
   size_t max_concurrent_requests = kDefaultMaxConcurrentRequests;
   snapshot::pagebroker::gpu::EngineOptions gpu;
   bool enable_gpu = true;
+  std::filesystem::path storage_config;
 };
 
 DaemonOptions ParseDaemonOptions(std::span<const std::string_view> arguments);

@@ -106,13 +106,13 @@ class FaultServiceTest(unittest.TestCase):
 
         service = s3_integration.FaultService(backend)
         statuses = []
-        for method, name in (("PUT", "first"), ("PUT", "bad"), ("HEAD", "first")):
-            service({"PATH_INFO": "/bucket/roundtrip/engine-partial/" + name,
+        prefix = "/bucket/roundtrip/engine-partial/" + "a" * 64 + "/data/"
+        for method, name in (("PUT", "data"), ("PUT", "last"), ("HEAD", "data")):
+            service({"PATH_INFO": prefix + name,
                      "QUERY_STRING": "", "REQUEST_METHOD": method},
                     lambda status, headers: statuses.append(status))
         self.assertEqual(statuses, ["200 OK", "403 Forbidden", "200 OK"])
-        self.assertEqual(forwarded, [("PUT", "/bucket/roundtrip/engine-partial/first"),
-                                     ("HEAD", "/bucket/roundtrip/engine-partial/first")])
+        self.assertEqual(forwarded, [("PUT", prefix + "data"), ("HEAD", prefix + "data")])
 
     def test_retries_are_scoped_to_the_native_test_prefix(self):
         forwarded = []
