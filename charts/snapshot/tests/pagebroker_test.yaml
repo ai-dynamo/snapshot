@@ -81,12 +81,22 @@ tests:
     set:
       pageBroker.artifactAddressing: true
     asserts:
-      - contains:
+      - equal:
           path: spec.template.spec.containers[1].args
-          content: --storage-config
-      - contains:
-          path: spec.template.spec.containers[1].args
-          content: /etc/snapshot/storage.yaml
+          value:
+            - /pagebroker/control/pagebroker.sock
+            - /pagebroker/staging
+            - /checkpoints
+            - --max-concurrent-requests
+            - "16"
+            - --custom-storage-buffer-count
+            - "32"
+            - --custom-storage-chunk-bytes
+            - "134217728"
+            - --custom-storage-max-pinned-bytes
+            - "0"
+            - --storage-config
+            - /etc/snapshot/storage.yaml
 
   - it: mounts the checkpoint PVC in both containers at the same path
     template: templates/daemonset.yaml

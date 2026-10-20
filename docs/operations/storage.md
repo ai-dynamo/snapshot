@@ -140,8 +140,10 @@ descriptor, and PageBroker refuses a descriptor from another store
 (`STORE_MISMATCH`), a publication that is missing (`ARTIFACT_NOT_FOUND`) or
 whose evidence does not match (`ARTIFACT_CORRUPT`). A transaction that
 outlives PageBroker's fixed 2h5m lifetime fails Commit with
-`TRANSACTION_EXPIRED` and is cleaned up. Legacy path-addressed requests are
-unchanged, and content without a store binding keeps using them.
+`TRANSACTION_EXPIRED`. PageBroker begins expiry cleanup, but active GPU work
+or a filesystem cleanup error can defer removal until a later sweep. Legacy
+path-addressed requests are unchanged, and content without a store binding
+keeps using them.
 
 Because the staging volume is RAM, size the agent pod for it:
 
