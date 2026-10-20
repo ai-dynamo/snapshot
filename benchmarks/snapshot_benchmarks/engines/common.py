@@ -57,7 +57,32 @@ class GuideEngine:
         )
 
     def build_source_pod(self, **kwargs):
-        return self._build("capture/qwen3-0.6b.yaml", **kwargs)
+        pod = self._build("capture/qwen3-0.6b.yaml", **kwargs)
+        if kwargs["model"].tp > 1:
+            # Reuse the guide's launcher delivery without its large-model sizing.
+            path = ROOT / "docs/guides" / self.guide / "capture/glm-5.3.yaml"
+            multi = yaml.safe_load(path.read_text())["spec"]["template"]["spec"]
+            spec = pod["spec"]
+            spec.setdefault("initContainers", []).extend(
+                c
+                for c in multi["initContainers"]
+                if c["name"] == "snapshot-cuda-install"
+            )
+            spec["volumes"].extend(
+                v for v in multi["volumes"] if v["name"] == "snapshot-cuda"
+            )
+            main = next(
+                c for c in spec["containers"] if c["name"] == self.container_name
+            )
+            reference = next(
+                c for c in multi["containers"] if c["name"] == self.container_name
+            )
+            main["volumeMounts"].extend(
+                m for m in reference["volumeMounts"] if m["name"] == "snapshot-cuda"
+            )
+            command = reference["command"]
+            main["command"] = command[: command.index("--") + 1] + main["command"]
+        return pod
 
     def build_restore_pod(self, *, snapshot_name, **kwargs):
         pod = self._build("restore/1-gpu.yaml", **kwargs)

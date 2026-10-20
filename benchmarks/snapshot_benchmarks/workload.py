@@ -33,13 +33,17 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
     pod["metadata"].setdefault("labels", {})["snapshot-benchmark"] = run_id
     if model.tp > 1:
         pod["metadata"].setdefault("annotations", {})[
-            "nvidia.com/cuda-shared-memory-support"
+            "nvidia.com/snapshot-multi-gpu"
         ] = "enabled"
     main = next(c for c in spec["containers"] if c["name"] == engine.container_name)
     main["resources"]["limits"]["nvidia.com/gpu"] = str(model.tp)
     if "nvidia.com/gpu" in main["resources"].get("requests", {}):
         main["resources"]["requests"]["nvidia.com/gpu"] = str(model.tp)
-    main["command"] = ["python3", "/snapshot-app/launch.py"]
+    prefix = []
+    if not restore and model.tp > 1:
+        command = main["command"]
+        prefix = command[: command.index("--") + 1]
+    main["command"] = prefix + ["python3", "/snapshot-app/launch.py"]
     values = dict(
         HF_HOME="/hf-cache",
         HF_HUB_OFFLINE="1",

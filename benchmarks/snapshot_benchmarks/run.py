@@ -137,7 +137,7 @@ def _container_started_at(pod, container_name: str) -> datetime.datetime | None:
     return None
 
 
-def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> None:
+def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> str:
     """Fails fast, before deploying anything, if no `snapshot-agent` pod is
     visible in `cfg.snapshot_namespace` for `cfg.release`. The most common
     cause is simply passing the wrong `--snapshot-namespace`/`--release` --
@@ -153,6 +153,10 @@ def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> None:
             f"no snapshot-agent pod found in namespace {snapshot_cfg.namespace!r} for "
             f"release {snapshot_cfg.release!r} -- check --snapshot-namespace and --release"
         )
+    for pod in agents:
+        if pod.spec.node_name == cfg.node:
+            return next(c.image for c in pod.spec.containers if c.name == "agent")
+    raise RuntimeError("No snapshot-agent on selected node: " + cfg.node)
 
 
 def run_benchmark(
@@ -201,8 +205,9 @@ def run_benchmark(
     folder = evidence_dir / run_id
     folder.mkdir(parents=True, exist_ok=False)
     measurement.save(folder / "settings.json", dataclasses.asdict(cfg))
-    if mode == "both":
-        _validate_snapshot_agent_present(cfg)
+    agent_image = None
+    if mode == "both" or model.tp > 1:
+        agent_image = _validate_snapshot_agent_present(cfg)
 
     source_name = f"bench-source-{run_id}"
 
@@ -248,6 +253,9 @@ def run_benchmark(
             tolerations=tolerations,
         )
         source_manifest = instrument_pod(source_manifest, cfg, engine, model, run_id)
+        for container in source_manifest["spec"].get("initContainers", []):
+            if container["name"] == "snapshot-cuda-install":
+                container["image"] = agent_image
         app = app_configmap(engine, cfg.workload_namespace, "bench-app-" + run_id)
         measurement.save(folder / "app.json", app)
         measurement.save(folder / "source-manifest.json", source_manifest)

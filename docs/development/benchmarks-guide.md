@@ -64,8 +64,11 @@ uv run --project benchmarks python -m snapshot_benchmarks run \
 Remove `--dry-run` to run it. Use `--engine sglang` or `--engine trtllm` for the
 other engines. `--tp` is the GPU count; `--ep` sets expert parallelism within
 those GPUs and must divide TP. vLLM supports EP=1 or EP=TP in this workload.
-The source and restore pods are pinned to `--node`. Use a separate run to
-measure a different topology.
+The source and restore pods are pinned to `--node`. Multi-GPU captures reuse
+the guide's launcher installer, using the agent image deployed on that node.
+Dry-run manifests retain the guide's `${SNAPSHOT_AGENT_IMAGE}` placeholder;
+the runner resolves it before creating a pod. Use a separate run to measure
+a different topology.
 
 Model-specific constructor arguments are JSON, using the engine's Python API
 names. For example, add this for vLLM Qwen3-14B:

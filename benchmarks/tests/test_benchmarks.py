@@ -67,8 +67,6 @@ def cluster():
 
     def create(body):
         command = body["spec"]["containers"][0]["command"]
-        if "nvidia.com/restore-from" not in body["metadata"].get("annotations", {}):
-            command = ["/snapshot/cuinterpose-launch", "--", *command]
         name = body["metadata"]["name"]
         pod = client.V1Pod(
             metadata=client.V1ObjectMeta(
@@ -104,7 +102,7 @@ def cluster():
     )
     boundaries = {
         "load_config": None,
-        "_validate_snapshot_agent_present": None,
+        "_validate_snapshot_agent_present": "snapshot-agent:test",
         "_collect_agent_log_phases": AgentLogPhases(),
         "_wait_for_pod_condition": lambda namespace, name, condition, **kwargs: pods[
             name
@@ -185,7 +183,9 @@ class BenchmarkTests(unittest.TestCase):
                 factory = Mock(return_value=llm)
                 globals_ = dict(
                     os=os,
-                    sys=SimpleNamespace(argv=["app.py", '{"model": "test", "tensor_parallel_size": 2}']),
+                    sys=SimpleNamespace(
+                        argv=["app.py", '{"model": "test", "tensor_parallel_size": 2}']
+                    ),
                     json=json,
                     gc=gc,
                     traceback=traceback,
@@ -213,9 +213,7 @@ class BenchmarkTests(unittest.TestCase):
                     globals_["main"]()
                 calls = [c.args[0] for c in llm._collective_rpc.call_args_list]
                 self.assertEqual(calls, ["sleep", "wakeup"])
-                self.assertEqual(
-                    factory.call_args.kwargs["dtype"], "auto"
-                )
+                self.assertEqual(factory.call_args.kwargs["dtype"], "auto")
 
     def test_source_analysis_counts_overlapping_ranks_once_and_excludes_inference(self):
         lines = []
@@ -356,16 +354,22 @@ class BenchmarkTests(unittest.TestCase):
                         main = spec["containers"][0]
                         constructor = json.loads(main["args"][0])
                         if engine.name == "sglang":
-                            self.assertEqual(constructor["model_path"], model.hf_id_or_path)
+                            self.assertEqual(
+                                constructor["model_path"], model.hf_id_or_path
+                            )
                             self.assertEqual(constructor["tp_size"], tp)
                             self.assertEqual(constructor["ep_size"], ep)
                         else:
                             self.assertEqual(constructor["model"], model.hf_id_or_path)
                             self.assertEqual(constructor["tensor_parallel_size"], tp)
                             if engine.name == "vllm":
-                                self.assertEqual(constructor["enable_expert_parallel"], ep > 1)
+                                self.assertEqual(
+                                    constructor["enable_expert_parallel"], ep > 1
+                                )
                             else:
-                                self.assertEqual(constructor["moe_expert_parallel_size"], ep)
+                                self.assertEqual(
+                                    constructor["moe_expert_parallel_size"], ep
+                                )
                         self.assertEqual(
                             main["resources"]["limits"]["nvidia.com/gpu"], str(tp)
                         )
@@ -384,12 +388,29 @@ class BenchmarkTests(unittest.TestCase):
                         if tp > 1:
                             self.assertEqual(
                                 pod["metadata"]["annotations"][
-                                    "nvidia.com/cuda-shared-memory-support"
+                                    "nvidia.com/snapshot-multi-gpu"
                                 ],
                                 "enabled",
                             )
+                    if tp > 1:
+                        self.assertEqual(
+                            Path(source["spec"]["containers"][0]["command"][0]).name,
+                            "cuinterpose-launch",
+                        )
+                        installer = next(
+                            c
+                            for c in source["spec"]["initContainers"]
+                            if c["name"] == "snapshot-cuda-install"
+                        )
+                        self.assertIn(
+                            "/usr/local/bin/cuinterpose-launch", installer["args"]
+                        )
                     self.assertEqual(
-                        source["spec"]["containers"][0]["volumeMounts"],
+                        [
+                            m
+                            for m in source["spec"]["containers"][0]["volumeMounts"]
+                            if m["name"] != "snapshot-cuda"
+                        ],
                         restore["spec"]["containers"][0]["volumeMounts"],
                     )
                     self.assertFalse(
