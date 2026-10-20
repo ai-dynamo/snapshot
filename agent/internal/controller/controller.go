@@ -418,7 +418,6 @@ func (w *NodeController) restorePodRelevant(pod *corev1.Pod) bool {
 // would instead leave deleted pods Terminating behind the queue, since the restore finalizer comes
 // off in processRestoreQueueItem.
 func (w *NodeController) runRestoreQueue(ctx context.Context) {
-	defer recoverPanic(w.log, "restore queue dispatch", nil)
 	for {
 		key, shutdown := w.restoreQueue.Get()
 		if shutdown {
@@ -437,7 +436,10 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		}
 	}()
 	// Registered after the Done defer so it runs first, leaving requeue false.
-	defer recoverPanic(w.log, "restore work order", nil, "pod", key.String())
+	var panicked *corev1.Pod
+	defer recoverPanic(w.log, "restore work order", func(err error) {
+		w.failRestoreAfterPanic(ctx, key, panicked, err)
+	}, "pod", key.String())
 
 	pod, err := w.restorePodLister.Pods(key.Namespace).Get(key.Name)
 	if apierrors.IsNotFound(err) {
@@ -449,6 +451,7 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		return
 	}
 	pod = pod.DeepCopy()
+	panicked = pod
 	if w.skipRequestedAfterRefusal(pod) {
 		// The skip request is the way back for a pod the gates turned down, so
 		// it has to clear the in-process marker as well as the condition below.
@@ -759,6 +762,11 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	for i, mapping := range plan.mappings {
 		i, destination := i, mapping.Destination
 		workers.Go(func() {
+			// sync.WaitGroup.Go recovers only to re-panic, so a panic here
+			// would kill the agent. Report it as a failed destination instead.
+			results[i] = restoreResult{destination: destination, state: restoreResultFailed,
+				reason: "agent panicked restoring this container; see the node agent log"}
+			defer recoverPanic(w.log, "restore destination", nil, "pod", podKey, "destination", destination)
 			results[i] = w.restoreDestination(ctx, pod, plan, destination, podKey, recovering)
 		})
 	}
@@ -1340,7 +1348,6 @@ func (w *NodeController) enqueueCaptureForSourcePod(obj interface{}) {
 // runCaptureQueue gives each work order its own goroutine, for the same reasons as the restore
 // queue. Per-key exclusion still comes from the queue itself.
 func (w *NodeController) runCaptureQueue(ctx context.Context) {
-	defer recoverPanic(w.log, "capture queue dispatch", nil)
 	for {
 		name, shutdown := w.captureQueue.Get()
 		if shutdown {

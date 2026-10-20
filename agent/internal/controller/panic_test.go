@@ -6,6 +6,7 @@ package controller
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -28,8 +29,17 @@ func TestRecoverPanicHandsTheCauseToTheHandler(t *testing.T) {
 	if !errors.As(got, &panicErr) {
 		t.Fatalf("error %T is not a *recoveredPanicError", got)
 	}
-	if panicErr.Stack() == "" {
-		t.Error("recovered panic carries no stack")
+}
+
+// The condition built from this error is readable by anyone who can read the
+// work order, so it must not carry a stack.
+func TestRecoveredPanicErrorCarriesNoStack(t *testing.T) {
+	err := &recoveredPanicError{value: "boom"}
+	if got := err.Error(); got != "panic: boom" {
+		t.Errorf("Error() = %q, want %q", got, "panic: boom")
+	}
+	if strings.Contains(err.Error(), ".go:") || strings.Contains(err.Error(), "goroutine") {
+		t.Errorf("Error() leaks a stack: %q", err.Error())
 	}
 }
 
@@ -55,23 +65,46 @@ func TestRecoverPanicContainsThePanic(t *testing.T) {
 	}
 }
 
-func TestRecoveredPanicStackIsBounded(t *testing.T) {
-	huge := strings.Repeat("x", stackLimit*3)
-	got := truncateStack(huge)
-	if len(got) <= stackLimit {
-		t.Fatalf("truncated stack length %d, want just over %d", len(got), stackLimit)
+// restorePodContainers runs each destination under sync.WaitGroup.Go, which
+// recovers only to re-panic, so a panic there would kill the agent. The worker
+// seeds a failed result before running, so a recovered panic leaves a reported
+// failure rather than a zero-valued success.
+func TestRestoreDestinationPanicLeavesAFailedResult(t *testing.T) {
+	results := make([]restoreResult, 1)
+	var workers sync.WaitGroup
+
+	workers.Go(func() {
+		results[0] = restoreResult{destination: "main", state: restoreResultFailed,
+			reason: "agent panicked restoring this container; see the node agent log"}
+		defer recoverPanic(logr.Discard(), "restore destination", nil)
+		panic("restore blew up")
+	})
+	workers.Wait()
+
+	if results[0].state != restoreResultFailed {
+		t.Errorf("state = %v, want restoreResultFailed", results[0].state)
 	}
-	if len(got) > stackLimit+64 {
-		t.Errorf("truncated stack length %d exceeds the bound", len(got))
+	if results[0].destination != "main" {
+		t.Errorf("destination = %q, want main", results[0].destination)
 	}
-	if !strings.HasSuffix(got, "<truncated>") {
-		t.Error("truncated stack is not marked as truncated")
+	if results[0].reason == "" {
+		t.Error("a panicking destination reported no reason")
 	}
 }
 
-func TestTruncateStackLeavesShortStacksAlone(t *testing.T) {
-	short := "goroutine 1 [running]:\nmain.main()"
-	if got := truncateStack(short); got != short {
-		t.Errorf("truncateStack(%q) = %q, want it unchanged", short, got)
+// The seeded result must not survive a destination that completes.
+func TestRestoreDestinationSuccessOverwritesTheSeed(t *testing.T) {
+	results := make([]restoreResult, 1)
+	var workers sync.WaitGroup
+
+	workers.Go(func() {
+		results[0] = restoreResult{destination: "main", state: restoreResultFailed, reason: "seed"}
+		defer recoverPanic(logr.Discard(), "restore destination", nil)
+		results[0] = restoreResult{destination: "main", state: restoreResultSucceeded}
+	})
+	workers.Wait()
+
+	if results[0].state != restoreResultSucceeded {
+		t.Errorf("state = %v, want restoreResultSucceeded", results[0].state)
 	}
 }
