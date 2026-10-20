@@ -99,8 +99,12 @@ func (c Client) PrepareGPUCheckpoint(ctx context.Context, transactionID, destina
 }
 
 // PrepareGPUStagedRestore prepares a staged image and retains the broker before PID namespace entry.
-func (c Client) PrepareGPUStagedRestore(ctx context.Context, transactionID, source string, gpuContext *GpuContext) (string, *CustomStorageExecution, error) {
-	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, stagedRestore(source))
+func (c Client) PrepareGPUStagedRestore(ctx context.Context, transactionID, source string, gpuContext *GpuContext, engines ...TransferEngine) (string, *CustomStorageExecution, error) {
+	command, err := stagedRestore(source, engines...)
+	if err != nil {
+		return "", nil, err
+	}
+	response, execution, err := c.prepareGPUExecution(ctx, transactionID, gpuContext, command)
 	if err != nil {
 		return "", nil, err
 	}

@@ -122,6 +122,41 @@ helm upgrade --install snapshot ./charts/snapshot \
   --set storage.pvc.name=my-snapshot-pvc
 ```
 
+## PageBroker transfer engines
+
+Every checkpoint and restore goes through PageBroker. The Snapshot Agent
+uses the configured transfer engine for staged filesystem requests. Direct
+restores and GPU checkpoint output retain their direct filesystem paths. Build
+the agent and dedicated PageBroker images from the same checkout and tag them
+alike. Only the PageBroker image includes the native Model Streamer library:
+
+```bash
+# In this repository. Add --push through DOCKER_BUILD_ARGS for a remote cluster.
+make docker-build-agent docker-build-pagebroker \
+  REGISTRY=ghcr.io/YOUR_ACCOUNT/snapshot \
+  TAGS=pagebroker-model-streamer
+
+helm upgrade --install snapshot ./charts/snapshot \
+  --namespace "${NAMESPACE}" --create-namespace \
+  --set pageBroker.restoreMode=staged \
+  --set pageBroker.transferEngine=model-streamer \
+  --set image.agent.repository=ghcr.io/YOUR_ACCOUNT/snapshot/agent \
+  --set image.agent.tag=pagebroker-model-streamer \
+  --set image.pageBroker.repository=ghcr.io/YOUR_ACCOUNT/snapshot/pagebroker
+```
+
+Model Streamer accelerates staged filesystem restore reads; its filesystem checkpoint path
+uses filesystem copy because Model Streamer does not provide a write API. The
+`pageBroker.transferEngine` value accepts `posix-copy` (the default) or
+`model-streamer`.
+
+The PageBroker Docker build downloads and verifies the pinned Model Streamer
+C++ SDK from its GitHub release. See the
+[source build instructions](../../docs/development/build-from-source.md) for
+the SDK version and native build instructions. The PageBroker image includes
+the library and its license materials even when `posix-copy` is selected at
+runtime. The agent image does not depend on the SDK.
+
 ## CRD upgrades
 
 Helm creates the CRDs in [crds/](./crds) on a fresh install and then leaves them
@@ -196,6 +231,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |
+| `pageBroker.transferEngine` | Engine for staged filesystem transfers: `posix-copy` or `model-streamer` | `posix-copy` |
 | `pageBroker.staging.sizeLimit` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for checkpoint (except GPU CustomStorage capture) and staged restore. Leave headroom above it in the writing container's memory limit; the chart's 64Gi default and the agent's 64Gi default memory limit leave none | `64Gi` |
 | `pageBroker.maxConcurrentRequests` | Concurrent control-socket requests the daemon serves | `16` |
 | `pageBroker.resources` | CPU and memory requests/limits for the PageBroker sidecar. The memory limit bounds restore prefetch into staging | 8 CPU / 32Gi request, 32 CPU / 256Gi limit |

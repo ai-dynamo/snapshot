@@ -588,6 +588,15 @@ func TestNewRestoreCleanupError(t *testing.T) {
 	}
 }
 
+func TestPageBrokerTransferEngineDefaultsEmptyToPosixCopy(t *testing.T) {
+	if got := pageBrokerTransferEngine(""); got != "posix-copy" {
+		t.Fatalf("pageBrokerTransferEngine(\"\") = %q, want posix-copy", got)
+	}
+	if got := pageBrokerTransferEngine("model-streamer"); got != "model-streamer" {
+		t.Fatalf("pageBrokerTransferEngine(model-streamer) = %q, want model-streamer", got)
+	}
+}
+
 func TestValidateRestoreManifest(t *testing.T) {
 	manifest := types.NewCheckpointManifest(
 		"content-uid-123",
@@ -1143,8 +1152,19 @@ func TestRestoreSuccessfulCPURestoreUnmountsBeforeCommitAndSkipsAbort(t *testing
 
 func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 	const gpuUUID = "GPU-11111111-1111-1111-1111-111111111111"
-	for _, mode := range []string{"cpu", "invalid-context", "custom-storage"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, test := range []struct {
+		name, mode, engine string
+	}{
+		{"cpu-default", "cpu", ""},
+		{"cpu-posix", "cpu", "posix-copy"},
+		{"cpu-model-streamer", "cpu", "model-streamer"},
+		{"invalid-context", "invalid-context", ""},
+		{"custom-storage-default", "custom-storage", ""},
+		{"custom-storage-posix", "custom-storage", "posix-copy"},
+		{"custom-storage-model-streamer", "custom-storage", "model-streamer"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mode := test.mode
 			base := t.TempDir()
 			directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
 			if err != nil {
@@ -1197,6 +1217,17 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 						if request.GetStagedRestore() == nil {
 							err = errors.New("expected StagedRestore")
 						}
+						engine := request.GetStagedRestore().GetIoEngine()
+						if test.engine == "model-streamer" {
+							if engine.GetModelStreamer() == nil {
+								t.Errorf("staged restore engine = %v, want Model Streamer", engine)
+							}
+						} else if engine.GetPosixCopy() == nil {
+							t.Errorf("staged restore engine = %v, want POSIX copy", engine)
+						}
+						if request.GetRequestBrokerPidfd() != (mode == "custom-storage") {
+							t.Errorf("broker pidfd requested = %v for %s restore", request.GetRequestBrokerPidfd(), mode)
+						}
 						response.Result = &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}}
 					case "abort":
 						if request.GetAbort() == nil {
@@ -1223,6 +1254,7 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
 				PageBrokerControlSocketPath: listener.Addr().String(),
 				PageBrokerRestoreMode:       "staged", CustomStorageAvailable: true, SkipCompatCheck: true,
+				PageBrokerTransferEngine: test.engine,
 			}, mounts)
 			if err == nil {
 				t.Fatal("expected restore failure")
