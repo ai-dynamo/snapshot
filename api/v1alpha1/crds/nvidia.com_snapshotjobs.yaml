@@ -72,6 +72,30 @@ spec:
                 format: int64
                 minimum: 1
                 type: integer
+              nonTargetArtifacts:
+                description: |-
+                  NonTargetArtifacts declares regular non-target writers and their opt-in
+                  failed-attempt cleanup policy. Omission retains their bytes and does not
+                  change capture-artifact or source-object deletion. The controller derives
+                  the source Pod annotation from this typed declaration.
+                properties:
+                  containers:
+                    description: Containers names the regular non-target containers
+                      publishing extra bytes.
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                  onFailure:
+                    description: OnFailure governs only these containers' UID-owned
+                      artifact directory.
+                    enum:
+                    - Retain
+                    - Cleanup
+                    type: string
+                required:
+                - containers
+                type: object
               podSnapshotTemplate:
                 description: |-
                   PodSnapshotTemplate defines the properties of the PodSnapshot produced by
@@ -8997,6 +9021,11 @@ spec:
             - message: targetContainers must name containers present in podTemplate
               rule: self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x,
                 x.name))
+            - message: nonTargetArtifacts and the legacy container annotation cannot
+                both be set
+              rule: '!has(self.nonTargetArtifacts) || !has(self.podTemplate.metadata)
+                || !has(self.podTemplate.metadata.annotations) || !(''nvidia.com/snapshot-non-target-artifact-containers''
+                in self.podTemplate.metadata.annotations)'
           status:
             description: SnapshotJobStatus defines the observed state of SnapshotJob.
             properties:

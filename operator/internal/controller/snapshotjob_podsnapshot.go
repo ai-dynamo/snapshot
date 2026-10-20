@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -233,6 +235,17 @@ func podSnapshotTemplateMetadata(sj *snapshotv1alpha1.SnapshotJob) (map[string]s
 	}
 	labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
 	labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
+	if sj.Spec.NonTargetArtifacts != nil {
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[podcontract.NonTargetArtifactContainersAnnotation] = strings.Join(sj.Spec.NonTargetArtifacts.Containers, ",")
+	} else if nonTargets, legacy := sj.Spec.PodTemplate.Annotations[podcontract.NonTargetArtifactContainersAnnotation]; legacy {
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[podcontract.NonTargetArtifactContainersAnnotation] = nonTargets
+	}
 	return labels, annotations, nil
 }
 

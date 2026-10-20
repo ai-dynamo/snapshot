@@ -148,6 +148,7 @@ def create_snapshotjob(
     *,
     target_containers: list[str] | None = None,
     active_deadline_seconds: int | None = None,
+    non_target_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "podTemplate": pod_template,
@@ -155,6 +156,8 @@ def create_snapshotjob(
     }
     if active_deadline_seconds is not None:
         spec["activeDeadlineSeconds"] = active_deadline_seconds
+    if non_target_artifacts is not None:
+        spec["nonTargetArtifacts"] = non_target_artifacts
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "SnapshotJob",
