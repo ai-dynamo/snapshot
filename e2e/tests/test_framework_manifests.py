@@ -21,6 +21,8 @@ pull request, without a cluster:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from snapshot_e2e import framework_workloads as fw
@@ -59,6 +61,24 @@ def pods(spec: frameworks.FrameworkSpec) -> tuple[dict, dict, workloads.TestRun]
         config=CONFIG, run=run, spec=spec, source_node="gpu-node-0", image=IMAGE
     )
     return source, restore, run
+
+
+@pytest.mark.workload
+def test_framework_pods_use_explicit_cpu_only_scheduling(
+    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_CPU_ONLY", "false")
+    config = replace(CONFIG, cpu_only=True)
+    run = workloads.TestRun.new("cpu-manifest")
+    source = fw.source_pod(config=config, run=run, spec=spec, image=IMAGE)
+    restore = fw.restore_pod(
+        config=config, run=run, spec=spec, source_node="only-node", image=IMAGE
+    )
+    for pod in (source, restore):
+        # Preserve GPU requirements from the guide itself; CPU-only mode only
+        # suppresses extra scheduling constraints from the e2e helper.
+        assert pod["spec"]["nodeSelector"] == {"nvidia.com/gpu.present": "true"}
+        assert pod["spec"]["tolerations"] == []
 
 
 @pytest.mark.workload

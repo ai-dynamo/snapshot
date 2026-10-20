@@ -64,6 +64,7 @@ def source_pod(
         labels=run.labels,
         image=image or framework_image(spec),
         model_cache=model_cache,
+        cpu_only=config.cpu_only,
     )
     # The direct PodSnapshot flow: the test creates the PodSnapshot itself, so
     # the source must carry no restore/snapshot annotations of its own.
@@ -88,6 +89,7 @@ def restore_pod(
         labels=run.labels,
         image=image or framework_image(spec),
         model_cache=model_cache,
+        cpu_only=config.cpu_only,
     )
     # The guide's placeholder annotation names its own PodSnapshot; this run's
     # PodSnapshot is what must be restored. Restore is node-pinned: the agent
@@ -169,6 +171,7 @@ def pod_from_deployment(
     labels: dict[str, str],
     image: str,
     model_cache: SharedModelCache | None = None,
+    cpu_only: bool = False,
 ) -> dict[str, Any]:
     template = copy.deepcopy(deployment["spec"]["template"])
     metadata = template.get("metadata", {})
@@ -191,9 +194,9 @@ def pod_from_deployment(
         container["image"] = image
         container["imagePullPolicy"] = pull_policy
 
-    scheduling = workload_scheduling()
-    pod_spec["nodeSelector"] = {**pod_spec.get("nodeSelector", {}), **scheduling["nodeSelector"]}
-    pod_spec["tolerations"] = pod_spec.get("tolerations", []) + scheduling["tolerations"]
+    scheduling = workload_scheduling(cpu_only=cpu_only)
+    pod_spec["nodeSelector"] = {**pod_spec.get("nodeSelector", {}), **scheduling.get("nodeSelector", {})}
+    pod_spec["tolerations"] = pod_spec.get("tolerations", []) + scheduling.get("tolerations", [])
 
     return {
         "apiVersion": "v1",
