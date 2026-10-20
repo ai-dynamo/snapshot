@@ -328,7 +328,8 @@ jobs:
           # leave the check green while it tested no round trip at all.
           SNAPSHOT_E2E_REQUIRED_TESTS: >-
             test_one_cpu_snapshot_restores_into_two_containers,
-            test_snapshotjob_cpu_captures_and_restore_recovers_state
+            test_snapshotjob_cpu_captures_and_restore_recovers_state,
+            test_snapshotjob_deadline_removed_pod_retains_non_target_artifacts
         run: |
           set -euo pipefail
           start=$(date +%s)
