@@ -21,7 +21,7 @@ the agent to checkpoint it:
 ```bash
 snapshotctl checkpoint \
   --manifest ./vllm-replica-pod.yaml \
-  --snapshot vllm-snapshot \
+  --snapshot vllm-qwen3-0-6b-snapshot \
   --container main \
   --namespace my-inference
 ```
@@ -49,7 +49,7 @@ named `PodSnapshot`:
 ```bash
 snapshotctl restore \
   --manifest ./vllm-replica-pod.yaml \
-  --snapshot vllm-snapshot \
+  --snapshot vllm-qwen3-0-6b-snapshot \
   --namespace my-inference
 ```
 

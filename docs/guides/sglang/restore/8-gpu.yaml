@@ -18,7 +18,7 @@ spec:
       labels:
         app: sglang-8gpu-restored
       annotations:
-        nvidia.com/restore-from: <snapshot-name>
+        nvidia.com/restore-from: ${SNAPSHOT_NAME}
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -76,7 +76,7 @@ spec:
             sizeLimit: 64Gi
         - name: model-cache
           persistentVolumeClaim:
-            claimName: snapshot-model-cache
+            claimName: model-cache
         - name: snapshot-control
           emptyDir: {}
         - name: app

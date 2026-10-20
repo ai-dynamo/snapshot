@@ -56,7 +56,7 @@ class FrameworkSpec:
     # traceback. The restored process keeps the dead source container's stdout,
     # so this file is the only place such a failure is visible.
     restore_error_file: str
-    # Guide PVC manifest for a persistent model cache, if the guide uses one.
+    # The guides' model cache PVC manifest, relative to manifest_dir.
     model_cache_manifest: str | None = None
     # Overrides RESTORE_TIMEOUT_SECONDS for this framework's restore-condition
     # and restore-outcome waits.
@@ -79,7 +79,7 @@ class FrameworkSpec:
 
     @property
     def restore_deployment_manifest(self) -> Path:
-        filename = "8-gpu.yaml" if self.recipe else "single-gpu.yaml"
+        filename = "8-gpu.yaml" if self.recipe else "1-gpu.yaml"
         return self.manifest_dir / "restore" / filename
 
     @property
@@ -99,19 +99,24 @@ class FrameworkSpec:
         return self.manifest_dir / self.model_cache_manifest
 
 
+# The model cache PVC every recipe mounts, relative to the framework's manifest
+# directory.
+MODEL_CACHE_PVC_MANIFEST = "../model-cache-pvc.yaml"
+
 FRAMEWORKS: dict[str, FrameworkSpec] = {
     "vllm": FrameworkSpec(
         name="vllm",
         model="Qwen/Qwen3-0.6B",
         restore_ready_file="/snapshot-control/vllm-restore-ready",
         restore_error_file="/snapshot-control/vllm-restore-error",
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
     ),
     "sglang": FrameworkSpec(
         name="sglang",
         model="Qwen/Qwen3-0.6B",
         restore_ready_file="/snapshot-control/sglang-restore-ready",
         restore_error_file="/snapshot-control/sglang-restore-error",
-        model_cache_manifest="model-cache-pvc.yaml",
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
         # engine.resume_memory_occupation() has come within seconds of the
         # default 300s budget in CI; give it more room than the other
         # frameworks need.
@@ -122,6 +127,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         model="Qwen/Qwen3-0.6B",
         restore_ready_file="/snapshot-control/trtllm-restore-ready",
         restore_error_file="/snapshot-control/trtllm-restore-error",
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
     ),
 }
 
@@ -152,7 +158,7 @@ def framework_spec(name: str) -> FrameworkSpec:
     return replace(
         spec,
         model=guide_model(main["args"])[0],
-        model_cache_manifest="../model-cache-pvc.yaml",
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
         source_ready_timeout_seconds=3600,
         checkpoint_timeout_seconds=1800,
         restore_timeout_seconds=1800,
@@ -166,8 +172,8 @@ class SharedModelCache:
     CI clusters commonly block or throttle model downloads from the pods, and
     even where they work, pulling weights on every run is wasted minutes. With
     a shared cache the framework pods mount the export at MODEL_CACHE_MOUNT,
-    point HF_HOME at it, and run offline; the guide's own per-deployment cache
-    (SGLang's download init container and PVC) is replaced, not duplicated.
+    point HF_HOME at it, and run offline; the guide's own model cache (its
+    download init container and PVC) is replaced, not duplicated.
     """
 
     server: str
@@ -188,7 +194,9 @@ class SharedModelCache:
         return cls(
             server=server,
             path=path,
-            pvc_name=os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_PVC", "model-cache"),
+            # Not the guides' own `model-cache` claim: a claim left behind by a
+            # run that downloaded through the guide must not shadow this one.
+            pvc_name=os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_PVC", "shared-model-cache"),
         )
 
 

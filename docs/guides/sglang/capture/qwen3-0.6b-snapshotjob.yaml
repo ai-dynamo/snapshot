@@ -4,8 +4,9 @@
 apiVersion: nvidia.com/v1alpha1
 kind: SnapshotJob
 metadata:
-  name: sglang-snapshot
+  name: sglang-qwen3-0-6b-snapshot
 spec:
+  activeDeadlineSeconds: 3600
   podSnapshotTemplate:
     targetContainers:
       - main
@@ -84,7 +85,7 @@ spec:
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: sglang-model-cache
+            claimName: model-cache
         - name: shm
           emptyDir:
             medium: Memory

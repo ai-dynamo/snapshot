@@ -170,7 +170,7 @@ spec:
           emptyDir: {}
         - name: model-cache
           persistentVolumeClaim:
-            claimName: snapshot-model-cache
+            claimName: model-cache
         - name: snapshot-control
           emptyDir: {}
         - name: app

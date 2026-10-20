@@ -7,7 +7,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-deepseek-v4.1-flash-source
+  name: vllm-deepseek-v4-1-flash-source
 spec:
   replicas: 1
   progressDeadlineSeconds: 3600
@@ -15,13 +15,13 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: vllm-deepseek-v4.1-flash-source
+      app: vllm-deepseek-v4-1-flash-source
   template:
     metadata:
       annotations:
         nvidia.com/snapshot-multi-gpu: enabled
       labels:
-        app: vllm-deepseek-v4.1-flash-source
+        app: vllm-deepseek-v4-1-flash-source
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -156,7 +156,7 @@ spec:
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: snapshot-model-cache
+            claimName: model-cache
         - name: shm
           emptyDir:
             medium: Memory

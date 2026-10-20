@@ -17,6 +17,9 @@ spec:
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       nodeSelector:
         nvidia.com/gpu.product: NVIDIA-B200
       initContainers:
@@ -97,7 +100,7 @@ spec:
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: snapshot-model-cache
+            claimName: model-cache
         - name: shm
           emptyDir:
             medium: Memory

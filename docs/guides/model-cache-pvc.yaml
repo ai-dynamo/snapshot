@@ -4,7 +4,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: snapshot-model-cache
+  name: model-cache
 spec:
   accessModes:
     - ReadWriteMany

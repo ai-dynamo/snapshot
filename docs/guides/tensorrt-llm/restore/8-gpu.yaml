@@ -18,7 +18,7 @@ spec:
       labels:
         app: tensorrt-llm-8gpu-restored
       annotations:
-        nvidia.com/restore-from: <snapshot-name>
+        nvidia.com/restore-from: ${SNAPSHOT_NAME}
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -73,7 +73,7 @@ spec:
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: snapshot-model-cache
+            claimName: model-cache
         - name: shm
           emptyDir:
             medium: Memory

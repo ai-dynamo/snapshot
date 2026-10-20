@@ -4,7 +4,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: tensorrt-llm-source
+  name: tensorrt-llm-qwen3-0-6b-source
 spec:
   replicas: 1
   progressDeadlineSeconds: 1800
@@ -12,11 +12,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: tensorrt-llm-source
+      app: tensorrt-llm-qwen3-0-6b-source
   template:
     metadata:
       labels:
-        app: tensorrt-llm-source
+        app: tensorrt-llm-qwen3-0-6b-source
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -28,6 +28,27 @@ spec:
           localhostProfile: profiles/block-iouring.json
       nodeSelector:
         nvidia.com/gpu.present: "true"
+      initContainers:
+        - name: model-cache
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import sys
+              from huggingface_hub import snapshot_download
+              snapshot_download(repo_id=sys.argv[1])
+            - Qwen/Qwen3-0.6B
+          env:
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
       containers:
         - name: main
           image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
@@ -38,13 +59,13 @@ spec:
           args:
             - '{"model": "Qwen/Qwen3-0.6B"}'
           env:
-            - name: TRTLLM_MAX_NUM_TOKENS
-              value: "1024"
-            - name: TRTLLM_MAX_BATCH_SIZE
-              value: "1"
             - name: TRTLLM_FREE_GPU_MEMORY_FRACTION
-              value: "0.10"
+              value: "0.75"
             - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
               value: "1"
             - name: OMPI_MCA_pml
               value: ob1
@@ -64,6 +85,8 @@ spec:
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
@@ -73,6 +96,9 @@ spec:
               mountPath: /snapshot-app
               readOnly: true
       volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
         - name: snapshot-control
           emptyDir: {}
         - name: shm

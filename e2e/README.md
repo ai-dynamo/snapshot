@@ -347,7 +347,7 @@ SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapsho
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
-To test a [multi-GPU recipe](../docs/guides/checkpoint.md#single-gpu-and-multi-gpu-capture),
+To test an [eight-GPU recipe](../docs/guides/README.md#choose-your-recipe),
 set `SNAPSHOT_E2E_RECIPE` to its manifest filename without `.yaml`:
 
 ```bash
@@ -366,19 +366,19 @@ Model weights come from one of two places:
   `SNAPSHOT_E2E_MODEL_CACHE_PATH` to an NFS export holding a Hugging Face cache
   in `HF_HOME` layout (`hub/models--<org>--<model>/...`). The test creates a
   static `PersistentVolume`/`PersistentVolumeClaim` (`SNAPSHOT_E2E_MODEL_CACHE_PVC`,
-  default `model-cache`), mounts it at `/models` on every framework container,
+  default `shared-model-cache`, distinct from the guides' own `model-cache` claim),
+  mounts it at `/models` on every framework container,
   sets `HF_HOME=/models` and `HF_HUB_OFFLINE=1`, and drops the guide's download
   init container. In vCluster mode the setup enables `sync.toHost.persistentVolumes`
   so the NFS mount options reach the node. The model must already be in the cache.
-- **Guide download** (default without the variables): the guide's own plumbing
-  runs unchanged. SGLang's init container downloads into its PVC, which the test
-  creates from the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS`
-  when set) and leaves in place; vLLM and TensorRT-LLM download in-process.
-  This needs working DNS and egress from the pods. A partial or stale SGLang
-  cache (for example after a killed run) is reset by deleting that PVC; the
-  next run recreates and refills it.
-
-Multi-GPU recipes use PVC-backed download init containers for every engine.
+- **Guide download** (default without the variables): the guides' own plumbing
+  runs unchanged. Every recipe's init container downloads into the guides'
+  [model cache](../docs/guides/README.md#model-cache), the `model-cache` PVC, which
+  the test creates from `docs/guides/model-cache-pvc.yaml` if missing (with
+  `SNAPSHOT_E2E_STORAGE_CLASS` when set) and leaves in place. This needs working
+  DNS and egress from the pods. A partial or stale model cache (for example after
+  a killed run) is reset by deleting that PVC; the next run recreates and refills
+  it.
 
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.

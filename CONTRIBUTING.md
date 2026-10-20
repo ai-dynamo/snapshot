@@ -93,10 +93,11 @@ under `docs/guides/<framework>/`:
 | --- | --- |
 | `app.py` | Cooperates with the checkpoint/restore lifecycle: loads the model, then signals readiness |
 | `capture/<model>.yaml` | Deploys the replica that gets checkpointed |
-| `restore/single-gpu.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
+| `restore/1-gpu.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
 
 Plus `docs/guides/<framework>.md` walking through it, and an entry in the
-[guides index](docs/guides/README.md).
+[guides index](docs/guides/README.md) with a row in its recipe table for each
+model you add.
 
 The contract your entrypoint has to honor — the control volume, the startup
 gate, the `SNAPSHOT_CONTROL_DIR` environment variable, and the seccomp profile
