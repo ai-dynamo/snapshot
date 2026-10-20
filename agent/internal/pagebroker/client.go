@@ -32,40 +32,25 @@ const (
 
 var commitRetryLimit = 30 * time.Second
 
-// TransferEngine selects the PageBroker implementation for one staging request.
-type TransferEngine string
-
-const (
-	TransferEnginePosixCopy     TransferEngine = "posix-copy"
-	TransferEngineModelStreamer TransferEngine = "model-streamer"
-)
-
-// Client speaks the local PageBroker protocol; artifact operations require backend support.
+// Client speaks the local PageBroker protocol. Filesystem operations run against
+// the current broker; artifact-addressed operations require a storage backend.
 type Client struct {
 	ControlSocketPath string
 }
 
-func (c Client) StagedRestore(ctx context.Context, transactionID, source string, engines ...TransferEngine) (string, error) {
-	command, err := stagedRestore(source, engines...)
-	if err != nil {
-		return "", err
-	}
-	response, err := c.request(ctx, transactionID, command)
+func (c Client) StagedRestore(ctx context.Context, transactionID, source string) (string, error) {
+	response, err := c.request(ctx, transactionID, stagedRestore(source))
 	if err != nil {
 		return "", err
 	}
 	return imageDirectory(response.GetStagedRestoreDirectory().GetImageDirectory())
 }
 
-func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destination string, engines ...TransferEngine) (string, error) {
-	ioEngine, err := stagedIOEngine(engines)
-	if err != nil {
-		return "", err
-	}
+func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destination string) (string, error) {
 	response, err := c.request(ctx, transactionID, &Request_PrepareStagedCheckpoint{
 		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{
 			Selector: &PrepareStagedCheckpointRequest_Destination{Destination: filesystem(destination)},
-			IoEngine: ioEngine,
+			IoEngine: posixCopy(),
 		},
 	})
 	if err != nil {
@@ -290,15 +275,11 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, request *Re
 	return response, os.NewFile(uintptr(receivedFiles[0]), "pagebroker-process"), nil
 }
 
-func stagedRestore(source string, engines ...TransferEngine) (isRequest_Command, error) {
-	ioEngine, err := stagedIOEngine(engines)
-	if err != nil {
-		return nil, err
-	}
+func stagedRestore(source string) isRequest_Command {
 	return &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{
 		Selector: &StagedRestoreRequest_Source{Source: filesystem(source)},
-		IoEngine: ioEngine,
-	}}, nil
+		IoEngine: posixCopy(),
+	}}
 }
 
 func directRestore(source string) isRequest_Command {
@@ -315,29 +296,8 @@ func filesystem(directory string) *StorageBackend {
 	return &StorageBackend{Kind: &StorageBackend_Filesystem{Filesystem: &FilesystemStorage{Directory: &directory}}}
 }
 
-func stagedIOEngine(engines []TransferEngine) (*IOEngine, error) {
-	if len(engines) == 0 {
-		return posixCopy(), nil
-	}
-	if len(engines) != 1 {
-		return nil, fmt.Errorf("exactly one transfer engine may be selected")
-	}
-	return protocolIOEngine(engines[0])
-}
-
 func posixCopy() *IOEngine {
 	return &IOEngine{Kind: &IOEngine_PosixCopy{PosixCopy: &PosixCopyIOEngine{}}}
-}
-
-func protocolIOEngine(engine TransferEngine) (*IOEngine, error) {
-	switch engine {
-	case TransferEnginePosixCopy:
-		return &IOEngine{Kind: &IOEngine_PosixCopy{PosixCopy: &PosixCopyIOEngine{}}}, nil
-	case TransferEngineModelStreamer:
-		return &IOEngine{Kind: &IOEngine_ModelStreamer{ModelStreamer: &ModelStreamerIOEngine{}}}, nil
-	default:
-		return nil, fmt.Errorf("unsupported PageBroker transfer engine %q", engine)
-	}
 }
 
 // Linux permits at most 253 descriptors in one SCM_RIGHTS message.

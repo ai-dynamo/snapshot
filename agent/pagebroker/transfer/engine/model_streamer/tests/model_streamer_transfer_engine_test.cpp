@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstdlib>
@@ -168,8 +169,9 @@ runai_file_streamer_request(
   for (unsigned file = 0; file < num_files; ++file) {
     const std::string path(paths[file]);
     const std::string prefix = "s3://local-test-bucket/";
-    std::ifstream source(path.starts_with(prefix) ? fake_s3_root / path.substr(prefix.size()) : fs::path(path),
-                         std::ios::binary);
+    if (!path.starts_with(prefix))
+      return 1;
+    std::ifstream source(fake_s3_root / path.substr(prefix.size()), std::ios::binary);
     if (!source)
       return 1;
     for (unsigned file_range = 0; file_range < num_ranges[file]; ++file_range, ++range) {
@@ -212,47 +214,36 @@ runai_file_streamer_response_str(int response_code)
 }
 
 
-TEST_F(ModelStreamerTransferEngineTest, DirectRestoreBorrowsSourceWithoutStartingNativeSession)
+TEST_F(ModelStreamerTransferEngineTest, RejectsDirectAndBorrowedRestoreBeforeNativeStartup)
 {
-  const auto source = root_.path() / "source";
-  fs::create_directory(source);
-  ASSERT_EQ(mkfifo((source / "unscanned").c_str(), 0600), 0);
-  StorageBackend backend;
-  backend.mutable_filesystem()->set_directory(source.string());
-  ModelStreamerTransferEngine engine(root_.path());
-  auto prepared = engine.PrepareRestore(backend, {}, nullptr, false, TransferMode::Direct);
-  EXPECT_EQ(prepared.plan.size_bytes(), 0u);
-  const auto access = engine.StageRestore(std::move(prepared), root_.path() / "unused");
-  EXPECT_EQ(access.image_directory, source);
-  EXPECT_TRUE(access.staging_directory.empty());
-  EXPECT_GE(access.source.get(), 0);
+  ModelStreamerTransferEngine engine;
+  for (int kind = 0; kind < 3; ++kind) {
+    PreparedRestore prepared;
+    prepared.plan.files.push_back({"s3://local-test-bucket/source", "data", 1});
+    if (kind == 0)
+      prepared.mode = TransferMode::Direct;
+    else if (kind == 1)
+      prepared.local_source = root_.path();
+    else
+      prepared.source = FileDescriptor::Duplicate(STDIN_FILENO);
+    EXPECT_THROW(engine.StageRestore(std::move(prepared), root_.path() / "unused"), std::invalid_argument);
+  }
   EXPECT_FALSE(fs::exists(root_.path() / "unused"));
-  EXPECT_EQ(starts, 0u);
+  EXPECT_EQ(starts, 0U);
 }
 
-TEST_F(ModelStreamerTransferEngineTest, PublishesBothFilesystemModesWithoutStartingNativeSession)
+TEST_F(ModelStreamerTransferEngineTest, RejectsUnsupportedStorageOperations)
 {
-  ModelStreamerTransferEngine engine(root_.path());
-  for (const auto mode : {TransferMode::Direct, TransferMode::Staged}) {
-    StorageBackend backend;
-    const auto destination = root_.path() / (mode == TransferMode::Direct ? "direct" : "staged");
-    backend.mutable_filesystem()->set_directory(destination.string());
-    const auto output = engine.PrepareCheckpoint(backend, root_.path() / "staging", "checkpoint", mode);
-    fs::create_directory(output);
-    std::ofstream(output / "data") << "checkpoint";
-    struct stat before{}, after{};
-    ASSERT_EQ(stat((output / "data").c_str(), &before), 0);
-    engine.PublishCheckpoint(output, backend, engine.InspectCheckpoint(output), nullptr, {}, mode);
-    ASSERT_EQ(stat((destination / "data").c_str(), &after), 0);
-    if (mode == TransferMode::Direct) {
-      EXPECT_EQ(before.st_ino, after.st_ino);
-      EXPECT_FALSE(fs::exists(output));
-    } else {
-      EXPECT_NE(before.st_ino, after.st_ino);
-      EXPECT_TRUE(fs::exists(output / "data"));
-    }
-  }
-  EXPECT_EQ(starts, 0u);
+  ModelStreamerTransferEngine engine;
+  StorageBackend storage;
+  storage.mutable_filesystem()->set_directory((root_.path() / "unused").string());
+  EXPECT_THROW(engine.PrepareRestore(storage), std::logic_error);
+  EXPECT_THROW(engine.PrepareCheckpoint(storage, root_.path() / "capture", "id"), std::logic_error);
+  EXPECT_THROW(engine.ValidateCheckpointDestination(storage), std::logic_error);
+  EXPECT_THROW(engine.InspectCheckpoint(root_.path()), std::logic_error);
+  EXPECT_THROW(engine.PublishCheckpoint(root_.path(), storage, {}), std::logic_error);
+  EXPECT_TRUE(fs::is_empty(root_.path()));
+  EXPECT_EQ(starts, 0U);
 }
 
 TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
@@ -268,15 +259,19 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
   fs::create_directories(source);
   std::ofstream(source / "data") << "recovered";
 
-  StorageBackend backend;
-  backend.mutable_filesystem()->set_directory(source.string());
+  fake_s3_root = source;
+  const auto prepare = [] {
+    PreparedRestore result;
+    result.plan.files.push_back({"s3://local-test-bucket/data", "data", 9});
+    return result;
+  };
   {
-    ModelStreamerTransferEngine engine(storage);
-    EXPECT_THROW(engine.StageRestore(engine.PrepareRestore(backend), root / "first"), std::runtime_error);
+    ModelStreamerTransferEngine engine;
+    EXPECT_THROW(engine.StageRestore(prepare(), root / "first"), std::runtime_error);
     EXPECT_EQ(starts, 1);
     EXPECT_EQ(ends, 1);
 
-    ASSERT_NO_THROW(engine.StageRestore(engine.PrepareRestore(backend), root / "second"));
+    ASSERT_NO_THROW(engine.StageRestore(prepare(), root / "second"));
     std::ifstream restored(root / "second" / "data");
     ASSERT_TRUE(restored);
     EXPECT_EQ(std::string(std::istreambuf_iterator<char>(restored), std::istreambuf_iterator<char>()), "recovered");
@@ -284,21 +279,6 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
   }
   EXPECT_EQ(ends, 2);
 }
-
-TEST_F(ModelStreamerTransferEngineTest, RejectsMissingStorageBeforeCreatingAnything)
-{
-  ModelStreamerTransferEngine engine(root_.path());
-  EXPECT_THROW(engine.PrepareRestore({}), std::invalid_argument);
-  EXPECT_THROW(engine.StageRestore(engine.PrepareRestore({}), root_.path() / "staged"), std::invalid_argument);
-  EXPECT_FALSE(fs::exists(root_.path() / "staged"));
-  EXPECT_EQ(starts, 0);
-}
-
-
-
-
-
-
 
 TEST(ModelStreamerSessionTest, ConfiguresBeforeRequestsInEveryNativeSession)
 {
@@ -318,7 +298,8 @@ TEST(ModelStreamerSessionTest, ConfiguresBeforeRequestsInEveryNativeSession)
   RestorePlan plan;
   const auto source = root.path() / "source";
   std::ofstream(source) << "data";
-  plan.files.push_back({source.string(), "data", 4});
+  fake_s3_root = root.path();
+  plan.files.push_back({"s3://local-test-bucket/source", "data", 4});
   restore.Stage(plan, root.path() / "first");
   restore.Stage(plan, root.path() / "second");
   EXPECT_EQ(credential_calls, 2);
@@ -341,7 +322,8 @@ TEST(ModelStreamerSessionTest, PreservesProviderChainWithConnectionOnlyOptions)
   RestorePlan plan;
   const auto source = root.path() / "source";
   std::ofstream(source) << "data";
-  plan.files.push_back({source.string(), "data", 4});
+  fake_s3_root = root.path();
+  plan.files.push_back({"s3://local-test-bucket/source", "data", 4});
   restore.Stage(plan, root.path() / "first");
   EXPECT_EQ(credential_calls, 1);
   EXPECT_EQ(configured.size(), 1);
@@ -364,7 +346,8 @@ TEST(ModelStreamerSessionTest, StopsSessionWhenConfigurationFails)
   RestorePlan plan;
   const auto source = root.path() / "source";
   std::ofstream(source) << "data";
-  plan.files.push_back({source.string(), "data", 4});
+  fake_s3_root = root.path();
+  plan.files.push_back({"s3://local-test-bucket/source", "data", 4});
   {
     ModelStreamerRestore restore(options);
     EXPECT_THROW(restore.Stage(plan, root.path() / "failed"), std::runtime_error);

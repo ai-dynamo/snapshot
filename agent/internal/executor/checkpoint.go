@@ -123,7 +123,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		}
 	}
 	preparationAttempted = true
-	tmpDir, gpu, err := prepareCheckpoint(ctx, broker, transactionID, finalDir, executionContext, pageBrokerTransferEngine(cfg.PageBroker.TransferEngine))
+	tmpDir, gpu, err := prepareCheckpoint(ctx, broker, transactionID, finalDir, executionContext)
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
 		return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
@@ -478,9 +478,9 @@ func abortCheckpointTransaction(broker pagebroker.Client, transactionID string, 
 	return cause
 }
 
-func prepareCheckpoint(ctx context.Context, broker pagebroker.Client, transactionID, destination string, gpuContext *pagebroker.GpuContext, engines ...pagebroker.TransferEngine) (string, *pagebroker.CustomStorageExecution, error) {
+func prepareCheckpoint(ctx context.Context, broker pagebroker.Client, transactionID, destination string, gpuContext *pagebroker.GpuContext) (string, *pagebroker.CustomStorageExecution, error) {
 	if gpuContext == nil {
-		directory, err := broker.PrepareCheckpoint(ctx, transactionID, destination, engines...)
+		directory, err := broker.PrepareCheckpoint(ctx, transactionID, destination)
 		return directory, nil, err
 	}
 	return broker.PrepareGPUCheckpoint(ctx, transactionID, destination, gpuContext)

@@ -38,7 +38,6 @@
 #include "tests/request_builder.hpp"
 #include "tests/temporary_directory.hpp"
 #include "transfer/engine/model_streamer/model_streamer_restore.hpp"
-#include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
 #include "transfer/engine/posix/posix_copy_engine.hpp"
 
 namespace fs = std::filesystem;
@@ -106,15 +105,7 @@ class BrokerTest : public ::testing::Test, public test::RequestBuilder {
   std::optional<Broker> broker_;
 };
 
-class FilesystemEngineTest : public BrokerTest, public ::testing::WithParamInterface<IoEngine> {
- protected:
-  void Configure(StorageBackend* storage, IOEngine* engine, const fs::path& directory)
-  {
-    test::Configure(storage, engine, directory, GetParam());
-  }
-};
-
-INSTANTIATE_TEST_SUITE_P(
+TEST_SUITE_P(
     TransferEngines,
     FilesystemEngineTest,
     ::testing::Values(IoEngine::POSIX_COPY, IoEngine::MODEL_STREAMER),
@@ -150,45 +141,17 @@ TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
   EXPECT_EQ(abort_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
 }
 
-TEST_F(BrokerTest, ModelStreamerRestoresFilesystemTreeDataAndPermissions)
+TEST_F(BrokerTest, RejectsFilesystemModelStreamerBeforeStaging)
 {
-  fs::create_directories(source_ / "nested" / "empty");
-  constexpr char kExpectedData[] = "model-streamer\0data\n";
-  const std::string expected_data(kExpectedData, sizeof(kExpectedData) - 1);
-  {
-    std::ofstream data(source_ / "nested" / "data", std::ios::binary);
-    data.write(expected_data.data(), expected_data.size());
-  }
-  std::ofstream(source_ / "empty-file", std::ios::binary);
-  const auto root_permissions = fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec;
-  const auto directory_permissions = fs::perms::owner_all;
-  const auto file_permissions = fs::perms::owner_read | fs::perms::group_read;
-  const auto empty_file_permissions = fs::perms::owner_read;
-  fs::permissions(source_, root_permissions, fs::perm_options::replace);
-  fs::permissions(source_ / "nested" / "empty", directory_permissions, fs::perm_options::replace);
-  fs::permissions(source_ / "nested" / "data", file_permissions, fs::perm_options::replace);
-  fs::permissions(source_ / "empty-file", empty_file_permissions, fs::perm_options::replace);
-
-  auto restore = RequestFor("model-streamer");
-  Configure(
-      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
-      source_, IoEngine::MODEL_STREAMER);
-  const auto staged = broker().HandleRequest(restore);
-  ASSERT_TRUE(staged.has_staged_restore_directory()) << staged.failure().message();
-  const fs::path staging_directory(staged.staged_restore_directory().image_directory());
-  const fs::path restored_directory = staging_directory / "nested" / "empty";
-  const fs::path restored_data = staging_directory / "nested" / "data";
-  ASSERT_TRUE(fs::is_directory(restored_directory));
-  ASSERT_TRUE(fs::is_regular_file(staging_directory / "empty-file"));
-  EXPECT_EQ(fs::file_size(staging_directory / "empty-file"), 0);
-  std::ifstream restored(restored_data, std::ios::binary);
-  ASSERT_TRUE(restored);
-  const std::string contents{std::istreambuf_iterator<char>(restored), std::istreambuf_iterator<char>()};
-  EXPECT_EQ(contents, expected_data);
-  EXPECT_EQ(fs::status(staging_directory).permissions(), root_permissions);
-  EXPECT_EQ(fs::status(restored_directory).permissions(), directory_permissions);
-  EXPECT_EQ(fs::status(restored_data).permissions(), file_permissions);
-  EXPECT_EQ(fs::status(staging_directory / "empty-file").permissions(), empty_file_permissions);
+  auto request = RequestFor("unsupported");
+  auto* restore = request.mutable_staged_restore();
+  Configure(restore->mutable_source(), restore->mutable_io_engine(), source_);
+  restore->mutable_io_engine()->mutable_model_streamer();
+  const auto response = broker().HandleRequest(request);
+  ASSERT_TRUE(response.has_failure());
+  EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_TRUE(fs::is_empty(root_ / "tmpfs" / "restore"));
+  EXPECT_TRUE(fs::exists(source_ / "image"));
 }
 
 TEST(ModelStreamerRestoreTest, RejectsUnsafeOrIncompleteRestorePlans)
@@ -197,7 +160,7 @@ TEST(ModelStreamerRestoreTest, RejectsUnsafeOrIncompleteRestorePlans)
   const fs::path root = temporary.path() / "destination";
   for (const auto& unsafe : {fs::path("../escape"), fs::path("/absolute"), fs::path("nested/../escape")}) {
     RestorePlan plan;
-    plan.files.push_back(RestoreFile{"unused", unsafe, 0});
+    plan.files.push_back(RestoreFile{"s3://test-bucket/data", unsafe, 0});
     ModelStreamerRestore restore;
     EXPECT_THROW(restore.Stage(plan, root), std::invalid_argument);
   }
@@ -382,7 +345,7 @@ TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
             Path(published.string() + ".pagebroker-tx-valid-id"));
 }
 
-TEST_P(FilesystemEngineTest, RejectsSymlinkInRestoreSource)
+TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
 {
   fs::create_symlink(root_ / "storage" / "elsewhere", source_ / "link");
   auto restore = RequestFor("symlink");
@@ -394,7 +357,7 @@ TEST_P(FilesystemEngineTest, RejectsSymlinkInRestoreSource)
   EXPECT_EQ(response.failure().code(), Failure::STORAGE_ERROR);
 }
 
-TEST_P(FilesystemEngineTest, InvalidRestoreDoesNotReserveTransaction)
+TEST_F(BrokerTest, InvalidRestoreDoesNotReserveTransaction)
 {
   auto invalid = RequestFor("restore");
   Configure(
@@ -409,7 +372,7 @@ TEST_P(FilesystemEngineTest, InvalidRestoreDoesNotReserveTransaction)
   EXPECT_TRUE(broker().HandleRequest(restore).has_staged_restore_directory());
 }
 
-TEST_P(FilesystemEngineTest, RejectsPathsOutsideStorageRoot)
+TEST_F(BrokerTest, RejectsPathsOutsideStorageRoot)
 {
   const fs::path outside = root_ / "outside";
   fs::create_directories(outside);
@@ -599,7 +562,7 @@ TEST_F(BrokerTest, RejectsUnownedCheckpointStaging)
   EXPECT_EQ(retry.failure().code(), Failure::TRANSACTION_CONFLICT);
 }
 
-TEST_P(FilesystemEngineTest, PublishedCheckpointRootPreservesCapturePermissions)
+TEST_F(BrokerTest, PublishedCheckpointRootPreservesCapturePermissions)
 {
   // Use normal directory creation as the staged-mode reference without changing
   // the process-wide umask while broker threads are running.
@@ -633,7 +596,7 @@ TEST_P(FilesystemEngineTest, PublishedCheckpointRootPreservesCapturePermissions)
   }
 }
 
-TEST_P(FilesystemEngineTest, PublishesCheckpoint)
+TEST_F(BrokerTest, PublishesCheckpoint)
 {
   const fs::path published = root_ / "storage" / "published";
   auto prepare = RequestFor("checkpoint");
@@ -654,7 +617,7 @@ TEST_P(FilesystemEngineTest, PublishesCheckpoint)
   EXPECT_FALSE(fs::exists(staging_directory));
 }
 
-TEST_P(FilesystemEngineTest, ReplacesExistingCheckpoint)
+TEST_F(BrokerTest, ReplacesExistingCheckpoint)
 {
   for (const bool direct : {false, true}) {
     SCOPED_TRACE(direct ? "direct" : "staged");
@@ -691,7 +654,7 @@ TEST_P(FilesystemEngineTest, ReplacesExistingCheckpoint)
   }
 }
 
-TEST_P(FilesystemEngineTest, PreservesExistingCheckpointWhenReplacementFails)
+TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
 {
   const fs::path published = root_ / "storage" / "published";
   const fs::path previous = published.string() + ".pagebroker-previous";
@@ -714,13 +677,9 @@ TEST_P(FilesystemEngineTest, PreservesExistingCheckpointWhenReplacementFails)
   EXPECT_TRUE(fs::exists(previous));
 }
 
-TEST_P(FilesystemEngineTest, DirectPublicationRejectsConflictWithoutChangingEitherTree)
+TEST_F(BrokerTest, DirectPublicationRejectsConflictWithoutChangingEitherTree)
 {
-  std::unique_ptr<TransferEngine> engine;
-  if (GetParam() == IoEngine::POSIX_COPY)
-    engine = std::make_unique<PosixCopyEngine>(root_ / "storage");
-  else
-    engine = std::make_unique<ModelStreamerTransferEngine>(root_ / "storage");
+  auto engine = std::make_unique<PosixCopyEngine>(root_ / "storage");
   const auto published = root_ / "storage/published";
   const fs::path partial = published.string() + ".pagebroker-partial";
   fs::create_directory(published);
@@ -745,7 +704,7 @@ TEST_P(FilesystemEngineTest, DirectPublicationRejectsConflictWithoutChangingEith
   EXPECT_EQ(contents, "keep");
 }
 
-TEST_P(FilesystemEngineTest, PreservesExistingPartialCheckpointDestination)
+TEST_F(BrokerTest, PreservesExistingPartialCheckpointDestination)
 {
   const fs::path destination = root_ / "storage" / "blocked";
   auto prepare = RequestFor("checkpoint");
@@ -917,7 +876,7 @@ TEST_F(BrokerTest, DirectRestoreExpiresFromPreparationTime)
   EXPECT_TRUE(fs::exists(source_ / "image"));
 }
 
-TEST_P(FilesystemEngineTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirectory)
+TEST_F(BrokerTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirectory)
 {
   const auto destination = root_ / "storage" / "nested" / "checkpoint";
   auto request = RequestFor("direct-save");

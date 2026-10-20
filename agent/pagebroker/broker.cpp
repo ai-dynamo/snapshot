@@ -18,7 +18,6 @@
 #include "gpu/checkpoint.hpp"
 #include "transfer/engine/posix/posix_copy_engine.hpp"
 #include "transfer/filesystem/filesystem_storage.hpp"
-#include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
 #include "transfer/restore_plan.hpp"
 
 namespace snapshot::pagebroker {
@@ -289,7 +288,6 @@ Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engin
     : lifetime_(lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
   io_engines_.push_back(std::make_unique<PosixCopyEngine>(storage_root));
-  io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(storage_root)));
   filesystem_storage::RemoveStaging(staging_root_ / "restore");
   filesystem_storage::RemoveStaging(staging_root_ / "checkpoint");
   fs::create_directories(staging_root_ / "restore");

@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#include "transfer/engine/model_streamer/model_streamer_restore.hpp"
+#include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
 
 #include <gtest/gtest.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -87,6 +88,32 @@ class ModelStreamerS3Test : public ::testing::Test {
   ModelStreamerSessionOptions options_;
   RestorePlan plan_;
 };
+
+TEST_F(ModelStreamerS3Test, EngineReturnsOwnedStaging)
+{
+  ModelStreamerTransferEngine engine(options_, std::chrono::seconds(30));
+  PreparedRestore prepared;
+  prepared.plan = plan_;
+  const auto destination = root_.path() / "engine";
+  const auto access = engine.StageRestore(std::move(prepared), destination);
+  EXPECT_EQ(access.image_directory, destination);
+  EXPECT_EQ(access.staging_directory, destination);
+  struct stat expected{}, actual{};
+  ASSERT_EQ(stat(destination.c_str(), &expected), 0);
+  ASSERT_EQ(fstat(access.source.get(), &actual), 0);
+  EXPECT_EQ(expected.st_dev, actual.st_dev);
+  EXPECT_EQ(expected.st_ino, actual.st_ino);
+  CheckTree(destination);
+}
+
+TEST_F(ModelStreamerS3Test, RestoresRestrictivePermissions)
+{
+  ModelStreamerRestore restore(options_, std::chrono::seconds(30));
+  auto plan = NonemptyFile();
+  plan.files.front().permissions = fs::perms::none;
+  restore.Stage(plan, root_.path() / "restricted");
+  EXPECT_EQ(fs::status(root_.path() / "restricted/data").permissions(), fs::perms::none);
+}
 
 TEST_F(ModelStreamerS3Test, RestoresTreeThroughNativePlugin)
 {

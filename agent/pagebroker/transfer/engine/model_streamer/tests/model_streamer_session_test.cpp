@@ -86,7 +86,7 @@ class ModelStreamerSessionTest : public ::testing::Test {
   {
     RestorePlan plan;
     for (unsigned i = 0; i < files; ++i)
-      plan.files.push_back(RestoreFile{"fake-source", std::to_string(i), 1});
+      plan.files.push_back(RestoreFile{"s3://test-bucket/object-" + std::to_string(i), std::to_string(i), 1});
     return plan;
   }
 
