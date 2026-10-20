@@ -100,6 +100,7 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if !sj.GetDeletionTimestamp().IsZero() {
 		return ctrl.Result{}, nil
 	}
+	r.acknowledgeE2EReconcile(sj)
 	if snapshotv1alpha1.IsSnapshotJobFailed(sj) {
 		return ctrl.Result{}, nil
 	}

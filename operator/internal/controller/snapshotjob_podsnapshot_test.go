@@ -363,6 +363,9 @@ func TestSnapshotJobReconcileRestartDoesNotOverwriteTerminalFailure(t *testing.T
 	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
 	require.NotNil(t, failed)
 	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, failed.Reason)
+	captured := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	require.NotNil(t, captured)
+	assert.Equal(t, metav1.ConditionFalse, captured.Status)
 	assert.True(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
 	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
 }

@@ -5,7 +5,10 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from snapshot_e2e import k8s
+from snapshot_e2e import lifecycle
 
 
 def test_restart_operator_waits_for_terminating_previous_pod(monkeypatch) -> None:
@@ -43,3 +46,113 @@ def test_restart_operator_waits_for_terminating_previous_pod(monkeypatch) -> Non
     k8s.restart_snapshot_operator("snapshot-system", "snapshot")
 
     assert len(pod_list_calls) == 2
+
+
+def test_wait_for_snapshotjob_reconcile_ack_matches_event_token(monkeypatch) -> None:
+    events = [
+        SimpleNamespace(message="reconcile acknowledgment old-token"),
+        SimpleNamespace(message="reconcile acknowledgment expected-token"),
+    ]
+    monkeypatch.setattr(k8s, "list_events", lambda *_args, **_kwargs: events)
+    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(monotonic=lambda: 0, sleep=lambda _: None))
+
+    lifecycle.wait_for_snapshotjob_reconcile_ack(
+        "snapshot-e2e",
+        "job",
+        token="expected-token",
+        timeout=1,
+    )
+
+
+def test_acknowledge_snapshotjob_reconcile_patches_and_waits(monkeypatch) -> None:
+    patches = []
+    waited = []
+
+    class CustomObjects:
+        def patch_namespaced_custom_object(self, *args):
+            patches.append(args)
+
+    monkeypatch.setattr(lifecycle.client, "CustomObjectsApi", lambda: CustomObjects())
+    monkeypatch.setattr(lifecycle.uuid, "uuid4", lambda: SimpleNamespace(hex="test-token"))
+    monkeypatch.setattr(
+        lifecycle,
+        "wait_for_snapshotjob_reconcile_ack",
+        lambda namespace, name, *, token, timeout: waited.append(
+            (namespace, name, token, timeout)
+        ),
+    )
+
+    token = lifecycle.acknowledge_snapshotjob_reconcile(
+        "snapshot-e2e", "job", timeout=7
+    )
+
+    assert token == "test-token"
+    assert patches == [
+        (
+            lifecycle.GROUP,
+            lifecycle.VERSION,
+            "snapshot-e2e",
+            lifecycle.SNAPSHOTJOBS,
+            "job",
+            {
+                "metadata": {
+                    "annotations": {
+                        "snapshot-e2e.nvidia.com/reconcile-ack": "test-token"
+                    }
+                }
+            },
+        )
+    ]
+    assert waited == [("snapshot-e2e", "job", "test-token", 7)]
+
+
+def test_wait_for_container_running_accepts_running_without_ready(monkeypatch) -> None:
+    pod = SimpleNamespace(
+        status=SimpleNamespace(
+            phase="Running",
+            container_statuses=[
+                SimpleNamespace(
+                    name="main",
+                    ready=False,
+                    state=SimpleNamespace(running=SimpleNamespace(), terminated=None),
+                )
+            ],
+        )
+    )
+    monkeypatch.setattr(k8s, "read_pod", lambda *_args, **_kwargs: pod)
+    monkeypatch.setattr(
+        lifecycle,
+        "wait_for",
+        lambda _description, check, _timeout, **_kwargs: check(),
+    )
+
+    assert lifecycle.wait_for_container_running("namespace", "pod", timeout=1) is pod
+
+
+@pytest.mark.parametrize(
+    ("phase", "state"),
+    [
+        ("Failed", SimpleNamespace(running=None, terminated=None)),
+        ("Running", SimpleNamespace(running=None, terminated=SimpleNamespace(exit_code=1))),
+    ],
+)
+def test_wait_for_container_running_rejects_terminal_or_terminated(
+    monkeypatch, phase, state
+) -> None:
+    pod = SimpleNamespace(
+        status=SimpleNamespace(
+            phase=phase,
+            container_statuses=[
+                SimpleNamespace(name="main", ready=False, state=state),
+            ],
+        )
+    )
+    monkeypatch.setattr(k8s, "read_pod", lambda *_args, **_kwargs: pod)
+    monkeypatch.setattr(
+        lifecycle,
+        "wait_for",
+        lambda _description, check, _timeout, **_kwargs: check(),
+    )
+
+    with pytest.raises(AssertionError):
+        lifecycle.wait_for_container_running("namespace", "pod", timeout=1)

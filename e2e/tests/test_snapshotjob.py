@@ -311,6 +311,8 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
     # A helper that exits non-zero after the capture is an incomplete
     # deliverable: the SnapshotJob must fail with JobFailed while Captured
     # stays True and the artifact remains usable.
+    if not k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
+        pytest.skip("operator release does not enable E2E reconciliation acknowledgments")
     try:
         snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
@@ -345,6 +347,7 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
         # The artifact survives the failure: the capture itself succeeded.
         snap.wait_for_snapshot_ready(config.namespace, sj["status"]["podSnapshotName"], timeout=60)
         k8s.restart_snapshot_operator(config.namespace, config.release)
+        snap.acknowledge_snapshotjob_reconcile(config.namespace, snapshotjob_name)
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
@@ -361,6 +364,8 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
+    if not k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
+        pytest.skip("operator release does not enable the capture-failure test hook")
     try:
         snapshotjob_name = run.snapshotjob_name
         template = workloads.snapshotjob_helper_pod_template(
@@ -410,11 +415,13 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
         assert k8s.delete_job(config.namespace, snapshotjob_name)
         snap.wait_for_pod_deleted(config.namespace, source_pod.metadata.name)
         k8s.restart_snapshot_operator(config.namespace, config.release)
+        snap.acknowledge_snapshotjob_reconcile(config.namespace, snapshotjob_name)
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
         assert snap.condition(after_restart, "Failed").get("status") == "True"
         assert snap.condition(after_restart, "Completed").get("status") != "True"
+        assert snap.condition(after_restart, "Captured").get("status") == "False"
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
         raise
@@ -426,6 +433,8 @@ def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
+    if not k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
+        pytest.skip("operator release does not enable E2E reconciliation acknowledgments")
     try:
         snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
@@ -448,12 +457,19 @@ def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
         assert snap.condition(before_restart, "Completed").get("status") != "True"
+        assert snap.condition(before_restart, "Captured").get("status") == "True"
         k8s.restart_snapshot_operator(config.namespace, config.release)
+        snap.acknowledge_snapshotjob_reconcile(config.namespace, snapshotjob_name)
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
         assert snap.condition(after_restart, "Completed").get("reason") == "WaitingForPodCompletion"
         source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        snap.wait_for_container_running(
+            config.namespace,
+            source_pod.metadata.name,
+            container=workloads.CONTAINER,
+        )
         k8s.exec_command(
             config.namespace,
             source_pod.metadata.name,
@@ -475,6 +491,8 @@ def test_snapshotjob_restart_preserves_pending_capture(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
+    if not k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
+        pytest.skip("operator release does not enable E2E reconciliation acknowledgments")
     try:
         snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
@@ -490,20 +508,32 @@ def test_snapshotjob_restart_preserves_pending_capture(
         snap.wait_for_status_field(
             config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, field="podSnapshotName"
         )
+        pending = snap.get_custom_object(
+            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
+        )
+        assert snap.condition(pending, "Captured").get("status") == "False"
         k8s.restart_snapshot_operator(config.namespace, config.release)
+        snap.acknowledge_snapshotjob_reconcile(config.namespace, snapshotjob_name)
+        before_release = snap.get_custom_object(
+            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
+        )
+        assert snap.condition(before_release, "Captured").get("status") == "False"
         source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        snap.wait_for_container_running(
+            config.namespace,
+            source_pod.metadata.name,
+            container=workloads.CONTAINER,
+        )
         k8s.exec_command(
             config.namespace,
             source_pod.metadata.name,
             f"touch {workloads.HELPER_SYNC_DIR}/capture-release",
             container=workloads.CONTAINER,
         )
-        sj = snap.get_custom_object(
-            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
-        )
         sj = snap.wait_for_condition(
             config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, condition_type="Captured", timeout=300
         )
+        assert snap.condition(sj, "Captured").get("status") == "True"
         assert snap.condition(sj, "Completed").get("status") != "True"
     except Exception:
         snap.debug_dump_snapshotjob(config, run)

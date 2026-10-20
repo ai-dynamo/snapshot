@@ -221,6 +221,23 @@ def restart_snapshot_operator(namespace: str, release: str, timeout: int = 180) 
     raise AssertionError(f"Snapshot operator deployment {namespace}/{name} did not roll out")
 
 
+def snapshot_operator_test_hook_enabled(namespace: str, release: str) -> bool:
+    """Return whether the operator was configured with the test capture hook."""
+    deployments = client.AppsV1Api().list_namespaced_deployment(
+        namespace, label_selector=snapshot_selector(release, "operator")
+    ).items
+    if len(deployments) != 1:
+        raise AssertionError(f"expected one Snapshot operator deployment, found {len(deployments)}")
+    for container in deployments[0].spec.template.spec.containers or []:
+        for env in container.env or []:
+            if (
+                env.name == "SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION"
+                and env.value
+            ):
+                return True
+    return False
+
+
 def create_job(body: dict[str, Any]) -> client.V1Job:
     return client.BatchV1Api().create_namespaced_job(
         namespace=body["metadata"]["namespace"],
