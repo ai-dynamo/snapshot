@@ -33,7 +33,7 @@ jobs:
   cuinterpose:
     name: cuinterpose CPU checks
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       SNAPSHOT_CUINTERPOSE_TEST_IMAGE: snapshot-cuinterpose-test:ci
     steps:
@@ -53,7 +53,7 @@ jobs:
         run: go test ./internal/protocol -run '^TestCuInterposeInstallerImage' -count=1 -v
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -67,7 +67,7 @@ jobs:
       - run: make test-integration
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -80,7 +80,7 @@ jobs:
       - run: make build
 
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -96,7 +96,7 @@ jobs:
   # framework guide manifests against the restore-pod contract. Seconds to
   # run, so they gate every pull request rather than only the GPU e2e flows.
   e2e-static:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV_LINK_MODE: copy
     steps:
@@ -132,7 +132,7 @@ jobs:
   # Runs on every pull request so cross-cutting changes (shared workflows, the
   # history writer's output shape) cannot silently break the dashboard.
   benchmark-dashboard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -158,7 +158,7 @@ jobs:
 
   helm-test:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: helm plugin install https://github.com/helm-unittest/helm-unittest
@@ -166,7 +166,7 @@ jobs:
 
   pagebroker-image:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       # Read-only, and deliberately so: this job reads the layer cache that

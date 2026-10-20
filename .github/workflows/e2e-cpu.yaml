@@ -99,7 +99,7 @@ env:
 jobs:
   cpu-e2e:
     name: CPU checkpoint/restore
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       # setup.py and kubectl both read KUBECONFIG; in direct mode the target

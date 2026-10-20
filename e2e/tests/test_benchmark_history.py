@@ -215,7 +215,7 @@ def test_framework_workflow_checks_repository_before_using_gpu_cluster() -> None
     ci_check = yaml.safe_load((workflows / "ci.yml").read_text())["jobs"]["check"]
     check = framework_jobs["check"]
 
-    assert check["runs-on"] == ci_check["runs-on"] == "ubuntu-latest"
+    assert check["runs-on"] == ci_check["runs-on"] == "ubuntu-24.04"
     # Match the existing full validation gate, including its pinned Go setup.
     assert check["steps"][1:] == ci_check["steps"][1:]
     assert check["steps"][0]["uses"] == ci_check["steps"][0]["uses"]
