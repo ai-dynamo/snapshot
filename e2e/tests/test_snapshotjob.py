@@ -23,6 +23,7 @@ race as a contract.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
@@ -32,6 +33,15 @@ from kubernetes.client import ApiException
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle as snap
 from snapshot_e2e import workloads
+
+
+def require_snapshotjob_test_hook(config: k8s.E2EConfig, description: str) -> None:
+    if k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
+        return
+    message = f"operator release does not enable {description}"
+    if os.environ.get("SNAPSHOT_E2E_REQUIRE_TEST_HOOKS") == "true":
+        pytest.fail(f"required CPU E2E setup is unavailable: {message}")
+    pytest.skip(message)
 
 
 @pytest.fixture
@@ -311,8 +321,7 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
     # A helper that exits non-zero after the capture is an incomplete
     # deliverable: the SnapshotJob must fail with JobFailed while Captured
     # stays True and the artifact remains usable.
-    if not k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
-        pytest.skip("operator release does not enable E2E reconciliation acknowledgments")
+    require_snapshotjob_test_hook(config, "E2E reconciliation acknowledgments")
     try:
         snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
@@ -346,8 +355,13 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
 
         # The artifact survives the failure: the capture itself succeeded.
         snap.wait_for_snapshot_ready(config.namespace, sj["status"]["podSnapshotName"], timeout=60)
-        k8s.restart_snapshot_operator(config.namespace, config.release)
-        snap.acknowledge_snapshotjob_reconcile(config.namespace, snapshotjob_name)
+        k8s.restart_snapshot_operator(
+            config.namespace,
+            config.release,
+            after_rollout=lambda: snap.acknowledge_snapshotjob_reconcile(
+                config.namespace, snapshotjob_name
+            ),
+        )
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
@@ -364,8 +378,7 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    if not k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
-        pytest.skip("operator release does not enable the capture-failure test hook")
+    require_snapshotjob_test_hook(config, "the capture-failure test hook")
     try:
         snapshotjob_name = run.snapshotjob_name
         template = workloads.snapshotjob_helper_pod_template(
@@ -415,8 +428,13 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
         # pod is the observable cleanup boundary for this failed attempt.
         assert k8s.delete_job(config.namespace, snapshotjob_name)
         snap.wait_for_pod_deleted(config.namespace, source_pod.metadata.name)
-        k8s.restart_snapshot_operator(config.namespace, config.release)
-        snap.acknowledge_snapshotjob_reconcile(config.namespace, snapshotjob_name)
+        k8s.restart_snapshot_operator(
+            config.namespace,
+            config.release,
+            after_rollout=lambda: snap.acknowledge_snapshotjob_reconcile(
+                config.namespace, snapshotjob_name
+            ),
+        )
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
@@ -434,8 +452,7 @@ def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    if not k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
-        pytest.skip("operator release does not enable E2E reconciliation acknowledgments")
+    require_snapshotjob_test_hook(config, "E2E reconciliation acknowledgments")
     try:
         snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
@@ -459,8 +476,13 @@ def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
         )
         assert snap.condition(before_restart, "Completed").get("status") != "True"
         assert snap.condition(before_restart, "Captured").get("status") == "True"
-        k8s.restart_snapshot_operator(config.namespace, config.release)
-        snap.acknowledge_snapshotjob_reconcile(config.namespace, snapshotjob_name)
+        k8s.restart_snapshot_operator(
+            config.namespace,
+            config.release,
+            after_rollout=lambda: snap.acknowledge_snapshotjob_reconcile(
+                config.namespace, snapshotjob_name
+            ),
+        )
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
@@ -492,8 +514,7 @@ def test_snapshotjob_restart_preserves_pending_capture(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    if not k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
-        pytest.skip("operator release does not enable E2E reconciliation acknowledgments")
+    require_snapshotjob_test_hook(config, "E2E reconciliation acknowledgments")
     try:
         snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
@@ -513,8 +534,13 @@ def test_snapshotjob_restart_preserves_pending_capture(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
         assert snap.condition(pending, "Captured").get("status") == "False"
-        k8s.restart_snapshot_operator(config.namespace, config.release)
-        snap.acknowledge_snapshotjob_reconcile(config.namespace, snapshotjob_name)
+        k8s.restart_snapshot_operator(
+            config.namespace,
+            config.release,
+            after_rollout=lambda: snap.acknowledge_snapshotjob_reconcile(
+                config.namespace, snapshotjob_name
+            ),
+        )
         before_release = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )

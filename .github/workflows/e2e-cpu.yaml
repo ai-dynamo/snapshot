@@ -94,11 +94,21 @@ jobs:
       # Not ${IMAGE_REGISTRY}: a job-level env cannot read another job-level
       # env. Keep in step with IMAGE_REGISTRY and IMAGE_TAG above.
       SNAPSHOT_E2E_WORKLOAD_IMAGE: localhost:5000/agent:cpu-e2e
+      SNAPSHOT_E2E_REQUIRE_TEST_HOOKS: "true"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.2"
+          cache: true
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
 
       # k3d is needed before the builds, not just before the cluster: the
       # registry they push to is one it creates.
@@ -159,6 +169,12 @@ jobs:
             DOCKER_BUILD_ARGS="--push --build-arg GO_BUILD_TAGS=snapshot_e2e ${cache_flags}"
           hack/ci-phase.sh "Build operator image" "${start}" \
             "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
+
+      - name: Run operator tests
+        working-directory: operator
+        run: |
+          go test ./...
+          go test -tags snapshot_e2e ./...
 
       - name: Build agent image
         timeout-minutes: 50

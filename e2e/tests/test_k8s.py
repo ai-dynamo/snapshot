@@ -43,9 +43,15 @@ def test_restart_operator_waits_for_terminating_previous_pod(monkeypatch) -> Non
     monkeypatch.setattr(k8s.time, "monotonic", lambda: 0)
     monkeypatch.setattr(k8s.time, "sleep", lambda _: None)
 
-    k8s.restart_snapshot_operator("snapshot-system", "snapshot")
+    callbacks = []
+    k8s.restart_snapshot_operator(
+        "snapshot-system",
+        "snapshot",
+        after_rollout=lambda: callbacks.append(len(pod_list_calls)),
+    )
 
     assert len(pod_list_calls) == 2
+    assert callbacks == [2]
 
 
 def test_wait_for_snapshotjob_reconcile_ack_matches_event_token(monkeypatch) -> None:

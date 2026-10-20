@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from kubernetes import client
 from kubernetes.client import ApiException
@@ -184,7 +184,19 @@ def read_job(namespace: str, name: str) -> client.V1Job | None:
         raise
 
 
-def restart_snapshot_operator(namespace: str, release: str, timeout: int = 180) -> None:
+def restart_snapshot_operator(
+    namespace: str,
+    release: str,
+    timeout: int = 180,
+    *,
+    after_rollout: Callable[[], Any] | None = None,
+) -> None:
+    """Restart the operator and optionally observe a specific reconciliation.
+
+    ``after_rollout`` runs only after the replacement pod is ready. Callers
+    that need restart safety must pass the SnapshotJob acknowledgment here,
+    rather than relying on rollout completion alone.
+    """
     deployments = client.AppsV1Api().list_namespaced_deployment(
         namespace, label_selector=snapshot_selector(release, "operator")
     ).items
@@ -216,6 +228,8 @@ def restart_snapshot_operator(namespace: str, release: str, timeout: int = 180) 
             and len(pods) == desired
             and all(pod.metadata.deletion_timestamp is None for pod in pods)
         ):
+            if after_rollout is not None:
+                after_rollout()
             return
         time.sleep(1)
     raise AssertionError(f"Snapshot operator deployment {namespace}/{name} did not roll out")
