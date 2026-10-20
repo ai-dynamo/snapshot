@@ -270,18 +270,18 @@ def sequence(name, title, desc, actors, steps, width=900):
 
 
 ROUND = (
-    [("L", "Leader", "rank 0 relay", "t"), ("AA", "Agent A", "rank 0 node", "t"),
+    [("L", "Leader", "lowest relay rank", "t"), ("AA", "Agent A", "leader's node", "t"),
      ("C", "Coordinator", "session", "p"), ("AB", "Agent B", "rank 1 node", "t"),
      ("R", "Relay", "rank 1", "t")],
     [
         ("m", "R", "AB", "Get cuinterpose/round/k/cmd, waits"),
         ("m", "AB", "C", "Get, stamped rank 1, role relay"),
         ("m", "L", "AA", "Insert cuinterpose/round/k/cmd: the step and its arguments, keyed by rank where needed"),
-        ("m", "AA", "C", "Insert, stamped rank 0, role relay"),
-        ("m", "C", "AB", "command, written by rank 0's relay", 1),
+        ("m", "AA", "C", "Insert, stamped with the leader's rank, role relay"),
+        ("m", "C", "AB", "command, written by the leader", 1),
         ("m", "AB", "R", "command", 1),
         ("g", "par · every rank runs the phase at the same time"),
-        ("s", "L", "run the step's handler on rank 0's processes"),
+        ("s", "L", "run the step's handler on its own Pod's processes"),
         ("e", "and"),
         ("s", "R", "keep its own entries, run the step's handler on every local process at once"),
         ("x",),
@@ -299,7 +299,7 @@ ROUND = (
 
 CHECKPOINT = (
     [("O", "Operator", "via API", "g"), ("A", "Agents", "every node", "t"),
-     ("C", "Coordinator", "session", "p"), ("L", "Leader", "rank 0 relay", "t"),
+     ("C", "Coordinator", "session", "p"), ("L", "Leader", "lowest relay rank", "t"),
      ("R", "Relays", "other ranks", "t"), ("W", "Workload", "processes, shims", "g")],
     [
         ("m", "O", "A", "member PodSnapshotContent, owned through its PodSnapshot by the set"),
@@ -317,7 +317,7 @@ CHECKPOINT = (
         ("r", "round 1 · INSPECT"),
         ("m", "L", "C", "Insert the round 1 command"),
         ("m", "C", "R", "command", 1),
-        ("m", "L", "W", "INSPECT (rank 0)"),
+        ("m", "L", "W", "INSPECT (leader's rank)"),
         ("m", "R", "W", "INSPECT (other ranks)"),
         ("m", "R", "C", "Insert replies with records and fabric handles"),
         ("m", "C", "L", "records of every rank", 1),
@@ -325,28 +325,30 @@ CHECKPOINT = (
         ("s", "L", "resolve importers by handle, validate the global topology"),
         ("x",),
         ("g", "alt · refused"),
-        ("m", "L", "C", "Fail(reason), before the commit"),
-        ("m", "C", "A", "SessionFailed, committed = false", 1),
-        ("s", "A", "source keeps running, member Failed with reason Refused"),
+        ("m", "L", "C", "Fail(reason)"),
+        ("m", "C", "A", "SessionFailed", 1),
+        ("s", "A", "no record written: source as found, member Failed with reason Refused"),
         ("e", "else · accepted"),
-        ("m", "A", "C", "barrier snapshot/prepare"),
+        ("m", "L", "A", "relay exits: topology accepted (leader's agent only)"),
+        ("m", "A", "C", "barrier snapshot/admitted, once its own checks pass"),
+        ("m", "C", "A", "every member admitted: the attempt commits", 1),
+        ("m", "A", "O", "Started condition on its PodSnapshotContent, before anything irreversible"),
         ("m", "A", "W", "CUDA prepare on every process at once: libraries tear down"),
         ("m", "A", "L", "run the relay in prepare mode"),
         ("m", "A", "R", "run the relays in prepare mode"),
         ("r", "round 2 · BEGIN_CHECKPOINT"),
         ("m", "L", "C", "Insert the round 2 command"),
         ("m", "C", "R", "command", 1),
-        ("m", "L", "W", "BEGIN_CHECKPOINT (rank 0)"),
+        ("m", "L", "W", "BEGIN_CHECKPOINT (leader's rank)"),
         ("m", "R", "W", "BEGIN_CHECKPOINT (other ranks)"),
         ("m", "R", "C", "Insert replies with records"),
         ("m", "C", "L", "records of every rank", 1),
         ("x",),
         ("s", "L", "revalidate the topology"),
-        ("m", "L", "C", "Commit: point of no return"),
         ("r", "rounds 3 to 5 · PREPARE_MULTICAST, SAVE_ALLOCATIONS, PREPARE_UNICAST"),
         ("m", "L", "C", "Insert the step and its arguments (expected bytes in SAVE_ALLOCATIONS)"),
         ("m", "C", "R", "command", 1),
-        ("m", "L", "W", "execute (rank 0)"),
+        ("m", "L", "W", "execute (leader's rank)"),
         ("m", "R", "W", "execute (other ranks)"),
         ("m", "R", "C", "Insert replies"),
         ("m", "C", "L", "replies of every rank", 1),
@@ -367,7 +369,7 @@ CHECKPOINT = (
 RESTORE = (
     [("O", "Operator", "and owner", "g"), ("A", "Agents", "every node", "t"),
      ("N", "nsrestore", "in the Pod", "t"), ("C", "Coordinator", "session", "p"),
-     ("L", "Leader", "rank 0 relay", "t"), ("R", "Relays", "other ranks", "t"),
+     ("L", "Leader", "lowest relay rank", "t"), ("R", "Relays", "other ranks", "t"),
      ("W", "Workload", "restored", "g")],
     [
         ("m", "O", "A", "restore Pods with restore-set, PodSetRestore mapping member IDs to Pods"),
@@ -378,8 +380,9 @@ RESTORE = (
         ("m", "A", "C", "all-gather snapshot/admit {new IP, capture ID, fabric domain, GPUs}"),
         ("m", "C", "A", "payloads of every rank: IP map with the artifact table, checks", 1),
         ("x",),
-        ("m", "C", "A", "session committed", 1),
-        ("m", "A", "O", "Restored reason Restoring, before anything destructive"),
+        ("m", "A", "C", "barrier snapshot/admitted, once its own checks pass"),
+        ("m", "C", "A", "every member admitted: the attempt commits", 1),
+        ("m", "A", "O", "Restored reason Restoring, before anything irreversible"),
         ("m", "A", "W", "hold only the preserved connections"),
         ("m", "A", "N", "nsrestore with the IP map, session socket, progress pipe"),
         ("s", "N", "CRIU restore, kept peer sockets, group IP remap"),
@@ -396,7 +399,7 @@ RESTORE = (
         ("r", "round 1 · INSPECT"),
         ("m", "L", "C", "Insert the round 1 command"),
         ("m", "C", "R", "command", 1),
-        ("m", "L", "W", "INSPECT (rank 0)"),
+        ("m", "L", "W", "INSPECT (leader's rank)"),
         ("m", "R", "W", "INSPECT (other ranks)"),
         ("m", "R", "C", "Insert replies: saved and current records"),
         ("m", "C", "L", "records of every rank", 1),
@@ -405,7 +408,7 @@ RESTORE = (
         ("r", "rounds 2 to 7 · LOAD_ALLOCATIONS, RESTORE_UNICAST, four RESTORE_MULTICAST phases"),
         ("m", "L", "C", "Insert the step and its arguments (expected bytes or handle table)"),
         ("m", "C", "R", "command", 1),
-        ("m", "L", "W", "execute (rank 0)"),
+        ("m", "L", "W", "execute (leader's rank)"),
         ("m", "R", "W", "execute with imports (other ranks)"),
         ("m", "R", "C", "Insert replies with new fabric handles"),
         ("m", "C", "L", "replies of every rank", 1),
@@ -449,31 +452,33 @@ LIBRARIES = (
 )
 
 FAILURES = (
-    [("L", "Leader", "rank 0 relay", "t"), ("AA", "Agent A", "", "t"),
+    [("L", "Leader", "lowest relay rank", "t"), ("AA", "Agent A", "", "t"),
      ("C", "Coordinator", "session", "p"), ("AB", "Agent B", "", "t"),
      ("R", "Relay", "rank 1", "t")],
     [
         ("g", "alt · refusal before the commit (capture admission)"),
         ("m", "L", "AA", "Fail(reason)"),
-        ("m", "AA", "C", "Fail, stamped rank 0"),
-        ("m", "C", "AA", "event SessionFailed, committed = false", 1),
-        ("m", "C", "AB", "event SessionFailed, committed = false", 1),
+        ("m", "AA", "C", "Fail, stamped with the leader's rank"),
+        ("m", "C", "AA", "event SessionFailed", 1),
+        ("m", "C", "AB", "event SessionFailed", 1),
         ("m", "AB", "R", "pending Get returns ABORTED", 1),
-        ("s", "R", "ABORT_CHECKPOINT on its processes, exit refused"),
-        ("s", "L", "ABORT_CHECKPOINT, exit refused"),
-        ("n", "AA", "AB", "no source is killed, and every member is Failed with reason Refused"),
-        ("e", "else · error after the commit, or any restore error"),
+        ("s", "R", "nothing to undo, since INSPECT only reads; exits with status refused"),
+        ("s", "L", "nothing to undo; exits with status refused"),
+        ("n", "AA", "AB", "no agent wrote a record, so every workload is left as found and every member is Failed with reason Refused"),
+        ("e", "else · error after the commit"),
         ("m", "R", "AB", "Fail(RESTORE_UNICAST error)"),
         ("m", "AB", "C", "Fail, stamped rank 1"),
-        ("m", "C", "AA", "event SessionFailed, committed = true, rank 1", 1),
-        ("m", "C", "AB", "event SessionFailed, committed = true, rank 1", 1),
+        ("m", "C", "AA", "event SessionFailed naming rank 1", 1),
+        ("m", "C", "AB", "event SessionFailed naming rank 1", 1),
         ("m", "AA", "L", "pending Get returns ABORTED", 1),
         ("s", "L", "exit failed"),
-        ("n", "AA", "AB", "every agent terminates its source or fails its restore"),
+        ("n", "AA", "AB", "each agent acts on its own record: with Started or Restoring it terminates its source or fails "
+                          "its restore, without one it leaves the workload as found, and after restore-complete it leaves "
+                          "the workload running"),
         ("e", "else · agent stream lost or deadline passed"),
         ("s", "C", "rank 1's stream not back within the grace period, or ranks missing at the deadline"),
         ("m", "C", "AA", "event SessionFailed naming rank 1", 1),
-        ("n", "AA", "AB", "handled as above: abort before the commit, fail-stop after it"),
+        ("n", "AA", "AB", "handled as above: each agent acts on its own record"),
         ("x",),
     ],
 )
@@ -519,36 +524,41 @@ def architecture():
 
 
 def lifecycle():
+    """The session has two outcomes; what a failure does to a member is
+    decided by the member's own durable record."""
     b = []
-    b.append('<circle class="dot" cx="34" cy="92" r="6"/>')
-    b.append(line(41, 92, 58, 92))
-    b += box(60, 70, 130, 44, "p", "Admitting")
-    b += box(300, 70, 130, 44, "p", "Committed")
-    b += box(540, 70, 130, 44, "p", "Released")
-    b += box(760, 70, 110, 44, "t", "Closed")
-    b += box(60, 200, 130, 44, "a", "Aborted")
-    b += box(300, 200, 130, 44, "r", "Failed")
-    b.append(line(190, 92, 298, 92))
-    b.append(T(244, 80, "commit", "tm", 12))
-    b.append(line(430, 92, 538, 92))
-    b.append(T(484, 80, "restore: release", "tm", 12))
-    b.append(line(670, 92, 758, 92))
-    b.append(T(714, 78, "every member", "tm", 12))
-    b.append(T(714, 106, "left, or deadline", "tm", 12))
-    b.append(path("M365 70 L365 40 L815 40 L815 68"))
-    b.append(T(590, 30, "capture: every member stored its artifacts", "tm", 12))
-    b.append(line(125, 114, 125, 198))
-    b.append(T(135, 148, "refusal, deadline,", "tm", 12, anchor="start"))
-    b.append(T(135, 164, "lost member, cancel", "tm", 12, anchor="start"))
-    b.append(line(365, 114, 365, 198))
-    b.append(T(375, 148, "member error, lost", "tm", 12, anchor="start"))
-    b.append(T(375, 164, "member, deadline", "tm", 12, anchor="start"))
-    b.append(T(500, 222, "Before the commit, workloads keep running; after it, failure is fail-stop;", "tm", 12, anchor="start"))
-    b.append(T(500, 238, "after release, a failure only ends the rendezvous.", "tm", 12, anchor="start"))
-    svg("session-lifecycle.svg", 900, 270, "Coordination session lifecycle",
-        "Admitting moves to Committed on commit or to Aborted on refusal, deadline, lost member or cancellation. "
-        "Committed moves to Failed on any member error, to Closed when a capture completes, or to Released when a "
-        "restore passes its release barrier. Released moves to Closed when every member has left.", b)
+    # Session lane.
+    b.append(T(30, 26, "Session", "tx", 14, True, "start"))
+    b.append('<circle class="dot" cx="38" cy="92" r="6"/>')
+    b.append(line(45, 92, 68, 92))
+    b += box(70, 70, 170, 44, "p", "Open", "attach, admit, work")
+    b += box(540, 40, 170, 44, "t", "Closed")
+    b += box(540, 112, 330, 44, "r", "Failed", "every pending read and barrier returns ABORTED")
+    b.append(path("M240 84 L290 84 L290 62 L538 62"))
+    b.append(T(302, 50, "every member has left", "tm", 12, anchor="start"))
+    b.append(path("M240 100 L290 100 L290 134 L538 134"))
+    b.append(T(302, 122, "any failure, deadline,", "tm", 12, anchor="start"))
+    b.append(T(302, 150, "lost member, or cancellation", "tm", 12, anchor="start"))
+    # Member lane.
+    b.append(T(30, 208, "Each member, as recorded durably by its agent", "tx", 14, True, "start"))
+    b += box(30, 240, 250, 52, "t", "No record", "before the commit, or not yet written")
+    b += box(330, 240, 250, 52, "a", "Record written", "Started at capture, Restoring at restore")
+    b += box(630, 240, 240, 52, "g", "restore-complete", "restore only, after release")
+    b.append(line(280, 266, 328, 266))
+    b.append(T(304, 232, "commit", "tm", 12))
+    b.append(line(580, 266, 628, 266))
+    b.append(T(604, 232, "release", "tm", 12))
+    for cx, lines in ((155, ("A failure leaves the workload", "as Snapshot found it")),
+                      (455, ("A failure fails the member;", "CRIU never runs twice")),
+                      (750, ("A failure only ends", "the rendezvous"))):
+        for i, s in enumerate(lines):
+            b.append(T(cx, 312 + i * 16, s, "tm", 12))
+    svg("session-lifecycle.svg", 900, 350, "Coordination session and member records",
+        "The session is open until every member has left, when it closes, or until any failure, deadline, lost "
+        "member or cancellation, when it fails and every pending operation returns ABORTED. Each member moves from "
+        "no record, to a durable record written after the commit and before its first irreversible step, to "
+        "restore-complete after release; a failure leaves a member without a record as found, fails a member with "
+        "one, and only ends the rendezvous for a released member.", b)
 
 
 def phases():
@@ -582,10 +592,11 @@ def phases():
         ("g", "Workload quiesces: ready-for-snapshot"),
         ("p", "Admission: all-gather"),
         ("t", "Round: inspect, validate"),
-        ("p", "Barrier: prepare"),
+        ("p", "Barrier: admitted"),
+        ("COMMIT",),
+        ("g", "Record: Started condition"),
         ("a", "CUDA prepare: libraries tear down"),
         ("t", "Round: begin, revalidate"),
-        ("COMMIT",),
         ("t", "Rounds: destructive phases"),
         ("g", "CUDA lock and checkpoint"),
         ("p", "Hold flows, barrier: net-freeze"),
@@ -596,7 +607,9 @@ def phases():
     x = 390
     y, prev = column(x, "Restore", [
         ("p", "Admission: all-gather, IP map"),
+        ("p", "Barrier: admitted"),
         ("COMMIT",),
+        ("g", "Record: Restoring reason"),
         ("g", "Hold flows, CRIU restore"),
     ])
     lx, lw = x, 150                      # left branch: the barrier
@@ -639,14 +652,15 @@ def phases():
 
     ly = max(ck_bottom, y3) + 8
     for i, (k, label) in enumerate((("p", "Session step"), ("t", "cuInterpose rounds"),
-                                    ("a", "CUDA Checkpoint phase"), ("g", "Existing step"))):
+                                    ("a", "CUDA Checkpoint phase"), ("g", "Agent or workload step"))):
         lx2 = 30 + i * 175
         b.append(f'<rect class="k-{k}" x="{lx2}" y="{ly}" width="12" height="12" rx="2" stroke-width="0.8"/>')
         b.append(T(lx2 + 18, ly + 6, label, "tm", 12, anchor="start"))
     svg("phases.svg", W, ly + 34, "Phases of a group checkpoint and a group restore",
         "Checkpoint: the workload quiesces and reports ready-for-snapshot, admission all-gather, an INSPECT round, "
-        "prepare barrier, CUDA prepare, a revalidation round, commit, destructive cuInterpose rounds, CUDA lock and "
-        "checkpoint, hold and net-freeze barrier, CRIU dump. Restore: admission, commit, CRIU restore under a narrow "
+        "admitted barrier, commit, the Started record, CUDA prepare, a revalidation round, destructive cuInterpose "
+        "rounds, CUDA lock and checkpoint, hold and net-freeze barrier, CRIU dump. Restore: admission, admitted "
+        "barrier, commit, the Restoring record, CRIU restore under a narrow "
         "hold, then in parallel the sockets-restored barrier and CUDA restore with the cuInterpose rounds, then the "
         "endpoint and resume barrier, CUDA resume, and the release barrier, after which the workload resumes; the "
         "workload waits from CRIU restore until restore-complete.", b)
@@ -660,8 +674,9 @@ def main():
              "The leader inserts one command that every relay reads, every rank executes it at once, and each relay "
              "inserts a reply that the leader collects.", *ROUND, width=860)
     sequence("checkpoint.svg", "Group checkpoint",
-             "Admission with an INSPECT round, prepare barrier and CUDA prepare, a BEGIN_CHECKPOINT round, commit, "
-             "three destructive rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU dump.", *CHECKPOINT, width=960)
+             "Admission with an INSPECT round, the admitted barrier and commit, the Started record, CUDA prepare, a "
+             "BEGIN_CHECKPOINT round, three destructive rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU "
+             "dump.", *CHECKPOINT, width=960)
     sequence("restore.svg", "Group restore up to release",
              "Admission, commit, CRIU restore under a narrow hold, sockets-restored barrier in parallel with CUDA "
              "restore and the cuInterpose rounds, resume barrier and CUDA resume, release barrier; the workload waits "
@@ -670,8 +685,8 @@ def main():
              "During CUDA resume, rank 0 of a communicator inserts a new unique ID that the other ranks read through "
              "their agents.", *LIBRARIES, width=860)
     sequence("failure-paths.svg", "Failure paths",
-             "Before the commit a failure aborts and workloads keep running; after it every member fails; a lost "
-             "stream or a deadline is handled the same way.", *FAILURES, width=860)
+             "Every failure fails the session; each agent then acts on its own record: no record leaves the workload "
+             "as found, a record fails the member, and restore-complete leaves it running.", *FAILURES, width=860)
 
 
 if __name__ == "__main__":
