@@ -114,13 +114,62 @@ Common `make` targets from the repo root:
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
 
-### Native S3 read tests
+### PageBroker native S3 upload and restore tests
 
-Build the `s3-test` Docker target; it downloads the pinned SDK. Install
-`agent/pagebroker/tests/requirements.txt` in a virtual environment, then run
-`agent/pagebroker/tests/s3_integration.py --image local/pagebroker:s3-test`.
-Add `--tls` to verify the temporary CA and rejection of untrusted TLS. The
-fixture uses disposable local Moto storage and fake credentials. Payloads are
-read by the native Model Streamer plugin. The tests independently compare restored
-bytes with their source fixtures and check sizes, permissions, and error handling.
-PageBroker does not perform application-level payload integrity verification.
+These tests exercise CRT-managed AWS SDK uploads and native Model Streamer S3 reads.
+
+Local native builds require a C++20 compiler, protobuf, GoogleTest, OpenSSL,
+the pinned AWS SDK for C++ S3 CRT component, and both pinned Streamer libraries.
+The Dockerfile builds SDK 1.11.584 at commit
+`bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3`, including its pinned submodules.
+Before configuring a local SDK build, apply the required cancellation patch
+from the Snapshot repository root:
+
+```bash
+git -C /path/to/aws-sdk-cpp apply \
+  "$PWD/agent/pagebroker/patches/aws-sdk-crt-cancellation.patch"
+```
+
+The patch keeps queued cancellations from accessing a completed request after
+it is released. Rebuild and reinstall any SDK built without it. The Dockerfile
+applies the same patch automatically.
+
+Build the patched revision with `BUILD_ONLY=s3-crt`, shared
+libraries, and `CMAKE_INSTALL_LIBDIR=lib`. Run
+`make -C agent/pagebroker test daemon MODEL_STREAMER_LIB_DIR=/path/to/libraries AWS_SDK_PREFIX=/path/to/aws-sdk`
+for filesystem, session-recovery, and S3 client tests. These tests need no S3
+endpoint or credentials.
+
+To exercise S3 in the distroless runtime, build the dedicated image target;
+the Dockerfile downloads the pinned SDK:
+
+```bash
+make docker-build-pagebroker REGISTRY=local VERSION=s3-test \
+  DOCKER_BUILD_ARGS="--load --target s3-test"
+python3 -m venv /tmp/pagebroker-s3-tests
+/tmp/pagebroker-s3-tests/bin/pip install -r agent/pagebroker/tests/requirements.txt
+PATH="/tmp/pagebroker-s3-tests/bin:$PATH" make -C agent/pagebroker s3-fixture-test
+/tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/s3_integration.py \
+  --resources --image local/pagebroker:s3-test
+/tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/s3_integration.py \
+  --tls --image local/pagebroker:s3-test
+```
+
+The runner starts disposable local Moto storage with fixed test credentials,
+ignoring inherited AWS credentials, profiles, endpoints and configuration files.
+The Linux Docker runner uses host networking to reach it. Python prepares the
+isolated reader fixtures; C++ backend uploads populate separate round-trip
+prefixes, which the native Model Streamer restores.
+
+The tests independently compare payload bytes and cover permissions, empty
+files/directories, concurrency, multipart uploads, truncation, missing objects,
+and endpoint errors. PageBroker does not perform application-level payload
+integrity verification.
+Injected failures exercise retries, cleanup and uncertain remote outcomes.
+`--resources` measures peak RSS and throughput in isolated uploads with a fixed
+buffer budget. `--tls` uses a temporary CA and checks that both clients reject
+the endpoint when that CA is missing. Moto does not enforce IAM policies.
+
+For a locally built executable, use `make -C agent/pagebroker s3-test` with the
+Python dependencies installed. The runner also accepts `--binary`; both paths
+use the same disposable local service.
