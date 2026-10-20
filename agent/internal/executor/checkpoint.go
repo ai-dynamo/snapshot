@@ -132,7 +132,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		}
 		// gpu.Abort is also that execution's teardown, so the GPU path always
 		// releases.
-		if gpu == nil && dumpComplete && !pagebroker.TransactionGone(retErr) {
+		if gpu == nil && dumpComplete && pagebroker.CommitWorthRetrying(retErr) {
 			return
 		}
 		if gpu != nil {
@@ -178,7 +178,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return nil, err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
+	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
 	if err != nil {
 		return nil, checkpointNeedsSourceKill(err)
 	}
@@ -425,6 +425,10 @@ func configureCheckpoint(
 
 	return criuOpts, m, nil
 }
+
+// captureCheckpointFunc is overridden in tests: captureCheckpoint runs CRIU
+// against a live process tree, which a unit test cannot satisfy.
+var captureCheckpointFunc = captureCheckpoint
 
 func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}

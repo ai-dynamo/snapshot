@@ -66,6 +66,25 @@ func TransactionGone(err error) bool {
 	}
 }
 
+// CommitWorthRetrying reports whether a failed commit leaves the staged pages
+// worth holding: the failure may clear, or its outcome is unknown. Every other
+// failure is settled, so holding its pages only costs node memory.
+func CommitWorthRetrying(err error) bool {
+	if isRetryableTransportError(err) {
+		return true
+	}
+	var failure *FailureError
+	if !errors.As(err, &failure) {
+		return false
+	}
+	switch failure.Code() {
+	case Failure_STORAGE_ERROR, Failure_UNAVAILABLE, Failure_STORAGE_UNAVAILABLE, Failure_OUTCOME_UNKNOWN:
+		return true
+	default:
+		return false
+	}
+}
+
 func isStorageFailure(code Failure_Code) bool {
 	switch code {
 	case Failure_STORE_MISMATCH, Failure_ACCESS_DENIED, Failure_STORAGE_UNAVAILABLE,

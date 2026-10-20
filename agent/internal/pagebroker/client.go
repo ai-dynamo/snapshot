@@ -152,6 +152,10 @@ func (c Client) retryAbort(ctx context.Context, transactionID string, first erro
 		case <-time.After(commitRetryDelay):
 		}
 		err := c.abort(retryCtx, transactionID)
+		// A definitive answer stands even if the budget expired reaching it.
+		if err == nil || TransactionGone(err) {
+			return err
+		}
 		if retryCtx.Err() != nil {
 			return first
 		}

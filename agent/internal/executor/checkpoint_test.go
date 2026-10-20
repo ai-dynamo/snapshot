@@ -15,13 +15,13 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sys/unix"
-
+	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
@@ -513,4 +513,105 @@ func TestCheckpointBoundSendsArtifactTarget(t *testing.T) {
 func TestCheckpointNeedsSourceKill(t *testing.T) {
 	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
 	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
+}
+
+// TestCheckpointCommitFailureReleasesOnlySettledFailures drives a completed dump
+// into a failed commit and records what the broker is asked to do next. The dump
+// itself is stubbed: the decision under test is the deferred cleanup's.
+func TestCheckpointCommitFailureReleasesOnlySettledFailures(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	for _, tc := range []struct {
+		name      string
+		code      pagebroker.Failure_Code
+		wantAbort bool
+	}{
+		{"storage error keeps the staged pages", pagebroker.Failure_STORAGE_ERROR, false},
+		{"outcome unknown keeps the staged pages", pagebroker.Failure_OUTCOME_UNKNOWN, false},
+		{"conflict releases them", pagebroker.Failure_TRANSACTION_CONFLICT, true},
+		{"insufficient storage releases them", pagebroker.Failure_INSUFFICIENT_STORAGE, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener := listenPageBroker(t)
+			imageDirectory := t.TempDir()
+			cfg := &types.AgentConfig{
+				Storage:    types.StorageSpec{BasePath: t.TempDir()},
+				PageBroker: types.PageBrokerSpec{ControlSocketPath: listener.Addr().String()},
+			}
+			req := CheckpointRequest{ContentUID: "content-uid", ContainerName: "main"}
+			ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+			defer cancel()
+
+			seen := make(chan string, 8)
+			served := make(chan error, 1)
+			go func() {
+				for {
+					connection, err := listener.Accept()
+					if err != nil {
+						served <- nil
+						return
+					}
+					request, err := readPageBrokerTestRequest(connection)
+					if err != nil {
+						_ = connection.Close()
+						served <- err
+						return
+					}
+					response := &pagebroker.Response{}
+					switch {
+					case request.GetPrepareStagedCheckpoint() != nil:
+						seen <- "prepare"
+						response.Result = &pagebroker.Response_StagedCheckpointDirectory{
+							StagedCheckpointDirectory: &pagebroker.StagedCheckpointDirectory{ImageDirectory: &imageDirectory},
+						}
+					case request.GetCommit() != nil:
+						seen <- "commit"
+						response.Result = &pagebroker.Response_Failure{Failure: &pagebroker.Failure{
+							Code: tc.code.Enum(), Message: proto.String("commit refused"),
+						}}
+					case request.GetAbort() != nil:
+						seen <- "abort"
+						response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+					default:
+						_ = connection.Close()
+						served <- fmt.Errorf("unexpected request %v", request)
+						return
+					}
+					err = replyPageBrokerTest(connection, request, response)
+					_ = connection.Close()
+					if err != nil {
+						served <- err
+						return
+					}
+				}
+			}()
+
+			originalCapture := captureCheckpointFunc
+			t.Cleanup(func() { captureCheckpointFunc = originalCapture })
+			captureCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
+				*types.CheckpointContainerSnapshot, string, string, logr.Logger, *pagebroker.CustomStorageExecution,
+			) (*checkpointPhaseTimings, error) {
+				return &checkpointPhaseTimings{}, nil
+			}
+
+			_, err := checkpoint(ctx, nil, logr.Discard(), req, cfg,
+				func(context.Context, snapshotruntime.Runtime, logr.Logger, CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
+					return &types.CheckpointContainerSnapshot{PID: -1, RootFS: workingDirectory}, 0, nil
+				})
+			require.ErrorContains(t, err, "commit PageBroker checkpoint")
+			_ = listener.Close()
+			waitPageBrokerTest(t, served)
+			close(seen)
+
+			var phases []string
+			for phase := range seen {
+				phases = append(phases, phase)
+			}
+			want := []string{"prepare", "commit"}
+			if tc.wantAbort {
+				want = append(want, "abort")
+			}
+			assert.Equal(t, want, phases, "a completed dump must not be released for a retryable failure")
+		})
+	}
 }
