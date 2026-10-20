@@ -436,7 +436,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	if state.UpperDir != "" {
 		overlayCaptureStart := time.Now()
 		if err := captureOverlay(state.UpperDir, data.Overlay, checkpointDir, log); err != nil {
-			return nil, err
+			return nil, failStep(StepCaptureOverlay, err)
 		}
 		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 	}
