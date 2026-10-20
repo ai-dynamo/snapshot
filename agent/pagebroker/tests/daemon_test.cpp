@@ -24,6 +24,8 @@
 #include <mutex>
 
 #include <fstream>
+#include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -128,6 +130,19 @@ TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
   const auto abort_response = broker().HandleRequest(abort);
   ASSERT_TRUE(abort_response.has_failure());
   EXPECT_EQ(abort_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}
+
+TEST_F(BrokerTest, RejectsFilesystemModelStreamerBeforeStaging)
+{
+  auto request = RequestFor("unsupported");
+  auto* restore = request.mutable_staged_restore();
+  Configure(restore->mutable_source(), restore->mutable_io_engine(), source_);
+  restore->mutable_io_engine()->mutable_model_streamer();
+  const auto response = broker().HandleRequest(request);
+  ASSERT_TRUE(response.has_failure());
+  EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_TRUE(fs::is_empty(root_ / "tmpfs" / "restore"));
+  EXPECT_TRUE(fs::exists(source_ / "image"));
 }
 
 TEST_F(BrokerTest, StagesIndependentRestoresConcurrently)
@@ -630,6 +645,65 @@ TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
   EXPECT_TRUE(broker().HandleRequest(commit).has_failure());
   EXPECT_TRUE(fs::exists(published / "old"));
   EXPECT_TRUE(fs::exists(previous));
+}
+
+TEST_F(BrokerTest, DirectPublicationRejectsConflictWithoutChangingEitherTree)
+{
+  auto engine = std::make_unique<PosixCopyEngine>(root_ / "storage");
+  const auto published = root_ / "storage/published";
+  const fs::path partial = published.string() + ".pagebroker-partial";
+  fs::create_directory(published);
+  fs::create_directory(partial);
+  std::ofstream(published / "old") << "old";
+  std::ofstream(partial / "other-attempt") << "keep";
+  StorageBackend destination;
+  destination.mutable_filesystem()->set_directory(published.string());
+  try {
+    engine->PublishCheckpoint(source_, destination, engine->InspectCheckpoint(source_), nullptr, {}, TransferMode::Direct);
+    FAIL() << "publication should reject an existing partial";
+  }
+  catch (const TransferError& error) {
+    EXPECT_EQ(error.code, Failure::TRANSACTION_CONFLICT);
+  }
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+  EXPECT_TRUE(fs::exists(published / "old"));
+  EXPECT_FALSE(fs::exists(published / "image"));
+  EXPECT_FALSE(fs::exists(partial / "image"));
+  std::string contents;
+  std::ifstream(partial / "other-attempt") >> contents;
+  EXPECT_EQ(contents, "keep");
+}
+
+TEST_F(BrokerTest, PreservesPartialFileWhenCheckpointDestinationIsAbsent)
+{
+  const fs::path destination = root_ / "storage" / "blocked";
+  auto prepare = RequestFor("checkpoint");
+  Configure(
+      prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), destination);
+  const auto output = broker().HandleRequest(prepare);
+  ASSERT_TRUE(output.has_staged_checkpoint_directory());
+  std::ofstream(fs::path(output.staged_checkpoint_directory().image_directory()) / "image") << "image";
+  const fs::path partial = destination.string() + ".pagebroker-partial";
+  std::ofstream(partial) << "keep";
+
+  auto commit = RequestFor("checkpoint");
+  commit.mutable_commit();
+  const auto response = broker().HandleRequest(commit);
+  ASSERT_TRUE(response.has_failure());
+  EXPECT_EQ(response.failure().code(), Failure::TRANSACTION_CONFLICT);
+  EXPECT_TRUE(fs::exists(partial));
+  std::string partial_contents;
+  std::ifstream(partial) >> partial_contents;
+  EXPECT_EQ(partial_contents, "keep");
+  const fs::path staging(output.staged_checkpoint_directory().image_directory());
+  EXPECT_TRUE(fs::exists(staging / "image"));
+  EXPECT_FALSE(fs::exists(destination));
+
+  fs::remove(partial);
+  EXPECT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+  EXPECT_TRUE(fs::exists(destination / "image"));
+  EXPECT_FALSE(fs::exists(staging));
 }
 
 TEST_F(BrokerTest, PreservesExistingPartialCheckpointDestination)

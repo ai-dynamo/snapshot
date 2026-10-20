@@ -15,7 +15,7 @@
 namespace snapshot::pagebroker {
 using Path = std::filesystem::path;
 
-enum class IoEngine { POSIX_COPY, NIXL };
+enum class IoEngine { POSIX_COPY, NIXL, MODEL_STREAMER };
 
 namespace io {
 enum class Operation { Read, Write };
