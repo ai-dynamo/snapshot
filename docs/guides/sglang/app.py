@@ -16,14 +16,14 @@ CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("prime", "snapshot"), default="snapshot")
+    # JSON keys are Engine API keyword arguments, not CLI flags.
+    parser.add_argument("engine_args", type=json.loads)
     return parser.parse_args()
 
 
 def configure_capture_environment() -> None:
     os.environ.update(
         {
-            "NCCL_CUMEM_ENABLE": "0",
-            "NCCL_NVLS_ENABLE": "0",
             "NCCL_IB_DISABLE": "1",
             "NCCL_RAS_ENABLE": "0",
             "TORCH_NCCL_ENABLE_MONITORING": "0",
@@ -33,19 +33,20 @@ def configure_capture_environment() -> None:
     )
 
 
-def create_engine(snapshot_mode: bool) -> Any:
+def create_engine(overrides: dict[str, Any], snapshot_mode: bool) -> Any:
     import sglang as sgl
 
-    return sgl.Engine(
-        model_path=os.environ["SNAPSHOT_MODEL"],
-        context_length=int(os.environ.get("SGLANG_CONTEXT_LENGTH", "10240")),
-        page_size=int(os.environ.get("SGLANG_PAGE_SIZE", "16")),
-        tp_size=1,
-        trust_remote_code=False,
-        enable_memory_saver=snapshot_mode,
-        enable_weights_cpu_backup=snapshot_mode,
-        log_level="info",
-    )
+    engine_args = {
+        "context_length": int(os.environ.get("SGLANG_CONTEXT_LENGTH", "10240")),
+        "page_size": int(os.environ.get("SGLANG_PAGE_SIZE", "16")),
+        "trust_remote_code": False,
+        "log_level": "info",
+        **overrides,
+        # Capture releases KV through the memory saver and keeps no CPU weight copy.
+        "enable_memory_saver": snapshot_mode,
+        "enable_weights_cpu_backup": False,
+    }
+    return sgl.Engine(**engine_args)
 
 
 def generate_text(engine: Any, prompt: str) -> str:
@@ -66,10 +67,7 @@ def pause_generation(engine: Any) -> None:
     # overlap result, clears last_batch and running_batch, and re-queues
     # unfinished requests (there are none here; the warm-up generation has
     # returned). release_memory_occupation() asserts is_fully_idle(), which
-    # also requires last_batch to be empty. The default "in_place" mode freezes
-    # scheduler state untouched, so pausing right after a generation leaves a
-    # stale last_batch and the release fails with "should be called only when
-    # server is idle" (SGLang 0.5.17).
+    # also requires last_batch to be empty, so explicitly retract before release.
     engine.loop.run_until_complete(
         engine.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="retract"))
     )
@@ -127,7 +125,7 @@ def main() -> None:
         configure_capture_environment()
         CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
-    engine = create_engine(snapshot_mode)
+    engine = create_engine(args.engine_args, snapshot_mode)
     try:
         text = generate_text(engine, "The capital city of France is")
         print(f"SGLang pre-checkpoint output={text!r}", flush=True)
@@ -137,7 +135,7 @@ def main() -> None:
 
         pause_generation(engine)
         try:
-            engine.release_memory_occupation()
+            engine.release_memory_occupation(tags=["kv_cache"])
         except BaseException:
             continue_generation(engine)
             raise
@@ -155,7 +153,7 @@ def main() -> None:
         # control directory next to the success sentinel.
         try:
             progress = CONTROL_DIR.joinpath("sglang-restore-progress")
-            engine.resume_memory_occupation()
+            engine.resume_memory_occupation(tags=["kv_cache"])
             progress.write_text("memory-resumed\n", encoding="utf-8")
             continue_generation(engine)
             progress.write_text("generation-continued\n", encoding="utf-8")

@@ -4,7 +4,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: tensorrt-llm-source
+  name: tensorrt-llm-qwen3-0-6b-source
 spec:
   replicas: 1
   progressDeadlineSeconds: 1800
@@ -12,11 +12,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: tensorrt-llm-source
+      app: tensorrt-llm-qwen3-0-6b-source
   template:
     metadata:
       labels:
-        app: tensorrt-llm-source
+        app: tensorrt-llm-qwen3-0-6b-source
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
@@ -28,6 +28,27 @@ spec:
           localhostProfile: profiles/block-iouring.json
       nodeSelector:
         nvidia.com/gpu.present: "true"
+      initContainers:
+        - name: model-cache
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import sys
+              from huggingface_hub import snapshot_download
+              snapshot_download(repo_id=sys.argv[1])
+            - Qwen/Qwen3-0.6B
+          env:
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
       containers:
         - name: main
           image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
@@ -35,23 +56,21 @@ spec:
           command:
             - python3
             - /snapshot-app/app.py
+          args:
+            - '{"model": "Qwen/Qwen3-0.6B"}'
           env:
-            - name: SNAPSHOT_MODEL
-              value: Qwen/Qwen3-0.6B
-            - name: TRTLLM_MAX_NUM_TOKENS
-              value: "1024"
-            - name: TRTLLM_MAX_BATCH_SIZE
-              value: "1"
             - name: TRTLLM_FREE_GPU_MEMORY_FRACTION
-              value: "0.10"
-            - name: SNAPSHOT_CONTROL_DIR
-              value: /snapshot-control
+              value: "0.75"
             - name: HF_HUB_DISABLE_XET
               value: "1"
-            - name: TLLM_NCCL_SYMMETRIC_ZERO_COPY
-              value: "0"
-            - name: UCX_TLS
-              value: tcp,self
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: OMPI_MCA_pml
+              value: ob1
+            - name: OMPI_MCA_btl
+              value: "tcp,self"
           ports:
             - name: api
               containerPort: 8000
@@ -66,22 +85,26 @@ spec:
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
             - name: snapshot-control
               mountPath: /snapshot-control
               subPath: main
-            - name: tun
-              mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
             - name: app
               mountPath: /snapshot-app
               readOnly: true
       volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
         - name: snapshot-control
           emptyDir: {}
-        - name: tun
-          hostPath:
-            path: /dev/net/tun
-            type: CharDevice
-        # Created from app.py: kubectl create configmap tensorrt-llm-app --from-file=app.py
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
         - name: app
           configMap:
             name: tensorrt-llm-app

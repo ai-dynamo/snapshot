@@ -19,7 +19,11 @@ namespaces. Workload pods never mount checkpoint storage.
 ## Prerequisites
 
 - Kubernetes cluster with x86_64 or arm64 GPU nodes
-- NVIDIA GPU Operator 26.3 or newer, with NVIDIA driver 580.xx or newer
+- NVIDIA GPU Operator 26.3 or newer
+- NVIDIA kernel-mode driver 580 or newer, and CUDA user-mode driver
+  (`libcuda.so`) 615 or newer. With an older kernel-mode driver, point
+  `LD_LIBRARY_PATH` at a 615 or newer `libcuda.so` in both the workload and
+  PageBroker.
 - **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
 

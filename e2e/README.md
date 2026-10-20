@@ -9,7 +9,8 @@ end-to-end checks against a Kubernetes cluster.
 - `kubectl` and `helm`
 - For CI/vCluster mode: `vcluster`
 - A GPU Kubernetes cluster with `RuntimeClass/nvidia`, GPU Operator `26.3.0+`,
-  MIG disabled on the target GPU nodes, CUDA driver `580+`, and a storage class
+  MIG disabled on the target GPU nodes, kernel-mode driver `580+`, CUDA
+  user-mode driver (`libcuda.so`) `615+`, and a storage class
   that can provision `ReadWriteMany` volumes
 
 Set `SNAPSHOT_E2E_STORAGE_CLASS` when the cluster default cannot provision RWX
@@ -346,23 +347,38 @@ SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapsho
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
+To test an [eight-GPU recipe](../docs/guides/README.md#choose-your-recipe),
+set `SNAPSHOT_E2E_RECIPE` to its manifest filename without `.yaml`:
+
+```bash
+SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_RECIPE=<recipe> \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+```
+
+Use the GPU count declared in the manifest. Set `SNAPSHOT_E2E_WORKLOAD_IMAGE`
+to the installed Snapshot agent image, or use the matching
+`SNAPSHOT_E2E_SNAPSHOT_TAG`. The library checks require `/usr/bin/python3` on the
+worker node.
+
 Model weights come from one of two places:
 
 - **Shared model cache** (CI): set `SNAPSHOT_E2E_MODEL_CACHE_SERVER` and
   `SNAPSHOT_E2E_MODEL_CACHE_PATH` to an NFS export holding a Hugging Face cache
   in `HF_HOME` layout (`hub/models--<org>--<model>/...`). The test creates a
   static `PersistentVolume`/`PersistentVolumeClaim` (`SNAPSHOT_E2E_MODEL_CACHE_PVC`,
-  default `model-cache`), mounts it at `/models` on every framework container,
+  default `shared-model-cache`, distinct from the guides' own `model-cache` claim),
+  mounts it at `/models` on every framework container,
   sets `HF_HOME=/models` and `HF_HUB_OFFLINE=1`, and drops the guide's download
   init container. In vCluster mode the setup enables `sync.toHost.persistentVolumes`
   so the NFS mount options reach the node. The model must already be in the cache.
-- **Guide download** (default without the variables): the guide's own plumbing
-  runs unchanged. SGLang's init container downloads into its PVC, which the test
-  creates from the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS`
-  when set) and leaves in place; vLLM and TensorRT-LLM download in-process.
-  This needs working DNS and egress from the pods. A partial or stale SGLang
-  cache (for example after a killed run) is reset by deleting that PVC; the
-  next run recreates and refills it.
+- **Guide download** (default without the variables): the guides' own plumbing
+  runs unchanged. Every recipe's init container downloads into the guides'
+  [model cache](../docs/guides/README.md#model-cache), the `model-cache` PVC, which
+  the test creates from `docs/guides/model-cache-pvc.yaml` if missing (with
+  `SNAPSHOT_E2E_STORAGE_CLASS` when set) and leaves in place. This needs working
+  DNS and egress from the pods. A partial or stale model cache (for example after
+  a killed run) is reset by deleting that PVC; the next run recreates and refills
+  it.
 
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.
@@ -565,21 +581,18 @@ one-time GitHub Pages configuration.
 
 ## Framework Images
 
-The framework e2e workloads are the programs and manifests under
-`manifests/frameworks/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`), owned
-by the e2e suite -- these are not the `docs/guides/` examples, which still
-document a build-and-push image flow and are updated separately. Each
-framework runs the upstream image unmodified -- the exact image reference is
+The framework e2e workloads use the programs and manifests under
+`docs/guides/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`). Each
+framework runs the upstream image unmodified. The exact image reference is
 `spec.template.spec.containers[0].image` in that framework's own
-`deployment.yaml` -- with `app.py` mounted from a ConfigMap (`kubectl create
+capture manifest, with `app.py` mounted from a ConfigMap (`kubectl create
 configmap <framework>-app --from-file=app.py -n
 "${SNAPSHOT_E2E_TEST_NAMESPACE:-snapshot-e2e}"`) rather than baked into a
-Snapshot-built image. There is nothing under `manifests/frameworks/<framework>/`
-for Snapshot to build, push, or keep available; `frameworks.framework_image()`
-reads the image straight from that `deployment.yaml`, and
+Snapshot-built image. `frameworks.framework_image()` reads the engine image
+straight from that capture manifest, and
 `framework_workloads.app_configmap()` builds the ConfigMap from the same
 `app.py`.
 
 Point `SNAPSHOT_E2E_FRAMEWORK_IMAGE` at a different image to test an
 unpublished change (a fork of `vllm/vllm-openai`, for example) without
-editing `deployment.yaml`.
+editing the capture manifest.
