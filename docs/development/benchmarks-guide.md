@@ -165,7 +165,13 @@ debugging; earlier restore pods are removed to free GPUs between repetitions.
 Work-PVC caches and logs remain under the run ID. Remove that directory only
 after copying the evidence. Model files and PVCs are never deleted.
 
-The extended runner has local tests for guide contracts, explicit topology,
-cache isolation, simulated capture/restore, precise timing and reports. These
-are not GPU acceptance tests. The earlier replacement runner's live results
-remain historical evidence; this rebuilt integration needs a fresh GPU run.
+Local tests cover guide contracts, explicit topology, cache isolation,
+failed-run cleanup, precise timing and reports.
+
+Live validation used Qwen3-0.6B at TP2 on B200 GPUs with Snapshot v0.2.0-rc.2,
+vLLM 0.31.0, SGLang 0.5.21 and TensorRT-LLM 1.3.0rc24. Each engine passed
+one capture and three restores from that checkpoint. Each restore preserved
+the source process token and passed three inference checks. Checkpoint payloads
+were deleted afterward. Model weights were cached; FlashInfer artifact downloads
+were permitted. This smoke test validates the runner; the published model matrix
+was measured separately.
