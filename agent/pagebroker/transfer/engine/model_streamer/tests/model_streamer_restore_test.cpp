@@ -15,71 +15,49 @@
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
-class RestoreContentsTest : public ::testing::Test {
- protected:
-  RestorePlan Plan(const std::string& contents)
-  {
-    const auto source = root_.path() / "source";
-    std::ofstream(source, std::ios::binary).write(contents.data(), contents.size());
-    RestorePlan plan;
-    plan.root_permissions = fs::perms::owner_all;
-    plan.directories.push_back({"nested", fs::perms::owner_read | fs::perms::owner_exec});
-    plan.directories.push_back({"empty", fs::perms::owner_all});
-    plan.files.push_back({source.string(), "nested/data", contents.size(), fs::perms::none});
-    return plan;
-  }
-
-  test::TemporaryDirectory root_;
-  ModelStreamerRestore restore_{std::chrono::seconds(5)};
-};
-
-TEST_F(RestoreContentsTest, CancellationAndDeadlineRejectBeforeCreatingStaging)
+TEST(ModelStreamerRestoreTest, RejectsNonS3SourcesBeforeCreatingStaging)
 {
-  const auto plan = Plan("data");
+  test::TemporaryDirectory root;
+  ModelStreamerRestore restore;
+  for (const auto& locator : {std::string("local"), std::string("/tmp/local"),
+       std::string("file:///tmp/local"), std::string("https://bucket/key"),
+       std::string("s3:///key"), std::string("s3://bucket/"), std::string("s3://bucket"),
+       std::string("s3://bucket/key\0suffix", 22)}) {
+    SCOPED_TRACE(locator);
+    RestorePlan plan;
+    plan.files.push_back({"s3://test-bucket/valid", "first", 0});
+    plan.files.push_back({locator, "second", 0});
+    EXPECT_THROW(restore.Stage(plan, root.path() / "unused"), std::invalid_argument);
+    EXPECT_FALSE(fs::exists(root.path() / "unused"));
+  }
+}
+
+TEST(ModelStreamerRestoreTest, CancellationAndDeadlineRejectBeforeCreatingStaging)
+{
+  test::TemporaryDirectory root;
+  ModelStreamerRestore restore;
+  RestorePlan plan;
+  plan.files.push_back({"s3://test-bucket/empty", "data", 0});
   Cancellation cancellation;
   cancellation.Cancel();
-  const auto destination = root_.path() / "cancelled";
-  EXPECT_THROW(restore_.Stage(plan, destination, cancellation), CancellationError);
+  const auto destination = root.path() / "cancelled";
+  EXPECT_THROW(restore.Stage(plan, destination, cancellation), CancellationError);
   EXPECT_FALSE(fs::exists(destination));
-  EXPECT_THROW(restore_.Stage(plan, destination, Cancellation(Cancellation::Clock::now())), CancellationError);
+  EXPECT_THROW(restore.Stage(plan, destination, Cancellation(Cancellation::Clock::now())), CancellationError);
   EXPECT_FALSE(fs::exists(destination));
-  EXPECT_NO_THROW(restore_.Stage(plan, root_.path() / "retry"));
+  EXPECT_NO_THROW(restore.Stage(plan, root.path() / "retry"));
 }
 
-TEST_F(RestoreContentsTest, RestoresBinaryContentsAndRestrictivePermissions)
+TEST(ModelStreamerRestoreTest, CreatesEmptyFilesAndDirectoriesWithoutReadingSource)
 {
-  const auto plan = Plan(std::string("binary\0data", 11));
-  const auto destination = root_.path() / "restored";
-  ASSERT_NO_THROW(restore_.Stage(plan, destination));
-  EXPECT_EQ(fs::status(destination / "nested/data").permissions(), fs::perms::none);
-  EXPECT_EQ(fs::status(destination / "nested").permissions(), plan.directories.front().permissions);
-  EXPECT_TRUE(fs::is_empty(destination / "empty"));
-  fs::permissions(destination / "nested/data", fs::perms::owner_read);
-  EXPECT_TRUE(test::FilesEqual(plan.files.front().source_locator, destination / "nested/data"));
-}
-
-TEST_F(RestoreContentsTest, RejectsTruncatedSource)
-{
-  const auto plan = Plan("original");
-  std::ofstream(plan.files.front().source_locator) << "short";
-  EXPECT_THROW(restore_.Stage(plan, root_.path() / "restored"), std::runtime_error);
-}
-
-TEST_F(RestoreContentsTest, CreatesEmptyFilesWithoutReadingSource)
-{
-  auto plan = Plan("");
-  fs::remove(plan.files.front().source_locator);
-  EXPECT_NO_THROW(restore_.Stage(plan, root_.path() / "empty-success"));
-  EXPECT_EQ(fs::file_size(root_.path() / "empty-success/nested/data"), 0);
-}
-
-TEST_F(RestoreContentsTest, SupportsConcurrentRestores)
-{
-  const auto plan = Plan("concurrent data");
-  auto first = std::async(std::launch::async, [&] { restore_.Stage(plan, root_.path() / "first"); });
-  auto second = std::async(std::launch::async, [&] { restore_.Stage(plan, root_.path() / "second"); });
-  EXPECT_NO_THROW(first.get());
-  EXPECT_NO_THROW(second.get());
+  test::TemporaryDirectory root;
+  ModelStreamerRestore restore;
+  RestorePlan plan;
+  plan.directories.push_back({"empty", fs::perms::owner_all});
+  plan.files.push_back({"s3://test-bucket/missing-empty-object", "data", 0});
+  EXPECT_NO_THROW(restore.Stage(plan, root.path() / "restored"));
+  EXPECT_EQ(fs::file_size(root.path() / "restored/data"), 0);
+  EXPECT_TRUE(fs::is_empty(root.path() / "restored/empty"));
 }
 }  // namespace
 }  // namespace snapshot::pagebroker

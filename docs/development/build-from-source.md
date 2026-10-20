@@ -59,10 +59,10 @@ make -C agent/pagebroker test daemon \
   MODEL_STREAMER_LIB_DIR=/tmp/snapshot-model-streamer-sdk/lib
 ```
 
-PageBroker submits CPU destinations and needs no CUDA driver. The filesystem
-strategy defaults to the library's ordered
-`io_uring_direct,libaio_direct,sync_buffered` preference list. Use `RUNAI_STREAMER_FS_STRATEGY` before starting PageBroker to select an explicit
-list such as `io_uring_buffered,sync_buffered`.
+PageBroker uses Model Streamer for S3 reads into local CPU staging and needs no
+CUDA driver for these reads. Filesystem storage uses POSIX; Model Streamer does
+not support filesystem sources or direct transfers. Artifact-addressed broker
+operations are supplied by the S3 storage integration.
 
 Native sessions admit at most eight submissions and target 10 GB of submitted
 bytes; one larger file runs alone. Admission closes on the first completed

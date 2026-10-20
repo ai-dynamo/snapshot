@@ -109,6 +109,12 @@ ValidateRestorePlan(const RestorePlan& plan)
       throw std::invalid_argument("restore plan contains a duplicate path");
   }
   for (const auto& file : plan.files) {
+    // Source locators are remote object addresses; never interpret them as local paths.
+    const auto& locator = file.source_locator;
+    const auto slash = locator.find('/', 5);
+    if (!locator.starts_with("s3://") || locator.find('\0') != std::string::npos ||
+        slash == std::string::npos || slash == 5 || slash + 1 == locator.size())
+      throw std::invalid_argument("Model Streamer requires an S3 object source");
     if (!IsSafeRelativePath(file.relative_path))
       throw std::invalid_argument("restore plan contains an unsafe file path");
     const Path parent = file.relative_path.parent_path();

@@ -126,7 +126,6 @@ type RestoreRequest struct {
 	CustomStorageAvailable      bool
 	PageBrokerControlSocketPath string
 	PageBrokerRestoreMode       string
-	PageBrokerTransferEngine    string
 
 	// Decided by the caller, so both gates reach the same answer.
 	SkipCompatCheck bool
@@ -141,13 +140,6 @@ type RestoreResult struct {
 	// RestoredPID is the restored process, relative to the container's PID
 	// namespace.
 	RestoredPID int
-}
-
-func pageBrokerTransferEngine(configured string) pagebroker.TransferEngine {
-	if configured == "" {
-		return pagebroker.TransferEnginePosixCopy
-	}
-	return pagebroker.TransferEngine(configured)
 }
 
 // Restore performs external restore for the given request.
@@ -289,11 +281,11 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if usePageBrokerGPU && direct {
 		gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
 	} else if usePageBrokerGPU {
-		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext, pageBrokerTransferEngine(req.PageBrokerTransferEngine))
+		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
 	} else if direct {
 		err = broker.DirectRestore(ctx, transactionID, artifactPath)
 	} else {
-		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath, pageBrokerTransferEngine(req.PageBrokerTransferEngine))
+		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
 	}
 	pageBrokerStageDuration = time.Since(stageStart)
 	if err != nil {
