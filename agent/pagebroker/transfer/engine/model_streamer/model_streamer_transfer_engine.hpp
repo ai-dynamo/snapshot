@@ -8,6 +8,7 @@
 #include <optional>
 
 #include "s3_config.hpp"
+#include "model_streamer_config.hpp"
 #include "transfer/s3/s3_storage_backend.hpp"
 
 #include "model_streamer_restore.hpp"
@@ -17,13 +18,13 @@ namespace snapshot::pagebroker {
 class ModelStreamerTransferEngine final : public TransferEngine {
  public:
   // Retains the storage root used to validate filesystem locations.
-  explicit ModelStreamerTransferEngine(Path storage_root);
+  explicit ModelStreamerTransferEngine(Path storage_root, ModelStreamerOptions model_streamer = {});
 
   // Configures native transfers with explicit S3 connection settings.
-  ModelStreamerTransferEngine(Path storage_root, S3TransferOptions options);
+  ModelStreamerTransferEngine(Path storage_root, S3TransferOptions options, ModelStreamerOptions model_streamer = {});
 
   // Binds artifact operations to the configured S3 store.
-  explicit ModelStreamerTransferEngine(S3Config config);
+  explicit ModelStreamerTransferEngine(S3Config config, ModelStreamerOptions model_streamer = {});
 
   // Identifies the Model Streamer transfer implementation.
   IoEngine type() const override;
@@ -75,6 +76,7 @@ class ModelStreamerTransferEngine final : public TransferEngine {
   std::shared_ptr<ModelStreamerRestore> AcquireRestore() const;
   Path storage_root_;
   const std::optional<S3TransferOptions> s3_options_;
+  const ModelStreamerOptions model_streamer_;
   std::unique_ptr<S3StorageBackend> store_;
   mutable std::mutex restore_mutex_;
   mutable std::shared_ptr<ModelStreamerRestore> restore_;
