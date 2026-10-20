@@ -409,6 +409,7 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
             config.namespace,
             source_pod.metadata.name,
             f"{workloads.HELPER_SYNC_DIR}/helper-finished",
+            container=workloads.CONTAINER,
         )
         # The helper marker is in a test-owned emptyDir, so deleting its source
         # pod is the observable cleanup boundary for this failed attempt.
@@ -468,7 +469,7 @@ def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
         snap.wait_for_container_running(
             config.namespace,
             source_pod.metadata.name,
-            container=workloads.CONTAINER,
+            container="helper",
         )
         k8s.exec_command(
             config.namespace,

@@ -106,13 +106,39 @@ def test_acknowledge_snapshotjob_reconcile_patches_and_waits(monkeypatch) -> Non
     assert waited == [("snapshot-e2e", "job", "test-token", 7)]
 
 
+def test_file_present_executes_in_requested_container(monkeypatch) -> None:
+    calls = []
+
+    def exec_command(namespace, pod, command, *, container=None):
+        calls.append((namespace, pod, command, container))
+        return "__snapshot_e2e_file_present__"
+
+    monkeypatch.setattr(k8s, "exec_command", exec_command)
+
+    assert lifecycle.file_present(
+        "snapshot-e2e",
+        "pod",
+        "/e2e-helper-sync/helper-finished",
+        container="main",
+    )
+    assert calls == [
+        (
+            "snapshot-e2e",
+            "pod",
+            "[[ -f /e2e-helper-sync/helper-finished ]] && printf '%s' "
+            "__snapshot_e2e_file_present__",
+            "main",
+        )
+    ]
+
+
 def test_wait_for_container_running_accepts_running_without_ready(monkeypatch) -> None:
     pod = SimpleNamespace(
         status=SimpleNamespace(
             phase="Running",
             container_statuses=[
                 SimpleNamespace(
-                    name="main",
+                    name="helper",
                     ready=False,
                     state=SimpleNamespace(running=SimpleNamespace(), terminated=None),
                 )
@@ -126,7 +152,9 @@ def test_wait_for_container_running_accepts_running_without_ready(monkeypatch) -
         lambda _description, check, _timeout, **_kwargs: check(),
     )
 
-    assert lifecycle.wait_for_container_running("namespace", "pod", timeout=1) is pod
+    assert lifecycle.wait_for_container_running(
+        "namespace", "pod", container="helper", timeout=1
+    ) is pod
 
 
 @pytest.mark.parametrize(

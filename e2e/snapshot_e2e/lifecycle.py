@@ -273,13 +273,19 @@ def wait_for_container_exit(
     )
 
 
-def file_present(namespace: str, pod: str, path: str) -> bool:
+def file_present(
+    namespace: str,
+    pod: str,
+    path: str,
+    *,
+    container: str = CONTAINER,
+) -> bool:
     # Require a stdout marker because exec does not expose remote exit status,
     # and look for it rather than match on it: exec returns stderr too, and a
     # login shell is free to write to it.
     marker = "__snapshot_e2e_file_present__"
     command = f"[[ -f {shlex.quote(path)} ]] && printf '%s' {shlex.quote(marker)}"
-    return marker in k8s.exec_command(namespace, pod, command)
+    return marker in k8s.exec_command(namespace, pod, command, container=container)
 
 
 def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> None:
