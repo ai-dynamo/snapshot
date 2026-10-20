@@ -4,6 +4,7 @@
 package types
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -137,4 +138,13 @@ func TestTimeoutsAcceptTheLargestRepresentableValue(t *testing.T) {
 
 	restore := RestoreSpec{RestoreTimeoutSeconds: limit}
 	require.NoError(t, restore.Validate())
+}
+
+func TestRejectsRemovedFilesystemEngineSetting(t *testing.T) {
+	for _, engine := range []string{"model-streamer", "posix-copy", ""} {
+		cfg := validAgentConfig()
+		require.NoError(t, yaml.Unmarshal([]byte("pageBroker:\n  transferEngine: "+fmt.Sprintf("%q", engine)+"\n"), cfg))
+		require.ErrorContains(t, cfg.Validate(), "pageBroker.transferEngine")
+	}
+	require.NoError(t, validAgentConfig().Validate())
 }
