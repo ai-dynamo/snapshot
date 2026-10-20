@@ -1,134 +1,163 @@
 # Reproducing the benchmarks
 
-This guide runs the tool in [`benchmarks/`](../../benchmarks) that produced the
-methodology behind [Performance Benchmarks](benchmarks.md): it deploys a
-snapshot-ready vLLM replica, times cold start, checkpoints it, restores it, and
-records the result as raw JSON plus per-run environment metadata (GPU, driver,
-storage backend, placement, checkpoint size).
+The tool in [`benchmarks/`](../../benchmarks) measures startup, checkpoints the
+initialized engine and restores it three times. It supports vLLM, SGLang and
+TensorRT-LLM on one node. It extends the original runner and reuses the e2e
+Kubernetes and PodSnapshot helpers, the guide deployment templates and the guide
+applications. Benchmark hooks record timing and verify that state survives.
 
-Only vLLM is implemented today ("the agreed day-one vLLM comparison" scope).
-SGLang and TensorRT-LLM can be added later without redesigning the tool — see
-`benchmarks/snapshot_benchmarks/engines/__init__.py`.
+The [published results](benchmarks.md) remain Markdown tables. A new run writes
+its own report; it does not update those tables.
 
 ## Prerequisites
 
-- [`uv`](https://docs.astral.sh/uv/)
-- `kubectl`
-- A Snapshot Helm release already [installed](../operations/install.md) and
-  reachable via `KUBECONFIG`
-- A GPU-schedulable node with `RuntimeClass/nvidia` (see the repo
-  [Prerequisites](../../README.md#prerequisites))
-- A pre-built snapshot-ready vLLM image — follow
-  [Build and deploy a vLLM replica](../guides/vllm.md) steps 1–2 first; the
-  benchmark deploys that image, it does not build it
+- Python 3.12 or newer, `uv` and `kubectl`.
+- An installed Snapshot operator, node agent and PageBroker.
+- A node with enough free GPUs and host memory for the selected model.
+- An engine image that supports the selected guide application's APIs.
+- A read-only model PVC, populated before the run, mounted at `/hf-cache`.
+- A writable work PVC for fresh compiler caches and timing files.
+- The Snapshot installation's checkpoint PVC, passed with `--pvc-name`.
+
+The guide templates require the NVIDIA runtime class, `/dev/net/tun` and the
+node's `profiles/block-iouring.json` seccomp profile. The runner does not install
+infrastructure, change node reservations or stop other users' workloads.
+
+The published setup used B200 GPUs, driver 615.71.09 and Snapshot v0.2.0-rc.2.
+Engine versions were vLLM 0.31.0, SGLang 0.5.21 and TensorRT-LLM 1.3.0rc24.
+Pass the image you intend to measure with `--image`; the guide's default image
+may differ. Each result records the image and queries its installed version.
+The agent log format must include checkpoint and restore timing summaries and
+the external-restore start marker. Missing timing evidence fails collection.
+
+For the published VAST setup, use NFSv3 with 1 MiB read/write sizes,
+`nconnect=32`, `spread_reads`, `nosharecache`, `nosharetransport` and
+`remoteports=<your four storage addresses>`. Those options require a compatible
+VAST client. Inspect the actual `/proc/mounts` records saved in `startup.log`;
+a PV declaration alone does not prove the client uses them. The runner can
+measure other storage too; it does not force VAST mount options.
 
 ## Quick start
 
-Sanity-check the cluster before committing to a multi-minute sweep — this
-prints the same environment bundle every run records (storage backend, cluster
-version, etc.), without deploying anything. It omits `gpu_product` and
-`gpu_driver_version` (both come back `null`), since those are queried live from
-inside a running GPU pod via `nvidia-smi`, and this command deploys none:
+Inspect the installed Snapshot release without creating a workload:
 
 ```bash
-export SNAPSHOT_E2E_TEST_NAMESPACE=<namespace-vllm-runs-in>
-export SNAPSHOT_E2E_SNAPSHOT_RELEASE=<helm-release-name>
 uv run --project benchmarks python -m snapshot_benchmarks metadata \
-  --snapshot-namespace <namespace-snapshot-is-installed-in>
+  --context YOUR_CONTEXT --namespace YOUR_NAMESPACE \
+  --snapshot-namespace SNAPSHOT_NAMESPACE --pvc-name CHECKPOINT_PVC
 ```
 
-Run a single model:
+Generate a workload for review without making Kubernetes calls:
 
 ```bash
 uv run --project benchmarks python -m snapshot_benchmarks run \
-  --snapshot-namespace <namespace-snapshot-is-installed-in> \
-  --model-label "Qwen3 0.6B" \
-  --image <registry>/vllm-snapshot:<tag>
+  --context YOUR_CONTEXT --namespace YOUR_NAMESPACE \
+  --snapshot-namespace SNAPSHOT_NAMESPACE --release SNAPSHOT_RELEASE \
+  --pvc-name CHECKPOINT_PVC --node YOUR_NODE \
+  --model-pvc MODEL_PVC --work-pvc WORK_PVC \
+  --engine vllm --model /hf-cache/Qwen3-0.6B --model-label Qwen3-0.6B \
+  --image YOUR_ENGINE_IMAGE --tp 1 --dry-run
 ```
 
-Run the full published model sweep (`benchmarks/models.yaml`, editable — see
-the comments in that file about tuning `VLLM_MAX_MODEL_LEN` /
-`VLLM_GPU_MEMORY_UTILIZATION` per model for your GPU's VRAM):
+Remove `--dry-run` to run it. Use `--engine sglang` or `--engine trtllm` for the
+other engines. `--tp` is the GPU count; `--ep` sets expert parallelism within
+those GPUs and must divide TP. vLLM supports EP=1 or EP=TP in this workload.
+The source and restore pods are pinned to `--node`. Use a separate run to
+measure a different topology.
+
+Model-specific constructor arguments are JSON, using the engine's Python API
+names. For example, add this for vLLM Qwen3-14B:
 
 ```bash
-uv run --project benchmarks python -m snapshot_benchmarks sweep \
-  --snapshot-namespace <namespace-snapshot-is-installed-in> \
-  --image <registry>/vllm-snapshot:<tag>
+--tp 2 --engine-args '{"max_model_len":2048,"gpu_memory_utilization":0.85}'
 ```
 
-Each run writes one JSON file per model to `benchmarks/results/<date>-<git-sha>-<invocation-id>/`
-(gitignored — these are local artifacts, not published content). Render a
-standalone text summary from a results directory:
+Set the model and topology through their dedicated flags. The tool rejects
+conflicting model or parallelism keys in `--engine-args`. For a local model,
+`--weights-bytes` records the measured logical weight-file size. If omitted,
+the report leaves that cell blank. Model files are not downloaded during a run;
+the model PVC is read-only and Hugging Face offline mode is enabled.
+
+FlashInfer may still download kernel artifacts when its cache is empty. For an
+offline run, pre-stage compatible artifacts separately from the fresh JIT cache
+and set the engine's download controls in the model's `env` settings. FlashInfer
+0.6.16 uses `FLASHINFER_NO_DOWNLOAD=1` and `FLASHINFER_CUBIN_DIR`. Verify those
+controls for the image you use; offline model loading does not disable every
+library's artifact downloads.
+
+The original `--model-label` selection from `models.yaml` and the `sweep`
+command remain available. That file is an editable example list, not the
+22-case published matrix. Entries can set `tp`, `ep`, `engine_args` and `env`.
+Use the same cluster, image and PVC flags with `sweep`, plus `--models FILE` for
+your own list. `--tp` and `--ep` override the list's values. Additional node
+tolerations use the existing repeatable `--toleration key=value:effect` flag.
+
+Each invocation writes under `benchmarks/results/<date>-<git-sha>-<id>/`.
+The top-level JSON files contain complete results. Subdirectories retain
+expanded manifests, admitted pods, logs, timing records, inference responses
+and failure details. The report reads only complete top-level results:
 
 ```bash
 uv run --project benchmarks python -m snapshot_benchmarks report \
-  --results-dir benchmarks/results/<date>-<git-sha>-<invocation-id>
+  --results-dir benchmarks/results/YOUR_INVOCATION --out tables.md
 ```
-
-`report` never edits [benchmarks.md](benchmarks.md) or any other doc — it
-prints/writes a separate summary for you to read or paste from by hand.
 
 ## What gets measured
 
-Every run separates two things the published doc reports together as "wake /
-remap": **Snapshot's own restore work** and **the engine's own wake and
-copy-to-GPU work**. The boundary is the node agent's `nvidia.com/Restored` pod
-condition, which fires the moment Snapshot believes the restore is done —
-before vLLM's own `wake_up()`/`resume_generation()`/warmup sequence runs. So,
-in each run's result JSON (the per-model file written to `benchmarks/results/`,
-see [Quick start](#quick-start)):
+**Cold start** begins at the workload's process-start marker and ends when the
+engine constructor returns. Image pull, scheduling, container setup and model
+download are outside that interval. Inference validation and memory release
+follow initialization and are excluded. Timers cover model loading, kernel
+compilation, tuning, graph capture and initialization inside the engine.
 
-- `restore.snapshot_restore_seconds` — container start → `nvidia.com/Restored`
-- `restore.wake_and_copy_seconds` — `nvidia.com/Restored` → pod `Ready`
+The report has four cold-start columns: Startup, Model load, Initialization,
+and Compilation, autotuning & graph capture. Overlapping work across workers
+counts once. Some JIT occurs during Startup and stays there. Small unmeasured
+intervals are distributed proportionally for display; those additions are
+estimates. Raw intervals and gaps remain in the local evidence.
 
-These come from Kubernetes condition timestamps, which have one-second
-resolution — a large relative error for the smallest models. For the headline
-total, `agent_log_phases.duration` is parsed from the node agent's own restore
-log, which has sub-second precision and is what actually produced the
-published numbers. `agent_log_phases` also includes a best-effort remap of the
-agent's own phase names to the published doc's 4-stage vocabulary
-(`agent_setup_approx`, `criu_restore_approx`, `cuda_restore_approx`) — these
-are approximate by construction; `cuda_restore_approx` is the one exact 1:1
-mapping. `wake_remap_approx` is always `null`: that published stage isn't
-represented in the agent log at all, so if you're reproducing the published
-"wake / remap" number, read `wake_and_copy_seconds` instead.
+**Checkpoint** uses the agent's measured capture duration. The application
+pauses requests and releases KV memory before capture. vLLM restores weights
+before capture; SGLang requests KV-only release without a CPU weight backup;
+TRT-LLM uses its KV sleep/wakeup RPC. A release call does not prove that every
+engine allocation was freed. In particular, the published SGLang GPT-OSS runs
+retained KV allocations, which increased their checkpoint sizes.
 
-Cold start is timed from pod creation to the source pod's `Ready` condition
-(model load + one warmup generation + pause — the readiness gate
-[capture/qwen3-0.6b.yaml](../guides/vllm/capture/qwen3-0.6b.yaml) already uses), with
-container start (`cold_start.container_start_seconds`) reported separately so
-it can be excluded to match the published doc's "Cold start" column.
+Checkpoint size sums the logical bytes of regular files under
+`containers/main`. It includes CPU/GPU images and rootfs changes. The runner
+requires per-process `gpu/<pid>/manifest.txt` files as evidence of PageBroker
+CustomStorage. The source pod must use `cuinterpose-launch` for multi-GPU runs;
+the runner saves the admitted command and checks it before capture.
 
-Checkpoint size (`model.checkpoint_artifact_bytes`) is measured with `du -sb`
-on the capture node — neither `PodSnapshot` nor `PodSnapshotContent` status
-exposes a size field.
+**Restore** begins at the agent's external-restore start marker and ends at the
+application's wake/resume completion. Its columns are Agent setup / rootfs,
+CRIU restore, CUDA restore and Wake / handoff. The CRIU/CUDA values come from
+the agent summary; setup is the rest of the agent duration, and handoff is the
+interval from agent completion to application wake/resume completion. Multi-GPU
+reconstruction is included in the CUDA/CRIU phases and has no separate timer.
 
-## Interpreting results
+Every restore must retain the pre-checkpoint process token and answer three
+factual prompts. Inference occurs after wake and is excluded from the measured
+restore time. The report uses attempt 1 for both total and phase values;
+attempts 2 and 3 remain in the local results. Missing wake events fail the run;
+readiness and first generation are not substituted as timing endpoints.
 
-The published numbers were measured on a single B200 (driver 595) with a VAST
-NFS PVC with `direct_io` enabled — see [Storage throughput sets the floor](benchmarks.md#storage-throughput-sets-the-floor)
-and [Checkpoint size is what predicts restore time](benchmarks.md#checkpoint-size-is-what-predicts-restore-time).
-A run on different hardware produces a **valid, different-baseline** result,
-not an invalid comparison — this is exactly why every run self-reports its own
-`environment` block (GPU product, driver version, storage class/provisioner,
-placement). Compare against the published table only when `gpu_product`,
-`gpu_driver_version`, and `storage_class`/`storage_provisioner` genuinely
-match; otherwise compare your own cold-start-vs-restore ratio, or checkpoint
-size vs. restore time, within your own results.
+Each source uses fresh compiler-cache directories. The runner does not clear
+Linux page cache or storage-server caches. Metadata includes capture/restore
+GPU and driver identities, engine version, storage class and placement.
+Schema-1 results remain readable, under their original timing definitions;
+the report separates them from the new startup-to-ready measurements.
 
-## Reporting a reproducibility mismatch
+## Cleanup and verification
 
-Treat it as a mismatch worth reporting when the restore total
-(`agent_log_phases.duration`) is more than roughly 2x the published figure for
-the same model **on equivalent hardware** (same GPU model, same driver major,
-same storage backend/class) — not when hardware differs, per the section
-above.
+The original cleanup path removes this run's pods, ConfigMap, PodSnapshot and
+PodSnapshotContent. Failed runs retain local evidence and still clean owned
+cluster resources. Cleanup errors stop a sweep. `--keep` retains resources for
+debugging; earlier restore pods are removed to free GPUs between repetitions.
+Work-PVC caches and logs remain under the run ID. Remove that directory only
+after copying the evidence. Model files and PVCs are never deleted.
 
-Open a GitHub issue on the repository and attach:
-
-- The raw `RunResult` JSON for the run in question
-- The output of `python -m snapshot_benchmarks metadata` for the same context
-- The Snapshot chart version and operator/agent image tags installed
-- `kubectl get nodes -o wide`
-- The node agent's pod logs for the run window
-  (`kubectl logs -n <snapshot-namespace> <snapshot-agent-pod>`)
+The extended runner has local tests for guide contracts, explicit topology,
+cache isolation, simulated capture/restore, precise timing and reports. These
+are not GPU acceptance tests. The earlier replacement runner's live results
+remain historical evidence; this rebuilt integration needs a fresh GPU run.

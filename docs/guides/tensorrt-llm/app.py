@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import nullcontext
+
+# The benchmark wrapper supplies these hooks. Normal guide runs need no helper files.
+phase = globals().get("benchmark_phase", lambda _: nullcontext())
+mark = globals().get("benchmark_mark", lambda _: None)
+benchmark_token = globals().get("benchmark_token")
+
 import gc
 import json
 import os
@@ -10,13 +17,12 @@ import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-# Forked compiler workers can inherit CUDA mappings that CRIU cannot restore.
-os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
-
+if benchmark_token:
+    os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 from tensorrt_llm import LLM, SamplingParams
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
-# Small default sizing so the example fits alongside other GPU tenants and
+# Small single-GPU sizing so the example fits alongside other GPU tenants and
 # keeps the checkpoint artifact small. Override through the Pod template.
 MAX_NUM_TOKENS = int(os.environ.get("TRTLLM_MAX_NUM_TOKENS", "1024"))
 MAX_BATCH_SIZE = int(os.environ.get("TRTLLM_MAX_BATCH_SIZE", "1"))
@@ -27,20 +33,21 @@ TRUST_REMOTE_CODE = False
 
 
 def generate_text(llm: LLM, prompts: list[str]) -> list[str]:
-    outputs = llm.generate(
-        prompts,
-        SamplingParams(temperature=0.0, max_tokens=16),
-        use_tqdm=False,
-    )
-    texts = []
-    for output in outputs:
-        if not output.outputs:
-            raise RuntimeError("TensorRT-LLM produced no output")
-        text = output.outputs[0].text.strip()
-        if not text:
-            raise RuntimeError("TensorRT-LLM produced empty output")
-        texts.append(text)
-    return texts
+    with phase("generation"):
+        outputs = llm.generate(
+            prompts,
+            SamplingParams(temperature=0.0, max_tokens=16),
+            use_tqdm=False,
+        )
+        texts = []
+        for output in outputs:
+            if not output.outputs:
+                raise RuntimeError("TensorRT-LLM produced no output")
+            text = output.outputs[0].text.strip()
+            if not text:
+                raise RuntimeError("TensorRT-LLM produced empty output")
+            texts.append(text)
+        return texts
 
 
 def serve_api(llm: LLM, restored_text: str) -> None:
@@ -64,7 +71,14 @@ def serve_api(llm: LLM, restored_text: str) -> None:
                 self.send_error(500, str(error))
                 return
 
-            body = json.dumps({"text": text}).encode()
+            body = json.dumps(
+                {
+                    "text": text,
+                    **(
+                        {"checkpoint_token": benchmark_token} if benchmark_token else {}
+                    ),
+                }
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -108,7 +122,9 @@ def main() -> None:
     engine_args["kv_cache_config"]["use_kv_cache_manager_v2"] = False
     engine_args["kv_cache_config"]["enable_block_reuse"] = False
     engine_args["sleep_config"] = {"restore_modes": {"kv_cache": "NONE"}}
+    mark("engine_init_begin")
     llm = LLM(**engine_args)
+    mark("engine_init_end")
 
     for text in generate_text(
         llm,
@@ -118,8 +134,24 @@ def main() -> None:
         ],
     ):
         print(f"TensorRT-LLM pre-checkpoint output={text!r}", flush=True)
+    mark("first_inference_complete")
+    if benchmark_token:
+        for prompt, expected in [
+            ("The capital city of France is", "paris"),
+            ("The capital city of Germany is", "berlin"),
+            ("The capital city of Japan is", "tokyo"),
+        ]:
+            answer = generate_text(llm, [prompt])[0]
+            print(
+                "CR_SEMANTIC_PRECHECK "
+                + json.dumps(dict(expected=expected, answer=answer)),
+                flush=True,
+            )
+            if expected not in answer.lower():
+                raise RuntimeError("Source inference check failed: " + repr(answer))
 
-    llm._collective_rpc("sleep", args=(["kv_cache"],))
+    with phase("sleep"):
+        llm._collective_rpc("sleep", args=(["kv_cache"],))
     gc.collect()
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
         "ready\n",
@@ -133,7 +165,8 @@ def main() -> None:
             # next to the success sentinel, where tools can read it.
             try:
                 progress = CONTROL_DIR.joinpath("trtllm-restore-progress")
-                llm._collective_rpc("wakeup", args=(["kv_cache"],))
+                with phase("wake"):
+                    llm._collective_rpc("wakeup", args=(["kv_cache"],))
                 text = generate_text(llm, ["The capital city of Germany is"])[0]
                 progress.write_text("generated\n", encoding="utf-8")
                 print(f"TensorRT-LLM restored output={text!r}", flush=True)

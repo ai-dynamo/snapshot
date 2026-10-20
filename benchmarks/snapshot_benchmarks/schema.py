@@ -26,7 +26,9 @@ def _iso(value: datetime.datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
-def _seconds(end: datetime.datetime | None, start: datetime.datetime | None) -> float | None:
+def _seconds(
+    end: datetime.datetime | None, start: datetime.datetime | None
+) -> float | None:
     """Returns (end - start) in seconds, or None if either side is missing."""
     if end is None or start is None:
         return None
@@ -78,6 +80,7 @@ class BenchmarkEnvironment:
 class BenchmarkEngine:
     name: str = "vllm"
     version: str | None = None  # queried live from the running pod, never hardcoded
+    image: str | None = None
 
 
 @dataclass
@@ -85,7 +88,10 @@ class ModelInfo:
     label: str
     hf_id_or_path: str
     reported_weights_bytes: int | None = None  # informational, from models.yaml
-    checkpoint_artifact_bytes: int | None = None  # measured via `du -sb` on the node
+    checkpoint_artifact_bytes: int | None = None  # sum of regular-file logical bytes
+    tp: int = 1
+    ep: int = 1
+    engine_args: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -93,6 +99,12 @@ class ColdStartTiming:
     pod_created_at: datetime.datetime | None = None
     container_started_at: datetime.datetime | None = None
     ready_at: datetime.datetime | None = None
+    measurement: dict[str, Any] | None = None
+
+    @property
+    def startup_to_ready_seconds(self) -> float | None:
+        """Process-start marker through engine initialization, before inference."""
+        return self.measurement["cold_start_s"] if self.measurement else None
 
     @property
     def container_start_seconds(self) -> float | None:
@@ -104,8 +116,7 @@ class ColdStartTiming:
 
     @property
     def cold_start_excl_container_seconds(self) -> float | None:
-        """Matches the published doc's "Cold start" column, which excludes
-        container pull/start."""
+        """Legacy container-start to Ready interval; includes validation and sleep."""
         return _seconds(self.ready_at, self.container_started_at)
 
 
@@ -117,14 +128,18 @@ class CheckpointTiming:
     timestamp), and `ready_at` is that same object's `Ready` condition
     `lastTransitionTime` -- the moment the node agent finishes capturing the
     checkpoint (CRIU dump + rootfs diff). Both come from the Kubernetes API
-    server, at one-second resolution, same as `RestoreTiming`.
+    server, at one-second resolution. New runs also record the agent's precise
+    capture duration and use it for `checkpoint_seconds`.
     """
 
     podsnapshot_created_at: datetime.datetime | None = None
     ready_at: datetime.datetime | None = None
+    agent_seconds: float | None = None
 
     @property
     def checkpoint_seconds(self) -> float | None:
+        if self.agent_seconds is not None:
+            return self.agent_seconds
         return _seconds(self.ready_at, self.podsnapshot_created_at)
 
 
@@ -145,15 +160,19 @@ class RestoreTiming:
     everything after it, up to pod Ready, is the engine's own wake and
     copy-to-GPU work.
 
-    These are derived from Kubernetes condition timestamps, which have
-    one-second resolution — see `restore_total_seconds_precise` for a
-    sub-second alternative headline number.
+    These legacy properties use Kubernetes condition timestamps. New reports
+    use `startup_to_ready_seconds`, measured from agent start to application wake.
     """
 
     restore_pod_created_at: datetime.datetime | None = None
     restore_container_started_at: datetime.datetime | None = None
     restored_condition_at: datetime.datetime | None = None
     restore_ready_at: datetime.datetime | None = None
+    measurement: dict[str, Any] | None = None
+
+    @property
+    def startup_to_ready_seconds(self) -> float | None:
+        return self.measurement["total_s"] if self.measurement else None
 
     @property
     def snapshot_restore_seconds(self) -> float | None:
@@ -203,7 +222,12 @@ class AgentLogPhases:
 
     @property
     def agent_setup_approx(self) -> float | None:
-        parts = [self.gpu_device_map, self.pagebroker_stage, self.pagebroker_mount, self.pagebroker_commit]
+        parts = [
+            self.gpu_device_map,
+            self.pagebroker_stage,
+            self.pagebroker_mount,
+            self.pagebroker_commit,
+        ]
         if any(p is None for p in parts):
             return None
         return sum(parts)
@@ -238,6 +262,7 @@ class RunResult:
     checkpoint: CheckpointTiming | None = None
     restore: RestoreTiming | None = None
     agent_log_phases: AgentLogPhases | None = None
+    restore_attempts: list[RestoreTiming] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     def to_json_dict(self) -> dict[str, Any]:
@@ -265,4 +290,4 @@ def _to_json_value(value: Any) -> Any:
     return value
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2

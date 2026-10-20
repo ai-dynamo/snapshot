@@ -1,0 +1,568 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import contextlib
+import ast
+import datetime
+import gc
+import io
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+import unittest
+import traceback
+from types import SimpleNamespace
+from unittest.mock import patch, Mock
+
+from kubernetes import client
+
+from snapshot_benchmarks import cli, measurement, report, run
+from snapshot_benchmarks.engines import ModelSpec
+from snapshot_benchmarks.schema import AgentLogPhases, BenchmarkEnvironment, GpuIdentity
+from snapshot_benchmarks.timing import restore_metrics
+from snapshot_benchmarks.workload import app_configmap, instrument_pod
+
+
+def config():
+    return run.BenchmarkConfig(
+        "workloads",
+        "snapshot",
+        "snapshot",
+        "checkpoints",
+        None,
+        "test-context",
+        "gpu-node",
+        "models",
+        "work",
+    )
+
+
+def cold_measurement():
+    return dict(
+        cold_start_s=31,
+        unattributed_s=0,
+        phases_s={
+            "Process/worker startup": 3,
+            "Runtime imports": 1,
+            "Model construction and weights": 2,
+            "Memory profiling": 3,
+            "Attention/sampler/kernel initialization": 4,
+            "MHC kernel prewarm": 0,
+            "Compilation and JIT module loading": 5,
+            "Autotuning": 6,
+            "CUDA graph capture": 7,
+        },
+    )
+
+
+@contextlib.contextmanager
+def cluster():
+    """Simulate API boundaries while exercising the real runner and guide builders."""
+    pods = {}
+    stamp = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+
+    def create(body):
+        command = body["spec"]["containers"][0]["command"]
+        if "nvidia.com/restore-from" not in body["metadata"].get("annotations", {}):
+            command = ["/snapshot/cuinterpose-launch", "--", *command]
+        name = body["metadata"]["name"]
+        pod = client.V1Pod(
+            metadata=client.V1ObjectMeta(
+                name=name,
+                namespace="workloads",
+                uid=name + "-uid",
+                creation_timestamp=stamp,
+            ),
+            spec=client.V1PodSpec(
+                node_name="gpu-node",
+                containers=[client.V1Container(name="main", command=command)],
+            ),
+            status=client.V1PodStatus(
+                phase="Running",
+                container_statuses=[],
+                conditions=[
+                    client.V1PodCondition(
+                        type="Ready", status="True", last_transition_time=stamp
+                    )
+                ],
+            ),
+        )
+        pods[name] = pod
+        return pod
+
+    snapshot = {
+        "metadata": {"creationTimestamp": stamp.isoformat()},
+        "status": {"boundSnapshotContentName": "content"},
+    }
+    content = {"metadata": {"name": "content", "uid": "content-uid"}}
+    metrics = dict(
+        total_s=4, agent_s=3, setup_s=1, criu_s=1, cuda_s=1, wake_handoff_s=1
+    )
+    boundaries = {
+        "load_config": None,
+        "_validate_snapshot_agent_present": None,
+        "_collect_agent_log_phases": AgentLogPhases(),
+        "_wait_for_pod_condition": lambda namespace, name, condition, **kwargs: pods[
+            name
+        ],
+        "k8s.create_pod": create,
+        "k8s.delete_pod": None,
+        "k8s.pod_logs": "failure log",
+        "lifecycle.create_podsnapshot": snapshot,
+        "lifecycle.wait_for_snapshot_ready": (snapshot, content),
+        "lifecycle.wait_for_pod_deleted": None,
+        "lifecycle.wait_for_pod_event": None,
+        "lifecycle.delete_podsnapshot": None,
+        "lifecycle.delete_podsnapshotcontent": None,
+        "lifecycle.wait_for_custom_object_deleted": None,
+        "lifecycle.wait_for_artifact_root_absent": None,
+        "metadata.collect_environment": BenchmarkEnvironment(
+            storage_class="test-storage"
+        ),
+        "metadata.collect_gpu_identity": GpuIdentity(
+            gpu_product="Test GPU", gpu_driver_version="test-driver"
+        ),
+        "metadata.engine_version": "test-version",
+        "measurement.source_measurement": (cold_measurement(), "preserved-token"),
+        "measurement.checkpoint_measurement": (2_000_000_000, 2),
+        "measurement.restored_measurement": metrics,
+    }
+    with contextlib.ExitStack() as stack:
+        mocks = {}
+        for name, value in boundaries.items():
+            kwargs = (
+                dict(side_effect=value) if callable(value) else dict(return_value=value)
+            )
+            mocks[name] = stack.enter_context(
+                patch("snapshot_benchmarks.run." + name, **kwargs)
+            )
+        mocks["api"] = stack.enter_context(
+            patch("snapshot_benchmarks.run.client.CoreV1Api")
+        ).return_value
+        yield mocks
+
+
+class BenchmarkTests(unittest.TestCase):
+    def test_sglang_guide_keeps_kv_only_policy(self):
+        path = Path(__file__).parents[2] / "docs/guides/sglang/app.py"
+        fn = next(
+            n
+            for n in ast.parse(path.read_text()).body
+            if isinstance(n, ast.FunctionDef) and n.name == "create_engine"
+        )
+        for token, backup in [(None, False), ("benchmark-token", False)]:
+            factory = Mock()
+            globals_ = dict(os=os, json=json, Any=object, benchmark_token=token)
+            with (
+                patch.dict(sys.modules, sglang=SimpleNamespace(Engine=factory)),
+                patch.dict(os.environ, SNAPSHOT_MODEL="test"),
+            ):
+                exec(
+                    compile(ast.Module(body=[fn], type_ignores=[]), str(path), "exec"),
+                    globals_,
+                )
+                globals_["create_engine"]({"model_path": "test", "tp_size": 2}, True)
+            self.assertEqual(
+                factory.call_args.kwargs["enable_weights_cpu_backup"], backup
+            )
+
+    def test_trt_guide_keeps_kv_sleep_policy(self):
+        path = Path(__file__).parents[2] / "docs/guides/tensorrt-llm/app.py"
+        fn = next(
+            n
+            for n in ast.parse(path.read_text()).body
+            if isinstance(n, ast.FunctionDef) and n.name == "main"
+        )
+        for token in (None, "benchmark-token"):
+            with tempfile.TemporaryDirectory() as tmp:
+                control = Path(tmp)
+                (control / "restore-complete").touch()
+                llm = Mock()
+                factory = Mock(return_value=llm)
+                globals_ = dict(
+                    os=os,
+                    sys=SimpleNamespace(argv=["app.py", '{"model": "test", "tensor_parallel_size": 2}']),
+                    json=json,
+                    gc=gc,
+                    traceback=traceback,
+                    CONTROL_DIR=control,
+                    MODEL="test",
+                    MAX_NUM_TOKENS=1024,
+                    MAX_BATCH_SIZE=1,
+                    FREE_GPU_MEMORY_FRACTION=0.1,
+                    TRUST_REMOTE_CODE=False,
+                    benchmark_token=token,
+                    phase=lambda _: contextlib.nullcontext(),
+                    mark=lambda _: None,
+                    LLM=factory,
+                    generate_text=lambda *_: ["paris berlin tokyo"],
+                    serve_api=Mock(side_effect=RuntimeError("stop-server")),
+                )
+                exec(
+                    compile(ast.Module(body=[fn], type_ignores=[]), str(path), "exec"),
+                    globals_,
+                )
+                with (
+                    contextlib.redirect_stdout(io.StringIO()),
+                    self.assertRaisesRegex(RuntimeError, "stop-server"),
+                ):
+                    globals_["main"]()
+                calls = [c.args[0] for c in llm._collective_rpc.call_args_list]
+                self.assertEqual(calls, ["sleep", "wakeup"])
+                self.assertEqual(
+                    factory.call_args.kwargs["dtype"], "auto"
+                )
+
+    def test_source_analysis_counts_overlapping_ranks_once_and_excludes_inference(self):
+        lines = []
+        for stage, elapsed in [
+            ("process_start", 0),
+            ("engine_init_begin", 1),
+            ("engine_init_end", 10),
+            ("first_inference_complete", 15),
+        ]:
+            lines.append(
+                "COLD_BENCH "
+                + json.dumps(
+                    dict(stage=stage, elapsed_s=elapsed, wall_time_ns=elapsed * 10**9)
+                )
+            )
+        for expected in ("paris", "berlin", "tokyo"):
+            lines.append(
+                "CR_SEMANTIC_PRECHECK "
+                + json.dumps(dict(expected=expected, answer=expected))
+            )
+        lines.append('CR_PHASE {"checkpoint_token":"token"}')
+        spans = []
+        for index, (name, start, end) in enumerate(
+            [
+                ("vllm.ModelRunner.load_model", 2, 6),
+                ("vllm.ModelRunner.load_model", 3, 7),
+                ("vllm.GPUModelRunner.capture_model", 7, 10),
+            ]
+        ):
+            for event, elapsed in [("begin", start), ("end", end)]:
+                spans.append(
+                    "STARTUP_SPAN "
+                    + json.dumps(
+                        dict(
+                            event=event,
+                            span=str(index),
+                            pid=index,
+                            rank=index,
+                            tid=1,
+                            name=name,
+                            parent=None,
+                            wall_ns=elapsed * 10**9,
+                            monotonic_ns=elapsed * 10**9,
+                            elapsed_ns=(end - start) * 10**9,
+                            success=True,
+                        )
+                    )
+                )
+        pod = client.V1Pod(metadata=client.V1ObjectMeta(name="source"))
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(
+                measurement, "remote_json", return_value=dict(log="\n".join(spans))
+            ),
+            patch.object(measurement.k8s, "pod_logs", return_value="\n".join(lines)),
+        ):
+            value, token = measurement.source_measurement(config(), pod, Path(tmp))
+            self.assertEqual(token, "token")
+            self.assertEqual(value["cold_start_s"], 10)
+            self.assertEqual(value["phases_s"]["Model construction and weights"], 5)
+            self.assertEqual(value["phases_s"]["CUDA graph capture"], 3)
+            self.assertEqual(value["phases_s"]["First generation"], 0)
+
+    def test_restore_timing_requires_wake_and_stops_before_inference(self):
+        epoch = 1767225600 * 10**9
+        events = [
+            dict(phase="wake", event="begin", wall_ns=epoch + 3 * 10**9),
+            dict(
+                phase="wake",
+                event="end",
+                wall_ns=epoch + 4 * 10**9,
+                success=True,
+                elapsed_ns=10**9,
+            ),
+            dict(phase="generation", event="begin", wall_ns=epoch + 5 * 10**9),
+            dict(phase="generation", event="end", wall_ns=epoch + 50 * 10**9),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            measurement.save(
+                folder / "pod-final.json",
+                dict(metadata=dict(name="restored", namespace="workloads")),
+            )
+            (folder / "agent.log").write_text(
+                '2026-01-01T00:00:00.000000000Z\tINFO === Starting external restore === {"pod":"workloads/restored"}\n'
+            )
+            measurement.save(
+                folder / "timing.json",
+                dict(duration="3s", phases=dict(criu_restore="1s", cuda_restore="1s")),
+            )
+
+            def write_events():
+                (folder / "phases.jsonl").write_text(
+                    "".join(json.dumps(e) + "\n" for e in events)
+                )
+
+            write_events()
+            self.assertEqual(restore_metrics(folder)["total_s"], 4)
+            events.pop(1)
+            write_events()
+            with self.assertRaisesRegex(ValueError, "wake completion"):
+                restore_metrics(folder)
+
+    def test_three_engines_use_guide_contract_and_explicit_topology(self):
+        for engine in cli.ENGINES.values():
+            for tp, ep in ((1, 1), (2, 1), (4, 1), (8, 8)):
+                with self.subTest(engine=engine.name, tp=tp):
+                    model = ModelSpec("Test", "/hf-cache/test", tp=tp, ep=ep)
+                    args = dict(
+                        name="test",
+                        namespace="workloads",
+                        image="engine:pinned",
+                        model=model,
+                    )
+                    source = instrument_pod(
+                        engine.build_source_pod(**args), config(), engine, model, "run"
+                    )
+                    restore = instrument_pod(
+                        engine.build_restore_pod(snapshot_name="snapshot", **args),
+                        config(),
+                        engine,
+                        model,
+                        "run",
+                        restore=True,
+                    )
+                    for pod in (source, restore):
+                        spec = pod["spec"]
+                        self.assertEqual(spec["runtimeClassName"], "nvidia")
+                        self.assertEqual(
+                            spec["securityContext"]["seccompProfile"][
+                                "localhostProfile"
+                            ],
+                            "profiles/block-iouring.json",
+                        )
+                        self.assertEqual(
+                            spec["nodeSelector"]["kubernetes.io/hostname"], "gpu-node"
+                        )
+                        main = spec["containers"][0]
+                        self.assertEqual(
+                            main["resources"]["limits"]["nvidia.com/gpu"], str(tp)
+                        )
+                        self.assertIn(
+                            dict(
+                                name="model-cache", mountPath="/hf-cache", readOnly=True
+                            ),
+                            main["volumeMounts"],
+                        )
+                        self.assertFalse(
+                            any(
+                                c["name"] == "model-cache"
+                                for c in spec.get("initContainers", [])
+                            )
+                        )
+                        if tp > 1:
+                            self.assertEqual(
+                                pod["metadata"]["annotations"][
+                                    "nvidia.com/cuda-shared-memory-support"
+                                ],
+                                "enabled",
+                            )
+                    self.assertEqual(
+                        source["spec"]["containers"][0]["volumeMounts"],
+                        restore["spec"]["containers"][0]["volumeMounts"],
+                    )
+                    self.assertFalse(
+                        any(
+                            c["name"] == "fresh-cache"
+                            for c in restore["spec"]["initContainers"]
+                        )
+                    )
+                    for filename, code in app_configmap(engine, "workloads", "app")[
+                        "data"
+                    ].items():
+                        compile(code, filename, "exec")
+
+    def test_cache_initializer_rejects_a_reused_run(self):
+        engine = cli.ENGINES["trtllm"]
+        model = ModelSpec("Test", "/hf-cache/test")
+        pod = instrument_pod(
+            engine.build_source_pod(
+                name="test", namespace="workloads", image="test", model=model
+            ),
+            config(),
+            engine,
+            model,
+            "run",
+        )
+        script = pod["spec"]["initContainers"][-1]["command"][-1]
+        with tempfile.TemporaryDirectory() as tmp:
+            script = script.replace("/work", tmp)
+            subprocess.run([sys.executable, "-c", script], check=True)
+            self.assertTrue((Path(tmp) / "run/compile-cache/startup-spans").is_dir())
+            repeated = subprocess.run(
+                [sys.executable, "-c", script], capture_output=True
+            )
+            self.assertNotEqual(repeated.returncode, 0)
+
+    def test_original_runner_captures_once_and_checks_three_restores(self):
+        for engine in cli.ENGINES.values():
+            with (
+                self.subTest(engine=engine.name),
+                tempfile.TemporaryDirectory() as tmp,
+                cluster() as mocks,
+            ):
+                result = run.run_benchmark(
+                    config(),
+                    engine,
+                    ModelSpec("Test", "/hf-cache/test", tp=2),
+                    image="test",
+                    evidence_dir=Path(tmp),
+                    run_id="test",
+                    progress=lambda _: None,
+                )
+                self.assertEqual(result.cold_start.startup_to_ready_seconds, 31)
+                self.assertEqual(result.restore.startup_to_ready_seconds, 4)
+                self.assertEqual(len(result.restore_attempts), 3)
+                self.assertEqual(mocks["lifecycle.create_podsnapshot"].call_count, 1)
+                self.assertEqual(
+                    mocks["measurement.restored_measurement"].call_count, 3
+                )
+                mocks["load_config"].assert_called_once_with(
+                    str(Path.home() / ".kube/config"), "test-context"
+                )
+                mocks["lifecycle.delete_podsnapshotcontent"].assert_called_once_with(
+                    "content"
+                )
+                self.assertTrue((Path(tmp) / "test/result.json").is_file())
+                text = report.render([result.to_json_dict()])
+                self.assertIn("7.75×", text)
+                self.assertIn("| 4.00 | 2.00 | 7.00 | 18.00 | 31.00 |", text)
+
+    def test_failure_retains_evidence_and_cleans_owned_resources(self):
+        with tempfile.TemporaryDirectory() as tmp, cluster() as mocks:
+            mocks["measurement.restored_measurement"].side_effect = ValueError(
+                "missing wake"
+            )
+            with self.assertRaisesRegex(ValueError, "missing wake"):
+                run.run_benchmark(
+                    config(),
+                    cli.ENGINES["vllm"],
+                    ModelSpec("Test", "/hf-cache/test", tp=2),
+                    image="test",
+                    evidence_dir=Path(tmp),
+                    run_id="failed",
+                    progress=lambda _: None,
+                )
+            self.assertTrue((Path(tmp) / "failed/failure.json").is_file())
+            self.assertFalse((Path(tmp) / "failed/result.json").exists())
+            mocks["lifecycle.delete_podsnapshotcontent"].assert_called_once_with(
+                "content"
+            )
+            mocks["api"].delete_namespaced_config_map.assert_called_once_with(
+                "bench-app-failed", "workloads"
+            )
+
+    def test_dry_run_never_loads_cluster_config(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("snapshot_benchmarks.run.load_config") as load,
+        ):
+            code = cli.main(
+                [
+                    "run",
+                    "--context",
+                    "test",
+                    "--namespace",
+                    "test",
+                    "--node",
+                    "test",
+                    "--model-pvc",
+                    "models",
+                    "--work-pvc",
+                    "work",
+                    "--engine",
+                    "sglang",
+                    "--model",
+                    "/hf-cache/test",
+                    "--image",
+                    "test",
+                    "--tp",
+                    "8",
+                    "--ep",
+                    "8",
+                    "--dry-run",
+                    "--output-dir",
+                    tmp,
+                ]
+            )
+            self.assertEqual(code, 0)
+            load.assert_not_called()
+            self.assertEqual(len(list(Path(tmp).rglob("source.json"))), 1)
+
+    def test_bad_topology_and_constructor_overrides_are_rejected(self):
+        for kwargs in (
+            dict(tp=0),
+            dict(tp=4, ep=3),
+            dict(engine_args={"tensor_parallel_size": 8}),
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                ModelSpec("Test", "test", **kwargs)
+
+    def test_remote_failure_cannot_look_like_valid_json(self):
+        with patch.object(
+            measurement.k8s, "exec_command", return_value='{"apparently":"valid"}'
+        ):
+            with self.assertRaisesRegex(RuntimeError, "collection failed"):
+                measurement.remote_json("test", "test", "raise RuntimeError('failed')")
+
+    def test_checkpoint_requires_custom_storage_and_matches_content(self):
+        inventory = dict(
+            total_bytes=12, files=[dict(path="gpu/123/manifest.txt", bytes=12)]
+        )
+        text = 'Checkpoint timing summary {"content":"content", "checkpoint":{"duration":"1.2s"}}'
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(
+                measurement.lifecycle, "checkpoint_agent_pod", return_value="agent"
+            ),
+            patch.object(measurement, "remote_json", return_value=inventory),
+            patch.object(measurement, "agent_log", return_value=text),
+        ):
+            self.assertEqual(
+                measurement.checkpoint_measurement(
+                    config(), "gpu-node", "uid", "content", Path(tmp)
+                ),
+                (12, 1.2),
+            )
+            inventory["files"] = [dict(path="pages.img", bytes=12)]
+            with self.assertRaisesRegex(ValueError, "CustomStorage"):
+                measurement.checkpoint_measurement(
+                    config(), "gpu-node", "uid", "content", Path(tmp)
+                )
+
+    def test_schema_one_results_are_still_readable_and_separate(self):
+        self.assertIn(
+            "Cold start vs.",
+            report.render([dict(schema_version=1, model={}, environment={})]),
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported schema_version"):
+            report.render([dict(schema_version=True)])
+
+    def test_version_probe_does_not_import_the_engine(self):
+        for engine in cli.ENGINES.values():
+            command = shlex.split(engine.version_probe_command)
+            self.assertEqual(command[:2], ["python3", "-c"])
+            self.assertIn("importlib.metadata", command[2])
+
+
+if __name__ == "__main__":
+    unittest.main()

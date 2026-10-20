@@ -1,10 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import nullcontext
+
+# The benchmark wrapper supplies these hooks. Normal guide runs need no helper files.
+phase = globals().get("benchmark_phase", lambda _: nullcontext())
+mark = globals().get("benchmark_mark", lambda _: None)
+benchmark_token = globals().get("benchmark_token")
+
 import asyncio
-import json
 import os
 import sys
+import json
 import traceback
 from pathlib import Path
 from uuid import uuid4
@@ -40,19 +47,20 @@ async def generate_text(
     prompt: str,
     request_id: str,
 ) -> str:
-    result = None
-    async for output in engine.generate(
-        prompt,
-        SamplingParams(temperature=0.0, max_tokens=8),
-        request_id,
-    ):
-        result = output
-    if result is None or not result.outputs:
-        raise RuntimeError("vLLM produced no output")
-    text = result.outputs[0].text.strip()
-    if not text:
-        raise RuntimeError("vLLM produced empty output")
-    return text
+    with phase("generation"):
+        result = None
+        async for output in engine.generate(
+            prompt,
+            SamplingParams(temperature=0.0, max_tokens=8),
+            request_id,
+        ):
+            result = output
+        if result is None or not result.outputs:
+            raise RuntimeError("vLLM produced no output")
+        text = result.outputs[0].text.strip()
+        if not text:
+            raise RuntimeError("vLLM produced empty output")
+        return text
 
 
 async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
@@ -65,7 +73,10 @@ async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
             request.prompt,
             f"request-{uuid4().hex}",
         )
-        return {"text": text}
+        return {
+            "text": text,
+            **({"checkpoint_token": benchmark_token} if benchmark_token else {}),
+        }
 
     server = uvicorn.Server(
         uvicorn.Config(
@@ -101,10 +112,12 @@ async def main() -> None:
         # Capture releases KV through sleep mode.
         "enable_sleep_mode": True,
     }
+    mark("engine_init_begin")
     engine = AsyncLLM.from_engine_args(
         AsyncEngineArgs(**engine_args),
         usage_context=UsageContext.LLM_CLASS,
     )
+    mark("engine_init_end")
 
     text = await generate_text(
         engine,
@@ -112,10 +125,26 @@ async def main() -> None:
         "snapshot-preflight",
     )
     print(f"vLLM pre-checkpoint output={text!r}", flush=True)
+    mark("first_inference_complete")
+    if benchmark_token:
+        for prompt, expected in [
+            ("The capital city of France is", "paris"),
+            ("The capital city of Germany is", "berlin"),
+            ("The capital city of Japan is", "tokyo"),
+        ]:
+            answer = await generate_text(engine, prompt, "precheck-" + expected)
+            print(
+                "CR_SEMANTIC_PRECHECK "
+                + json.dumps(dict(expected=expected, answer=answer)),
+                flush=True,
+            )
+            if expected not in answer.lower():
+                raise RuntimeError("Source inference check failed: " + repr(answer))
 
-    await engine.pause_generation()
-    # Discard the KV cache and keep weights on the GPU for capture.
-    await engine.release_kv_cache_memory()
+    with phase("pause_generation"):
+        await engine.pause_generation()
+    with phase("release_kv_cache"):
+        await engine.release_kv_cache_memory()
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
         "ready\n",
         encoding="utf-8",
@@ -128,9 +157,11 @@ async def main() -> None:
             # next to the success sentinel, where tools can read it.
             try:
                 progress = CONTROL_DIR.joinpath("vllm-restore-progress")
-                await engine.wake_up()
+                with phase("wake"):
+                    await engine.wake_up()
                 progress.write_text("woken\n", encoding="utf-8")
-                await engine.resume_generation()
+                with phase("resume_generation"):
+                    await engine.resume_generation()
                 await engine.check_health()
                 progress.write_text("generation-resumed\n", encoding="utf-8")
                 text = await generate_text(

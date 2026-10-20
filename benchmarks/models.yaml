@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Default model sweep -- the 7 models published in
-# docs/development/benchmarks.md, in the same order.
+# Example model sweep. Edit it for the engine, model revisions and GPUs you use.
+# This is not the configuration matrix for the published results.
 #
 # `reported_weights_bytes` is informational only (decimal GB, from the
 # published doc's Weights column), never authoritative -- the benchmark

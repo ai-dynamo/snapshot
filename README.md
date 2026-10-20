@@ -47,14 +47,10 @@ new replica comes online in seconds instead of minutes.
 ## Benchmarks
 
 <div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/development/img/cold-start-vs-snapshot-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/development/img/cold-start-vs-snapshot-light.svg">
-    <img width="900" alt="Paired column chart comparing cold start against Snapshot for each model. Cold start ranges from 52 to 102 seconds, Snapshot from 3.5 to 40.9 seconds." src="docs/development/img/cold-start-vs-snapshot-light.svg">
-  </picture>
+  <img width="900" alt="Cold start and first Snapshot restore for the vLLM configurations on one to eight B200 GPUs." src="docs/development/img/vllm-cold-start-vs-snapshot.png">
 </div>
 
-<p align="center"><i><b>Figure 1.</b> Restoring a captured workload is 2.4 to 14.9 times faster than starting the same workload from scratch on the same hardware.</i></p>
+<p align="center"><i><b>Figure 1.</b> Cold start and first Snapshot restore for vLLM on one to eight B200 GPUs.</i></p>
 
 For the experiment setup, the per stage breakdown, and the full results, see [benchmarks](docs/development/benchmarks.md).
 
