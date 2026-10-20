@@ -126,18 +126,26 @@ def agent_log(cfg, node, path):
 def checkpoint_measurement(cfg, node, uid, content_name, folder):
     agent = lifecycle.checkpoint_agent_pod(cfg.snapshot_e2e_config(), node)
     root = lifecycle.checkpoint_artifact_path(uid)
-    scan = f"""
-import json,stat
-from pathlib import Path
-root=Path({shlex.split(root)[0]!r})
-files=[]
-for path in root.rglob('*'):
-    s=path.lstat()
-    if stat.S_ISREG(s.st_mode):files.append(dict(path=str(path.relative_to(root)),bytes=s.st_size))
-if not files:raise RuntimeError('Empty checkpoint artifact')
-print('BENCHMARK_JSON '+json.dumps(dict(files=files,total_bytes=sum(f['bytes'] for f in files))))
-"""
-    inventory = remote_json(cfg.snapshot_namespace, agent, scan, container="agent")
+    text = agent_log(cfg, node, folder / "checkpoint-agent.log")
+    # The stock agent has no Python. NUL fields preserve arbitrary filenames.
+    output = k8s.exec_command(
+        cfg.snapshot_namespace,
+        agent,
+        "find "
+        + root
+        + r" -type f -printf '%P\0%s\0' && printf 'BENCHMARK_FIND_COMPLETE\0'",
+        container="agent",
+    )
+    fields = output.split("\0")
+    if fields[-2:] != ["BENCHMARK_FIND_COMPLETE", ""] or len(fields[:-2]) % 2:
+        raise RuntimeError("Checkpoint inventory did not complete: " + output[-1000:])
+    files = [
+        dict(path=fields[i], bytes=int(fields[i + 1]))
+        for i in range(0, len(fields) - 2, 2)
+    ]
+    if not files:
+        raise ValueError("Empty checkpoint artifact")
+    inventory = dict(files=files, total_bytes=sum(f["bytes"] for f in files))
     save(folder / "artifacts.json", inventory)
     if not any(
         len(parts := Path(f["path"]).parts) == 3
@@ -147,7 +155,6 @@ print('BENCHMARK_JSON '+json.dumps(dict(files=files,total_bytes=sum(f['bytes'] f
         for f in inventory["files"]
     ):
         raise ValueError("Checkpoint lacks PageBroker CustomStorage GPU manifests")
-    text = agent_log(cfg, node, folder / "checkpoint-agent.log")
     payloads = []
     for line in text.splitlines():
         if "Checkpoint timing summary" not in line or "{" not in line:

@@ -558,16 +558,17 @@ class BenchmarkTests(unittest.TestCase):
                 measurement.remote_json("test", "test", "raise RuntimeError('failed')")
 
     def test_checkpoint_requires_custom_storage_and_matches_content(self):
-        inventory = dict(
-            total_bytes=12, files=[dict(path="gpu/123/manifest.txt", bytes=12)]
-        )
         text = 'Checkpoint timing summary {"content":"content", "checkpoint":{"duration":"1.2s"}}'
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch.object(
                 measurement.lifecycle, "checkpoint_agent_pod", return_value="agent"
             ),
-            patch.object(measurement, "remote_json", return_value=inventory),
+            patch.object(
+                measurement.k8s,
+                "exec_command",
+                return_value="gpu/123/manifest.txt\0" + "12\0BENCHMARK_FIND_COMPLETE\0",
+            ) as execute,
             patch.object(measurement, "agent_log", return_value=text),
         ):
             self.assertEqual(
@@ -576,10 +577,57 @@ class BenchmarkTests(unittest.TestCase):
                 ),
                 (12, 1.2),
             )
-            inventory["files"] = [dict(path="pages.img", bytes=12)]
+            self.assertNotIn("python", execute.call_args.args[2])
+            execute.return_value = "pages.img\0" + "12\0BENCHMARK_FIND_COMPLETE\0"
             with self.assertRaisesRegex(ValueError, "CustomStorage"):
                 measurement.checkpoint_measurement(
                     config(), "gpu-node", "uid", "content", Path(tmp)
+                )
+
+    def test_checkpoint_inventory_uses_available_agent_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            file = root / "gpu/123/manifest.txt"
+            file.parent.mkdir(parents=True)
+            file.write_text("gpu manifest")
+            (root / "a name\twith\nwhitespace").write_bytes(b"abcd")
+            (root / "symlink").symlink_to(file)
+
+            def execute(namespace, pod, command, **kwargs):
+                return subprocess.check_output(["bash", "-c", command], text=True)
+
+            with (
+                patch.object(
+                    measurement.lifecycle, "checkpoint_agent_pod", return_value="agent"
+                ),
+                patch.object(
+                    measurement.lifecycle,
+                    "checkpoint_artifact_path",
+                    return_value=shlex.quote(tmp),
+                ),
+                patch.object(measurement.k8s, "exec_command", side_effect=execute),
+                patch.object(
+                    measurement,
+                    "agent_log",
+                    return_value='Checkpoint timing summary {"content":"content", "checkpoint":{"duration":"1s"}}',
+                ),
+            ):
+                size, duration = measurement.checkpoint_measurement(
+                    config(), "node", "uid", "content", root
+                )
+                self.assertEqual((size, duration), (16, 1))
+            with (
+                patch.object(
+                    measurement.lifecycle, "checkpoint_agent_pod", return_value="agent"
+                ),
+                patch.object(
+                    measurement.k8s, "exec_command", return_value="find: failure"
+                ),
+                patch.object(measurement, "agent_log", return_value=""),
+                self.assertRaisesRegex(RuntimeError, "inventory did not complete"),
+            ):
+                measurement.checkpoint_measurement(
+                    config(), "node", "uid", "content", root
                 )
 
     def test_schema_one_results_are_still_readable_and_separate(self):
