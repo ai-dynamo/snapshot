@@ -98,19 +98,6 @@ class BrokerTest : public ::testing::Test, public test::RequestBuilder {
 
   void TearDown() override { broker_.reset(); }
 
-  void Configure(
-      StorageBackend* storage,
-      IOEngine* engine,
-      const fs::path& directory,
-      IoEngine engine_type = IoEngine::POSIX_COPY)
-  {
-    storage->mutable_filesystem()->set_directory(directory.string());
-    if (engine_type == IoEngine::MODEL_STREAMER)
-      engine->mutable_model_streamer();
-    else
-      engine->mutable_posix_copy();
-  }
-
   Broker& broker() { return *broker_; }
 
   test::TemporaryDirectory temporary_;
@@ -123,7 +110,7 @@ class FilesystemEngineTest : public BrokerTest, public ::testing::WithParamInter
  protected:
   void Configure(StorageBackend* storage, IOEngine* engine, const fs::path& directory)
   {
-    BrokerTest::Configure(storage, engine, directory, GetParam());
+    test::Configure(storage, engine, directory, GetParam());
   }
 };
 
@@ -743,7 +730,7 @@ TEST_P(FilesystemEngineTest, DirectPublicationRejectsConflictWithoutChangingEith
   StorageBackend destination;
   destination.mutable_filesystem()->set_directory(published.string());
   try {
-    engine->PublishCheckpoint(source_, destination, engine->InspectCheckpoint(source_));
+    engine->PublishCheckpoint(source_, destination, engine->InspectCheckpoint(source_), nullptr, {}, TransferMode::Direct);
     FAIL() << "publication should reject an existing partial";
   }
   catch (const TransferError& error) {
@@ -930,7 +917,7 @@ TEST_F(BrokerTest, DirectRestoreExpiresFromPreparationTime)
   EXPECT_TRUE(fs::exists(source_ / "image"));
 }
 
-TEST_F(BrokerTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirectory)
+TEST_P(FilesystemEngineTest, DirectCheckpointPreparationRepeatsAndPublishesPrivateDirectory)
 {
   const auto destination = root_ / "storage" / "nested" / "checkpoint";
   auto request = RequestFor("direct-save");
