@@ -59,6 +59,9 @@ func (c *AgentConfig) Validate() error {
 	default:
 		return &ConfigError{Field: "pageBroker.restoreMode", Message: "pageBroker.restoreMode must be staged or direct"}
 	}
+	if c.PageBroker.TransferEngine != nil {
+		return &ConfigError{Field: "pageBroker.transferEngine", Message: "remove this setting; filesystem storage uses POSIX"}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
@@ -86,6 +89,8 @@ type StorageSpec struct {
 }
 
 type PageBrokerSpec struct {
+	// Retained only to reject obsolete configuration instead of silently selecting POSIX.
+	TransferEngine *string `yaml:"transferEngine"`
 	// RestoreMode selects the restore source. Empty defaults to direct.
 	RestoreMode       string `yaml:"restoreMode"`
 	ControlSocketPath string `yaml:"controlSocketPath"`

@@ -57,3 +57,10 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'restoreMode: "staged"'
+
+  - it: rejects the removed filesystem transfer engine setting
+    set:
+      pageBroker.transferEngine: model-streamer
+    asserts:
+      - failedTemplate:
+          errorPattern: "pageBroker.transferEngine has been removed"
