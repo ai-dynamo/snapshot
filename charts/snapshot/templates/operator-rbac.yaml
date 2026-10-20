@@ -96,6 +96,16 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  {{- if eq .Values.storage.type "s3" }}
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    # Writes the PageBroker S3 configuration ConfigMap this chart's DaemonSet
+    # mounts; see ensurePageBrokerS3Config in operator/cmd/manager. RBAC
+    # cannot scope "create" by resourceNames, so this grants create on any
+    # ConfigMap in this namespace; get/update stay scoped to the one name.
+    resourceNames: [{{ printf "%s-pagebroker-storage-config" (include "snapshot.fullname" .) | quote }}]
+    verbs: ["get", "create", "update"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

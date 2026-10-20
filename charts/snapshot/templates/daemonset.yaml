@@ -203,10 +203,24 @@ spec:
             runAsGroup: 0
           env:
             {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
+          {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
+          # Standard AWS env var providers; see ResolveS3Credentials in #416.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.storage.s3.credentialsSecretRef }}
+          {{- end }}
           args:
             - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
             - {{ $pageBrokerStagingPath | quote }}
+            {{- if eq .Values.storage.type "s3" }}
+            # No local checkpoint directory exists in S3 mode; this positional
+            # argument is required by every PageBroker build regardless of
+            # backend. Confirm with #416's reviewers that it stays unused
+            # once --storage-config selects the S3 backend.
+            - /var/snapshot/pagebroker-unused-storage-root
+            {{- else }}
             - {{ .Values.storage.pvc.basePath | quote }}
+            {{- end }}
             - --max-concurrent-requests
             - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
             - --custom-storage-buffer-count
@@ -220,6 +234,13 @@ spec:
             - --storage-config
             - /etc/snapshot/storage.yaml
             {{- end }}
+            {{- if eq .Values.storage.type "s3" }}
+            # Resolved by the operator, not rendered by this chart: the JSON
+            # file's storeId requires the Go identity computation the chart
+            # cannot reproduce. See operator/cmd/manager/pagebroker_storage_config.go.
+            - --storage-config
+            - /etc/snapshot-s3/pagebroker-s3-config.json
+            {{- end }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
@@ -228,8 +249,15 @@ spec:
               readOnly: true
             - name: pagebroker
               mountPath: /pagebroker
+            {{- if eq .Values.storage.type "pvc" }}
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
+            {{- end }}
+            {{- if eq .Values.storage.type "s3" }}
+            - name: pagebroker-s3-config
+              mountPath: /etc/snapshot-s3
+              readOnly: true
+            {{- end }}
       volumes:
         # Configuration ConfigMap
         - name: config
@@ -263,6 +291,15 @@ spec:
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
+        {{- end }}
+        {{- if eq .Values.storage.type "s3" }}
+        # Written by the operator (ensurePageBrokerS3Config), not this chart:
+        # its storeId field needs the Go identity computation. Fails closed if
+        # the operator has not written it yet, surfacing the rollout ordering
+        # rather than silently starting PageBroker without a storage config.
+        - name: pagebroker-s3-config
+          configMap:
+            name: {{ include "snapshot.fullname" . }}-pagebroker-storage-config
         {{- end }}
         # Runtime socket directory (read-write for checkpoint operations).
         # Same path inside and on the host so the agent dials runtime.socketPath
