@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <exception>
 #include <future>
 #include <functional>
@@ -190,32 +191,55 @@ TEST(EventLoopTest, StopCancelsQueuedEvents)
 
 TEST(EventLoopTest, FailureCancelsCurrentAndQueuedEvents)
 {
-  std::promise<void> failure_handled;
+  const auto failure = std::make_exception_ptr(std::runtime_error("event failed"));
+  std::promise<void> executing;
+  auto started = executing.get_future();
+  std::promise<void> release;
+  auto released = release.get_future();
+  std::promise<void> current_cancelled;
+  auto current_done = current_cancelled.get_future();
+  std::promise<void> queued_cancelled;
+  auto queued_done = queued_cancelled.get_future();
+  std::atomic<int> failures = 0;
+  std::atomic<int> current_cancellations = 0;
+  std::atomic<int> queued_cancellations = 0;
   EventLoop loop([&](std::exception_ptr error) {
-    EXPECT_NE(error, nullptr);
-    failure_handled.set_value();
+    EXPECT_EQ(error, failure);
+    ++failures;
   });
   loop.Start();
 
-  std::promise<void> current_cancelled;
-  std::promise<void> queued_cancelled;
-  loop.Post(std::make_unique<TestEvent>(
-      [] { throw std::runtime_error("event failed"); },
+  EXPECT_TRUE(loop.Post(std::make_unique<TestEvent>(
+      [&] {
+        executing.set_value();
+        EXPECT_EQ(released.wait_for(std::chrono::seconds{5}), std::future_status::ready);
+        std::rethrow_exception(failure);
+      },
       [&](std::exception_ptr error) {
-        EXPECT_NE(error, nullptr);
+        EXPECT_EQ(error, failure);
+        EXPECT_EQ(failures.load(), 1);
+        ++current_cancellations;
         current_cancelled.set_value();
-      }));
-  loop.Post(std::make_unique<TestEvent>(
+      })));
+  EXPECT_EQ(started.wait_for(std::chrono::seconds{5}), std::future_status::ready);
+  // Keep the first event running until Post accepts the second. Otherwise its
+  // cancellation could merely be rejection by an already-failed loop.
+  EXPECT_TRUE(loop.Post(std::make_unique<TestEvent>(
       [] { FAIL() << "queued event was executed"; },
       [&](std::exception_ptr error) {
-        EXPECT_NE(error, nullptr);
+        EXPECT_EQ(error, failure);
+        EXPECT_EQ(failures.load(), 1);
+        ++queued_cancellations;
         queued_cancelled.set_value();
-      }));
+      })));
 
-  failure_handled.get_future().get();
-  current_cancelled.get_future().get();
-  queued_cancelled.get_future().get();
+  release.set_value();
+  EXPECT_EQ(current_done.wait_for(std::chrono::seconds{5}), std::future_status::ready);
+  EXPECT_EQ(queued_done.wait_for(std::chrono::seconds{5}), std::future_status::ready);
   loop.Stop();
+  EXPECT_EQ(failures.load(), 1);
+  EXPECT_EQ(current_cancellations.load(), 1);
+  EXPECT_EQ(queued_cancellations.load(), 1);
 }
 }  // namespace
 }  // namespace snapshot::pagebroker::utils
