@@ -354,6 +354,18 @@ class BenchmarkTests(unittest.TestCase):
                             spec["nodeSelector"]["kubernetes.io/hostname"], "gpu-node"
                         )
                         main = spec["containers"][0]
+                        constructor = json.loads(main["args"][0])
+                        if engine.name == "sglang":
+                            self.assertEqual(constructor["model_path"], model.hf_id_or_path)
+                            self.assertEqual(constructor["tp_size"], tp)
+                            self.assertEqual(constructor["ep_size"], ep)
+                        else:
+                            self.assertEqual(constructor["model"], model.hf_id_or_path)
+                            self.assertEqual(constructor["tensor_parallel_size"], tp)
+                            if engine.name == "vllm":
+                                self.assertEqual(constructor["enable_expert_parallel"], ep > 1)
+                            else:
+                                self.assertEqual(constructor["moe_expert_parallel_size"], ep)
                         self.assertEqual(
                             main["resources"]["limits"]["nvidia.com/gpu"], str(tp)
                         )
