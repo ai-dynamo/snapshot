@@ -12,18 +12,17 @@ published results.
 
 - `uv`
 - `kubectl`
-- A Snapshot Helm release already installed and reachable via `KUBECONFIG`,
-  including its checkpoint PVC (provisioned by the chart by default — see
-  [Installation](../docs/operations/install.md))
+- An installed Snapshot Helm release and its checkpoint PVC. Use `KUBECONFIG`
+  to connect to the cluster. See [Installation](../docs/operations/install.md).
 - An engine image compatible with the selected [framework guide](../docs/guides/)
-- Pre-populated model and writable work PVCs, plus a node with enough free GPUs
+- A model PVC with the model files, a writable work PVC and enough free GPUs
 
 ## Layout
 
-Benchmarks use real engine images and take minutes per model, so they run
-manually rather than in the e2e CI suite. The runner reuses `snapshot_e2e.k8s`
-and `snapshot_e2e.lifecycle` as a local `uv` dependency, plus the engine guide
-applications and deployment templates.
+Benchmarks use real engine images and take minutes per model. Run them manually, outside
+the e2e CI suite. The runner uses `snapshot_e2e.k8s` and `snapshot_e2e.lifecycle` as a
+local `uv` dependency. It also uses the engine guide applications and deployment
+templates.
 
 - `snapshot_benchmarks/schema.py` — the `RunResult` data model written to disk
 - `snapshot_benchmarks/run.py` — runs one model and engine configuration
@@ -51,8 +50,8 @@ Follow the [quick start](../docs/development/benchmarks-guide.md#quick-start)
 for cluster settings, a dry run and a measured run. Each run selects one engine,
 model and TP/EP configuration.
 
-Results from new runs are saved as JSON and logs under `results/`. The published
-tables are in [Performance Benchmarks](../docs/development/benchmarks.md).
+New runs save JSON and logs under `results/`. See [Performance
+Benchmarks](../docs/development/benchmarks.md) for the published tables.
 
 ## Local checks
 
@@ -60,5 +59,5 @@ tables are in [Performance Benchmarks](../docs/development/benchmarks.md).
 uv run --project benchmarks python -m unittest discover -s benchmarks/tests
 ```
 
-These checks exercise guide-based manifests, simulated lifecycle calls, timing
-accounting and reports. They do not start GPU workloads.
+These checks test guide manifests, simulated lifecycle calls, timing calculations and
+reports. They do not start GPU workloads.

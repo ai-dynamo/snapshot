@@ -1,12 +1,17 @@
 # Performance Benchmarks
 
-These benchmarks compare cold start with Snapshot restore for 22 configurations of vLLM, SGLang and TensorRT-LLM on one to eight B200 GPUs. Both timings end when the engine is ready, before inference. Restore was 9.9–77.6 times faster in these runs. See [Limitations](#limitations) before comparing the results with another setup.
+We tested 22 configurations of vLLM, SGLang and TensorRT-LLM on one to eight B200 GPUs.
+Restore was 9.9–77.6 times faster than cold start. Both measurements end when the engine
+is ready, before inference. Read the [limitations](#limitations) before you compare
+these results with another setup.
 
 > [!TIP]
 > See the [benchmark guide](benchmarks-guide.md) for setup and commands, and the
 > [runner README](../../benchmarks/README.md) for the code layout.
 
-Cold start loads weights, creates workers, initializes device memory, compiles and tunes kernels, and captures CUDA graphs. Snapshot restores a process in a warm state, ready for serving.
+During cold start, the engine loads weights, creates workers and sets up device memory.
+It also compiles and tunes kernels, then captures CUDA graphs. Snapshot restores the
+process with this work complete and the engine ready to serve requests.
 
 ## Benchmarking setup
 
@@ -24,22 +29,35 @@ Cold start loads weights, creates workers, initializes device memory, compiles a
 
 ## Limitations
 
-- Cold starts and restores came from separate runs and did not always use the same node.
+- Cold starts and restores came from separate runs. Some runs used different nodes.
 - Results apply to this B200 and VAST NFS setup. GPU, driver, storage and engine settings can change the times.
-- The published cold starts include instrumentation overhead. They have not been rerun after fixes that narrowed constructor timers and disabled unused import profiling.
-- The five TRT-LLM Qwen and GPT-OSS cold starts allowed FlashInfer artifact downloads. The [offline follow-up](#flashinfer-artifact-downloads) found differences of up to 33 seconds; the tables retain the original measurements.
+- The timing code adds work during cold start. These results were measured before fixes that narrowed constructor timers and disabled unused import profiling.
+- The five TRT-LLM Qwen and GPT-OSS cold starts allowed FlashInfer artifact downloads. The [offline follow-up](#flashinfer-artifact-downloads) found differences of up to 33 seconds. The tables keep the original measurements.
 
-Weights are the logical bytes in the cached model weight files, using decimal GB. Checkpoint size is the sum of logical file sizes in the captured container's artifact. This includes CPU state, GPU state and the root filesystem archive. Logical size can differ from GPU memory use and allocated disk space.
+Weight size is the sum of the logical sizes of cached weight files. Checkpoint size is
+the sum of the logical sizes of saved container files. It includes CPU state, GPU state
+and the root filesystem archive. Both sizes use decimal GB. File size can differ from
+GPU memory use and the disk space used.
 
-Before capture, each engine was asked to release memory it no longer needs, such as the KV cache. In the SGLang GPT-OSS runs, KV allocations were still held at capture time. Those checkpoints include the retained memory, which adds work during restore. Those rows are marked ¹. Memory release has not been checked individually for the larger SGLang models (²).
+Before capture, we asked each engine to release unused memory, such as the KV cache.
+SGLang GPT-OSS still held KV memory at capture time. That memory adds to checkpoint size
+and restore work. We mark those rows with ¹. We have not checked memory release for each
+larger SGLang model (²).
 
 ## Measurement boundaries
 
-**Cold start** begins at the workload's process-start marker and ends when engine initialization returns. Model download, pod scheduling, image pull and container startup are outside this interval. A generation check follows initialization and is excluded from the reported time.
+**Cold start** begins at the process-start marker and ends when engine initialization
+returns. This time excludes model download, pod scheduling, image pull and container
+startup. We check text generation after initialization. That check is outside the
+measured time.
 
-**Snapshot** begins at the agent's external-restore start marker and ends after the application's wake and resume calls complete. The destination container already exists. Generation checks run afterward to verify that inference works and that the process token survived restore; their time is excluded.
+**Snapshot** begins at the agent's external-restore start marker. It ends when the
+application completes its wake and resume calls. The destination container already
+exists. We then check inference and the saved process token. These checks are outside
+the measured time.
 
-**Checkpoint time** is the agent's capture duration. It excludes the preceding application sleep or memory-release call.
+**Checkpoint time** is the time the agent takes to capture the process. It excludes the
+application's sleep or memory-release call before capture.
 
 ### Cold-start stages
 
@@ -61,7 +79,9 @@ Before capture, each engine was asked to release memory it no longer needs, such
 
 ## Results
 
-All times are seconds. Speedup is cold-start time divided by the first restore time; configurations with multiple cold-start samples use their mean. Engine settings, including weight loading, differ between rows, so compare engines with care.
+All times are in seconds. Speedup is cold-start time divided by the first restore time.
+If a configuration has more than one cold-start sample, we use the mean. Engine settings
+differ between rows, including weight-loading settings. Compare engines with care.
 
 ### Cold start compared with Snapshot
 
@@ -90,9 +110,11 @@ All times are seconds. Speedup is cold-start time divided by the first restore t
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 913.09 | 996.53 | 193.84 | 908.48 | 39.56 | 22.96× |
 | DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 913.09 | 1042.12 | 185.61 | 1443.23 | 44.43 | 32.48× |
 
-¹ SGLang GPT-OSS: the v0.5.21 image still held KV allocations after the memory-release call. Checkpoint sizes and restore times include that memory.
+¹ SGLang GPT-OSS: the v0.5.21 image still held KV memory after the release call.
+Checkpoint sizes and restore times include that memory.
 
-² Large SGLang models: whether memory is fully released before capture has not been checked yet.
+² Large SGLang models: we have not checked whether each model fully releases memory
+before capture.
 
 Figures 1–3 compare cold start with the first restore for each engine.
 
@@ -144,7 +166,10 @@ Figures 1–3 compare cold start with the first restore for each engine.
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 64.42 | 95.14 | 64.87 | 684.05 | 908.48 |
 | DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 59.41 | 913.59 | 41.59 | 428.64 | 1443.23 |
 
-These columns divide elapsed time between phases. They count overlapping work across GPU workers once. Small untimed intervals are spread proportionally across the columns. These additions are estimates. The runner saves raw timings and gaps in each new run's local evidence. Some kernel JIT occurs during Startup and is included there.
+These columns divide the elapsed time into phases. Work that overlaps across GPU workers
+counts once. We divide small gaps between columns in proportion to their measured times.
+These additions are estimates. Each new run saves the raw timings and gaps. Some kernel
+JIT occurs during Startup and stays in that column.
 
 ### Where the restore time goes
 
@@ -173,7 +198,10 @@ These columns divide elapsed time between phases. They count overlapping work ac
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 5.44 | 4.73 | 28.98 | 0.42 | 39.56 |
 | DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 6.36 | 8.64 | 29.12 | 0.31 | 44.43 |
 
-Every restore row uses attempt 1, including all its phase values. Wake / handoff includes the interval from agent completion through the application wake and resume calls. The CUDA/CRIU phases include GPU reconstruction and remapping. These operations have no separate timers here. Rounding can change a displayed sum by 0.01 seconds.
+Every restore row uses the first attempt for both the total and the phase times. Wake /
+handoff starts when the agent finishes. It ends when the application completes its wake
+and resume calls. GPU reconstruction and remapping are inside the CUDA/CRIU phases, with
+no separate timers. Rounding can change a displayed sum by 0.01 seconds.
 
 Figure 4 shows how much each stage contributes to the first vLLM restore.
 
@@ -188,31 +216,47 @@ Figure 4 shows how much each stage contributes to the first vLLM restore.
 
 ### Startup work
 
-Snapshot skips the measured compilation, autotuning and graph-capture work. These phases share one column because kernel compilation can occur inside tuning and graph capture, and the engines expose different timers.
+Snapshot skips the measured compilation, autotuning and graph capture. We combine these
+phases because kernel compilation can run during tuning and graph capture. The engines
+also provide different timers.
 
 ### Checkpoint size
 
-Weight precision, parallelism and retained memory affect checkpoint size. SGLang's GPT-OSS TP4 checkpoint is 698.89 GB for 65.25 GB of weights: KV allocations remained after the release call. Its 32.51-second restore includes that retained memory.
+Weight precision, parallelism and retained memory affect checkpoint size. SGLang GPT-OSS
+TP4 has a 698.89 GB checkpoint for 65.25 GB of weights. It still held KV memory after
+the release call. Its 32.51-second restore includes that memory.
 
 ### Restore work and storage
 
-For the three TEP8 vLLM configurations, CUDA restore takes 19.37–28.98 seconds of the 28.64–39.56-second total. It is the largest stage in each row. For Qwen3-0.6B, agent setup and CRIU together take 3.66 of 4.66 seconds.
+CUDA restore is the largest stage in all three TEP8 vLLM rows. It takes 19.37–28.98
+seconds of the 28.64–39.56-second total. For Qwen3-0.6B, agent setup and CRIU together
+take 3.66 of 4.66 seconds.
 
-Checkpoint size affects how much data must be read, but it does not determine restore time alone. For example, the 81.56 GB vLLM GPT-OSS TP1 checkpoint restores in 10.09 seconds; the larger 119.69 GB TP4 checkpoint restores in 11.62 seconds. Parallel reads, CPU/GPU state, rootfs work and cache state also affect the total. Storage throughput limits the read stages, so another backend can change these results.
+Checkpoint size affects how much data the system must read. Size alone does not
+determine restore time. The 81.56 GB vLLM GPT-OSS TP1 checkpoint restores in 10.09
+seconds. The larger 119.69 GB TP4 checkpoint restores in 11.62 seconds. Parallel reads,
+CPU/GPU state, rootfs work and cache state also affect the total. Storage throughput
+limits the read stages. A different storage backend can change the results.
 
 ### SGLang model loading
 
-SGLang Qwen3-14B TP1 spends 337.49 seconds in Model load, compared with 26.15 seconds for vLLM. GPT-OSS TP1 takes 729.12 versus 38.69 seconds. Model load includes weight preparation as well as reads, and the engines used different loading settings. These timings do not isolate the cause of that difference; they should not be read as a controlled engine comparison.
+SGLang Qwen3-14B TP1 takes 337.49 seconds for Model load. vLLM takes 26.15 seconds.
+GPT-OSS TP1 takes 729.12 seconds on SGLang and 38.69 seconds on vLLM. Model load
+includes weight preparation and reads. The engines used different loading settings.
+These timers do not show what caused the difference. The runs are not a controlled
+comparison of the engines.
 
 ### Repeat restores
 
-The tables use the first restore; the dataset also contains attempts two and three. Later attempts can be faster. Even the first attempt may read cached data. Direct I/O on one path does not bypass caches in every restore stage.
+The tables use the first restore. The dataset also contains the second and third
+attempts. Later attempts can be faster. Even the first attempt can read cached data.
+Direct I/O on one path does not bypass caches in every restore stage.
 
 ### FlashInfer artifact downloads
 
-The published TRT-LLM cold starts allowed FlashInfer kernel artifact downloads.
-A follow-up used the same pinned engine image with 11 pre-staged, checksum-verified
-artifacts, `FLASHINFER_NO_DOWNLOAD=1` and a separate read-only
+The published TRT-LLM cold starts allowed FlashInfer to download kernel artifacts. We
+repeated the tests with the same engine image and 11 artifacts prepared in advance. We
+checked their checksums, set `FLASHINFER_NO_DOWNLOAD=1` and used a separate read-only
 `FLASHINFER_CUBIN_DIR`. Generated JIT/autotune caches started empty.
 
 | Model | Parallelism | Published cold start (s) | Pre-staged artifacts (s) | Difference (s) |
@@ -223,10 +267,10 @@ artifacts, `FLASHINFER_NO_DOWNLOAD=1` and a separate read-only
 | gpt-oss-120b | TP1 | 200.55 | 198.10 | -2.45 |
 | gpt-oss-120b | TP4 | 223.96 | 191.33 | -32.63 |
 
-The multi-GPU differences were mainly in attention warmup. Logged fetch windows
-covered only 2.81 seconds on Qwen3-14B TP2, so the full difference cannot be
-attributed to downloads. Original-download controls took 158.39 seconds for that
-configuration and 221.88 seconds for GPT-OSS TP4. The first offline GPT-OSS TP4
-attempt failed output validation and is excluded; the table uses its successful
-repeat. All five selected configurations passed output checks, capture and three
-restores. The published tables retain the original measurements.
+Most of the multi-GPU difference was in attention warmup. Logs show only 2.81 seconds of
+downloads for Qwen3-14B TP2. Downloads therefore do not explain the full difference.
+Control runs with downloads enabled took 158.39 seconds for that configuration and
+221.88 seconds for GPT-OSS TP4. The first offline GPT-OSS TP4 attempt failed its output
+check. We excluded it and used the successful repeat. All five configurations passed
+output checks, capture and three restores. The published tables keep the original
+measurements.

@@ -1,10 +1,9 @@
 # Reproducing the benchmarks
 
-The tool in [`benchmarks/`](../../benchmarks) measures startup, checkpoints the
-initialized engine and restores it three times. It supports vLLM, SGLang and
-TensorRT-LLM on one node, using the engine guide applications and templates.
-Each run writes a report; the [published tables](benchmarks.md) are maintained
-separately.
+The tool in [`benchmarks/`](../../benchmarks) measures engine startup. It then captures
+a checkpoint and restores it three times. It supports vLLM, SGLang and TensorRT-LLM on
+one node. It uses the engine guide applications and templates. Each run writes a report.
+The [published tables](benchmarks.md) are separate.
 
 ## Prerequisites
 
@@ -19,8 +18,8 @@ separately.
 - The NVIDIA runtime class, `/dev/net/tun` and the node's
   `profiles/block-iouring.json` seccomp profile, as required by the guide templates.
 
-The agent must log checkpoint and restore timing summaries and the external
-restore start marker. Missing timing evidence fails collection.
+The agent must log checkpoint and restore timing summaries and the external restore
+start marker. The run fails if these records are missing.
 
 > [!NOTE]
 > The runner does not install infrastructure, change node reservations or stop
@@ -28,11 +27,10 @@ restore start marker. Missing timing evidence fails collection.
 
 ## Reference setup
 
-The [published setup](benchmarks.md#benchmarking-setup) used B200 GPUs, driver
-615.71.09, Snapshot v0.2.0-rc.2, vLLM 0.31.0, SGLang 0.5.21 and
-TensorRT-LLM 1.3.0rc24. Pass the image to measure with `--image`; the guide's
-default image may differ. Each result records the image and queries its installed
-version.
+The [published setup](benchmarks.md#benchmarking-setup) used B200 GPUs and driver
+615.71.09. It used Snapshot v0.2.0-rc.2, vLLM 0.31.0, SGLang 0.5.21 and TensorRT-LLM
+1.3.0rc24. Set `--image` to the image you want to measure. The guide's default image can
+differ. The runner records the image and reads its installed engine version.
 
 The VAST client used these NFS mount options:
 
@@ -45,8 +43,8 @@ The VAST client used these NFS mount options:
 | `remoteports` | four storage addresses | Use multiple server addresses |
 | `nosharecache`, `nosharetransport` | enabled | Separate cache and transports for this mount |
 
-These options require a compatible VAST client. Other storage can be measured;
-the runner does not set mount options.
+These options require a compatible VAST client. You can measure other storage. The
+runner does not set mount options.
 
 > [!NOTE]
 > Check the actual `/proc/mounts` records saved in `startup.log`. A PV declaration
@@ -100,10 +98,10 @@ with a compatible image for those engines. Run each topology separately.
 
 ### 5. Generate a report
 
-Each invocation writes under `benchmarks/results/<date>-<git-sha>-<id>/`.
-Top-level JSON files contain complete results. Subdirectories contain manifests,
-admitted pods, logs, timing records, inference responses and failure details.
-The report reads complete top-level results:
+Each run writes to `benchmarks/results/<date>-<git-sha>-<id>/`. JSON files at the top
+level contain complete results. Subdirectories contain manifests, admitted pods, logs,
+timing records, inference responses and failure details. The report reads complete
+results from the top level:
 
 ```bash
 uv run --project benchmarks python -m snapshot_benchmarks report \
@@ -122,19 +120,18 @@ uv run --project benchmarks python -m snapshot_benchmarks report \
 | `--keep` | Retain resources for debugging after the run. |
 | `--toleration` | Repeatable node toleration in `key=value:effect` form. |
 
-Use dedicated flags for model and topology. Conflicting keys in `--engine-args`
-are rejected. For example, add these arguments for vLLM Qwen3-14B:
+Use the model and parallelism flags to set those values. The runner rejects conflicting
+keys in `--engine-args`. For example, add these arguments for vLLM Qwen3-14B:
 
 ```bash
 --tp 2 --engine-args '{"max_model_len":2048,"gpu_memory_utilization":0.85}'
 ```
 
-Multi-GPU captures use the guide's launcher installer and the agent image
-from the selected node. Dry-run manifests retain the guide's
-`${SNAPSHOT_AGENT_IMAGE}` placeholder; the runner resolves it before creating a
-pod. The admitted command is saved and checked for `cuinterpose-launch` before
-capture. Per-process `gpu/<pid>/manifest.txt` files are required as evidence of
-PageBroker CustomStorage.
+Multi-GPU captures use the guide's launcher installer and the agent image from the
+selected node. Dry-run manifests keep the `${SNAPSHOT_AGENT_IMAGE}` placeholder. The
+runner replaces it before it creates a pod. Before capture, the runner saves the
+admitted command and checks for `cuinterpose-launch`. It also requires per-process
+`gpu/<pid>/manifest.txt` files to confirm use of PageBroker CustomStorage.
 
 Use `--model-label` to select an entry from `models.yaml`, or `sweep` to run
 the list. Entries can set `tp`, `ep`, `engine_args` and `env`. Use the same
@@ -143,15 +140,15 @@ list. `--tp` and `--ep` override the list's values.
 
 ## Offline runs
 
-Populate the model PVC before the run. It is mounted read-only, and Hugging Face
-offline mode is enabled.
+Copy the model files to the model PVC before the run. The runner mounts it read-only and
+enables Hugging Face offline mode.
 
-FlashInfer may still download kernel artifacts when its cache is empty. For an
-offline run, pre-stage compatible artifacts separately from the fresh JIT cache
-and set the engine's download controls in the model's `env` settings. FlashInfer
-0.6.16 uses `FLASHINFER_NO_DOWNLOAD=1` and `FLASHINFER_CUBIN_DIR`. Verify these
-controls for the image in use; offline model loading does not disable every
-library's artifact downloads.
+FlashInfer can still download kernel artifacts when its cache is empty. For an offline
+run, prepare compatible artifacts in advance. Keep them separate from the fresh JIT
+cache. Set the engine's download controls in the model's `env` settings. FlashInfer
+0.6.16 uses `FLASHINFER_NO_DOWNLOAD=1` and `FLASHINFER_CUBIN_DIR`. Check these controls
+for your image. Offline model loading does not stop every library from downloading
+artifacts.
 
 The [FlashInfer follow-up](benchmarks.md#flashinfer-artifact-downloads) reports
 how pre-staged artifacts affected five published configurations.
@@ -162,49 +159,47 @@ See [Measurement boundaries](benchmarks.md#measurement-boundaries) for the timin
 endpoints and stage definitions. Inference checks are outside the measured
 cold-start and restore intervals.
 
-Every restore must retain the source process token and answer three factual
-prompts. Missing wake events fail the run. Readiness and first generation are
-not used as timing endpoints. The first restore supplies the report's total and
-phase values; all three attempts are saved.
+Every restore must keep the source process token and answer three factual prompts. The
+run fails if wake events are missing. Timing ends at wake/resume completion, before the
+inference checks. The report uses the first restore for the total and phase times. It
+saves all three attempts.
 
-Each source uses fresh compiler-cache directories. TRT-LLM's FlashInfer workspace
-stays in the container rootfs and is included in the checkpoint. Its loaded,
-deleted extension files must be restored independently; sharing them through
-NFS can break repeated restores.
+Each source uses fresh compiler-cache directories. The checkpoint includes TRT-LLM's
+FlashInfer workspace in the container rootfs. FlashInfer can load extension files and
+then delete them while they remain in use. Each restore needs its own copy of these
+files. Sharing them through NFS can break repeated restores.
 
-Before capture, the application pauses requests and asks the engine to release
-KV memory. vLLM retains GPU weights; SGLang requests KV-only release without a
-CPU weight backup; TRT-LLM uses its KV sleep/wakeup RPC. A successful release call
-does not prove that all allocations were freed. See the SGLang notes in the
-[published results](benchmarks.md#benchmarking-setup).
+Before capture, the application pauses requests and asks the engine to release KV
+memory. vLLM keeps weights on the GPU. SGLang requests KV-only release without a CPU
+weight backup. TRT-LLM uses its KV sleep/wakeup RPC. A successful release call does not
+prove that the engine freed all memory. See the SGLang notes in the [published
+results](benchmarks.md#benchmarking-setup).
 
-Results from earlier tool versions use older timing definitions and are reported
+Earlier tool versions use different timing definitions. The report shows those results
 separately.
 
 ## Interpreting results
 
-Compare the recorded GPU, driver, engine image, model precision, parallelism,
-constructor arguments, storage and cache conditions with the
-[reference setup](benchmarks.md#benchmarking-setup). Different settings give a
-different baseline. Use the ratio within a run when comparing against a published
-row would mix those settings. Read the [limitations](benchmarks.md#limitations),
-including retained SGLang KV memory and instrumentation changes.
+Compare your settings with the [reference setup](benchmarks.md#benchmarking-setup).
+Check the GPU, driver, engine image, model precision, parallelism, constructor
+arguments, storage and cache conditions. If these differ, compare cold start with
+restore within your own run. Read the [limitations](benchmarks.md#limitations),
+including retained SGLang KV memory and changes to the timing code.
 
 ## Reporting a reproducibility mismatch
 
-If repeated runs differ substantially under equivalent settings, open an issue
-with the command, expected result and observed result. Attach the run's JSON,
-expanded manifests, `startup.log`, restore agent logs and timing files, plus the
-`metadata` output. Include the Snapshot chart version, operator/agent images and
-engine image. Remove credentials, private addresses and identifying volume or
-cluster names before sharing.
+If repeated runs give very different results with the same settings, open an issue.
+Include the command, expected result and actual result. Attach the run's JSON, expanded
+manifests, `startup.log`, restore agent logs, timing files and `metadata` output.
+Include the Snapshot chart version, operator/agent images and engine image. Remove
+credentials, private addresses and identifying volume or cluster names before sharing.
 
 ## Cleanup
 
-Cleanup removes the run's pods, ConfigMap, PodSnapshot and PodSnapshotContent.
-Failed runs retain local evidence and still clean owned cluster resources.
-Cleanup errors stop a sweep. `--keep` retains resources for debugging; earlier
-restore pods are removed to free GPUs between repetitions.
+The runner deletes its pods, ConfigMap, PodSnapshot and PodSnapshotContent after the
+run. If the run fails, it keeps local evidence and still deletes its cluster resources.
+A cleanup error stops a sweep. Use `--keep` to keep resources for debugging. The runner
+still removes earlier restore pods to free GPUs for the next attempt.
 
-Work-PVC caches and logs remain under the run ID. Copy the evidence before
-removing that directory. Model files and PVCs are never deleted.
+Caches and logs stay on the work PVC under the run ID. Copy the evidence before you
+remove that directory. The runner does not delete model files or PVCs.
