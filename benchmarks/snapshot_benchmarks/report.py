@@ -100,16 +100,9 @@ def _cold_phases(measured):
             )
         ),
     ]
-    total = measured["cold_start_s"]
     if sum(raw) <= 0:
         raise ValueError("Cold start has no measured phases")
-    scaled = [v * total / sum(raw) for v in raw]
-    cents = [int(v * 100) for v in scaled]
-    for i in sorted(range(4), key=lambda i: scaled[i] * 100 - cents[i], reverse=True)[
-        : round(total * 100) - sum(cents)
-    ]:
-        cents[i] += 1
-    return [v / 100 for v in cents]
+    return raw
 
 
 def render(results: list[dict]) -> str:

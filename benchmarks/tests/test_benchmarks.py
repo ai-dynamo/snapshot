@@ -496,6 +496,11 @@ class BenchmarkTests(unittest.TestCase):
                         Path(main["command"][0]).name, "cuinterpose-launch"
                     )
 
+    def test_cold_phases_preserve_measured_times_without_scaling(self):
+        measured = cold_measurement()
+        measured.update(cold_start_s=36, unattributed_s=5)
+        self.assertEqual(report._cold_phases(measured), [4, 2, 7, 18])
+
     def test_basic_run_report_keeps_totals_without_cold_start_breakdown(self):
         with tempfile.TemporaryDirectory() as tmp, cluster() as mocks:
             mocks["measurement.source_measurement"].return_value = (
