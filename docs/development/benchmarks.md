@@ -18,14 +18,13 @@ Cold start loads weights, creates workers, initializes device memory, compiles a
 | Engines | vLLM 0.31.0; SGLang 0.5.21; TensorRT-LLM 1.3.0rc24 |
 | Model weights | 1.50–913.09 GB, already present on shared storage |
 | Storage | VAST NFSv3 over TCP; 1 MiB reads/writes; `nconnect=32`, `spread_reads`, four server addresses |
-| Compiler caches | Fresh compiler-cache directories for each cold start; OS and storage cache state varied on shared infrastructure |
+| Compiler caches | Fresh directories for each cold start |
 | Parallelism | TP: tensor parallelism. TEP8: tensor and expert parallelism across eight GPUs; exact settings are in each manifest |
 | Restore samples | Three per configuration; the tables use the first restore |
 
 ## Limitations
 
 - Cold starts and restores came from separate runs and did not always use the same node.
-- Compiler caches started empty; OS and storage cache state varied on the shared infrastructure.
 - Results apply to this B200 and VAST NFS setup. GPU, driver, storage and engine settings can change the times.
 - The published cold starts include instrumentation overhead. They have not been rerun after fixes that narrowed constructor timers and disabled unused import profiling.
 - The five TRT-LLM Qwen and GPT-OSS cold starts allowed FlashInfer artifact downloads. The [offline follow-up](#flashinfer-artifact-downloads) found differences of up to 33 seconds; the tables retain the original measurements.
@@ -207,15 +206,14 @@ SGLang Qwen3-14B TP1 spends 337.49 seconds in Model load, compared with 26.15 se
 
 ### Repeat restores
 
-The tables use the first restore; the dataset also contains attempts two and three. Later attempts can be faster. Cache isolation is limited on shared infrastructure, so even the first attempt may read cached data. Direct I/O on one path does not bypass caches in every restore stage.
+The tables use the first restore; the dataset also contains attempts two and three. Later attempts can be faster. Even the first attempt may read cached data. Direct I/O on one path does not bypass caches in every restore stage.
 
 ### FlashInfer artifact downloads
 
 The published TRT-LLM cold starts allowed FlashInfer kernel artifact downloads.
 A follow-up used the same pinned engine image with 11 pre-staged, checksum-verified
 artifacts, `FLASHINFER_NO_DOWNLOAD=1` and a separate read-only
-`FLASHINFER_CUBIN_DIR`. Generated JIT/autotune caches started empty; OS and storage
-cache state varied on the shared infrastructure.
+`FLASHINFER_CUBIN_DIR`. Generated JIT/autotune caches started empty.
 
 | Model | Parallelism | Published cold start (s) | Pre-staged artifacts (s) | Difference (s) |
 | --- | --- | --- | --- | --- |

@@ -170,8 +170,7 @@ phase values; all three attempts are saved.
 Each source uses fresh compiler-cache directories. TRT-LLM's FlashInfer workspace
 stays in the container rootfs and is included in the checkpoint. Its loaded,
 deleted extension files must be restored independently; sharing them through
-NFS can break repeated restores. OS and storage cache isolation is limited on
-shared infrastructure; the first restore may also benefit from cached data.
+NFS can break repeated restores.
 
 Before capture, the application pauses requests and asks the engine to release
 KV memory. vLLM retains GPU weights; SGLang requests KV-only release without a
