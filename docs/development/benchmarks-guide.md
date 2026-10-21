@@ -171,7 +171,8 @@ Each source uses fresh compiler-cache directories. TRT-LLM's FlashInfer workspac
 stays in the container rootfs and is included in the checkpoint. Its loaded,
 deleted extension files must be restored independently; sharing them through
 NFS can break repeated restores. The runner does not clear Linux page cache or
-storage-server caches.
+storage-server caches. The published runs used nodes shared with other users,
+so these caches were not flushed.
 
 Before capture, the application pauses requests and asks the engine to release
 KV memory. vLLM retains GPU weights; SGLang requests KV-only release without a

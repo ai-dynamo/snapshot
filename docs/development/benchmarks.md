@@ -25,7 +25,7 @@ Cold start loads weights, creates workers, initializes device memory, compiles a
 ## Limitations
 
 - Cold starts and restores came from separate runs and did not always use the same node.
-- Compiler caches started empty. Linux page cache and storage-server caches were not cleared or controlled between runs, including before the first restore.
+- Compiler caches started empty. The nodes were shared with other users, so Linux page cache and storage-server caches were not flushed between runs. Their contents were not controlled, including before the first restore.
 - Results apply to this B200 and VAST NFS setup. GPU, driver, storage and engine settings can change the times.
 - The published cold starts include instrumentation overhead. They have not been rerun after fixes that narrowed constructor timers and disabled unused import profiling.
 - The five TRT-LLM Qwen and GPT-OSS cold starts allowed FlashInfer artifact downloads. The [offline follow-up](#flashinfer-artifact-downloads) found differences of up to 33 seconds; the tables retain the original measurements.
