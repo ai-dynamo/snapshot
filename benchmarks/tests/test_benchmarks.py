@@ -530,6 +530,9 @@ class BenchmarkTests(unittest.TestCase):
             single = result.to_json_dict()
             single["restore_attempts"] = []
             self.assertIn("4.00 ± —", report.render([single]))
+            for tp, ep, label in ((8, 8, "TEP8"), (8, 1, "TP8"), (4, 2, "TP4/EP2")):
+                single["model"].update(tp=tp, ep=ep)
+                self.assertIn(f"| Test | vllm | {label} |", report.render([single]))
 
     def test_three_engines_use_guide_contract_and_explicit_topology(self):
         for engine in cli.ENGINES.values():

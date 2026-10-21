@@ -117,7 +117,9 @@ def render(results: list[dict]) -> str:
     f = lambda value: "-" if value is None else f"{value:.2f}"
     for r in current:
         model, engine, env = r["model"], r["engine"], r["environment"]
-        topology = f"TP{model['tp']}" + (f"/EP{model['ep']}" if model["ep"] > 1 else "")
+        topology = f"TP{model['tp']}"
+        if model["ep"] > 1:
+            topology = "TEP8" if model["tp"] == model["ep"] == 8 else f"{topology}/EP{model['ep']}"
         prefix = [model["label"], engine["name"], topology]
         elapsed = r["cold_start"]["startup_to_ready_seconds"]
         timings = [
