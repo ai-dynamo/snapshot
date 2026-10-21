@@ -124,6 +124,9 @@ const (
 type NonTargetArtifactPolicy struct {
 	// Containers names the regular non-target containers publishing extra bytes.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Containers []string `json:"containers"`
 
 	// OnFailure governs only these containers' UID-owned artifact directory.

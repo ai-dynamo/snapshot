@@ -61,6 +61,10 @@ func TestSnapshotJobNonTargetArtifactPolicyAdmissionAndCompatibility(t *testing.
 		{"explicit retain", map[string]any{"containers": []any{"saver"}, "onFailure": "Retain"}, true},
 		{"cleanup", map[string]any{"containers": []any{"saver"}, "onFailure": "Cleanup"}, true},
 		{"empty container list", map[string]any{"containers": []any{}, "onFailure": "Cleanup"}, false},
+		{"uppercase container name", map[string]any{"containers": []any{"Saver"}, "onFailure": "Cleanup"}, false},
+		{"invalid container separator", map[string]any{"containers": []any{"save_artifacts"}, "onFailure": "Cleanup"}, false},
+		{"trailing separator", map[string]any{"containers": []any{"saver-"}, "onFailure": "Cleanup"}, false},
+		{"container name too long", map[string]any{"containers": []any{"saver-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "onFailure": "Cleanup"}, false},
 		// Kubernetes rejects uniqueItems and unbounded cross-list CEL rules here;
 		// the controller rejects these names before it creates the source Job.
 		{"duplicate container", map[string]any{"containers": []any{"saver", "saver"}, "onFailure": "Cleanup"}, true},
