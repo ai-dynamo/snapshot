@@ -3,6 +3,8 @@
 
 """Collect measured clocks and inference checks through the existing e2e helpers."""
 
+import base64
+import gzip
 import json
 import shlex
 import subprocess
@@ -43,14 +45,14 @@ def source_measurement(cfg, pod, folder):
     packet = remote_json(
         cfg.workload_namespace,
         pod.metadata.name,
-        """
-import json
+        r"""
+import base64,gzip,json
 from pathlib import Path
-root = Path('/compile-cache/startup-spans')
+root = Path('/startup-spans')
 files = sorted(root.glob('*.jsonl'))
 if not files:raise RuntimeError('No timing span files')
-text = '\\n'.join(p.read_text() for p in files)
-print('BENCHMARK_JSON ' + json.dumps(dict(log=text)))
+text = '\n'.join(p.read_text() for p in files)
+print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compress(text.encode())).decode())))
 """,
     )
     text = (
@@ -58,7 +60,7 @@ print('BENCHMARK_JSON ' + json.dumps(dict(log=text)))
             cfg.workload_namespace, pod.metadata.name, tail_lines=None, container="main"
         )
         + "\n"
-        + packet["log"]
+        + gzip.decompress(base64.b64decode(packet["log_gzip"])).decode()
     )
     (folder / "startup.log").write_text(text)
     marks = [

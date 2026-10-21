@@ -12,7 +12,7 @@ The [published tables](benchmarks.md) are separate.
 - A node with enough free GPUs and host memory for the selected model.
 - An engine image that supports the selected guide application's APIs.
 - A populated model PVC, mounted read-only at `/hf-cache`.
-- A writable work PVC for compiler caches and timing files.
+- A writable work PVC for compiler caches.
 - A filesystem checkpoint PVC, passed with `--pvc-name`. Artifact inventory does
   not support bound or remote stores.
 - The NVIDIA runtime class, `/dev/net/tun` and the node's
@@ -168,6 +168,9 @@ Each source uses fresh compiler-cache directories. The checkpoint includes TRT-L
 FlashInfer workspace in the container rootfs. FlashInfer can load extension files and
 then delete them while they remain in use. Each restore needs its own copy of these
 files. Sharing them through NFS can break repeated restores.
+
+Timing logs use a 2 GiB memory volume. The runner copies them to the local results
+before capture. Trace transfer uses gzip to handle large multi-GPU logs.
 
 Before capture, the application pauses requests and asks the engine to release KV
 memory. vLLM keeps weights on the GPU. SGLang requests KV-only release without a CPU

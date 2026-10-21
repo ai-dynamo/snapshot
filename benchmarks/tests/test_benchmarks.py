@@ -343,14 +343,28 @@ class BenchmarkTests(unittest.TestCase):
                     )
                 )
         pod = client.V1Pod(metadata=client.V1ObjectMeta(name="source"))
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.object(
-                measurement, "remote_json", return_value=dict(log="\n".join(spans))
-            ),
-            patch.object(measurement.k8s, "pod_logs", return_value="\n".join(lines)),
-        ):
-            value, token = measurement.source_measurement(config(), pod, Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            span_dir = Path(tmp) / "spans"
+            span_dir.mkdir()
+            (span_dir / "worker-0.jsonl").write_text("\n".join(spans[:2]))
+            (span_dir / "worker-1.jsonl").write_text("\n".join(spans[2:]))
+
+            def execute(_namespace, _pod, command, **_kwargs):
+                script = shlex.split(command)[2].replace("/startup-spans", str(span_dir))
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    exec(script, {})
+                return output.getvalue()
+
+            with (
+                patch.object(measurement.k8s, "exec_command", side_effect=execute),
+                patch.object(measurement.k8s, "pod_logs", return_value="\n".join(lines)),
+            ):
+                value, token = measurement.source_measurement(config(), pod, Path(tmp))
+            self.assertEqual(
+                (Path(tmp) / "startup.log").read_text(),
+                "\n".join(lines) + "\n" + "\n".join(spans),
+            )
             self.assertEqual(token, "token")
             self.assertEqual(value["cold_start_s"], 10)
             self.assertEqual(value["phases_s"]["Model construction and weights"], 5)
@@ -435,8 +449,18 @@ class BenchmarkTests(unittest.TestCase):
                             spec["nodeSelector"]["kubernetes.io/hostname"], "gpu-node"
                         )
                         main = spec["containers"][0]
+                        env = {e["name"]: e["value"] for e in main["env"]}
+                        span_mount = next(
+                            m
+                            for m in main["volumeMounts"]
+                            if m["mountPath"] == env["STARTUP_SPAN_DIRECTORY"]
+                        )
+                        span_volume = next(
+                            v for v in spec["volumes"] if v["name"] == span_mount["name"]
+                        )
+                        self.assertEqual(span_volume["emptyDir"]["medium"], "Memory")
+                        self.assertIn("sizeLimit", span_volume["emptyDir"])
                         if engine.name == "trtllm":
-                            env = {e["name"]: e["value"] for e in main["env"]}
                             self.assertEqual(
                                 env["FLASHINFER_WORKSPACE_BASE"],
                                 "/snapshot-flashinfer-cache",
@@ -540,7 +564,8 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             script = script.replace("/work", tmp)
             subprocess.run([sys.executable, "-c", script], check=True)
-            self.assertTrue((Path(tmp) / "run/compile-cache/startup-spans").is_dir())
+            self.assertTrue((Path(tmp) / "run/compile-cache").is_dir())
+            self.assertFalse((Path(tmp) / "run/compile-cache/startup-spans").exists())
             repeated = subprocess.run(
                 [sys.executable, "-c", script], capture_output=True
             )

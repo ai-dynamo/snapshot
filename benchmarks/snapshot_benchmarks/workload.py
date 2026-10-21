@@ -60,7 +60,7 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
         if engine.name == "sglang"
         else "/compile-cache/triton",
         TORCH_EXTENSIONS_DIR="/compile-cache/torch-extensions",
-        STARTUP_SPAN_DIRECTORY="/compile-cache/startup-spans",
+        STARTUP_SPAN_DIRECTORY="/startup-spans",
         SNAPSHOT_TENSOR_PARALLEL_SIZE=str(model.tp),
     )
     extra = dict(model.engine_args)
@@ -93,7 +93,9 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
         set_env(main, key, value)
     mounts = main["volumeMounts"]
     mounts[:] = [
-        m for m in mounts if m["name"] not in ("model-cache", "bench-cache", "shm")
+        m
+        for m in mounts
+        if m["name"] not in ("model-cache", "bench-cache", "shm", "startup-spans")
     ]
     mounts.extend(
         [
@@ -109,9 +111,10 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
                 subPath=run_id + "/flashinfer",
             ),
             dict(name="shm", mountPath="/dev/shm"),
+            dict(name="startup-spans", mountPath="/startup-spans"),
         ]
     )
-    cache_dirs = ["compile-cache", "compile-cache/startup-spans", "flashinfer"]
+    cache_dirs = ["compile-cache", "flashinfer"]
     if engine.name == "trtllm":
         mounts.append(
             dict(
@@ -123,7 +126,9 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
         cache_dirs.append("torchinductor-root")
     volumes = spec["volumes"]
     volumes[:] = [
-        v for v in volumes if v["name"] not in ("model-cache", "bench-cache", "shm")
+        v
+        for v in volumes
+        if v["name"] not in ("model-cache", "bench-cache", "shm", "startup-spans")
     ]
     volumes.extend(
         [
@@ -139,6 +144,11 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
                 emptyDir=dict(
                     medium="Memory", sizeLimit="16Gi" if model.tp > 1 else "1Gi"
                 ),
+            ),
+            # Frequent timing events must not measure network-storage writes.
+            dict(
+                name="startup-spans",
+                emptyDir=dict(medium="Memory", sizeLimit="2Gi"),
             ),
         ]
     )
