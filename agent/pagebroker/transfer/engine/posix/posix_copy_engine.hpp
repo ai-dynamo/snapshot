@@ -14,7 +14,7 @@ class PosixCopyEngine final : public TransferEngine {
   // Identifies the POSIX transfer implementation.
   IoEngine type() const override;
 
-  // Validates the source and prepares direct access or a CPU staging plan.
+  // Validates the source and prepares direct access or a CPU staging inventory.
   PreparedRestore PrepareRestore(const StorageBackend& source, Cancellation cancellation = {},
       const PublishedArtifact* artifact = nullptr, bool metadata_only = false,
       TransferMode mode = TransferMode::Staged) const override;
@@ -33,11 +33,11 @@ class PosixCopyEngine final : public TransferEngine {
       const PublishedArtifact* artifact = nullptr, Cancellation cancellation = {}) const override;
 
   // Scans local checkpoint output before publication admission.
-  RestorePlan InspectCheckpoint(const Path& source, const PublishedArtifact* artifact = nullptr,
+  CheckpointInventory InspectCheckpoint(const Path& source, const PublishedArtifact* artifact = nullptr,
       Cancellation cancellation = {}) const override;
 
   // Publishes checkpoint output using the filesystem strategy for its mode.
-  void PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
+  void PublishCheckpoint(const Path& source, const StorageBackend& destination, CheckpointInventory inventory,
       CheckpointPublication* publication = nullptr, Cancellation cancellation = {},
       TransferMode mode = TransferMode::Staged) const override;
 

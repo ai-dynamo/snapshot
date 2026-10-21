@@ -48,16 +48,16 @@ int restore_started_fd = -1;
 }  // namespace
 
 // GNU ld wraps the C++ filesystem staging symbol only in the test executable.
-void RealStageRestore(const RestorePlan&, const fs::path&, Cancellation)
-    asm("__real__ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_11RestorePlanE"
+void RealStageRestore(const CheckpointInventory&, const fs::path&, Cancellation)
+    asm("__real__ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_19CheckpointInventoryE"
         "RKNSt10filesystem7__cxx114pathENS0_12CancellationE");
-void WrappedStageRestore(const RestorePlan&, const fs::path&, Cancellation)
-    asm("__wrap__ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_11RestorePlanE"
+void WrappedStageRestore(const CheckpointInventory&, const fs::path&, Cancellation)
+    asm("__wrap__ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_19CheckpointInventoryE"
         "RKNSt10filesystem7__cxx114pathENS0_12CancellationE");
 
-void WrappedStageRestore(const RestorePlan& plan, const fs::path& destination, Cancellation cancellation)
+void WrappedStageRestore(const CheckpointInventory& inventory, const fs::path& destination, Cancellation cancellation)
 {
-  RealStageRestore(plan, destination, cancellation);
+  RealStageRestore(inventory, destination, cancellation);
   if (restore_started_fd < 0)
     return;
   // The real copy is complete, but the request still owns staging and is active.
@@ -866,7 +866,7 @@ TEST_F(BrokerTest, CpuStagingOmitsGpuPayloadsWithoutChangingTheSource)
   EXPECT_TRUE(fs::exists(cpu / "image"));
   EXPECT_FALSE(fs::exists(cpu / gpu::kDataDirectory));
   EXPECT_TRUE(fs::exists(source_ / gpu::kDataDirectory / "1" / "extent"));
-  EXPECT_EQ(engine.PrepareRestore(source).plan.size_bytes(), fs::file_size(source_ / "image"));
+  EXPECT_EQ(engine.PrepareRestore(source).inventory.size_bytes(), fs::file_size(source_ / "image"));
 }
 
 TEST_F(BrokerTest, RejectsExistingDirectCheckpointOutput)

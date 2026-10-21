@@ -8,7 +8,7 @@
 #include <limits>
 
 #include "pagebroker_types.hpp"
-#include "transfer/restore_plan.hpp"
+#include "transfer/checkpoint_inventory.hpp"
 #include "cancellation.hpp"
 
 namespace snapshot::pagebroker::filesystem_storage {
@@ -28,14 +28,14 @@ void CreateDirectoryExclusive(const Path& directory, std::filesystem::perms perm
 void RemoveStaging(const Path& directory);
 
 // Copies the planned files into staging and applies saved permissions.
-void StageRestore(const RestorePlan& plan, const Path& destination, Cancellation cancellation = {});
+void StageRestore(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation = {});
 
-// Scans a checkpoint tree into a restore plan, enforcing the entry limit.
-RestorePlan BuildRestorePlan(
+// Scans a checkpoint tree into an inventory, enforcing the entry limit.
+CheckpointInventory BuildCheckpointInventory(
     const Path& source, Cancellation cancellation = {}, std::size_t limit = std::numeric_limits<std::size_t>::max());
 
-// Builds a CPU restore plan that omits the payload directory owned by the GPU engine.
-RestorePlan BuildCpuRestorePlan(const Path& source, Cancellation cancellation = {});
+// Builds a CPU restore inventory that omits the payload directory owned by the GPU engine.
+CheckpointInventory BuildCpuRestoreInventory(const Path& source, Cancellation cancellation = {});
 
 // Opens a local directory without following its final symlink.
 FileDescriptor OpenDirectory(const Path& directory);
@@ -53,5 +53,5 @@ Path PrepareCheckpoint(const StorageBackend& destination, const Path& storage_ro
 
 // Publishes by direct rename or staged copy, checking cancellation before promotion.
 void PublishCheckpoint(const Path& source, const StorageBackend& destination, const Path& storage_root,
-    const RestorePlan& plan, TransferMode mode, Cancellation cancellation = {});
+    const CheckpointInventory& inventory, TransferMode mode, Cancellation cancellation = {});
 }  // namespace snapshot::pagebroker::filesystem_storage

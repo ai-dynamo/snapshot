@@ -65,17 +65,17 @@ class InterruptingEngine : public TransferEngine {
     callback_(Boundary::ValidateCheckpoint, cancellation);
     posix_.ValidateCheckpointDestination(destination, artifact, cancellation);
   }
-  RestorePlan InspectCheckpoint(const Path& source, const PublishedArtifact* artifact,
+  CheckpointInventory InspectCheckpoint(const Path& source, const PublishedArtifact* artifact,
       Cancellation cancellation) const override
   {
     callback_(Boundary::InspectCheckpoint, cancellation);
     return posix_.InspectCheckpoint(source, artifact, cancellation);
   }
-  void PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
+  void PublishCheckpoint(const Path& source, const StorageBackend& destination, CheckpointInventory inventory,
       CheckpointPublication* publication, Cancellation cancellation, TransferMode mode) const override
   {
     callback_(Boundary::PublishCheckpoint, cancellation);
-    posix_.PublishCheckpoint(source, destination, std::move(plan), publication, cancellation, mode);
+    posix_.PublishCheckpoint(source, destination, std::move(inventory), publication, cancellation, mode);
   }
 
  private:

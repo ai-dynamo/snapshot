@@ -42,27 +42,27 @@ IsSafeRelativePath(const Path& path)
   return true;
 }
 
-struct RestoreDirectory {
-  // Relative to the staging root.
+struct CheckpointDirectory {
+  // Relative to the checkpoint tree root.
   Path relative_path;
   std::filesystem::perms permissions = std::filesystem::perms::unknown;
 };
 
-struct RestoreFile {
+struct CheckpointFile {
   // Backend-specific source path or URI; never joined to the destination.
   std::string source_locator;
-  // Relative to the staging root.
+  // Relative to the checkpoint tree root.
   Path relative_path;
   uintmax_t size_bytes = 0;
   std::filesystem::perms permissions = std::filesystem::perms::unknown;
 };
 
-// Transfer plan with unique, normalized relative paths and no dot components.
+// Checkpoint inventory with unique, normalized relative paths and no dot components.
 // Directories must be ordered parent-first.
-struct RestorePlan {
+struct CheckpointInventory {
   std::filesystem::perms root_permissions = std::filesystem::perms::unknown;
-  std::vector<RestoreDirectory> directories;
-  std::vector<RestoreFile> files;
+  std::vector<CheckpointDirectory> directories;
+  std::vector<CheckpointFile> files;
 
   // Totals the planned file sizes and rejects integer overflow.
   uintmax_t size_bytes() const
@@ -81,7 +81,7 @@ enum class TransferMode { Staged, Direct };
 
 // Preparation retains borrowed local access separately from the files to transfer.
 struct PreparedRestore {
-  RestorePlan plan;
+  CheckpointInventory inventory;
   TransferMode mode = TransferMode::Staged;
   Path local_source;
   FileDescriptor source{-1};
