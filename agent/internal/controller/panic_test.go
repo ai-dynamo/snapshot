@@ -9,15 +9,22 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -118,4 +125,58 @@ func TestFailCaptureAfterPanicFailsWhenNothingCommitted(t *testing.T) {
 	require.True(t, isContentFailed(got))
 	assert.Equal(t, "AgentPanic",
 		meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
+}
+
+func TestFailRestoreAfterPanicRecordsTheFailureOnThePod(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+
+	w.failRestoreAfterPanic(context.Background(), client.ObjectKeyFromObject(pod), pod, errors.New("panic: boom"))
+
+	payload := string(lastPodStatusApply(t, w).GetPatch())
+	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
+	assert.Contains(t, payload, "panic: boom")
+	assert.Contains(t, payload, testNodeName, "the message must point at the node holding the log")
+	assert.True(t, w.restoreHandled(pod), "a recorded panic must not be replayed")
+}
+
+func TestFailRestoreAfterPanicWithoutAPodDoesNothing(t *testing.T) {
+	w := makeTestController(t, nil)
+
+	w.failRestoreAfterPanic(context.Background(),
+		client.ObjectKey{Namespace: "inference", Name: "restore-worker"}, nil, errors.New("panic: boom"))
+
+	assert.False(t, hasPodStatusApply(w))
+}
+
+// A panic during the restore must stop the placeholder, not leave the container
+// waiting for a restore that will never arrive.
+func TestRunRestorePanicFailsTheDestination(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+		panic("boom")
+	}
+	var sentinels []string
+	w.writeControlSentinelFn = func(_ int, name string, _ []byte) error {
+		sentinels = append(sentinels, name)
+		return nil
+	}
+	killed := 0
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		killed++
+		return nil
+	}
+	plan := &restorePlan{
+		artifact: &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"},
+		mappings: []podcontract.ContainerMapping{{Source: "main", Destination: "main"}},
+	}
+
+	err := w.runRestore(context.Background(), pod, plan, "main", "containerd://abc", time.Now(), false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "panic: boom")
+	assert.Equal(t, []string{podcontract.RestoreFailedFile}, sentinels)
+	assert.Equal(t, 1, killed, "the placeholder must be killed")
 }

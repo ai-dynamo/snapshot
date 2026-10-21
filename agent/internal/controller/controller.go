@@ -996,8 +996,12 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //     CRIU-restored process resumes inside the polling loop that waits on
 //     this file, exits quiescence, and resumes the engine. On failure, write
 //     restore-failed and kill the placeholder instead.
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) error {
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) (retErr error) {
 	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
+	// Without this the placeholder keeps waiting for a restore that panicked.
+	defer recoverPanic(op.log, "restore", func(err error) {
+		retErr = op.failRestore(ctx, err)
+	}, "destination", destination)
 	if recovering {
 		completed, err := op.recoverCompletedRestore(ctx)
 		if err != nil {
