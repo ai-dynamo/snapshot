@@ -85,17 +85,17 @@ TEST(FilesystemStorageTest, AppliesOnlyKnownRestorePermissions)
     fs::create_directory(root.path() / "reference");
     const auto created_mode = fs::status(root.path() / "reference").permissions();
 
-    RestorePlan plan;
-    plan.directories.push_back(RestoreDirectory{"nested"});
-    plan.files.push_back(RestoreFile{source.string(), "nested/image", 5});
+    CheckpointInventory inventory;
+    inventory.directories.push_back(CheckpointDirectory{"nested"});
+    inventory.files.push_back(CheckpointFile{source.string(), "nested/image", 5});
     const auto root_mode = fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec;
     if (known) {
-      plan.root_permissions = root_mode;
-      plan.directories.front().permissions = fs::perms::owner_all;
-      plan.files.front().permissions = fs::perms::owner_read;
+      inventory.root_permissions = root_mode;
+      inventory.directories.front().permissions = fs::perms::owner_all;
+      inventory.files.front().permissions = fs::perms::owner_read;
     }
 
-    filesystem_storage::StageRestore(plan, destination, {});
+    filesystem_storage::StageRestore(inventory, destination, {});
     EXPECT_EQ(fs::status(destination).permissions(), known ? root_mode : fs::perms::owner_all);
     EXPECT_EQ(fs::status(destination / "nested").permissions(), known ? fs::perms::owner_all : created_mode);
     EXPECT_EQ(fs::status(destination / "nested/image").permissions(), known ? fs::perms::owner_read : file_mode);

@@ -167,23 +167,23 @@ RemoveStaging(const Path& directory)
 }
 
 void
-StageRestore(const RestorePlan& plan, const Path& destination, Cancellation cancellation)
+StageRestore(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
   cancellation.ThrowIfCancelled();
-  for (const auto& directory : plan.directories) {
+  for (const auto& directory : inventory.directories) {
     if (!IsSafeRelativePath(directory.relative_path))
       throw std::invalid_argument("invalid restore directory");
   }
-  for (const auto& file : plan.files) {
+  for (const auto& file : inventory.files) {
     if (!IsSafeRelativePath(file.relative_path))
       throw std::invalid_argument("invalid restore file");
   }
   fs::create_directory(destination);
-  for (const auto& directory : plan.directories) {
+  for (const auto& directory : inventory.directories) {
     cancellation.ThrowIfCancelled();
     fs::create_directory(destination / directory.relative_path);
   }
-  for (const auto& file : plan.files) {
+  for (const auto& file : inventory.files) {
     cancellation.ThrowIfCancelled();
     fs::copy_file(file.source_locator, destination / file.relative_path);
     cancellation.ThrowIfCancelled();
@@ -191,29 +191,29 @@ StageRestore(const RestorePlan& plan, const Path& destination, Cancellation canc
       fs::permissions(destination / file.relative_path, file.permissions);
   }
   // Apply directory modes only after all children have been populated.
-  for (auto directory = plan.directories.rbegin(); directory != plan.directories.rend(); ++directory) {
+  for (auto directory = inventory.directories.rbegin(); directory != inventory.directories.rend(); ++directory) {
     cancellation.ThrowIfCancelled();
     if (directory->permissions != fs::perms::unknown)
       fs::permissions(destination / directory->relative_path, directory->permissions);
   }
   cancellation.ThrowIfCancelled();
-  if (plan.root_permissions != fs::perms::unknown)
-    fs::permissions(destination, plan.root_permissions);
+  if (inventory.root_permissions != fs::perms::unknown)
+    fs::permissions(destination, inventory.root_permissions);
   cancellation.ThrowIfCancelled();
 }
 
 namespace {
-RestorePlan
-BuildPlan(const Path& source, Cancellation cancellation, std::size_t limit, bool cpu_restore)
+CheckpointInventory
+BuildInventory(const Path& source, Cancellation cancellation, std::size_t limit, bool cpu_restore)
 {
   cancellation.ThrowIfCancelled();
   ValidateSourceRoot(source);
-  RestorePlan plan;
-  plan.root_permissions = fs::symlink_status(source).permissions();
+  CheckpointInventory inventory;
+  inventory.root_permissions = fs::symlink_status(source).permissions();
   for (auto it = fs::recursive_directory_iterator(source); it != fs::recursive_directory_iterator(); ++it) {
     const auto& entry = *it;
     cancellation.ThrowIfCancelled();
-    if (plan.files.size() + plan.directories.size() >= limit)
+    if (inventory.files.size() + inventory.directories.size() >= limit)
       throw std::invalid_argument("checkpoint exceeds entry limit");
     const auto status = entry.symlink_status();
     if (fs::is_symlink(status))
@@ -228,36 +228,36 @@ BuildPlan(const Path& source, Cancellation cancellation, std::size_t limit, bool
     if (!IsSafeRelativePath(relative))
       throw std::runtime_error("checkpoint contains invalid path");
     if (fs::is_directory(status)) {
-      plan.directories.push_back(RestoreDirectory{relative, status.permissions()});
+      inventory.directories.push_back(CheckpointDirectory{relative, status.permissions()});
       continue;
     }
     if (!fs::is_regular_file(status))
       throw std::runtime_error("checkpoint contains unsupported file type");
 
-    plan.files.push_back(
-        RestoreFile{entry.path().string(), relative, entry.file_size(), status.permissions()});
+    inventory.files.push_back(
+        CheckpointFile{entry.path().string(), relative, entry.file_size(), status.permissions()});
   }
   // Lexicographic path ordering is deterministic and puts parents first.
-  std::sort(plan.directories.begin(), plan.directories.end(), [](const auto& a, const auto& b) {
+  std::sort(inventory.directories.begin(), inventory.directories.end(), [](const auto& a, const auto& b) {
     return a.relative_path < b.relative_path;
   });
-  std::sort(plan.files.begin(), plan.files.end(), [](const auto& a, const auto& b) {
+  std::sort(inventory.files.begin(), inventory.files.end(), [](const auto& a, const auto& b) {
     return a.relative_path < b.relative_path;
   });
-  return plan;
+  return inventory;
 }
 }  // namespace
 
-RestorePlan
-BuildRestorePlan(const Path& source, Cancellation cancellation, std::size_t limit)
+CheckpointInventory
+BuildCheckpointInventory(const Path& source, Cancellation cancellation, std::size_t limit)
 {
-  return BuildPlan(source, cancellation, limit, false);
+  return BuildInventory(source, cancellation, limit, false);
 }
 
-RestorePlan
-BuildCpuRestorePlan(const Path& source, Cancellation cancellation)
+CheckpointInventory
+BuildCpuRestoreInventory(const Path& source, Cancellation cancellation)
 {
-  return BuildPlan(source, cancellation, std::numeric_limits<std::size_t>::max(), true);
+  return BuildInventory(source, cancellation, std::numeric_limits<std::size_t>::max(), true);
 }
 
 FileDescriptor
@@ -278,7 +278,7 @@ PrepareRestore(const StorageBackend& source, const Path& storage_root, TransferM
   prepared.local_source = SourcePath(source, storage_root);
   prepared.source = OpenDirectory(prepared.local_source);
   if (mode == TransferMode::Staged)
-    prepared.plan = BuildCpuRestorePlan(prepared.local_source, cancellation);
+    prepared.inventory = BuildCpuRestoreInventory(prepared.local_source, cancellation);
   return prepared;
 }
 
@@ -306,7 +306,7 @@ PrepareCheckpoint(const StorageBackend& destination, const Path& storage_root,
 
 void
 PublishCheckpoint(const Path& source, const StorageBackend& destination, const Path& storage_root,
-    const RestorePlan& plan, TransferMode mode, Cancellation cancellation)
+    const CheckpointInventory& inventory, TransferMode mode, Cancellation cancellation)
 {
   cancellation.ThrowIfCancelled();
   const Path published = DestinationPath(destination, storage_root);
@@ -321,7 +321,7 @@ PublishCheckpoint(const Path& source, const StorageBackend& destination, const P
   if (!fs::create_directory(partial))
     throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint destination conflicts");
   try {
-    StageRestore(plan, partial, cancellation);
+    StageRestore(inventory, partial, cancellation);
     cancellation.ThrowIfCancelled();
     ReplaceDirectory(partial, published);
   }

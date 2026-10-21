@@ -9,7 +9,7 @@
 #include <string>
 
 #include "pagebroker_types.hpp"
-#include "transfer/restore_plan.hpp"
+#include "transfer/checkpoint_inventory.hpp"
 #include "cancellation.hpp"
 
 namespace snapshot::pagebroker {
@@ -77,12 +77,12 @@ class TransferEngine {
   virtual void ValidateCheckpointDestination(const StorageBackend& destination,
       const PublishedArtifact* artifact = nullptr, Cancellation cancellation = {}) const;
 
-  // Builds the checkpoint plan before the caller reserves staging capacity.
-  virtual RestorePlan InspectCheckpoint(const Path& source, const PublishedArtifact* artifact = nullptr,
+  // Builds the checkpoint inventory before the caller reserves staging capacity.
+  virtual CheckpointInventory InspectCheckpoint(const Path& source, const PublishedArtifact* artifact = nullptr,
       Cancellation cancellation = {}) const;
 
   // Publishes a checkpoint after admission, rejecting destination conflicts.
-  virtual void PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
+  virtual void PublishCheckpoint(const Path& source, const StorageBackend& destination, CheckpointInventory inventory,
       CheckpointPublication* publication = nullptr, Cancellation cancellation = {},
       TransferMode mode = TransferMode::Staged) const;
 };

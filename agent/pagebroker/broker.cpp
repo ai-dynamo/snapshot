@@ -18,7 +18,7 @@
 #include "gpu/checkpoint.hpp"
 #include "transfer/engine/posix/posix_copy_engine.hpp"
 #include "transfer/filesystem/filesystem_storage.hpp"
-#include "transfer/restore_plan.hpp"
+#include "transfer/checkpoint_inventory.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -578,7 +578,7 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     auto prepared = engine.PrepareRestore(source, transaction->cancellation(), artifact, metadata_only, mode);
     transaction->cancellation().ThrowIfCancelled();
     source_prepared = true;
-    bytes = prepared.plan.size_bytes();
+    bytes = prepared.inventory.size_bytes();
     // The configured budget remains reserved until staging cleanup. The separate
     // filesystem reservation covers concurrent copies and ends after copying,
     // when the staged files themselves consume the space reported by statvfs.
@@ -772,12 +772,12 @@ Broker::PublishCheckpoint(
   const auto& engine = Engine(descriptor.engine_type());
   try {
     auto* publication = transaction.publication();
-    RestorePlan plan;
+    CheckpointInventory inventory;
     if (!publication || publication->pending_index.empty()) {
-      plan = engine.InspectCheckpoint(staging_directory, publication ? &publication->artifact : nullptr, transaction.cancellation());
-      transaction.Reserve(plan.size_bytes());
+      inventory = engine.InspectCheckpoint(staging_directory, publication ? &publication->artifact : nullptr, transaction.cancellation());
+      transaction.Reserve(inventory.size_bytes());
     }
-    engine.PublishCheckpoint(staging_directory, descriptor.destination_storage(), std::move(plan), publication,
+    engine.PublishCheckpoint(staging_directory, descriptor.destination_storage(), std::move(inventory), publication,
         transaction.cancellation(), descriptor.mode());
     // Publication succeeded; retaining the descriptor for cleanup does not fail the commit.
     (void)transaction.TryClearDescriptor();

@@ -34,6 +34,6 @@ PreparedRestore TransferEngine::PrepareRestore(const StorageBackend&, Cancellati
 RestoreAccess TransferEngine::StageRestore(PreparedRestore, const Path&, Cancellation) const { UnsupportedOperation(); }
 Path TransferEngine::PrepareCheckpoint(const StorageBackend&, const Path&, const std::string&, TransferMode, const PublishedArtifact*, Cancellation) const { UnsupportedOperation(); }
 void TransferEngine::ValidateCheckpointDestination(const StorageBackend&, const PublishedArtifact*, Cancellation) const { UnsupportedOperation(); }
-RestorePlan TransferEngine::InspectCheckpoint(const Path&, const PublishedArtifact*, Cancellation) const { UnsupportedOperation(); }
-void TransferEngine::PublishCheckpoint(const Path&, const StorageBackend&, RestorePlan, CheckpointPublication*, Cancellation, TransferMode) const { UnsupportedOperation(); }
+CheckpointInventory TransferEngine::InspectCheckpoint(const Path&, const PublishedArtifact*, Cancellation) const { UnsupportedOperation(); }
+void TransferEngine::PublishCheckpoint(const Path&, const StorageBackend&, CheckpointInventory, CheckpointPublication*, Cancellation, TransferMode) const { UnsupportedOperation(); }
 }  // namespace snapshot::pagebroker

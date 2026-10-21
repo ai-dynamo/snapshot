@@ -35,7 +35,7 @@ RestoreAccess
 PosixCopyEngine::StageRestore(PreparedRestore preparation, const Path& destination, Cancellation cancellation) const
 {
   if (preparation.mode == TransferMode::Staged)
-    filesystem_storage::StageRestore(preparation.plan, destination, cancellation);
+    filesystem_storage::StageRestore(preparation.inventory, destination, cancellation);
   else
     cancellation.ThrowIfCancelled();
   return filesystem_storage::CompleteRestore(std::move(preparation), destination);
@@ -59,19 +59,19 @@ PosixCopyEngine::ValidateCheckpointDestination(const StorageBackend& destination
   filesystem_storage::DestinationPath(destination, storage_root_);
 }
 
-RestorePlan
+CheckpointInventory
 PosixCopyEngine::InspectCheckpoint(const Path& source, const PublishedArtifact* artifact, Cancellation cancellation) const
 {
   if (artifact)
     throw std::invalid_argument("POSIX copy requires filesystem storage");
-  return filesystem_storage::BuildRestorePlan(source, cancellation);
+  return filesystem_storage::BuildCheckpointInventory(source, cancellation);
 }
 
 void
-PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
+PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& destination, CheckpointInventory inventory,
     CheckpointPublication* publication, Cancellation cancellation, TransferMode mode) const
 {
   ValidateCheckpointDestination(destination, publication ? &publication->artifact : nullptr, cancellation);
-  filesystem_storage::PublishCheckpoint(source, destination, storage_root_, plan, mode, cancellation);
+  filesystem_storage::PublishCheckpoint(source, destination, storage_root_, inventory, mode, cancellation);
 }
 }  // namespace snapshot::pagebroker
