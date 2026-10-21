@@ -197,11 +197,12 @@ def render(results: list[dict]) -> str:
             "Checkpoint size",
             "Checkpoint (s)",
             "Cold start (s)",
-            "Snapshot (s)",
+            "Restore (s, mean ± SD)",
             "Speedup",
         ],
         headline,
     )
+    text += "\n\nRestore summarizes three attempts. Cold-start and checkpoint values are reported without a standard deviation. Speedup uses the mean restore time. Older single-attempt results show — for standard deviation.\n"
     if cold:
         text += "\n\n## Where the cold start time goes (s)\n\n"
         text += _table(
@@ -217,7 +218,7 @@ def render(results: list[dict]) -> str:
             ],
             cold,
         )
-    text += "\n\nRestore values are mean ± sample standard deviation across the recorded attempts. Speedup uses the mean restore time. A single attempt has no standard deviation (—). Each run saves the raw timings.\n\n## Where the restore time goes (s)\n\n"
+    text += "\n\nEach run saves the raw timings.\n\n## Where the restore time goes (s)\n\n"
     text += _table(
         [
             "Model",

@@ -82,7 +82,7 @@ Cold-start values use the mean when multiple samples are available.
 
 ### Cold start compared with Snapshot
 
-| Model | Engine | Parallelism | Weights (GB) | Checkpoint (GB) | Checkpoint (s) | Cold start (s) | Snapshot (s) | Speedup |
+| Model | Engine | Parallelism | Weights (GB) | Checkpoint (GB) | Checkpoint (s) | Cold start (s) | Restore (s, mean ± SD) | Speedup |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Qwen3-0.6B | vLLM | TP1 | 1.50 | 8.13 | 15.30 | 104.43 | 3.32 ± 1.16 | 31.43× |
 | Qwen3-0.6B | SGLang | TP1 | 1.50 | 9.42 | 20.71 | 87.08 | 3.41 ± 0.16 | 25.57× |
@@ -106,6 +106,9 @@ Cold-start values use the mean when multiple samples are available.
 | DeepSeek-V4.1-Flash | SGLang | TEP8 | 510.30 | 743.35 | 286.77 | 953.09 | 32.84 ± 3.26 | 29.02× |
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 913.09 | 996.53 | 193.84 | 908.48 | 36.25 ± 2.87 | 25.06× |
 | DeepSeek-V4-Pro-NVFP4 | SGLang | TEP8 | 913.09 | 1039.09 | 253.72 | 621.55 | 38.91 ± 3.30 | 15.98× |
+
+Restore summarizes three attempts. Cold-start and checkpoint values are reported
+without a standard deviation.
 
 Figures 1–3 compare cold start with mean restore time. Error bars show one sample
 standard deviation across the three restores.
