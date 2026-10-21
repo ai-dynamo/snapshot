@@ -703,7 +703,8 @@ func (w *NodeController) resolveRestoreArtifact(
 		return nil, err
 	}
 	if !ready {
-		return nil, newRestorePendingError("ArtifactPending", fmt.Sprintf("Waiting for artifact %s", path))
+		// Ready guarantees a usable artifact; absence is stale state, not a retryable dependency.
+		return nil, fmt.Errorf("artifact %s for Ready PodSnapshotContent %s is missing", path, content.Name)
 	}
 	return &restoreArtifact{
 		SnapshotName:        target.SnapshotName,

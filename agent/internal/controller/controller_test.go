@@ -893,13 +893,28 @@ func TestPreflightRestorePendingStates(t *testing.T) {
 		assert.Nil(t, artifact)
 		assert.Equal(t, "ContentPending", pendingRestoreReason(t, err))
 	})
-	t.Run("artifact visibility", func(t *testing.T) {
-		snapshot, content := readySnapshotObjects()
-		w := makeTestController(t, pod, snapshot, content)
-		artifact, err := w.preflightRestore(context.Background(), pod)
-		assert.Nil(t, artifact)
-		assert.Equal(t, "ArtifactPending", pendingRestoreReason(t, err))
-	})
+}
+
+func TestReconcileRestorePodFailsWhenReadyArtifactIsMissing(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+	restoreCalls := 0
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+		restoreCalls++
+		return executor.RestoreResult{}, nil
+	}
+
+	requeue := w.reconcileRestorePod(context.Background(), pod)
+
+	assert.False(t, requeue)
+	assert.Zero(t, restoreCalls)
+	payload := string(lastPodStatusApply(t, w).GetPatch())
+	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
+	assert.Contains(t, payload, "for Ready PodSnapshotContent "+content.Name+" is missing")
+	event := eventForReason(w.clientset.(*fake.Clientset), podcontract.RestoreReasonFailed)
+	require.NotNil(t, event)
+	assert.Equal(t, corev1.EventTypeWarning, event.Type)
 }
 
 func TestPreflightRestoreFailsWhenInProgressSnapshotDisappears(t *testing.T) {
