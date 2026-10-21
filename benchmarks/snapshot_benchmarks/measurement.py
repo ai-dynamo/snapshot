@@ -50,7 +50,6 @@ import base64,gzip,json
 from pathlib import Path
 root = Path('/startup-spans')
 files = sorted(root.glob('*.jsonl'))
-if not files:raise RuntimeError('No timing span files')
 text = '\n'.join(p.read_text() for p in files)
 cache = root / 'cache-control.json'
 print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compress(text.encode())).decode(), page_cache=json.loads(cache.read_text()) if cache.exists() else None)))
@@ -58,6 +57,8 @@ print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compres
     )
     cache = packet["page_cache"]
     save(folder / "cache-control.json", cache or dict(skipped=True))
+    if not cache or not cache.get("success") or not cache.get("weights_bytes", 0) > 0:
+        raise ValueError("Missing successful model weight-file inventory")
     if cfg.drop_page_cache and (
         not cache
         or not cache.get("success")
@@ -110,6 +111,17 @@ print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compres
         folder / "cold-runs.json",
         dict(cases=[dict(case="source", directory=str(folder))]),
     )
+    if not cfg.detailed_timing:
+        by_stage = {mark["stage"]: mark["elapsed_s"] for mark in marks}
+        measured = dict(
+            cold_start_s=by_stage["engine_init_end"] - by_stage["process_start"],
+            detailed_timing=False,
+            weights_bytes=cache["weights_bytes"],
+            page_cache=cache,
+        )
+        return measured, tokens.pop()
+    if not gzip.decompress(base64.b64decode(packet["log_gzip"])).strip():
+        raise ValueError("No detailed timing span files")
     analysis = Path(__file__).parent / "analysis"
     with (folder / "analysis.log").open("w") as stream:
         for script in (
@@ -124,7 +136,9 @@ print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compres
                 check=True,
             )
     measured = json.loads((folder / "phase-accounting.json").read_text())[0]
-    measured["page_cache"] = cache or dict(skipped=True)
+    measured["detailed_timing"] = True
+    measured["weights_bytes"] = cache["weights_bytes"]
+    measured["page_cache"] = cache
     return measured, tokens.pop()
 
 

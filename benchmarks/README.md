@@ -19,10 +19,8 @@ published results.
 
 ## Layout
 
-Benchmarks use real engine images and take minutes per model. Run them manually, outside
-the e2e CI suite. The runner uses `snapshot_e2e.k8s` and `snapshot_e2e.lifecycle` as a
-local `uv` dependency. It also uses the engine guide applications and deployment
-templates.
+The runner uses the engine guide workloads and the `snapshot_e2e.k8s` and
+`snapshot_e2e.lifecycle` helpers. Run GPU benchmarks manually, outside the e2e CI suite.
 
 - `snapshot_benchmarks/schema.py` — the `RunResult` data model written to disk
 - `snapshot_benchmarks/run.py` — runs one model and engine configuration
@@ -30,7 +28,7 @@ templates.
   the corresponding guide deployment templates
 - `snapshot_benchmarks/measurement.py` — collects clocks, artifact sizes and inference checks
 - `snapshot_benchmarks/timing.py` — computes restore phases from agent and application clocks
-- `snapshot_benchmarks/analysis/` — classifies startup spans and accounts for overlapping work
+- `snapshot_benchmarks/analysis/` — classifies startup spans
 - `snapshot_benchmarks/workload.py` — benchmark mounts and fresh caches added
   to those guide pods
 - `instrumentation/` — timers projected alongside the guide application;
@@ -67,3 +65,6 @@ uv run --project benchmarks python -m unittest discover -s benchmarks/tests
 
 These checks test guide manifests, simulated lifecycle calls, timing calculations and
 reports. They do not start GPU workloads.
+
+Use `--detailed-timing` to collect cold-start phase breakdowns. Normal runs do not
+patch engine functions or trace imports.

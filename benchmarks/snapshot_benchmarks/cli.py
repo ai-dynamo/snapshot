@@ -90,6 +90,7 @@ def _benchmark_config(args: argparse.Namespace) -> BenchmarkConfig:
         model_pvc=getattr(args, "model_pvc", None),
         work_pvc=getattr(args, "work_pvc", None),
         drop_page_cache=not getattr(args, "no_drop_page_cache", False),
+        detailed_timing=getattr(args, "detailed_timing", False),
     )
 
 
@@ -125,7 +126,6 @@ def _load_models(path: Path) -> list[ModelSpec]:
         ModelSpec(
             label=entry["label"],
             hf_id_or_path=entry["hf_id_or_path"],
-            reported_weights_bytes=entry.get("reported_weights_bytes"),
             env=_stringify_env(entry["label"], entry.get("env")),
             tp=entry.get("tp", 1),
             ep=entry.get("ep", 1),
@@ -165,7 +165,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         model = ModelSpec(
             label=args.model_label or Path(args.model).name,
             hf_id_or_path=args.model,
-            reported_weights_bytes=args.weights_bytes,
         )
     elif args.model_label not in models:
         print(
@@ -323,9 +322,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--model", help="Cached model ID or local directory under /hf-cache"
     )
     run_parser.add_argument(
-        "--weights-bytes", type=int, help="Logical weight size for --model"
-    )
-    run_parser.add_argument(
         "--models", default=str(Path(__file__).resolve().parents[1] / "models.yaml")
     )
     run_parser.add_argument("--mode", choices=["cold_start", "both"], default="both")
@@ -390,6 +386,11 @@ def build_parser() -> argparse.ArgumentParser:
     sweep_parser.set_defaults(func=cmd_sweep)
 
     for command in (run_parser, sweep_parser):
+        command.add_argument(
+            "--detailed-timing",
+            action="store_true",
+            help="Patch engine functions and trace imports for cold-start phase timings",
+        )
         command.add_argument(
             "--no-drop-page-cache",
             action="store_true",

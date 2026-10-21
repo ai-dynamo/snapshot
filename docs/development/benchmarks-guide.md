@@ -1,9 +1,9 @@
 # Reproducing the benchmarks
 
-The tool in [`benchmarks/`](../../benchmarks) measures engine startup. It then captures
-a checkpoint and restores it three times. It supports vLLM, SGLang and TensorRT-LLM on
-one node. It uses the engine guide applications and templates. Each run writes a report.
-The [published tables](benchmarks.md) are separate.
+Run cold-start, checkpoint and restore measurements for vLLM, SGLang or TensorRT-LLM
+with the tool in [`benchmarks/`](../../benchmarks). Each run uses one node, captures
+a checkpoint and restores it three times. The runner uses the engine guide workloads
+and saves a report. See the [published results](benchmarks.md).
 
 ## Prerequisites
 
@@ -45,8 +45,8 @@ The VAST client used these NFS mount options:
 | `remoteports` | four storage addresses | Use multiple server addresses |
 | `nosharecache`, `nosharetransport` | enabled | Separate cache and transports for this mount |
 
-These options require a compatible VAST client. You can measure other storage. The
-runner does not set mount options.
+These mount options require a compatible VAST client. The runner uses existing mounts;
+it does not set their options.
 
 > [!NOTE]
 > Check the actual `/proc/mounts` records saved in `startup.log`. A PV declaration
@@ -101,7 +101,7 @@ with a compatible image for those engines. Run each topology separately.
 SGLang benchmarks enable `weight_loader_prefetch_checkpoints` by default, as in the
 published results. SGLang 0.5.21 uses four prefetch threads by default. To measure loading
 without prefetch, pass `--engine-args '{"weight_loader_prefetch_checkpoints":false}'`.
-The admitted source pod records the resolved constructor arguments.
+The source pod records the engine arguments.
 
 ### 5. Generate a report
 
@@ -123,8 +123,8 @@ uv run --project benchmarks python -m snapshot_benchmarks report \
 | `--ep` | Expert parallelism within those GPUs; must divide TP. vLLM supports EP=1 or EP=TP here. |
 | `--node` | Node for both source and restore pods. |
 | `--engine-args` | JSON constructor arguments using the engine's Python API names. |
-| `--weights-bytes` | Measured logical weight-file size; omitted sizes stay blank in the report. |
 | `--keep` | Retain resources for debugging after the run. |
+| `--detailed-timing` | Enable engine-source patches and import tracing for the cold-start breakdown. Off by default. |
 | `--no-drop-page-cache` | Skip node page-cache eviction and weight residency verification. |
 | `--toleration` | Repeatable node toleration in `key=value:effect` form. |
 
@@ -151,30 +151,25 @@ list. `--tp` and `--ep` override the list's values.
 Copy the model files to the model PVC before the run. The runner mounts it read-only and
 enables Hugging Face offline mode.
 
-FlashInfer can still download kernel artifacts when its cache is empty. For an offline
-run, prepare compatible artifacts in advance. Keep them separate from the fresh JIT
-cache. Set the engine's download controls in the model's `env` settings. FlashInfer
-0.6.16 uses `FLASHINFER_NO_DOWNLOAD=1` and `FLASHINFER_CUBIN_DIR`. Check these controls
-for your image. Offline model loading does not stop every library from downloading
-artifacts.
-
-The [FlashInfer follow-up](benchmarks.md#flashinfer-artifact-downloads) reports
-how pre-staged artifacts affected five published configurations.
+For a fully offline run, also prepare the kernel artifacts required by your image.
+FlashInfer 0.6.16 uses `FLASHINFER_NO_DOWNLOAD=1` and `FLASHINFER_CUBIN_DIR`. Set these
+in the model's `env` settings and keep prebuilt artifacts separate from the JIT cache.
 
 ## Measurements and verification
 
 Before each cold start, a privileged init container checks write access to
 `/proc/sys/vm/drop_caches`, runs `sync`, then writes `1` to clear the node's page cache.
-This affects the whole node. Use a node where you have permission to do this.
+This clears caches for the whole node and requires permission to do so.
 The init container also calls `POSIX_FADV_DONTNEED` on the selected model's weight
 files and checks residency with `mincore`. The source starts only if all checked
 weight pages are nonresident. Permission failures, unsupported weight layouts and
 failed eviction stop the run. Cache preparation is outside the cold-start timer.
 
-The run saves `cache-control.json`, including per-file page counts, with its results.
+Weight sizes are measured from the cached model files, including when cache clearing is disabled.
+The run saves `cache-control.json`, including file sizes and page counts, with its results.
 This controls client page cache; it does not clear storage-server caches. Restore
 pods do not clear caches. Use `--no-drop-page-cache` to skip this preparation;
-the run records that choice instead of claiming a verified cold cache.
+the run records whether cache preparation was skipped.
 
 See [Measurement boundaries](benchmarks.md#measurement-boundaries) for the timing
 endpoints and stage definitions. Inference checks are outside the measured
@@ -182,40 +177,38 @@ cold-start and restore intervals.
 
 Every restore must keep the source process token and answer three factual prompts. The
 run fails if wake events are missing. Timing ends at wake/resume completion, before the
-inference checks. The report uses the first restore for the total and phase times. It
-saves all three attempts.
+inference checks. Each run saves the restore totals, phase timings and inference results.
 
 Each source uses fresh compiler-cache directories. The checkpoint includes TRT-LLM's
 FlashInfer workspace in the container rootfs. FlashInfer can load extension files and
 then delete them while they remain in use. Each restore needs its own copy of these
 files. Sharing them through NFS can break repeated restores.
 
+Total startup and restore timings are always collected. Use `--detailed-timing` to
+collect the cold-start breakdown. This patches engine functions and traces imports.
+
 Timing logs use a 2 GiB memory volume. The runner copies them to the local results
 before capture. Trace transfer uses gzip to handle large multi-GPU logs. Restore pods
 start with `sleep infinity` so a second engine does not start before checkpoint injection.
 
 Before capture, the application pauses requests and asks the engine to release KV
-memory. vLLM keeps weights on the GPU. SGLang requests KV-only release without a CPU
+memory. Weights remain on the GPU. SGLang requests KV-only release without a CPU
 weight backup. TRT-LLM uses its KV sleep/wakeup RPC. A successful release call does not
 prove that the engine freed all memory. See the SGLang notes in the [published
 results](benchmarks.md#benchmarking-setup).
-
-Earlier tool versions use different timing definitions. The report shows those results
-separately.
 
 ## Interpreting results
 
 Compare your settings with the [reference setup](benchmarks.md#benchmarking-setup).
 Check the GPU, driver, engine image, model precision, parallelism, constructor
-arguments, storage and cache conditions. If these differ, compare cold start with
-restore within your own run. Read the [limitations](benchmarks.md#limitations),
-including retained SGLang KV memory and changes to the timing code.
+arguments, storage and cache conditions. Read the
+[limitations](benchmarks.md#limitations), including retained SGLang KV memory.
 
 ## Reporting a reproducibility mismatch
 
-If repeated runs give very different results with the same settings, open an issue.
-Include the command, expected result and actual result. Attach the run's JSON, expanded
-manifests, `startup.log`, restore agent logs, timing files and `metadata` output.
+To report unexpected results, include the command and expected and actual results.
+Attach the run's JSON, manifests, `startup.log`, restore agent logs, timing files and
+`metadata` output.
 Include the Snapshot chart version, operator/agent images and engine image. Remove
 credentials, private addresses and identifying volume or cluster names before sharing.
 
@@ -226,5 +219,5 @@ run. If the run fails, it keeps local evidence and still deletes its cluster res
 A cleanup error stops a sweep. Use `--keep` to keep resources for debugging. The runner
 still removes earlier restore pods to free GPUs for the next attempt.
 
-Caches and logs stay on the work PVC under the run ID. Copy the evidence before you
-remove that directory. The runner does not delete model files or PVCs.
+Compiler caches stay on the work PVC under the run ID. Logs and results are saved
+locally. The runner does not delete model files or PVCs.

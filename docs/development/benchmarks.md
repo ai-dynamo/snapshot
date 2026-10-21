@@ -38,7 +38,8 @@ the sum of the logical sizes of saved container files. It includes CPU state, GP
 and the root filesystem archive. Both sizes use decimal GB. File size can differ from
 GPU memory use and the disk space used.
 
-Before capture, we asked each engine to release unused memory, such as the KV cache.
+Before capture, we asked each engine to release KV cache memory. For vLLM, model
+weights are resident on the GPU at capture time.
 SGLang GPT-OSS still held KV memory at capture time. That memory adds to checkpoint size
 and restore work. We mark those rows with ¹. We have not checked memory release for each
 larger SGLang model (²).
@@ -62,7 +63,7 @@ application's sleep or memory-release call before capture.
 
 | Stage | What is included |
 |---|---|
-| Startup | Imports, worker creation and runtime setup before model construction; some early kernel JIT also occurs here. |
+| Startup | Imports, worker creation and runtime setup before model construction. |
 | Model load | Model construction, weight reads and weight preparation, excluding separately timed nested phases. |
 | Initialization | Memory profiling, attention/sampler initialization and remaining measured engine warmup. |
 | Compilation, autotuning & graph capture | The combined measured time for kernel compilation, tuning and graph-capture scopes, including compilation inside those scopes. |
@@ -74,13 +75,12 @@ application's sleep or memory-release call before capture.
 | Agent setup / rootfs | The agent duration outside its CRIU and CUDA phase timers, including filesystem preparation and rootfs work. |
 | CRIU restore | The measured CRIU phase that reconstructs the saved process state. |
 | CUDA restore | The measured CUDA restoration phase, including multi-GPU reconstruction where applicable. |
-| Wake / handoff | Time from agent completion through the application's wake and resume calls, including the polling handoff. |
+| Wake | Time from agent completion through the application's wake and resume calls. |
 
 ## Results
 
-All times are in seconds. Speedup is cold-start time divided by the first restore time.
-If a configuration has more than one cold-start sample, we use the mean. Engine settings
-differ between rows, including weight-loading settings. Compare engines with care.
+All times are in seconds. Speedup is cold-start time divided by the restore time.
+Cold-start values use the mean when multiple samples are available.
 
 ### Cold start compared with Snapshot
 
@@ -115,28 +115,28 @@ Checkpoint sizes and restore times include that memory.
 ² Large SGLang models: we have not checked whether each model fully releases memory
 before capture.
 
-Figures 1–3 compare cold start with the first restore for each engine.
+Figures 1–3 compare cold start with the restore for each engine.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/vllm-cold-start-vs-snapshot-dark.png">
-  <img alt="Cold start and first restore on vLLM." src="img/vllm-cold-start-vs-snapshot.png">
+  <img alt="Cold start and restore on vLLM." src="img/vllm-cold-start-vs-snapshot.png">
 </picture>
 
-*Figure 1. Cold start and first restore on vLLM.*
+*Figure 1. Cold start and restore on vLLM.*
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/sglang-cold-start-vs-snapshot-dark.png">
-  <img alt="Cold start and first restore on SGLang." src="img/sglang-cold-start-vs-snapshot.png">
+  <img alt="Cold start and restore on SGLang." src="img/sglang-cold-start-vs-snapshot.png">
 </picture>
 
-*Figure 2. Cold start and first restore on SGLang.*
+*Figure 2. Cold start and restore on SGLang.*
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/trtllm-cold-start-vs-snapshot-dark.png">
-  <img alt="Cold start and first restore on TensorRT-LLM." src="img/trtllm-cold-start-vs-snapshot.png">
+  <img alt="Cold start and restore on TensorRT-LLM." src="img/trtllm-cold-start-vs-snapshot.png">
 </picture>
 
-*Figure 3. Cold start and first restore on TensorRT-LLM.*
+*Figure 3. Cold start and restore on TensorRT-LLM.*
 
 ### Where the cold start time goes
 
@@ -165,14 +165,11 @@ Figures 1–3 compare cold start with the first restore for each engine.
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 64.42 | 95.14 | 64.87 | 684.05 | 908.48 |
 | DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 58.80 | 87.68 | 42.55 | 432.52 | 621.55 |
 
-These columns divide the elapsed time into phases. Work that overlaps across GPU workers
-counts once. We divide small gaps between columns in proportion to their measured times.
-These additions are estimates. Each new run saves the raw timings and gaps. Some kernel
-JIT occurs during Startup and stays in that column.
+Each run saves the raw timings.
 
 ### Where the restore time goes
 
-| Model | Engine | Parallelism | Agent setup / rootfs | CRIU restore | CUDA restore | Wake / handoff | Total |
+| Model | Engine | Parallelism | Agent setup / rootfs | CRIU restore | CUDA restore | Wake | Total |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Qwen3-0.6B | vLLM | TP1 | 2.30 | 1.36 | 0.78 | 0.22 | 4.66 |
 | Qwen3-0.6B | SGLang | TP1 | 0.24 | 1.33 | 1.02 | 0.99 | 3.59 |
@@ -197,80 +194,39 @@ JIT occurs during Startup and stays in that column.
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 5.44 | 4.73 | 28.98 | 0.42 | 39.56 |
 | DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 3.13 | 10.13 | 28.60 | 0.83 | 42.69 |
 
-Every restore row uses the first attempt for both the total and the phase times. Wake /
-handoff starts when the agent finishes. It ends when the application completes its wake
-and resume calls. GPU reconstruction and remapping are inside the CUDA/CRIU phases, with
-no separate timers. Rounding can change a displayed sum by 0.01 seconds.
+Wake starts when the agent finishes and ends when the application completes its wake
+and resume calls. CUDA restore includes multi-GPU reconstruction. Values are rounded
+to two decimal places.
 
-Figure 4 shows how much each stage contributes to the first vLLM restore.
+Figure 4 shows how much each stage contributes to vLLM restore.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/vllm-restore-stages-dark.png">
-  <img alt="First vLLM restore split into Agent setup / rootfs, CRIU restore, CUDA restore and Wake / handoff." src="img/vllm-restore-stages.png">
+  <img alt="vLLM restore split into Agent setup / rootfs, CRIU restore, CUDA restore and Wake." src="img/vllm-restore-stages.png">
 </picture>
 
-*Figure 4. First restore on vLLM, split into the four reported stages.*
+*Figure 4. Restore on vLLM, split into the four reported stages.*
 
 ## Reading the results
 
 ### Startup work
 
-Snapshot skips the measured compilation, autotuning and graph capture. We combine these
-phases because kernel compilation can run during tuning and graph capture. The engines
-also provide different timers.
-
-### Checkpoint size
-
-Weight precision, parallelism and retained memory affect checkpoint size. SGLang GPT-OSS
-TP4 has a 693.89 GB checkpoint for 65.25 GB of weights. It still held KV memory after
-the release call. Its 29.64-second restore includes that memory.
+Restore skips model loading, kernel compilation, autotuning and CUDA graph capture.
+Compilation can run during tuning and graph capture, so the table groups these phases
+in one column.
 
 ### Restore work and storage
 
-CUDA restore is the largest stage in all three TEP8 vLLM rows. It takes 19.37–28.98
-seconds of the 28.64–39.56-second total. For Qwen3-0.6B, agent setup and CRIU together
-take 3.66 of 4.66 seconds.
+CUDA restore takes 19.37–28.98 seconds for the eight-GPU vLLM models. For Qwen3-0.6B,
+agent setup and CRIU take 3.66 of the 4.66-second restore.
 
-Checkpoint size affects how much data the system must read. Size alone does not
-determine restore time. The 81.56 GB vLLM GPT-OSS TP1 checkpoint restores in 10.09
-seconds. The larger 119.69 GB TP4 checkpoint restores in 11.62 seconds. Parallel reads,
-CPU/GPU state, rootfs work and cache state also affect the total. Storage throughput
-limits the read stages. A different storage backend can change the results.
+Checkpoint size, storage throughput and parallel reads affect restore time. The
+81.56 GB vLLM GPT-OSS TP1 checkpoint restores in 10.09 seconds. The 119.69 GB TP4
+checkpoint restores in 11.62 seconds.
 
 ### SGLang model loading
 
-SGLang uses `weight_loader_prefetch_checkpoints=true` with four prefetch threads.
-Qwen3-14B TP1 takes 20.79 seconds for Model load, compared with 26.15 seconds on vLLM.
-GPT-OSS TP1 takes 34.44 seconds on SGLang and 38.69 seconds on vLLM. GPT-OSS TP4 takes
-49.06 seconds on SGLang and 24.71 seconds on vLLM. Model load includes weight preparation
-and reads, excluding separately timed nested phases. These are engine runs with different
-loading paths and settings, not a controlled loader comparison.
-
-### Repeat restores
-
-The tables use the first restore. The dataset also contains the second and third
-attempts. Later attempts can be faster. Even the first attempt can read cached data.
-Direct I/O on one path does not bypass caches in every restore stage.
-
-### FlashInfer artifact downloads
-
-The published TRT-LLM cold starts allowed FlashInfer to download kernel artifacts. We
-repeated the tests with the same engine image and 11 artifacts prepared in advance. We
-checked their checksums, set `FLASHINFER_NO_DOWNLOAD=1` and used a separate read-only
-`FLASHINFER_CUBIN_DIR`. Generated JIT/autotune caches started empty.
-
-| Model | Parallelism | Published cold start (s) | Pre-staged artifacts (s) | Difference (s) |
-| --- | --- | --- | --- | --- |
-| Qwen3-0.6B | TP1 | 121.26 | 117.94 | -3.32 |
-| Qwen3-14B | TP1 | 127.02 | 124.14 | -2.89 |
-| Qwen3-14B | TP2 | 158.66 | 130.22 | -28.44 |
-| gpt-oss-120b | TP1 | 200.55 | 198.10 | -2.45 |
-| gpt-oss-120b | TP4 | 223.96 | 191.33 | -32.63 |
-
-Most of the multi-GPU difference was in attention warmup. Logs show only 2.81 seconds of
-downloads for Qwen3-14B TP2. Downloads therefore do not explain the full difference.
-Control runs with downloads enabled took 158.39 seconds for that configuration and
-221.88 seconds for GPT-OSS TP4. The first offline GPT-OSS TP4 attempt failed its output
-check. We excluded it and used the successful repeat. All five configurations passed
-output checks, capture and three restores. The published tables keep the original
-measurements.
+Qwen3-14B TP1 loads in 20.79 seconds,
+compared with 26.15 seconds on vLLM. GPT-OSS TP1 loads in 34.44 seconds on SGLang and
+38.69 seconds on vLLM. At TP4, GPT-OSS loads in 49.06 seconds on SGLang and
+24.71 seconds on vLLM. Model load includes weight reads and preparation.

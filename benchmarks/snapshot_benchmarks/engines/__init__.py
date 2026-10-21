@@ -18,15 +18,12 @@ class ModelSpec:
 
     label: str
     hf_id_or_path: str
-    reported_weights_bytes: int | None = None
     env: dict[str, str] | None = None
     tp: int = 1
     ep: int = 1
     engine_args: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        if self.reported_weights_bytes is not None and self.reported_weights_bytes <= 0:
-            raise ValueError("Reported weight size must be positive")
         if (
             type(self.tp) is not int
             or type(self.ep) is not int

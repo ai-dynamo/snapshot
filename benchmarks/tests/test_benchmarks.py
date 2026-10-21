@@ -4,6 +4,7 @@
 import contextlib
 import ast
 import datetime
+import dataclasses
 import gc
 import io
 import importlib.util
@@ -46,6 +47,7 @@ def config():
 
 def cold_measurement():
     return dict(
+        weights_bytes=1503300328,
         cold_start_s=31,
         unattributed_s=0,
         phases_s={
@@ -348,13 +350,22 @@ class BenchmarkTests(unittest.TestCase):
             span_dir.mkdir()
             (span_dir / "worker-0.jsonl").write_text("\n".join(spans[:2]))
             (span_dir / "worker-1.jsonl").write_text("\n".join(spans[2:]))
-            (span_dir / "cache-control.json").write_text(json.dumps(dict(
-                success=True, node_page_cache_dropped=True,
-                total_pages=1, resident_pages_after=0,
-            )))
+            (span_dir / "cache-control.json").write_text(
+                json.dumps(
+                    dict(
+                        success=True,
+                        node_page_cache_dropped=True,
+                        weights_bytes=1503300328,
+                        total_pages=1,
+                        resident_pages_after=0,
+                    )
+                )
+            )
 
             def execute(_namespace, _pod, command, **_kwargs):
-                script = shlex.split(command)[2].replace("/startup-spans", str(span_dir))
+                script = shlex.split(command)[2].replace(
+                    "/startup-spans", str(span_dir)
+                )
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
                     exec(script, {})
@@ -362,14 +373,31 @@ class BenchmarkTests(unittest.TestCase):
 
             with (
                 patch.object(measurement.k8s, "exec_command", side_effect=execute),
-                patch.object(measurement.k8s, "pod_logs", return_value="\n".join(lines)),
+                patch.object(
+                    measurement.k8s, "pod_logs", return_value="\n".join(lines)
+                ),
             ):
-                value, token = measurement.source_measurement(config(), pod, Path(tmp))
+                value, token = measurement.source_measurement(
+                    dataclasses.replace(config(), detailed_timing=True), pod, Path(tmp)
+                )
+                detailed_log = (Path(tmp) / "startup.log").read_text()
+                for span_file in span_dir.glob("*.jsonl"):
+                    span_file.unlink()
+                with patch.object(measurement.subprocess, "run") as analysis:
+                    basic, basic_token = measurement.source_measurement(
+                        config(), pod, Path(tmp)
+                    )
+                analysis.assert_not_called()
+                self.assertEqual(basic["cold_start_s"], 10)
+                self.assertEqual(basic_token, token)
+                self.assertFalse(basic["detailed_timing"])
+                self.assertNotIn("phases_s", basic)
             self.assertEqual(
-                (Path(tmp) / "startup.log").read_text(),
+                detailed_log,
                 "\n".join(lines) + "\n" + "\n".join(spans),
             )
             self.assertEqual(token, "token")
+            self.assertEqual(value["weights_bytes"], 1503300328)
             self.assertEqual(value["cold_start_s"], 10)
             self.assertEqual(value["phases_s"]["Model construction and weights"], 5)
             self.assertEqual(value["phases_s"]["CUDA graph capture"], 3)
@@ -414,6 +442,77 @@ class BenchmarkTests(unittest.TestCase):
             write_events()
             with self.assertRaisesRegex(ValueError, "wake completion"):
                 restore_metrics(folder)
+
+    def test_import_tracing_is_disabled_by_default(self):
+        for enabled in (False, True):
+            output = subprocess.check_output(
+                [
+                    sys.executable,
+                    "-c",
+                    "import builtins; print(builtins.__import__.__module__)",
+                ],
+                env=dict(
+                    os.environ,
+                    PYTHONPATH=str(Path(__file__).parents[1] / "instrumentation"),
+                    BENCHMARK_DETAILED_TIMING="1" if enabled else "0",
+                ),
+                text=True,
+            )
+            self.assertEqual(output.strip(), "sitecustomize" if enabled else "builtins")
+
+    def test_detailed_timing_toggle_selects_launcher_and_import_tracing(self):
+        for engine in cli.ENGINES.values():
+            for enabled in (False, True):
+                with self.subTest(engine=engine.name, enabled=enabled):
+                    model = ModelSpec("Test", "/hf-cache/test", tp=2)
+                    pod = engine.build_source_pod(
+                        name="test", namespace="workloads", image="test", model=model
+                    )
+                    instrument_pod(
+                        pod,
+                        dataclasses.replace(config(), detailed_timing=enabled),
+                        engine,
+                        model,
+                        "test",
+                    )
+                    main = next(
+                        c
+                        for c in pod["spec"]["containers"]
+                        if c["name"] == engine.container_name
+                    )
+                    self.assertEqual(
+                        main["command"][-1],
+                        "/snapshot-app/launch.py"
+                        if enabled
+                        else "/snapshot-app/bench.py",
+                    )
+                    env = {e["name"]: e.get("value") for e in main["env"]}
+                    self.assertEqual(
+                        env["BENCHMARK_DETAILED_TIMING"], "1" if enabled else "0"
+                    )
+                    self.assertEqual(
+                        Path(main["command"][0]).name, "cuinterpose-launch"
+                    )
+
+    def test_basic_run_report_keeps_totals_without_cold_start_breakdown(self):
+        with tempfile.TemporaryDirectory() as tmp, cluster() as mocks:
+            mocks["measurement.source_measurement"].return_value = (
+                dict(cold_start_s=31, detailed_timing=False, weights_bytes=1503300328),
+                "preserved-token",
+            )
+            result = run.run_benchmark(
+                config(),
+                cli.ENGINES["vllm"],
+                ModelSpec("Test", "/hf-cache/test"),
+                image="test",
+                evidence_dir=Path(tmp),
+                run_id="basic",
+                progress=lambda _: None,
+            )
+            text = report.render([result.to_json_dict()])
+            self.assertIn("7.75×", text)
+            self.assertIn("Where the restore time goes", text)
+            self.assertNotIn("Where the cold start time goes", text)
 
     def test_three_engines_use_guide_contract_and_explicit_topology(self):
         for engine in cli.ENGINES.values():
@@ -658,6 +757,7 @@ class BenchmarkTests(unittest.TestCase):
                     run_id="test",
                     progress=lambda _: None,
                 )
+                self.assertEqual(result.model.reported_weights_bytes, 1503300328)
                 self.assertEqual(result.cold_start.startup_to_ready_seconds, 31)
                 self.assertEqual(result.restore.startup_to_ready_seconds, 4)
                 self.assertEqual(len(result.restore_attempts), 3)

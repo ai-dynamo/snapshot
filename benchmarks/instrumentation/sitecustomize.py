@@ -4,6 +4,7 @@
 """Time first heavy-package imports in each Python worker."""
 
 import builtins
+import os
 import sys
 from startup_timing import phase
 
@@ -28,4 +29,5 @@ def _timed_import(name, globals=None, locals=None, fromlist=(), level=0):
     return _original_import(name, globals, locals, fromlist, level)
 
 
-builtins.__import__ = _timed_import
+if os.environ.get("BENCHMARK_DETAILED_TIMING") == "1":
+    builtins.__import__ = _timed_import

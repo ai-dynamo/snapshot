@@ -48,7 +48,10 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
     main["command"] = (
         ["sleep", "infinity"]
         if restore
-        else prefix + ["python3", "/snapshot-app/launch.py"]
+        else prefix + [
+            "python3",
+            "/snapshot-app/launch.py" if cfg.detailed_timing else "/snapshot-app/bench.py",
+        ]
     )
     values = dict(
         HF_HOME="/hf-cache",
@@ -67,6 +70,7 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
         else "/compile-cache/triton",
         TORCH_EXTENSIONS_DIR="/compile-cache/torch-extensions",
         STARTUP_SPAN_DIRECTORY="/startup-spans",
+        BENCHMARK_DETAILED_TIMING="1" if cfg.detailed_timing else "0",
         SNAPSHOT_TENSOR_PARALLEL_SIZE=str(model.tp),
     )
     extra = dict(model.engine_args)
@@ -181,23 +185,25 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
                 volumeMounts=[dict(name="bench-cache", mountPath="/work")],
             )
         )
-        if cfg.drop_page_cache:
-            spec["initContainers"].append(
-                dict(
-                    name="drop-page-cache",
-                    image=main["image"],
-                    imagePullPolicy=main["imagePullPolicy"],
-                    command=["python3", "/snapshot-app/page_cache.py"],
-                    args=[model.hf_id_or_path, str(extra.get("revision") or "main")],
-                    env=[
-                        dict(name="HF_HOME", value="/hf-cache"),
-                        dict(name="HF_HUB_OFFLINE", value="1"),
-                    ],
-                    securityContext=dict(privileged=True, runAsUser=0),
-                    volumeMounts=[
-                        m for m in main["volumeMounts"]
-                        if m["name"] in ("model-cache", "app", "startup-spans")
-                    ],
-                )
+        spec["initContainers"].append(
+            dict(
+                name="drop-page-cache" if cfg.drop_page_cache else "model-weights",
+                image=main["image"],
+                imagePullPolicy=main["imagePullPolicy"],
+                command=["python3", "/snapshot-app/page_cache.py"],
+                args=[model.hf_id_or_path, str(extra.get("revision") or "main")]
+                + ([] if cfg.drop_page_cache else ["--no-drop-page-cache"]),
+                env=[
+                    dict(name="HF_HOME", value="/hf-cache"),
+                    dict(name="HF_HUB_OFFLINE", value="1"),
+                ],
+                securityContext=(
+                    dict(privileged=True, runAsUser=0) if cfg.drop_page_cache else {}
+                ),
+                volumeMounts=[
+                    m for m in main["volumeMounts"]
+                    if m["name"] in ("model-cache", "app", "startup-spans")
+                ],
             )
+        )
     return pod

@@ -68,6 +68,7 @@ class BenchmarkConfig:
     model_pvc: str
     work_pvc: str
     drop_page_cache: bool = True
+    detailed_timing: bool = False
 
     def configure(self):
         # Supplying a path prevents the helper falling back to in-cluster access
@@ -222,7 +223,6 @@ def run_benchmark(
         model=ModelInfo(
             label=model.label,
             hf_id_or_path=model.hf_id_or_path,
-            reported_weights_bytes=model.reported_weights_bytes,
             tp=model.tp,
             ep=model.ep,
             engine_args=dict(model.engine_args),
@@ -282,6 +282,7 @@ def run_benchmark(
         cold_measurement, source_token = measurement.source_measurement(
             cfg, source_pod, folder
         )
+        result.model.reported_weights_bytes = cold_measurement["weights_bytes"]
         result.cold_start = ColdStartTiming(
             pod_created_at=source_pod.metadata.creation_timestamp,
             container_started_at=_container_started_at(
@@ -435,18 +436,19 @@ def run_benchmark(
             dict(error=repr(exc), partial_result=result.to_json_dict()),
         )
         if source_created and not source_deleted:
-            if cfg.drop_page_cache:
-                try:
-                    (folder / "page-cache-init.log").write_text(
-                        k8s.pod_logs(
-                            cfg.workload_namespace,
-                            source_name,
-                            tail_lines=None,
-                            container="drop-page-cache",
-                        )
+            try:
+                (folder / "model-preparation.log").write_text(
+                    k8s.pod_logs(
+                        cfg.workload_namespace,
+                        source_name,
+                        tail_lines=None,
+                        container=(
+                            "drop-page-cache" if cfg.drop_page_cache else "model-weights"
+                        ),
                     )
-                except Exception as log_error:
-                    (folder / "page-cache-log-error.txt").write_text(repr(log_error))
+                )
+            except Exception as log_error:
+                (folder / "model-preparation-log-error.txt").write_text(repr(log_error))
             try:
                 (folder / "source-failure.log").write_text(
                     k8s.pod_logs(cfg.workload_namespace, source_name, tail_lines=None)

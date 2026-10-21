@@ -87,7 +87,7 @@ class BenchmarkEngine:
 class ModelInfo:
     label: str
     hf_id_or_path: str
-    reported_weights_bytes: int | None = None  # informational, from models.yaml
+    reported_weights_bytes: int | None = None  # measured logical weight-file bytes
     checkpoint_artifact_bytes: int | None = None  # sum of regular-file logical bytes
     tp: int = 1
     ep: int = 1

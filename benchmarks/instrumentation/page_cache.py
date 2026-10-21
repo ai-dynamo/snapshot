@@ -3,11 +3,11 @@
 
 """Clear the node page cache and verify model weights before engine startup."""
 
+import argparse
 import ctypes
 import json
 import os
 from pathlib import Path
-import sys
 
 DROP_CACHES = Path("/proc/sys/vm/drop_caches")
 
@@ -41,7 +41,12 @@ def resident_pages(fd, size):
             raise OSError(ctypes.get_errno(), "Cannot unmap weight-file probe")
 
 
-def prepare(model, revision="main", output=Path("/startup-spans/cache-control.json")):
+def prepare(
+    model,
+    revision="main",
+    output=Path("/startup-spans/cache-control.json"),
+    drop_page_cache=True,
+):
     report = dict(success=False, node_page_cache_dropped=False, files=[])
     try:
         root = Path(model)
@@ -63,6 +68,12 @@ def prepare(model, revision="main", output=Path("/startup-spans/cache-control.js
                 "No nonempty safetensors or PyTorch weight files: " + str(root)
             )
         report["model_directory"] = str(root)
+        report["files"] = [dict(file=p.name, bytes=p.stat().st_size) for p in weights]
+        report["weights_bytes"] = sum(entry["bytes"] for entry in report["files"])
+        if not drop_page_cache:
+            report["eviction_skipped"] = True
+            report["success"] = True
+            return report
         # Open first: permission failures must stop before sync or engine startup.
         try:
             control = DROP_CACHES.open("w")
@@ -76,16 +87,15 @@ def prepare(model, revision="main", output=Path("/startup-spans/cache-control.js
             control.write("1\n")
             control.flush()
         report["node_page_cache_dropped"] = True
-        for path in weights:
+        for path, entry in zip(weights, report["files"]):
             with path.open("rb") as stream:
                 fd = stream.fileno()
                 os.fsync(fd)
                 before, total = resident_pages(fd, path.stat().st_size)
                 os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
                 after, _ = resident_pages(fd, path.stat().st_size)
-            report["files"].append(
+            entry.update(
                 dict(
-                    file=path.name,
                     total_pages=total,
                     resident_pages_before=before,
                     resident_pages_after=after,
@@ -111,4 +121,10 @@ def prepare(model, revision="main", output=Path("/startup-spans/cache-control.js
 
 
 if __name__ == "__main__":
-    prepare(*sys.argv[1:])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("model")
+    parser.add_argument("revision", nargs="?", default="main")
+    parser.add_argument(
+        "--no-drop-page-cache", action="store_false", dest="drop_page_cache"
+    )
+    prepare(**vars(parser.parse_args()))

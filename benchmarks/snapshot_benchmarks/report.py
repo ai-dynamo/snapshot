@@ -139,11 +139,12 @@ def render(results: list[dict]) -> str:
                 f(elapsed / restored) + "×" if restored else "-",
             ]
         )
-        cold.append(
-            prefix
-            + [f(v) for v in _cold_phases(r["cold_start"]["measurement"])]
-            + [f(elapsed)]
-        )
+        if r["cold_start"]["measurement"].get("phases_s"):
+            cold.append(
+                prefix
+                + [f(v) for v in _cold_phases(r["cold_start"]["measurement"])]
+                + [f(elapsed)]
+            )
         if timing:
             restore.append(
                 prefix
@@ -186,21 +187,22 @@ def render(results: list[dict]) -> str:
         ],
         headline,
     )
-    text += "\n\n## Where the cold start time goes (s)\n\n"
-    text += _table(
-        [
-            "Model",
-            "Engine",
-            "Parallelism",
-            "Startup",
-            "Model load",
-            "Initialization",
-            "Compilation, autotuning & graph capture",
-            "Total",
-        ],
-        cold,
-    )
-    text += "\n\nOverlapping worker intervals count once. Untimed intervals are distributed proportionally; these additions are estimates. Raw intervals and gaps remain in each run's evidence. Some kernel JIT occurs during Startup.\n\n## Where the restore time goes (s)\n\n"
+    if cold:
+        text += "\n\n## Where the cold start time goes (s)\n\n"
+        text += _table(
+            [
+                "Model",
+                "Engine",
+                "Parallelism",
+                "Startup",
+                "Model load",
+                "Initialization",
+                "Compilation, autotuning & graph capture",
+                "Total",
+            ],
+            cold,
+        )
+    text += "\n\nEach run saves the raw timings.\n\n## Where the restore time goes (s)\n\n"
     text += _table(
         [
             "Model",
@@ -209,12 +211,12 @@ def render(results: list[dict]) -> str:
             "Agent setup / rootfs",
             "CRIU restore",
             "CUDA restore",
-            "Wake / handoff",
+            "Wake",
             "Total",
         ],
         restore,
     )
-    text += "\n\nRestore uses attempt 1, measured through wake/resume completion, before inference. Attempts 2 and 3 remain in the local results. CUDA restore includes multi-GPU reconstruction.\n\n## Observed environment\n\n"
+    text += "\n\nRestore ends at wake/resume completion, before inference. CUDA restore includes multi-GPU reconstruction.\n\n## Observed environment\n\n"
     text += (
         _table(
             [

@@ -58,6 +58,38 @@ class PageCacheTests(unittest.TestCase):
             self.assertEqual(result["resident_pages_after"], 0)
             self.assertEqual(json.loads(output.read_text()), result)
 
+    def test_inventory_measures_logical_sizes_without_cache_operations(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            root = Path(tmp)
+            blob = root / "blob"
+            with blob.open("wb") as stream:
+                stream.truncate(1048576)
+            (root / "model-00001.safetensors").symlink_to(blob)
+            (root / "model-00002.safetensors").write_bytes(b"weights")
+            (root / "config.json").write_text("{}")
+            output = root / "cache-control.json"
+            with (
+                patch.object(page_cache, "DROP_CACHES") as control,
+                patch.object(page_cache.os, "sync") as sync,
+                patch.object(page_cache.os, "posix_fadvise") as advise,
+                patch.object(page_cache, "resident_pages") as residency,
+            ):
+                result = page_cache.prepare(
+                    str(root), output=output, drop_page_cache=False
+                )
+            self.assertTrue(result["success"])
+            self.assertTrue(result["eviction_skipped"])
+            self.assertEqual(result["weights_bytes"], 1048576 + 7)
+            self.assertEqual(len(result["files"]), 2)
+            self.assertEqual(json.loads(output.read_text()), result)
+            control.open.assert_not_called()
+            sync.assert_not_called()
+            advise.assert_not_called()
+            residency.assert_not_called()
+
     def test_permission_failure_stops_before_sync_and_saves_reason(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -131,6 +163,25 @@ class PageCacheTests(unittest.TestCase):
                     "--no-drop-page-cache",
                 ]
             )
+            self.assertFalse(args.detailed_timing)
+            self.assertFalse(cli._benchmark_config(args).detailed_timing)
+            detailed = parser.parse_args(
+                [
+                    command,
+                    "--context",
+                    "test",
+                    "--node",
+                    "test",
+                    "--image",
+                    "test",
+                    "--model-pvc",
+                    "models",
+                    "--work-pvc",
+                    "work",
+                    "--detailed-timing",
+                ]
+            )
+            self.assertTrue(cli._benchmark_config(detailed).detailed_timing)
             self.assertTrue(args.no_drop_page_cache)
             self.assertFalse(cli._benchmark_config(args).drop_page_cache)
         cfg = BenchmarkConfig(
@@ -155,6 +206,11 @@ class PageCacheTests(unittest.TestCase):
                 model=model,
             )
             instrument_pod(pod, cfg, engine, model, "test")
+            inventory = next(
+                c for c in pod["spec"]["initContainers"] if c["name"] == "model-weights"
+            )
+            self.assertFalse(inventory["securityContext"].get("privileged", False))
+            self.assertIn("--no-drop-page-cache", inventory["args"])
             self.assertFalse(
                 any(
                     c["name"] == "drop-page-cache"
