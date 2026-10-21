@@ -122,13 +122,11 @@ fn importer(share: Share) {
     let mut address = 0;
     let lazy = CUipcMem_flags::CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS as u32;
     cu!(cuIpcOpenMemHandle_v2(&mut address, handle, lazy));
-    let backing = cuda::retain(address);
-    let properties = cuda::properties_of(backing);
-    cu!(cuMemRelease(backing));
-    let location = properties.location;
+    cuda::assert_malloc_semantics(address, true, "IPC import");
+    let location = shim::mapped_location(process::pid(), address);
     assert_eq!(
-        location.type_,
-        CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+        location.location_type,
+        CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE as u32
     );
     if let Some(gpu) = exporter_gpu {
         assert_eq!(location.id, gpu);

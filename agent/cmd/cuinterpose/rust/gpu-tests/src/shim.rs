@@ -5,7 +5,9 @@
 
 use crate::process::{self, Child, socket_dir, work_dir};
 use crate::{core_abi, cu, cuda, loader, sys};
-use cuinterpose_protocol::{Manifest, Record, Reply, Request, Response, socket_path};
+use cuinterpose_protocol::{
+    Manifest, MemoryLocation, Record, Reply, Request, Response, socket_path,
+};
 use std::env;
 use std::ffi::{CStr, c_int};
 use std::fs;
@@ -137,6 +139,35 @@ pub fn records(pid: u32) -> Vec<Record> {
         Ok(Reply::Inspection { records }) => records,
         other => panic!("inspect {pid}: {other:?}"),
     }
+}
+
+/// The recorded location of the allocation behind the tracked mapping at `address`.
+/// Converted mallocs and their IPC imports cannot be retained, so tests read their
+/// tracking from the shim's records.
+pub fn mapped_location(pid: u32, address: sys::CUdeviceptr) -> MemoryLocation {
+    let records = records(pid);
+    let mapped = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Mapping {
+                allocation,
+                address: start,
+                ..
+            } if *start == address => Some(*allocation),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no tracked mapping at {address:#x}"));
+    records
+        .into_iter()
+        .find_map(|record| match record {
+            Record::Allocation {
+                allocation,
+                location,
+                ..
+            } if allocation == mapped => Some(location),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no allocation record for the mapping at {address:#x}"))
 }
 
 pub struct Coordinated {
