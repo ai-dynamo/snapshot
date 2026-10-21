@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"google.golang.org/protobuf/encoding/protowire"
+	criustats "github.com/checkpoint-restore/go-criu/v8/stats"
 )
 
 const (
@@ -65,111 +65,50 @@ func ReadDumpStats(checkpointDir string) (DumpStats, error) {
 }
 
 func statsPayload(data []byte) ([]byte, error) {
-	if len(data) < 8 {
+	// CRIU always writes the service magic, then the stats magic, then the
+	// payload length. Checking the length here avoids the panic in go-criu's
+	// readStatisticsFile on a truncated file.
+	const header = 12
+	if len(data) < header {
 		return nil, fmt.Errorf("%s is too short (%d bytes)", statsDumpFilename, len(data))
 	}
-	off := 0
-	magic := binary.LittleEndian.Uint32(data[off : off+4])
-	off += 4
-	if magic == imgServiceMagic {
-		if len(data) < off+8 {
-			return nil, fmt.Errorf("%s truncated after service magic", statsDumpFilename)
-		}
-		magic = binary.LittleEndian.Uint32(data[off : off+4])
-		off += 4
+	service := binary.LittleEndian.Uint32(data[0:4])
+	if service != imgServiceMagic {
+		return nil, fmt.Errorf("%s service magic 0x%08x, want 0x%08x", statsDumpFilename, service, imgServiceMagic)
 	}
+	magic := binary.LittleEndian.Uint32(data[4:8])
 	if magic != statsMagic {
 		return nil, fmt.Errorf("%s magic 0x%08x, want 0x%08x", statsDumpFilename, magic, statsMagic)
 	}
-	if len(data) < off+4 {
-		return nil, fmt.Errorf("%s truncated before payload length", statsDumpFilename)
+	size := binary.LittleEndian.Uint32(data[8:12])
+	if uint64(size) > uint64(len(data)-header) {
+		return nil, fmt.Errorf("%s payload length %d exceeds remaining %d", statsDumpFilename, size, len(data)-header)
 	}
-	size := binary.LittleEndian.Uint32(data[off : off+4])
-	off += 4
-	if uint64(size) > uint64(len(data)-off) {
-		return nil, fmt.Errorf("%s payload length %d exceeds remaining %d", statsDumpFilename, size, len(data)-off)
-	}
-	return data[off : off+int(size)], nil
+	return data[header : header+int(size)], nil
 }
 
-func parseStatsEntry(buf []byte) (DumpStats, error) {
-	var dump []byte
-	for len(buf) > 0 {
-		num, typ, n := protowire.ConsumeTag(buf)
-		if n < 0 {
-			return DumpStats{}, fmt.Errorf("%s has an invalid stats entry tag", statsDumpFilename)
-		}
-		buf = buf[n:]
-		if num == 1 && typ == protowire.BytesType {
-			value, m := protowire.ConsumeBytes(buf)
-			if m < 0 {
-				return DumpStats{}, fmt.Errorf("%s has an invalid dump entry", statsDumpFilename)
-			}
-			buf = buf[m:]
-			dump = append([]byte(nil), value...)
-			continue
-		}
-		m := protowire.ConsumeFieldValue(num, typ, buf)
-		if m < 0 {
-			return DumpStats{}, fmt.Errorf("%s has an invalid stats entry field %d", statsDumpFilename, num)
-		}
-		buf = buf[m:]
+func parseStatsEntry(payload []byte) (DumpStats, error) {
+	entry := &criustats.StatsEntry{}
+	if err := entry.UnmarshalVT(payload); err != nil {
+		return DumpStats{}, fmt.Errorf("unmarshal %s: %w", statsDumpFilename, err)
 	}
+	dump := entry.GetDump()
 	if dump == nil {
 		return DumpStats{}, fmt.Errorf("%s has no dump entry", statsDumpFilename)
 	}
-	return parseDumpStats(dump)
-}
-
-func parseDumpStats(buf []byte) (DumpStats, error) {
-	var stats DumpStats
-	var sawTiming bool
-	for len(buf) > 0 {
-		num, typ, n := protowire.ConsumeTag(buf)
-		if n < 0 {
-			return DumpStats{}, fmt.Errorf("%s has an invalid dump stats tag", statsDumpFilename)
-		}
-		buf = buf[n:]
-		if typ != protowire.VarintType {
-			m := protowire.ConsumeFieldValue(num, typ, buf)
-			if m < 0 {
-				return DumpStats{}, fmt.Errorf("%s has an invalid dump stats field %d", statsDumpFilename, num)
-			}
-			buf = buf[m:]
-			continue
-		}
-		value, m := protowire.ConsumeVarint(buf)
-		if m < 0 {
-			return DumpStats{}, fmt.Errorf("%s has an invalid dump stats varint %d", statsDumpFilename, num)
-		}
-		buf = buf[m:]
-		switch num {
-		case 1:
-			stats.Freezing = usecDuration(value)
-			sawTiming = true
-		case 2:
-			stats.Frozen = usecDuration(value)
-			sawTiming = true
-		case 3:
-			stats.MemDump = usecDuration(value)
-			sawTiming = true
-		case 4:
-			stats.MemWrite = usecDuration(value)
-			sawTiming = true
-		case 5:
-			stats.PagesScanned = value
-		case 6:
-			stats.PagesSkippedParent = value
-		case 7:
-			stats.PagesWritten = value
-		case 9:
-			stats.PagesLazy = value
-		}
-	}
-	if !sawTiming {
+	if dump.FreezingTime == nil && dump.FrozenTime == nil && dump.MemdumpTime == nil && dump.MemwriteTime == nil {
 		return DumpStats{}, fmt.Errorf("%s dump entry has no timing fields", statsDumpFilename)
 	}
-	return stats, nil
+	return DumpStats{
+		Freezing:           usecDuration(uint64(dump.GetFreezingTime())),
+		Frozen:             usecDuration(uint64(dump.GetFrozenTime())),
+		MemDump:            usecDuration(uint64(dump.GetMemdumpTime())),
+		MemWrite:           usecDuration(uint64(dump.GetMemwriteTime())),
+		PagesScanned:       dump.GetPagesScanned(),
+		PagesSkippedParent: dump.GetPagesSkippedParent(),
+		PagesWritten:       dump.GetPagesWritten(),
+		PagesLazy:          dump.GetPagesLazy(),
+	}, nil
 }
 
 func usecDuration(usec uint64) time.Duration {

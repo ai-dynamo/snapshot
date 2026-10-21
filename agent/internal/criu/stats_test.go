@@ -46,18 +46,14 @@ func TestReadDumpStatsReadsServiceHeader(t *testing.T) {
 	}
 }
 
-func TestReadDumpStatsAcceptsBareStatsMagic(t *testing.T) {
+func TestReadDumpStatsRejectsBareStatsMagic(t *testing.T) {
 	dir := t.TempDir()
 	payload := statsEntry(dumpStatsMessage(dumpStatsFixture{freezingUsec: 1, memwriteUsec: 2}))
 	if err := os.WriteFile(filepath.Join(dir, statsDumpFilename), frameStats(false, payload), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := ReadDumpStats(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.MemWrite != 2*time.Microsecond {
-		t.Fatalf("memwrite = %s", stats.MemWrite)
+	if _, err := ReadDumpStats(dir); err == nil {
+		t.Fatal("expected bare stats magic to be rejected")
 	}
 }
 
@@ -88,44 +84,15 @@ func TestDirectoryBytesSkipsSymlinks(t *testing.T) {
 	}
 }
 
-func TestThinGrowthSamplesKeepsBothEnds(t *testing.T) {
-	samples := make([]ImageGrowthSample, 5)
-	for i := range samples {
-		samples[i] = ImageGrowthSample{Offset: time.Duration(i) * time.Second, Bytes: int64(i)}
-	}
-
-	got := thinGrowthSamples(samples)
-
-	if len(got) >= len(samples) {
-		t.Fatalf("len = %d, want fewer than %d", len(got), len(samples))
-	}
-	if got[0] != samples[0] || got[len(got)-1] != samples[len(samples)-1] {
-		t.Fatalf("ends = %+v, want first %+v and last %+v", got, samples[0], samples[len(samples)-1])
-	}
-}
-
-func TestSampleImageGrowthStops(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "pages-1.img"), []byte("0123"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	samples := sampleImageGrowth(dir)()
-	if len(samples) == 0 {
-		t.Fatal("expected at least one sample")
-	}
-	if samples[len(samples)-1].Bytes != 4 {
-		t.Fatalf("last sample = %+v", samples[len(samples)-1])
-	}
-}
-
 type dumpStatsFixture struct {
-	freezingUsec uint64
-	frozenUsec   uint64
-	memdumpUsec  uint64
-	memwriteUsec uint64
-	pagesScanned uint64
-	pagesWritten uint64
-	pagesLazy    uint64
+	freezingUsec       uint64
+	frozenUsec         uint64
+	memdumpUsec        uint64
+	memwriteUsec       uint64
+	pagesScanned       uint64
+	pagesSkippedParent uint64
+	pagesWritten       uint64
+	pagesLazy          uint64
 }
 
 func dumpStatsMessage(fix dumpStatsFixture) []byte {
@@ -135,6 +102,7 @@ func dumpStatsMessage(fix dumpStatsFixture) []byte {
 	buf = appendVarintField(buf, 3, fix.memdumpUsec)
 	buf = appendVarintField(buf, 4, fix.memwriteUsec)
 	buf = appendVarintField(buf, 5, fix.pagesScanned)
+	buf = appendVarintField(buf, 6, fix.pagesSkippedParent)
 	buf = appendVarintField(buf, 7, fix.pagesWritten)
 	buf = appendVarintField(buf, 9, fix.pagesLazy)
 	return buf

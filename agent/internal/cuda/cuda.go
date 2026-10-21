@@ -54,6 +54,9 @@ type CheckpointPhaseTimings struct {
 	LockDuration    time.Duration
 	CopyDuration    time.Duration
 	JobFileDuration time.Duration
+	// PhasesMeasured is set only by the cuda-checkpoint-helper path. PageBroker
+	// CustomStorage records TotalDuration and leaves the split unset.
+	PhasesMeasured bool
 }
 
 type RestorePhaseTimings struct {
@@ -514,7 +517,7 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 // then persists the launch-job state needed to restore them.
 // On failure, the caller is expected to fail the operation and terminate the workload.
 func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpointDir string, log logr.Logger) (CheckpointPhaseTimings, error) {
-	var timings CheckpointPhaseTimings
+	timings := CheckpointPhaseTimings{PhasesMeasured: true}
 
 	start := time.Now()
 	lockStart := time.Now()

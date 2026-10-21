@@ -509,6 +509,7 @@ func TestCheckpointBoundSendsArtifactTarget(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "stop after target validation")
 	waitPageBrokerTest(t, server)
+}
 
 func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 	imageBytes := int64(7_000_000_000)
@@ -516,6 +517,7 @@ func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 		Wall:         7289 * time.Millisecond,
 		GPUDeviceMap: 36 * time.Millisecond,
 		Timings: &checkpointPhaseTimings{
+			CUDAPhasesMeasured:     true,
 			CUDALockDuration:       100 * time.Millisecond,
 			CUDACopyDuration:       1500 * time.Millisecond,
 			CUDAJobFileDuration:    65 * time.Millisecond,
@@ -528,11 +530,7 @@ func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 				MemWrite:     4500 * time.Millisecond,
 				PagesWritten: 100,
 			},
-			CRIUImageBytes: &imageBytes,
-			CRIUImageGrowth: []criu.ImageGrowthSample{{
-				Offset: 200 * time.Millisecond,
-				Bytes:  1_000_000,
-			}},
+			CRIUImageBytes:         &imageBytes,
 			OverlayCaptureDuration: 343 * time.Millisecond,
 			OverlayDiffBytes:       49 << 20,
 			AccountingDuration:     20 * time.Millisecond,
@@ -554,12 +552,24 @@ func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 	assert.Equal(t, (400 * time.Millisecond).String(), criuFields["memdump"])
 	assert.Equal(t, uint64(100*4096), criuFields["pages_written_bytes"])
 	assert.Equal(t, imageBytes, criuFields["image_bytes"])
-	growth := criuFields["image_growth"].([]map[string]any)
-	require.Len(t, growth, 1)
-	assert.Equal(t, int64(1_000_000), growth[0]["bytes"])
+	assert.NotContains(t, criuFields, "image_growth")
 
 	overlay := summary["overlay"].(map[string]any)
 	assert.Equal(t, int64(49<<20), overlay["diff_bytes"])
+}
+
+func TestCheckpointTimingSummaryOmitsUnmeasuredCUDA(t *testing.T) {
+	summary := checkpointTimingSummary(checkpointSummaryInput{
+		Wall: 2 * time.Second,
+		Timings: &checkpointPhaseTimings{
+			CUDACheckpointDuration: 800 * time.Millisecond,
+			CRIUDumpDuration:       time.Second,
+		},
+	})
+
+	assert.NotContains(t, summary, "cuda")
+	phases := summary["phases"].(map[string]string)
+	assert.Equal(t, (800 * time.Millisecond).String(), phases["cuda_checkpoint"])
 }
 
 func TestCheckpointNeedsSourceKill(t *testing.T) {

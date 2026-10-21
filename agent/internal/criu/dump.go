@@ -96,13 +96,10 @@ func BuildDumpOptions(
 
 // DumpExecution is the agent's view of one CRIU dump.
 //
-// Duration is the wall time of the dump RPC. ImageGrowth samples the image
-// directory while that RPC runs, so a stall (size flat) is distinguishable
-// from a steady write. CRIU's own memdump/memwrite timers are read afterwards
-// from stats-dump; see DumpStats.
+// Duration is the wall time of the dump RPC. CRIU's own memdump/memwrite
+// timers are read afterwards from stats-dump; see DumpStats.
 type DumpExecution struct {
-	Duration    time.Duration
-	ImageGrowth []ImageGrowthSample
+	Duration time.Duration
 }
 
 // ExecuteDump opens the image directory FD, runs the CRIU dump, and cleans up.
@@ -128,18 +125,8 @@ func ExecuteDump(
 	}
 
 	criuDumpStart := time.Now()
-	stopGrowth := sampleImageGrowth(checkpointDir)
-	defer func() {
-		if stopGrowth != nil {
-			stopGrowth()
-		}
-	}()
 	dumpErr := criuClient.Dump(criuOpts, nil)
-	// The sampler's last directory walk happens after the RPC. Reading the
-	// clock first keeps that walk out of the reported dump duration.
 	criuDumpDuration := time.Since(criuDumpStart)
-	growth := stopGrowth()
-	stopGrowth = nil
 	if dumpErr != nil {
 		dumpLogPath := filepath.Join(checkpointDir, dumpLogFilename)
 		log.Error(dumpErr, "CRIU dump failed",
@@ -152,8 +139,8 @@ func ExecuteDump(
 		return DumpExecution{}, fmt.Errorf("CRIU dump failed: %w", dumpErr)
 	}
 
-	log.Info("CRIU dump completed", "duration", criuDumpDuration, "growth_samples", len(growth))
-	return DumpExecution{Duration: criuDumpDuration, ImageGrowth: growth}, nil
+	log.Info("CRIU dump completed", "duration", criuDumpDuration)
+	return DumpExecution{Duration: criuDumpDuration}, nil
 }
 
 func readLogTail(path string) string {

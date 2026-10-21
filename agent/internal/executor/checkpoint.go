@@ -81,7 +81,7 @@ type checkpointPhaseTimings struct {
 	CRIUStats              *criu.DumpStats
 	CRIUStatsError         string
 	CRIUImageBytes         *int64
-	CRIUImageGrowth        []criu.ImageGrowthSample
+	CUDAPhasesMeasured     bool
 	OverlayCaptureDuration time.Duration
 	OverlayDiffBytes       int64
 	AccountingDuration     time.Duration
@@ -421,16 +421,18 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		return nil, err
 	}
 	timings.CUDACheckpointDuration = gpuTimings.TotalDuration
-	timings.CUDALockDuration = gpuTimings.LockDuration
-	timings.CUDACopyDuration = gpuTimings.CopyDuration
-	timings.CUDAJobFileDuration = gpuTimings.JobFileDuration
+	if gpuTimings.PhasesMeasured {
+		timings.CUDAPhasesMeasured = true
+		timings.CUDALockDuration = gpuTimings.LockDuration
+		timings.CUDACopyDuration = gpuTimings.CopyDuration
+		timings.CUDAJobFileDuration = gpuTimings.JobFileDuration
+	}
 
 	dump, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 	if err != nil {
 		return nil, err
 	}
 	timings.CRIUDumpDuration = dump.Duration
-	timings.CRIUImageGrowth = dump.ImageGrowth
 
 	// Stats and the final image size are diagnostic. A failure here must not
 	// fail a dump that already succeeded. The walk is its own phase so it
@@ -597,10 +599,10 @@ type checkpointSummaryInput struct {
 
 // checkpointTimingSummary is the "Checkpoint timing summary" payload.
 //
-// phases are additive pieces of Wall. cuda and criu are breakdowns of
-// cuda_checkpoint and criu_dump respectively: criu's timers overlap (see
-// DumpStats) and must not be added to criu_dump. criu.image_growth is the
-// image-directory size sampled during the dump RPC.
+// phases are additive pieces of Wall. cuda, when present, splits
+// cuda_checkpoint for the helper path. criu's timers overlap (see DumpStats)
+// and must not be added to criu_dump. PageBroker CustomStorage leaves cuda
+// out because it does not measure lock, copy, and job file.
 func checkpointTimingSummary(in checkpointSummaryInput) map[string]any {
 	timings := in.Timings
 	unaccounted := remainingDuration(in.Wall,
@@ -622,15 +624,17 @@ func checkpointTimingSummary(in checkpointSummaryInput) map[string]any {
 			"remove_old_version_and_switch": in.Switch.String(),
 			"unaccounted":                   unaccounted.String(),
 		},
-		"cuda": map[string]string{
-			"lock":     timings.CUDALockDuration.String(),
-			"copy":     timings.CUDACopyDuration.String(),
-			"job_file": timings.CUDAJobFileDuration.String(),
-		},
 		"criu": criuSummary(timings),
 		"overlay": map[string]any{
 			"diff_bytes": timings.OverlayDiffBytes,
 		},
+	}
+	if timings.CUDAPhasesMeasured {
+		summary["cuda"] = map[string]string{
+			"lock":     timings.CUDALockDuration.String(),
+			"copy":     timings.CUDACopyDuration.String(),
+			"job_file": timings.CUDAJobFileDuration.String(),
+		}
 	}
 	if !in.StartedAt.IsZero() {
 		summary["started_to_complete"] = time.Since(in.StartedAt).String()
@@ -657,16 +661,6 @@ func criuSummary(timings *checkpointPhaseTimings) map[string]any {
 	}
 	if timings.CRIUImageBytes != nil {
 		criuFields["image_bytes"] = *timings.CRIUImageBytes
-	}
-	if len(timings.CRIUImageGrowth) > 0 {
-		growth := make([]map[string]any, 0, len(timings.CRIUImageGrowth))
-		for _, sample := range timings.CRIUImageGrowth {
-			growth = append(growth, map[string]any{
-				"offset": sample.Offset.String(),
-				"bytes":  sample.Bytes,
-			})
-		}
-		criuFields["image_growth"] = growth
 	}
 	return criuFields
 }

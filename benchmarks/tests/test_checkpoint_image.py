@@ -69,28 +69,28 @@ def test_parse_inventory_names_non_page_bytes() -> None:
     assert parsed.dumping_finished_seconds == 5.055
 
 
-def test_parse_inventory_keeps_finish_after_pagemap_flood() -> None:
-    pagemaps = "\n".join(
-        f"./containers/main/dump.log:(00.{index:06d}) Pagemap generated: 10 pages (0 lazy) 3 holes"
-        for index in range(500)
+def test_awk_keeps_finish_after_pagemap_flood(tmp_path: Path) -> None:
+    dump_log = tmp_path / "dump.log"
+    lines = ["(00.100000) Dumping pages (type: 1 pid: 100)"]
+    lines.extend(
+        f"(00.{index:06d}) Pagemap generated: 10 pages (0 lazy) 3 holes" for index in range(500)
     )
-    threads = "\n".join(
-        f"./containers/main/dump.log:(03.{index:06d}) Dumping core for thread (pid: {index})"
-        for index in range(800)
+    lines.extend(
+        f"(03.{index:06d}) Dumping core for thread (pid: {index})" for index in range(800)
     )
-    output = f"""
-## files
-4096	8	containers/main/pages-1.img
-## dump-log
-./containers/main/dump.log:(00.100000) Dumping pages (type: 1 pid: 100)
-{pagemaps}
-{threads}
-./containers/main/dump.log:(05.200000) Dumping finished successfully
-## summary
-pagemap count=500 first=00.000000 last=00.000499 pages=5000 holes=1500
-threads count=800 first=03.000000 last=03.000799
-"""
-    parsed = image.parse_inventory(output)
+    lines.append("(05.200000) Dumping finished successfully")
+    dump_log.write_text("\n".join(lines) + "\n")
+
+    completed = subprocess.run(
+        ["awk", image._DUMP_LOG_AWK, str(dump_log)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    parsed = image.parse_inventory(
+        "## files\n4096\t8\tcontainers/main/pages-1.img\n## dump-log\n" + completed.stdout
+    )
 
     assert parsed.parse_warnings == []
     assert parsed.dumping_finished_seconds == 5.2
@@ -136,6 +136,10 @@ def test_report_includes_image_categories() -> None:
     assert "5.055" in text
     assert "Unfreezing tasks" in text
     assert "sparse" in text
+    sparse_line = next(line for line in text.splitlines() if line.startswith("Pages apparent"))
+    assert "Pagemap holes" not in sparse_line
+    assert "parent image" in text
+    assert "pages_skipped_parent" in text
 
 
 def test_inventory_command_lists_allocated_blocks_and_summarizes() -> None:

@@ -117,9 +117,15 @@ def _image_section(results: list[dict]) -> list[str]:
         lines.append(
             f"Pages apparent {_fmt_bytes(image.get('pages_bytes'))}, "
             f"allocated {_fmt_bytes(image.get('pages_allocated_bytes'))}, "
-            f"sparse {_fmt_bytes(image.get('pages_sparse_bytes'))}. "
+            f"sparse {_fmt_bytes(image.get('pages_sparse_bytes'))}."
+        )
+        lines.append("")
+        lines.append(
             f"Pagemap holes {image.get('pagemap_holes', 0)} "
-            f"({_fmt_bytes(image.get('pagemap_hole_bytes'))})."
+            f"({_fmt_bytes(image.get('pagemap_hole_bytes'))}) are pages CRIU "
+            "skipped because a parent image already holds them. That count is "
+            "`pages_skipped_parent` and is zero without `--prev-images-dir`. "
+            "It is not file sparseness."
         )
         lines.append("")
         large = image.get("files") or []
@@ -155,6 +161,80 @@ def _dump_marks(image: dict) -> list[tuple[str, str]]:
         ("Writing stats", _fmt(image.get("writing_stats_seconds"))),
         ("Dumping finished", _fmt(image.get("dumping_finished_seconds"))),
     ]
+
+
+def _capture_sections(results: list[dict]) -> list[str]:
+    """Capture breakdown. Skips results that have no checkpoint agent log."""
+    lines = [
+        "## Where the capture time goes",
+        "",
+        "Wall, CUDA, CRIU, and overlay come from the capture-node agent's "
+        "Checkpoint timing summary. CUDA lock is the device freeze; CUDA copy "
+        "moves device state into host memory before CRIU runs. Those CUDA "
+        "columns are blank when the capture used PageBroker CustomStorage, "
+        "which records the CUDA total and does not measure the split. CRIU "
+        "memdump is CRIU reading the frozen process; CRIU memwrite is CRIU "
+        "writing pages. Those two CRIU timers overlap the CRIU wall and are "
+        "not added to it. Checkpoint (API) is the one-second Kubernetes Ready "
+        "timestamp and is coarser than Wall.",
+        "",
+        "| Model | Wall (s) | CUDA lock | CUDA copy | CRIU wall | CRIU freeze | "
+        "CRIU memdump | CRIU memwrite | Overlay | Checkpoint (API) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for result in results:
+        capture = result.get("checkpoint_agent_log") or {}
+        if not capture:
+            continue
+        model = result.get("model") or {}
+        checkpoint = result.get("checkpoint") or {}
+        phases = capture.get("phases") or {}
+        lines.append(
+            "| {label} | {wall} | {lock} | {copy} | {criu} | {freeze} | {memdump} | "
+            "{memwrite} | {overlay} | {api} |".format(
+                label=model.get("label", "-"),
+                wall=_fmt(capture.get("duration")),
+                lock=_fmt(capture.get("cuda_lock")),
+                copy=_fmt(capture.get("cuda_copy")),
+                criu=_fmt(phases.get("criu_dump")),
+                freeze=_fmt(capture.get("criu_freezing")),
+                memdump=_fmt(capture.get("criu_memdump")),
+                memwrite=_fmt(capture.get("criu_memwrite")),
+                overlay=_fmt(phases.get("overlay_capture")),
+                api=_fmt(checkpoint.get("checkpoint_seconds")),
+            )
+        )
+    lines.append("")
+    lines.extend(
+        [
+            "## How the CRIU image was written",
+            "",
+            "Memwrite GB/s divides CRIU's written page bytes (`pages_written`) "
+            "by CRIU's memwrite timer. The CRIU image column is the apparent "
+            "size of the image directory. That directory also holds metadata "
+            "and pages `pages_written` does not count, so it is not turned "
+            "into a rate against the dump wall.",
+            "",
+            "| Model | Pages written | CRIU image | Overlay diff | Memwrite GB/s |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for result in results:
+        capture = result.get("checkpoint_agent_log") or {}
+        if not capture:
+            continue
+        model = result.get("model") or {}
+        lines.append(
+            "| {label} | {pages} | {image} | {overlay} | {memwrite_rate} |".format(
+                label=model.get("label", "-"),
+                pages=_fmt_bytes(capture.get("criu_pages_written_bytes")),
+                image=_fmt_bytes(capture.get("criu_image_bytes")),
+                overlay=_fmt_bytes(capture.get("overlay_diff_bytes")),
+                memwrite_rate=_fmt(capture.get("memwrite_gigabytes_per_second")),
+            )
+        )
+    lines.append("")
+    return lines
 
 
 def render(results: list[dict]) -> str:
@@ -226,79 +306,8 @@ def render(results: list[dict]) -> str:
         )
     lines.append("")
 
-    lines.append("## Where the capture time goes")
-    lines.append("")
-    lines.append(
-        "Wall, CUDA, CRIU, and overlay come from the capture-node agent's "
-        "Checkpoint timing summary. CUDA lock is the device freeze; CUDA copy "
-        "moves device state into host memory before CRIU runs. CRIU memdump is "
-        "CRIU reading the frozen process; CRIU memwrite is CRIU writing pages. "
-        "Those two CRIU timers overlap the CRIU wall and are not added to it. "
-        "Checkpoint (API) is the one-second Kubernetes Ready timestamp and is "
-        "coarser than Wall."
-    )
-    lines.append("")
-    lines.append(
-        "| Model | Wall (s) | CUDA lock | CUDA copy | CRIU wall | CRIU freeze | "
-        "CRIU memdump | CRIU memwrite | Overlay | Checkpoint (API) |"
-    )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-    for r in results:
-        model = r.get("model", {})
-        checkpoint = r.get("checkpoint") or {}
-        capture = r.get("checkpoint_agent_log") or {}
-        phases = capture.get("phases") or {}
-        lines.append(
-            "| {label} | {wall} | {lock} | {copy} | {criu} | {freeze} | {memdump} | "
-            "{memwrite} | {overlay} | {api} |".format(
-                label=model.get("label", "-"),
-                wall=_fmt(capture.get("duration")),
-                lock=_fmt(capture.get("cuda_lock")),
-                copy=_fmt(capture.get("cuda_copy")),
-                criu=_fmt(phases.get("criu_dump")),
-                freeze=_fmt(capture.get("criu_freezing")),
-                memdump=_fmt(capture.get("criu_memdump")),
-                memwrite=_fmt(capture.get("criu_memwrite")),
-                overlay=_fmt(phases.get("overlay_capture")),
-                api=_fmt(checkpoint.get("checkpoint_seconds")),
-            )
-        )
-    lines.append("")
-
-    lines.append("## How the CRIU image was written")
-    lines.append("")
-    lines.append(
-        "Memwrite GB/s divides CRIU's written page bytes by CRIU's memwrite "
-        "timer. Image GB/s divides the whole CRIU image by the agent's CRIU "
-        "wall, which is the lower number because that wall also includes "
-        "freeze and memory collection. Midpoint fraction is how much of the "
-        "final image was already on disk halfway through the dump: near 0.5 "
-        "is a steady write, near 0 means the bytes arrived late. Max stall is "
-        "the longest stretch where the image size did not grow."
-    )
-    lines.append("")
-    lines.append(
-        "| Model | Pages written | CRIU image | Overlay diff | Memwrite GB/s | "
-        "Image GB/s | Midpoint fraction | Max stall (s) |"
-    )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
-    for r in results:
-        model = r.get("model", {})
-        capture = r.get("checkpoint_agent_log") or {}
-        lines.append(
-            "| {label} | {pages} | {image} | {overlay} | {memwrite_rate} | "
-            "{image_rate} | {mid} | {stall} |".format(
-                label=model.get("label", "-"),
-                pages=_fmt_bytes(capture.get("criu_pages_written_bytes")),
-                image=_fmt_bytes(capture.get("criu_image_bytes")),
-                overlay=_fmt_bytes(capture.get("overlay_diff_bytes")),
-                memwrite_rate=_fmt(capture.get("memwrite_gigabytes_per_second")),
-                image_rate=_fmt(capture.get("criu_image_gigabytes_per_second")),
-                mid=_fmt(capture.get("image_growth_midpoint_fraction")),
-                stall=_fmt(capture.get("image_growth_max_stall_seconds")),
-            )
-        )
-    lines.append("")
+    if any(r.get("checkpoint_agent_log") for r in results):
+        lines.extend(_capture_sections(results))
 
     if any(r.get("checkpoint_image") for r in results):
         lines.extend(_image_section(results))

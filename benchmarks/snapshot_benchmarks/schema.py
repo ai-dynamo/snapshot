@@ -110,28 +110,18 @@ class ColdStartTiming:
 
 
 @dataclass
-class ImageGrowthSample:
-    """One stat of the CRIU image directory while the dump RPC was running."""
-
-    offset_seconds: float
-    bytes: int
-
-
-@dataclass
 class CheckpointAgentLog:
     """Capture breakdown from the agent's ``Checkpoint timing summary``.
 
     ``phases`` are the additive pieces of ``duration``. ``cuda_*`` splits
     ``phases["cuda_checkpoint"]`` into lock, device-to-host copy, and job-file
-    refresh. ``criu_memdump`` and ``criu_memwrite`` are CRIU's own timers from
-    ``stats-dump``. They overlap ``phases["criu_dump"]`` and are not added to
-    it: memdump is time spent reading the frozen process, memwrite is time
-    spent writing pages. CRIU can count the last write interval twice, so use
-    the pair to see which side dominates rather than as a partition.
-
-    ``image_growth`` is the agent's own sampling of image-directory size during
-    the dump. A long stall with a flat size means the time is not a steady
-    disk write.
+    refresh when the helper path measured them. PageBroker CustomStorage leaves
+    those fields unset. ``criu_memdump`` and ``criu_memwrite`` are CRIU's own
+    timers from ``stats-dump``. They overlap ``phases["criu_dump"]`` and are
+    not added to it: memdump is time spent reading the frozen process,
+    memwrite is time spent writing pages. CRIU can count the last write
+    interval twice, so use the pair to see which side dominates rather than
+    as a partition.
     """
 
     log_line_found: bool = False
@@ -154,66 +144,20 @@ class CheckpointAgentLog:
     criu_pages_written_bytes: int | None = None
     criu_pages_scanned: int | None = None
     criu_image_bytes: int | None = None
-    image_growth: list[ImageGrowthSample] = field(default_factory=list)
     overlay_diff_bytes: int | None = None
 
     @property
     def memwrite_gigabytes_per_second(self) -> float | None:
-        """Page payload divided by CRIU's memwrite timer."""
+        """Page payload divided by CRIU's memwrite timer.
+
+        This uses ``pages_written``, not the apparent size of the image
+        directory. The directory also holds metadata and pages that
+        ``pages_written`` does not count, so dividing it by the dump wall
+        overstates the write rate.
+        """
         if not self.criu_pages_written_bytes or not self.criu_memwrite:
             return None
         return self.criu_pages_written_bytes / self.criu_memwrite / 1e9
-
-    @property
-    def criu_image_gigabytes_per_second(self) -> float | None:
-        """Whole CRIU image divided by the agent's criu_dump wall time."""
-        criu_dump = self.phases.get("criu_dump")
-        if not self.criu_image_bytes or not criu_dump:
-            return None
-        return self.criu_image_bytes / criu_dump / 1e9
-
-    @property
-    def image_growth_max_stall_seconds(self) -> float | None:
-        return _growth_max_stall(self.image_growth)
-
-    @property
-    def image_growth_midpoint_fraction(self) -> float | None:
-        """Share of the final image present at the midpoint of the dump.
-
-        Near 0.5 is a steady write. Near 0 means the bytes arrived late.
-        """
-        return _growth_midpoint_fraction(self.image_growth)
-
-
-def _growth_max_stall(samples: list[ImageGrowthSample]) -> float | None:
-    if len(samples) < 2:
-        return None
-    ordered = sorted(samples, key=lambda sample: sample.offset_seconds)
-    best = 0.0
-    running = 0.0
-    for previous, current in zip(ordered, ordered[1:]):
-        gap = current.offset_seconds - previous.offset_seconds
-        if gap < 0:
-            continue
-        if current.bytes <= previous.bytes:
-            running += gap
-            if running > best:
-                best = running
-        else:
-            running = 0.0
-    return best
-
-
-def _growth_midpoint_fraction(samples: list[ImageGrowthSample]) -> float | None:
-    if len(samples) < 2:
-        return None
-    ordered = sorted(samples, key=lambda sample: sample.offset_seconds)
-    final = ordered[-1]
-    if final.bytes <= 0 or final.offset_seconds <= 0:
-        return None
-    half = final.offset_seconds / 2
-    closest = min(ordered, key=lambda sample: abs(sample.offset_seconds - half))
-    return closest.bytes / final.bytes
 
 
 @dataclass
@@ -375,7 +319,7 @@ class CheckpointImage:
 
     Collected by listing the artifact before the benchmark deletes it. The
     category totals name bytes that CRIU's pages_written counter does not.
-    dump.log offsets share CRIU's clock with the image-growth samples.
+    dump.log offsets are CRIU's own log clock.
     """
 
     files: list[ArtifactFile] = field(default_factory=list)
@@ -404,7 +348,11 @@ class CheckpointImage:
 
     @property
     def pages_sparse_bytes(self) -> int | None:
-        """Apparent page-image size minus allocated size. Holes live here."""
+        """Apparent page-image size minus allocated size.
+
+        This is file sparseness (``st_size`` minus ``st_blocks * 512``). It is
+        not CRIU's parent-image pagemap hole count.
+        """
         allocated = self.pages_allocated_bytes
         if allocated is None:
             return None
@@ -412,7 +360,11 @@ class CheckpointImage:
 
     @property
     def pagemap_hole_bytes(self) -> int | None:
-        """CRIU-reported holes, in bytes. None when no pagemap line was read."""
+        """Pages skipped because a parent image already holds them.
+
+        The count equals ``pages_skipped_parent`` and is zero without
+        ``--prev-images-dir``. None when no pagemap summary was read.
+        """
         if self.pagemap_count == 0:
             return None
         return self.pagemap_holes * 4096
@@ -427,9 +379,7 @@ class CheckpointImage:
 
     @property
     def last_pagemap_seconds(self) -> float | None:
-        if self.pagemap_last_seconds is not None:
-            return self.pagemap_last_seconds
-        return _last_event(self.dump_log, "Pagemap generated:")
+        return self.pagemap_last_seconds
 
     @property
     def first_dumping_core_seconds(self) -> float | None:

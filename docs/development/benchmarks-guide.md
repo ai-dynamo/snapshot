@@ -113,36 +113,38 @@ split is `checkpoint_agent_log`, parsed from the capture-node agent's
 
 - `duration` — agent wall time for the whole capture
 - `phases.cuda_checkpoint` — CUDA lock + device-to-host copy + job file
-- `cuda_lock`, `cuda_copy`, `cuda_job_file` — that CUDA total, split
+- `cuda_lock`, `cuda_copy`, `cuda_job_file` — that CUDA total, split. Absent
+  when PageBroker CustomStorage captured the GPU: that path records
+  `phases.cuda_checkpoint` and does not measure lock, copy, and job file
 - `phases.criu_dump` — CRIU dump RPC wall time, including the page write
 - `criu_freezing`, `criu_memdump`, `criu_memwrite` — CRIU's own timers.
   Memdump is reading the frozen process. Memwrite is writing pages. They
   overlap the CRIU wall and are not added to it; CRIU can count the last
   write interval twice, so use them to see which side dominates
 - `criu_pages_written_bytes` and `criu_image_bytes` — page payload versus
-  the whole CRIU image, with `memwrite_gigabytes_per_second` and
-  `criu_image_gigabytes_per_second`
-- `image_growth` — image-directory size sampled every 200ms during the dump.
-  `image_growth_max_stall_seconds` is the longest stretch where the size did
-  not grow. `image_growth_midpoint_fraction` near 0.5 is a steady write;
-  near 0 means the bytes arrived late
+  the whole CRIU image. `memwrite_gigabytes_per_second` divides the page
+  payload by CRIU's memwrite timer. The image directory also holds other
+  bytes, so it is not turned into a rate
 - `phases.overlay_capture` and `overlay_diff_bytes` — writable-layer tar
 
 `report` prints this as **Where the capture time goes** and **How the CRIU
-image was written**. An agent built before this split still produces phase
-totals; the result then warns that the cuda/criu breakdown is absent.
+image was written** when a result has `checkpoint_agent_log`. An agent built
+before this split still produces phase totals; the result then warns that
+the criu memwrite split is absent.
 
 Before the run deletes the artifact, it also lists every file under that
 content directory and reads `dump.log`. `checkpoint_image.categories` sums
 those files by kind (`pages`, `core`, `mm`, and so on). Each total has an
 apparent size (`st_size`, holes included) and an allocated size
-(`st_blocks * 512`). `pages_sparse_bytes` is the difference for page images.
-`pagemap_holes` is CRIU's own hole count from every `Pagemap generated` line.
-A large non-`pages` category is the rest of the image. The finish-path
-offsets (`first_dumping_core_seconds`, the thread-core span,
+(`st_blocks * 512`). `pages_sparse_bytes` is that difference for page images:
+bytes the filesystem did not allocate. `pagemap_holes` is a different number.
+It counts pages CRIU skipped because a parent image already holds them, the
+same count as `pages_skipped_parent`, and it is zero without
+`--prev-images-dir`. A large non-`pages` category is the rest of the image.
+The finish-path offsets (`first_dumping_core_seconds`, the thread-core span,
 `unfreezing_seconds`, `writing_stats_seconds`, `dumping_finished_seconds`)
-are CRIU's own clock, the same clock as `image_growth`. Pagemap and
-per-thread lines are summarized so `Dumping finished` is not dropped.
+are CRIU's own log clock. Pagemap and per-thread lines are summarized in the
+inventory command so `Dumping finished` is not dropped.
 
 A single-model baseline on the same hardware you care about:
 

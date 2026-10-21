@@ -5,10 +5,10 @@
 
 The agent's pages_written counter is only private anonymous pages. Listing
 every file names the rest of the image, and `st_blocks` separates apparent
-size (which counts sparse holes) from allocated size. dump.log markers place
-CRIU's own clock next to the image-growth samples. Pagemap and per-thread
-core lines are summarized rather than stored: a vLLM dump emits hundreds of
-each, and a fixed cap on those lines used to drop "Dumping finished".
+size (which counts sparse holes) from allocated size. dump.log markers are
+CRIU's own log clock. Pagemap and per-thread core lines are summarized by
+awk rather than stored: a vLLM dump emits hundreds of each, and a fixed cap
+on those lines used to drop "Dumping finished".
 """
 
 from __future__ import annotations
@@ -89,9 +89,6 @@ END {
 """
 
 _DUMP_LINE = re.compile(r"^(?P<path>.*?):\((?P<offset>\d+(?:\.\d+)?)\)\s*(?P<message>.*)$")
-_PAGEMAP_LINE = re.compile(
-    r"Pagemap generated: (?P<pages>\d+) pages \((?P<lazy>\d+) lazy\) (?P<holes>\d+) holes"
-)
 _PAGEMAP_SUMMARY = re.compile(
     r"^pagemap count=(?P<count>\d+) first=(?P<first>[0-9.]*) last=(?P<last>[0-9.]*) "
     r"pages=(?P<pages>\d+) holes=(?P<holes>\d+)$"
@@ -210,36 +207,14 @@ def _parse_dump_log(text: str, parsed: CheckpointImage) -> list[DumpLogEvent]:
         match = _DUMP_LINE.match(line.strip())
         if match is None:
             continue
-        event = DumpLogEvent(
-            offset_seconds=float(match.group("offset")),
-            message=match.group("message"),
-            path=match.group("path").removeprefix("./"),
+        events.append(
+            DumpLogEvent(
+                offset_seconds=float(match.group("offset")),
+                message=match.group("message"),
+                path=match.group("path").removeprefix("./"),
+            )
         )
-        if _fold_verbose(parsed, event):
-            continue
-        events.append(event)
     return events
-
-
-def _fold_verbose(parsed: CheckpointImage, event: DumpLogEvent) -> bool:
-    """Reduces pagemap and per-thread lines to counts. Returns True when stored."""
-    if event.message.startswith("Pagemap generated:"):
-        if parsed.pagemap_count == 0:
-            parsed.pagemap_first_seconds = event.offset_seconds
-        parsed.pagemap_last_seconds = event.offset_seconds
-        parsed.pagemap_count += 1
-        match = _PAGEMAP_LINE.search(event.message)
-        if match is not None:
-            parsed.pagemap_pages += int(match.group("pages"))
-            parsed.pagemap_holes += int(match.group("holes"))
-        return True
-    if event.message.startswith("Dumping core for thread"):
-        if parsed.thread_core_count == 0:
-            parsed.thread_core_first_seconds = event.offset_seconds
-        parsed.thread_core_last_seconds = event.offset_seconds
-        parsed.thread_core_count += 1
-        return True
-    return False
 
 
 def _apply_summary(parsed: CheckpointImage, text: str) -> None:

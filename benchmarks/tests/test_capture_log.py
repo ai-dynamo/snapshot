@@ -4,7 +4,7 @@
 """Parser and report coverage for the capture breakdown."""
 
 from snapshot_benchmarks import logs, report
-from snapshot_benchmarks.schema import CheckpointAgentLog, ImageGrowthSample, _to_json_value
+from snapshot_benchmarks.schema import CheckpointAgentLog, _to_json_value
 
 SUMMARY = """
 2026-10-12T19:07:00.000000000Z  INFO  Checkpoint timing summary  {"content":"other","checkpoint":{"duration":"1s","phases":{}}}
@@ -25,16 +25,14 @@ def test_parse_checkpoint_agent_log_splits_criu_and_cuda() -> None:
     assert parsed.criu_memwrite == 4.5
     assert parsed.criu_pages_written_bytes == 7_000_000_000
     assert parsed.overlay_diff_bytes == 49_000_000
-    assert len(parsed.image_growth) == 4
     assert parsed.memwrite_gigabytes_per_second == 7_000_000_000 / 4.5 / 1e9
-    assert parsed.image_growth_midpoint_fraction == 0.5
-    assert parsed.image_growth_max_stall_seconds is not None
-    assert abs(parsed.image_growth_max_stall_seconds - 0.2) < 1e-9
+    assert not hasattr(parsed, "criu_image_gigabytes_per_second")
 
 
 def test_parse_checkpoint_agent_log_warns_for_old_agent() -> None:
     logs_text = (
-        'Checkpoint timing summary\t{"content":"wanted","checkpoint":'
+        "2026-10-12T19:07:07Z INFO Checkpoint timing summary "
+        '{"content":"wanted","checkpoint":'
         '{"duration":"6.8s","phases":{"criu_dump":"4.95s","cuda_checkpoint":"1.45s"}}}'
     )
 
@@ -59,11 +57,6 @@ def test_report_includes_capture_tables() -> None:
         criu_pages_written_bytes=7_000_000_000,
         criu_image_bytes=7_000_000_000,
         overlay_diff_bytes=49_000_000,
-        image_growth=[
-            ImageGrowthSample(0.0, 1000),
-            ImageGrowthSample(2.5, 3_500_000_000),
-            ImageGrowthSample(5.0, 7_000_000_000),
-        ],
     )
     text = report.render(
         [
@@ -80,3 +73,20 @@ def test_report_includes_capture_tables() -> None:
     assert "## How the CRIU image was written" in text
     assert "Qwen3 0.6B" in text
     assert "1.556" in text  # 7e9/4.5/1e9
+    assert "Image GB/s" not in text
+    assert "Midpoint" not in text
+
+
+def test_report_skips_capture_tables_without_agent_log() -> None:
+    text = report.render(
+        [
+            {
+                "schema_version": 1,
+                "model": {"label": "older"},
+                "checkpoint": {"checkpoint_seconds": 8.0},
+            }
+        ]
+    )
+
+    assert "## Where the capture time goes" not in text
+    assert "## How the CRIU image was written" not in text
