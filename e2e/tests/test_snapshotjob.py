@@ -314,6 +314,7 @@ def test_snapshotjob_waits_for_helper_then_completes(
 
 @pytest.mark.cpu
 @pytest.mark.snapshot_failure
+@pytest.mark.serial
 def test_snapshotjob_fails_when_helper_fails_after_capture(
     config: k8s.E2EConfig,
     run: snap.TestRun,
@@ -374,6 +375,7 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
 
 @pytest.mark.cpu
 @pytest.mark.snapshot_failure
+@pytest.mark.serial
 def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
     config: k8s.E2EConfig,
     run: snap.TestRun,
@@ -448,6 +450,7 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
 
 @pytest.mark.cpu
 @pytest.mark.snapshot_failure
+@pytest.mark.serial
 def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
     config: k8s.E2EConfig,
     run: snap.TestRun,
@@ -510,6 +513,7 @@ def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
 
 @pytest.mark.cpu
 @pytest.mark.snapshot_failure
+@pytest.mark.serial
 def test_snapshotjob_restart_preserves_pending_capture(
     config: k8s.E2EConfig,
     run: snap.TestRun,

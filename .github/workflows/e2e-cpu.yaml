@@ -326,31 +326,27 @@ jobs:
         env:
           # Dispatch-only negative control; normal PR runs disable it.
           SNAPSHOT_E2E_RESTORE_FAILURE_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.qualify_restore_failure && 'true' || 'false' }}
-          # The cases this job exists to prove. pytest exits 0 when a test is
-          # deselected or skips, so without naming them a marker change could
-          # leave the check green while it tested no round trip at all.
-          SNAPSHOT_E2E_REQUIRED_TESTS: >-
-            test_one_cpu_snapshot_restores_into_two_containers,
-            test_snapshotjob_cpu_captures_and_restore_recovers_state,
-            test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot,
-            test_snapshotjob_fails_when_capture_fails_after_helper_succeeds,
-            test_snapshotjob_fails_when_helper_fails_after_capture,
-            test_snapshotjob_deadline_exceeded_when_helper_overruns,
-            test_snapshotjob_restart_preserves_capture_waiting_for_helper,
-            test_snapshotjob_restart_preserves_pending_capture
         run: |
           set -euo pipefail
+          # The cases this job exists to prove. pytest exits 0 when a test is
+          # deselected or skips, so each execution phase guards the tests it
+          # selects. Restart cases mutate the shared operator Deployment and
+          # must run alone.
+          parallel_required_tests="test_one_cpu_snapshot_restores_into_two_containers,test_snapshotjob_cpu_captures_and_restore_recovers_state,test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot,test_snapshotjob_deadline_exceeded_when_helper_overruns"
+          serial_required_tests="test_snapshotjob_fails_when_capture_fails_after_helper_succeeds,test_snapshotjob_fails_when_helper_fails_after_capture,test_snapshotjob_restart_preserves_capture_waiting_for_helper,test_snapshotjob_restart_preserves_pending_capture"
           start=$(date +%s)
           # Recorded even when the suite fails, so a slow run is still
           # measurable; the trap keeps the pipeline's exit status.
           trap 'hack/ci-phase.sh "Run CPU tests" "${start}"' EXIT
           rc=0
-          uv run --locked --project e2e pytest e2e/tests -m "cpu and not serial" \
+          SNAPSHOT_E2E_REQUIRED_TESTS="${parallel_required_tests}" \
+            uv run --locked --project e2e pytest e2e/tests -m "cpu and not serial" \
             -n "${CPU_E2E_WORKERS}" -vv \
             --junitxml="${RUNNER_TEMP}/cpu-e2e-junit.xml" || rc=$?
           # Then the tests that must be alone on the node, one at a time. They
           # run even when the first pass fails, so a red run still reports them.
-          SNAPSHOT_E2E_REQUIRED_TESTS= uv run --locked --project e2e pytest e2e/tests \
+          SNAPSHOT_E2E_REQUIRED_TESTS="${serial_required_tests}" \
+            uv run --locked --project e2e pytest e2e/tests \
             -m "cpu and serial" -vv -s \
             --junitxml="${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" || rc=$?
           exit "${rc}"
