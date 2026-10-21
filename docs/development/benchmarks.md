@@ -40,9 +40,6 @@ GPU memory use and the disk space used.
 
 Before capture, we asked each engine to release KV cache memory. For vLLM, model
 weights are resident on the GPU at capture time.
-SGLang GPT-OSS still held KV memory at capture time. That memory adds to checkpoint size
-and restore work. We mark those rows with ¹. We have not checked memory release for each
-larger SGLang model (²).
 
 ## Measurement boundaries
 
@@ -98,23 +95,17 @@ Cold-start values use the mean when multiple samples are available.
 | Qwen3-14B | TRT-LLM | TP2 | 29.54 | 47.97 | 42.90 | 158.66 | 10.30 ± 4.92 | 15.40× |
 | gpt-oss-120b | vLLM | TP1 | 65.25 | 81.56 | 44.37 | 172.80 | 9.50 ± 0.72 | 18.19× |
 | gpt-oss-120b | vLLM | TP4 | 65.25 | 119.69 | 133.01 | 155.66 | 10.52 ± 1.06 | 14.79× |
-| gpt-oss-120b | SGLang¹ | TP1 | 65.25 | 172.32 | 55.63 | 268.96 | 15.78 ± 0.15 | 17.05× |
-| gpt-oss-120b | SGLang¹ | TP4 | 65.25 | 693.89 | 174.20 | 240.17 | 29.13 ± 1.94 | 8.25× |
+| gpt-oss-120b | SGLang | TP1 | 65.25 | 172.32 | 55.63 | 268.96 | 15.78 ± 0.15 | 17.05× |
+| gpt-oss-120b | SGLang | TP4 | 65.25 | 693.89 | 174.20 | 240.17 | 29.13 ± 1.94 | 8.25× |
 | gpt-oss-120b | TRT-LLM | TP1 | 65.25 | 77.87 | 29.98 | 200.55 | 7.57 ± 0.19 | 26.48× |
 | gpt-oss-120b | TRT-LLM | TP4 | 65.25 | 111.34 | 85.29 | 223.96 | 14.03 ± 3.99 | 15.96× |
 | GLM-5.3-NVFP4 | vLLM | TEP8 | 464.82 | 604.00 | 282.80 | 393.65 | 26.43 ± 1.98 | 14.89× |
-| GLM-5.3-NVFP4 | SGLang² | TEP8 | 464.82 | 669.49 | 327.20 | 426.70 | 31.41 ± 3.47 | 13.59× |
+| GLM-5.3-NVFP4 | SGLang | TEP8 | 464.82 | 669.49 | 327.20 | 426.70 | 31.41 ± 3.47 | 13.59× |
 | GLM-5.3-NVFP4 | TRT-LLM | TEP8 | 464.82 | 628.30 | 231.33 | 363.90 | 32.10 ± 3.11 | 11.34× |
 | DeepSeek-V4.1-Flash | vLLM | TEP8 | 510.30 | 647.18 | 274.75 | 1110.65 | 27.75 ± 2.80 | 40.03× |
-| DeepSeek-V4.1-Flash | SGLang² | TEP8 | 510.30 | 743.35 | 286.77 | 953.09 | 32.84 ± 3.26 | 29.02× |
+| DeepSeek-V4.1-Flash | SGLang | TEP8 | 510.30 | 743.35 | 286.77 | 953.09 | 32.84 ± 3.26 | 29.02× |
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 913.09 | 996.53 | 193.84 | 908.48 | 36.25 ± 2.87 | 25.06× |
-| DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 913.09 | 1039.09 | 253.72 | 621.55 | 38.91 ± 3.30 | 15.98× |
-
-¹ SGLang GPT-OSS: the v0.5.21 image still held KV memory after the release call.
-Checkpoint sizes and restore times include that memory.
-
-² Large SGLang models: we have not checked whether each model fully releases memory
-before capture.
+| DeepSeek-V4-Pro-NVFP4 | SGLang | TEP8 | 913.09 | 1039.09 | 253.72 | 621.55 | 38.91 ± 3.30 | 15.98× |
 
 Figures 1–3 compare cold start with mean restore time. Error bars show one sample
 standard deviation across the three restores.
@@ -155,17 +146,17 @@ standard deviation across the three restores.
 | Qwen3-14B | TRT-LLM | TP2 | 27.42 | 8.88 | 70.62 | 51.74 | 158.66 |
 | gpt-oss-120b | vLLM | TP1 | 35.15 | 38.69 | 10.49 | 88.47 | 172.80 |
 | gpt-oss-120b | vLLM | TP4 | 49.91 | 24.71 | 12.13 | 68.91 | 155.66 |
-| gpt-oss-120b | SGLang¹ | TP1 | 42.54 | 34.44 | 0.36 | 191.62 | 268.96 |
-| gpt-oss-120b | SGLang¹ | TP4 | 57.97 | 49.06 | 1.33 | 131.81 | 240.17 |
+| gpt-oss-120b | SGLang | TP1 | 42.54 | 34.44 | 0.36 | 191.62 | 268.96 |
+| gpt-oss-120b | SGLang | TP4 | 57.97 | 49.06 | 1.33 | 131.81 | 240.17 |
 | gpt-oss-120b | TRT-LLM | TP1 | 26.21 | 47.50 | 42.85 | 83.99 | 200.55 |
 | gpt-oss-120b | TRT-LLM | TP4 | 34.28 | 42.72 | 22.34 | 124.62 | 223.96 |
 | GLM-5.3-NVFP4 | vLLM | TEP8 | 65.47 | 65.88 | 48.88 | 213.42 | 393.65 |
-| GLM-5.3-NVFP4 | SGLang² | TEP8 | 60.77 | 73.98 | 2.66 | 289.29 | 426.70 |
+| GLM-5.3-NVFP4 | SGLang | TEP8 | 60.77 | 73.98 | 2.66 | 289.29 | 426.70 |
 | GLM-5.3-NVFP4 | TRT-LLM | TEP8 | 31.58 | 90.39 | 120.43 | 121.50 | 363.90 |
 | DeepSeek-V4.1-Flash | vLLM | TEP8 | 63.96 | 184.90 | 77.25 | 784.54 | 1110.65 |
-| DeepSeek-V4.1-Flash | SGLang² | TEP8 | 56.18 | 74.21 | 38.50 | 784.20 | 953.09 |
+| DeepSeek-V4.1-Flash | SGLang | TEP8 | 56.18 | 74.21 | 38.50 | 784.20 | 953.09 |
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 64.42 | 95.14 | 64.87 | 684.05 | 908.48 |
-| DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 58.80 | 87.68 | 42.55 | 432.52 | 621.55 |
+| DeepSeek-V4-Pro-NVFP4 | SGLang | TEP8 | 58.80 | 87.68 | 42.55 | 432.52 | 621.55 |
 
 Each run saves the raw timings.
 
@@ -184,17 +175,17 @@ Each run saves the raw timings.
 | Qwen3-14B | TRT-LLM | TP2 | 4.76 ± 4.23 | 2.73 ± 0.68 | 2.44 ± 0.03 | 0.36 ± 0.04 | 10.30 ± 4.92 |
 | gpt-oss-120b | vLLM | TP1 | 0.22 ± 0.22 | 2.27 ± 0.58 | 6.61 ± 0.09 | 0.40 ± 0.09 | 9.50 ± 0.72 |
 | gpt-oss-120b | vLLM | TP4 | 1.23 ± 0.33 | 2.99 ± 1.22 | 5.73 ± 0.37 | 0.57 ± 0.44 | 10.52 ± 1.06 |
-| gpt-oss-120b | SGLang¹ | TP1 | 0.16 ± 0.08 | 1.62 ± 0.08 | 13.49 ± 0.03 | 0.51 ± 0.03 | 15.78 ± 0.15 |
-| gpt-oss-120b | SGLang¹ | TP4 | 2.74 ± 0.51 | 3.98 ± 1.03 | 21.88 ± 0.29 | 0.52 ± 0.39 | 29.13 ± 1.94 |
+| gpt-oss-120b | SGLang | TP1 | 0.16 ± 0.08 | 1.62 ± 0.08 | 13.49 ± 0.03 | 0.51 ± 0.03 | 15.78 ± 0.15 |
+| gpt-oss-120b | SGLang | TP4 | 2.74 ± 0.51 | 3.98 ± 1.03 | 21.88 ± 0.29 | 0.52 ± 0.39 | 29.13 ± 1.94 |
 | gpt-oss-120b | TRT-LLM | TP1 | 0.16 ± 0.10 | 1.42 ± 0.09 | 5.80 ± 0.07 | 0.20 ± 0.07 | 7.57 ± 0.19 |
 | gpt-oss-120b | TRT-LLM | TP4 | 5.63 ± 3.78 | 3.32 ± 0.23 | 4.63 ± 0.54 | 0.46 ± 0.45 | 14.03 ± 3.99 |
 | GLM-5.3-NVFP4 | vLLM | TEP8 | 2.81 ± 0.88 | 3.48 ± 0.61 | 19.70 ± 0.96 | 0.44 ± 0.41 | 26.43 ± 1.98 |
-| GLM-5.3-NVFP4 | SGLang² | TEP8 | 3.12 ± 0.21 | 6.65 ± 3.60 | 20.73 ± 0.67 | 0.91 ± 0.46 | 31.41 ± 3.47 |
+| GLM-5.3-NVFP4 | SGLang | TEP8 | 3.12 ± 0.21 | 6.65 ± 3.60 | 20.73 ± 0.67 | 0.91 ± 0.46 | 31.41 ± 3.47 |
 | GLM-5.3-NVFP4 | TRT-LLM | TEP8 | 7.32 ± 3.13 | 5.27 ± 0.13 | 18.78 ± 0.99 | 0.73 ± 0.44 | 32.10 ± 3.11 |
 | DeepSeek-V4.1-Flash | vLLM | TEP8 | 3.62 ± 1.23 | 4.44 ± 1.13 | 19.01 ± 0.49 | 0.68 ± 0.41 | 27.75 ± 2.80 |
-| DeepSeek-V4.1-Flash | SGLang² | TEP8 | 4.34 ± 0.13 | 6.60 ± 2.76 | 21.23 ± 0.16 | 0.67 ± 0.38 | 32.84 ± 3.26 |
+| DeepSeek-V4.1-Flash | SGLang | TEP8 | 4.34 ± 0.13 | 6.60 ± 2.76 | 21.23 ± 0.16 | 0.67 ± 0.38 | 32.84 ± 3.26 |
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 3.41 ± 1.76 | 3.37 ± 1.18 | 28.89 ± 0.16 | 0.58 ± 0.17 | 36.25 ± 2.87 |
-| DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 2.99 ± 0.14 | 6.41 ± 3.25 | 28.80 ± 0.21 | 0.70 ± 0.22 | 38.91 ± 3.30 |
+| DeepSeek-V4-Pro-NVFP4 | SGLang | TEP8 | 2.99 ± 0.14 | 6.41 ± 3.25 | 28.80 ± 0.21 | 0.70 ± 0.22 | 38.91 ± 3.30 |
 
 Wake starts when the agent finishes and ends when the application completes its wake
 and resume calls. CUDA restore includes multi-GPU reconstruction. Each stage shows

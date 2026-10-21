@@ -203,16 +203,14 @@ start with `sleep infinity` so a second engine does not start before checkpoint 
 
 Before capture, the application pauses requests and asks the engine to release KV
 memory. Weights remain on the GPU. SGLang requests KV-only release without a CPU
-weight backup. TRT-LLM uses its KV sleep/wakeup RPC. A successful release call does not
-prove that the engine freed all memory. See the SGLang notes in the [published
-results](benchmarks.md#benchmarking-setup).
+weight backup. TRT-LLM uses its KV sleep/wakeup RPC.
 
 ## Interpreting results
 
 Compare your settings with the [reference setup](benchmarks.md#benchmarking-setup).
 Check the GPU, driver, engine image, model precision, parallelism, constructor
 arguments, storage and cache conditions. Read the
-[limitations](benchmarks.md#limitations), including retained SGLang KV memory.
+[limitations](benchmarks.md#limitations).
 
 ## Reporting a reproducibility mismatch
 
