@@ -489,7 +489,9 @@ def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
-        assert snap.condition(after_restart, "Completed").get("reason") == "WaitingForPodCompletion"
+        completed = snap.condition(after_restart, "Completed")
+        assert completed and completed.get("status") != "True"
+        assert completed.get("reason") == "WaitingForPodCompletion"
         source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
         snap.wait_for_container_running(
             config.namespace,
