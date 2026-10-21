@@ -181,4 +181,23 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
                 volumeMounts=[dict(name="bench-cache", mountPath="/work")],
             )
         )
+        if cfg.drop_page_cache:
+            spec["initContainers"].append(
+                dict(
+                    name="drop-page-cache",
+                    image=main["image"],
+                    imagePullPolicy=main["imagePullPolicy"],
+                    command=["python3", "/snapshot-app/page_cache.py"],
+                    args=[model.hf_id_or_path, str(extra.get("revision") or "main")],
+                    env=[
+                        dict(name="HF_HOME", value="/hf-cache"),
+                        dict(name="HF_HUB_OFFLINE", value="1"),
+                    ],
+                    securityContext=dict(privileged=True, runAsUser=0),
+                    volumeMounts=[
+                        m for m in main["volumeMounts"]
+                        if m["name"] in ("model-cache", "app", "startup-spans")
+                    ],
+                )
+            )
     return pod

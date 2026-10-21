@@ -26,14 +26,12 @@ process with this work complete and the engine ready to serve requests.
 | Compiler caches | Fresh directories for each cold start |
 | Weight loading | vLLM: prefetch with eight threads and 16 MiB blocks; SGLang: checkpoint prefetch with four threads |
 | Parallelism | TP: tensor parallelism. TEP8: tensor and expert parallelism across eight GPUs; exact settings are in each manifest |
-| Restore samples | Three per configuration; the tables use the first restore |
 
 ## Limitations
 
 - Cold starts and restores came from separate runs. Some runs used different nodes.
 - Results apply to this B200 and VAST NFS setup. GPU, driver, storage and engine settings can change the times.
 - Timing instrumentation adds work during cold start.
-- The five TRT-LLM Qwen and GPT-OSS cold starts allowed FlashInfer artifact downloads. The [offline follow-up](#flashinfer-artifact-downloads) found differences of up to 33 seconds. The tables keep the original measurements.
 
 Weight size is the sum of the logical sizes of cached weight files. Checkpoint size is
 the sum of the logical sizes of saved container files. It includes CPU state, GPU state

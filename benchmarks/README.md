@@ -54,6 +54,11 @@ model and TP/EP configuration. SGLang runs enable checkpoint prefetch by default
 New runs save JSON and logs under `results/`. See [Performance
 Benchmarks](../docs/development/benchmarks.md) for the published tables.
 
+Cold starts clear the node's page cache and verify weight-file residency before
+timing begins. This requires permission to create a privileged init container and
+clear the node cache. `--no-drop-page-cache` skips this step. Each run records the
+cache policy and saves the probe results.
+
 ## Local checks
 
 ```bash

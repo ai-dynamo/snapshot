@@ -348,6 +348,10 @@ class BenchmarkTests(unittest.TestCase):
             span_dir.mkdir()
             (span_dir / "worker-0.jsonl").write_text("\n".join(spans[:2]))
             (span_dir / "worker-1.jsonl").write_text("\n".join(spans[2:]))
+            (span_dir / "cache-control.json").write_text(json.dumps(dict(
+                success=True, node_page_cache_dropped=True,
+                total_pages=1, resident_pages_after=0,
+            )))
 
             def execute(_namespace, _pod, command, **_kwargs):
                 script = shlex.split(command)[2].replace("/startup-spans", str(span_dir))
@@ -460,6 +464,17 @@ class BenchmarkTests(unittest.TestCase):
                         )
                         self.assertEqual(span_volume["emptyDir"]["medium"], "Memory")
                         self.assertIn("sizeLimit", span_volume["emptyDir"])
+                        cache_init = [
+                            c for c in spec.get("initContainers", [])
+                            if c["name"] == "drop-page-cache"
+                        ]
+                        if pod is restore:
+                            self.assertEqual(cache_init, [])
+                        else:
+                            self.assertEqual(len(cache_init), 1)
+                            self.assertTrue(cache_init[0]["securityContext"]["privileged"])
+                            self.assertEqual(cache_init[0]["args"][0], model.hf_id_or_path)
+                            self.assertEqual(spec["initContainers"][-1], cache_init[0])
                         if engine.name == "trtllm":
                             self.assertEqual(
                                 env["FLASHINFER_WORKSPACE_BASE"],
@@ -613,7 +628,10 @@ class BenchmarkTests(unittest.TestCase):
             model,
             "run",
         )
-        script = pod["spec"]["initContainers"][-1]["command"][-1]
+        initializer = next(
+            c for c in pod["spec"]["initContainers"] if c["name"] == "fresh-cache"
+        )
+        script = initializer["command"][-1]
         with tempfile.TemporaryDirectory() as tmp:
             script = script.replace("/work", tmp)
             subprocess.run([sys.executable, "-c", script], check=True)

@@ -10,6 +10,8 @@ The [published tables](benchmarks.md) are separate.
 - Python 3.12 or newer, `uv` and `kubectl`.
 - An installed Snapshot operator, node agent and PageBroker.
 - A node with enough free GPUs and host memory for the selected model.
+- Permission to clear that node's page cache and create a privileged root init
+  container. The init container must be able to write `/proc/sys/vm/drop_caches`.
 - An engine image that supports the selected guide application's APIs.
 - A populated model PVC, mounted read-only at `/hf-cache`.
 - A writable work PVC for compiler caches.
@@ -123,6 +125,7 @@ uv run --project benchmarks python -m snapshot_benchmarks report \
 | `--engine-args` | JSON constructor arguments using the engine's Python API names. |
 | `--weights-bytes` | Measured logical weight-file size; omitted sizes stay blank in the report. |
 | `--keep` | Retain resources for debugging after the run. |
+| `--no-drop-page-cache` | Skip node page-cache eviction and weight residency verification. |
 | `--toleration` | Repeatable node toleration in `key=value:effect` form. |
 
 Use the model and parallelism flags to set those values. The runner rejects conflicting
@@ -159,6 +162,19 @@ The [FlashInfer follow-up](benchmarks.md#flashinfer-artifact-downloads) reports
 how pre-staged artifacts affected five published configurations.
 
 ## Measurements and verification
+
+Before each cold start, a privileged init container checks write access to
+`/proc/sys/vm/drop_caches`, runs `sync`, then writes `1` to clear the node's page cache.
+This affects the whole node. Use a node where you have permission to do this.
+The init container also calls `POSIX_FADV_DONTNEED` on the selected model's weight
+files and checks residency with `mincore`. The source starts only if all checked
+weight pages are nonresident. Permission failures, unsupported weight layouts and
+failed eviction stop the run. Cache preparation is outside the cold-start timer.
+
+The run saves `cache-control.json`, including per-file page counts, with its results.
+This controls client page cache; it does not clear storage-server caches. Restore
+pods do not clear caches. Use `--no-drop-page-cache` to skip this preparation;
+the run records that choice instead of claiming a verified cold cache.
 
 See [Measurement boundaries](benchmarks.md#measurement-boundaries) for the timing
 endpoints and stage definitions. Inference checks are outside the measured

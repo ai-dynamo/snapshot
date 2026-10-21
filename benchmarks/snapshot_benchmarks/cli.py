@@ -89,6 +89,7 @@ def _benchmark_config(args: argparse.Namespace) -> BenchmarkConfig:
         node=getattr(args, "node", None),
         model_pvc=getattr(args, "model_pvc", None),
         work_pvc=getattr(args, "work_pvc", None),
+        drop_page_cache=not getattr(args, "no_drop_page_cache", False),
     )
 
 
@@ -389,6 +390,11 @@ def build_parser() -> argparse.ArgumentParser:
     sweep_parser.set_defaults(func=cmd_sweep)
 
     for command in (run_parser, sweep_parser):
+        command.add_argument(
+            "--no-drop-page-cache",
+            action="store_true",
+            help="Skip node page-cache eviction and weight residency verification",
+        )
         command.add_argument("--node", required=True, help="Node with enough free GPUs")
         command.add_argument(
             "--model-pvc", required=True, help="Read-only, pre-populated model volume"

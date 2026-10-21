@@ -52,9 +52,20 @@ root = Path('/startup-spans')
 files = sorted(root.glob('*.jsonl'))
 if not files:raise RuntimeError('No timing span files')
 text = '\n'.join(p.read_text() for p in files)
-print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compress(text.encode())).decode())))
+cache = root / 'cache-control.json'
+print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compress(text.encode())).decode(), page_cache=json.loads(cache.read_text()) if cache.exists() else None)))
 """,
     )
+    cache = packet["page_cache"]
+    save(folder / "cache-control.json", cache or dict(skipped=True))
+    if cfg.drop_page_cache and (
+        not cache
+        or not cache.get("success")
+        or not cache.get("node_page_cache_dropped")
+        or not cache.get("total_pages")
+        or cache.get("resident_pages_after") != 0
+    ):
+        raise ValueError("Missing successful page-cache eviction and residency check")
     text = (
         k8s.pod_logs(
             cfg.workload_namespace, pod.metadata.name, tail_lines=None, container="main"
@@ -113,6 +124,7 @@ print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compres
                 check=True,
             )
     measured = json.loads((folder / "phase-accounting.json").read_text())[0]
+    measured["page_cache"] = cache or dict(skipped=True)
     return measured, tokens.pop()
 
 

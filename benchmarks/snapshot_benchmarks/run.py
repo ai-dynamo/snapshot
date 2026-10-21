@@ -67,6 +67,7 @@ class BenchmarkConfig:
     node: str
     model_pvc: str
     work_pvc: str
+    drop_page_cache: bool = True
 
     def configure(self):
         # Supplying a path prevents the helper falling back to in-cluster access
@@ -434,6 +435,18 @@ def run_benchmark(
             dict(error=repr(exc), partial_result=result.to_json_dict()),
         )
         if source_created and not source_deleted:
+            if cfg.drop_page_cache:
+                try:
+                    (folder / "page-cache-init.log").write_text(
+                        k8s.pod_logs(
+                            cfg.workload_namespace,
+                            source_name,
+                            tail_lines=None,
+                            container="drop-page-cache",
+                        )
+                    )
+                except Exception as log_error:
+                    (folder / "page-cache-log-error.txt").write_text(repr(log_error))
             try:
                 (folder / "source-failure.log").write_text(
                     k8s.pod_logs(cfg.workload_namespace, source_name, tail_lines=None)
