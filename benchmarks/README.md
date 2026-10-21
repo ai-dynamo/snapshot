@@ -48,7 +48,8 @@ templates.
 
 Follow the [quick start](../docs/development/benchmarks-guide.md#quick-start)
 for cluster settings, a dry run and a measured run. Each run selects one engine,
-model and TP/EP configuration.
+model and TP/EP configuration. SGLang runs enable checkpoint prefetch by default;
+`--engine-args '{"weight_loader_prefetch_checkpoints":false}'` disables it.
 
 New runs save JSON and logs under `results/`. See [Performance
 Benchmarks](../docs/development/benchmarks.md) for the published tables.

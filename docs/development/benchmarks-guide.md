@@ -96,6 +96,11 @@ uv run --project benchmarks python -m snapshot_benchmarks run \
 Repeat step 3 without `--dry-run`. Use `--engine sglang` or `--engine trtllm`
 with a compatible image for those engines. Run each topology separately.
 
+SGLang benchmarks enable `weight_loader_prefetch_checkpoints` by default, as in the
+published results. SGLang 0.5.21 uses four prefetch threads by default. To measure loading
+without prefetch, pass `--engine-args '{"weight_loader_prefetch_checkpoints":false}'`.
+The admitted source pod records the resolved constructor arguments.
+
 ### 5. Generate a report
 
 Each run writes to `benchmarks/results/<date>-<git-sha>-<id>/`. JSON files at the top
@@ -170,7 +175,8 @@ then delete them while they remain in use. Each restore needs its own copy of th
 files. Sharing them through NFS can break repeated restores.
 
 Timing logs use a 2 GiB memory volume. The runner copies them to the local results
-before capture. Trace transfer uses gzip to handle large multi-GPU logs.
+before capture. Trace transfer uses gzip to handle large multi-GPU logs. Restore pods
+start with `sleep infinity` so a second engine does not start before checkpoint injection.
 
 Before capture, the application pauses requests and asks the engine to release KV
 memory. vLLM keeps weights on the GPU. SGLang requests KV-only release without a CPU

@@ -482,6 +482,9 @@ class BenchmarkTests(unittest.TestCase):
                         else:
                             constructor = json.loads(main["args"][0])
                             if engine.name == "sglang":
+                                self.assertTrue(
+                                    constructor["weight_loader_prefetch_checkpoints"]
+                                )
                                 self.assertEqual(
                                     constructor["model_path"], model.hf_id_or_path
                                 )
@@ -551,6 +554,20 @@ class BenchmarkTests(unittest.TestCase):
                         "data"
                     ].items():
                         compile(code, filename, "exec")
+
+    def test_sglang_prefetch_can_be_disabled(self):
+        engine = cli.ENGINES["sglang"]
+        model = ModelSpec(
+            "Test",
+            "/hf-cache/test",
+            engine_args={"weight_loader_prefetch_checkpoints": False},
+        )
+        pod = engine.build_source_pod(
+            name="test", namespace="workloads", image="engine:pinned", model=model
+        )
+        instrument_pod(pod, config(), engine, model, "run")
+        constructor = json.loads(pod["spec"]["containers"][0]["args"][0])
+        self.assertFalse(constructor["weight_loader_prefetch_checkpoints"])
 
     def test_restore_waits_without_starting_a_second_engine(self):
         for engine in cli.ENGINES.values():

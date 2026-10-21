@@ -79,6 +79,7 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
         extra["enable_expert_parallel"] = model.ep > 1
         extra.update(model=model.hf_id_or_path, tensor_parallel_size=model.tp)
     elif engine.name == "sglang":
+        extra.setdefault("weight_loader_prefetch_checkpoints", True)
         values.update(
             SGLANG_CACHE_DIR="/compile-cache/sglang",
             SGLANG_JIT_CACHE_DIR="/compile-cache/sglang-jit",
