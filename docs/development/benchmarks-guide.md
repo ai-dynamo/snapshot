@@ -3,7 +3,8 @@
 Run cold-start, checkpoint and restore measurements for vLLM, SGLang or TensorRT-LLM
 with the tool in [`benchmarks/`](../../benchmarks). Each run uses one node, captures
 a checkpoint and restores it three times. The runner uses the engine guide workloads
-and saves a report. See the [published results](benchmarks.md).
+and saves JSON results and logs. Use the `report` command to build the tables.
+See the [published results](benchmarks.md).
 
 ## Prerequisites
 
@@ -12,6 +13,10 @@ and saves a report. See the [published results](benchmarks.md).
 - A node with enough free GPUs and host memory for the selected model.
 - Permission to clear that node's page cache and create a privileged root init
   container. The init container must be able to write `/proc/sys/vm/drop_caches`.
+  Namespace admission policies must allow this container; baseline and restricted
+  Pod Security Admission policies reject it unless an exemption applies.
+  Clearing the cache affects all workloads on the node. Use `--no-drop-page-cache`
+  to skip cache clearing.
 - An engine image that supports the selected guide application's APIs.
 - A populated model PVC, mounted read-only at `/hf-cache`.
 - A writable work PVC for compiler caches.
@@ -157,9 +162,11 @@ in the model's `env` settings and keep prebuilt artifacts separate from the JIT 
 
 ## Measurements and verification
 
-Before each cold start, a privileged init container checks write access to
+Before each cold start, an unprivileged init container resolves and checks the model files.
+A separate helper, using a digest-pinned official Python image, checks write access to
 `/proc/sys/vm/drop_caches`, runs `sync`, then writes `1` to clear the node's page cache.
-This clears caches for the whole node and requires permission to do so.
+The helper runs as privileged root. This clears caches for the whole node and requires
+permission to do so. Admission policies can reject the pod before the helper starts.
 The init container also calls `POSIX_FADV_DONTNEED` on the selected model's weight
 files and checks residency with `mincore`. The source starts only if all checked
 weight pages are nonresident. Permission failures, unsupported weight layouts and
@@ -167,6 +174,8 @@ failed eviction stop the run. Cache preparation is outside the cold-start timer.
 
 Weight sizes are measured from the cached model files, including when cache clearing is disabled.
 The run saves `cache-control.json`, including file sizes and page counts, with its results.
+`resident_pages_after_node_drop` is measured after the node-wide drop and before
+per-file eviction. `resident_pages_after` is measured after per-file eviction.
 This controls client page cache; it does not clear storage-server caches. Restore
 pods do not clear caches. Use `--no-drop-page-cache` to skip this preparation;
 the run records whether cache preparation was skipped.
@@ -214,9 +223,9 @@ credentials, private addresses and identifying volume or cluster names before sh
 
 ## Cleanup
 
-The runner deletes its pods, ConfigMap, PodSnapshot and PodSnapshotContent after the
-run. If the run fails, it keeps local evidence and still deletes its cluster resources.
-A cleanup error stops a sweep. Use `--keep` to keep resources for debugging. The runner
+The runner attempts to delete its pods, ConfigMap, PodSnapshot and PodSnapshotContent
+after the run. Failed runs keep local evidence. If deletion fails, resources can remain;
+the runner saves `cleanup-errors.json`, raises `CleanupError` and stops the sweep. Use `--keep` to keep resources for debugging. The runner
 still removes earlier restore pods to free GPUs for the next attempt.
 
 Compiler caches stay on the work PVC under the run ID. Logs and results are saved

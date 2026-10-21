@@ -20,7 +20,8 @@ published results.
 ## Layout
 
 The runner uses the engine guide workloads and the `snapshot_e2e.k8s` and
-`snapshot_e2e.lifecycle` helpers. Run GPU benchmarks manually, outside the e2e CI suite.
+`snapshot_e2e.lifecycle` helpers. Benchmarks need large engine images and take minutes
+per model, so they run manually, outside the e2e CI suite.
 
 - `snapshot_benchmarks/schema.py` — the `RunResult` data model written to disk
 - `snapshot_benchmarks/run.py` — runs one model and engine configuration

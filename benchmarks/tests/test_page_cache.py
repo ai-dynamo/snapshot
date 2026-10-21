@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -25,6 +26,7 @@ spec.loader.exec_module(page_cache)
 
 
 class PageCacheTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "Linux page-cache APIs")
     def test_sync_and_drop_precede_weight_eviction_and_saved_probe(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -56,7 +58,73 @@ class PageCacheTests(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual(events, ["sync", "fadvise"])
             self.assertEqual(result["resident_pages_after"], 0)
+            self.assertEqual(result["files"][0]["resident_pages_after_node_drop"], 2)
             self.assertEqual(json.loads(output.read_text()), result)
+
+    def test_missing_indexed_shard_fails_before_node_cache_drop(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            root = Path(tmp)
+            (root / "model-00001.safetensors").write_bytes(b"weights")
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps(
+                    dict(
+                        weight_map={
+                            "layer1": "model-00001.safetensors",
+                            "layer2": "model-00002.safetensors",
+                        }
+                    )
+                )
+            )
+            with patch.object(page_cache, "DROP_CACHES") as control:
+                with self.assertRaisesRegex(ValueError, "Missing or empty"):
+                    page_cache.prepare(str(root), output=root / "cache-control.json")
+            control.open.assert_not_called()
+            (root / "model-00002.safetensors").write_bytes(b"weights")
+            (root / "unused.safetensors").write_bytes(b"unused")
+            result = page_cache.prepare(
+                str(root), output=root / "cache-control.json", drop_page_cache=False
+            )
+            self.assertEqual(result["weights_bytes"], 14)
+            self.assertEqual(len(result["files"]), 2)
+
+    def test_pinned_helper_uses_directory_resolved_by_unprivileged_inventory(self):
+        cfg = BenchmarkConfig(
+            "work",
+            "snap",
+            "snap",
+            "checkpoints",
+            None,
+            "test",
+            "test",
+            "models",
+            "work",
+        )
+        engine = cli.ENGINES["vllm"]
+        model = ModelSpec("Test", "/hf-cache/test")
+        pod = engine.build_source_pod(
+            name="test", namespace="work", image="engine:test", model=model
+        )
+        instrument_pod(pod, cfg, engine, model, "test")
+        helper = next(
+            c for c in pod["spec"]["initContainers"] if c["name"] == "drop-page-cache"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            inventory = Path(tmp) / "cache-control.json"
+            inventory.write_text(
+                json.dumps(dict(model_directory="/hf-cache/resolved-snapshot"))
+            )
+            script = helper["command"][-1].replace(
+                "/startup-spans/cache-control.json", str(inventory)
+            )
+            with (
+                patch.dict(sys.modules, page_cache=page_cache),
+                patch.object(page_cache, "prepare") as prepare,
+            ):
+                exec(script, {})
+            prepare.assert_called_once_with("/hf-cache/resolved-snapshot")
 
     def test_inventory_measures_logical_sizes_without_cache_operations(self):
         with (
@@ -74,7 +142,7 @@ class PageCacheTests(unittest.TestCase):
             with (
                 patch.object(page_cache, "DROP_CACHES") as control,
                 patch.object(page_cache.os, "sync") as sync,
-                patch.object(page_cache.os, "posix_fadvise") as advise,
+                patch.object(page_cache.os, "posix_fadvise", create=True) as advise,
                 patch.object(page_cache, "resident_pages") as residency,
             ):
                 result = page_cache.prepare(
@@ -90,6 +158,7 @@ class PageCacheTests(unittest.TestCase):
             advise.assert_not_called()
             residency.assert_not_called()
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux page-cache APIs")
     def test_permission_failure_stops_before_sync_and_saves_reason(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -103,7 +172,7 @@ class PageCacheTests(unittest.TestCase):
             with (
                 patch.object(page_cache, "DROP_CACHES", control),
                 patch.object(page_cache.os, "sync") as sync,
-                patch.object(page_cache.os, "posix_fadvise") as advise,
+                patch.object(page_cache.os, "posix_fadvise", create=True) as advise,
             ):
                 with self.assertRaisesRegex(
                     PermissionError, "privileged init container"
@@ -115,6 +184,7 @@ class PageCacheTests(unittest.TestCase):
             self.assertFalse(result["success"])
             self.assertFalse(result["node_page_cache_dropped"])
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux page-cache APIs")
     def test_resident_weights_fail_instead_of_claiming_a_cold_cache(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -135,6 +205,7 @@ class PageCacheTests(unittest.TestCase):
             self.assertFalse(result["success"])
             self.assertEqual(result["resident_pages_after"], 1)
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux page-cache APIs")
     def test_mincore_observes_a_read_page_without_faulting_the_mapping(self):
         with tempfile.TemporaryFile() as stream:
             stream.write(b"x" * os.sysconf("SC_PAGE_SIZE"))

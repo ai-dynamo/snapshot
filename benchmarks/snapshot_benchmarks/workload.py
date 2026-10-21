@@ -7,6 +7,9 @@ import json
 
 from snapshot_benchmarks.engines.common import ROOT, set_env
 
+# Official multi-platform Python image; the privileged helper needs only stdlib.
+CACHE_HELPER_IMAGE = "docker.io/library/python:3.12-slim@sha256:cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2"
+
 
 def app_configmap(engine, namespace, name):
     data = {"app.py": (ROOT / "docs/guides" / engine.guide / "app.py").read_text()}
@@ -187,23 +190,41 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
         )
         spec["initContainers"].append(
             dict(
-                name="drop-page-cache" if cfg.drop_page_cache else "model-weights",
+                name="model-weights",
                 image=main["image"],
                 imagePullPolicy=main["imagePullPolicy"],
                 command=["python3", "/snapshot-app/page_cache.py"],
-                args=[model.hf_id_or_path, str(extra.get("revision") or "main")]
-                + ([] if cfg.drop_page_cache else ["--no-drop-page-cache"]),
+                args=[model.hf_id_or_path, str(extra.get("revision") or "main"), "--no-drop-page-cache"],
                 env=[
                     dict(name="HF_HOME", value="/hf-cache"),
                     dict(name="HF_HUB_OFFLINE", value="1"),
                 ],
-                securityContext=(
-                    dict(privileged=True, runAsUser=0) if cfg.drop_page_cache else {}
-                ),
+                securityContext=dict(privileged=False, allowPrivilegeEscalation=False),
                 volumeMounts=[
                     m for m in main["volumeMounts"]
                     if m["name"] in ("model-cache", "app", "startup-spans")
                 ],
             )
         )
+        if cfg.drop_page_cache:
+            spec["initContainers"].append(
+                dict(
+                    name="drop-page-cache",
+                    image=CACHE_HELPER_IMAGE,
+                    imagePullPolicy="IfNotPresent",
+                    command=[
+                        "python3",
+                        "-c",
+                        "import json; from pathlib import Path; from page_cache import prepare; "
+                        "prepare(json.loads(Path('/startup-spans/cache-control.json').read_text())['model_directory'])",
+                    ],
+                    env=[dict(name="PYTHONPATH", value="/snapshot-app")],
+                    securityContext=dict(privileged=True, runAsUser=0),
+                    volumeMounts=[
+                        m
+                        for m in main["volumeMounts"]
+                        if m["name"] in ("model-cache", "app", "startup-spans")
+                    ],
+                )
+            )
     return pod

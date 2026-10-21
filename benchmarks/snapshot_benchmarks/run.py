@@ -366,6 +366,10 @@ def run_benchmark(
                 measurement.save(restore_folder / "manifest.json", restore_manifest)
                 restore_created_pod = k8s.create_pod(restore_manifest)
                 restore_created = True
+                timing = RestoreTiming(
+                    restore_pod_created_at=restore_created_pod.metadata.creation_timestamp,
+                )
+                result.restore_attempts.append(timing)
                 lifecycle.wait_for_pod_event(
                     cfg.workload_namespace,
                     restore_name,
@@ -379,6 +383,13 @@ def run_benchmark(
                     "Ready",
                     timeout=timeout,
                 )
+                timing.restore_container_started_at = _container_started_at(
+                    restore_ready_pod, engine.container_name
+                )
+                timing.restored_condition_at = _pod_condition_time(
+                    restore_ready_pod, "nvidia.com/Restored"
+                )
+                timing.restore_ready_at = _pod_condition_time(restore_ready_pod, "Ready")
                 metrics = measurement.restored_measurement(
                     cfg,
                     restore_ready_pod,
@@ -386,18 +397,7 @@ def run_benchmark(
                     source_token,
                     restore_folder,
                 )
-                timing = RestoreTiming(
-                    restore_pod_created_at=restore_created_pod.metadata.creation_timestamp,
-                    restore_container_started_at=_container_started_at(
-                        restore_ready_pod, engine.container_name
-                    ),
-                    restored_condition_at=_pod_condition_time(
-                        restore_ready_pod, "nvidia.com/Restored"
-                    ),
-                    restore_ready_at=_pod_condition_time(restore_ready_pod, "Ready"),
-                    measurement=metrics,
-                )
-                result.restore_attempts.append(timing)
+                timing.measurement = metrics
                 if repeat == 1:
                     result.restore = timing
                     restore_node = restore_ready_pod.spec.node_name
@@ -435,20 +435,56 @@ def run_benchmark(
             folder / "failure.json",
             dict(error=repr(exc), partial_result=result.to_json_dict()),
         )
-        if source_created and not source_deleted:
-            try:
-                (folder / "model-preparation.log").write_text(
-                    k8s.pod_logs(
-                        cfg.workload_namespace,
-                        source_name,
-                        tail_lines=None,
-                        container=(
-                            "drop-page-cache" if cfg.drop_page_cache else "model-weights"
-                        ),
+        if restore_created:
+            for filename, collect in (
+                (
+                    "pod-failure.json",
+                    lambda: measurement.save(
+                        restore_folder / "pod-failure.json",
+                        k8s.read_pod(cfg.workload_namespace, restore_name),
+                    ),
+                ),
+                (
+                    "restore-failure.log",
+                    lambda: (restore_folder / "restore-failure.log").write_text(
+                        k8s.pod_logs(
+                            cfg.workload_namespace,
+                            restore_name,
+                            tail_lines=None,
+                            container=engine.container_name,
+                        )
+                    ),
+                ),
+                (
+                    "agent.log",
+                    lambda: measurement.agent_log(
+                        cfg, capture_node, restore_folder / "agent.log"
+                    ),
+                ),
+            ):
+                try:
+                    collect()
+                except Exception as log_error:
+                    (restore_folder / (filename + "-error.txt")).write_text(
+                        repr(log_error)
                     )
-                )
-            except Exception as log_error:
-                (folder / "model-preparation-log-error.txt").write_text(repr(log_error))
+        if source_created and not source_deleted:
+            for container in ["model-weights"] + (
+                ["drop-page-cache"] if cfg.drop_page_cache else []
+            ):
+                try:
+                    (folder / (container + ".log")).write_text(
+                        k8s.pod_logs(
+                            cfg.workload_namespace,
+                            source_name,
+                            tail_lines=None,
+                            container=container,
+                        )
+                    )
+                except Exception as log_error:
+                    (folder / (container + "-log-error.txt")).write_text(
+                        repr(log_error)
+                    )
             try:
                 (folder / "source-failure.log").write_text(
                     k8s.pod_logs(cfg.workload_namespace, source_name, tail_lines=None)

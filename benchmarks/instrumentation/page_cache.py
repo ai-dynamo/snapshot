@@ -61,11 +61,19 @@ def prepare(
                 )
             )
         weights = sorted(root.glob("*.safetensors"))
+        index = root / "model.safetensors.index.json"
         if not weights:
             weights = sorted(root.glob("pytorch_model*.bin"))
-        if not weights or any(p.stat().st_size == 0 for p in weights):
+            if not index.exists():
+                index = root / "pytorch_model.bin.index.json"
+        if index.exists():
+            shards = set(json.loads(index.read_text())["weight_map"].values())
+            weights = sorted(root / shard for shard in shards)
+        if not weights or any(
+            not p.is_file() or p.stat().st_size == 0 for p in weights
+        ):
             raise ValueError(
-                "No nonempty safetensors or PyTorch weight files: " + str(root)
+                "Missing or empty safetensors or PyTorch weight files: " + str(root)
             )
         report["model_directory"] = str(root)
         report["files"] = [dict(file=p.name, bytes=p.stat().st_size) for p in weights]
@@ -97,7 +105,7 @@ def prepare(
             entry.update(
                 dict(
                     total_pages=total,
-                    resident_pages_before=before,
+                    resident_pages_after_node_drop=before,
                     resident_pages_after=after,
                 )
             )

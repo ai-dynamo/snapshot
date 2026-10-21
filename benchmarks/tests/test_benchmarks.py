@@ -115,6 +115,8 @@ def cluster():
         "k8s.create_pod": create,
         "k8s.delete_pod": None,
         "k8s.pod_logs": "failure log",
+        "k8s.read_pod": lambda namespace, name: pods[name],
+        "measurement.agent_log": lambda cfg, node, path: path.write_text("agent failure log"),
         "lifecycle.create_podsnapshot": snapshot,
         "lifecycle.wait_for_snapshot_ready": (snapshot, content),
         "lifecycle.wait_for_pod_deleted": None,
@@ -564,15 +566,26 @@ class BenchmarkTests(unittest.TestCase):
                         self.assertEqual(span_volume["emptyDir"]["medium"], "Memory")
                         self.assertIn("sizeLimit", span_volume["emptyDir"])
                         cache_init = [
-                            c for c in spec.get("initContainers", [])
+                            c
+                            for c in spec.get("initContainers", [])
                             if c["name"] == "drop-page-cache"
                         ]
                         if pod is restore:
                             self.assertEqual(cache_init, [])
                         else:
                             self.assertEqual(len(cache_init), 1)
-                            self.assertTrue(cache_init[0]["securityContext"]["privileged"])
-                            self.assertEqual(cache_init[0]["args"][0], model.hf_id_or_path)
+                            self.assertTrue(
+                                cache_init[0]["securityContext"]["privileged"]
+                            )
+                            self.assertNotEqual(cache_init[0]["image"], main["image"])
+                            self.assertIn("@sha256:", cache_init[0]["image"])
+                            inventory = next(
+                                c
+                                for c in spec["initContainers"]
+                                if c["name"] == "model-weights"
+                            )
+                            self.assertFalse(inventory["securityContext"]["privileged"])
+                            self.assertEqual(inventory["args"][0], model.hf_id_or_path)
                             self.assertEqual(spec["initContainers"][-1], cache_init[0])
                         if engine.name == "trtllm":
                             self.assertEqual(
@@ -791,13 +804,54 @@ class BenchmarkTests(unittest.TestCase):
                     run_id="failed",
                     progress=lambda _: None,
                 )
-            self.assertTrue((Path(tmp) / "failed/failure.json").is_file())
+            failure = json.loads((Path(tmp) / "failed/failure.json").read_text())
+            self.assertEqual(len(failure["partial_result"]["restore_attempts"]), 1)
+            attempt = Path(tmp) / "failed/restore-01"
+            self.assertEqual(
+                (attempt / "restore-failure.log").read_text(), "failure log"
+            )
+            self.assertEqual((attempt / "agent.log").read_text(), "agent failure log")
+            self.assertEqual(
+                json.loads((attempt / "pod-failure.json").read_text())["metadata"][
+                    "name"
+                ],
+                "bench-restore-failed-1",
+            )
             self.assertFalse((Path(tmp) / "failed/result.json").exists())
             mocks["lifecycle.delete_podsnapshotcontent"].assert_called_once_with(
                 "content"
             )
             mocks["api"].delete_namespaced_config_map.assert_called_once_with(
                 "bench-app-failed", "workloads"
+            )
+
+    def test_restore_wait_failure_keeps_partial_attempt_and_logs(self):
+        with tempfile.TemporaryDirectory() as tmp, cluster() as mocks:
+            mocks["lifecycle.wait_for_pod_event"].side_effect = TimeoutError(
+                "restore timed out"
+            )
+            with self.assertRaisesRegex(TimeoutError, "restore timed out"):
+                run.run_benchmark(
+                    config(),
+                    cli.ENGINES["vllm"],
+                    ModelSpec("Test", "/hf-cache/test"),
+                    image="test",
+                    evidence_dir=Path(tmp),
+                    run_id="timeout",
+                    progress=lambda _: None,
+                )
+            folder = Path(tmp) / "timeout"
+            failure = json.loads((folder / "failure.json").read_text())
+            attempts = failure["partial_result"]["restore_attempts"]
+            self.assertEqual(len(attempts), 1)
+            self.assertIsNotNone(attempts[0]["restore_pod_created_at"])
+            self.assertIsNone(attempts[0]["measurement"])
+            self.assertEqual(
+                (folder / "restore-01/restore-failure.log").read_text(), "failure log"
+            )
+            mocks["measurement.restored_measurement"].assert_not_called()
+            mocks["lifecycle.delete_podsnapshotcontent"].assert_called_once_with(
+                "content"
             )
 
     def test_dry_run_never_loads_cluster_config(self):
