@@ -20,13 +20,18 @@ published results.
 
 ## Layout
 
-The runner uses `snapshot_e2e.k8s` and `snapshot_e2e.lifecycle` from
-[`e2e/`](../e2e), plus the engine guide applications and deployment templates.
+Benchmarks use real engine images and take minutes per model, so they run
+manually rather than in the e2e CI suite. The runner reuses `snapshot_e2e.k8s`
+and `snapshot_e2e.lifecycle` as a local `uv` dependency, plus the engine guide
+applications and deployment templates.
 
 - `snapshot_benchmarks/schema.py` — the `RunResult` data model written to disk
 - `snapshot_benchmarks/run.py` — runs one model and engine configuration
 - `snapshot_benchmarks/engines/` — vLLM, SGLang and TRT-LLM adapters that load
   the corresponding guide deployment templates
+- `snapshot_benchmarks/measurement.py` — collects clocks, artifact sizes and inference checks
+- `snapshot_benchmarks/timing.py` — computes restore phases from agent and application clocks
+- `snapshot_benchmarks/analysis/` — classifies startup spans and accounts for overlapping work
 - `snapshot_benchmarks/workload.py` — benchmark mounts and fresh caches added
   to those guide pods
 - `instrumentation/` — timers projected alongside the guide application;
@@ -40,23 +45,14 @@ The runner uses `snapshot_e2e.k8s` and `snapshot_e2e.lifecycle` from
 - `models.yaml` — an example model list for sweeps
 - `results/` — gitignored, per-invocation raw JSON output
 
-## Quick start
+## Running a benchmark
 
-```bash
-uv run --project benchmarks python -m snapshot_benchmarks metadata --context YOUR_CONTEXT
-uv run --project benchmarks python -m snapshot_benchmarks run \
-  --context YOUR_CONTEXT --namespace YOUR_NAMESPACE \
-  --snapshot-namespace SNAPSHOT_NAMESPACE --node YOUR_NODE \
-  --model-pvc YOUR_MODEL_PVC --work-pvc YOUR_WORK_PVC \
-  --engine vllm --model /hf-cache/Qwen3-0.6B \
-  --image YOUR_ENGINE_IMAGE --tp 1 --dry-run
-```
+Follow the [quick start](../docs/development/benchmarks-guide.md#quick-start)
+for cluster settings, a dry run and a measured run. Each run selects one engine,
+model and TP/EP configuration.
 
-Remove `--dry-run` to run it. Use `--tp 2` for two GPUs, or `--tp 8 --ep 8`
-for eight-way tensor and expert parallelism. See the guide for engine arguments,
-storage requirements and timing boundaries.
-
-Published results are Markdown tables. New runs save JSON and logs under `results/`.
+Results from new runs are saved as JSON and logs under `results/`. The published
+tables are in [Performance Benchmarks](../docs/development/benchmarks.md).
 
 ## Local checks
 

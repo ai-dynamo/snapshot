@@ -47,10 +47,13 @@ new replica comes online in seconds instead of minutes.
 ## Benchmarks
 
 <div align="center">
-  <img width="900" alt="Cold start and first Snapshot restore for the vLLM configurations on one to eight B200 GPUs." src="docs/development/img/vllm-cold-start-vs-snapshot.png">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/development/img/vllm-cold-start-vs-snapshot-dark.png">
+    <img width="900" alt="Cold start and first Snapshot restore for vLLM on a single B200 node, using one to eight GPUs." src="docs/development/img/vllm-cold-start-vs-snapshot.png">
+  </picture>
 </div>
 
-<p align="center"><i><b>Figure 1.</b> Cold start and first Snapshot restore for vLLM on one to eight B200 GPUs.</i></p>
+<p align="center"><i><b>Figure 1.</b> Cold start and first Snapshot restore for vLLM on a single B200 node, using one to eight GPUs.</i></p>
 
 For the experiment setup, the per stage breakdown, and the full results, see [benchmarks](docs/development/benchmarks.md).
 
