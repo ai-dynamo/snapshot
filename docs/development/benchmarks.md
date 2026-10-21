@@ -161,7 +161,8 @@ standard deviation across the three restores.
 | DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 64.42 | 95.14 | 64.87 | 684.05 | 908.48 |
 | DeepSeek-V4-Pro-NVFP4 | SGLang | TEP8 | 58.80 | 87.68 | 42.55 | 432.52 | 621.55 |
 
-Each run saves the raw timings.
+Cold-start phases may not sum to the total because logging and instrumentation do not
+capture every interval. Each run saves the raw timings.
 
 ### Where the restore time goes
 
