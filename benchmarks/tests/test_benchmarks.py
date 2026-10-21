@@ -476,24 +476,28 @@ class BenchmarkTests(unittest.TestCase):
                         self.assertNotIn(
                             "PYTHONPROFILEIMPORTTIME", {e["name"] for e in main["env"]}
                         )
-                        constructor = json.loads(main["args"][0])
-                        if engine.name == "sglang":
-                            self.assertEqual(
-                                constructor["model_path"], model.hf_id_or_path
-                            )
-                            self.assertEqual(constructor["tp_size"], tp)
-                            self.assertEqual(constructor["ep_size"], ep)
+                        if pod is restore:
+                            self.assertEqual(main["command"], ["sleep", "infinity"])
+                            self.assertEqual(main["args"], [])
                         else:
-                            self.assertEqual(constructor["model"], model.hf_id_or_path)
-                            self.assertEqual(constructor["tensor_parallel_size"], tp)
-                            if engine.name == "vllm":
+                            constructor = json.loads(main["args"][0])
+                            if engine.name == "sglang":
                                 self.assertEqual(
-                                    constructor["enable_expert_parallel"], ep > 1
+                                    constructor["model_path"], model.hf_id_or_path
                                 )
+                                self.assertEqual(constructor["tp_size"], tp)
+                                self.assertEqual(constructor["ep_size"], ep)
                             else:
-                                self.assertEqual(
-                                    constructor["moe_expert_parallel_size"], ep
-                                )
+                                self.assertEqual(constructor["model"], model.hf_id_or_path)
+                                self.assertEqual(constructor["tensor_parallel_size"], tp)
+                                if engine.name == "vllm":
+                                    self.assertEqual(
+                                        constructor["enable_expert_parallel"], ep > 1
+                                    )
+                                else:
+                                    self.assertEqual(
+                                        constructor["moe_expert_parallel_size"], ep
+                                    )
                         self.assertEqual(
                             main["resources"]["limits"]["nvidia.com/gpu"], str(tp)
                         )
@@ -547,6 +551,38 @@ class BenchmarkTests(unittest.TestCase):
                         "data"
                     ].items():
                         compile(code, filename, "exec")
+
+    def test_restore_waits_without_starting_a_second_engine(self):
+        for engine in cli.ENGINES.values():
+            for tp in (1, 8):
+                with self.subTest(engine=engine.name, tp=tp):
+                    model = ModelSpec("Test", "/hf-cache/test", tp=tp)
+                    pod = instrument_pod(
+                        engine.build_restore_pod(
+                            name="restored",
+                            namespace="workloads",
+                            image="engine:pinned",
+                            model=model,
+                            snapshot_name="snapshot",
+                        ),
+                        config(),
+                        engine,
+                        model,
+                        "run",
+                        restore=True,
+                    )
+                    main = pod["spec"]["containers"][0]
+                    process = subprocess.Popen(
+                        main["command"] + main.get("args", []),
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    try:
+                        with self.assertRaises(subprocess.TimeoutExpired):
+                            process.wait(timeout=0.1)
+                    finally:
+                        process.terminate()
+                        process.wait(timeout=5)
 
     def test_cache_initializer_rejects_a_reused_run(self):
         engine = cli.ENGINES["trtllm"]

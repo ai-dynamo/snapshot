@@ -43,7 +43,13 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
     if not restore and model.tp > 1:
         command = main["command"]
         prefix = command[: command.index("--") + 1]
-    main["command"] = prefix + ["python3", "/snapshot-app/launch.py"]
+    # Older operators do not replace the entrypoint with a restore proxy.
+    # Keep the destination idle while the agent restores the saved process.
+    main["command"] = (
+        ["sleep", "infinity"]
+        if restore
+        else prefix + ["python3", "/snapshot-app/launch.py"]
+    )
     values = dict(
         HF_HOME="/hf-cache",
         HF_HUB_OFFLINE="1",
@@ -88,7 +94,7 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
             FLASHINFER_WORKSPACE_BASE="/snapshot-flashinfer-cache",
         )
         extra.update(model=model.hf_id_or_path, tensor_parallel_size=model.tp)
-    main["args"] = [json.dumps(extra)]
+    main["args"] = [] if restore else [json.dumps(extra)]
     for key, value in values.items():
         set_env(main, key, value)
     mounts = main["volumeMounts"]
