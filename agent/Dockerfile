@@ -20,7 +20,7 @@
 # Build Arguments
 # =============================================================================
 ARG DOCKER_PROXY
-ARG GO_VERSION=1.26.9
+ARG GO_VERSION=1.26.10
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
