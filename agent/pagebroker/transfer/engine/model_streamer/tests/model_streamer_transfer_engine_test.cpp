@@ -393,6 +393,9 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
     EXPECT_TRUE(native_changed.wait_for(lock, std::chrono::seconds(2), [] { return end_entered; }));
   }
   EXPECT_EQ(stage.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  EXPECT_THROW(engine.StageRestore(prepare(), root_.path() / "during-teardown"), std::runtime_error);
+  EXPECT_EQ(starts, 1U);
+  EXPECT_EQ(ends, 0U);
   {
     std::lock_guard lock(native_mutex);
     hold_end = false;
