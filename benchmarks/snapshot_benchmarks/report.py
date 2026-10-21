@@ -197,7 +197,7 @@ def render(results: list[dict]) -> str:
         ],
         headline,
     )
-    text += "\n\nRestore summarizes three attempts. Cold-start and checkpoint values are reported without a standard deviation. Speedup uses the mean restore time. Older single-attempt results show — for standard deviation.\n"
+    text += "\n\nThe report averages the recorded restore times and shows their sample standard deviation. Cold-start and checkpoint values are reported without a standard deviation. Speedup uses the mean restore time. Older single-attempt results show — for standard deviation.\n"
     if cold:
         text += "\n\n## Where the cold start time goes (s)\n\n"
         text += _table(
