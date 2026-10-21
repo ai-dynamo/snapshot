@@ -68,7 +68,24 @@ def prepare(
                 index = root / "pytorch_model.bin.index.json"
         if index.exists():
             shards = set(json.loads(index.read_text())["weight_map"].values())
+            if any(
+                Path(shard).is_absolute() or ".." in Path(shard).parts
+                for shard in shards
+            ):
+                raise ValueError("Index references a file outside " + str(root))
             weights = sorted(root / shard for shard in shards)
+        base = root.resolve()
+        # Hugging Face snapshots link to this repository's shared blob files.
+        blobs = base
+        if base.parent.name == "snapshots" and base.parent.parent.name.startswith(
+            "models--"
+        ):
+            blobs = base.parent.parent / "blobs"
+        if any(
+            not (p.resolve().is_relative_to(base) or p.resolve().is_relative_to(blobs))
+            for p in weights
+        ):
+            raise ValueError("Weight file points outside the model cache: " + str(root))
         if not weights or any(
             not p.is_file() or p.stat().st_size == 0 for p in weights
         ):

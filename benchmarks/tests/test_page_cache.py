@@ -90,6 +90,41 @@ class PageCacheTests(unittest.TestCase):
             self.assertEqual(result["weights_bytes"], 14)
             self.assertEqual(len(result["files"]), 2)
 
+    def test_index_rejects_escaping_paths_but_allows_hugging_face_blobs(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            cache = Path(tmp)
+            root = cache / "models--test" / "snapshots" / "revision"
+            root.mkdir(parents=True)
+            blob = root.parent.parent / "blobs" / "weights"
+            blob.parent.mkdir()
+            blob.write_bytes(b"weights")
+            outside = cache / "unrelated"
+            outside.write_bytes(b"outside")
+            (root / "escaping.safetensors").symlink_to(outside)
+            (root / "model.safetensors").symlink_to(blob)
+            index = root / "model.safetensors.index.json"
+            with patch.object(page_cache, "DROP_CACHES") as control:
+                for shard in (
+                    str(outside),
+                    "../../../unrelated",
+                    "escaping.safetensors",
+                ):
+                    with self.subTest(shard=shard):
+                        index.write_text(json.dumps(dict(weight_map={"weight": shard})))
+                        with self.assertRaisesRegex(ValueError, "outside"):
+                            page_cache.prepare(str(root), output=cache / "probe.json")
+                control.open.assert_not_called()
+            index.write_text(
+                json.dumps(dict(weight_map={"weight": "model.safetensors"}))
+            )
+            result = page_cache.prepare(
+                str(root), output=cache / "probe.json", drop_page_cache=False
+            )
+            self.assertEqual(result["weights_bytes"], len(b"weights"))
+
     def test_pinned_helper_uses_directory_resolved_by_unprivileged_inventory(self):
         cfg = BenchmarkConfig(
             "work",
