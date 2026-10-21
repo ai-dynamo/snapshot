@@ -24,7 +24,6 @@
 
 #include "file_descriptor.hpp"
 #include <streamer/streamer.h>
-#include "utils/event_loop.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -196,46 +195,6 @@ ModelStreamerRestore::StreamerEntry::ReleaseMappings() noexcept
   }
 }
 
-// The pinned Model Streamer ABI permits multiple in-flight submissions but
-// does not permit request and response calls in parallel. Restore events are
-// therefore the sole API callers, while request threads wait on futures for
-// their independently tracked submissions.
-ModelStreamerRestore::SubmitEvent::SubmitEvent(
-    ModelStreamerRestore& restore,
-    std::shared_ptr<StreamerEntry> entry)
-    : restore_(restore), entry_(std::move(entry))
-{
-}
-
-void
-ModelStreamerRestore::SubmitEvent::Execute()
-{
-  restore_.QueueSubmission(entry_);
-}
-
-void
-ModelStreamerRestore::SubmitEvent::Cancel(std::exception_ptr error) noexcept
-{
-  if (entry_)
-    restore_.FailEntry(*entry_, std::move(error));
-}
-
-ModelStreamerRestore::WorkEvent::WorkEvent(ModelStreamerRestore& restore)
-    : restore_(restore)
-{
-}
-
-void
-ModelStreamerRestore::WorkEvent::Execute()
-{
-  restore_.ProcessWork();
-}
-
-void
-ModelStreamerRestore::WorkEvent::Cancel(std::exception_ptr) noexcept
-{
-}
-
 ModelStreamerRestore::ModelStreamerRestore(std::chrono::milliseconds submission_timeout)
     : ModelStreamerRestore(ModelStreamerSessionOptions{}, submission_timeout)
 {
@@ -245,8 +204,7 @@ ModelStreamerRestore::ModelStreamerRestore(
     ModelStreamerSessionOptions options,
     std::chrono::milliseconds submission_timeout)
     : submission_timeout_(submission_timeout), options_(std::move(options)),
-      stopped_error_(std::make_exception_ptr(std::runtime_error("Model Streamer restore stopped"))),
-      event_loop_([this](std::exception_ptr error) { HandleFailure(std::move(error)); })
+      stopped_error_(std::make_exception_ptr(std::runtime_error("Model Streamer restore stopped")))
 {
   if (submission_timeout_ <= std::chrono::milliseconds::zero())
     throw std::invalid_argument("Model Streamer submission timeout must be positive");
@@ -261,17 +219,62 @@ ModelStreamerRestore::ModelStreamerRestore(
 
 ModelStreamerRestore::~ModelStreamerRestore() noexcept
 {
-  event_loop_.Stop();
-  // A stopped event loop can leave accepted submissions active. Model
-  // Streamer must release their raw destinations before their waiters wake.
-  StopStreamer();
-  FailAll(stopped_error_);
+  RequestStop();
+  if (worker_.joinable())
+    worker_.join();
 }
 
 bool
 ModelStreamerRestore::Failed() const noexcept
 {
   return failed_.load(std::memory_order_acquire);
+}
+
+void
+ModelStreamerRestore::RequestStop() noexcept
+{
+  {
+    std::lock_guard lock(pending_mutex_);
+    if (!terminal_error_)
+      terminal_error_ = stopped_error_;
+  }
+  work_ready_.notify_one();
+}
+
+void
+ModelStreamerRestore::Run() noexcept
+{
+  std::exception_ptr error;
+  bool failed = false;
+  try {
+    while (true) {
+      {
+        std::unique_lock lock(pending_mutex_);
+        work_ready_.wait(lock, [this] { return terminal_error_ || !pending_.empty() || !active_.empty(); });
+        if (terminal_error_) {
+          error = terminal_error_;
+          break;
+        }
+      }
+      // The native ABI permits concurrent submissions, but request and response
+      // calls must be serialized. Only this worker calls the native API.
+      ProcessWork();
+    }
+  }
+  catch (...) {
+    failed = true;
+    std::lock_guard lock(pending_mutex_);
+    if (!terminal_error_)
+      terminal_error_ = std::current_exception();
+    error = terminal_error_;
+  }
+
+  // Close admission before teardown, but allow engine replacement only after
+  // native access ends. Waiters may release mappings as soon as we complete them.
+  StopStreamer();
+  if (failed)
+    failed_.store(true, std::memory_order_release);
+  FailAll(std::move(error));
 }
 
 void
@@ -283,7 +286,7 @@ ModelStreamerRestore::Start()
   if (value_ == nullptr)
     throw std::runtime_error("Model Streamer started without returning a handle");
 
-  // The event-loop failure handler owns teardown, including partial startup.
+  // The worker owns teardown, including partial startup.
   std::vector<const char*> keys;
   std::vector<const char*> values;
   const auto append = [&](const char* key, const std::string& value) {
@@ -306,10 +309,19 @@ ModelStreamerRestore::Start()
 }
 
 void
-ModelStreamerRestore::QueueSubmission(std::shared_ptr<StreamerEntry>& entry)
+ModelStreamerRestore::QueueSubmission(const std::shared_ptr<StreamerEntry>& entry)
 {
-  pending_.push_back(std::move(entry));
-  ScheduleWork();
+  std::exception_ptr error;
+  {
+    std::lock_guard lock(pending_mutex_);
+    error = terminal_error_;
+    if (!error)
+      pending_.push_back(entry);
+  }
+  if (error)
+    FailEntry(*entry, std::move(error));
+  else
+    work_ready_.notify_one();
 }
 
 bool
@@ -331,13 +343,24 @@ void
 ModelStreamerRestore::SubmitPending()
 {
   DiscardInterruptedPending();
-  while (!pending_.empty() && CanAdmit(*pending_.front())) {
+  while (true) {
+    std::shared_ptr<StreamerEntry> entry;
+    {
+      std::lock_guard lock(pending_mutex_);
+      if (terminal_error_)
+        return;
+      if (pending_.empty() || !CanAdmit(*pending_.front()))
+        break;
+      entry = pending_.front();
+    }
     if (value_ == nullptr)
       Start();
-    // Keep the entry in pending_ until native submission and registration both
-    // finish. On any exception, HandleFailure ends native access before FailAll
-    // releases even an entry that the library accepted but we could not track.
-    AdmitAndSubmit(pending_.front());
+    // Retain the queued reference until submission and registration finish.
+    // On exception, Run stops native access before completing even an entry
+    // that the library accepted but we could not register in active_.
+    if (!AdmitAndSubmit(entry))
+      return;
+    std::lock_guard lock(pending_mutex_);
     pending_.pop_front();
   }
   // End an unused session if every request was rejected or cancelled.
@@ -348,20 +371,31 @@ ModelStreamerRestore::SubmitPending()
 void
 ModelStreamerRestore::DiscardInterruptedPending()
 {
-  for (auto entry = pending_.begin(); entry != pending_.end();) {
-    try {
-      (*entry)->cancellation.ThrowIfCancelled();
-      ++entry;
+  while (true) {
+    std::shared_ptr<StreamerEntry> interrupted;
+    std::exception_ptr error;
+    {
+      std::lock_guard lock(pending_mutex_);
+      for (auto entry = pending_.begin(); entry != pending_.end(); ++entry) {
+        try {
+          (*entry)->cancellation.ThrowIfCancelled();
+        }
+        catch (const CancellationError&) {
+          error = std::current_exception();
+          interrupted = std::move(*entry);
+          pending_.erase(entry);
+          break;
+        }
+      }
     }
-    catch (const CancellationError&) {
-      FailEntry(**entry, std::current_exception());
-      entry = pending_.erase(entry);
-    }
+    if (!interrupted)
+      return;
+    FailEntry(*interrupted, std::move(error));
   }
 }
 
-void
-ModelStreamerRestore::AdmitAndSubmit(std::shared_ptr<StreamerEntry>& entry)
+bool
+ModelStreamerRestore::AdmitAndSubmit(const std::shared_ptr<StreamerEntry>& entry)
 {
   try {
     entry->cancellation.ThrowIfCancelled();
@@ -370,17 +404,22 @@ ModelStreamerRestore::AdmitAndSubmit(std::shared_ptr<StreamerEntry>& entry)
     // Cancellation can race with session startup or admission. No native
     // request owns this entry yet, so it must not fail other submissions.
     FailEntry(*entry, std::current_exception());
-    return;
+    return true;
   }
-  // Let the caller cancel while the session starts. Claim the entry just before
-  // submitting it, so its buffers stay alive while Model Streamer uses them.
-  auto expected = Admission::Pending;
-  if (!entry->admission.compare_exchange_strong(expected, Admission::Claimed))
-    return;  // The caller cancelled and may already have released its buffers.
+  {
+    std::lock_guard lock(pending_mutex_);
+    if (terminal_error_)
+      return false;
+    // A claim is ordered against shutdown and caller cancellation. Never hold
+    // the mutex during the native request: it may block while other callers cancel.
+    auto expected = Admission::Pending;
+    if (!entry->admission.compare_exchange_strong(expected, Admission::Claimed))
+      return true;  // The caller cancelled and may already have released its buffers.
+  }
 
   const auto submission_id = SubmitToStreamer(*entry);
   if (submission_id == 0)
-    return;
+    return true;
 
   entry->deadline = std::min(entry->cancellation.Deadline(), std::chrono::steady_clock::now() + submission_timeout_);
   const auto [active, inserted] = active_.try_emplace(submission_id);
@@ -389,7 +428,8 @@ ModelStreamerRestore::AdmitAndSubmit(std::shared_ptr<StreamerEntry>& entry)
   session_bytes_ += entry->bytes;
   ++session_submissions_;
   ++unfinished_;
-  active->second = std::move(entry);
+  active->second = entry;
+  return true;
 }
 
 std::uint64_t
@@ -464,7 +504,6 @@ ModelStreamerRestore::FailEntry(StreamerEntry& entry, std::exception_ptr error) 
 void
 ModelStreamerRestore::ProcessWork()
 {
-  work_scheduled_ = false;
   SubmitPending();
   if (active_.empty())
     return;
@@ -489,8 +528,8 @@ ModelStreamerRestore::ProcessWork()
 
   const auto now = std::chrono::steady_clock::now();
   for (const auto& [submission_id, entry] : active_) {
-    // The native API cannot cancel one submission. Failing the event loop stops
-    // the shared streamer before waking every Stage call in HandleFailure.
+    // The native API cannot cancel one submission. Failing the worker stops
+    // the shared streamer before waking every Stage call in Run.
     entry->cancellation.ThrowIfCancelled();
     if (now >= entry->deadline)
       throw std::runtime_error("Model Streamer submission " + std::to_string(submission_id) + " timed out");
@@ -506,7 +545,6 @@ ModelStreamerRestore::ProcessWork()
 
   if (unfinished_ == 0)
     FinishSession();
-  ScheduleWork();
 }
 
 void
@@ -522,19 +560,6 @@ ModelStreamerRestore::FinishSession()
 }
 
 void
-ModelStreamerRestore::ScheduleWork()
-{
-  if (work_scheduled_)
-    return;
-  if (active_.empty() && pending_.empty())
-    return;
-
-  work_scheduled_ = true;
-  if (!event_loop_.Post(std::make_unique<WorkEvent>(*this)))
-    work_scheduled_ = false;
-}
-
-void
 ModelStreamerRestore::StopStreamer() noexcept
 {
   if (value_ != nullptr) {
@@ -544,37 +569,32 @@ ModelStreamerRestore::StopStreamer() noexcept
 }
 
 void
-ModelStreamerRestore::HandleFailure(std::exception_ptr error) noexcept
-{
-  // Model Streamer may still hold raw mapped destinations. Stop it before
-  // waking callers who will then release their entries' mappings.
-  StopStreamer();
-  failed_.store(true, std::memory_order_release);
-  FailAll(std::move(error));
-}
-
-void
 ModelStreamerRestore::FailAll(std::exception_ptr error) noexcept
 {
   for (auto& [id, entry] : active_)
     FailEntry(*entry, error);
-  for (auto& entry : pending_) {
-    if (entry)
-      FailEntry(*entry, error);
-  }
   active_.clear();
-  pending_.clear();
+  while (true) {
+    std::shared_ptr<StreamerEntry> entry;
+    {
+      std::lock_guard lock(pending_mutex_);
+      if (pending_.empty())
+        break;
+      entry = std::move(pending_.front());
+      pending_.pop_front();
+    }
+    FailEntry(*entry, error);
+  }
   unfinished_ = 0;
   session_bytes_ = 0;
   session_submissions_ = 0;
-  work_scheduled_ = false;
 }
 
 void
 ModelStreamerRestore::SubmitAndWait(const std::shared_ptr<StreamerEntry>& entry)
 {
   auto completion = entry->completion.get_future();
-  event_loop_.Post(std::make_unique<SubmitEvent>(*this, entry));
+  QueueSubmission(entry);
   auto& admission = entry->admission;
   const auto& cancellation = entry->cancellation;
   while (completion.wait_for(std::chrono::milliseconds::zero()) != std::future_status::ready) {
@@ -644,7 +664,7 @@ ModelStreamerRestore::Stage(const CheckpointInventory& inventory, const Path& de
   cancellation.ThrowIfCancelled();
   ValidateRestoreInventory(inventory);
   CreateDirectoryTree(inventory, destination);
-  std::call_once(start_once_, [this] { event_loop_.Start(); });
+  std::call_once(start_once_, [this] { worker_ = std::thread([this] { Run(); }); });
   RestoreFiles(inventory, destination, cancellation);
   cancellation.ThrowIfCancelled();
   ApplyTreePermissions(inventory, destination);

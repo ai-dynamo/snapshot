@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -27,6 +28,30 @@
 using namespace snapshot::pagebroker;
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
+
+namespace snapshot::pagebroker {
+class ModelStreamerRestoreTestPeer {
+ public:
+  // Check actual acceptance while a native barrier holds the worker. try_lock
+  // makes an accidentally held queue mutex fail the test instead of hanging it.
+  static bool WaitForPending(ModelStreamerRestore& restore, std::size_t count)
+  {
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    do {
+      {
+        std::unique_lock lock(restore.pending_mutex_, std::try_to_lock);
+        if (lock.owns_lock() && restore.pending_.size() == count)
+          return true;
+      }
+      std::this_thread::sleep_for(1ms);
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+  }
+
+  static bool HasWorker(const ModelStreamerRestore& restore) { return restore.worker_.joinable(); }
+  static void RequestStop(ModelStreamerRestore& restore) { restore.RequestStop(); }
+};
+}  // namespace snapshot::pagebroker
 
 namespace {
 enum class Fault { NONE, UNKNOWN, INVALID_INDEX, EARLY_DONE, MISSING_DONE, STORAGE, TIMEOUT };
@@ -74,6 +99,7 @@ struct FakeState {
   std::vector<std::string> sources;
   std::vector<std::vector<std::string>> submission_sources;
   std::vector<uintmax_t> submission_bytes;
+  std::thread::id native_thread;
   Fault fault = Fault::NONE;
   RunaiFileStreamerSubmissionId next_id = 0;
 } state;
@@ -119,6 +145,7 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.submission_sources.clear();
     state.submission_bytes.clear();
     state.fault = Fault::NONE;
+    state.native_thread = {};
     state.next_id = 0;
     root_ = temporary_.path();
   }
@@ -195,6 +222,7 @@ extern "C" int __wrap_posix_fallocate(int descriptor, off_t offset, off_t length
 extern "C" int runai_file_streamer_start(void** value)
 {
   std::unique_lock lock(state.mutex);
+  state.native_thread = std::this_thread::get_id();
   *value = state.return_start_handle ? new Session : nullptr;
   ++state.starts;
   state.changed.notify_all();
@@ -204,6 +232,8 @@ extern "C" int runai_file_streamer_start(void** value)
 
 extern "C" int runai_file_streamer_set_credentials(void*, const char**, const char**, unsigned)
 {
+  std::lock_guard lock(state.mutex);
+  EXPECT_EQ(state.native_thread, std::this_thread::get_id());
   return state.credential_status;
 }
 
@@ -217,6 +247,7 @@ extern "C" void runai_file_streamer_end(void* value)
   auto* session = static_cast<Session*>(value);
   {
     std::unique_lock lock(state.mutex);
+    EXPECT_EQ(state.native_thread, std::this_thread::get_id());
     ++state.ends_entered;
     state.changed.notify_all();
     state.changed.wait(lock, [] {
@@ -243,6 +274,7 @@ extern "C" int runai_file_streamer_request(
   EXPECT_EQ(device.id, 0);
   auto& session = *static_cast<Session*>(value);
   std::unique_lock lock(state.mutex);
+  EXPECT_EQ(state.native_thread, std::this_thread::get_id());
   ++state.requests_entered;
   state.changed.notify_all();
   state.changed.wait(lock, [] { return !state.hold_request; });
@@ -278,6 +310,7 @@ extern "C" int runai_file_streamer_response(
 {
   auto& session = *static_cast<Session*>(value);
   std::unique_lock lock(state.mutex);
+  EXPECT_EQ(state.native_thread, std::this_thread::get_id());
   ++state.response_polls;
   state.changed.wait_for(lock, 1ms, [] { return state.allow_responses; });
   if (!state.allow_responses || state.fault == Fault::TIMEOUT)
@@ -313,6 +346,96 @@ extern "C" int runai_file_streamer_response(
 }
 
 extern "C" const char* runai_file_streamer_response_str(int) { return "injected native status"; }
+
+TEST_F(ModelStreamerSessionTest, UnusedCoordinatorDoesNotStartWorker)
+{
+  {
+    ModelStreamerRestore restore;
+    EXPECT_FALSE(ModelStreamerRestoreTestPeer::HasWorker(restore));
+  }
+  EXPECT_EQ(state.starts, 0U);
+  EXPECT_EQ(state.ends, 0U);
+}
+
+TEST_F(ModelStreamerSessionTest, ReusesWorkerAfterEachSessionDrains)
+{
+  ModelStreamerRestore restore;
+  std::thread::id worker;
+  for (unsigned i = 0; i < 8; ++i) {
+    EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / std::to_string(i)));
+    EXPECT_TRUE(WaitForIdle());
+    EXPECT_TRUE(ModelStreamerRestoreTestPeer::HasWorker(restore));
+    std::lock_guard lock(state.mutex);
+    if (i == 0)
+      worker = state.native_thread;
+    EXPECT_EQ(state.native_thread, worker);
+    EXPECT_EQ(state.starts, i + 1);
+    EXPECT_EQ(state.ends, i + 1);
+  }
+  // Repeated requests to stop must wake the idle worker and remain safe when
+  // the destructor requests stop again and joins it.
+  ModelStreamerRestoreTestPeer::RequestStop(restore);
+  ModelStreamerRestoreTestPeer::RequestStop(restore);
+  EXPECT_THROW(restore.Stage(Inventory(), root_ / "stopped"), std::runtime_error);
+  EXPECT_FALSE(restore.Failed());
+}
+
+TEST_F(ModelStreamerSessionTest, ShutdownDuringStartupRejectsPendingWithoutSubmitting)
+{
+  state.hold_start = true;
+  ModelStreamerRestore restore;
+  auto first = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "first"); });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.starts == 1; }));
+  }
+  auto queued = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "queued"); });
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::WaitForPending(restore, 2));
+  auto stop = std::async(std::launch::async, [&] { ModelStreamerRestoreTestPeer::RequestStop(restore); });
+  const bool stopped = stop.wait_for(2s) == std::future_status::ready;
+  EXPECT_TRUE(stopped);
+  if (stopped) {
+    EXPECT_THROW(restore.Stage(Inventory(), root_ / "late"), std::runtime_error);
+  }
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.submitted, 0U);
+    state.hold_start = false;
+    state.changed.notify_all();
+  }
+  stop.get();
+  EXPECT_THROW(first.get(), std::runtime_error);
+  EXPECT_THROW(queued.get(), std::runtime_error);
+  EXPECT_FALSE(HasMapping(root_ / "first"));
+  EXPECT_FALSE(HasMapping(root_ / "queued"));
+  EXPECT_EQ(state.submitted, 0U);
+  EXPECT_EQ(state.ends, 1U);
+  EXPECT_FALSE(restore.Failed());
+}
+
+TEST_F(ModelStreamerSessionTest, ShutdownDrainsClaimedBuffersAndRejectsNewWork)
+{
+  state.allow_responses = false;
+  state.hold_end = true;
+  ModelStreamerRestore restore;
+  auto active = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "active"); });
+  EXPECT_TRUE(WaitForSubmissions(1));
+  ModelStreamerRestoreTestPeer::RequestStop(restore);
+  const bool ending = WaitForEnd();
+  EXPECT_TRUE(ending);
+  EXPECT_EQ(active.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "active"));
+  EXPECT_FALSE(restore.Failed());
+  if (ending) {
+    EXPECT_THROW(restore.Stage(Inventory(), root_ / "late"), std::runtime_error);
+  }
+  ReleaseEnd();
+  EXPECT_THROW(active.get(), std::runtime_error);
+  EXPECT_FALSE(HasMapping(root_ / "active"));
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_EQ(state.ends, 1U);
+  EXPECT_FALSE(restore.Failed());
+}
 
 TEST_F(ModelStreamerSessionTest, AllocationFailureDoesNotSubmitNativeWritesAndAllowsRetry)
 {
@@ -622,6 +745,36 @@ TEST_F(ModelStreamerSessionTest, StorageFailureAllowsSubsequentRestore)
   EXPECT_EQ(state.ends, 2U);
 }
 
+TEST_F(ModelStreamerSessionTest, DuplicateSubmissionIdRetainsBothEntriesUntilTeardown)
+{
+  state.allow_responses = false;
+  state.hold_end = true;
+  ModelStreamerRestore restore;
+  auto first = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "first"); });
+  EXPECT_TRUE(WaitForSubmissions(1));
+  {
+    std::lock_guard lock(state.mutex);
+    // The next request accepts its destinations but cannot be registered in
+    // active_. The pending queue must retain that entry through native end().
+    state.next_id = 0;
+  }
+  auto duplicate = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "duplicate"); });
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_EQ(first.wait_for(0ms), std::future_status::timeout);
+  EXPECT_EQ(duplicate.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "first"));
+  EXPECT_TRUE(HasMapping(root_ / "duplicate"));
+  EXPECT_FALSE(restore.Failed());
+  ReleaseEnd();
+  EXPECT_THROW(first.get(), std::runtime_error);
+  EXPECT_THROW(duplicate.get(), std::runtime_error);
+  EXPECT_FALSE(HasMapping(root_ / "first"));
+  EXPECT_FALSE(HasMapping(root_ / "duplicate"));
+  EXPECT_TRUE(restore.Failed());
+  EXPECT_EQ(state.submitted, 2U);
+  EXPECT_EQ(state.ends, 1U);
+}
+
 TEST_F(ModelStreamerSessionTest, BoundsSessionAdmissionUnderConcurrentLoad)
 {
   state.allow_responses = false;
@@ -811,10 +964,16 @@ TEST_F(ModelStreamerSessionTest, TerminalFailureDrainsActiveAndQueuedRestores)
   {
     std::unique_lock lock(state.mutex);
     EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted >= 8; }));
+  }
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::WaitForPending(restore, 4));
+  {
+    std::lock_guard lock(state.mutex);
     state.allow_responses = true;
     state.changed.notify_all();
   }
   EXPECT_TRUE(WaitForEnd());
+  EXPECT_FALSE(restore.Failed());
+  EXPECT_THROW(restore.Stage(Inventory(), root_ / "late"), std::runtime_error);
   // Every accepted destination must stay alive until the shared session ends.
   const auto waiting = std::count_if(results.begin(), results.end(), [](auto& result) {
     return result.wait_for(0ms) == std::future_status::timeout;
@@ -922,7 +1081,7 @@ TEST_P(SharedSessionCancellationTest, ReportsEachRequestsOwnCancellationAfterDra
       EXPECT_STREQ(error.what(), "Model Streamer session interrupted by another submission's cancellation");
     }
   };
-  // Post rejects new work with the event loop's retained exception while end
+  // Queue closure rejects new work with the retained exception while end
   // is blocked. It must apply the same per-request attribution as active work.
   if (ending)
     expect_session_failure([&] { restore.Stage(Inventory(), root_ / "late"); });
@@ -986,17 +1145,12 @@ TEST_P(QueuedTeardownCancellationTest, ReturnsBeforeTeardownAndNeverSubmitsCance
 
   Cancellation cancellation;
   if (deadline)
-    cancellation = cancellation.WithDeadline(Cancellation::Clock::now() + 1s);
+    cancellation = cancellation.WithDeadline(Cancellation::Clock::now() + 2s);
   auto queued = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "queued", cancellation); });
-  {
-    std::unique_lock lock(state.mutex);
-    // The final file's allocation follows the last preparation cancellation
-    // check. From here this batch proceeds to the submission wait.
-    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.allocations == 2; }));
-  }
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::WaitForPending(restore, 1));
   if (!deadline)
     cancellation.Cancel();
-  const auto queued_status = queued.wait_for(2s);
+  const auto queued_status = queued.wait_for(3s);
   EXPECT_EQ(queued_status, std::future_status::ready);
   {
     std::lock_guard lock(state.mutex);
@@ -1010,7 +1164,7 @@ TEST_P(QueuedTeardownCancellationTest, ReturnsBeforeTeardownAndNeverSubmitsCance
     EXPECT_FALSE(HasMapping(root_ / "queued"));
   }
   // A ready result means Stage has released its mappings. Remove staging before
-  // allowing the worker to process B's event; its pointer targets are gone.
+  // allowing the worker to inspect the queued entry; its pointer targets are gone.
   if (queued_status == std::future_status::ready) {
     std::error_code error;
     fs::remove_all(root_ / "queued", error);
