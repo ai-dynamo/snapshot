@@ -765,7 +765,7 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 			// sync.WaitGroup.Go recovers only to re-panic, so a panic here
 			// would kill the agent. Report it as a failed destination instead.
 			results[i] = restoreResult{destination: destination, state: restoreResultFailed,
-				reason: "agent panicked restoring this container; see the node agent log"}
+				reason: "agent panicked restoring this container"}
 			defer recoverPanic(w.log, "restore destination", nil, "pod", podKey, "destination", destination)
 			results[i] = w.restoreDestination(ctx, pod, plan, destination, podKey, recovering)
 		})

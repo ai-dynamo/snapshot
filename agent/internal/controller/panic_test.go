@@ -136,7 +136,6 @@ func TestFailRestoreAfterPanicRecordsTheFailureOnThePod(t *testing.T) {
 	payload := string(lastPodStatusApply(t, w).GetPatch())
 	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
 	assert.Contains(t, payload, "panic: boom")
-	assert.Contains(t, payload, testNodeName, "the message must point at the node holding the log")
 	assert.True(t, w.restoreHandled(pod), "a recorded panic must not be replayed")
 }
 
