@@ -55,7 +55,7 @@ Three separate Go modules — `api`, `agent`, and `operator` — each with its o
 
 ## Build and test
 
-Run everything from the repository root. Go 1.27.2 — the version is pinned in
+Run everything from the repository root. Go 1.27.3 — the version is pinned in
 `hack/tools.mk`, `go.work`, all three `go.mod` files, `agent/Dockerfile`, and
 the workflows, and they must agree.
 
