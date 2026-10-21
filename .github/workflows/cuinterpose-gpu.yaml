@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+name: CuInterpose GPU tests
+
+# GPU infrastructure accepts trusted mirror pushes, not pull_request events.
+on:
+  push:
+    branches: ['pull-request/[0-9]+']
+    paths:
+      - 'agent/cmd/cuinterpose/**'
+      - 'agent/Dockerfile'
+      - '.github/workflows/cuinterpose-gpu.yaml'
+  schedule:
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: cuinterpose-gpu-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
+
+jobs:
+  check:
+    name: Validate repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: true
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - run: make check
+
+  artifacts:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and stage matching artifacts
+        shell: bash
+        run: |
+          # One build writes the artifacts and the test binary that tests them.
+          make -C agent/cmd/cuinterpose gpu-tests
+          mkdir payload
+          cp -a agent/cmd/cuinterpose/build payload/
+          printf '%s\n' "$GITHUB_SHA" > payload/revision
+          sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfile > payload/image
+          test "$(wc -l < payload/image)" -eq 1
+          # Keep executable modes and the exact inputs with the artifacts.
+          (cd payload && find . -type f -print0 | sort -z | xargs -0 sha256sum) > SHA256SUMS
+          mv SHA256SUMS payload/
+          tar -czf cuinterpose-gpu.tar.gz -C payload .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cuinterpose-gpu-inputs
+          path: cuinterpose-gpu.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  gpu:
+    needs: artifacts
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 60
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-nebius-2
+      TEST_NAMESPACE: dynamo-deploy-test
+      TEST_POD: snapshot-cuinterpose-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cuinterpose-gpu-inputs
+      - name: Start isolated two-GPU test pod
+        shell: bash
+        run: |
+          mkdir -p payload results
+          tar -xzf cuinterpose-gpu.tar.gz -C payload
+          (cd payload && sha256sum --check SHA256SUMS)
+          test "$(cat payload/revision)" = "$GITHUB_SHA"
+          cp payload/{revision,image,SHA256SUMS} results/
+          image=$(cat payload/image)
+          # The deployment runner already has access to this shared test namespace.
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" get namespace "$TEST_NAMESPACE" >/dev/null
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" create -f - <<YAML
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: ${TEST_POD}
+          spec:
+            restartPolicy: Never
+            activeDeadlineSeconds: 3300
+            terminationGracePeriodSeconds: 1
+            automountServiceAccountToken: false
+            runtimeClassName: nvidia
+            nodeSelector:
+              kubernetes.io/arch: amd64
+              nvidia.com/gpu.present: "true"
+              nvidia.com/gpu.product: NVIDIA-H200
+            tolerations:
+            - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+            - {key: dedicated, operator: Exists, effect: NoSchedule}
+            - {key: CriticalAddonsOnly, operator: Exists, effect: NoSchedule}
+            containers:
+            - name: tests
+              image: ${image}
+              command: [/bin/bash, -c, "sleep 3300"]
+              workingDir: /work
+              securityContext:
+                capabilities: {add: [SYS_PTRACE]}
+                seccompProfile: {type: Unconfined}
+              resources:
+                requests: {cpu: "2", memory: 8Gi, ephemeral-storage: 16Gi, nvidia.com/gpu: "2"}
+                limits: {cpu: "8", memory: 24Gi, ephemeral-storage: 40Gi, nvidia.com/gpu: "2"}
+              volumeMounts:
+              - {name: work, mountPath: /work}
+              - {name: shm, mountPath: /dev/shm}
+            volumes:
+            - {name: work, emptyDir: {}}
+            - {name: shm, emptyDir: {medium: Memory, sizeLimit: 2Gi}}
+          YAML
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" wait "pod/$TEST_POD" --for=condition=Ready --timeout=600s
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" exec -i "$TEST_POD" -- tar -xz -C /work < cuinterpose-gpu.tar.gz
+      - name: Run GPU tests
+        shell: bash
+        run: |
+          timeout 40m kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" exec -i "$TEST_POD" -- bash -seuo pipefail <<'SH' 2>&1 | tee results/run.log
+          sha256sum --check SHA256SUMS
+          mkdir results
+          nvidia-smi -q > results/nvidia-smi.txt
+          nvidia-smi topo -m > results/topology.txt
+          # The node supplies the driver, and the pinned CUDA base supplies the CUDA runtime
+          # and C compiler. The suite fails if the GPUs, driver, or artifacts do not meet its
+          # requirements, and the check below rejects ignored tests.
+          build/cuinterpose-gpu-tests --test-threads=1 | tee results/tests.txt
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' results/tests.txt
+          SH
+      - name: Collect diagnostics and remove test pod
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p results
+          status=0
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" get pod "$TEST_POD" -o yaml > results/pod.yaml || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" describe pod "$TEST_POD" > results/pod-description.txt || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" logs "$TEST_POD" > results/pod.log || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" cp "$TEST_POD:/work/results" results/pod-results || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" delete pod "$TEST_POD" --ignore-not-found --timeout=120s || status=1
+          exit "$status"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: cuinterpose-gpu-results
+          path: results/
+          if-no-files-found: error
+          retention-days: 14

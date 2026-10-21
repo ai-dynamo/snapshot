@@ -123,11 +123,9 @@ pageBroker:
   restoreMode: direct
   maxConcurrentRequests: 16
   staging:
-    # Checkpoint (except GPU CustomStorage capture, which writes directly to
-    # the PVC) and staged restore write into this RAM volume from the writing
-    # container's own memory limit. Leave headroom above sizeLimit for the
-    # agent's process and CRIU memory; see docs/operations/storage.md.
-    sizeLimit: 64Gi
+    # RAM on the node, unbounded without this cap. Lowered to fit when it does
+    # not leave the writing container room; see docs/operations/storage.md.
+    sizeLimit: 56Gi
   # Allocate and register the full ring before accepting GPU work.
   # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
   transferBufferCount: 32

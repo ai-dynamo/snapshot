@@ -30,13 +30,35 @@ env:
   CACHE_BRANCH: ${{ github.base_ref || github.ref_name }}
 
 jobs:
+  cuinterpose:
+    name: cuinterpose CPU checks
+    needs: check
+    runs-on: ubuntu-latest
+    env:
+      SNAPSHOT_CUINTERPOSE_TEST_IMAGE: snapshot-cuinterpose-test:ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make -C agent cuinterpose-test TEST_IMAGE="$SNAPSHOT_CUINTERPOSE_TEST_IMAGE"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: true
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - name: Check generated installer against the image payload
+        working-directory: operator
+        run: go test ./internal/protocol -run '^TestCuInterposeInstallerImage' -count=1 -v
+
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -50,7 +72,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -63,7 +85,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -88,11 +110,13 @@ jobs:
       - run: |
           uv run --locked --project e2e pytest \
             e2e/tests/test_agent_container.py \
+            e2e/tests/test_cpu_restore_failure_probe.py \
             e2e/tests/test_benchmark.py \
             e2e/tests/test_benchmark_outcomes.py \
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
+            e2e/tests/test_inference.py \
             e2e/tests/test_pod_status_writers.py \
             e2e/tests/test_prune_ghcr.py \
             e2e/tests/test_required_tests.py \

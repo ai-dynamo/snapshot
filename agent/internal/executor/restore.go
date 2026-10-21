@@ -127,6 +127,10 @@ type RestoreRequest struct {
 	PageBrokerControlSocketPath string
 	PageBrokerRestoreMode       string
 
+	// PublishedArtifact, when set, switches restore to the artifact-addressed
+	// RPCs; read from the content's recorded status, never reconstructed here.
+	PublishedArtifact *pagebroker.PublishedArtifact
+
 	// Decided by the caller, so both gates reach the same answer.
 	SkipCompatCheck bool
 	// WithoutProxy restores into a container whose PID 1 is its own command,
@@ -143,6 +147,29 @@ type RestoreResult struct {
 	// RestoredPID is the restored process, relative to the container's PID
 	// namespace.
 	RestoredPID int
+}
+
+// fetchArtifactMetadata retrieves and parses the manifest, then releases the
+// metadata transaction on every exit. Parses before the deferred Abort runs,
+// since Abort invalidates the staging directory.
+func fetchArtifactMetadata(ctx context.Context, broker pagebroker.Client, artifact *pagebroker.PublishedArtifact) (manifest *types.CheckpointManifest, retErr error) {
+	transactionID := uuid.NewString()
+	defer func() {
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pageBrokerAbortTimeout)
+		defer cancel()
+		if err := broker.Abort(abortCtx, transactionID); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker metadata transaction %q: %w", transactionID, err))
+		}
+	}()
+	dir, err := broker.GetArtifactMetadata(ctx, transactionID, artifact)
+	if err != nil {
+		return nil, fmt.Errorf("get PageBroker artifact metadata: %w", err)
+	}
+	manifest, err = types.ReadManifest(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read PageBroker artifact manifest: %w", err)
+	}
+	return manifest, nil
 }
 
 // Restore performs external restore for the given request.
@@ -217,13 +244,24 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"destination_container", req.DestinationContainerName,
 	)
 
-	artifactPath, err := nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
-	if err != nil {
-		return RestoreResult{}, fmt.Errorf("resolve checkpoint artifact: %w", err)
-	}
-	manifest, err := types.ReadManifest(artifactPath)
-	if err != nil {
-		return RestoreResult{}, fmt.Errorf("read checkpoint manifest: %w", err)
+	bound := req.PublishedArtifact != nil
+	var artifactPath string
+	var manifest *types.CheckpointManifest
+	var err error
+	if bound {
+		manifest, err = fetchArtifactMetadata(ctx, broker, req.PublishedArtifact)
+		if err != nil {
+			return RestoreResult{}, err
+		}
+	} else {
+		artifactPath, err = nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
+		if err != nil {
+			return RestoreResult{}, fmt.Errorf("resolve checkpoint artifact: %w", err)
+		}
+		manifest, err = types.ReadManifest(artifactPath)
+		if err != nil {
+			return RestoreResult{}, fmt.Errorf("read checkpoint manifest: %w", err)
+		}
 	}
 	if err := validateRestoreManifest(req, manifest); err != nil {
 		return RestoreResult{}, err
@@ -278,18 +316,11 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
 	transactionID = uuid.NewString()
 	stageStart := time.Now()
-	direct := req.PageBrokerRestoreMode != "staged"
+	// Bound restore has no direct mode at the protocol level.
+	direct := !bound && req.PageBrokerRestoreMode != "staged"
 	var staged string
 	preparationAttempted = true
-	if usePageBrokerGPU && direct {
-		gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
-	} else if usePageBrokerGPU {
-		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
-	} else if direct {
-		err = broker.DirectRestore(ctx, transactionID, artifactPath)
-	} else {
-		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
-	}
+	staged, gpu, err = prepareRestoreSource(ctx, broker, transactionID, bound, usePageBrokerGPU, direct, req.PublishedArtifact, artifactPath, gpuContext)
 	pageBrokerStageDuration = time.Since(stageStart)
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
@@ -385,6 +416,41 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	)
 
 	return RestoreResult{PlaceholderHostPID: snap.PlaceholderPID, RestoredPID: result.RestoredPID}, nil
+}
+
+// prepareRestoreSource starts the PageBroker transaction that stages (or, for legacy
+// direct restores, opens in place) the checkpoint this restore reads from. Bound
+// restore always stages, since artifact-addressed restore has no direct mode at the
+// protocol level; legacy restore keeps its existing direct/staged choice.
+func prepareRestoreSource(ctx context.Context, broker pagebroker.Client, transactionID string, bound, usePageBrokerGPU, direct bool, publishedArtifact *pagebroker.PublishedArtifact, artifactPath string, gpuContext *pagebroker.GpuContext) (staged string, gpu *pagebroker.CustomStorageExecution, err error) {
+	if bound {
+		if usePageBrokerGPU {
+			// Bound GPU restore.
+			staged, gpu, err = broker.PrepareGPUStagedArtifactRestore(ctx, transactionID, publishedArtifact, nil, gpuContext)
+			return staged, gpu, err
+		}
+		// Bound CPU restore.
+		staged, err = broker.StagedArtifactRestore(ctx, transactionID, publishedArtifact, nil)
+		return staged, nil, err
+	}
+	if usePageBrokerGPU {
+		if direct {
+			// Legacy GPU restore, direct from the filesystem artifact.
+			gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
+			return "", gpu, err
+		}
+		// Legacy GPU restore, staged through PageBroker.
+		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
+		return staged, gpu, err
+	}
+	if direct {
+		// Legacy CPU restore, direct from the filesystem artifact.
+		err = broker.DirectRestore(ctx, transactionID, artifactPath)
+		return "", nil, err
+	}
+	// Legacy CPU restore, staged through PageBroker.
+	staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
+	return staged, nil, err
 }
 
 // mountRestoreSource mounts the direct artifact or the PageBroker-staged copy into
@@ -546,6 +612,9 @@ func inspectRestore(
 	if !manifest.CUDA.IsEmpty() {
 		if len(manifest.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
+		}
+		if err := refuseMIGRestore(ctx, log, placeholderPID, req.SkipCompatCheck); err != nil {
+			return nil, 0, err
 		}
 		discoverStart := time.Now()
 		var env []string

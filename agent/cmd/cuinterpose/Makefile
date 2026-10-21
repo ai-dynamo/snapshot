@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 .DEFAULT_GOAL := build
-.PHONY: build test frontend native test-native
+.PHONY: build test frontend native test-native gpu-tests test-gpu
 
 CBINDGEN ?= cbindgen
 PLATFORM ?= linux/amd64
@@ -27,13 +27,14 @@ frontend:
 		{ test "$$actual" = "cbindgen $${expected#cbindgen v}" || \
 		  { echo "ERROR: $$actual does not match locked $$expected" >&2; exit 1; }; }
 	mkdir -p build
-	# Keep the matching private header in the export for ABI and GPU tests.
+	# The frontend includes the generated private ABI header.
 	cd rust && $(CBINDGEN) --quiet --config abi/cbindgen.toml --crate cuinterpose-abi \
 		--output ../build/core_abi.h .
 	$(FRONTEND_CC) -std=gnu11 -O2 -Wall -Wextra -Werror -shared -fPIC -fvisibility=hidden \
 		-Wl,--build-id=sha1,-Bsymbolic-functions,--version-script=frontend/libcuinterpose.ldscript \
 		-I$(CUDA_INCLUDE) -Ibuild frontend/frontend.c -o build/libcuinterpose.so -ldl -pthread
 	chmod 0644 build/libcuinterpose.so
+	sh check-local-binding.sh build/libcuinterpose.so
 
 native: frontend
 	cd rust && cargo build --locked --release --target $(RUST_ARCH)-unknown-linux-gnu -p cuinterpose-core
@@ -47,6 +48,17 @@ native: frontend
 test-native: native
 	cd rust && cargo fmt --all -- --check
 	cd rust && cargo clippy --locked --workspace --all-targets --target $(RUST_ARCH)-unknown-linux-gnu -- -D warnings
-	cd rust && cargo test --locked --workspace --target $(RUST_ARCH)-unknown-linux-gnu
+	# The GPU tests need two GPUs. See test-gpu.
+	cd rust && cargo test --locked --workspace --exclude cuinterpose-gpu-tests --target $(RUST_ARCH)-unknown-linux-gnu
 	cd rust && cargo test --locked --release -p cuinterpose-coordinator -p cuinterpose-protocol -p cuinterpose-launch --target $(RUST_ARCH)-unknown-linux-musl
 	build/cuinterpose-launch --library "$(CURDIR)/build/libcuinterpose.so" -- /bin/true
+
+# Writes the artifacts and build/cuinterpose-gpu-tests, which tests them on a GPU host.
+gpu-tests:
+	docker buildx build --platform $(PLATFORM) --target cuinterpose-gpu-tests \
+		--output type=local,dest=build -f ../../Dockerfile ../..
+
+# Tests build/ (or CUINTERPOSE_BUILD_DIR) against the installed driver and two GPUs.
+test-gpu:
+	cd rust && cargo test --locked -p cuinterpose-gpu-tests --test gpu --target $(RUST_ARCH)-unknown-linux-gnu \
+		-- --test-threads=1 $(TEST_ARGS)

@@ -54,6 +54,15 @@ commit-level history for each release is on its
   `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one
   more release before removal in v0.3.0+.
+- A checkpoint or restore on a MIG slice is refused up front, under the new
+  `mig-slice` check, because Snapshot supports whole GPUs only. A checkpoint
+  fails before anything is locked, leaving the source process running, with the
+  slice named on the `PodSnapshotContent` `Failed` condition; a restore is
+  refused as incompatible at the inspect gate, and
+  `nvidia.com/snapshot-skip-compat-check` waives it like any other check.
+  Previously nothing named MIG: under
+  DRA, GPU discovery failed with `DRA GPU allocation has no resolvable UUIDs`,
+  and elsewhere a slice was recorded as its parent card.
 - Restore semantics: Snapshot replaces the command of every restore destination
   container with its restore proxy, `/snapshot-control/snapshot-restore-proxy`.
   The proxy is the container's PID 1: it waits for the restore, forwards signals

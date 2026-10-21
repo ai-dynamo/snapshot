@@ -86,18 +86,18 @@ not touch the operator or the agent. See the
 [usage guides](docs/guides/README.md) for the shape of the flow.
 
 To add one, follow an existing framework end to end —
-[vLLM](docs/guides/vllm.md) is the smallest — and provide the same four pieces
+[vLLM](docs/guides/vllm.md) is the smallest — and provide the same three pieces
 under `docs/guides/<framework>/`:
 
 | File | What it does |
 | --- | --- |
-| `Dockerfile.<framework>` | Starts from the framework's runtime image and adds the entrypoint program |
 | `app.py` | Cooperates with the checkpoint/restore lifecycle: loads the model, then signals readiness |
-| `deployment.yaml` | Deploys the replica that gets checkpointed |
-| `restore-deployment.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
+| `capture/<model>.yaml` | Deploys the replica that gets checkpointed |
+| `restore/1-gpu.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
 
 Plus `docs/guides/<framework>.md` walking through it, and an entry in the
-[guides index](docs/guides/README.md).
+[guides index](docs/guides/README.md) with a row in its recipe table for each
+model you add.
 
 The contract your entrypoint has to honor — the control volume, the startup
 gate, the `SNAPSHOT_CONTROL_DIR` environment variable, and the seccomp profile
