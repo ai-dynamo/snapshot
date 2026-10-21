@@ -131,30 +131,3 @@ for old in json.loads((P / "phase-inventory.json").read_text()):
         )
     )
 (P / "phase-accounting.json").write_text(json.dumps(results, indent=2) + "\n")
-lines = [
-    "# Startup phase accounting audit",
-    "",
-    "Measured wall-time intervals, counted once across concurrent ranks. This is an audit, not a finalized blog table. Process/worker startup ends at the first model-load or construction timer. Model loading includes construction and weight preparation. Compilation/autotuning/graph capture are subtracted from enclosing profiling and kernel initialization scopes. Native SGLang autotune log boundaries have one-second precision. Unattributed time remains explicit; it is not assigned to an operation. Zero compilation/JIT means no separately identified timer, not proof that no JIT occurred. Graph-capture wrappers include their internal warmup and may include unseparated lazy compilation; these columns must not be presented as pure CUDA capture versus pure JIT without further evidence.",
-    "",
-    "| Case | " + " | ".join(columns) + " | Measured sum | Cold total | Unattributed |",
-    "|" + " --- |" * (len(columns) + 4),
-]
-for r in results:
-    lines.append(
-        "| "
-        + r["case"]
-        + " | "
-        + " | ".join(f"{r['phases_s'][c]:.2f}" for c in columns)
-        + f" | {r['covered_s']:.2f} | {r['cold_start_s']:.2f} | {r['unattributed_s']:.2f} |"
-    )
-(P / "PHASE-ACCOUNTING-AUDIT.md").write_text("\n".join(lines) + "\n")
-for r in results:
-    print(
-        r["case"],
-        "measured",
-        round(r["covered_s"], 2),
-        "total",
-        round(r["cold_start_s"], 2),
-        "unattributed",
-        round(r["unattributed_s"], 2),
-    )

@@ -136,13 +136,14 @@ def render(results: list[dict]) -> str:
                 f((r.get("checkpoint") or {}).get("checkpoint_seconds")),
                 f(elapsed),
                 f(restored),
-                f(elapsed / restored) + "×" if restored else "-",
+                f(elapsed / restored) + "×" if restored and elapsed is not None else "-",
             ]
         )
-        if r["cold_start"]["measurement"].get("phases_s"):
+        measurement = r["cold_start"]["measurement"] or {}
+        if measurement.get("phases_s"):
             cold.append(
                 prefix
-                + [f(v) for v in _cold_phases(r["cold_start"]["measurement"])]
+                + [f(v) for v in _cold_phases(measurement)]
                 + [f(elapsed)]
             )
         if timing:

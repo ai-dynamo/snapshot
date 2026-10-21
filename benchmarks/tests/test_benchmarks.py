@@ -515,6 +515,13 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIn("7.75×", text)
             self.assertIn("Where the restore time goes", text)
             self.assertNotIn("Where the cold start time goes", text)
+            missing = result.to_json_dict()
+            missing["model"]["label"] = "Missing timing"
+            missing["cold_start"]["measurement"] = None
+            missing["cold_start"]["startup_to_ready_seconds"] = None
+            mixed = report.render([result.to_json_dict(), missing])
+            self.assertIn("Missing timing", mixed)
+            self.assertEqual(mixed.count("7.75×"), 1)
 
     def test_three_engines_use_guide_contract_and_explicit_topology(self):
         for engine in cli.ENGINES.values():

@@ -548,20 +548,7 @@ def run_benchmark(
                     )
                 )
             if cleanup_errors:
-                # A cleanup failure here means a pod, PodSnapshot, or
-                # PodSnapshotContent from this run may still be sitting on the
-                # cluster -- holding a GPU or leaving stale checkpoint state
-                # behind for the next run to trip over. That must never be
-                # swallowed the way individual `_try_cleanup` steps are: it
-                # has to reach the caller (`cli.py`'s `sweep`) as a distinct,
-                # unmissable signal to stop rather than start another model
-                # against contaminated cluster state. `sys.exc_info()` reads
-                # whatever exception is already propagating out of the `try`
-                # block above (if any) -- raising here would otherwise
-                # silently replace it. We fold its message into the new
-                # exception and chain it with `raise ... from`, so it's
-                # visible both via `str(exc)` (e.g. `cli.py`'s plain `print`)
-                # and via the full traceback, instead of being lost.
+                # Stop the sweep if resources remain, preserving the benchmark error.
                 measurement.save(
                     folder / "cleanup-errors.json",
                     [repr(exc) for exc in cleanup_errors],

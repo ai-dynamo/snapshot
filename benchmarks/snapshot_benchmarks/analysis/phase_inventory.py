@@ -16,18 +16,6 @@ args = parser.parse_args()
 P = args.directory
 
 
-def union(intervals):
-    out = []
-    for a, b in sorted(intervals):
-        if b <= a:
-            continue
-        if out and a <= out[-1][1]:
-            out[-1][1] = max(b, out[-1][1])
-        else:
-            out.append([a, b])
-    return out
-
-
 def category(name):
     if name.startswith("import."):
         return "Imports"
@@ -197,46 +185,5 @@ for case in json.loads((P / "cold-runs.json").read_text())["cases"]:
             pid=None,
         )
     )
-    labels = sorted({x["category"] for x in intervals})
-    measured = {
-        label: sum(
-            b - a
-            for a, b in union(
-                [(x["start"], x["end"]) for x in intervals if x["category"] == label]
-            )
-        )
-        for label in labels
-    }
-    merged = union([(x["start"], x["end"]) for x in intervals])
-    covered = sum(b - a for a, b in merged)
-    gaps = []
-    cursor = 0
-    for a, b in merged:
-        if a > cursor:
-            gaps.append(dict(start=cursor, end=a, seconds=a - cursor))
-        cursor = b
-    if cursor < end:
-        gaps.append(dict(start=cursor, end=end, seconds=end - cursor))
-    results.append(
-        dict(
-            case=case["case"],
-            cold_start_s=end,
-            category_union_s=measured,
-            covered_union_s=covered,
-            unattributed_s=end - covered,
-            cross_category_overlap_s=sum(measured.values()) - covered,
-            intervals=intervals,
-            gaps=gaps,
-        )
-    )
+    results.append(dict(case=case["case"], intervals=intervals))
 (P / "phase-inventory.json").write_text(json.dumps(results, indent=2) + "\n")
-for r in results:
-    print(
-        r["case"],
-        "coverage",
-        round(100 * r["covered_union_s"] / r["cold_start_s"], 1),
-        "overlap",
-        round(r["cross_category_overlap_s"], 2),
-        "unattributed",
-        round(r["unattributed_s"], 2),
-    )
