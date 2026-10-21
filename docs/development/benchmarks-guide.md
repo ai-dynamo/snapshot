@@ -113,7 +113,8 @@ The source pod records the engine arguments.
 Each run writes to `benchmarks/results/<date>-<git-sha>-<id>/`. JSON files at the top
 level contain complete results. Subdirectories contain manifests, admitted pods, logs,
 timing records, inference responses and failure details. The report reads complete
-results from the top level:
+results from the top level. Restore values show mean ± sample standard deviation
+across the three attempts. Speedup uses the mean restore time:
 
 ```bash
 uv run --project benchmarks python -m snapshot_benchmarks report \

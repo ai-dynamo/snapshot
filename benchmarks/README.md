@@ -2,7 +2,8 @@
 
 Measure cold start, checkpoint time and three restores for vLLM, SGLang or
 TensorRT-LLM. Each run saves timings, checkpoint size, environment metadata and
-logs under `results/`.
+logs under `results/`. Reports show restore mean ± sample standard deviation across
+the three attempts; speedup uses the mean restore time.
 
 See the [benchmark guide](../docs/development/benchmarks-guide.md) for setup and
 commands, and [Performance Benchmarks](../docs/development/benchmarks.md) for

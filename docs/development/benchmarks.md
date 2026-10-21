@@ -1,7 +1,7 @@
 # Performance Benchmarks
 
 We tested 22 configurations of vLLM, SGLang and TensorRT-LLM on one to eight B200 GPUs.
-Restore was 8.1–35.9 times faster than cold start. Both measurements end when the engine
+Restore was 8.2–40.0 times faster than cold start. Both measurements end when the engine
 is ready, before inference. Read the [limitations](#limitations) before you compare
 these results with another setup.
 
@@ -79,35 +79,36 @@ application's sleep or memory-release call before capture.
 
 ## Results
 
-All times are in seconds. Speedup is cold-start time divided by the restore time.
+All times are in seconds. Restore values are mean ± sample standard deviation across
+three consecutive attempts. Speedup is cold-start time divided by the mean restore time.
 Cold-start values use the mean when multiple samples are available.
 
 ### Cold start compared with Snapshot
 
 | Model | Engine | Parallelism | Weights (GB) | Checkpoint (GB) | Checkpoint (s) | Cold start (s) | Snapshot (s) | Speedup |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Qwen3-0.6B | vLLM | TP1 | 1.50 | 8.13 | 15.30 | 104.43 | 4.66 | 22.40× |
-| Qwen3-0.6B | SGLang | TP1 | 1.50 | 9.42 | 20.71 | 87.08 | 3.59 | 24.26× |
-| Qwen3-0.6B | TRT-LLM | TP1 | 1.50 | 8.04 | 20.07 | 121.26 | 8.15 | 14.88× |
-| Qwen3-14B | vLLM | TP1 | 29.54 | 37.71 | 19.98 | 122.76 | 5.72 | 21.45× |
-| Qwen3-14B | vLLM | TP2 | 29.54 | 48.29 | 38.37 | 139.63 | 6.19 | 22.55× |
-| Qwen3-14B | SGLang | TP1 | 29.54 | 40.19 | 26.17 | 106.26 | 5.60 | 18.96× |
-| Qwen3-14B | SGLang | TP2 | 29.54 | 51.93 | 33.88 | 124.72 | 7.45 | 16.75× |
-| Qwen3-14B | TRT-LLM | TP1 | 29.54 | 36.38 | 23.72 | 127.02 | 12.50 | 10.16× |
-| Qwen3-14B | TRT-LLM | TP2 | 29.54 | 47.97 | 42.90 | 158.66 | 15.99 | 9.92× |
-| gpt-oss-120b | vLLM | TP1 | 65.25 | 81.56 | 44.37 | 172.80 | 10.09 | 17.12× |
-| gpt-oss-120b | vLLM | TP4 | 65.25 | 119.69 | 133.01 | 155.66 | 11.62 | 13.40× |
-| gpt-oss-120b | SGLang¹ | TP1 | 65.25 | 172.32 | 55.63 | 268.96 | 15.94 | 16.87× |
-| gpt-oss-120b | SGLang¹ | TP4 | 65.25 | 693.89 | 174.20 | 240.17 | 29.64 | 8.10× |
-| gpt-oss-120b | TRT-LLM | TP1 | 65.25 | 77.87 | 29.98 | 200.55 | 7.79 | 25.75× |
-| gpt-oss-120b | TRT-LLM | TP4 | 65.25 | 111.34 | 85.29 | 223.96 | 18.58 | 12.05× |
-| GLM-5.3-NVFP4 | vLLM | TEP8 | 464.82 | 604.00 | 282.80 | 393.65 | 28.64 | 13.74× |
-| GLM-5.3-NVFP4 | SGLang² | TEP8 | 464.82 | 669.49 | 327.20 | 426.70 | 35.34 | 12.07× |
-| GLM-5.3-NVFP4 | TRT-LLM | TEP8 | 464.82 | 628.30 | 231.33 | 363.90 | 33.55 | 10.85× |
-| DeepSeek-V4.1-Flash | vLLM | TEP8 | 510.30 | 647.18 | 274.75 | 1110.65 | 30.96 | 35.87× |
-| DeepSeek-V4.1-Flash | SGLang² | TEP8 | 510.30 | 743.35 | 286.77 | 953.09 | 36.54 | 26.08× |
-| DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 913.09 | 996.53 | 193.84 | 908.48 | 39.56 | 22.96× |
-| DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 913.09 | 1039.09 | 253.72 | 621.55 | 42.69 | 14.56× |
+| Qwen3-0.6B | vLLM | TP1 | 1.50 | 8.13 | 15.30 | 104.43 | 3.32 ± 1.16 | 31.43× |
+| Qwen3-0.6B | SGLang | TP1 | 1.50 | 9.42 | 20.71 | 87.08 | 3.41 ± 0.16 | 25.57× |
+| Qwen3-0.6B | TRT-LLM | TP1 | 1.50 | 8.04 | 20.07 | 121.26 | 5.13 ± 2.62 | 23.64× |
+| Qwen3-14B | vLLM | TP1 | 29.54 | 37.71 | 19.98 | 122.76 | 6.12 ± 0.97 | 20.07× |
+| Qwen3-14B | vLLM | TP2 | 29.54 | 48.29 | 38.37 | 139.63 | 6.25 ± 0.13 | 22.34× |
+| Qwen3-14B | SGLang | TP1 | 29.54 | 40.19 | 26.17 | 106.26 | 5.44 ± 0.14 | 19.52× |
+| Qwen3-14B | SGLang | TP2 | 29.54 | 51.93 | 33.88 | 124.72 | 6.74 ± 0.82 | 18.52× |
+| Qwen3-14B | TRT-LLM | TP1 | 29.54 | 36.38 | 23.72 | 127.02 | 7.96 ± 3.93 | 15.95× |
+| Qwen3-14B | TRT-LLM | TP2 | 29.54 | 47.97 | 42.90 | 158.66 | 10.30 ± 4.92 | 15.40× |
+| gpt-oss-120b | vLLM | TP1 | 65.25 | 81.56 | 44.37 | 172.80 | 9.50 ± 0.72 | 18.19× |
+| gpt-oss-120b | vLLM | TP4 | 65.25 | 119.69 | 133.01 | 155.66 | 10.52 ± 1.06 | 14.79× |
+| gpt-oss-120b | SGLang¹ | TP1 | 65.25 | 172.32 | 55.63 | 268.96 | 15.78 ± 0.15 | 17.05× |
+| gpt-oss-120b | SGLang¹ | TP4 | 65.25 | 693.89 | 174.20 | 240.17 | 29.13 ± 1.94 | 8.25× |
+| gpt-oss-120b | TRT-LLM | TP1 | 65.25 | 77.87 | 29.98 | 200.55 | 7.57 ± 0.19 | 26.48× |
+| gpt-oss-120b | TRT-LLM | TP4 | 65.25 | 111.34 | 85.29 | 223.96 | 14.03 ± 3.99 | 15.96× |
+| GLM-5.3-NVFP4 | vLLM | TEP8 | 464.82 | 604.00 | 282.80 | 393.65 | 26.43 ± 1.98 | 14.89× |
+| GLM-5.3-NVFP4 | SGLang² | TEP8 | 464.82 | 669.49 | 327.20 | 426.70 | 31.41 ± 3.47 | 13.59× |
+| GLM-5.3-NVFP4 | TRT-LLM | TEP8 | 464.82 | 628.30 | 231.33 | 363.90 | 32.10 ± 3.11 | 11.34× |
+| DeepSeek-V4.1-Flash | vLLM | TEP8 | 510.30 | 647.18 | 274.75 | 1110.65 | 27.75 ± 2.80 | 40.03× |
+| DeepSeek-V4.1-Flash | SGLang² | TEP8 | 510.30 | 743.35 | 286.77 | 953.09 | 32.84 ± 3.26 | 29.02× |
+| DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 913.09 | 996.53 | 193.84 | 908.48 | 36.25 ± 2.87 | 25.06× |
+| DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 913.09 | 1039.09 | 253.72 | 621.55 | 38.91 ± 3.30 | 15.98× |
 
 ¹ SGLang GPT-OSS: the v0.5.21 image still held KV memory after the release call.
 Checkpoint sizes and restore times include that memory.
@@ -115,28 +116,29 @@ Checkpoint sizes and restore times include that memory.
 ² Large SGLang models: we have not checked whether each model fully releases memory
 before capture.
 
-Figures 1–3 compare cold start with the restore for each engine.
+Figures 1–3 compare cold start with mean restore time. Error bars show one sample
+standard deviation across the three restores.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/vllm-cold-start-vs-snapshot-dark.png">
-  <img alt="Cold start and restore on vLLM." src="img/vllm-cold-start-vs-snapshot.png">
+  <img alt="Cold start and mean restore time on vLLM." src="img/vllm-cold-start-vs-snapshot.png">
 </picture>
 
-*Figure 1. Cold start and restore on vLLM.*
+*Figure 1. Cold start and mean restore time on vLLM.*
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/sglang-cold-start-vs-snapshot-dark.png">
-  <img alt="Cold start and restore on SGLang." src="img/sglang-cold-start-vs-snapshot.png">
+  <img alt="Cold start and mean restore time on SGLang." src="img/sglang-cold-start-vs-snapshot.png">
 </picture>
 
-*Figure 2. Cold start and restore on SGLang.*
+*Figure 2. Cold start and mean restore time on SGLang.*
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/trtllm-cold-start-vs-snapshot-dark.png">
-  <img alt="Cold start and restore on TensorRT-LLM." src="img/trtllm-cold-start-vs-snapshot.png">
+  <img alt="Cold start and mean restore time on TensorRT-LLM." src="img/trtllm-cold-start-vs-snapshot.png">
 </picture>
 
-*Figure 3. Cold start and restore on TensorRT-LLM.*
+*Figure 3. Cold start and mean restore time on TensorRT-LLM.*
 
 ### Where the cold start time goes
 
@@ -171,34 +173,36 @@ Each run saves the raw timings.
 
 | Model | Engine | Parallelism | Agent setup / rootfs | CRIU restore | CUDA restore | Wake | Total |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Qwen3-0.6B | vLLM | TP1 | 2.30 | 1.36 | 0.78 | 0.22 | 4.66 |
-| Qwen3-0.6B | SGLang | TP1 | 0.24 | 1.33 | 1.02 | 0.99 | 3.59 |
-| Qwen3-0.6B | TRT-LLM | TP1 | 5.72 | 1.43 | 0.84 | 0.16 | 8.15 |
-| Qwen3-14B | vLLM | TP1 | 0.13 | 1.58 | 3.16 | 0.85 | 5.72 |
-| Qwen3-14B | vLLM | TP2 | 0.57 | 2.03 | 3.43 | 0.17 | 6.19 |
-| Qwen3-14B | SGLang | TP1 | 0.24 | 1.35 | 3.67 | 0.34 | 5.60 |
-| Qwen3-14B | SGLang | TP2 | 0.92 | 2.17 | 3.49 | 0.87 | 7.45 |
-| Qwen3-14B | TRT-LLM | TP1 | 6.80 | 2.70 | 2.82 | 0.18 | 12.50 |
-| Qwen3-14B | TRT-LLM | TP2 | 9.65 | 3.52 | 2.41 | 0.41 | 15.99 |
-| gpt-oss-120b | vLLM | TP1 | 0.48 | 2.60 | 6.71 | 0.30 | 10.09 |
-| gpt-oss-120b | vLLM | TP4 | 1.02 | 4.40 | 5.57 | 0.62 | 11.62 |
-| gpt-oss-120b | SGLang¹ | TP1 | 0.26 | 1.69 | 13.46 | 0.54 | 15.94 |
-| gpt-oss-120b | SGLang¹ | TP4 | 2.69 | 4.34 | 21.69 | 0.93 | 29.64 |
-| gpt-oss-120b | TRT-LLM | TP1 | 0.28 | 1.51 | 5.74 | 0.26 | 7.79 |
-| gpt-oss-120b | TRT-LLM | TP4 | 9.99 | 3.30 | 4.34 | 0.95 | 18.58 |
-| GLM-5.3-NVFP4 | vLLM | TEP8 | 3.79 | 4.18 | 20.61 | 0.06 | 28.64 |
-| GLM-5.3-NVFP4 | SGLang² | TEP8 | 3.27 | 10.80 | 19.96 | 1.31 | 35.34 |
-| GLM-5.3-NVFP4 | TRT-LLM | TEP8 | 9.81 | 5.32 | 18.17 | 0.25 | 33.55 |
-| DeepSeek-V4.1-Flash | vLLM | TEP8 | 4.84 | 5.71 | 19.37 | 1.04 | 30.96 |
-| DeepSeek-V4.1-Flash | SGLang² | TEP8 | 4.34 | 9.77 | 21.40 | 1.03 | 36.54 |
-| DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 5.44 | 4.73 | 28.98 | 0.42 | 39.56 |
-| DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 3.13 | 10.13 | 28.60 | 0.83 | 42.69 |
+| Qwen3-0.6B | vLLM | TP1 | 1.08 ± 1.06 | 1.24 ± 0.10 | 0.78 ± 0.01 | 0.22 ± 0.01 | 3.32 ± 1.16 |
+| Qwen3-0.6B | SGLang | TP1 | 0.16 ± 0.08 | 1.22 ± 0.09 | 1.03 ± 0.01 | 1.00 ± 0.02 | 3.41 ± 0.16 |
+| Qwen3-0.6B | TRT-LLM | TP1 | 2.81 ± 2.52 | 1.32 ± 0.10 | 0.83 ± 0.01 | 0.17 ± 0.01 | 5.13 ± 2.62 |
+| Qwen3-14B | vLLM | TP1 | 0.10 ± 0.02 | 2.00 ± 0.97 | 3.17 ± 0.01 | 0.84 ± 0.01 | 6.12 ± 0.97 |
+| Qwen3-14B | vLLM | TP2 | 0.59 ± 0.08 | 2.07 ± 0.05 | 3.19 ± 0.36 | 0.40 ± 0.35 | 6.25 ± 0.13 |
+| Qwen3-14B | SGLang | TP1 | 0.22 ± 0.10 | 1.27 ± 0.07 | 3.55 ± 0.11 | 0.40 ± 0.11 | 5.44 ± 0.14 |
+| Qwen3-14B | SGLang | TP2 | 0.86 ± 0.12 | 1.87 ± 0.26 | 3.31 ± 0.15 | 0.69 ± 0.43 | 6.74 ± 0.82 |
+| Qwen3-14B | TRT-LLM | TP1 | 3.20 ± 3.12 | 1.76 ± 0.81 | 2.82 ± 0.02 | 0.18 ± 0.02 | 7.96 ± 3.93 |
+| Qwen3-14B | TRT-LLM | TP2 | 4.76 ± 4.23 | 2.73 ± 0.68 | 2.44 ± 0.03 | 0.36 ± 0.04 | 10.30 ± 4.92 |
+| gpt-oss-120b | vLLM | TP1 | 0.22 ± 0.22 | 2.27 ± 0.58 | 6.61 ± 0.09 | 0.40 ± 0.09 | 9.50 ± 0.72 |
+| gpt-oss-120b | vLLM | TP4 | 1.23 ± 0.33 | 2.99 ± 1.22 | 5.73 ± 0.37 | 0.57 ± 0.44 | 10.52 ± 1.06 |
+| gpt-oss-120b | SGLang¹ | TP1 | 0.16 ± 0.08 | 1.62 ± 0.08 | 13.49 ± 0.03 | 0.51 ± 0.03 | 15.78 ± 0.15 |
+| gpt-oss-120b | SGLang¹ | TP4 | 2.74 ± 0.51 | 3.98 ± 1.03 | 21.88 ± 0.29 | 0.52 ± 0.39 | 29.13 ± 1.94 |
+| gpt-oss-120b | TRT-LLM | TP1 | 0.16 ± 0.10 | 1.42 ± 0.09 | 5.80 ± 0.07 | 0.20 ± 0.07 | 7.57 ± 0.19 |
+| gpt-oss-120b | TRT-LLM | TP4 | 5.63 ± 3.78 | 3.32 ± 0.23 | 4.63 ± 0.54 | 0.46 ± 0.45 | 14.03 ± 3.99 |
+| GLM-5.3-NVFP4 | vLLM | TEP8 | 2.81 ± 0.88 | 3.48 ± 0.61 | 19.70 ± 0.96 | 0.44 ± 0.41 | 26.43 ± 1.98 |
+| GLM-5.3-NVFP4 | SGLang² | TEP8 | 3.12 ± 0.21 | 6.65 ± 3.60 | 20.73 ± 0.67 | 0.91 ± 0.46 | 31.41 ± 3.47 |
+| GLM-5.3-NVFP4 | TRT-LLM | TEP8 | 7.32 ± 3.13 | 5.27 ± 0.13 | 18.78 ± 0.99 | 0.73 ± 0.44 | 32.10 ± 3.11 |
+| DeepSeek-V4.1-Flash | vLLM | TEP8 | 3.62 ± 1.23 | 4.44 ± 1.13 | 19.01 ± 0.49 | 0.68 ± 0.41 | 27.75 ± 2.80 |
+| DeepSeek-V4.1-Flash | SGLang² | TEP8 | 4.34 ± 0.13 | 6.60 ± 2.76 | 21.23 ± 0.16 | 0.67 ± 0.38 | 32.84 ± 3.26 |
+| DeepSeek-V4-Pro-NVFP4 | vLLM | TEP8 | 3.41 ± 1.76 | 3.37 ± 1.18 | 28.89 ± 0.16 | 0.58 ± 0.17 | 36.25 ± 2.87 |
+| DeepSeek-V4-Pro-NVFP4 | SGLang² | TEP8 | 2.99 ± 0.14 | 6.41 ± 3.25 | 28.80 ± 0.21 | 0.70 ± 0.22 | 38.91 ± 3.30 |
 
 Wake starts when the agent finishes and ends when the application completes its wake
-and resume calls. CUDA restore includes multi-GPU reconstruction. Values are rounded
-to two decimal places.
+and resume calls. CUDA restore includes multi-GPU reconstruction. Each stage shows
+mean ± sample standard deviation across three restores. Mean stage times add to the
+mean total; standard deviations do not add. Values are rounded to two
+decimal places.
 
-Figure 4 shows how much each stage contributes to vLLM restore.
+Figure 4 shows how much each stage contributes to mean vLLM restore time.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/vllm-restore-stages-dark.png">
@@ -217,12 +221,12 @@ in one column.
 
 ### Restore work and storage
 
-CUDA restore takes 19.37–28.98 seconds for the eight-GPU vLLM models. For Qwen3-0.6B,
-agent setup and CRIU take 3.66 of the 4.66-second restore.
+CUDA restore takes 19.01–28.89 seconds on average for the eight-GPU vLLM models.
+For Qwen3-0.6B, agent setup and CRIU take 2.32 of the 3.32-second mean restore.
 
 Checkpoint size, storage throughput and parallel reads affect restore time. The
-81.56 GB vLLM GPT-OSS TP1 checkpoint restores in 10.09 seconds. The 119.69 GB TP4
-checkpoint restores in 11.62 seconds.
+81.56 GB vLLM GPT-OSS TP1 checkpoint restores in 9.50 seconds on average. The 119.69 GB TP4
+checkpoint restores in 10.52 seconds on average.
 
 ### SGLang model loading
 

@@ -522,6 +522,9 @@ class BenchmarkTests(unittest.TestCase):
             mixed = report.render([result.to_json_dict(), missing])
             self.assertIn("Missing timing", mixed)
             self.assertEqual(mixed.count("7.75×"), 1)
+            single = result.to_json_dict()
+            single["restore_attempts"] = []
+            self.assertIn("4.00 ± —", report.render([single]))
 
     def test_three_engines_use_guide_contract_and_explicit_topology(self):
         for engine in cli.ENGINES.values():
@@ -768,6 +771,17 @@ class BenchmarkTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as tmp,
                 cluster() as mocks,
             ):
+                mocks["measurement.restored_measurement"].side_effect = [
+                    dict(
+                        total_s=total,
+                        agent_s=total * 0.75,
+                        setup_s=total / 4,
+                        criu_s=total / 4,
+                        cuda_s=total / 4,
+                        wake_handoff_s=total / 4,
+                    )
+                    for total in (4, 8, 12)
+                ]
                 result = run.run_benchmark(
                     config(),
                     engine,
@@ -793,7 +807,12 @@ class BenchmarkTests(unittest.TestCase):
                 )
                 self.assertTrue((Path(tmp) / "test/result.json").is_file())
                 text = report.render([result.to_json_dict()])
-                self.assertIn("7.75×", text)
+                self.assertIn("3.88×", text)
+                self.assertIn("8.00 ± 4.00", text)
+                self.assertIn(
+                    "| 2.00 ± 1.00 | 2.00 ± 1.00 | 2.00 ± 1.00 | 2.00 ± 1.00 | 8.00 ± 4.00 |",
+                    text,
+                )
                 self.assertIn("| 4.00 | 2.00 | 7.00 | 18.00 | 31.00 |", text)
 
     def test_failure_retains_evidence_and_cleans_owned_resources(self):

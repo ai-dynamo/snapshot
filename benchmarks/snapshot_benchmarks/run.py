@@ -399,6 +399,7 @@ def run_benchmark(
                 )
                 timing.measurement = metrics
                 if repeat == 1:
+                    # Keep the first raw record for compatibility; reports use all attempts.
                     result.restore = timing
                     restore_node = restore_ready_pod.spec.node_name
                     result.environment.restore_node = restore_node

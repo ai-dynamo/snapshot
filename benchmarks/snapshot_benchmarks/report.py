@@ -11,6 +11,7 @@ artifact. See docs/development/benchmarks-guide.md for why.
 
 from __future__ import annotations
 
+from statistics import mean, stdev
 from typing import Any
 
 SUPPORTED_SCHEMA_VERSIONS = (1, 2)
@@ -126,8 +127,21 @@ def render(results: list[dict]) -> str:
         topology = f"TP{model['tp']}" + (f"/EP{model['ep']}" if model["ep"] > 1 else "")
         prefix = [model["label"], engine["name"], topology]
         elapsed = r["cold_start"]["startup_to_ready_seconds"]
-        timing = (r.get("restore") or {}).get("measurement")
-        restored = timing["total_s"] if timing else None
+        timings = [
+            a["measurement"]
+            for a in r.get("restore_attempts", [])
+            if a.get("measurement")
+        ]
+        if not timings and (r.get("restore") or {}).get("measurement"):
+            timings = [r["restore"]["measurement"]]
+        restored = mean(t["total_s"] for t in timings) if timings else None
+
+        def spread(key):
+            values = [t[key] for t in timings]
+            return (
+                f(mean(values)) + " ± " + (f(stdev(values)) if len(values) > 1 else "—")
+            )
+
         headline.append(
             prefix
             + [
@@ -135,7 +149,7 @@ def render(results: list[dict]) -> str:
                 _fmt_bytes(model.get("checkpoint_artifact_bytes")),
                 f((r.get("checkpoint") or {}).get("checkpoint_seconds")),
                 f(elapsed),
-                f(restored),
+                spread("total_s") if timings else "-",
                 f(elapsed / restored) + "×" if restored and elapsed is not None else "-",
             ]
         )
@@ -146,11 +160,11 @@ def render(results: list[dict]) -> str:
                 + [f(v) for v in _cold_phases(measurement)]
                 + [f(elapsed)]
             )
-        if timing:
+        if timings:
             restore.append(
                 prefix
                 + [
-                    f(timing[k])
+                    spread(k)
                     for k in (
                         "setup_s",
                         "criu_s",
@@ -203,7 +217,7 @@ def render(results: list[dict]) -> str:
             ],
             cold,
         )
-    text += "\n\nEach run saves the raw timings.\n\n## Where the restore time goes (s)\n\n"
+    text += "\n\nRestore values are mean ± sample standard deviation across the recorded attempts. Speedup uses the mean restore time. A single attempt has no standard deviation (—). Each run saves the raw timings.\n\n## Where the restore time goes (s)\n\n"
     text += _table(
         [
             "Model",
