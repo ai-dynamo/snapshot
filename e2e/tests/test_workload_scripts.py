@@ -142,9 +142,23 @@ def test_snapshotjob_helper_waits_before_signalling_capture_readiness(
     )
 
     command = template["spec"]["containers"][0]["command"][2]
+    target = template["spec"]["containers"][0]
     helper_wait = f"while [ ! -f {workloads.HELPER_SYNC_DIR}/helper-finished ]; do sleep 0.1; done"
     capture_ready = f"echo ready > {workloads.SOURCE_READY}"
     assert command.index(helper_wait) < command.index(capture_ready)
+    assert target["readinessProbe"]["exec"]["command"] == [
+        "cat",
+        f"{workloads.HELPER_SYNC_DIR}/helper-finished",
+    ]
+
+    release_gated_template = workloads.snapshotjob_helper_pod_template(
+        config=config,
+        run=workloads.TestRun.new("helper-release-gated"),
+        helper_command="true",
+        wait_for_helper_before_capture=False,
+        wait_for_capture_release=True,
+    )
+    assert "readinessProbe" not in release_gated_template["spec"]["containers"][0]
 
 
 @pytest.mark.workload
