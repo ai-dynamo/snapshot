@@ -98,12 +98,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git init /src/aws-sdk-cpp \
     && cd /src/aws-sdk-cpp \
     && git remote add origin https://github.com/aws/aws-sdk-cpp.git \
-    && git fetch --depth 1 origin bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3 \
+    && git fetch --depth 1 origin e03a5aa84e101193f10ef8b40ba14951f5ace625 \
     && git checkout --detach FETCH_HEAD \
     && git submodule update --init --recursive --depth 1
-# Keep queued cancellations alive if a request finishes before the executor runs.
-COPY patches/aws-sdk-crt-cancellation.patch /tmp/aws-sdk-crt-cancellation.patch
-RUN git -C /src/aws-sdk-cpp apply /tmp/aws-sdk-crt-cancellation.patch
 RUN cmake -S /src/aws-sdk-cpp -B /src/aws-sdk-cpp/build -DCMAKE_BUILD_TYPE=Release \
        -DCMAKE_INSTALL_PREFIX=/opt/aws-sdk -DCMAKE_INSTALL_LIBDIR=lib \
        -DBUILD_ONLY=s3-crt -DUSE_CRT_HTTP_CLIENT=ON -DBUILD_SHARED_LIBS=ON \
@@ -117,7 +114,6 @@ RUN set -eu; \
     mkdir -p /runtime/lib /runtime/legal/aws-sdk /runtime/legal/packages; \
     cp -a /opt/aws-sdk/lib/*.so* /runtime/lib/; \
     cp /src/aws-sdk-cpp/LICENSE /runtime/legal/aws-sdk/; \
-    cp /tmp/aws-sdk-crt-cancellation.patch /runtime/legal/aws-sdk/; \
     git -C /src/aws-sdk-cpp rev-parse HEAD > /runtime/legal/aws-sdk/REVISION; \
     find /src/aws-sdk-cpp/crt -name LICENSE -o -name NOTICE | while read -r notice; do \
       relative=${notice#/src/aws-sdk-cpp/}; \

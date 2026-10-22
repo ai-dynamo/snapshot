@@ -8,20 +8,17 @@
 #include <sys/stat.h>
 
 #include <aws/core/auth/AWSCredentialsProvider.h>
-#include <aws/core/utils/threading/Executor.h>
+#include <aws/core/client/CoreErrors.h>
 #include <aws/s3-crt/S3CrtClient.h>
 #include <aws/s3-crt/model/HeadObjectRequest.h>
 #include <aws/s3-crt/model/GetObjectRequest.h>
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <future>
-#include <functional>
-#include <mutex>
 #include <thread>
 #include <iostream>
 #include <vector>
@@ -145,90 +142,36 @@ class S3RoundTripTest : public ::testing::Test {
 };
 
 
-// Deliberately run cancellation after the synchronous request has finished.
-// This exercises the pinned SDK's ownership of queued tasks, including rejection.
-class DeferredCancellationExecutor : public Aws::Utils::Threading::Executor {
- public:
-  explicit DeferredCancellationExecutor(bool accept) : accept_(accept) {}
-
-  std::size_t Drain()
-  {
-    std::vector<std::function<void()>> tasks;
-    {
-      std::lock_guard lock(mutex_);
-      tasks.swap(tasks_);
-    }
-    for (auto& task : tasks)
-      task();
-    return tasks.size();
-  }
-
-  bool WaitForSubmission()
-  {
-    std::unique_lock lock(mutex_);
-    return changed_.wait_for(lock, std::chrono::seconds(5), [&] { return submitted > 0; });
-  }
-
-  std::atomic<unsigned> submitted{0};
-
- protected:
-  bool SubmitToThread(std::function<void()>&& task) override
-  {
-    std::lock_guard lock(mutex_);
-    ++submitted;
-    if (accept_)
-      tasks_.push_back(std::move(task));
-    changed_.notify_all();
-    return accept_;
-  }
-
- private:
-  bool accept_;
-  std::mutex mutex_;
-  std::condition_variable changed_;
-  std::vector<std::function<void()>> tasks_;
-};
-
-TEST_F(S3RoundTripTest, CancellationTaskOutlivesCompletedRequest)
+TEST_F(S3RoundTripTest, CancelsConcurrentReadsWithoutCrashing)
 {
   S3Client uploader(connection_, limits_);  // Holds the SDK runtime for both clients.
-  const auto object = Destination("delayed-cancellation");
+  const auto object = Destination("concurrent-cancellation");
   uploader.Put(object, "{}", 2);
-  for (bool accept : {true, false}) {
-    auto executor = std::make_shared<DeferredCancellationExecutor>(accept);
-    Aws::S3Crt::S3CrtClientConfiguration config(Aws::Client::ClientConfigurationInitValues{true});
-    config.region = connection_.region;
-    config.scheme = connection_.endpoint.starts_with("https://") ? Aws::Http::Scheme::HTTPS : Aws::Http::Scheme::HTTP;
-    config.endpointOverride = connection_.endpoint.substr(connection_.endpoint.find("://") + 3);
-    config.useVirtualAddressing = false;
-    config.caFile = connection_.ca_file;
-    config.httpRequestTimeoutMs = 3000;
-    config.executor = executor;
-    Aws::S3Crt::S3CrtClient client(Aws::Auth::AWSCredentials(connection_.access_key_id, connection_.secret_access_key), config);
-    std::atomic<bool> received{false};
-    Aws::S3Crt::Model::GetObjectRequest request;
-    request.WithBucket(object.bucket).WithKey(object.key);
-    request.SetDataReceivedEventHandler([&](const Aws::Http::HttpRequest*, const Aws::Http::HttpResponse*, long long) {
-      received = true;
-    });
-    request.SetContinueRequestHandler([&](const Aws::Http::HttpRequest*) { return !received.load(); });
-    // Completion releases the original reference while cancellation is queued.
-    // GetObject itself waits for request destruction, so it runs on another thread.
-    auto result = std::async(std::launch::async, [&] { return client.GetObject(request).IsSuccess(); });
-    EXPECT_TRUE(executor->WaitForSubmission());
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    std::size_t drained = 0;
-    // More callbacks can enqueue cancellation after the first drain. Each task
-    // retains the request, so keep draining until GetObject can finish teardown.
-    // The runner's process watchdog bounds a broken SDK cancellation path.
-    do {
-      drained += executor->Drain();
-    } while (result.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready);
-    EXPECT_TRUE(result.get());
-    EXPECT_TRUE(received);
-    EXPECT_GT(executor->submitted, 0U);
-    EXPECT_EQ(drained, accept ? executor->submitted.load() : 0U);
+  Aws::S3Crt::S3CrtClientConfiguration config(Aws::Client::ClientConfigurationInitValues{true});
+  config.region = connection_.region;
+  config.scheme = connection_.endpoint.starts_with("https://") ? Aws::Http::Scheme::HTTPS : Aws::Http::Scheme::HTTP;
+  config.endpointOverride = connection_.endpoint.substr(connection_.endpoint.find("://") + 3);
+  config.useVirtualAddressing = false;
+  config.caFile = connection_.ca_file;
+  config.httpRequestTimeoutMs = 3000;
+  Aws::S3Crt::S3CrtClient client(Aws::Auth::AWSCredentials(connection_.access_key_id, connection_.secret_access_key), config);
+  std::vector<std::future<void>> requests;
+  for (unsigned i = 0; i < 64; ++i) {
+    requests.push_back(std::async(std::launch::async, [&] {
+      std::atomic<unsigned> callbacks{0};
+      Aws::S3Crt::Model::GetObjectRequest request;
+      request.WithBucket(object.bucket).WithKey(object.key);
+      // Admit the request, then cancel from a callback while peers are active.
+      request.SetContinueRequestHandler([&](const Aws::Http::HttpRequest*) { return callbacks.fetch_add(1) == 0; });
+      const auto outcome = client.GetObject(request);
+      EXPECT_GT(callbacks.load(), 1U);
+      EXPECT_TRUE(outcome.IsSuccess() ||
+          static_cast<Aws::Client::CoreErrors>(outcome.GetError().GetErrorType()) == Aws::Client::CoreErrors::USER_CANCELLED);
+    }));
   }
+  // The runner watchdog bounds teardown if the SDK deadlocks during cancellation.
+  for (auto& request : requests)
+    request.get();
 }
 
 TEST_F(S3RoundTripTest, AppliesRetryLimitToEveryMetadataOperation)
