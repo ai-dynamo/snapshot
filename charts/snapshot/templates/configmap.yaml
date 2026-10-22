@@ -18,6 +18,7 @@ kind: ConfigMap
 {{- if and (eq .Values.storage.type "s3") (not .Values.operator.bindNewContents) }}
 {{- fail "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path capture mode" }}
 {{- end }}
+{{- include "snapshot.validateS3Settings" . }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -44,6 +45,26 @@ data:
       bucket: {{ required "storage.s3.bucket is required" .Values.storage.s3.bucket | quote }}
       prefix: {{ .Values.storage.s3.prefix | default "" | quote }}
     {{- end }}
+  {{- if eq .Values.storage.type "s3" }}
+  # PageBroker-only S3 settings, none of them a store identity input. The
+  # operator merges them into the JSON file PageBroker reads; the DaemonSet
+  # sets the environment PageBroker checks them against.
+  pagebroker-s3.yaml: |
+    {{- with .Values.storage.s3.addressing }}
+    addressing: {{ . | quote }}
+    {{- end }}
+    {{- if .Values.storage.s3.allowHttp }}
+    allowHttp: true
+    {{- end }}
+    {{- if .Values.storage.s3.caBundleConfigMapRef }}
+    caFile: {{ include "snapshot.s3CABundlePath" . | quote }}
+    {{- end }}
+    limits:
+      {{- include "snapshot.pageBrokerS3Limits" . | nindent 6 }}
+  {{- if .Values.pageBroker.modelStreamer }}
+  model-streamer.json: {{ toJson .Values.pageBroker.modelStreamer | quote }}
+  {{- end }}
+  {{- end }}
   config.yaml: |
     # Pinned to pvc/checkpoints regardless of storage.type or storage.pvc.basePath
     # above: the agent itself has no S3 awareness yet, and this value can no
