@@ -761,7 +761,7 @@ func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 	criuFields := summary["criu"].(map[string]any)
 	assert.Equal(t, (4500 * time.Millisecond).String(), criuFields["memwrite"])
 	assert.Equal(t, (400 * time.Millisecond).String(), criuFields["memdump"])
-	assert.Equal(t, uint64(100*4096), criuFields["pages_written_bytes"])
+	assert.Equal(t, uint64(100)*uint64(os.Getpagesize()), criuFields["pages_written_bytes"])
 	assert.Equal(t, imageBytes, criuFields["image_bytes"])
 	assert.NotContains(t, criuFields, "image_growth")
 
@@ -783,7 +783,11 @@ func TestCheckpointTimingSummaryOmitsUnmeasuredCUDA(t *testing.T) {
 	assert.Equal(t, (800 * time.Millisecond).String(), phases["cuda_checkpoint"])
 }
 
-func TestCheckpointNeedsSourceKill(t *testing.T) {
-	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
-	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
+func TestSourceNeedsRecoveryWrapsCaptureFailures(t *testing.T) {
+	wrapped := sourceNeedsRecovery(errors.New("capture failed"), []int{41}, false, false)
+	suspended, needsRecovery := SuspendedSourceOf(wrapped)
+	assert.True(t, needsRecovery)
+	assert.Equal(t, []int{41}, suspended.GPUPIDs)
+	_, needsRecovery = SuspendedSourceOf(errors.New("prepare failed"))
+	assert.False(t, needsRecovery)
 }

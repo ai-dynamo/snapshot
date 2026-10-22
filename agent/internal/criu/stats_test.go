@@ -38,7 +38,7 @@ func TestReadDumpStatsReadsServiceHeader(t *testing.T) {
 	if stats.MemDump != 400*time.Millisecond || stats.MemWrite != 4500*time.Millisecond {
 		t.Fatalf("memory timings = %s / %s", stats.MemDump, stats.MemWrite)
 	}
-	if stats.PagesWritten != 100 || stats.PagesWrittenBytes() != 100*pageBytes {
+	if stats.PagesWritten != 100 || stats.PagesWrittenBytes() != 100*uint64(os.Getpagesize()) {
 		t.Fatalf("pages = %d (%d bytes)", stats.PagesWritten, stats.PagesWrittenBytes())
 	}
 	if stats.PagesScanned != 110 || stats.PagesLazy != 3 {
