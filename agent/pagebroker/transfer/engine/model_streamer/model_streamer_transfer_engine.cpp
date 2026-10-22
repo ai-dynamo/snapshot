@@ -25,24 +25,14 @@ ModelStreamerTransferEngine::CreateRestore() const
 std::shared_ptr<ModelStreamerRestore>
 ModelStreamerTransferEngine::AcquireRestore() const
 {
-  for (;;) {
-    std::shared_ptr<ModelStreamerRestore> current;
-    {
-      std::lock_guard lock(restore_mutex_);
-      current = restore_;
-    }
-    if (!current->Failed())
-      return current;
-
+  // Declare before the lock so destruction joins the old worker after unlocking.
+  std::shared_ptr<ModelStreamerRestore> previous;
+  std::lock_guard lock(restore_mutex_);
+  if (restore_->Failed()) {
     auto replacement = CreateRestore();
-    {
-      std::lock_guard lock(restore_mutex_);
-      if (restore_ == current) {
-        restore_ = replacement;
-        return replacement;
-      }
-    }
+    previous = std::exchange(restore_, std::move(replacement));
   }
+  return restore_;
 }
 
 IoEngine
