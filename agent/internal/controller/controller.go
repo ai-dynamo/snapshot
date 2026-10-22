@@ -42,6 +42,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
@@ -72,6 +73,8 @@ type NodeController struct {
 	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
 	stagingCapacityFn         func(string) (int64, error)
 	minimumImageSizeFn        func(string, []int) (int64, error)
+	filterCUDAProcessesFn     func(context.Context, []int, logr.Logger) []int
+	reviveGPUProcessesFn      func(context.Context, []int, string, logr.Logger) error
 	restoreQueue              workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister          corev1listers.PodLister
 	compareFn                 func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
@@ -249,6 +252,8 @@ func newDefaultController(
 		sendSignalFn:              snapshotruntime.SendSignalToPID,
 		stagingCapacityFn:         snapshotruntime.StagingCapacity,
 		minimumImageSizeFn:        snapshotruntime.MinimumImageSize,
+		filterCUDAProcessesFn:     cuda.FilterProcesses,
+		reviveGPUProcessesFn:      cuda.ReviveProcessTree,
 		compareFn:                 compat.Compare,
 	}
 	w.checkpointFn = w.executorCheckpoint

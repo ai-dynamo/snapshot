@@ -52,18 +52,20 @@ func IsCleanupFailure(err error) bool {
 	return errors.As(err, &cleanup)
 }
 
-// checkpointNeedsSourceKillError reports a failure after CUDA or CRIU may have left the source unsafe.
-type checkpointNeedsSourceKillError struct{ cause error }
+// sourceNeedsRecoveryError reports a failure after CUDA or CRIU had already touched the source,
+// which leaves it suspended rather than running. What becomes of it is the caller's decision.
+type sourceNeedsRecoveryError struct{ cause error }
 
-func (e *checkpointNeedsSourceKillError) Error() string { return e.cause.Error() }
+func (e *sourceNeedsRecoveryError) Error() string { return e.cause.Error() }
 
-func (e *checkpointNeedsSourceKillError) Unwrap() error { return e.cause }
+func (e *sourceNeedsRecoveryError) Unwrap() error { return e.cause }
 
-func checkpointNeedsSourceKill(err error) error { return &checkpointNeedsSourceKillError{cause: err} }
+func sourceNeedsRecovery(err error) error { return &sourceNeedsRecoveryError{cause: err} }
 
-// CheckpointNeedsSourceKill reports whether a failed checkpoint may have left the source unsafe.
-func CheckpointNeedsSourceKill(err error) bool {
-	var checkpointError *checkpointNeedsSourceKillError
+// SourceNeedsRecovery reports whether a failed checkpoint left the source suspended, and so in a
+// state nothing will resolve on its own.
+func SourceNeedsRecovery(err error) bool {
+	var checkpointError *sourceNeedsRecoveryError
 	return errors.As(err, &checkpointError)
 }
 
@@ -201,7 +203,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
 	if err != nil {
-		return nil, checkpointNeedsSourceKill(err)
+		return nil, sourceNeedsRecovery(err)
 	}
 
 	dumpComplete = true

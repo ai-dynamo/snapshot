@@ -624,10 +624,8 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	}
 	artifact, err := executor.Checkpoint(ctx, w.runtime, log, req, w.config)
 	if err != nil {
-		if executor.CheckpointNeedsSourceKill(err) {
-			if killErr := w.killCheckpointProcess(log, params.ContainerPID, "checkpoint failed"); killErr != nil {
-				log.Error(killErr, "Failed to kill target after checkpoint failure")
-			}
+		if executor.SourceNeedsRecovery(err) {
+			w.recoverSourceAfterFailedDump(ctx, log, params.ContainerPID)
 		}
 		return nil, fmt.Errorf("checkpoint: %w", err)
 	}
@@ -656,7 +654,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 // killCheckpointProcess SIGKILLs the CUDA-locked process so it does not hang after a failed dump.
 // ESRCH (already exited) is success. Any other signal error is returned so callers can fail closed.
 func (w *NodeController) killCheckpointProcess(log logr.Logger, pid int, reason string) error {
-	if err := snapshotruntime.SendSignalToPID(log, pid, syscall.SIGKILL, reason); err != nil {
+	if err := w.sendSignalFn(log, pid, syscall.SIGKILL, reason); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}

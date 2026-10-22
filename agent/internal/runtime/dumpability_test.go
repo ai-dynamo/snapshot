@@ -127,3 +127,49 @@ func TestGPUStateUniform(t *testing.T) {
 		t.Error("a tree with no GPU processes is vacuously uniform")
 	}
 }
+
+// Released is the half of the check that stands on its own: a task CRIU never
+// let go of cannot resume, whatever the tree looked like at suspend.
+func TestReleased(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		tracerPID int
+		state     string
+		want      bool
+	}{
+		{name: "released", state: "S", want: true},
+		{name: "running", state: "R", want: true},
+		{name: "still traced", tracerPID: 99, state: "S"},
+		{name: "stopped", state: "T"},
+		{name: "traced-and-stopped", state: "t"},
+		{name: "uninterruptible sleep", state: "D"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			procRoot := t.TempDir()
+			writeProcStatus(t, procRoot, 42, tc.tracerPID, 4, tc.state)
+
+			got, reason := Released(procRoot, []int{42})
+
+			if got != tc.want {
+				t.Errorf("Released() = %v (%s), want %v", got, reason, tc.want)
+			}
+			if !got && reason == "" {
+				t.Error("a task that was not released must say why")
+			}
+		})
+	}
+}
+
+// Thread count is Dumpable's concern alone: a tree that forked after CRIU let
+// go is still released, just no longer the tree that was suspended.
+func TestReleasedIgnoresThreadCount(t *testing.T) {
+	procRoot := t.TempDir()
+	writeProcStatus(t, procRoot, 42, 0, 9, "S")
+
+	if released, reason := Released(procRoot, []int{42}); !released {
+		t.Errorf("Released() = false (%s), want true", reason)
+	}
+	if dumpable, _ := Dumpable(procRoot, TreeSnapshot{42: 4}); dumpable {
+		t.Error("Dumpable() = true, want false for a changed tree")
+	}
+}

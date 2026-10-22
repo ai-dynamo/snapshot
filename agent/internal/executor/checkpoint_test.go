@@ -319,7 +319,7 @@ func TestCheckpointPreparationFailure(t *testing.T) {
 					assert.ErrorContains(t, err, fmt.Sprintf("abort PageBroker checkpoint %q: read PageBroker response: EOF", transactionID))
 					assert.ErrorIs(t, err, io.EOF)
 				}
-				assert.False(t, CheckpointNeedsSourceKill(err))
+				assert.False(t, SourceNeedsRecovery(err))
 				for _, path := range []string{workingDirectory, cfg.Storage.BasePath} {
 					entries, err := os.ReadDir(path)
 					require.NoError(t, err)
@@ -429,7 +429,7 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	require.ErrorContains(t, err, "while preparing PageBroker checkpoint")
 	assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
 	assert.Less(t, time.Since(start), 3*time.Second)
-	assert.False(t, CheckpointNeedsSourceKill(err))
+	assert.False(t, SourceNeedsRecovery(err))
 	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts"))
 }
 
@@ -510,9 +510,9 @@ func TestCheckpointBoundSendsArtifactTarget(t *testing.T) {
 	waitPageBrokerTest(t, server)
 }
 
-func TestCheckpointNeedsSourceKill(t *testing.T) {
-	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
-	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
+func TestSourceNeedsRecovery(t *testing.T) {
+	assert.True(t, SourceNeedsRecovery(sourceNeedsRecovery(errors.New("capture failed"))))
+	assert.False(t, SourceNeedsRecovery(errors.New("prepare failed")))
 }
 
 // TestCheckpointCommitFailureReleasesOnlySettledFailures drives a completed dump

@@ -74,14 +74,15 @@ func SnapshotTree(procRoot string, pids []int) (TreeSnapshot, error) {
 	return snapshot, nil
 }
 
-// Dumpable reports whether CRIU can dump the recorded tree as it stands, and
-// names the first signal that says it cannot.
+// Released reports whether CRIU has let go of every task, and names the first
+// one it has not.
 //
 // CRIU seizes every task and injects a parasite, undoing both when it finishes.
 // A run that was interrupted can leave a task attached or stopped, and CRIU
-// cannot seize a task that is already seized.
-func Dumpable(procRoot string, recorded TreeSnapshot) (bool, string) {
-	for _, pid := range sortedPIDs(recorded) {
+// cannot seize a task that is already seized. A task left this way also cannot
+// resume on its own.
+func Released(procRoot string, pids []int) (bool, string) {
+	for _, pid := range pids {
 		probe, err := ProbeTask(procRoot, pid)
 		if err != nil {
 			return false, fmt.Sprintf("process %d is gone or unreadable: %v", pid, err)
@@ -93,7 +94,25 @@ func Dumpable(procRoot string, recorded TreeSnapshot) (bool, string) {
 			return false, fmt.Sprintf("process %d is stopped", pid)
 		case probe.State == "D":
 			return false, fmt.Sprintf("process %d is in uninterruptible sleep", pid)
-		case probe.Threads != recorded[pid]:
+		}
+	}
+	return true, ""
+}
+
+// Dumpable reports whether CRIU can dump the recorded tree as it stands, and
+// names the first signal that says it cannot: CRIU released it, and the tree is
+// still the one that was suspended.
+func Dumpable(procRoot string, recorded TreeSnapshot) (bool, string) {
+	pids := sortedPIDs(recorded)
+	if released, reason := Released(procRoot, pids); !released {
+		return false, reason
+	}
+	for _, pid := range pids {
+		probe, err := ProbeTask(procRoot, pid)
+		if err != nil {
+			return false, fmt.Sprintf("process %d is gone or unreadable: %v", pid, err)
+		}
+		if probe.Threads != recorded[pid] {
 			return false, fmt.Sprintf("process %d now has %d threads, not %d", pid, probe.Threads, recorded[pid])
 		}
 	}
