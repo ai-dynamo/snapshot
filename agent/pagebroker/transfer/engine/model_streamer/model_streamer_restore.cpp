@@ -91,14 +91,6 @@ ApplyPermissions(const Path& path, fs::perms permissions, Cancellation cancellat
 }
 
 void
-ApplyFilePermissions(const FileDescriptor& descriptor, fs::perms permissions)
-{
-  if (permissions != fs::perms::unknown &&
-      fchmod(descriptor.get(), static_cast<mode_t>(permissions & fs::perms::mask)) < 0)
-    throw SystemError("set restore file permissions");
-}
-
-void
 ValidateRestoreInventory(const CheckpointInventory& inventory, Cancellation cancellation)
 {
   cancellation.ThrowIfCancelled();
@@ -156,13 +148,13 @@ CreateDirectoryTree(const CheckpointInventory& inventory, const Path& destinatio
 }
 
 void
-CreateEmptyFile(const CheckpointFile& file, const Path& destination)
+CreateEmptyFile(const CheckpointFile& file, const Path& destination, Cancellation cancellation)
 {
   FileDescriptor descriptor(open(destination.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600));
   if (descriptor.get() < 0)
     throw SystemError("create empty restore staging file");
   // Empty files need no native submission; the backend checks remote existence.
-  ApplyFilePermissions(descriptor, file.permissions);
+  ApplyPermissions(destination, file.permissions, cancellation);
 }
 
 void
@@ -212,7 +204,7 @@ ModelStreamerRestore::StreamerEntry::TryAddFile(const CheckpointFile& file, cons
   request.destinations.back() = address;
   // Native reads write through this mapping, so final file permissions can be
   // applied before submission. Record the mapping first for failure cleanup.
-  ApplyFilePermissions(descriptor, file.permissions);
+  ApplyPermissions(destination, file.permissions, cancellation);
   bytes += file_bytes;
   return true;
 }
@@ -689,7 +681,7 @@ ModelStreamerRestore::RestoreFiles(const CheckpointInventory& inventory, const P
         cancellation.ThrowIfCancelled();
         const Path staged = destination / file->relative_path;
         if (file->size_bytes == 0) {
-          CreateEmptyFile(*file, staged);
+          CreateEmptyFile(*file, staged, cancellation);
           ++file;
           continue;
         }
