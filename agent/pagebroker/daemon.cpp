@@ -52,6 +52,8 @@ using snapshot::pagebroker::Request;
 using snapshot::pagebroker::Response;
 
 namespace {
+constexpr char kStorageConfigOption[] = "--storage-config";
+constexpr char kModelStreamerConfigOption[] = "--model-streamer-config";
 constexpr uint32_t kMaxMessageSize = 64 << 10;  // 64 KB
 constexpr size_t kMaxPassedFiles = 253;  // Linux SCM_RIGHTS per-message limit.
 constexpr timeval kConnectionTimeout{30, 0};
@@ -738,9 +740,9 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
       options.gpu.chunk_bytes = ParseSize(option, input, false);
     } else if (option == "--custom-storage-max-pinned-bytes") {
       options.gpu.max_pinned_bytes = ParseSize(option, input, true);
-    } else if (option == "--storage-config") {
+    } else if (option == kStorageConfigOption) {
       options.storage_config = input;
-    } else if (option == "--model-streamer-config") {
+    } else if (option == kModelStreamerConfigOption) {
       options.model_streamer_config = input;
     } else {
       throw std::invalid_argument("unknown option: " + std::string(option));

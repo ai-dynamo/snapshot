@@ -41,6 +41,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::uint64_t kMiB = 1024 * 1024;
 constexpr char kAllocationTag[] = "PageBrokerS3";
+constexpr char kHttpEndpointPrefix[] = "http://";
 
 class SdkLease {
  public:
@@ -114,7 +115,7 @@ HasSupportedEndpoint(const std::string& endpoint)
 {
   if (endpoint.empty())
     return true;
-  return endpoint.starts_with("https://") || endpoint.starts_with("http://");
+  return endpoint.starts_with(kHttpsEndpointPrefix) || endpoint.starts_with(kHttpEndpointPrefix);
 }
 
 bool
@@ -302,10 +303,10 @@ ClientConfiguration(const S3Connection& connection, const S3Limits& limits)
   if (!connection.region.empty())
     config.region = connection.region;
   config.endpointOverride = connection.endpoint;
-  for (const auto& prefix : {Aws::String("https://"), Aws::String("http://")}) {
+  for (const auto& prefix : {Aws::String(kHttpsEndpointPrefix), Aws::String(kHttpEndpointPrefix)}) {
     if (StartsWithCaseInsensitive(config.endpointOverride, prefix)) {
       config.endpointOverride.erase(0, prefix.size());
-      config.scheme = prefix == "https://" ? Aws::Http::Scheme::HTTPS : Aws::Http::Scheme::HTTP;
+      config.scheme = prefix == kHttpsEndpointPrefix ? Aws::Http::Scheme::HTTPS : Aws::Http::Scheme::HTTP;
       if (config.endpointOverride.empty() || config.endpointOverride.front() == ':')
         throw std::invalid_argument("S3 endpoint has no host");
       break;

@@ -12,6 +12,8 @@
 namespace snapshot::pagebroker {
 // Version of the published checkpoint index.
 inline constexpr char kCheckpointFormat[] = "snapshot.s3-checkpoint/v1";
+// Metadata object name within a checkpoint storage prefix.
+inline constexpr char kCheckpointIndexName[] = "index.json";
 // Required metadata entry and the alphabet used to encode artifact handles.
 inline constexpr char kCheckpointManifestName[] = "manifest.yaml";
 inline constexpr char kCheckpointHandleHexDigits[] = "0123456789abcdef";

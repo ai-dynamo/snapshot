@@ -15,7 +15,6 @@ namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
 constexpr char kS3UriPrefix[] = "s3://";
-constexpr char kIndexObjectName[] = "index.json";
 constexpr char kPayloadPrefix[] = "data/";
 constexpr char kSourceSizeChangedCode[] = "SourceSizeChanged";
 
@@ -119,7 +118,7 @@ S3StorageBackend::Object(const PublishedArtifact& storage, const std::string& ke
 void
 S3StorageBackend::CheckCheckpointDestination(const PublishedArtifact& storage, Cancellation cancellation) const
 {
-  const auto object = Object(storage, kIndexObjectName);
+  const auto object = Object(storage, kCheckpointIndexName);
   if (Client().Head(object, cancellation).has_value())
     throw CheckpointError(Failure::TRANSACTION_CONFLICT, "checkpoint is already published; recover using its ID");
 }
@@ -160,7 +159,7 @@ void
 S3StorageBackend::PublishIndex(const PublishedArtifact& storage, const std::string& index, Cancellation cancellation) const
 {
   try {
-    const auto object = Object(storage, kIndexObjectName);
+    const auto object = Object(storage, kCheckpointIndexName);
     auto& client = Client();
     // The checkpoint publication state saves these exact bytes before publication. Every
     // error here remains uncertain independently of concurrent Abort/expiry.
@@ -186,7 +185,7 @@ S3StorageBackend::PublishIndex(const PublishedArtifact& storage, const std::stri
 CheckpointInventory
 S3StorageBackend::LoadCheckpointInventory(const PublishedArtifact& storage, bool metadata_only, Cancellation cancellation) const
 {
-  const auto object = Object(storage, kIndexObjectName);
+  const auto object = Object(storage, kCheckpointIndexName);
   auto& client = Client();
   const auto text = client.Get(object, kMaxIndexBytes, cancellation);
   if (!text)

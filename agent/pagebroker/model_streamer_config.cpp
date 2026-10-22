@@ -17,6 +17,46 @@
 namespace snapshot::pagebroker {
 namespace {
 using Json = nlohmann::json;
+constexpr char kReadChunkBytesKey[] = "readChunkBytes";
+constexpr char kProcessGroupSizeKey[] = "processGroupSize";
+constexpr char kS3ReaderKey[] = "s3Reader";
+constexpr char kConcurrencyKey[] = "concurrency";
+constexpr char kTargetGbpsKey[] = "targetGbps";
+constexpr char kMaxConnectionsKey[] = "maxConnections";
+constexpr char kMaxInflightMiBKey[] = "maxInflightMiB";
+constexpr char kMaxRetriesKey[] = "maxRetries";
+constexpr char kRetryWindowSecondsKey[] = "retryWindowSeconds";
+constexpr char kLowSpeedTimeoutMsKey[] = "lowSpeedTimeoutMs";
+constexpr char kLowSpeedBytesPerSecondKey[] = "lowSpeedBytesPerSecond";
+constexpr char kLoggingKey[] = "logging";
+constexpr char kLevelKey[] = "level";
+constexpr char kToStderrKey[] = "toStderr";
+
+constexpr char kReadChunkBytesEnv[] = "RUNAI_STREAMER_CHUNK_BYTESIZE";
+constexpr char kProcessGroupSizeEnv[] = "RUNAI_STREAMER_PROCESS_GROUP_SIZE";
+constexpr char kS3ConcurrencyEnv[] = "RUNAI_STREAMER_OBJ_CONCURRENCY";
+constexpr char kS3TargetGbpsEnv[] = "RUNAI_STREAMER_S3_TARGET_GBPS";
+constexpr char kS3MaxConnectionsEnv[] = "RUNAI_STREAMER_S3_MAX_CONNECTIONS";
+constexpr char kS3MaxInflightMiBEnv[] = "RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB";
+constexpr char kS3MaxRetriesEnv[] = "RUNAI_STREAMER_S3_MAX_RETRIES";
+constexpr char kS3RetryWindowSecondsEnv[] = "RUNAI_STREAMER_S3_TIMEOUT";
+constexpr char kS3LowSpeedTimeoutMsEnv[] = "RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS";
+constexpr char kS3LowSpeedBytesPerSecondEnv[] = "RUNAI_STREAMER_S3_LOW_SPEED_LIMIT";
+constexpr char kLogLevelEnv[] = "RUNAI_STREAMER_LOG_LEVEL";
+constexpr char kLogToStderrEnv[] = "RUNAI_STREAMER_LOG_TO_STDERR";
+constexpr char kLegacyConcurrencyEnv[] = "RUNAI_STREAMER_CONCURRENCY";
+constexpr char kAwsEc2MetadataDisabledEnv[] = "AWS_EC2_METADATA_DISABLED";
+
+constexpr char kNativeBooleanTrue[] = "1";
+constexpr char kNativeBooleanFalse[] = "0";
+constexpr char kDisableEc2Metadata[] = "true";
+
+constexpr char kSpamLogLevel[] = "SPAM";
+constexpr char kDebugLogLevel[] = "DEBUG";
+constexpr char kInfoLogLevel[] = "INFO";
+constexpr char kWarningLogLevel[] = "WARNING";
+constexpr char kErrorLogLevel[] = "ERROR";
+
 constexpr std::size_t kMaxConfigBytes = 65536;
 constexpr std::uint64_t kMiB = 1024 * 1024;
 constexpr std::uint64_t kMaxCount = std::numeric_limits<unsigned>::max();
@@ -33,16 +73,16 @@ struct NumericSetting {
 // One mapping drives parsing, validation and native translation, keeping the
 // JSON contract and environment fallback rules identical.
 constexpr NumericSetting kNumbers[] = {
-    {"", "readChunkBytes", "RUNAI_STREAMER_CHUNK_BYTESIZE", &ModelStreamerOptions::read_chunk_bytes, 2 * kMiB, 1024 * kMiB},
-    {"", "processGroupSize", "RUNAI_STREAMER_PROCESS_GROUP_SIZE", &ModelStreamerOptions::process_group_size, 1, kMaxCount},
-    {"s3Reader", "concurrency", "RUNAI_STREAMER_OBJ_CONCURRENCY", &ModelStreamerOptions::s3_concurrency, 1, 1024},
-    {"s3Reader", "targetGbps", "RUNAI_STREAMER_S3_TARGET_GBPS", &ModelStreamerOptions::s3_target_gbps, 1, kMaxCount},
-    {"s3Reader", "maxConnections", "RUNAI_STREAMER_S3_MAX_CONNECTIONS", &ModelStreamerOptions::s3_max_connections, 1, kMaxCount},
-    {"s3Reader", "maxInflightMiB", "RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB", &ModelStreamerOptions::s3_max_inflight_mib, 1, 1024 * 1024},
-    {"s3Reader", "maxRetries", "RUNAI_STREAMER_S3_MAX_RETRIES", &ModelStreamerOptions::s3_max_retries, 0, 10},
-    {"s3Reader", "retryWindowSeconds", "RUNAI_STREAMER_S3_TIMEOUT", &ModelStreamerOptions::s3_retry_window_seconds, 0, 86400},
-    {"s3Reader", "lowSpeedTimeoutMs", "RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS", &ModelStreamerOptions::s3_low_speed_timeout_ms, 1, 86400000},
-    {"s3Reader", "lowSpeedBytesPerSecond", "RUNAI_STREAMER_S3_LOW_SPEED_LIMIT", &ModelStreamerOptions::s3_low_speed_bytes_per_second, 1, kMaxCount},
+    {"", kReadChunkBytesKey, kReadChunkBytesEnv, &ModelStreamerOptions::read_chunk_bytes, 2 * kMiB, 1024 * kMiB},
+    {"", kProcessGroupSizeKey, kProcessGroupSizeEnv, &ModelStreamerOptions::process_group_size, 1, kMaxCount},
+    {kS3ReaderKey, kConcurrencyKey, kS3ConcurrencyEnv, &ModelStreamerOptions::s3_concurrency, 1, 1024},
+    {kS3ReaderKey, kTargetGbpsKey, kS3TargetGbpsEnv, &ModelStreamerOptions::s3_target_gbps, 1, kMaxCount},
+    {kS3ReaderKey, kMaxConnectionsKey, kS3MaxConnectionsEnv, &ModelStreamerOptions::s3_max_connections, 1, kMaxCount},
+    {kS3ReaderKey, kMaxInflightMiBKey, kS3MaxInflightMiBEnv, &ModelStreamerOptions::s3_max_inflight_mib, 1, 1024 * 1024},
+    {kS3ReaderKey, kMaxRetriesKey, kS3MaxRetriesEnv, &ModelStreamerOptions::s3_max_retries, 0, 10},
+    {kS3ReaderKey, kRetryWindowSecondsKey, kS3RetryWindowSecondsEnv, &ModelStreamerOptions::s3_retry_window_seconds, 0, 86400},
+    {kS3ReaderKey, kLowSpeedTimeoutMsKey, kS3LowSpeedTimeoutMsEnv, &ModelStreamerOptions::s3_low_speed_timeout_ms, 1, 86400000},
+    {kS3ReaderKey, kLowSpeedBytesPerSecondKey, kS3LowSpeedBytesPerSecondEnv, &ModelStreamerOptions::s3_low_speed_bytes_per_second, 1, kMaxCount},
 };
 
 std::string
@@ -119,7 +159,7 @@ ModelStreamerOptions::Validate() const
     if (!IsWithinBounds(value, setting))
       Invalid(FieldName(setting));
   }
-  const std::set<std::string> levels{"SPAM", "DEBUG", "INFO", "WARNING", "ERROR"};
+  const std::set<std::string> levels{kSpamLogLevel, kDebugLogLevel, kInfoLogLevel, kWarningLogLevel, kErrorLogLevel};
   if (log_level && !levels.contains(*log_level))
     Invalid("logging.level");
 }
@@ -134,9 +174,9 @@ ModelStreamerOptions::NativeEnvironment() const
       result.emplace(setting.environment, std::to_string(*value));
   }
   if (log_level)
-    result.emplace("RUNAI_STREAMER_LOG_LEVEL", *log_level);
+    result.emplace(kLogLevelEnv, *log_level);
   if (log_to_stderr)
-    result.emplace("RUNAI_STREAMER_LOG_TO_STDERR", *log_to_stderr ? "1" : "0");
+    result.emplace(kLogToStderrEnv, *log_to_stderr ? kNativeBooleanTrue : kNativeBooleanFalse);
   return result;
 }
 
@@ -160,11 +200,11 @@ ParseModelStreamerConfig(std::string_view text)
   catch (const std::exception&) {
     Invalid("JSON");
   }
-  ValidateFields(value, "", {"s3Reader", "logging"});
-  if (value.contains("s3Reader"))
-    ValidateFields(value.at("s3Reader"), "s3Reader", {});
-  if (value.contains("logging"))
-    ValidateFields(value.at("logging"), "logging", {"level", "toStderr"});
+  ValidateFields(value, "", {kS3ReaderKey, kLoggingKey});
+  if (value.contains(kS3ReaderKey))
+    ValidateFields(value.at(kS3ReaderKey), kS3ReaderKey, {});
+  if (value.contains(kLoggingKey))
+    ValidateFields(value.at(kLoggingKey), kLoggingKey, {kLevelKey, kToStderrKey});
 
   ModelStreamerOptions options;
   for (const auto& setting : kNumbers) {
@@ -183,14 +223,14 @@ ParseModelStreamerConfig(std::string_view text)
       }
     }
   }
-  if (value.contains("logging")) {
-    const auto& logging = value.at("logging");
-    if (logging.contains("level"))
-      options.log_level = String(logging.at("level"), "logging.level");
-    if (logging.contains("toStderr")) {
-      if (!logging.at("toStderr").is_boolean())
+  if (value.contains(kLoggingKey)) {
+    const auto& logging = value.at(kLoggingKey);
+    if (logging.contains(kLevelKey))
+      options.log_level = String(logging.at(kLevelKey), "logging.level");
+    if (logging.contains(kToStderrKey)) {
+      if (!logging.at(kToStderrKey).is_boolean())
         Invalid("logging.toStderr");
-      options.log_to_stderr = logging.at("toStderr").get<bool>();
+      options.log_to_stderr = logging.at(kToStderrKey).get<bool>();
     }
   }
   options.Validate();
@@ -220,17 +260,17 @@ ResolveModelStreamerOptions(ModelStreamerOptions options, const S3Config* storag
         options.*setting.member = Number(value, FieldName(setting));
     }
   }
-  Inherit(options.log_level, "RUNAI_STREAMER_LOG_LEVEL");
+  Inherit(options.log_level, kLogLevelEnv);
   if (!options.log_to_stderr) {
-    if (const auto* value = std::getenv("RUNAI_STREAMER_LOG_TO_STDERR")) {
+    if (const auto* value = std::getenv(kLogToStderrEnv)) {
       const std::string_view flag(value);
-      if (flag != "0" && flag != "1")
+      if (flag != kNativeBooleanFalse && flag != kNativeBooleanTrue)
         Invalid("logging.toStderr");
-      options.log_to_stderr = flag == "1";
+      options.log_to_stderr = flag == kNativeBooleanTrue;
     }
   }
   // Preserve the legacy fallback for S3 concurrency when no explicit setting exists.
-  if (const auto* legacy = std::getenv("RUNAI_STREAMER_CONCURRENCY")) {
+  if (const auto* legacy = std::getenv(kLegacyConcurrencyEnv)) {
     if (!options.s3_concurrency)
       options.s3_concurrency = Number(legacy, "s3Reader.concurrency");
   }
@@ -256,7 +296,7 @@ ConfigureModelStreamerEnvironment(const ModelStreamerOptions& options, const S3C
     const auto& connection = storage->transfer.connection;
     environment[kS3VirtualAddressingEnv] = connection.use_virtual_addressing
         ? kS3VirtualAddressingEnabled : kS3VirtualAddressingDisabled;
-    environment["AWS_EC2_METADATA_DISABLED"] = "true";
+    environment[kAwsEc2MetadataDisabledEnv] = kDisableEc2Metadata;
     environment[kAwsCaBundleEnv] = connection.ca_file;
   }
   for (const auto& [name, value] : environment) {

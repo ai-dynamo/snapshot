@@ -15,6 +15,9 @@
 #include "cancellation.hpp"
 
 namespace snapshot::pagebroker {
+// HTTPS endpoint prefix shared by connection validation and startup configuration.
+inline constexpr char kHttpsEndpointPrefix[] = "https://";
+
 // Standard CA override shared by SDK and native restore configuration.
 inline constexpr char kAwsCaBundleEnv[] = "AWS_CA_BUNDLE";
 
