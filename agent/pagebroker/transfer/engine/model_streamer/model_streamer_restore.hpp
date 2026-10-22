@@ -123,7 +123,7 @@ class ModelStreamerRestore {
   // Starts a native session on the worker thread.
   void Start();
   // Restores files in batches using a byte budget; an oversized file forms its
-  // own batch. Applies file permissions after restoration.
+  // own batch. Applies file permissions before native submission.
   void RestoreFiles(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation);
   // Submits an entry and waits, allowing cancellation before admission.
   // Claimed buffers remain alive until native access ends.

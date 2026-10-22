@@ -5,6 +5,7 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -89,6 +90,14 @@ ApplyPermissions(const Path& path, fs::perms permissions)
 }
 
 void
+ApplyFilePermissions(const FileDescriptor& descriptor, fs::perms permissions)
+{
+  if (permissions != fs::perms::unknown &&
+      fchmod(descriptor.get(), static_cast<mode_t>(permissions & fs::perms::mask)) < 0)
+    throw SystemError("set restore file permissions");
+}
+
+void
 ValidateRestoreInventory(const CheckpointInventory& inventory)
 {
   std::set<Path> directories;
@@ -150,7 +159,7 @@ CreateEmptyFile(const CheckpointFile& file, const Path& destination)
   if (descriptor.get() < 0)
     throw SystemError("create empty restore staging file");
   // Empty files need no native submission; the backend checks remote existence.
-  ApplyPermissions(destination, file.permissions);
+  ApplyFilePermissions(descriptor, file.permissions);
 }
 
 void
@@ -200,6 +209,9 @@ ModelStreamerRestore::StreamerEntry::TryAddFile(const CheckpointFile& file, cons
   if (address == MAP_FAILED)
     throw SystemError("map restore staging file");
   request.destinations.back() = address;
+  // Native reads write through this mapping, so final file permissions can be
+  // applied before submission. Record the mapping first for failure cleanup.
+  ApplyFilePermissions(descriptor, file.permissions);
   bytes += file_bytes;
   return true;
 }
@@ -668,7 +680,6 @@ void
 ModelStreamerRestore::RestoreFiles(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
   for (auto file = inventory.files.begin(); file != inventory.files.end();) {
-    const auto batch_begin = file;
     auto entry = std::make_shared<StreamerEntry>();
     entry->cancellation = cancellation;
     auto& request = entry->request;
@@ -689,13 +700,6 @@ ModelStreamerRestore::RestoreFiles(const CheckpointInventory& inventory, const P
 
       if (!request.paths.empty())
         SubmitAndWait(entry);
-
-      for (auto restored = batch_begin; restored != file; ++restored) {
-        if (restored->size_bytes == 0)
-          continue;  // Empty files already received their permissions on creation.
-        cancellation.ThrowIfCancelled();
-        ApplyPermissions(destination / restored->relative_path, restored->permissions);
-      }
     }
     catch (...) {
       // A queued entry can outlive its caller. The admission handshake either
