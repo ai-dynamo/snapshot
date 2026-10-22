@@ -276,6 +276,170 @@ class AgentLogPhases:
 
 
 @dataclass
+class ArtifactFile:
+    """One file in the checkpoint artifact, relative to the content directory.
+
+    `bytes` is the apparent size (`st_size`), which counts sparse holes.
+    `allocated_bytes` is `st_blocks * 512`, the space the filesystem has
+    actually reserved. A page image whose apparent size is far above its
+    allocated size is mostly holes.
+    """
+
+    path: str
+    bytes: int
+    allocated_bytes: int | None = None
+
+
+@dataclass
+class ImageCategory:
+    """Bytes in the artifact grouped by CRIU image kind (pages, core, mm, ...).
+
+    `bytes` sums apparent sizes. `allocated_bytes` sums allocated sizes, or
+    is None when the inventory did not report blocks.
+    """
+
+    name: str
+    bytes: int
+    file_count: int
+    allocated_bytes: int | None = None
+
+
+@dataclass
+class DumpLogEvent:
+    """One CRIU dump.log line. offset_seconds is CRIU's own clock."""
+
+    offset_seconds: float
+    message: str
+    path: str
+
+
+@dataclass
+class CheckpointImage:
+    """File inventory and dump.log markers for one captured artifact.
+
+    Collected by listing the artifact before the benchmark deletes it. The
+    category totals name bytes that CRIU's pages_written counter does not.
+    dump.log offsets are CRIU's own log clock.
+    """
+
+    files: list[ArtifactFile] = field(default_factory=list)
+    categories: list[ImageCategory] = field(default_factory=list)
+    file_count: int = 0
+    dump_log: list[DumpLogEvent] = field(default_factory=list)
+    parse_warnings: list[str] = field(default_factory=list)
+    # Summaries of the high-volume dump.log lines. Kept off the event list so
+    # "Dumping finished" is not dropped behind hundreds of pagemap lines.
+    pagemap_count: int = 0
+    pagemap_pages: int = 0
+    pagemap_holes: int = 0
+    pagemap_first_seconds: float | None = None
+    pagemap_last_seconds: float | None = None
+    thread_core_count: int = 0
+    thread_core_first_seconds: float | None = None
+    thread_core_last_seconds: float | None = None
+
+    @property
+    def pages_bytes(self) -> int:
+        return _category_bytes(self.categories, "pages")
+
+    @property
+    def pages_allocated_bytes(self) -> int | None:
+        return _category_allocated(self.categories, "pages")
+
+    @property
+    def pages_sparse_bytes(self) -> int | None:
+        """Apparent page-image size minus allocated size.
+
+        This is file sparseness (``st_size`` minus ``st_blocks * 512``). It is
+        not CRIU's parent-image pagemap hole count.
+        """
+        allocated = self.pages_allocated_bytes
+        if allocated is None:
+            return None
+        return self.pages_bytes - allocated
+
+    @property
+    def pagemap_hole_bytes(self) -> int | None:
+        """Pages skipped because a parent image already holds them.
+
+        The count equals ``pages_skipped_parent`` and is zero without
+        ``--prev-images-dir``. None when no pagemap summary was read.
+        """
+        if self.pagemap_count == 0:
+            return None
+        return self.pagemap_holes * 4096
+
+    @property
+    def non_page_bytes(self) -> int:
+        return sum(category.bytes for category in self.categories if category.name != "pages")
+
+    @property
+    def first_dumping_pages_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Dumping pages (")
+
+    @property
+    def last_pagemap_seconds(self) -> float | None:
+        return self.pagemap_last_seconds
+
+    @property
+    def first_dumping_core_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Dumping core (pid:")
+
+    @property
+    def dumping_mm_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Dumping mm (")
+
+    @property
+    def dumping_pstree_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Dumping pstree")
+
+    @property
+    def namespaces_complete_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Namespaces dump complete")
+
+    @property
+    def unfreezing_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Unfreezing tasks")
+
+    @property
+    def writing_stats_seconds(self) -> float | None:
+        return _first_event(self.dump_log, "Writing stats")
+
+    @property
+    def dumping_finished_seconds(self) -> float | None:
+        return _last_event(self.dump_log, "Dumping finished")
+
+
+def _category_bytes(categories: list[ImageCategory], name: str) -> int:
+    for category in categories:
+        if category.name == name:
+            return category.bytes
+    return 0
+
+
+def _category_allocated(categories: list[ImageCategory], name: str) -> int | None:
+    for category in categories:
+        if category.name == name:
+            return category.allocated_bytes
+    return None
+
+
+def _first_event(events: list[DumpLogEvent], prefix: str) -> float | None:
+    for event in events:
+        if event.message.startswith(prefix):
+            return event.offset_seconds
+    return None
+
+
+def _last_event(events: list[DumpLogEvent], prefix: str) -> float | None:
+    found: float | None = None
+    for event in events:
+        if event.message.startswith(prefix):
+            found = event.offset_seconds
+    return found
+
+
+@dataclass
 class RunResult:
     schema_version: int
     run_id: str
@@ -288,6 +452,7 @@ class RunResult:
     cold_start: ColdStartTiming | None = None
     checkpoint: CheckpointTiming | None = None
     checkpoint_agent_log: CheckpointAgentLog | None = None
+    checkpoint_image: CheckpointImage | None = None
     restore: RestoreTiming | None = None
     agent_log_phases: AgentLogPhases | None = None
     warnings: list[str] = field(default_factory=list)

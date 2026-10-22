@@ -27,13 +27,14 @@ from kubernetes.client import ApiException
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
 
-from snapshot_benchmarks import logs, metadata
+from snapshot_benchmarks import image, logs, metadata
 from snapshot_benchmarks.engines import Engine, ModelSpec
 from snapshot_benchmarks.schema import (
     SCHEMA_VERSION,
     AgentLogPhases,
     BenchmarkEngine,
     CheckpointAgentLog,
+    CheckpointImage,
     CheckpointTiming,
     ColdStartTiming,
     GpuIdentity,
@@ -287,6 +288,7 @@ def run_benchmark(
             result.checkpoint_agent_log = _collect_checkpoint_agent_log(
                 cfg, capture_node, content_name=content_name
             )
+            result.checkpoint_image = _collect_checkpoint_image(cfg, capture_node, content_uid)
 
             progress(f"[{run_id}] deleting source pod {source_name} to free the GPU")
             k8s.delete_pod(cfg.workload_namespace, source_name)
@@ -484,6 +486,31 @@ def _collect_checkpoint_agent_log(
         return CheckpointAgentLog(parse_warnings=[str(exc)])
     except Exception as exc:  # noqa: BLE001 - log fetch/parse fails in many untyped ways
         return CheckpointAgentLog(parse_warnings=[f"checkpoint_agent_log unavailable: {exc}"])
+
+
+def _collect_checkpoint_image(
+    cfg: BenchmarkConfig, capture_node: str | None, content_uid: str
+) -> CheckpointImage:
+    """Lists the artifact and reads dump.log markers before cleanup deletes it.
+
+    Best-effort: the checkpoint has already succeeded, so an exec failure
+    becomes a warning on the returned object rather than a failed run.
+    """
+    if not capture_node:
+        return CheckpointImage(parse_warnings=["source pod had no node_name; cannot list the artifact"])
+    snapshot_cfg = cfg.snapshot_e2e_config()
+    try:
+        agent_pod = lifecycle.checkpoint_agent_pod(snapshot_cfg, capture_node)
+        output = k8s.exec_payload(
+            cfg.snapshot_namespace,
+            agent_pod,
+            image.inventory_command(lifecycle.checkpoint_artifact_root(content_uid)),
+        )
+        return image.parse_inventory(output)
+    except AssertionError as exc:
+        return CheckpointImage(parse_warnings=[str(exc)])
+    except Exception as exc:  # noqa: BLE001 - exec-over-websocket fails in many untyped ways
+        return CheckpointImage(parse_warnings=[f"checkpoint image inventory unavailable: {exc}"])
 
 
 def _collect_agent_log_phases(

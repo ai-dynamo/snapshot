@@ -132,6 +132,20 @@ image was written** when a result has `checkpoint_agent_log`. An agent built
 before this split still produces phase totals; the result then warns that
 the criu memwrite split is absent.
 
+Before the run deletes the artifact, it also lists every file under that
+content directory and reads `dump.log`. `checkpoint_image.categories` sums
+those files by kind (`pages`, `core`, `mm`, and so on). Each total has an
+apparent size (`st_size`, holes included) and an allocated size
+(`st_blocks * 512`). `pages_sparse_bytes` is that difference for page images:
+bytes the filesystem did not allocate. `pagemap_holes` is a different number.
+It counts pages CRIU skipped because a parent image already holds them, the
+same count as `pages_skipped_parent`, and it is zero without
+`--prev-images-dir`. A large non-`pages` category is the rest of the image.
+The finish-path offsets (`first_dumping_core_seconds`, the thread-core span,
+`unfreezing_seconds`, `writing_stats_seconds`, `dumping_finished_seconds`)
+are CRIU's own log clock. Pagemap and per-thread lines are summarized in the
+inventory command so `Dumping finished` is not dropped.
+
 A single-model baseline on the same hardware you care about:
 
 ```bash
