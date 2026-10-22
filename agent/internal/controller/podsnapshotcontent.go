@@ -241,6 +241,8 @@ func (w *NodeController) captureOwnerForPod(pod *corev1.Pod) (string, error) {
 //
 // A returned error means the outcome was not recorded and the queue should retry; a recorded
 // failure returns nil, because retrying a terminal work order achieves nothing.
+//
+// The attempt is separate so a retry can run one without its failure becoming terminal (SNEP-394).
 func (w *NodeController) runCheckpoint(
 	ctx context.Context,
 	content *snapshotv1alpha1.PodSnapshotContent,
@@ -251,9 +253,26 @@ func (w *NodeController) runCheckpoint(
 	contentUID string,
 	artifactPath string,
 ) error {
-	logger := logr.FromContextOrDiscard(ctx)
+	artifact, err := w.attemptCheckpoint(ctx, content, pod, containerName, containerID, containerPID,
+		cuInterposeRequested, contentUID, artifactPath)
+	if err != nil {
+		return w.markCheckpointFailed(ctx, content, "CheckpointFailed", err)
+	}
+	return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
+}
 
-	// Status writes below keep the outer ctx, so a dump that fails on the deadline still records it.
+// attemptCheckpoint runs one dump and reports what happened, writing no status.
+func (w *NodeController) attemptCheckpoint(
+	ctx context.Context,
+	content *snapshotv1alpha1.PodSnapshotContent,
+	pod *corev1.Pod,
+	containerName, containerID string,
+	containerPID int,
+	cuInterposeRequested bool,
+	contentUID string,
+	artifactPath string,
+) (*pagebroker.PublishedArtifact, error) {
+	// The caller's ctx governs status writes, so a dump that fails on its deadline is still recorded.
 	dumpCtx := ctx
 	if timeout := w.config.Checkpoint.CheckpointTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
@@ -279,16 +298,21 @@ func (w *NodeController) runCheckpoint(
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
 	// would discard a usable checkpoint and, being terminal, block recovery from ever promoting it.
-	artifact, err := w.checkpointFn(dumpCtx, params)
-	if err != nil {
-		logger.Error(err, "Checkpoint failed")
-		if patchErr := w.setSnapshotContentFailed(ctx, content, "CheckpointFailed", err); patchErr != nil {
-			return fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, patchErr)
-		}
-		return nil
-	}
+	return w.checkpointFn(dumpCtx, params)
+}
 
-	return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
+// markCheckpointFailed makes a failed attempt terminal.
+func (w *NodeController) markCheckpointFailed(
+	ctx context.Context,
+	content *snapshotv1alpha1.PodSnapshotContent,
+	reason string,
+	cause error,
+) error {
+	logr.FromContextOrDiscard(ctx).Error(cause, "Checkpoint failed")
+	if patchErr := w.setSnapshotContentFailed(ctx, content, reason, cause); patchErr != nil {
+		return fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, patchErr)
+	}
+	return nil
 }
 
 // classifySourcePodIdentity reports whether the live pod is the work order's pinned source
