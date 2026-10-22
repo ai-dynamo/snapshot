@@ -1,0 +1,298 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: PageBroker S3 settings
+templates:
+  - templates/configmap.yaml
+  - templates/daemonset.yaml
+  - templates/operator-deployment.yaml
+release:
+  name: snapshot
+  namespace: storage-ns
+set:
+  storage.type: s3
+  storage.s3.endpoint: https://s3.example.com
+  storage.s3.region: us-east-1
+  storage.s3.bucket: snapshot-bucket
+  storage.s3.credentialsSecretRef: s3-creds
+tests:
+  - it: renders only the staging cap as a limit when nothing else is set
+    template: templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data["pagebroker-s3.yaml"]
+          value: |
+            limits:
+              stagingBytes: 60129542144
+      - notExists:
+          path: data["model-streamer.json"]
+
+  - it: hands the settings file to the operator
+    template: templates/operator-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pagebroker-s3-settings=/etc/snapshot/pagebroker-s3.yaml
+      - contains:
+          path: spec.template.spec.volumes[?(@.name == "storage-config")].configMap.items
+          content:
+            key: pagebroker-s3.yaml
+            path: pagebroker-s3.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --artifact-cleanup-s3-ca-bundle-path
+          any: true
+
+  - it: sets no PageBroker environment when addressing and CA are unset
+    template: templates/daemonset.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: AWS_CA_BUNDLE
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          content: --model-streamer-config
+
+  - it: follows the staging cap when it is lowered to fit a smaller memory limit
+    template: templates/configmap.yaml
+    set:
+      pageBroker.resources.limits.memory: 8Gi
+    asserts:
+      - matchRegex:
+          path: data["pagebroker-s3.yaml"]
+          pattern: "stagingBytes: 7516192768"
+
+  - it: lets a configured stagingBytes win over the staging cap
+    template: templates/configmap.yaml
+    set:
+      pageBroker.s3.limits.stagingBytes: 1073741824
+    asserts:
+      - equal:
+          path: data["pagebroker-s3.yaml"]
+          value: |
+            limits:
+              stagingBytes: 1073741824
+
+  - it: renders the other limits as integers next to the staging cap
+    template: templates/configmap.yaml
+    set:
+      pageBroker.s3.limits.activeTransactions: 4
+      pageBroker.s3.limits.uploadPartBytes: 16777216
+      pageBroker.s3.limits.uploadRequestRetries: 0
+    asserts:
+      - equal:
+          path: data["pagebroker-s3.yaml"]
+          value: |
+            limits:
+              activeTransactions: 4
+              stagingBytes: 60129542144
+              uploadPartBytes: 16777216
+              uploadRequestRetries: 0
+
+  - it: rejects a limit PageBroker does not know
+    template: templates/configmap.yaml
+    set:
+      pageBroker.s3.limits.uploadWorkers: 2
+    asserts:
+      - failedTemplate:
+          errorPattern: "pageBroker.s3.limits.uploadWorkers is not a PageBroker S3 limit"
+
+  - it: rejects activeTransactions at or above maxConcurrentRequests
+    template: templates/configmap.yaml
+    set:
+      pageBroker.s3.limits.activeTransactions: 16
+    asserts:
+      - failedTemplate:
+          errorPattern: "activeTransactions must be below pageBroker.maxConcurrentRequests"
+
+  - it: writes path addressing to the file and the environment PageBroker checks it against
+    set:
+      storage.s3.addressing: path
+    asserts:
+      - matchRegex:
+          path: data["pagebroker-s3.yaml"]
+          pattern: '^addressing: "path"\n'
+        template: templates/configmap.yaml
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING
+            value: "0"
+        template: templates/daemonset.yaml
+
+  - it: writes virtual addressing with the matching environment value
+    set:
+      storage.s3.addressing: virtual
+    asserts:
+      - matchRegex:
+          path: data["pagebroker-s3.yaml"]
+          pattern: '^addressing: "virtual"\n'
+        template: templates/configmap.yaml
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING
+            value: "1"
+        template: templates/daemonset.yaml
+
+  - it: rejects an addressing mode PageBroker does not know
+    template: templates/configmap.yaml
+    set:
+      storage.s3.addressing: dual
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.s3.addressing must be"
+
+  - it: rejects a plain-http endpoint unless allowHttp is set
+    template: templates/configmap.yaml
+    set:
+      storage.s3.endpoint: http://s3.example.com
+    asserts:
+      - failedTemplate:
+          errorPattern: "set storage.s3.allowHttp=true"
+
+  - it: writes allowHttp for a plain-http endpoint when set
+    template: templates/configmap.yaml
+    set:
+      storage.s3.endpoint: http://s3.example.com
+      storage.s3.allowHttp: true
+    asserts:
+      - matchRegex:
+          path: data["pagebroker-s3.yaml"]
+          pattern: '^allowHttp: true\n'
+
+  - it: mounts the CA bundle into PageBroker and names it in the file and the environment
+    set:
+      storage.s3.caBundleConfigMapRef: s3-ca
+    asserts:
+      - matchRegex:
+          path: data["pagebroker-s3.yaml"]
+          pattern: 'caFile: "/etc/snapshot-s3-ca/ca.crt"'
+        template: templates/configmap.yaml
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: AWS_CA_BUNDLE
+            value: /etc/snapshot-s3-ca/ca.crt
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-ca-bundle
+            mountPath: /etc/snapshot-s3-ca
+            readOnly: true
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-ca-bundle
+            configMap:
+              name: s3-ca
+              items:
+                - key: ca.crt
+                  path: ca.crt
+        template: templates/daemonset.yaml
+
+  - it: gives the operator's maintenance client the same CA bundle
+    template: templates/operator-deployment.yaml
+    set:
+      storage.s3.caBundleConfigMapRef: s3-ca
+      storage.s3.caBundleConfigMapKey: bundle.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --artifact-cleanup-s3-ca-bundle-path=/etc/snapshot-s3-ca/bundle.pem
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: s3-ca-bundle
+            mountPath: /etc/snapshot-s3-ca
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-ca-bundle
+            configMap:
+              name: s3-ca
+              items:
+                - key: bundle.pem
+                  path: bundle.pem
+
+  - it: rejects a CA bundle reference without a key
+    template: templates/operator-deployment.yaml
+    set:
+      storage.s3.caBundleConfigMapRef: s3-ca
+      storage.s3.caBundleConfigMapKey: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.s3.caBundleConfigMapKey is required"
+
+  - it: renders and mounts the Model Streamer file and passes its flag only when tuning is set
+    set:
+      pageBroker.modelStreamer.s3Reader.concurrency: 2
+      pageBroker.modelStreamer.logging.toStderr: true
+    asserts:
+      - equal:
+          path: data["model-streamer.json"]
+          value: '{"logging":{"toStderr":true},"s3Reader":{"concurrency":2}}'
+        template: templates/configmap.yaml
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          content: --model-streamer-config
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          content: /etc/snapshot-model-streamer/model-streamer.json
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: model-streamer-config
+            mountPath: /etc/snapshot-model-streamer
+            readOnly: true
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: model-streamer-config
+            configMap:
+              name: snapshot-config
+              items:
+                - key: model-streamer.json
+                  path: model-streamer.json
+        template: templates/daemonset.yaml
+
+  - it: renders none of it for a PVC install
+    set:
+      storage.type: pvc
+      storage.s3.addressing: path
+      storage.s3.caBundleConfigMapRef: s3-ca
+      pageBroker.modelStreamer.s3Reader.concurrency: 2
+    asserts:
+      - notExists:
+          path: data["pagebroker-s3.yaml"]
+        template: templates/configmap.yaml
+      - notExists:
+          path: data["model-streamer.json"]
+        template: templates/configmap.yaml
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING
+          any: true
+        template: templates/daemonset.yaml
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          content: --model-streamer-config
+        template: templates/daemonset.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --pagebroker-s3-settings=/etc/snapshot/pagebroker-s3.yaml
+        template: templates/operator-deployment.yaml
