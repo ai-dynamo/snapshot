@@ -36,6 +36,7 @@ data:
     pageBroker:
       restoreMode: {{ .Values.pageBroker.restoreMode | quote }}
       controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}
+      stagingPath: {{ include "snapshot.pageBrokerStagingPath" . | quote }}
 
     checkpoint:
       checkpointTimeoutSeconds: {{ .Values.config.checkpoint.checkpointTimeoutSeconds }}
