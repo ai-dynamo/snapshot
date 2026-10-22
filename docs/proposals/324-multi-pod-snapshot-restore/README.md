@@ -164,8 +164,8 @@ stays parked until `restore-complete`, although for a set that second rule
 becomes load-bearing: it is what keeps a restored member from acting before its
 peers are reconstructed, so a workload that cannot honor it is not supported,
 and [Workload contract](#workload-contract) defines which threads it covers.
-The owner must not delete or replace a source until its member is captured, and
-set restore Pods must carry the existing restore startup probe. Placement stays
+The owner must not delete or replace a source until the set's capture has
+ended, Ready or Failed, and set restore Pods must carry the existing restore startup probe. Placement stays
 with the owner, but Snapshot refuses a restore that cannot work, for example one
 whose members share GPU memory across nodes but were placed in different fabric
 domains, because such a restore would otherwise fail only after its destructive
@@ -205,8 +205,8 @@ rendezvous server those platforms provide.
 | Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member that has started. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, every member records when it started, and member results report partial outcomes truthfully, so the owner can retire the set and retry with a new attempt. |
 | Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; workloads launched through a wrapper that gates on the contract's signals satisfy it, and an enforced hold is left to future work. |
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
-| Holds that protect preserved connections pause their traffic while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
-| The capture-side freeze holds only TCP connections between members, so traffic on other channels, such as RDMA, datagrams, shared volumes, or external services, is not held while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
+| CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
+| At capture, CRIU's network lock covers a member's IP traffic only from the moment CRIU freezes it, and never covers RDMA, shared volumes, or external services, while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
 | The coordinator is a single point of failure for attempts in flight, because sessions live only in its memory. | Failure is fail-stop and reported as `CoordinatorLost`, a standby replica serves new attempts, and a broken stream that reconnects does not fail an attempt; the protocol is resumable, so persisting or replicating sessions later changes only the coordinator. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
 | Importing GPU memory shared from another node after a native CUDA restore depends on a driver fix, and cuInterpose currently infers the kind of an imported FABRIC handle from its opaque contents. | Cross-node sharing in alpha requires a driver with the fix, and a public query for the handle kind is a beta prerequisite. |
@@ -378,8 +378,9 @@ Checkpoint's phases interleave with the steps Snapshot already performs, where
 each attempt commits, and where a restore runs the `sockets-restored` barrier in
 parallel with CUDA restore and the cuInterpose rounds. Figures 5 and 6 expand
 both columns into complete sequences, in which every shaded band labeled "round"
-is one instance of Figure 3, drawn with the same messages so that each round can
-be traced from the leader's command to the replies it collects.
+is one instance of Figure 3, drawn with the same messages but without the agent
+hop that Figure 3 details, so that each round can be traced from the leader's
+command to the replies it collects.
 
 ### Workload contract
 
@@ -454,10 +455,13 @@ whose teardown is collective. A second round then moves the shims into their
 checkpointing phase, the leader revalidates a topology that now contains only
 application-owned shared memory, and three more rounds run the destructive
 cuInterpose phases. Finally,
-every agent locks and checkpoints CUDA, holds the Pod's preserved connections,
-passes a `net-freeze` barrier, and only then runs CRIU, because each source ends
-with its own dump and the freeze is what lets dumps finish at different times
-without one member's disappearance resetting another member's sockets. Every
+every agent locks and checkpoints CUDA, passes a `net-freeze` barrier, and only
+then runs CRIU, which drops all traffic in the Pod's network namespace as soon
+as it freezes the processes and keeps it dropped after the source ends. The
+barrier makes every member reach that lock before any member can finish its
+dump, so dumps can finish at different times without one member's
+disappearance resetting another member's sockets, as
+[Cross-Pod TCP connections](#cross-pod-tcp-connections) explains. Every
 artifact records the capture ID, which is the `PodSetSnapshot`'s UID, its own member ID, and the ordered table of all
 members with their Pod UIDs, containers, and Pod IPs, which is what a restore
 later uses to check that all members come from the same capture and to build
@@ -465,7 +469,7 @@ the IP map.
 
 ![Group checkpoint](diagrams/checkpoint.svg)
 
-*Figure 5. Group checkpoint. Each shaded band is a round as in Figure 3.*
+*Figure 5. Group checkpoint. Each shaded band is a round as in Figure 3, with every relay message passing through its agent.*
 
 The operator marks the `PodSetSnapshot` Ready only when every member is
 Captured, and otherwise records which member failed and why, together with each
@@ -533,7 +537,7 @@ results as they are.
 
 ![Group restore up to release](diagrams/restore.svg)
 
-*Figure 6. Group restore up to release. Each shaded band is a round as in Figure 3.*
+*Figure 6. Group restore up to release. Each shaded band is a round as in Figure 3, with every relay message passing through its agent.*
 
 ### cuInterpose across nodes
 
@@ -656,21 +660,31 @@ exactly as dumped rather than disconnected. Before CRIU runs, the agent drops,
 inside the Pod's network namespace, only the packets of those preserved
 connections, and it lifts that hold at the `sockets-restored` barrier, by which
 time every peer socket exists; new connections, including library bootstrap
-traffic, are never affected. At capture, the `net-freeze` barrier applies the
-same narrow hold before any member is dumped.
+traffic, are never affected.
 
-The freeze covers only TCP connections between members, because they are the
-only cross-Pod channels whose state one member's dump can break for another.
-Every other channel must already be quiet when a member reports
-`ready-for-snapshot`: datagrams are lossy by contract, RDMA transports cannot be
-dumped and are torn down by their libraries before the dump, and files on
-shared volumes or calls to external services reflect whatever the application
-did before it quiesced. The freeze therefore protects what the
+At capture, the agent takes no hold of its own. Because the agent dumps with
+the Pod's network namespace marked as external, CRIU treats it as the dumped
+processes' own namespace, drops all incoming and outgoing traffic in it as soon
+as it freezes them, and never lifts that lock after a dump that ends them, so a
+dumped member cannot reset its peers while its Pod exists. The `net-freeze`
+barrier right before CRIU keeps preserved connections live until every member is
+ready and makes every member reach that lock before any member can finish its
+dump. That covers in practice the one case the lock cannot, a source Pod
+deleted, and its IP reused by a new Pod that resets the peer, while a peer has
+not dumped yet, and owners close it entirely by keeping sources until the set's
+capture has ended.
+
+CRIU's lock covers all of a member's IP traffic from its freeze onwards, but
+nothing before it, and nothing outside the kernel's IP stack. Every such channel
+must already be quiet when a member reports `ready-for-snapshot`: RDMA
+transports cannot be dumped and are torn down by their libraries before the
+dump, and files on shared volumes or calls to external services reflect
+whatever the application did before it quiesced. The lock therefore protects what the
 [workload contract](#workload-contract) cannot, namely kernel traffic on
 connections that the application has stopped using, without replacing that
 contract.
 
-Holding traffic does not stop the kernel's TCP timers, so keepalive,
+Neither CRIU's lock nor the agent's hold stops the kernel's TCP timers, so keepalive,
 retransmission, and user timeouts keep running while a peer is dumped or
 restored, and a long interruption can still break a preserved connection
 ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). Taking each
@@ -858,7 +872,7 @@ reports `Refused` only when no member has it.
 | `restore-complete` file | Adds an `attempt` key holding the `PodSetRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
 | Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before CRIU under a field manager of its own and never removed; `nvidia.com/Restored` keeps its public reasons and gains only `SetPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety and an exact `startedAt`, with `ClassifyRestoreOutcome` unchanged |
 | Control volume | Reserves `coordination/` for rendezvous endpoints | Gives every Pod a private and stable endpoint path |
-| Agent DaemonSet | The chart annotates the agent's Pod template with the set protocol versions it supports | Set controllers create member work only after a set-capable agent is fully rolled out |
+| Agent DaemonSet | The chart annotates the agent's Pod template with the set protocol versions it supports | Set controllers create member work only on nodes whose agent Pod is Ready and set-capable |
 | `SnapshotJob` and single-Pod restore | Unchanged | Not applicable |
 
 [Appendix D](#d-api-definitions) gives the complete Go types with their
@@ -866,7 +880,7 @@ validation rules, the artifact metadata, and the Pod-contract constants. The
 coordinator's gRPC API, the framing between agents and relays, and the
 endpoint protocol for CUDA Checkpoint are internal and versioned, so a version
 mismatch fails admission rather than surfacing later. The operator needs full
-access to the new kinds and read access to the agent DaemonSet, the agents need
+access to the new kinds and read access to the agent Pods, the agents need
 read access to the new kinds, and the
 coordinator needs read access to the new kinds and to Pods, plus permission to
 create TokenReviews.
@@ -911,15 +925,17 @@ configuration change.
 
 Sets also need agents that understand them, because an older agent would treat
 a member's `PodSnapshotContent` as an ordinary capture and dump its source
-before group admission. Alpha therefore requires a completed agent upgrade and
-enforces it. The chart annotates the agent DaemonSet's Pod template with the set
-protocol versions it supports, and the set controllers create member work, or
-admit a restore target, only once that template is fully rolled out, that is,
-when the DaemonSet has observed its latest generation and every scheduled agent
-Pod is updated and available. Until then they keep the attempt pending, with a
-condition that names the incomplete rollout, until the rollout completes or the
-deadline expires. Downgrading the agents to a version without sets requires
-turning sets off first.
+before group admission. Alpha therefore requires an upgraded agent on every
+node that a set uses, and enforces it. The chart annotates the agent DaemonSet's
+Pod template with the set protocol versions it supports, so every agent Pod
+created from it carries them, and before creating a member's work, or admitting
+a restore target, the set controllers check that the agent Pod on that member's
+node is Ready and lists a compatible version. Otherwise they keep the attempt
+pending, with a condition that names the node, until that agent is upgraded or
+the deadline expires. The check is scoped to the nodes a set uses, so an
+unavailable agent elsewhere, or a routine agent rollout, holds no other set.
+Downgrading the agents to a version without sets requires turning sets off
+first.
 
 ### Performance and Scalability
 
@@ -987,8 +1003,8 @@ handle, missing ranks, duplicated creators, and a leader other than rank 0.
 Integration tests extend the existing end-to-end suite on CPU-only nodes. A
 two-Pod set with TCP and ZeroMQ connections is captured and restored onto
 swapped nodes, the same set without the group IP map serves as a negative
-control, a set created while the agent rollout is incomplete must create no
-member work, a refusal during admission and a short probe budget must leave both
+control, a member whose node runs an older or unready agent must keep the set
+pending without creating member work, a refusal during admission and a short probe budget must leave both
 Pods as they were with no `startedAt`, and a failure injected after the commit
 must terminate every member that started,
 whereas a dropped agent stream that reconnects must not fail the attempt and a
@@ -1078,8 +1094,9 @@ evidence; and an API review that settles the open questions in
    as SNEP-411's application contracts, and should a later version enforce the
    hold before release, given that CUDA, cuInterpose, and library threads need
    the restored processes running?
-4. **Source lifetime.** What must survive of a source that has finished its dump
-   while its peers are still capturing, beyond the owner not deleting it?
+4. **Source lifetime.** Beyond the owner keeping every source until the set's
+   capture has ended, must anything else of a source that has finished its dump
+   survive while its peers are still capturing?
 5. **Naming.** Should the kinds be called `PodSet` or `PodGroup`?
 6. **Cross-namespace restore.** Would restoring a set into another namespace
    justify a cluster-scoped, set-level content resource?
@@ -1098,9 +1115,10 @@ with only cuInterpose's leader logic, and its commands become a generic, pure
 broadcast of a step and its arguments. Group parameters come from the resources
 instead of Pod annotations, which removes the shared secret, and the per-Pod
 inspection becomes a group admission, without which every multi-node workload
-would be refused. Finally, the TCP hold drops only preserved connections and
-lifts at `sockets-restored`, which removes the prototype's conflict between the
-hold and its own coordination traffic.
+would be refused. Finally, the TCP hold applies only at restore, drops only preserved
+connections, and lifts at `sockets-restored`, which removes the prototype's
+conflict between the hold and its own coordination traffic, while capture
+relies on CRIU's own network lock.
 
 ### C. Diagram sources
 
@@ -1473,8 +1491,9 @@ const (
 	// CoordinationDir is reserved in the control volume for rendezvous endpoints.
 	CoordinationDir = "coordination"
 
-	// PodSetProtocolsAnnotation on the agent DaemonSet's Pod template lists
-	// the set protocol versions that the agent supports, for example "v1".
+	// PodSetProtocolsAnnotation on the agent DaemonSet's Pod template, and so
+	// on every agent Pod created from it, lists the set protocol versions that
+	// the agent supports, for example "v1".
 	PodSetProtocolsAnnotation = "nvidia.com/podset-protocols"
 )
 
