@@ -137,6 +137,17 @@ storage:
     credentialsSecretRef: ""
     # Key inside credentialsSecretRef holding the credentials file.
     credentialsSecretKey: credentials
+    # Bucket addressing PageBroker uses against the endpoint: "virtual"
+    # (bucket.endpoint/key, PageBroker's default when empty) or "path"
+    # (endpoint/bucket/key), which most self-hosted S3-compatible stores need.
+    addressing: ""
+    # Accept a plain-http endpoint. PageBroker refuses one otherwise.
+    allowHttp: false
+    # ConfigMap holding the CA bundle that signs the endpoint's TLS certificate,
+    # at the key named by caBundleConfigMapKey. Mounted into PageBroker and the
+    # operator. Empty uses the containers' system trust store.
+    caBundleConfigMapRef: ""
+    caBundleConfigMapKey: ca.crt
 
   # Reserved for future snapshot-owned backends. Unsupported today.
   oci:
@@ -161,6 +172,19 @@ pageBroker:
   transferChunkBytes: 134217728
   # Zero is uncapped. This limit includes CUDA allocation-granularity rounding.
   maxPinnedBytes: 0
+  # S3 transfer and transaction limits, written as given into PageBroker's S3
+  # configuration as its "limits" object. The keys and bounds are PageBroker's:
+  # transactionSeconds, stagingBytes, activeTransactions, uploadPartBytes,
+  # uploadBufferBytes, uploadTargetGbps, uploadActiveFiles, requestSeconds,
+  # uploadRequestRetries, uploadConnectSeconds. stagingBytes defaults to the
+  # staging volume cap (staging.sizeLimit), so PageBroker refuses a restore the
+  # volume cannot hold instead of filling it. Used with storage.type=s3 only.
+  s3:
+    limits: {}
+  # Model Streamer reader tuning for S3 restores, written as given to the JSON
+  # file PageBroker reads with --model-streamer-config. Empty passes no file.
+  # Used with storage.type=s3 only.
+  modelStreamer: {}
   # Requires 32 GiB of free allocatable memory, plus the agent request.
   # Override for each node profile. Budget 4 GiB per GPU plus process and staging
   # overhead. A lower request does not reduce the pinned ring allocation.

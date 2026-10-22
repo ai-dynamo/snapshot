@@ -181,6 +181,57 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      mounted at, shared by the agent, PageBroker and operator containers. */}}
 {{- define "snapshot.s3CredentialsMountDir" -}}/etc/snapshot-s3-credentials{{- end -}}
 
+{{/* Directory and file the S3 CA bundle (storage.s3.caBundleConfigMapRef) is
+     mounted at, shared by PageBroker and the operator. */}}
+{{- define "snapshot.s3CABundleMountDir" -}}/etc/snapshot-s3-ca{{- end -}}
+{{- define "snapshot.s3CABundlePath" -}}
+{{- printf "%s/%s" (include "snapshot.s3CABundleMountDir" .) (required "storage.s3.caBundleConfigMapKey is required with storage.s3.caBundleConfigMapRef" .Values.storage.s3.caBundleConfigMapKey) -}}
+{{- end -}}
+
+{{/* Where PageBroker reads the Model Streamer tuning file (pageBroker.modelStreamer). */}}
+{{- define "snapshot.modelStreamerMountDir" -}}/etc/snapshot-model-streamer{{- end -}}
+{{- define "snapshot.modelStreamerConfigPath" -}}{{ include "snapshot.modelStreamerMountDir" . }}/model-streamer.json{{- end -}}
+
+{{/* PageBroker's S3 limits object: the configured limits, with the staging
+     volume cap as stagingBytes unless one was given. Values pass through
+     int64 so floats never reach the rendered YAML. */}}
+{{- define "snapshot.pageBrokerS3Limits" -}}
+{{- $limits := dict -}}
+{{- range $key, $value := ((.Values.pageBroker.s3 | default dict).limits | default dict) -}}
+{{- $_ := set $limits $key (int64 $value) -}}
+{{- end -}}
+{{- if not (hasKey $limits "stagingBytes") -}}
+{{- $_ := set $limits "stagingBytes" (int64 (include "snapshot.quantityBytes" (include "snapshot.stagingSizeLimit" .))) -}}
+{{- end -}}
+{{- toYaml $limits -}}
+{{- end -}}
+
+{{/* Fails the render on S3 settings PageBroker would refuse at startup. */}}
+{{- define "snapshot.validateS3Settings" -}}
+{{- if eq .Values.storage.type "s3" -}}
+{{- $s3 := .Values.storage.s3 -}}
+{{- $addressing := $s3.addressing | default "" -}}
+{{- if not (has $addressing (list "" "path" "virtual")) -}}
+{{- fail (printf "storage.s3.addressing must be \"path\" or \"virtual\", got %q" $addressing) -}}
+{{- end -}}
+{{- if and (not $s3.allowHttp) (hasPrefix "http://" ($s3.endpoint | default "")) -}}
+{{- fail "storage.s3.endpoint is plain http; set storage.s3.allowHttp=true to accept it" -}}
+{{- end -}}
+{{- $allowed := list "transactionSeconds" "stagingBytes" "activeTransactions" "uploadPartBytes" "uploadBufferBytes" "uploadTargetGbps" "uploadActiveFiles" "requestSeconds" "uploadRequestRetries" "uploadConnectSeconds" -}}
+{{- $limits := ((.Values.pageBroker.s3 | default dict).limits | default dict) -}}
+{{- range $key, $_ := $limits -}}
+{{- if not (has $key $allowed) -}}
+{{- fail (printf "pageBroker.s3.limits.%s is not a PageBroker S3 limit" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $limits "activeTransactions" -}}
+{{- if ge (int64 $limits.activeTransactions) (int64 .Values.pageBroker.maxConcurrentRequests) -}}
+{{- fail "pageBroker.s3.limits.activeTransactions must be below pageBroker.maxConcurrentRequests" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Driver access shared by the agent and PageBroker. */}}
 {{- define "snapshot.nvidiaEnvironment" -}}
 - name: NVIDIA_VISIBLE_DEVICES

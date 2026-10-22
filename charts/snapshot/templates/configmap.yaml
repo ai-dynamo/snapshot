@@ -12,6 +12,7 @@ kind: ConfigMap
 {{- if and .Values.operator.bindNewContents (not .Values.pageBroker.artifactAddressing) }}
 {{- fail "operator.bindNewContents requires pageBroker.artifactAddressing and a completed compatible agent rollout" }}
 {{- end }}
+{{- include "snapshot.validateS3Settings" . }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -38,6 +39,26 @@ data:
       bucket: {{ required "storage.s3.bucket is required" .Values.storage.s3.bucket | quote }}
       prefix: {{ .Values.storage.s3.prefix | default "" | quote }}
     {{- end }}
+  {{- if eq .Values.storage.type "s3" }}
+  # PageBroker-only S3 settings, none of them a store identity input. The
+  # operator merges them into the JSON file PageBroker reads; the DaemonSet
+  # sets the environment PageBroker checks them against.
+  pagebroker-s3.yaml: |
+    {{- with .Values.storage.s3.addressing }}
+    addressing: {{ . | quote }}
+    {{- end }}
+    {{- if .Values.storage.s3.allowHttp }}
+    allowHttp: true
+    {{- end }}
+    {{- if .Values.storage.s3.caBundleConfigMapRef }}
+    caFile: {{ include "snapshot.s3CABundlePath" . | quote }}
+    {{- end }}
+    limits:
+      {{- include "snapshot.pageBrokerS3Limits" . | nindent 6 }}
+  {{- if .Values.pageBroker.modelStreamer }}
+  model-streamer.json: {{ toJson .Values.pageBroker.modelStreamer | quote }}
+  {{- end }}
+  {{- end }}
   config.yaml: |
     storage:
       type: {{ .Values.storage.type | quote }}
