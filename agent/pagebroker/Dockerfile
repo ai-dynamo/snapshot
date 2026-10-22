@@ -73,10 +73,14 @@ RUN sha256sum -c /tmp/model-streamer-sdk.sha256 \
     && mv LICENSE legal/LICENSE \
     && cp /tmp/model-streamer-sdk.sha256 legal/SDK.sha256 \
     && printf '%s\n' "${MODEL_STREAMER_VERSION}" > legal/VERSION \
-    && printf '%s\n' "${MODEL_STREAMER_REF}" > legal/REVISION
+    && printf '%s\n' "${MODEL_STREAMER_REF}" > legal/REVISION \
+    && printf 'Release: https://github.com/dsx-ai-factory/model-streamer/releases/tag/%s\nBuild: https://github.com/dsx-ai-factory/model-streamer/blob/%s/.devcontainer/Dockerfile\n' \
+      "${MODEL_STREAMER_VERSION}" "${MODEL_STREAMER_REF}" > legal/UPSTREAM.txt
 
 # Preserve corresponding sources for the core library and its statically linked
 # I/O dependencies. These archives are attribution inputs, not build inputs.
+# Dependency versions and checksums follow Model Streamer's pinned build (see
+# legal/UPSTREAM.txt); changing these archives does not change the prebuilt SDK.
 ADD --checksum=sha256:c344e2ee677a3c3e4cb65fc7ab1e04918d85c2f7268e9d4465a895cea2082499 https://codeload.github.com/dsx-ai-factory/model-streamer/tar.gz/${MODEL_STREAMER_REF} /opt/model-streamer-sdk/legal/source/model-streamer.tar.gz
 ADD --checksum=sha256:2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz /opt/model-streamer-sdk/legal/source/libaio.tar.gz
 ADD --checksum=sha256:5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf61de0c https://github.com/axboe/liburing/archive/refs/tags/liburing-2.14.tar.gz /opt/model-streamer-sdk/legal/source/liburing.tar.gz

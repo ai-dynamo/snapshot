@@ -34,9 +34,12 @@ NVIDIA-authored code uses the Apache-2.0 license and is published at:
 
 Per-component license texts are in /legal/THIRD-PARTY.txt.
 
-Model Streamer uses the 0.17.0 native SDK release, source revision
-dd9e5d34f966cc2667c9f0505262050b4bedc35a.
-Its release version, SDK checksum, source revision and source archive are installed
-under /legal/model-streamer/. The source directory also contains the exact
-libaio 0.3.113 and liburing 2.14 source archives (including their license texts)
-used by the release toolchain to build libstreamer.so.
+Model Streamer's release and pinned upstream build definition are linked in
+/legal/model-streamer/UPSTREAM.txt. Its release version, SDK checksum, source
+revision and source archive are installed alongside that file.
+
+Model Streamer selects and statically links its libaio and liburing dependencies
+when building libstreamer.so. Snapshot consumes that prebuilt SDK; it does not
+build or independently select those dependency versions. The source directory
+also contains their matching source archives and license texts for attribution.
+The upstream build definition records their versions and checksums.
