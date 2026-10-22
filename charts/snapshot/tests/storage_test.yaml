@@ -181,6 +181,7 @@ tests:
     template: templates/configmap.yaml
     set:
       storage.type: s3
+      storage.s3.credentialsSecretRef: s3-creds
     asserts:
       - failedTemplate:
           errorMessage: storage.s3.endpoint is required
@@ -193,6 +194,7 @@ tests:
       storage.s3.region: us-east-1
       storage.s3.bucket: snapshot-bucket
       storage.s3.prefix: containers
+      storage.s3.credentialsSecretRef: s3-creds
     asserts:
       - matchRegex:
           path: data["storage.yaml"]
@@ -213,6 +215,7 @@ tests:
       storage.s3.endpoint: https://s3.example.com
       storage.s3.region: us-east-1
       storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
@@ -234,3 +237,65 @@ tests:
             name: checkpoints
             persistentVolumeClaim:
               claimName: snapshot-pvc
+
+  - it: mounts the shared S3 credentials file into the operator
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --artifact-cleanup-s3-credentials-path=/etc/snapshot-s3-credentials/credentials
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: s3-credentials
+            mountPath: /etc/snapshot-s3-credentials
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+            secret:
+              secretName: s3-creds
+              items:
+                - key: credentials
+                  path: credentials
+
+  - it: rejects an S3 install missing the shared credentials secret
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+    asserts:
+      - failedTemplate:
+          errorMessage: storage.s3.credentialsSecretRef is required when storage.type=s3
+
+  - it: honours a custom shared credentials secret key
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
+      storage.s3.credentialsSecretKey: aws-credentials
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --artifact-cleanup-s3-credentials-path=/etc/snapshot-s3-credentials/aws-credentials
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+            secret:
+              secretName: s3-creds
+              items:
+                - key: aws-credentials
+                  path: aws-credentials

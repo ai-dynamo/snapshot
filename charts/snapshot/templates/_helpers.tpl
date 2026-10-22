@@ -177,6 +177,10 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- printf "%s-pagebroker-storage-config" (include "snapshot.fullname" .) -}}
 {{- end -}}
 
+{{/* Directory the S3 credentials Secret (storage.s3.credentialsSecretRef) is
+     mounted at, shared by the agent, PageBroker and operator containers. */}}
+{{- define "snapshot.s3CredentialsMountDir" -}}/etc/snapshot-s3-credentials{{- end -}}
+
 {{/* Driver access shared by the agent and PageBroker. */}}
 {{- define "snapshot.nvidiaEnvironment" -}}
 - name: NVIDIA_VISIBLE_DEVICES

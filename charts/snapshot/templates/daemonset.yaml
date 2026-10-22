@@ -133,6 +133,10 @@ spec:
             - name: SNAPSHOT_NRI_HOST_NAMESPACE
               value: {{ . | quote }}
             {{- end }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: {{ printf "%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
+            {{- end }}
             # Conventional CUDA queries need the host driver libraries.
             {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
           volumeMounts:
@@ -186,11 +190,11 @@ spec:
               mountPath: /root/.docker
               readOnly: true
             {{- end }}
-          {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
-          envFrom:
-            - secretRef:
-                name: {{ .Values.storage.s3.credentialsSecretRef }}
-          {{- end }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
+            - name: s3-credentials
+              mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
         - name: pagebroker
@@ -202,14 +206,11 @@ spec:
             runAsUser: 0
             runAsGroup: 0
           env:
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: {{ printf "%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
+            {{- end }}
             {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
-          {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
-          # Standard AWS env var providers, resolved by PageBroker's own S3
-          # credential handling at startup.
-          envFrom:
-            - secretRef:
-                name: {{ .Values.storage.s3.credentialsSecretRef }}
-          {{- end }}
           args:
             - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
             - {{ $pageBrokerStagingPath | quote }}
@@ -258,6 +259,11 @@ spec:
               mountPath: /etc/snapshot-s3
               readOnly: true
             {{- end }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
+            - name: s3-credentials
+              mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
+              readOnly: true
+            {{- end }}
       volumes:
         # Configuration ConfigMap
         - name: config
@@ -300,6 +306,14 @@ spec:
         - name: pagebroker-s3-config
           configMap:
             name: {{ include "snapshot.pageBrokerS3ConfigName" . | quote }}
+        {{- end }}
+        {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
+        - name: s3-credentials
+          secret:
+            secretName: {{ .Values.storage.s3.credentialsSecretRef }}
+            items:
+              - key: {{ .Values.storage.s3.credentialsSecretKey }}
+                path: {{ .Values.storage.s3.credentialsSecretKey }}
         {{- end }}
         # Runtime socket directory (read-write for checkpoint operations).
         # Same path inside and on the host so the agent dials runtime.socketPath
