@@ -99,10 +99,7 @@ rules:
   {{- if eq .Values.storage.type "s3" }}
   - apiGroups: [""]
     resources: ["configmaps"]
-    # RBAC cannot scope a top-level "create" by resourceNames: the object's
-    # name may not exist yet at authorization time. This grants create on any
-    # ConfigMap in this namespace; the rule below scopes get/update to the
-    # one name ensurePageBrokerS3Config actually writes.
+    # Top-level "create" cannot be scoped by resourceNames.
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["configmaps"]

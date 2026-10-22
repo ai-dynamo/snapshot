@@ -133,10 +133,6 @@ spec:
             - name: SNAPSHOT_NRI_HOST_NAMESPACE
               value: {{ . | quote }}
             {{- end }}
-            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
-            - name: AWS_SHARED_CREDENTIALS_FILE
-              value: {{ printf "%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
-            {{- end }}
             # Conventional CUDA queries need the host driver libraries.
             {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
           volumeMounts:
@@ -190,11 +186,6 @@ spec:
               mountPath: /root/.docker
               readOnly: true
             {{- end }}
-            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
-            - name: s3-credentials
-              mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
-              readOnly: true
-            {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
         - name: pagebroker
@@ -215,10 +206,7 @@ spec:
             - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
             - {{ $pageBrokerStagingPath | quote }}
             {{- if eq .Values.storage.type "s3" }}
-            # No local checkpoint directory exists in S3 mode; this positional
-            # argument is required by every PageBroker build regardless of
-            # backend. The S3 broker construction path never reads it, only
-            # the legacy path does.
+            # Unused positional arg in S3 mode; still required by the CLI.
             - /var/snapshot/pagebroker-unused-storage-root
             {{- else }}
             - {{ .Values.storage.pvc.basePath | quote }}
