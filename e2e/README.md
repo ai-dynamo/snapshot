@@ -3,6 +3,10 @@
 This directory contains the Python helpers and pytest tests used to run Snapshot
 end-to-end checks against a Kubernetes cluster.
 
+The opt-in [PageBroker Qwen smoke cases](../agent/pagebroker/tests/k3s/README.md#qwen-gpu-checkpoint-and-repeated-restore)
+checkpoint Qwen3-0.6B and Qwen3-8B and restore each twice using staged POSIX
+filesystem transfers. They run separately from the default framework suite.
+
 ## Requirements
 
 - `uv`
