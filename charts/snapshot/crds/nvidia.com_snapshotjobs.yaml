@@ -9030,6 +9030,9 @@ spec:
               rule: '!has(self.nonTargetArtifacts) || !has(self.podTemplate.metadata)
                 || !has(self.podTemplate.metadata.annotations) || !(''nvidia.com/snapshot-non-target-artifact-containers''
                 in self.podTemplate.metadata.annotations)'
+            - message: nonTargetArtifacts.containers must not name capture targets
+              rule: '!has(self.nonTargetArtifacts) || self.nonTargetArtifacts.containers.all(c,
+                !(c in self.podSnapshotTemplate.targetContainers))'
           status:
             description: SnapshotJobStatus defines the observed state of SnapshotJob.
             properties:

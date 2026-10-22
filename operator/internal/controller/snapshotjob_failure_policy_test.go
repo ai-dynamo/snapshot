@@ -73,7 +73,7 @@ func TestSnapshotJobNonTargetArtifactPolicyAdmissionAndCompatibility(t *testing.
 		{"trailing separator", map[string]any{"containers": []any{"saver-"}, "onFailure": "Cleanup"}, false},
 		{"container name too long", map[string]any{"containers": []any{"saver-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "onFailure": "Cleanup"}, false},
 		{"duplicate container", map[string]any{"containers": []any{"saver", "saver"}, "onFailure": "Cleanup"}, false},
-		{"capture target", map[string]any{"containers": []any{"worker"}, "onFailure": "Cleanup"}, true},
+		{"capture target", map[string]any{"containers": []any{"worker"}, "onFailure": "Cleanup"}, false},
 		{"missing container", map[string]any{"containers": []any{"missing"}, "onFailure": "Cleanup"}, true},
 		{"unknown action", map[string]any{"containers": []any{"saver"}, "onFailure": "Delete"}, false},
 	} {
@@ -112,6 +112,12 @@ func TestSnapshotJobNonTargetArtifactPolicyAdmissionAndCompatibility(t *testing.
 	celErrs, _ = cel.Validate(context.Background(), field.NewPath(""), structural, optedIn, base, 10000000)
 	require.NotEmpty(t, celErrs, "an existing job cannot be retroactively opted in")
 	require.Contains(t, celErrs.ToAggregate().Error(), "spec is immutable")
+	ordered := runtime.DeepCopyJSON(optedIn)
+	ordered["spec"].(map[string]any)["nonTargetArtifacts"].(map[string]any)["containers"] = []any{"saver", "exporter"}
+	reordered := runtime.DeepCopyJSON(ordered)
+	reordered["spec"].(map[string]any)["nonTargetArtifacts"].(map[string]any)["containers"] = []any{"exporter", "saver"}
+	celErrs, _ = cel.Validate(context.Background(), field.NewPath(""), structural, reordered, ordered, 10000000)
+	require.Empty(t, celErrs, "a set-valued container list permits an order-only update")
 
 	// An older CRD prunes the typed field. Decoding then yields retention,
 	// never cleanup permission; clients must verify the persisted selection.

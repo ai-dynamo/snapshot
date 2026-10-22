@@ -237,8 +237,14 @@ func (q *Queue) nonTargetArtifactWritersStopped(ctx context.Context, sj *snapsho
 	}
 	nonTargets, err := podcontract.NonTargetArtifactContainers(job.Spec.Template.Annotations)
 	if err != nil || len(nonTargets) == 0 || sj.Spec.NonTargetArtifacts == nil ||
-		!slices.Equal(nonTargets, sj.Spec.NonTargetArtifacts.Containers) ||
 		job.Spec.Template.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] != string(sj.UID) {
+		return false, writerDeclarationMismatchReason, nil
+	}
+	jobWriters := slices.Clone(nonTargets)
+	declared := slices.Clone(sj.Spec.NonTargetArtifacts.Containers)
+	slices.Sort(jobWriters)
+	slices.Sort(declared)
+	if !slices.Equal(jobWriters, declared) {
 		return false, writerDeclarationMismatchReason, nil
 	}
 	subdir, err := podcontract.NonTargetArtifactSubdir(string(sj.UID))

@@ -138,6 +138,7 @@ type NonTargetArtifactPolicy struct {
 // SnapshotJobSpec defines the desired state of SnapshotJob.
 // +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
 // +kubebuilder:validation:XValidation:rule="!has(self.nonTargetArtifacts) || !has(self.podTemplate.metadata) || !has(self.podTemplate.metadata.annotations) || !('nvidia.com/snapshot-non-target-artifact-containers' in self.podTemplate.metadata.annotations)",message="nonTargetArtifacts and the legacy container annotation cannot both be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.nonTargetArtifacts) || self.nonTargetArtifacts.containers.all(c, !(c in self.podSnapshotTemplate.targetContainers))",message="nonTargetArtifacts.containers must not name capture targets"
 type SnapshotJobSpec struct {
 	// PodTemplate defines the workload to run and capture. The controller injects
 	// the snapshot contract (control volume, readiness probe, seccomp, sidecar

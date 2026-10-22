@@ -78,6 +78,20 @@ func TestNonTargetArtifactSweepFailureOrdering(t *testing.T) {
 		keep   bool
 	}{
 		{"failed capture after non-target artifact publication", func(*snapshotv1alpha1.SnapshotJob, *batchv1.Job, *corev1.Pod) {}, false},
+		{"set-valued writers reordered after source Job creation", func(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job, pod *corev1.Pod) {
+			sj.Spec.NonTargetArtifacts.Containers = []string{"exporter", "saver"}
+			job.Spec.Template.Annotations[podcontract.NonTargetArtifactContainersAnnotation] = "saver,exporter"
+			exporter := job.Spec.Template.Spec.Containers[1].DeepCopy()
+			exporter.Name = "exporter"
+			job.Spec.Template.Spec.Containers = append(job.Spec.Template.Spec.Containers, *exporter)
+			pod.Spec.Containers = append(pod.Spec.Containers, *exporter)
+			pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+				Name: "exporter", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+			})
+		}, false},
+		{"different writer membership retains bytes", func(sj *snapshotv1alpha1.SnapshotJob, _ *batchv1.Job, _ *corev1.Pod) {
+			sj.Spec.NonTargetArtifacts.Containers = []string{"exporter"}
+		}, true},
 		{"omitted policy retains legacy managed bytes", func(sj *snapshotv1alpha1.SnapshotJob, _ *batchv1.Job, _ *corev1.Pod) {
 			sj.Spec.NonTargetArtifacts = nil
 		}, true},
