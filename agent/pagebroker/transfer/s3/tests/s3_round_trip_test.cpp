@@ -4,6 +4,7 @@
 #include "transfer/s3/s3_client.hpp"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 #include <sys/resource.h>
 #include <sys/stat.h>
 
@@ -24,6 +25,10 @@
 #include <vector>
 
 #include "transfer/engine/model_streamer/model_streamer_restore.hpp"
+#include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
+#include "transfer/filesystem/filesystem_storage.hpp"
+#include "transfer/s3/checkpoint_index.hpp"
+#include "transfer/s3/s3_storage_backend.hpp"
 #include "tests/temporary_directory.hpp"
 #include "tests/file_contents.hpp"
 
@@ -75,13 +80,42 @@ class S3RoundTripTest : public ::testing::Test {
     return {bucket_, "roundtrip/" + scenario + "/" + name};
   }
 
+  S3Config Config(const std::string& scenario) const
+  {
+    S3Config config;
+    config.transfer = {connection_, limits_, std::chrono::seconds(30)};
+    config.store_id = "test-store";
+    config.bucket = bucket_;
+    config.prefix = "roundtrip/" + scenario;
+    return config;
+  }
 
+  PublishedArtifact Artifact(char id = 'a') const
+  {
+    PublishedArtifact artifact;
+    artifact.set_store_id("test-store");
+    artifact.set_artifact_handle(std::string(64, id));
+    return artifact;
+  }
+
+  // Exercise the same inspection, publication and index read used by the broker.
+  CheckpointInventory PublishTree(S3StorageBackend& storage, const Path& source, char id = 'a') const
+  {
+    CheckpointPublication publication{Artifact(id), {}, false};
+    storage.ValidateArtifactDescriptor(publication.artifact);
+    auto inventory = storage.BuildCheckpointInventory(source, publication.artifact, {});
+    storage.PublishCheckpoint(source, std::move(inventory), publication, {});
+    EXPECT_TRUE(publication.published);
+    EXPECT_FALSE(publication.pending_index.empty());
+    return storage.PrepareRestore(publication.artifact, false, TransferMode::Staged, {}).inventory;
+  }
 
   Path SingleFileTree(const std::string& name, bool large = false)
   {
     const auto source = temporary_.path() / name;
     fs::create_directory(source);
     fs::copy_file(fixture_ / (large ? "nested/large" : "small"), source / "data");
+    std::ofstream(source / "manifest.yaml") << "version: 1\n";
     return source;
   }
 
@@ -141,6 +175,199 @@ class S3RoundTripTest : public ::testing::Test {
   S3Limits limits_;
 };
 
+TEST_F(S3RoundTripTest, ChecksDestinationExistenceWithoutReadingIndex)
+{
+  S3StorageBackend storage(Config("destination-exists"));
+  S3Client client(connection_, limits_);
+  for (const auto size : {std::size_t{1}, kMaxIndexBytes + 1}) {
+    SCOPED_TRACE(size);
+    const auto artifact = Artifact(size == 1 ? 'a' : 'b');
+    storage.ValidateArtifactDescriptor(artifact);
+    EXPECT_NO_THROW(storage.CheckCheckpointDestination(artifact, {}));
+    // Existence is enough to conflict, even when the object is not a valid index.
+    client.Put(Destination("destination-exists", artifact.artifact_handle() + "/index.json"),
+        std::string(size, 'x'), size);
+    try {
+      storage.CheckCheckpointDestination(artifact, {});
+      FAIL() << "existing index accepted";
+    }
+    catch (const TransferError& error) {
+      EXPECT_EQ(error.code, Failure::TRANSACTION_CONFLICT);
+    }
+  }
+}
+
+TEST_F(S3RoundTripTest, UploadsAndRestoresVerifiedTree)
+{
+  // Exercise the proposed production part size; the fixture crosses two parts.
+  limits_.part_size = 16 * 1024 * 1024;
+  ModelStreamerTransferEngine engine(Config("tree"));
+  CheckpointPublication publication{Artifact(), {}, false};
+  engine.ValidateArtifact(publication.artifact);
+  const auto source = temporary_.path() / "tree-source";
+  ASSERT_EQ(engine.PrepareCheckpoint({}, source, "tree", TransferMode::Staged, &publication.artifact), source);
+  fs::copy(fixture_, source, fs::copy_options::recursive);
+  std::ofstream(source / "manifest.yaml") << "version: 1\n";
+  auto captured = engine.InspectCheckpoint(source, &publication.artifact);
+  engine.PublishCheckpoint(source, {}, std::move(captured), &publication);
+  ASSERT_TRUE(publication.published);
+  ASSERT_FALSE(publication.pending_index.empty());
+  auto preparation = engine.PrepareRestore({}, {}, &publication.artifact);
+  const auto inventory = preparation.inventory;
+  EXPECT_EQ(inventory.root_permissions, fs::status(source).permissions());
+  std::size_t source_count = 0;
+  for (const auto& entry : fs::recursive_directory_iterator(source)) {
+    ++source_count;
+    const auto relative = entry.path().lexically_relative(source);
+    if (entry.is_directory()) {
+      const auto directory = std::find_if(inventory.directories.begin(), inventory.directories.end(), [&](const auto& value) {
+        return value.relative_path == relative;
+      });
+      ASSERT_NE(directory, inventory.directories.end());
+      EXPECT_EQ(directory->permissions, entry.status().permissions());
+    } else {
+      const auto file = std::find_if(inventory.files.begin(), inventory.files.end(), [&](const auto& value) {
+        return value.relative_path == relative;
+      });
+      ASSERT_NE(file, inventory.files.end());
+      EXPECT_EQ(file->source_locator, "s3://" + bucket_ + "/roundtrip/tree/" + Artifact().artifact_handle() + "/data/" + relative.generic_string());
+      EXPECT_EQ(file->size_bytes, entry.file_size());
+      EXPECT_EQ(file->permissions, entry.status().permissions());
+    }
+  }
+  EXPECT_EQ(source_count, inventory.directories.size() + inventory.files.size());
+  EXPECT_TRUE(std::is_sorted(inventory.directories.begin(), inventory.directories.end(), [](const auto& a, const auto& b) {
+    return a.relative_path < b.relative_path;
+  }));
+  const auto destination = temporary_.path() / "tree";
+  const auto access = engine.StageRestore(std::move(preparation), destination);
+  EXPECT_EQ(access.image_directory, destination);
+  EXPECT_EQ(access.staging_directory, destination);
+  struct stat local{}, retained{};
+  ASSERT_EQ(stat(destination.c_str(), &local), 0);
+  ASSERT_EQ(fstat(access.source.get(), &retained), 0);
+  EXPECT_EQ(local.st_dev, retained.st_dev);
+  EXPECT_EQ(local.st_ino, retained.st_ino);
+  EXPECT_EQ(fs::status(destination).permissions(), inventory.root_permissions);
+  std::size_t count = 0;
+  for ([[maybe_unused]] const auto& entry : fs::recursive_directory_iterator(destination))
+    ++count;
+  EXPECT_EQ(count, inventory.directories.size() + inventory.files.size());
+  for (const auto& directory : inventory.directories) {
+    EXPECT_TRUE(fs::is_directory(destination / directory.relative_path));
+    EXPECT_EQ(fs::status(destination / directory.relative_path).permissions(), directory.permissions);
+  }
+  for (const auto& file : inventory.files) {
+    EXPECT_EQ(fs::file_size(destination / file.relative_path), fs::file_size(source / file.relative_path));
+    EXPECT_TRUE(test::FilesEqual(source / file.relative_path, destination / file.relative_path));
+    EXPECT_EQ(fs::status(destination / file.relative_path).permissions(), file.permissions);
+  }
+}
+
+TEST_F(S3RoundTripTest, PreservesSpecialCharactersInCheckpointPaths)
+{
+  const auto source = temporary_.path() / "special-source";
+  fs::create_directories(source / "nested ?#%");
+  const std::vector<Path> paths{
+      "manifest.yaml", "with space", "with?query", "with#fragment", "literal%20space", "nested ?#%/payload%23"};
+  for (const auto& path : paths)
+    std::ofstream(source / path) << "contents for " << path.generic_string();
+
+  S3StorageBackend storage(Config("special-characters"));
+  const auto inventory = PublishTree(storage, source);
+  ASSERT_EQ(inventory.files.size(), paths.size());
+  ModelStreamerRestore reader(ReaderOptions(), std::chrono::seconds(30));
+  const auto destination = temporary_.path() / "special-restored";
+  reader.Stage(inventory, destination);
+  for (const auto& path : paths) {
+    SCOPED_TRACE(path.generic_string());
+    ASSERT_TRUE(fs::is_regular_file(destination / path));
+    EXPECT_TRUE(test::FilesEqual(source / path, destination / path));
+  }
+}
+
+TEST_F(S3RoundTripTest, RejectsUnsafeIndexBeforeCreatingStaging)
+{
+  const auto config = Config("unsafe-index");
+  ModelStreamerTransferEngine engine(config);
+  S3Client client(connection_, limits_);
+  const auto artifact = Artifact();
+  const auto prefix = config.prefix + "/" + artifact.artifact_handle() + "/";
+  CheckpointInventory inventory;
+  inventory.root_permissions = fs::perms::owner_all;
+  inventory.directories = {{"nested", fs::perms::owner_all}};
+  inventory.files = {{"", "manifest.yaml", 3, fs::perms::owner_read}};
+  auto index = nlohmann::json::parse(SerializeCheckpointIndex(inventory));
+  index["directories"][0]["path"] = "../escape";
+  client.Put({bucket_, prefix + "data/manifest.yaml"}, "v1\n", 3);
+  client.Put({bucket_, prefix + "index.json"}, index.dump(), kMaxIndexBytes);
+  const auto destination = temporary_.path() / "rejected";
+  try {
+    engine.StageRestore(engine.PrepareRestore({}, {}, &artifact), destination);
+    FAIL() << "unsafe index accepted";
+  }
+  catch (const TransferError& error) {
+    EXPECT_EQ(error.code, Failure::ARTIFACT_CORRUPT);
+  }
+  EXPECT_FALSE(fs::exists(destination));
+  EXPECT_FALSE(fs::exists(temporary_.path() / "escape"));
+}
+
+TEST_F(S3RoundTripTest, RestoresOnlyManifestFromMetadataPreparation)
+{
+  const auto config = Config("metadata-only");
+  S3StorageBackend storage(config);
+  const auto source = SingleFileTree("metadata-source");
+  fs::create_directories(source / "nested/empty");
+  PublishTree(storage, source);
+  ModelStreamerTransferEngine engine(config);
+  const auto artifact = Artifact();
+  auto prepared = engine.PrepareRestore({}, {}, &artifact, true);
+  ASSERT_TRUE(prepared.inventory.directories.empty());
+  ASSERT_EQ(prepared.inventory.files.size(), 1);
+  EXPECT_EQ(prepared.inventory.files.front().relative_path, "manifest.yaml");
+  EXPECT_EQ(prepared.inventory.files.front().source_locator,
+      "s3://" + bucket_ + "/roundtrip/metadata-only/" + artifact.artifact_handle() + "/data/manifest.yaml");
+  const auto destination = temporary_.path() / "metadata-restored";
+  engine.StageRestore(std::move(prepared), destination);
+  EXPECT_TRUE(test::FilesEqual(source / "manifest.yaml", destination / "manifest.yaml"));
+  EXPECT_EQ(fs::status(destination).permissions(), fs::perms::owner_all);
+  EXPECT_EQ(fs::status(destination / "manifest.yaml").permissions(), fs::perms::owner_read | fs::perms::owner_write);
+  EXPECT_FALSE(fs::exists(destination / "data"));
+  EXPECT_FALSE(fs::exists(destination / "nested"));
+}
+
+TEST_F(S3RoundTripTest, RejectsPublicationConflictAfterInspectionWithoutOverwritingPayloads)
+{
+  const auto config = Config("publication-conflict");
+  ModelStreamerTransferEngine engine(config);
+  CheckpointPublication publication{Artifact(), {}, false};
+  engine.ValidateArtifact(publication.artifact);
+  const auto source = temporary_.path() / "conflicting-source";
+  ASSERT_EQ(engine.PrepareCheckpoint({}, source, "conflict", TransferMode::Staged, &publication.artifact), source);
+  fs::create_directory(source);
+  std::ofstream(source / "manifest.yaml") << "replacement\n";
+  auto inventory = engine.InspectCheckpoint(source, &publication.artifact);
+
+  // An index appearing after preparation must still prevent payload writes.
+  const auto original = temporary_.path() / "published-source";
+  fs::create_directory(original);
+  std::ofstream(original / "manifest.yaml") << "original\n";
+  S3StorageBackend storage(config);
+  PublishTree(storage, original);
+  try {
+    engine.PublishCheckpoint(source, {}, std::move(inventory), &publication);
+    FAIL() << "existing publication accepted";
+  }
+  catch (const TransferError& error) {
+    EXPECT_EQ(error.code, Failure::TRANSACTION_CONFLICT);
+  }
+  EXPECT_TRUE(publication.pending_index.empty());
+  EXPECT_FALSE(publication.published);
+  const auto restored = temporary_.path() / "original-restored";
+  const auto access = engine.StageRestore(engine.PrepareRestore({}, {}, &publication.artifact), restored);
+  EXPECT_TRUE(test::FilesEqual(original / "manifest.yaml", access.image_directory / "manifest.yaml"));
+}
 
 TEST_F(S3RoundTripTest, CancelsConcurrentReadsWithoutCrashing)
 {
@@ -321,8 +548,90 @@ TEST_F(S3RoundTripTest, HandlesMultipartThresholdAndExactParts)
   }
 }
 
+TEST_F(S3RoundTripTest, PreflightsEntireTreeBeforeAnyUpload)
+{
+  S3StorageBackend storage(Config("preflight"));
+  const auto source = SingleFileTree("preflight-source");
+  std::ofstream(source / "last") << "last file";
+  const auto artifact = Artifact();
+  storage.ValidateArtifactDescriptor(artifact);
+  EXPECT_NO_THROW(storage.BuildCheckpointInventory(source, artifact, {}));
 
+  fs::remove(source / "manifest.yaml");
+  EXPECT_THROW(storage.BuildCheckpointInventory(source, artifact, {}), std::invalid_argument);
+  std::ofstream(source / "manifest.yaml") << "version: 1\n";
+  for (const auto& name : {"bad\nname", "bad\\name"}) {
+    std::ofstream(source / name) << "bad path";
+    EXPECT_THROW(storage.BuildCheckpointInventory(source, artifact, {}), std::invalid_argument);
+    fs::remove(source / name);
+  }
+  const auto deep = source / std::string(250, 'a') / std::string(250, 'b');
+  fs::create_directories(deep);
+  std::ofstream(deep / "overlong-path") << "bad path";
+  EXPECT_THROW(storage.BuildCheckpointInventory(source, artifact, {}), std::invalid_argument);
+  fs::remove_all(source / std::string(250, 'a'));
+  for (const auto& prefix : {std::string("bad\nkey"), std::string("bad\0key", 7), std::string(1024, 'x')}) {
+    auto config = Config("preflight");
+    config.prefix = prefix;
+    EXPECT_THROW(S3StorageBackend{config}, std::invalid_argument);
+  }
+  auto config = Config("preflight");
+  config.bucket = "INVALID";
+  EXPECT_THROW(S3StorageBackend{config}, std::invalid_argument);
 
+  fs::create_symlink(source / "data", source / "link");
+  EXPECT_THROW(storage.BuildCheckpointInventory(source, artifact, {}), std::invalid_argument);
+  fs::remove(source / "link");
+  const auto link = temporary_.path() / "linked-root";
+  fs::create_directory_symlink(source, link);
+  EXPECT_THROW(storage.BuildCheckpointInventory(link / "", artifact, {}), std::invalid_argument);
+  ASSERT_EQ(mkfifo((source / "fifo").c_str(), 0600), 0);
+  EXPECT_THROW(storage.BuildCheckpointInventory(source, artifact, {}), std::runtime_error);
+  fs::remove(source / "fifo");
+
+  // A sparse last file exercises the part-count limit without allocating it.
+  fs::resize_file(source / "last", limits_.part_size * 10000 + 1);
+  EXPECT_THROW(storage.BuildCheckpointInventory(source, artifact, {}), std::invalid_argument);
+  fs::resize_file(source / "last", 0);
+  // The host asserts no request at all used the preflight prefix.
+}
+
+TEST_F(S3RoundTripTest, RestoresAnEmptyDirectoryTreeWithoutObjects)
+{
+  const auto source = temporary_.path() / "empty-source";
+  fs::create_directories(source / "nested/empty");
+  fs::permissions(source / "nested/empty", fs::perms::owner_read | fs::perms::owner_exec);
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  // Empty inventories are supported by the native reader; published artifacts require a manifest.
+  const auto inventory = filesystem_storage::BuildCheckpointInventory(source);
+  ASSERT_TRUE(inventory.files.empty());
+  ASSERT_EQ(inventory.directories.size(), 2);
+  restore_reader.Stage(inventory, temporary_.path() / "empty-restore");
+  EXPECT_EQ(fs::status(temporary_.path() / "empty-restore/nested/empty").permissions(),
+            fs::status(source / "nested/empty").permissions());
+}
+
+TEST_F(S3RoundTripTest, PreservesPartialTreeFailureAndReusesBackend)
+{
+  const auto source = SingleFileTree("partial-source");
+  std::ofstream(source / "last") << "last file";
+  S3StorageBackend storage(Config("engine-partial"));
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  try {
+    PublishTree(storage, source);
+    FAIL() << "second object should be denied";
+  }
+  catch (const S3Error& error) {
+    EXPECT_EQ(error.destination.key, Destination("engine-partial", Artifact().artifact_handle() + "/data/last").key);
+    EXPECT_EQ(error.primary.operation, "PutObject");
+    EXPECT_EQ(error.primary.http_status, 403);
+    EXPECT_EQ(error.cleanup_state, S3CleanupState::NOT_NEEDED);
+  }
+  EXPECT_TRUE(Barrier("engine-partial", Artifact().artifact_handle() + "/data/data"));
+  EXPECT_NO_THROW(storage.CheckCheckpointDestination(Artifact(), {}));
+  const auto inventory = PublishTree(storage, source, 'b');
+  EXPECT_NO_THROW(restore_reader.Stage(inventory, temporary_.path() / "partial-recovered"));
+}
 
 TEST_F(S3RoundTripTest, RetriesTransientErrorsAndRejectsAccessDenial)
 {
@@ -411,8 +720,70 @@ TEST_F(S3RoundTripTest, ReportsLostInitiationWithoutClaimingCleanup)
   EXPECT_EQ(error.cleanup_state, S3CleanupState::UNCONFIRMED);
 }
 
+TEST_F(S3RoundTripTest, RejectsTruncatedReadAndKeepsSessionUsable)
+{
+  S3StorageBackend storage(Config("truncated-read"));
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  const auto source = SingleFileTree("truncation-source");
+  const auto good = PublishTree(storage, source, 'b');
+  auto truncated = good;
+  ++truncated.files.front().size_bytes;
+  EXPECT_THROW(restore_reader.Stage(truncated, temporary_.path() / "truncated"), std::runtime_error);
+  EXPECT_EQ(fs::status(temporary_.path() / "truncated/data").permissions(), fs::perms::owner_read);
+  EXPECT_NO_THROW(restore_reader.Stage(good, temporary_.path() / "read-recovered"));
+  EXPECT_TRUE(test::FilesEqual(source / "data", temporary_.path() / "read-recovered/data"));
+}
 
+TEST_F(S3RoundTripTest, BoundsConcurrentUploadsAndIsolatesFailure)
+{
+  S3StorageBackend storage(Config("bounded"));
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  const auto source = SingleFileTree("concurrent-source", true);
+  const auto small = SingleFileTree("concurrent-small");
+  fs::rename(small / "data", small / "bad");
+  std::vector<std::future<CheckpointInventory>> uploads;
+  for (unsigned i = 0; i < 6; ++i)
+    uploads.push_back(std::async(std::launch::async, [&, i] {
+      return PublishTree(storage, source, 'a' + i);
+    }));
+  auto failing = std::async(std::launch::async, [&] {
+    EXPECT_THROW(PublishTree(storage, small, '0'), S3Error);
+  });
+  std::vector<std::future<void>> restores;
+  for (unsigned i = 0; i < uploads.size(); ++i) {
+    const auto destination = temporary_.path() / ("concurrent-" + std::to_string(i));
+    const auto inventory = uploads[i].get();
+    restores.push_back(std::async(std::launch::async, [&, inventory, destination] {
+      restore_reader.Stage(inventory, destination);
+      EXPECT_TRUE(test::FilesEqual(source / "data", destination / "data"));
+    }));
+  }
+  failing.get();
+  for (auto& restore : restores)
+    EXPECT_NO_THROW(restore.get());
+  // The host independently checks file admission; CRT schedules the HTTP parts.
+}
 
+TEST_F(S3RoundTripTest, RestoreContinuesWhileUploadIsBlocked)
+{
+  limits_.request_timeout = std::chrono::seconds(12);
+  S3StorageBackend storage(Config("engine-overlap"));
+  ModelStreamerRestore restore_reader(ReaderOptions(), std::chrono::seconds(30));
+  const auto small = SingleFileTree("overlap-small");
+  const auto large = SingleFileTree("overlap-large", true);
+  const auto seed = PublishTree(storage, small);
+  auto upload = std::async(std::launch::async, [&] {
+    return PublishTree(storage, large, 'b');
+  });
+  EXPECT_TRUE(Barrier("wait", "engine-overlap/" + Artifact('b').artifact_handle() + "/data"));
+  auto restore = std::async(std::launch::async, [&] {
+    restore_reader.Stage(seed, temporary_.path() / "overlap-restored");
+  });
+  EXPECT_EQ(restore.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  EXPECT_TRUE(Barrier("release", "engine-overlap/" + Artifact('b').artifact_handle() + "/data"));
+  EXPECT_NO_THROW(restore.get());
+  EXPECT_NO_THROW(upload.get());
+}
 
 TEST_F(S3RoundTripTest, DeadlineDrainsAndReleasesResources)
 {
@@ -484,6 +855,56 @@ TEST_F(S3RoundTripTest, CancellationDrainsAndLeavesClientUsable)
   EXPECT_NO_THROW(uploader.UploadFile(fixture_ / "small", Destination("after-cancel")));
 }
 
+TEST_F(S3RoundTripTest, CoexistsWithReaderAndMultipleUploaderLifetimes)
+{
+  ModelStreamerRestore reader(ReaderOptions(), std::chrono::seconds(30));
+  CheckpointInventory reader_fixture;
+  reader_fixture.files.push_back({"s3://" + bucket_ + "/fixture/small", "data", fs::file_size(fixture_ / "small"),
+                                  fs::perms::owner_read});
+  reader.Stage(reader_fixture, temporary_.path() / "before");
+  {
+    S3Client first(connection_, limits_);
+    {
+      auto provider = connection_;
+      provider.access_key_id.clear();
+      provider.secret_access_key.clear();
+      auto config = Config("provider");
+      config.transfer.connection = provider;
+      S3StorageBackend second(config);
+      const auto source = SingleFileTree("provider-source");
+      auto reading = std::async(std::launch::async, [&] { reader.Stage(reader_fixture, temporary_.path() / "during"); });
+      const auto inventory = PublishTree(second, source);
+      EXPECT_NO_THROW(reading.get());
+      const auto restored = temporary_.path() / "second-restored";
+      reader.Stage(inventory, restored);
+      EXPECT_TRUE(test::FilesEqual(source / "data", restored / "data"));
+    }
+    EXPECT_NO_THROW(first.UploadFile(fixture_ / "small", Destination("after-second")));
+  }
+  EXPECT_NO_THROW(reader.Stage(reader_fixture, temporary_.path() / "after"));
+  for (const auto* phase : {"before", "during", "after"}) {
+    SCOPED_TRACE(phase);
+    EXPECT_TRUE(test::FilesEqual(fixture_ / "small", temporary_.path() / phase / "data"));
+  }
+}
+
+TEST_F(S3RoundTripTest, UploadsAndRestoresUsingProviderChainCredentials)
+{
+  auto config = Config("provider-chain");
+  auto& connection = config.transfer.connection;
+  connection.access_key_id.clear();
+  connection.secret_access_key.clear();
+  connection.session_token.clear();
+  S3StorageBackend storage(config);
+  const auto source = SingleFileTree("provider-chain-source");
+  const auto inventory = PublishTree(storage, source);
+  ModelStreamerRestore reader({connection.region, connection.endpoint}, std::chrono::seconds(30));
+  const auto restored = temporary_.path() / "provider-chain-restored";
+  reader.Stage(inventory, restored);
+  EXPECT_TRUE(test::FilesEqual(source / "data", restored / "data"));
+  EXPECT_TRUE(test::FilesEqual(source / "manifest.yaml", restored / "manifest.yaml"));
+}
+
 TEST_F(S3RoundTripTest, CancellationWakesUploadWaitingForSlot)
 {
   limits_.active_files = 1;
@@ -521,7 +942,6 @@ TEST_F(S3RoundTripTest, CancellationWakesUploadWaitingForSlot)
   EXPECT_NO_THROW(owner.get());
   EXPECT_NO_THROW(uploader.UploadFile(fixture_ / "small", Destination("after-slot-cancel")));
 }
-
 
 TEST_F(S3RoundTripTest, RejectsUntrustedTLS)
 {

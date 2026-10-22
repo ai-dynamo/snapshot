@@ -10,12 +10,14 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -56,6 +58,30 @@ bool hold_end = false;
 bool end_entered = false;
 std::map<std::string, std::string> configured;
 
+class ScopedEnvironment {
+ public:
+  ScopedEnvironment(const char* name, const char* value) : name_(name)
+  {
+    if (const auto* previous = std::getenv(name))
+      previous_ = previous;
+    if (value)
+      setenv(name, value, 1);
+    else
+      unsetenv(name);
+  }
+  ~ScopedEnvironment()
+  {
+    if (previous_)
+      setenv(name_, previous_->c_str(), 1);
+    else
+      unsetenv(name_);
+  }
+
+ private:
+  const char* name_;
+  std::optional<std::string> previous_;
+};
+
 class ModelStreamerTransferEngineTest : public ::testing::Test {
  protected:
   void SetUp() override
@@ -67,9 +93,37 @@ class ModelStreamerTransferEngineTest : public ::testing::Test {
     configured.clear();
     fake_s3_root.clear();
     hold_end = end_entered = false;
+    options_.connection.region = "test-region";
+    options_.connection.endpoint = "http://s3.example.invalid";
+    options_.connection.access_key_id = "fake-access-key";
+    options_.connection.secret_access_key = "fake-secret-key";
+    options_.connection.session_token = "fake-session-token";
+    options_.connection.use_virtual_addressing = false;
+    options_.upload_limits.part_size = 8 * 1024 * 1024;
+    options_.upload_limits.target_gbps = options_.upload_limits.active_files = 1;
+    options_.restore_timeout = std::chrono::milliseconds(50);
   }
 
+  S3Config Config() const
+  {
+    S3Config config;
+    config.transfer = options_;
+    config.store_id = "test-store";
+    config.bucket = "local-test-bucket";
+    return config;
+  }
+
+  PreparedRestore Prepared() const
+  {
+    PreparedRestore result;
+    result.inventory.files.push_back({"s3://local-test-bucket/data", "data", 9});
+    return result;
+  }
+
+  ScopedEnvironment addressing_{"RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING", "0"};
+  ScopedEnvironment ca_{"AWS_CA_BUNDLE", nullptr};
   test::TemporaryDirectory root_;
+  S3TransferOptions options_;
 };
 
 }  // namespace
@@ -197,38 +251,6 @@ runai_file_streamer_response_str(int response_code)
 }
 
 
-TEST_F(ModelStreamerTransferEngineTest, RejectsDirectAndBorrowedRestoreBeforeNativeStartup)
-{
-  ModelStreamerTransferEngine engine;
-  for (int kind = 0; kind < 3; ++kind) {
-    PreparedRestore prepared;
-    prepared.inventory.files.push_back({"s3://local-test-bucket/source", "data", 1});
-    if (kind == 0)
-      prepared.mode = TransferMode::Direct;
-    else if (kind == 1)
-      prepared.local_source = root_.path();
-    else
-      prepared.source = FileDescriptor::Duplicate(STDIN_FILENO);
-    EXPECT_THROW(engine.StageRestore(std::move(prepared), root_.path() / "unused"), std::invalid_argument);
-  }
-  EXPECT_FALSE(fs::exists(root_.path() / "unused"));
-  EXPECT_EQ(starts, 0U);
-}
-
-TEST_F(ModelStreamerTransferEngineTest, RejectsUnsupportedStorageOperations)
-{
-  ModelStreamerTransferEngine engine;
-  StorageBackend storage;
-  storage.mutable_filesystem()->set_directory((root_.path() / "unused").string());
-  EXPECT_THROW(engine.PrepareRestore(storage), std::logic_error);
-  EXPECT_THROW(engine.PrepareCheckpoint(storage, root_.path() / "capture", "id"), std::logic_error);
-  EXPECT_THROW(engine.ValidateCheckpointDestination(storage), std::logic_error);
-  EXPECT_THROW(engine.InspectCheckpoint(root_.path()), std::logic_error);
-  EXPECT_THROW(engine.PublishCheckpoint(root_.path(), storage, {}), std::logic_error);
-  EXPECT_TRUE(fs::is_empty(root_.path()));
-  EXPECT_EQ(starts, 0U);
-}
-
 TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
 {
   starts = 0;
@@ -249,7 +271,7 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
     return result;
   };
   {
-    ModelStreamerTransferEngine engine;
+    ModelStreamerTransferEngine engine(Config());
     EXPECT_THROW(engine.StageRestore(prepare(), root / "first"), std::runtime_error);
     EXPECT_EQ(starts, 1);
     EXPECT_EQ(ends, 1);
@@ -264,6 +286,179 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
     EXPECT_EQ(ends, 1);
   }
   EXPECT_EQ(ends, 2);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, ConfiguredStoreRequiresArtifactForStorageOperations)
+{
+  S3Config config;
+  config.transfer = options_;
+  config.store_id = "test-store";
+  config.bucket = "local-test-bucket";
+  ModelStreamerTransferEngine implementation(config);
+  const TransferEngine& engine = implementation;
+  const auto source = root_.path() / "source";
+  fs::create_directory(source);
+  StorageBackend storage;
+  storage.mutable_filesystem()->set_directory(source.string());
+  EXPECT_THROW(engine.PrepareRestore(storage).inventory.size_bytes(), std::invalid_argument);
+  EXPECT_THROW(engine.PrepareCheckpoint(storage, root_.path() / "unused", "checkpoint"), std::invalid_argument);
+  EXPECT_THROW(engine.PublishCheckpoint(source, storage, {}), std::invalid_argument);
+  EXPECT_FALSE(fs::exists(root_.path() / "staged"));
+  EXPECT_EQ(starts, 0);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, S3RestoreReturnsOwnedLocalAccess)
+{
+  fail_first_session = false;
+  fake_s3_root = root_.path();
+  std::ofstream(root_.path() / "payload") << "GPU";
+  S3Config config;
+  config.transfer = options_;
+  config.store_id = "test-store";
+  config.bucket = "local-test-bucket";
+  ModelStreamerTransferEngine engine(config);
+  PreparedRestore prepared;
+  prepared.inventory.files.push_back({"s3://local-test-bucket/payload", "payload", 3});
+  const auto destination = root_.path() / "restored";
+  const auto access = engine.StageRestore(std::move(prepared), destination);
+  EXPECT_EQ(access.image_directory, destination);
+  EXPECT_EQ(access.staging_directory, destination);
+  struct stat local{}, retained{};
+  ASSERT_EQ(stat(destination.c_str(), &local), 0);
+  ASSERT_EQ(fstat(access.source.get(), &retained), 0);
+  EXPECT_EQ(local.st_ino, retained.st_ino);
+  EXPECT_TRUE(fs::exists(destination / "payload"));
+}
+
+TEST_F(ModelStreamerTransferEngineTest, S3DirectModeIsRejectedThroughGenericInterface)
+{
+  S3Config config;
+  config.transfer = options_;
+  config.store_id = "test-store";
+  config.bucket = "local-test-bucket";
+  ModelStreamerTransferEngine implementation(config);
+  const TransferEngine& engine = implementation;
+  ArtifactTarget target;
+  target.set_store_id(config.store_id);
+  target.mutable_artifact()->set_artifact_uid("direct");
+  target.mutable_artifact()->set_container_name("main");
+  const auto artifact = engine.ResolveArtifactTarget(target);
+  EXPECT_THROW(engine.PrepareRestore({}, {}, &artifact, false, TransferMode::Direct), TransferError);
+  EXPECT_THROW(engine.PrepareCheckpoint({}, root_.path() / "unused", "direct", TransferMode::Direct, &artifact), TransferError);
+  EXPECT_FALSE(fs::exists(root_.path() / "unused"));
+  EXPECT_EQ(starts, 0u);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, ConfiguredStoreDistinguishesCancellationFromDeadline)
+{
+  S3Config config;
+  config.transfer = options_;
+  config.store_id = "test-store";
+  config.bucket = "local-test-bucket";
+  ModelStreamerTransferEngine engine(config);
+  Cancellation cancelled;
+  cancelled.Cancel();
+  for (const bool expired : {false, true}) {
+    SCOPED_TRACE(expired);
+    const Cancellation cancellation = expired ? cancelled.WithDeadline(Cancellation::Clock::now()) : cancelled;
+    try {
+      engine.StageRestore({}, root_.path() / "staged", cancellation);
+      FAIL() << "interrupted restore succeeded";
+    } catch (const TransferError& error) {
+      EXPECT_EQ(error.code, expired ? Failure::TRANSACTION_EXPIRED : Failure::INTERNAL_ERROR);
+    }
+    EXPECT_FALSE(fs::exists(root_.path() / "staged"));
+  }
+  EXPECT_EQ(starts, 0);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, S3RecoveryPreservesConnectionAndTimeout)
+{
+  const auto source = root_.path() / "source";
+  fs::create_directory(source);
+  std::ofstream(source / "data") << "recovered";
+  fake_s3_root = source;
+  ModelStreamerTransferEngine engine(Config());
+  options_.connection.region = "changed-after-construction";
+  EXPECT_THROW(engine.StageRestore(Prepared(), root_.path() / "failed"), std::runtime_error);
+  const auto original = configured;
+  EXPECT_EQ(original.at("region"), "test-region");
+  EXPECT_EQ(original.at("endpoint"), options_.connection.endpoint);
+  EXPECT_EQ(original.at("access_key_id"), options_.connection.access_key_id);
+  EXPECT_EQ(original.at("secret_access_key"), options_.connection.secret_access_key);
+  EXPECT_EQ(original.at("session_token"), options_.connection.session_token);
+
+  // Make the replacement generation stall. It must use the configured short
+  // timeout, rather than the reader's default two-hour deadline.
+  timeout_first_session = true;
+  fail_first_session = false;
+  ASSERT_EQ(starts.load(), ends.load());
+  starts = ends = 0;
+  const auto begin = std::chrono::steady_clock::now();
+  EXPECT_THROW(engine.StageRestore(Prepared(), root_.path() / "timed-out"), std::runtime_error);
+  EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::seconds(2));
+  EXPECT_EQ(configured, original);
+  timeout_first_session = false;
+  EXPECT_NO_THROW(engine.StageRestore(Prepared(), root_.path() / "recovered"));
+  EXPECT_EQ(configured, original);
+  EXPECT_EQ(credential_calls, 3);
+  EXPECT_EQ(fs::file_size(root_.path() / "recovered/data"), 9);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, RejectsConflictingS3SettingsAndInvalidTimeouts)
+{
+  options_.connection.use_virtual_addressing = true;
+  EXPECT_THROW(ModelStreamerTransferEngine{Config()}, std::invalid_argument);
+  options_.connection.use_virtual_addressing = false;
+  for (const auto* value : {"", "true", "invalid"}) {
+    ScopedEnvironment invalid_addressing("RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING", value);
+    EXPECT_THROW(ModelStreamerTransferEngine{Config()}, std::invalid_argument);
+  }
+  options_.connection.ca_file = "/test-only/ca.pem";
+  EXPECT_THROW(ModelStreamerTransferEngine{Config()}, std::invalid_argument);
+  ScopedEnvironment matching_ca("AWS_CA_BUNDLE", "/test-only/ca.pem");
+  EXPECT_NO_THROW(ModelStreamerTransferEngine{Config()});
+  for (const auto timeout : {std::chrono::milliseconds(0), std::chrono::milliseconds(-1),
+                            std::chrono::milliseconds::max()}) {
+    options_.restore_timeout = timeout;
+    EXPECT_THROW(ModelStreamerTransferEngine{Config()}, std::invalid_argument);
+  }
+  EXPECT_EQ(starts, 0);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, RejectsMalformedS3DestinationsAtConstruction)
+{
+  S3Config config;
+  config.transfer = options_;
+  config.store_id = "test-store";
+  config.bucket = "local-test-bucket";
+  for (const auto& prefix : {std::string("bad\nkey"), std::string("bad\0key", 7), std::string(1024, 'x')}) {
+    config.prefix = prefix;
+    EXPECT_THROW(ModelStreamerTransferEngine{config}, std::invalid_argument);
+  }
+  EXPECT_EQ(starts, 0);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, RejectsInvalidUtf8FilenameAsInvalidRequest)
+{
+  const auto config = Config();
+  ModelStreamerTransferEngine engine(config);
+  PublishedArtifact artifact;
+  artifact.set_store_id(config.store_id);
+  artifact.set_artifact_handle(std::string(64, 'a'));
+  engine.ValidateArtifact(artifact);
+  std::ofstream(root_.path() / "manifest.yaml") << "version: 1\n";
+  const auto invalid = root_.path() / "invalid-\xff";
+  std::ofstream(invalid) << "payload";
+  ASSERT_TRUE(fs::is_regular_file(invalid));
+  try {
+    engine.InspectCheckpoint(root_.path(), &artifact);
+    FAIL() << "invalid UTF-8 filename accepted";
+  }
+  catch (const TransferError& error) {
+    EXPECT_EQ(error.code, Failure::INVALID_REQUEST);
+  }
+  EXPECT_EQ(starts, 0u);
 }
 
 TEST_F(ModelStreamerTransferEngineTest, ConfiguresOnceForReusedNativeSession)
@@ -377,7 +572,8 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
   std::ofstream(root_.path() / "source") << "a";
   CheckpointInventory inventory;
   inventory.files.push_back({"s3://local-test-bucket/source", "data", 1, fs::perms::owner_read});
-  ModelStreamerTransferEngine engine;
+  options_.restore_timeout = std::chrono::hours(1);
+  ModelStreamerTransferEngine engine(Config());
   const auto prepare = [&] {
     PreparedRestore prepared;
     prepared.inventory = inventory;
@@ -406,7 +602,12 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
     hold_end = false;
     native_changed.notify_all();
   }
-  EXPECT_THROW(stage.get(), CancellationError);
+  try {
+    stage.get();
+    FAIL() << "cancelled restore succeeded";
+  } catch (const TransferError& error) {
+    EXPECT_EQ(error.code, Failure::INTERNAL_ERROR);
+  }
   EXPECT_EQ(ends, 1U);
   char byte = 0;
   std::ifstream(root_.path() / "cancelled/data").get(byte);

@@ -103,8 +103,8 @@ message PrepareStagedCheckpointRequest
   // Required for legacy destination; optional with target (configured engine by default).
   IOEngine io_engine = 2;
 }
-// Fetch verified manifest.yaml for one publication into private shared staging.
-// Snapshot interprets the manifest. This does not verify all checkpoint payloads.
+// Fetch manifest.yaml for one publication into private shared staging.
+// Snapshot interprets the manifest. Payload integrity is not verified.
 message GetArtifactMetadataRequest
 {
   // Exactly one of artifact or target is required.
@@ -231,7 +231,7 @@ message Failure
     ACCESS_DENIED = 21;        // Authentication, authorization or decryption refused; not proof of absence.
     STORAGE_UNAVAILABLE = 22;  // Transient storage/transport failure after bounded retries.
     ARTIFACT_NOT_FOUND = 23;   // Authoritative absence of the requested publication.
-    ARTIFACT_CORRUPT = 24;     // Invalid index, unsafe paths, missing indexed data or digest mismatch.
+    ARTIFACT_CORRUPT = 24;     // Invalid index, unsafe paths, missing indexed data or invalid object size.
     UNSUPPORTED_ARTIFACT = 25; // No reader for the backend or the layout version recorded in the index.
     OUTCOME_UNKNOWN = 26;     // Cannot establish publication outcome; never authorizes process replay.
     // The fixed deadline passed while PageBroker still remembers the transaction; no new storage operations

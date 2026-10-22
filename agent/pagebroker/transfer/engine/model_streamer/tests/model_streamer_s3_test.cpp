@@ -91,7 +91,15 @@ class ModelStreamerS3Test : public ::testing::Test {
 
 TEST_F(ModelStreamerS3Test, EngineReturnsOwnedStaging)
 {
-  ModelStreamerTransferEngine engine(options_, std::chrono::seconds(30));
+  S3Config config;
+  config.store_id = "test-store";
+  config.bucket = Environment("PAGEBROKER_S3_TEST_BUCKET");
+  config.transfer.connection.region = options_.region;
+  config.transfer.connection.endpoint = options_.endpoint;
+  config.transfer.connection.ca_file = Environment("AWS_CA_BUNDLE");
+  config.transfer.connection.use_virtual_addressing = Environment("RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING") != "0";
+  config.transfer.restore_timeout = std::chrono::seconds(30);
+  ModelStreamerTransferEngine engine(config);
   PreparedRestore prepared;
   prepared.inventory = inventory_;
   const auto destination = root_.path() / "engine";

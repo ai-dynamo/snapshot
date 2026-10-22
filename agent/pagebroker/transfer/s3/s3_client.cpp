@@ -178,7 +178,7 @@ struct Operation {
   void Check() const
   {
     if (const auto reason = cancellation.Reason())
-      throw S3Error({name, *reason == CancellationError::Reason::DEADLINE_EXCEEDED ? "DeadlineExceeded" : "Cancelled"});
+      throw S3Error({name, *reason == CancellationError::Reason::DEADLINE_EXCEEDED ? kS3DeadlineExceededCode : kS3CancelledCode});
   }
 
   const std::string name;
@@ -314,7 +314,7 @@ ClientConfiguration(const S3Connection& connection, const S3Limits& limits)
   config.useVirtualAddressing = connection.use_virtual_addressing;
   config.caFile = connection.ca_file;
   if (config.caFile.empty()) {
-    if (const auto* ca = std::getenv("AWS_CA_BUNDLE"))
+    if (const auto* ca = std::getenv(kAwsCaBundleEnv))
       config.caFile = ca;
     else
       config.caFile = Aws::Config::GetCachedConfigValue(Aws::Auth::GetConfigProfileName(), "ca_bundle");

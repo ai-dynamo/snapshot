@@ -47,9 +47,8 @@ func (c Client) CommitCheckpoint(ctx context.Context, transactionID string) (*Pu
 	return artifact, nil
 }
 
-// StagedArtifactRestore verifies the exact publication into local staging. A nil
-// engine selects the broker's configured default. Finish consumers and unmount
-// before Commit or Abort releases staging; neither deletes the publication.
+// StagedArtifactRestore prepares and stages an artifact; a nil engine uses the default.
+// Finish consumers and unmount before Commit or Abort releases staging; neither deletes the artifact.
 func (c Client) StagedArtifactRestore(ctx context.Context, transactionID string, artifact *PublishedArtifact, engine *IOEngine) (string, error) {
 	if err := validatePublishedArtifact(artifact); err != nil {
 		return "", err
@@ -66,9 +65,8 @@ func (c Client) StagedArtifactRestore(ctx context.Context, transactionID string,
 	return imageDirectory(response.GetStagedRestoreDirectory().GetImageDirectory())
 }
 
-// GetArtifactMetadata returns a private shared directory with verified
-// manifest.yaml, not a verified payload. The caller must Abort on every exit,
-// including a lost reply, using a bounded cleanup context if ctx was cancelled.
+// GetArtifactMetadata returns a private shared directory with manifest.yaml only.
+// Always Abort, even after a lost reply; use a bounded cleanup context if cancelled.
 func (c Client) GetArtifactMetadata(ctx context.Context, transactionID string, artifact *PublishedArtifact) (string, error) {
 	if err := validatePublishedArtifact(artifact); err != nil {
 		return "", err

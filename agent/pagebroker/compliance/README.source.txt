@@ -18,7 +18,7 @@ Source for PageBroker and the third-party components distributed in this image:
 This image also ships the pinned Model Streamer core and S3 native libraries,
 with their SDK license and release metadata in /legal/model-streamer/.
 The S3 plugin license is also in /legal/model-streamer-s3/.
-OpenSSL libcrypto supports the AWS SDK; its attribution
+OpenSSL libcrypto supports artifact identity hashing and the AWS SDK; its attribution
 is in /legal/openssl/copyright. The uploader uses the S3 CRT client from the
 unmodified AWS SDK for C++ release published at:
 

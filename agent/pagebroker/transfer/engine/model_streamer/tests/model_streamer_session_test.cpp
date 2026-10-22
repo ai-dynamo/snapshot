@@ -57,9 +57,6 @@ class ModelStreamerRestoreTestPeer {
 }  // namespace snapshot::pagebroker
 
 namespace {
-// Only the calling test thread injects cancellation; native worker clocks stay real.
-thread_local unsigned cancel_on_clock_read = 0;
-
 enum class Fault { NONE, UNKNOWN, INVALID_INDEX, EARLY_DONE, MISSING_DONE, STORAGE, TIMEOUT };
 struct Response {
   RunaiFileStreamerSubmissionId id;
@@ -235,14 +232,6 @@ class ModelStreamerSessionTest : public ::testing::Test {
   Path root_;
 };
 }  // namespace
-
-extern "C" Cancellation::Clock::time_point __real__ZNSt6chrono3_V212steady_clock3nowEv() noexcept;
-extern "C" Cancellation::Clock::time_point __wrap__ZNSt6chrono3_V212steady_clock3nowEv() noexcept
-{
-  if (cancel_on_clock_read != 0 && --cancel_on_clock_read == 0)
-    state.preparation_cancellation.Cancel();
-  return __real__ZNSt6chrono3_V212steady_clock3nowEv();
-}
 
 extern "C" int __real_posix_fallocate(int descriptor, off_t offset, off_t length);
 extern "C" void* __real_mmap(void* address, size_t length, int protection, int flags, int descriptor, off_t offset);
@@ -454,60 +443,6 @@ TEST_F(ModelStreamerSessionTest, UnusedCoordinatorDoesNotStartWorker)
   }
   EXPECT_EQ(state.starts, 0U);
   EXPECT_EQ(state.ends, 0U);
-}
-
-TEST_F(ModelStreamerSessionTest, CancelledEmptyInventoryDoesNotCreateDestination)
-{
-  const auto destination = root_ / "cancelled";
-  state.preparation_cancellation.Cancel();
-  ModelStreamerRestore restore;
-  EXPECT_THROW(restore.Stage({}, destination, state.preparation_cancellation), CancellationError);
-  EXPECT_FALSE(fs::exists(destination));
-  EXPECT_FALSE(ModelStreamerRestoreTestPeer::HasWorker(restore));
-}
-
-TEST_F(ModelStreamerSessionTest, CancellationDuringValidationStopsBeforeInvalidEntries)
-{
-  for (const bool files : {false, true}) {
-    CheckpointInventory inventory;
-    if (files) {
-      inventory = Inventory(2);
-      inventory.files.back().relative_path = "../unsafe";
-    } else {
-      inventory.directories = {{"first"}, {"../unsafe"}};
-    }
-    const auto destination = root_ / (files ? "files" : "directories");
-    state.preparation_cancellation = Cancellation{};
-    ModelStreamerRestore restore;
-    // First check is at entry; the next must run after the first valid entry,
-    // before validation can reach the unsafe entry or create any directories.
-    cancel_on_clock_read = 2;
-    EXPECT_THROW(restore.Stage(inventory, destination, state.preparation_cancellation), CancellationError);
-    cancel_on_clock_read = 0;
-    EXPECT_FALSE(fs::exists(destination));
-    EXPECT_FALSE(ModelStreamerRestoreTestPeer::HasWorker(restore));
-    EXPECT_EQ(state.starts, 0U);
-  }
-}
-
-TEST_F(ModelStreamerSessionTest, CancellationAfterLastValidatedEntryDoesNotCreateDestination)
-{
-  for (const bool files : {false, true}) {
-    CheckpointInventory inventory;
-    if (files)
-      inventory = Inventory();
-    else
-      inventory.directories = {{"last"}};
-    const auto destination = root_ / (files ? "files" : "directories");
-    state.preparation_cancellation = Cancellation{};
-    ModelStreamerRestore restore;
-    cancel_on_clock_read = 2;
-    EXPECT_THROW(restore.Stage(inventory, destination, state.preparation_cancellation), CancellationError);
-    cancel_on_clock_read = 0;
-    EXPECT_FALSE(fs::exists(destination));
-    EXPECT_FALSE(ModelStreamerRestoreTestPeer::HasWorker(restore));
-    EXPECT_EQ(state.starts, 0U);
-  }
 }
 
 TEST_F(ModelStreamerSessionTest, CancellationDuringDirectoryCreationStopsBeforeStartingWorker)

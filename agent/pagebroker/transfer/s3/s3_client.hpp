@@ -15,6 +15,9 @@
 #include "cancellation.hpp"
 
 namespace snapshot::pagebroker {
+// Standard CA override shared by SDK and native restore configuration.
+inline constexpr char kAwsCaBundleEnv[] = "AWS_CA_BUNDLE";
+
 // Identifies one object using a bucket and its literal key, rather than a URL.
 struct S3ObjectLocation {
   std::string bucket;
@@ -74,6 +77,10 @@ struct S3UploadResult {
   S3ObjectLocation destination;
   std::uint64_t size_bytes;
 };
+
+// Locally generated request failure codes consumed by transfer error mapping.
+inline constexpr char kS3DeadlineExceededCode[] = "DeadlineExceeded";
+inline constexpr char kS3CancelledCode[] = "Cancelled";
 
 // Identifies the failed SDK operation without retaining its response body or
 // credentials. HTTP status and request ID are populated when available.

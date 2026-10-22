@@ -13,23 +13,22 @@ GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
 MODEL_STREAMER_LIB_DIR ?= /usr/local/lib
 MODEL_STREAMER_INCLUDE_DIR ?= /usr/local/include
 MODEL_STREAMER_FLAGS := -L$(MODEL_STREAMER_LIB_DIR) -lstreamer -Wl,-rpath,$(MODEL_STREAMER_LIB_DIR)
+CRYPTO_FLAGS = $(shell pkg-config --cflags --libs libcrypto)
 AWS_SDK_PREFIX ?= /usr/local
 AWS_FLAGS := -I$(AWS_SDK_PREFIX)/include -L$(AWS_SDK_PREFIX)/lib -Wl,-rpath,$(AWS_SDK_PREFIX)/lib -laws-cpp-sdk-s3-crt -laws-cpp-sdk-core -laws-c-common -pthread
 S3_TEST_VENV := build/s3-test-venv
 STREAMER_SOURCES := transfer/engine/model_streamer/model_streamer_restore.cpp
-S3_SOURCES := transfer/s3/s3_client.cpp
+S3_SOURCES := utils/sha256.cpp s3_config.cpp transfer/s3/s3_client.cpp transfer/s3/s3_storage_backend.cpp transfer/s3/checkpoint_index.cpp
 RESTORE_SOURCES := file_descriptor.cpp $(STREAMER_SOURCES)
 ENGINE_SOURCES = $(COMMON_SOURCES) $(STREAMER_SOURCES) $(S3_SOURCES) transfer/engine/model_streamer/model_streamer_transfer_engine.cpp transfer/engine/transfer_engine.cpp
-TRANSFER_TEST_SOURCES := tests/transaction_test.cpp transfer/engine/model_streamer/tests/model_streamer_restore_test.cpp transfer/s3/tests/s3_client_test.cpp tests/temporary_directory_test.cpp
+TRANSFER_TEST_SOURCES := tests/transaction_test.cpp transfer/s3/tests/checkpoint_index_test.cpp transfer/s3/tests/s3_storage_backend_test.cpp utils/tests/sha256_test.cpp transfer/engine/model_streamer/tests/model_streamer_restore_test.cpp transfer/s3/tests/s3_client_test.cpp tests/temporary_directory_test.cpp
 MODEL_STREAMER_RECOVERY_TEST_SOURCES = $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_transfer_engine_test.cpp
 MODEL_STREAMER_SESSION_TEST_SOURCES := $(RESTORE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_session_test.cpp
 # Inject filesystem failures and cancellation deterministically in the session tests.
-# The clock wrapper lets validation observe cancellation without timing races.
 MODEL_STREAMER_SESSION_TEST_WRAP_FLAGS := -Wl,--wrap=posix_fallocate,--wrap=mmap \
-	-Wl,--wrap=_ZNSt6chrono3_V212steady_clock3nowEv \
 	-Wl,--wrap=_ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE \
 	-Wl,--wrap=_ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE
-TRANSFER_FLAGS := $(MODEL_STREAMER_FLAGS) $(AWS_FLAGS)
+TRANSFER_FLAGS := $(MODEL_STREAMER_FLAGS) $(CRYPTO_FLAGS) $(AWS_FLAGS)
 CPPFLAGS += -I$(MODEL_STREAMER_INCLUDE_DIR)
 
 BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp transfer/engine/posix/posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer/engine/transfer_engine.cpp
@@ -74,7 +73,7 @@ test: generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-
 	./build/gpu-engine-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp tests/daemon_test.cpp $(BROKER_TEST_SOURCES) tests/filesystem_storage_test.cpp tests/storage_contract_test.cpp $(TRANSFER_TEST_SOURCES) v1/pagebroker.pb.cc $(BROKER_TEST_WRAP_FLAGS) -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o build/pagebroker-test
 	./build/pagebroker-test
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODEL_STREAMER_RECOVERY_TEST_SOURCES) v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(AWS_FLAGS) -o build/model-streamer-recovery-test
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODEL_STREAMER_RECOVERY_TEST_SOURCES) v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(CRYPTO_FLAGS) $(AWS_FLAGS) -o build/model-streamer-recovery-test
 	./build/model-streamer-recovery-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODEL_STREAMER_SESSION_TEST_SOURCES) $(GTEST_FLAGS) $(MODEL_STREAMER_SESSION_TEST_WRAP_FLAGS) -o build/model-streamer-session-test
 	./build/model-streamer-session-test
@@ -121,7 +120,7 @@ $(S3_TEST_VENV)/.installed: tests/requirements.txt | build
 # Uses a disposable local S3 service; no cloud credentials are needed.
 s3-test-build: generate
 	mkdir -p build
-	c++ -I. -I$(MODEL_STREAMER_INCLUDE_DIR) -std=c++20 -Wall -Werror $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_s3_test.cpp transfer/s3/tests/s3_round_trip_test.cpp v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(GTEST_FLAGS) $(MODEL_STREAMER_FLAGS) $(AWS_FLAGS) -o build/model-streamer-s3-test
+	c++ -I. -I$(MODEL_STREAMER_INCLUDE_DIR) -std=c++20 -Wall -Werror $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_s3_test.cpp transfer/s3/tests/s3_round_trip_test.cpp v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(GTEST_FLAGS) $(MODEL_STREAMER_FLAGS) $(CRYPTO_FLAGS) $(AWS_FLAGS) -o build/model-streamer-s3-test
 
 s3-test: s3-test-build $(S3_TEST_VENV)/.installed
 	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$(AWS_SDK_PREFIX)/lib:$$LD_LIBRARY_PATH" $(S3_TEST_VENV)/bin/python3 tests/s3_integration.py --binary ./build/model-streamer-s3-test
