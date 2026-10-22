@@ -170,7 +170,7 @@ class ModelStreamerRestore {
   void FailAll(std::exception_ptr error) noexcept;
 
   std::once_flag start_once_;
-  void* value_ = nullptr;
+  void* streamer_handle_ = nullptr;
   const std::chrono::milliseconds submission_timeout_;
   const ModelStreamerSessionOptions options_;
   const std::exception_ptr stopped_error_;

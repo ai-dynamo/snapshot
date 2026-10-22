@@ -295,10 +295,10 @@ ModelStreamerRestore::Run() noexcept
 void
 ModelStreamerRestore::Start()
 {
-  const int response = runai_file_streamer_start(&value_);
+  const int response = runai_file_streamer_start(&streamer_handle_);
   if (response != 0)
     throw std::runtime_error("start Model Streamer: " + StreamerError(response));
-  if (value_ == nullptr)
+  if (streamer_handle_ == nullptr)
     throw std::runtime_error("Model Streamer started without returning a handle");
 
   // The worker owns teardown, including partial startup.
@@ -317,7 +317,7 @@ ModelStreamerRestore::Start()
   append(kSessionTokenKey, options_.session_token);
   if (!keys.empty()) {
     const int status = runai_file_streamer_set_credentials(
-        value_, keys.data(), values.data(), static_cast<unsigned>(keys.size()));
+        streamer_handle_, keys.data(), values.data(), static_cast<unsigned>(keys.size()));
     if (status != 0)
       throw std::runtime_error("configure Model Streamer session: " + StreamerError(status));
   }
@@ -423,7 +423,7 @@ ModelStreamerRestore::SubmitPending()
       return;
     if (!entry)
       break;
-    if (value_ == nullptr)
+    if (streamer_handle_ == nullptr)
       Start();
     // Retain the queued reference until submission and registration finish.
     // On exception, Run stops native access before completing even an entry
@@ -489,7 +489,7 @@ ModelStreamerRestore::SubmitToStreamer(StreamerEntry& entry)
   auto& request = entry.request;
   RunaiFileStreamerSubmissionId submission_id = 0;
   const int response = runai_file_streamer_request(
-      value_, &submission_id, static_cast<unsigned>(request.paths.size()), request.paths.data(),
+      streamer_handle_, &submission_id, static_cast<unsigned>(request.paths.size()), request.paths.data(),
       request.range_counts.data(), request.offsets.data(), request.sizes.data(), request.destinations.data(),
       RunaiFileStreamerDevice{RUNAI_FILE_STREAMER_DEVICE_CPU, 0});
   if (response != 0) {
@@ -562,7 +562,7 @@ ModelStreamerRestore::ProcessWork()
   StreamerResponse response;
   std::shared_ptr<StreamerEntry> completed;
   response.status = runai_file_streamer_response(
-      value_, &response.submission_id, &response.file_index, &response.range_index, &response.submission_done,
+      streamer_handle_, &response.submission_id, &response.file_index, &response.range_index, &response.submission_done,
       kResponsePollTimeoutMs);
   if (response.status != RUNAI_FILE_STREAMER_RESPONSE_TIMED_OUT) {
     if (!IsRecoverableRangeStatus(response.status))
@@ -613,9 +613,9 @@ ModelStreamerRestore::FinishSession()
 void
 ModelStreamerRestore::StopStreamer() noexcept
 {
-  if (value_ != nullptr) {
-    runai_file_streamer_end(value_);
-    value_ = nullptr;
+  if (streamer_handle_ != nullptr) {
+    runai_file_streamer_end(streamer_handle_);
+    streamer_handle_ = nullptr;
   }
 }
 
