@@ -264,6 +264,11 @@ extern "C" bool __wrap__ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE(c
 extern "C" void __wrap__ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE(
     const Path& path, fs::perms permissions, fs::perm_options options)
 {
+  {
+    std::lock_guard lock(state.mutex);
+    if (++state.permission_calls == state.fail_permission_call)
+      throw fs::filesystem_error("injected permission failure", path, std::make_error_code(std::errc::permission_denied));
+  }
   __real__ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE(path, permissions, options);
   std::lock_guard lock(state.mutex);
   state.permission_paths.push_back(path);
@@ -302,20 +307,6 @@ extern "C" int __wrap_posix_fallocate(int descriptor, off_t offset, off_t length
     state.changed.notify_all();
   }
   return result;
-}
-
-extern "C" int __real_fchmod(int descriptor, mode_t mode);
-
-extern "C" int __wrap_fchmod(int descriptor, mode_t mode)
-{
-  {
-    std::lock_guard lock(state.mutex);
-    if (++state.permission_calls == state.fail_permission_call) {
-      errno = EACCES;
-      return -1;
-    }
-  }
-  return __real_fchmod(descriptor, mode);
 }
 
 extern "C" int runai_file_streamer_start(void** value)
@@ -783,6 +774,24 @@ TEST_P(FilePermissionFailureTest, ReleasesBatchMappingsWithoutSubmittingAndAllow
   EXPECT_NO_THROW(restore.Stage(inventory, root_ / "retry"));
   EXPECT_EQ(state.submitted, 1U);
   EXPECT_FALSE(HasMapping(root_ / "retry"));
+}
+
+TEST_P(FilePermissionFailureTest, CancellationDuringFilePermissionsReleasesMappingsWithoutSubmitting)
+{
+  auto inventory = Inventory(2);
+  inventory.files.front().permissions = fs::perms::owner_read;
+  if (GetParam())
+    inventory.files.front().size_bytes = 0;
+  const auto destination = root_ / "cancelled";
+  state.cancel_after_permissions = destination / inventory.files.front().relative_path;
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(inventory, destination, state.preparation_cancellation), CancellationError);
+  EXPECT_EQ(state.permission_calls, 1U);
+  EXPECT_FALSE(fs::exists(destination / inventory.files.back().relative_path));
+  EXPECT_FALSE(HasMapping(destination));
+  EXPECT_EQ(state.starts, 0U);
+  EXPECT_EQ(state.submitted, 0U);
+  EXPECT_FALSE(restore.Failed());
 }
 
 INSTANTIATE_TEST_SUITE_P(FileKinds, FilePermissionFailureTest, ::testing::Bool(),
