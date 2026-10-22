@@ -14,11 +14,12 @@ MODEL_STREAMER_LIB_DIR ?= /usr/local/lib
 MODEL_STREAMER_INCLUDE_DIR ?= /usr/local/include
 MODEL_STREAMER_FLAGS := -L$(MODEL_STREAMER_LIB_DIR) -lstreamer -Wl,-rpath,$(MODEL_STREAMER_LIB_DIR)
 CRYPTO_FLAGS = $(shell pkg-config --cflags --libs libcrypto)
-STREAMER_SOURCES := transfer/engine/model_streamer/model_streamer_restore.cpp
+S3_TEST_VENV := build/s3-test-venv
+STREAMER_SOURCES := model_streamer_config.cpp transfer/engine/model_streamer/model_streamer_restore.cpp
 S3_SOURCES := utils/sha256.cpp s3_config.cpp transfer/s3/s3_client.cpp transfer/s3/s3_storage_backend.cpp transfer/s3/checkpoint_index.cpp
 RESTORE_SOURCES := file_descriptor.cpp $(STREAMER_SOURCES)
 ENGINE_SOURCES = $(COMMON_SOURCES) $(STREAMER_SOURCES) $(S3_SOURCES) transfer/engine/model_streamer/model_streamer_transfer_engine.cpp transfer/engine/transfer_engine.cpp
-TRANSFER_TEST_SOURCES := tests/transaction_test.cpp transfer/s3/tests/checkpoint_index_test.cpp transfer/s3/tests/s3_storage_backend_test.cpp utils/tests/sha256_test.cpp transfer/engine/model_streamer/tests/model_streamer_restore_test.cpp transfer/s3/tests/s3_client_test.cpp tests/temporary_directory_test.cpp
+TRANSFER_TEST_SOURCES := tests/model_streamer_config_test.cpp tests/daemon_options_test.cpp tests/transaction_test.cpp transfer/s3/tests/checkpoint_index_test.cpp transfer/s3/tests/s3_storage_backend_test.cpp tests/s3_config_test.cpp utils/tests/sha256_test.cpp transfer/engine/model_streamer/tests/model_streamer_restore_test.cpp transfer/s3/tests/s3_client_test.cpp tests/temporary_directory_test.cpp
 MODEL_STREAMER_RECOVERY_TEST_SOURCES = $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_transfer_engine_test.cpp
 MODEL_STREAMER_SESSION_TEST_SOURCES := $(RESTORE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_session_test.cpp
 # Inject filesystem failures and cancellation deterministically in the session tests.

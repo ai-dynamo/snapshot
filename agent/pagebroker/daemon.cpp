@@ -3,6 +3,7 @@
 
 #include <sys/syscall.h>
 #include "daemon.hpp"
+#include <set>
 #include "errors.hpp"
 #include "fatal_cleanup.hpp"
 
@@ -722,6 +723,8 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
       throw std::invalid_argument("missing value for " + std::string(option));
     }
     const auto input = arguments[index];
+    if (input.empty())
+      throw std::invalid_argument("empty value for " + std::string(option));
     if (option == "--custom-storage-engine") {
       if (input != "on" && input != "off") {
         throw std::invalid_argument("invalid value for --custom-storage-engine: " + std::string(input));
@@ -735,6 +738,10 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
       options.gpu.chunk_bytes = ParseSize(option, input, false);
     } else if (option == "--custom-storage-max-pinned-bytes") {
       options.gpu.max_pinned_bytes = ParseSize(option, input, true);
+    } else if (option == "--storage-config") {
+      options.storage_config = input;
+    } else if (option == "--model-streamer-config") {
+      options.model_streamer_config = input;
     } else {
       throw std::invalid_argument("unknown option: " + std::string(option));
     }
@@ -747,6 +754,32 @@ RunDaemon(const DaemonOptions& options)
 {
   shutting_down.store(false, std::memory_order_relaxed);
   snapshot::pagebroker::FatalCleanupShutdown cleanup_shutdown(shutting_down);
+  // Resolve the entire configuration before exposing a socket or creating
+  // worker threads. Cached native settings cannot be changed per operation.
+  using namespace snapshot::pagebroker;
+  std::optional<S3Config> config;
+  if (!options.storage_config.empty()) {
+    config = ReadS3Config(options.storage_config);
+    if (config->active_transactions >= options.max_concurrent_requests)
+      throw std::invalid_argument("S3 transaction admission must leave a connection available for Abort");
+  }
+  ModelStreamerOptions model_streamer;
+  try {
+    if (!options.model_streamer_config.empty())
+      model_streamer = ReadModelStreamerConfig(options.model_streamer_config);
+    model_streamer = ResolveModelStreamerOptions(std::move(model_streamer), config ? &*config : nullptr);
+  }
+  catch (const std::invalid_argument& error) {
+    // The tuning parser only reports schema-owned field names, never values.
+    std::cerr << error.what() << '\n';
+    return ExitCode::INVALID_ARGUMENTS;
+  }
+  if (config)
+    config->transfer.connection = ResolveS3Credentials(std::move(config->transfer.connection));
+  // Resolve SDK providers before disabling native IMDS lookup: the daemon may
+  // itself obtain its shared credentials from an instance role.
+  ConfigureModelStreamerEnvironment(model_streamer, config ? &*config : nullptr);
+
   if (!RaiseFileDescriptorLimit())
     return ExitCode::FAILURE;
   if (BrokerPidfd() < 0)
@@ -776,7 +809,8 @@ RunDaemon(const DaemonOptions& options)
     return Fail("protect control socket", {errno, std::generic_category()});
   }
   try {
-    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine));
+    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine), std::move(config),
+        kDefaultTransactionLifetime, std::move(model_streamer));
     Serve(listener, broker, options.max_concurrent_requests);
   } catch (const std::exception& failure) {
     std::cerr << "PageBroker: " << failure.what() << '\n';
