@@ -204,7 +204,8 @@ spec:
           env:
             {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
           {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
-          # Standard AWS env var providers; see ResolveS3Credentials in #416.
+          # Standard AWS env var providers, resolved by PageBroker's own S3
+          # credential handling at startup.
           envFrom:
             - secretRef:
                 name: {{ .Values.storage.s3.credentialsSecretRef }}
@@ -215,8 +216,10 @@ spec:
             {{- if eq .Values.storage.type "s3" }}
             # No local checkpoint directory exists in S3 mode; this positional
             # argument is required by every PageBroker build regardless of
-            # backend. Confirm with #416's reviewers that it stays unused
-            # once --storage-config selects the S3 backend.
+            # backend. Unconfirmed: whether the S3 backend actually leaves it
+            # unused once --storage-config selects S3, or expects something
+            # else here. Needs validating against a PageBroker build that
+            # implements the S3 backend before this ships.
             - /var/snapshot/pagebroker-unused-storage-root
             {{- else }}
             - {{ .Values.storage.pvc.basePath | quote }}
