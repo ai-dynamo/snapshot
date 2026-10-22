@@ -348,7 +348,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 				return rt.TerminateContainer(stopCtx, req.ContainerID)
 			}
 		}
-		return RestoreResult{}, failStep(StepRunNSRestore, err)
+		return RestoreResult{}, failStepUnlessNamed(StepRunNSRestore, err)
 	}
 	gpuRestoreComplete = usePageBrokerGPU
 	restoreSource := activeMounts[len(activeMounts)-1]
