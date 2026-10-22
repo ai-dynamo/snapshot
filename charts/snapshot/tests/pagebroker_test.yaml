@@ -429,7 +429,7 @@ tests:
             - --storage-config
             - /etc/snapshot-s3/pagebroker-s3-config.json
 
-  - it: mounts shared S3 credentials as a file into the agent and PageBroker containers
+  - it: mounts the shared S3 credentials file into the PageBroker container only
     template: templates/daemonset.yaml
     set:
       storage.type: s3
@@ -438,12 +438,12 @@ tests:
       storage.s3.bucket: snapshot-bucket
       storage.s3.credentialsSecretRef: snapshot-s3-credentials
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[?(@.name == "agent")].env
           content:
             name: AWS_SHARED_CREDENTIALS_FILE
             value: /etc/snapshot-s3-credentials/credentials
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
           content:
             name: s3-credentials
