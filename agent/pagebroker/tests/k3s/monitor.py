@@ -6,6 +6,7 @@
 from collections import Counter
 from datetime import datetime, timezone
 import json
+from itertools import islice
 import math
 import os
 from pathlib import Path
@@ -39,25 +40,16 @@ def number(values, key, unit=None):
     return value * (1024 if unit == "kB" else 1)
 
 
-class ResourceMonitor:
-    def __init__(self, pid, pidfd, staging, output, interval):
+class ProcessSampler:
+    def __init__(self, pid, pidfd, staging):
         self.pid, self.pidfd = pid, pidfd
         self.staging = Path(staging)
-        self.interval = interval
-        self.started = time.monotonic()
-        self.next_sample = self.started
-        self.samples = 0
-        self.phases = Counter()
-        self.metrics = {}
-        self.error = None
-        self.duration = 0
         # Keep reads tied to this process even if Linux later reuses its PID.
         self.proc = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY)
         try:
             self.check_alive()
             self.start_ticks = int(self.read("stat").rsplit(")", 1)[1].split()[19])
             self.staging_is_mount = self.staging.is_mount()
-            self.output = Path(output).open("x", buffering=1)
         except BaseException:
             os.close(self.proc)
             raise
@@ -76,7 +68,8 @@ class ResourceMonitor:
         rollup = fields(self.read("smaps_rollup"))
         descriptors = os.open("fd", os.O_RDONLY | os.O_DIRECTORY, dir_fd=self.proc)
         try:
-            fd_count = len(os.listdir(descriptors))
+            with os.scandir(descriptors) as entries:
+                fd_count = sum(1 for _ in entries)
         finally:
             os.close(descriptors)
         usage = os.statvfs(self.staging)
@@ -96,6 +89,58 @@ class ResourceMonitor:
         }
         self.check_alive()
         return metrics
+
+    def diagnostics(self):
+        descriptors = os.open("fd", os.O_RDONLY | os.O_DIRECTORY, dir_fd=self.proc)
+        types, names = Counter(), Counter()
+        try:
+            with os.scandir(descriptors) as entries:
+                names_to_read = [entry.name for entry in islice(entries, 4096)]
+            for name in names_to_read:
+                try:
+                    target = os.readlink(name, dir_fd=descriptors)
+                    kind = next((prefix for prefix in ("socket:", "pipe:", "anon_inode:")
+                                 if target.startswith(prefix)), "file")
+                    types[kind] += 1
+                except FileNotFoundError:
+                    types["closed-during-sample"] += 1
+        finally:
+            os.close(descriptors)
+        tasks = os.open("task", os.O_RDONLY | os.O_DIRECTORY, dir_fd=self.proc)
+        try:
+            with os.scandir(tasks) as entries:
+                tids = [entry.name for entry in islice(entries, 4096)]
+            for tid in tids:
+                try:
+                    with os.fdopen(os.open(f"{tid}/comm", os.O_RDONLY, dir_fd=tasks)) as source:
+                        name = source.read(64).strip()
+                    names[name if name in names or len(names) < 64 else "other"] += 1
+                except FileNotFoundError:
+                    names["exited-during-sample"] += 1
+        finally:
+            os.close(tasks)
+        return {"descriptorTypes": dict(types), "threadNames": dict(names)}
+
+    def close(self):
+        os.close(self.proc)
+
+
+class ResourceMonitor(ProcessSampler):
+    def __init__(self, pid, pidfd, staging, output, interval):
+        super().__init__(pid, pidfd, staging)
+        self.interval = interval
+        self.started = time.monotonic()
+        self.next_sample = self.started
+        self.samples = 0
+        self.phases = Counter()
+        self.metrics = {}
+        self.error = None
+        self.duration = 0
+        try:
+            self.output = Path(output).open("x", buffering=1)
+        except BaseException:
+            super().close()
+            raise
 
     def sample(self, phase, force=False):
         now = time.monotonic()
@@ -140,4 +185,4 @@ class ResourceMonitor:
         try:
             self.output.close()
         finally:
-            os.close(self.proc)
+            super().close()
