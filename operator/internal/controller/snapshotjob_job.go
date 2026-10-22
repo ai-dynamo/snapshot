@@ -113,9 +113,12 @@ func injectNonTargetArtifactContract(template *corev1.PodTemplateSpec, policy *s
 				return fmt.Errorf("non-target container %q sets controller-owned environment variable %s", name, env.Name)
 			}
 		}
-		nonTarget.Env = append(nonTarget.Env,
+		// Kubernetes expands env references in declaration order, so caller
+		// variables may refer to these controller-owned values.
+		nonTarget.Env = append([]corev1.EnvVar{
 			corev1.EnvVar{Name: podcontract.SnapshotJobUIDEnv, Value: uid},
-			corev1.EnvVar{Name: podcontract.NonTargetArtifactSubdirEnv, Value: subdir})
+			corev1.EnvVar{Name: podcontract.NonTargetArtifactSubdirEnv, Value: subdir},
+		}, nonTarget.Env...)
 	}
 	return nil
 }

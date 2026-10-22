@@ -13,9 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsvalidation "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/validation"
 	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	structuralcel "k8s.io/apiextensions-apiserver/pkg/apiserver/schema/cel"
 	structuraldefaulting "k8s.io/apiextensions-apiserver/pkg/apiserver/schema/defaulting"
+	structurallisttype "k8s.io/apiextensions-apiserver/pkg/apiserver/schema/listtype"
 	structuralpruning "k8s.io/apiextensions-apiserver/pkg/apiserver/schema/pruning"
 	apivalidation "k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,6 +31,11 @@ func TestSnapshotJobNonTargetArtifactPolicyAdmissionAndCompatibility(t *testing.
 	var crd apiextensionsv1.CustomResourceDefinition
 	require.NoError(t, yaml.Unmarshal([]byte(crds.SnapshotJobCRD()), &crd))
 	require.Len(t, crd.Spec.Versions, 1)
+	var internalCRD apiextensions.CustomResourceDefinition
+	require.NoError(t, apiextensionsv1.Convert_v1_CustomResourceDefinition_To_apiextensions_CustomResourceDefinition(&crd, &internalCRD, nil))
+	internalCRD.Status.StoredVersions = []string{crd.Spec.Versions[0].Name}
+	require.Empty(t, apiextensionsvalidation.ValidateCustomResourceDefinition(context.Background(), &internalCRD),
+		"generated CRD must be accepted by Kubernetes")
 	var schema apiextensions.JSONSchemaProps
 	require.NoError(t, apiextensionsv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(
 		crd.Spec.Versions[0].Schema.OpenAPIV3Schema, &schema, nil))
@@ -65,9 +72,7 @@ func TestSnapshotJobNonTargetArtifactPolicyAdmissionAndCompatibility(t *testing.
 		{"invalid container separator", map[string]any{"containers": []any{"save_artifacts"}, "onFailure": "Cleanup"}, false},
 		{"trailing separator", map[string]any{"containers": []any{"saver-"}, "onFailure": "Cleanup"}, false},
 		{"container name too long", map[string]any{"containers": []any{"saver-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "onFailure": "Cleanup"}, false},
-		// Kubernetes rejects uniqueItems and unbounded cross-list CEL rules here;
-		// the controller rejects these names before it creates the source Job.
-		{"duplicate container", map[string]any{"containers": []any{"saver", "saver"}, "onFailure": "Cleanup"}, true},
+		{"duplicate container", map[string]any{"containers": []any{"saver", "saver"}, "onFailure": "Cleanup"}, false},
 		{"capture target", map[string]any{"containers": []any{"worker"}, "onFailure": "Cleanup"}, true},
 		{"missing container", map[string]any{"containers": []any{"missing"}, "onFailure": "Cleanup"}, true},
 		{"unknown action", map[string]any{"containers": []any{"saver"}, "onFailure": "Delete"}, false},
@@ -80,8 +85,10 @@ func TestSnapshotJobNonTargetArtifactPolicyAdmissionAndCompatibility(t *testing.
 			structuralpruning.Prune(obj, structural, true)
 			structuraldefaulting.Default(obj, structural)
 			errs := apivalidation.ValidateCustomResource(field.NewPath(""), obj, validator)
+			listErrs := structurallisttype.ValidateListSetsAndMaps(field.NewPath(""), structural, obj)
 			celErrs, _ := cel.Validate(context.Background(), field.NewPath(""), structural, obj, nil, 10000000)
-			require.Equal(t, tc.valid, len(errs) == 0 && len(celErrs) == 0, "schema: %v, CEL: %v", errs, celErrs)
+			require.Equal(t, tc.valid, len(errs) == 0 && len(listErrs) == 0 && len(celErrs) == 0,
+				"schema: %v, list: %v, CEL: %v", errs, listErrs, celErrs)
 			if !tc.valid {
 				return
 			}

@@ -89,6 +89,7 @@ spec:
                       type: string
                     minItems: 1
                     type: array
+                    x-kubernetes-list-type: set
                   onFailure:
                     description: OnFailure governs only these containers' UID-owned
                       artifact directory.

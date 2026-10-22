@@ -64,6 +64,19 @@ func TestBuildSourceJobNonTargetArtifactContract(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "saver", legacySnap.Annotations[podcontract.NonTargetArtifactContainersAnnotation])
 
+	withOutputPath := makeJob()
+	withOutputPath.Spec.PodTemplate.Spec.Containers[1].Env = []corev1.EnvVar{{
+		Name: "OUT", Value: "/mnt/$(SNAPSHOT_NON_TARGET_ARTIFACT_SUBDIR)",
+	}}
+	outputJob, err := buildSourceJob(withOutputPath)
+	require.NoError(t, err)
+	outputSaver := requireContainer(t, outputJob.Spec.Template.Spec.Containers, "saver")
+	require.Len(t, outputSaver.Env, 3)
+	assert.Equal(t, podcontract.SnapshotJobUIDEnv, outputSaver.Env[0].Name)
+	assert.Equal(t, podcontract.NonTargetArtifactSubdirEnv, outputSaver.Env[1].Name)
+	assert.Equal(t, "OUT", outputSaver.Env[2].Name)
+	assert.Len(t, withOutputPath.Spec.PodTemplate.Spec.Containers[1].Env, 1, "injection must not mutate the caller's template")
+
 	for _, tc := range []struct {
 		name   string
 		mutate func(*snapshotv1alpha1.SnapshotJob)
