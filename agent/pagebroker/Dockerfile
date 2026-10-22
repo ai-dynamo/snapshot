@@ -153,9 +153,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgtest-dev \
     libprotobuf-dev \
     libssl-dev \
+    openssl \
     pkg-config \
     protobuf-compiler \
     python3 \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=cuda-headers /usr/local/cuda/include/ /opt/cuda/include/
@@ -171,14 +173,12 @@ RUN useradd --create-home --user-group pagebroker-test \
     && chown pagebroker-test:pagebroker-test /src
 COPY --chown=pagebroker-test:pagebroker-test . .
 USER pagebroker-test
-# Run CPU tests unprivileged so directory permissions are enforced. GPU tests
-# are compiled here and run separately.
+# Run CPU and local S3 tests unprivileged so directory permissions are enforced.
+# GPU tests are compiled here and run separately.
 RUN test "$(id -u)" -ne 0 \
     && make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
     && make build/gpu-checkpoint-test build/gpu-transfer-test CUDA_ROOT=/opt/cuda CUDA_LIBRARY_DIR=/opt/cuda/lib64/stubs \
-    && make daemon CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
-    && make s3-test-build CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
-    && make s3-lifetime-test
+    && make daemon CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
 
 # Packaging below needs root to collect libraries and corresponding sources.
 USER root
