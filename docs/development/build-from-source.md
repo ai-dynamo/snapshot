@@ -77,26 +77,10 @@ Common `make` targets from the repo root:
 - `make helm-lint` — lint the Helm chart
 - `make check` — the full pre-merge gate (generate, license headers, fmt, tidy, lint, and more)
 
+The PageBroker image build runs its native `make test` suite, including local S3
+HTTP/TLS and SDK buffer-lifetime tests. Dependencies and fixtures are set up
+automatically; no GPU, cluster, or cloud credentials are needed. These tests also
+run in the `pagebroker-image` CI job.
+
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
-
-### Native S3 read tests
-
-Build the `s3-test` Docker target; it downloads the pinned SDK. Install
-`agent/pagebroker/tests/requirements.txt` in a virtual environment, then run
-`agent/pagebroker/tests/s3_integration.py --image local/pagebroker:s3-test`.
-Add `--tls` to verify the temporary CA and rejection of untrusted TLS. The
-fixture uses disposable local Moto storage and fake credentials. Payloads are
-read by the native Model Streamer plugin. The tests independently compare restored
-bytes with their source fixtures and check sizes, permissions, and error handling.
-PageBroker does not perform application-level payload integrity verification.
-
-The PageBroker image build also runs `make -C agent/pagebroker s3-lifetime-test`.
-This checks the pinned native SDK's CPU/S3 buffer lifetime with a controlled local
-HTTP server: one submission finishes while another remains blocked, and the
-completed buffers become inaccessible before the other submission continues.
-The cases cover success, retry, and a later submission's failure. Each case runs
-in a separate process with a timeout, so a late native memory access or blocked
-teardown fails the test. It requires Python 3 and the installed SDK, without
-additional Python packages, cloud credentials, or a GPU. For an SDK installed
-elsewhere, pass `MODEL_STREAMER_LIB_DIR=/path/to/sdk/lib`.
