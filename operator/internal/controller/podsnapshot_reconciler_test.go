@@ -100,6 +100,27 @@ func reconcileSnapshot(t *testing.T, r *PodSnapshotReconciler, name string) ctrl
 	return res
 }
 
+// The agent reads the work order, not the request, so a per-capture limit is
+// only honoured if it is copied across.
+func TestBuildPodSnapshotContentCarriesTheRetryLimit(t *testing.T) {
+	snap := makeSnapshotForReconcile()
+	snap.Spec.CheckpointRetryLimit = ptr.To(int32(2))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: "pod-uid-9"},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
+	}
+	sr := &PodSnapshotReconciler{}
+
+	content := sr.buildPodSnapshotContent(snap, "content-a", pod)
+
+	require.NotNil(t, content.Spec.CheckpointRetryLimit)
+	assert.Equal(t, int32(2), *content.Spec.CheckpointRetryLimit)
+
+	snap.Spec.CheckpointRetryLimit = nil
+	assert.Nil(t, sr.buildPodSnapshotContent(snap, "content-a", pod).Spec.CheckpointRetryLimit,
+		"absent must stay absent")
+}
+
 func TestSnapshotReconciler_PodUnscheduledBacksOff(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()

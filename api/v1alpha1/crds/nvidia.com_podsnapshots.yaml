@@ -58,6 +58,15 @@ spec:
           spec:
             description: PodSnapshotSpec defines the desired state of PodSnapshot.
             properties:
+              checkpointRetryLimit:
+                description: |-
+                  CheckpointRetryLimit is how many times a failed capture may be retried in
+                  place, over and above the first attempt: 0 means one attempt and no retry.
+                  Unset means this request expressed no preference and the agent's
+                  cluster-wide default applies, which is distinct from an explicit 0.
+                format: int32
+                minimum: 0
+                type: integer
               source:
                 description: |-
                   Source identifies the captured workload. It is a struct (rather than an

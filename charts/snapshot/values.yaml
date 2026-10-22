@@ -264,6 +264,10 @@ config:
   checkpoint:
     # Maximum seconds before the agent marks a checkpoint failed.
     checkpointTimeoutSeconds: 3600
+    # Times a failed capture may be retried in place, beyond the first attempt.
+    # A PodSnapshot can override it with spec.checkpointRetryLimit; 0 keeps
+    # retry opt-in, so upgrading changes no existing capture's behaviour.
+    retryLimit: 0
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed

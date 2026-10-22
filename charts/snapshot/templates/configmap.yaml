@@ -39,6 +39,7 @@ data:
 
     checkpoint:
       checkpointTimeoutSeconds: {{ .Values.config.checkpoint.checkpointTimeoutSeconds }}
+      retryLimit: {{ .Values.config.checkpoint.retryLimit | default 0 }}
 
     restore:
       restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
