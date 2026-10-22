@@ -132,11 +132,15 @@ CheckedRestoreFileSize(uintmax_t bytes)
 }
 
 void
-CreateDirectoryTree(const CheckpointInventory& inventory, const Path& destination)
+CreateDirectoryTree(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
+  cancellation.ThrowIfCancelled();
   fs::create_directory(destination);
-  for (const auto& directory : inventory.directories)
+  for (const auto& directory : inventory.directories) {
+    cancellation.ThrowIfCancelled();
     fs::create_directory(destination / directory.relative_path);
+  }
+  cancellation.ThrowIfCancelled();
 }
 
 void
@@ -150,11 +154,15 @@ CreateEmptyFile(const CheckpointFile& file, const Path& destination)
 }
 
 void
-ApplyTreePermissions(const CheckpointInventory& inventory, const Path& destination)
+ApplyTreePermissions(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
-  for (auto directory = inventory.directories.rbegin(); directory != inventory.directories.rend(); ++directory)
+  for (auto directory = inventory.directories.rbegin(); directory != inventory.directories.rend(); ++directory) {
+    cancellation.ThrowIfCancelled();
     ApplyPermissions(destination / directory->relative_path, directory->permissions);
+  }
+  cancellation.ThrowIfCancelled();
   ApplyPermissions(destination, inventory.root_permissions);
+  cancellation.ThrowIfCancelled();
 }
 }  // namespace
 
@@ -187,6 +195,7 @@ ModelStreamerRestore::StreamerEntry::TryAddFile(const CheckpointFile& file, cons
   const int allocation_error = posix_fallocate(descriptor.get(), 0, static_cast<off_t>(file_bytes));
   if (allocation_error != 0)
     throw std::system_error(allocation_error, std::generic_category(), "allocate restore staging file");
+  cancellation.ThrowIfCancelled();
   void* address = mmap(nullptr, file_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor.get(), 0);
   if (address == MAP_FAILED)
     throw SystemError("map restore staging file");
@@ -704,10 +713,9 @@ ModelStreamerRestore::Stage(const CheckpointInventory& inventory, const Path& de
 {
   cancellation.ThrowIfCancelled();
   ValidateRestoreInventory(inventory);
-  CreateDirectoryTree(inventory, destination);
+  CreateDirectoryTree(inventory, destination, cancellation);
   std::call_once(start_once_, [this] { worker_ = std::thread([this] { Run(); }); });
   RestoreFiles(inventory, destination, cancellation);
-  cancellation.ThrowIfCancelled();
-  ApplyTreePermissions(inventory, destination);
+  ApplyTreePermissions(inventory, destination, cancellation);
 }
 }  // namespace snapshot::pagebroker
