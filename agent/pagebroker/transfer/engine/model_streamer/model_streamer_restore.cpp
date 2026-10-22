@@ -145,11 +145,11 @@ void
 CreateDirectoryTree(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
   fs::create_directory(destination);
-  for (const auto& directory : inventory.directories) {
-    cancellation.ThrowIfCancelled();
-    fs::create_directory(destination / directory.relative_path);
-  }
   cancellation.ThrowIfCancelled();
+  for (const auto& directory : inventory.directories) {
+    fs::create_directory(destination / directory.relative_path);
+    cancellation.ThrowIfCancelled();
+  }
 }
 
 void
