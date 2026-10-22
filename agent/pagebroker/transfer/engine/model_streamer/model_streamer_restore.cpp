@@ -28,6 +28,13 @@
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
+// Credential keys documented by Model Streamer's public C API.
+constexpr char kRegionKey[] = "region";
+constexpr char kEndpointKey[] = "endpoint";
+constexpr char kAccessKeyIdKey[] = "access_key_id";
+constexpr char kSecretAccessKeyKey[] = "secret_access_key";
+constexpr char kSessionTokenKey[] = "session_token";
+
 // Use the Python streamer's default per-submission target: one quarter of its
 // 40 GB read-ahead budget. A single larger file is submitted on its own.
 constexpr uintmax_t kSubmissionByteBudget = 10'000'000'000;
@@ -303,11 +310,11 @@ ModelStreamerRestore::Start()
       values.push_back(value.c_str());
     }
   };
-  append("region", options_.region);
-  append("endpoint", options_.endpoint);
-  append("access_key_id", options_.access_key_id);
-  append("secret_access_key", options_.secret_access_key);
-  append("session_token", options_.session_token);
+  append(kRegionKey, options_.region);
+  append(kEndpointKey, options_.endpoint);
+  append(kAccessKeyIdKey, options_.access_key_id);
+  append(kSecretAccessKeyKey, options_.secret_access_key);
+  append(kSessionTokenKey, options_.session_token);
   if (!keys.empty()) {
     const int status = runai_file_streamer_set_credentials(
         value_, keys.data(), values.data(), static_cast<unsigned>(keys.size()));
