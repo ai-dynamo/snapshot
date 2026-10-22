@@ -15,3 +15,14 @@
 !agent/pagebroker/tests/k3s/
 !agent/pagebroker/tests/k3s/run.py
 !agent/pagebroker/tests/k3s/monitor.py
+!agent/pagebroker/tests/k3s/stress.py
+!agent/pagebroker/tests/k3s/stress_config.py
+!agent/pagebroker/tests/k3s/stress_control.py
+!agent/pagebroker/tests/k3s/stress_supervisor.py
+!agent/pagebroker/tests/k3s/stress_evidence.py
+!agent/pagebroker/tests/k3s/stress_analysis.py
+!agent/pagebroker/tests/k3s/stress_cgroup.py
+!agent/pagebroker/tests/k3s/stress_storage.py
+!agent/pagebroker/tests/k3s/stress_export.py
+!agent/pagebroker/tests/k3s/s3_cleanup.py
+!agent/pagebroker/tests/k3s/stress-requirements.txt
