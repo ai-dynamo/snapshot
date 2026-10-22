@@ -147,9 +147,13 @@ class FaultServiceTest(unittest.TestCase):
         accepted = []
 
         def backend(environment, start_response):
-            accepted.append(True)
             start_response("200 OK", [("Content-Length", "2")])
-            return [b"ok"]
+
+            def body():
+                yield b"ok"
+                accepted.append(True)
+
+            return body()
 
         service = s3_integration.FaultService(backend)
         statuses = []
