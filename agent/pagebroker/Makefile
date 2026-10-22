@@ -21,7 +21,9 @@ TRANSFER_TEST_SOURCES := tests/transaction_test.cpp transfer/engine/model_stream
 MODEL_STREAMER_RECOVERY_TEST_SOURCES = $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_transfer_engine_test.cpp
 MODEL_STREAMER_SESSION_TEST_SOURCES := $(RESTORE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_session_test.cpp
 # Inject filesystem failures and cancellation deterministically in the session tests.
+# The clock wrapper lets validation observe cancellation without timing races.
 MODEL_STREAMER_SESSION_TEST_WRAP_FLAGS := -Wl,--wrap=posix_fallocate,--wrap=mmap,--wrap=fchmod \
+	-Wl,--wrap=_ZNSt6chrono3_V212steady_clock3nowEv \
 	-Wl,--wrap=_ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE \
 	-Wl,--wrap=_ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE
 TRANSFER_FLAGS := $(MODEL_STREAMER_FLAGS)
