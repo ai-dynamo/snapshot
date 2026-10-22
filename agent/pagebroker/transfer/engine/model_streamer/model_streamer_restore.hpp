@@ -38,8 +38,9 @@ struct ModelStreamerSessionOptions {
 
 // Materializes restore inventories through Model Streamer while one worker
 // coordinates multiple in-flight submissions and their responses. Concurrent
-// Stage calls must use separate destinations. Only one coordinator may run a
-// native session per process; independent concurrent coordinators are unsupported.
+// Stage calls must use separate destinations. Healthy native sessions stay open
+// between restores. Only one coordinator may run a native session per process;
+// independent concurrent coordinators are unsupported.
 // A failed coordinator may be replaced after its native session has stopped.
 class ModelStreamerRestore {
  public:
@@ -142,7 +143,7 @@ class ModelStreamerRestore {
   // Worker-only, after admission closes: removes an entry under pending_mutex_
   // without allocating during failure cleanup. Complete it after releasing the lock.
   std::shared_ptr<StreamerEntry> TakePendingSubmission();
-  // Admits a bounded group of queued submissions into one native session.
+  // Admits queued submissions within the outstanding count and byte limits.
   void SubmitPending();
   // Queued entries have no native readers and can be cancelled independently.
   void DiscardInterruptedPending();
@@ -158,12 +159,12 @@ class ModelStreamerRestore {
   // Throws when the error requires ending the native session.
   std::uint64_t SubmitToStreamer(StreamerEntry& entry);
   // Ends a drained session before releasing failed submissions' destinations.
-  void FinishSession();
+  void FinishFailedSession();
   // Applies one response to an entry and reports whether the submission finished.
   bool AcceptEntry(StreamerEntry& entry, const StreamerResponse& response);
   // Completes a failed entry using its own cancellation reason, if interrupted.
   void FailEntry(StreamerEntry& entry, std::exception_ptr error) noexcept;
-  // Admits pending entries, polls one response, and finishes a drained session.
+  // Admits pending entries, polls one response, and drains failed submissions.
   void ProcessWork();
   // Ends the native Model Streamer session if it is running.
   void StopStreamer() noexcept;
@@ -184,8 +185,7 @@ class ModelStreamerRestore {
   std::deque<std::shared_ptr<StreamerEntry>> pending_;
   // Worker-owned state. No pending_mutex_ is held during native calls.
   std::unordered_map<std::uint64_t, std::shared_ptr<StreamerEntry>> active_;
-  uintmax_t session_bytes_ = 0;
-  std::size_t session_submissions_ = 0;
+  uintmax_t active_bytes_ = 0;
   std::size_t unfinished_ = 0;
   std::atomic<bool> failed_ = false;
 };
