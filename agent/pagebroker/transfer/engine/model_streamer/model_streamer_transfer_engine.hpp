@@ -15,7 +15,7 @@ namespace snapshot::pagebroker {
 class ModelStreamerTransferEngine final : public TransferEngine {
  public:
   explicit ModelStreamerTransferEngine(ModelStreamerSessionOptions options = {},
-      std::chrono::milliseconds restore_timeout = std::chrono::hours(2));
+      std::chrono::milliseconds restore_timeout = kDefaultModelStreamerSubmissionTimeout);
 
   IoEngine type() const override;
 
