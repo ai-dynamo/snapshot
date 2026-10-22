@@ -44,6 +44,23 @@ using namespace snapshot::pagebroker;
 
 namespace {
 
+// Set only in the child, before RunDaemon starts its handler threads.
+int restore_started_fd = -1;
+
+S3Config TestS3Config()
+{
+  S3Config config;
+  config.store_id = "test-store";
+  config.bucket = "test-bucket";
+  config.transfer.connection.region = "us-east-1";
+  config.transfer.connection.endpoint = "https://unused.invalid";
+  const auto* addressing = std::getenv(kS3VirtualAddressingEnv);
+  config.transfer.connection.use_virtual_addressing = !addressing || std::string(addressing) != kS3VirtualAddressingDisabled;
+  if (const auto* ca = std::getenv(kAwsCaBundleEnv))
+    config.transfer.connection.ca_file = ca;
+  return config;
+}
+
 }  // namespace
 
 namespace {
@@ -243,11 +260,14 @@ TEST(BrokerStartupTest, PreservesExternalTargetsOfStagingLinks)
   const auto outside = root.path() / "published";
   const auto staging = root.path() / "staging";
   fs::create_directories(outside);
+  fs::create_directories(outside / "restore");
+  std::ofstream(outside / "restore/image") << "external staging";
   std::ofstream(outside / "image") << "published";
   fs::permissions(outside, fs::perms::owner_read | fs::perms::owner_exec);
   fs::permissions(outside / "image", fs::perms::owner_read);
   fs::create_directories(staging / "checkpoint/stale");
   fs::create_directory_symlink(outside, staging / "restore");
+  fs::create_directory_symlink(outside, staging / "s3");
   fs::create_directory_symlink(outside, staging / "checkpoint/stale/directory");
   fs::create_symlink(outside / "image", staging / "checkpoint/stale/file");
   fs::create_hard_link(outside / "image", staging / "checkpoint/stale/hard-link");
@@ -258,6 +278,53 @@ TEST(BrokerStartupTest, PreservesExternalTargetsOfStagingLinks)
   EXPECT_EQ(fs::status(outside).permissions(), fs::perms::owner_read | fs::perms::owner_exec);
   EXPECT_EQ(fs::status(outside / "image").permissions(), fs::perms::owner_read);
   EXPECT_EQ(fs::file_size(outside / "image"), 9u);
+  EXPECT_EQ(fs::file_size(outside / "restore/image"), 16u);
+  EXPECT_FALSE(fs::is_symlink(staging / "s3"));
+}
+
+TEST(BrokerStartupTest, CleansBothNamespacesWhenSwitchingStorageModes)
+{
+  for (const bool use_s3 : {false, true}) {
+    SCOPED_TRACE(use_s3 ? "POSIX to S3" : "S3 to POSIX");
+    test::TemporaryDirectory root;
+    const auto staging = root.path() / "staging";
+    // Both namespaces can contain leftovers from earlier daemon instances.
+    for (const auto& namespace_root : {staging, staging / "s3"}) {
+      for (const auto* kind : {"restore", "checkpoint"}) {
+        const auto stale = namespace_root / kind / "interrupted";
+        fs::create_directories(stale / "nested");
+        std::ofstream(stale / "nested/image") << "unfinished";
+        fs::permissions(stale / "nested", fs::perms::none);
+        fs::permissions(stale, fs::perms::owner_read | fs::perms::owner_exec);
+      }
+      std::ofstream(namespace_root / "unrelated") << "keep";
+    }
+    Broker restarted(staging, root.path() / "storage", nullptr,
+                     use_s3 ? std::optional(TestS3Config()) : std::nullopt);
+    const auto active = use_s3 ? staging / "s3" : staging;
+    const auto inactive = use_s3 ? staging : staging / "s3";
+    for (const auto* kind : {"restore", "checkpoint"}) {
+      EXPECT_TRUE(fs::is_empty(active / kind));
+      EXPECT_FALSE(fs::exists(inactive / kind));
+    }
+    EXPECT_EQ(fs::file_size(staging / "unrelated"), 4u);
+    EXPECT_EQ(fs::file_size(staging / "s3/unrelated"), 4u);
+  }
+}
+
+TEST(BrokerStartupTest, PreservesStagingWhenEngineConfigurationIsInvalid)
+{
+  test::TemporaryDirectory root;
+  const auto staging = root.path() / "staging";
+  for (const auto& namespace_root : {staging, staging / "s3"}) {
+    fs::create_directories(namespace_root / "restore");
+    std::ofstream(namespace_root / "restore/image") << "keep";
+  }
+  auto config = TestS3Config();
+  config.transfer.restore_timeout = std::chrono::milliseconds::zero();
+  EXPECT_THROW((Broker(staging, root.path(), nullptr, config)), std::invalid_argument);
+  EXPECT_EQ(fs::file_size(staging / "restore/image"), 4u);
+  EXPECT_EQ(fs::file_size(staging / "s3/restore/image"), 4u);
 }
 
 TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
@@ -1007,6 +1074,37 @@ TEST_F(BrokerTest, RejectsArtifactRestoreBeforeReadingThenAllowsLegacyFallback)
   EXPECT_TRUE(broker().HandleRequest(request).has_staged_restore_directory());
 }
 
+TEST_F(BrokerTest, RejectsInvalidS3DescriptorsBeforeAllocatingRestoreOrMetadataTransactions)
+{
+  broker_.emplace(root_ / "tmpfs", root_ / "storage", nullptr, TestS3Config());
+  struct Case {
+    const char* name;
+    const char* store;
+    std::string handle;
+    Failure::Code code;
+  };
+  for (const auto& invalid : {
+      Case{"missing-store", "", std::string(64, 'a'), Failure::INVALID_REQUEST},
+      Case{"malformed-handle", "test-store", "../foreign", Failure::INVALID_REQUEST},
+      Case{"foreign-store", "other-store", std::string(64, 'a'), Failure::STORE_MISMATCH}}) {
+    SCOPED_TRACE(invalid.name);
+    for (const bool metadata : {false, true}) {
+      SCOPED_TRACE(metadata ? "metadata" : "restore");
+      auto request = RequestFor(invalid.name);
+      auto* artifact = metadata ? request.mutable_get_artifact_metadata()->mutable_artifact()
+                                : request.mutable_staged_restore()->mutable_artifact();
+      artifact->set_store_id(invalid.store);
+      artifact->set_artifact_handle(invalid.handle);
+      const auto rejected = broker().HandleRequest(request);
+      ASSERT_TRUE(rejected.has_failure());
+      EXPECT_EQ(rejected.failure().code(), invalid.code);
+      EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "restore" / request.transaction_id()));
+      request.mutable_commit();
+      EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+    }
+  }
+}
+
 TEST_F(BrokerTest, RejectsUnsupportedArtifactSelectorsWithOrWithoutEngine)
 {
   auto request = RequestFor("empty-target");
@@ -1035,7 +1133,7 @@ TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
   const auto rejected = broker().HandleRequest(request);
   ASSERT_TRUE(rejected.has_failure());
   EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
-  EXPECT_EQ(rejected.failure().message(), "artifact metadata retrieval is not implemented");
+  EXPECT_EQ(rejected.failure().message(), "configured I/O engine not found");
   EXPECT_EQ(rejected.request_id(), request.request_id());
   EXPECT_EQ(rejected.transaction_id(), request.transaction_id());
 

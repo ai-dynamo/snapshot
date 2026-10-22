@@ -19,12 +19,14 @@
 #include "restore_transaction_descriptor.hpp"
 #include "transaction.hpp"
 #include "transaction_defaults.hpp"
+#include "s3_config.hpp"
 #include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class Broker {
  public:
   Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine = nullptr,
+      std::optional<S3Config> config = std::nullopt,
       std::chrono::seconds lifetime = kDefaultTransactionLifetime);
   ~Broker();
   Response HandleGpuRequest(const Request& request, CancellationPtr cancellation,
@@ -50,6 +52,8 @@ class Broker {
 
   const TransferEngine& Engine(IoEngine engine_type) const;
   const TransferEngine& Engine(const IOEngine& engine) const;
+  const TransferEngine& ArtifactEngine(const IOEngine* engine = nullptr) const;
+  Response Metadata(const Request& request);
   TransactionHandle CreateOrGetTransaction(const std::string& transaction_id);
   TransactionHandle FindTransaction(const std::string& transaction_id);
   // Acquires transactions_mutex_ and removes only the matching transaction instance.
