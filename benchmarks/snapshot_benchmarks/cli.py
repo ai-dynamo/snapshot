@@ -295,6 +295,11 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--out", default=None, help="Write to this file instead of stdout.")
     report_parser.set_defaults(func=cmd_report)
 
+    # Registration imports no SDK and the handler performs no cluster setup.
+    from snapshot_benchmarks.pagebroker import add_parser
+
+    add_parser(subparsers)
+
     return parser
 
 
