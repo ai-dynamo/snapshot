@@ -168,6 +168,15 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- define "snapshot.pageBrokerControlPath" -}}/pagebroker/control{{- end -}}
 {{- define "snapshot.pageBrokerStagingPath" -}}/pagebroker/staging{{- end -}}
 
+{{/* Name of the ConfigMap the operator writes PageBroker's resolved S3
+     configuration into (operator/cmd/manager/pagebroker_storage_config.go).
+     Referenced from the DaemonSet volume, the operator Deployment's args and
+     its RBAC Role's resourceNames: keep all three in sync through this define
+     rather than spelling the name out independently in each. */}}
+{{- define "snapshot.pageBrokerS3ConfigName" -}}
+{{- printf "%s-pagebroker-storage-config" (include "snapshot.fullname" .) -}}
+{{- end -}}
+
 {{/* Driver access shared by the agent and PageBroker. */}}
 {{- define "snapshot.nvidiaEnvironment" -}}
 - name: NVIDIA_VISIBLE_DEVICES

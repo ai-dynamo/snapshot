@@ -19,6 +19,7 @@ import (
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/controller"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 // version is overridable at build time via -ldflags "-X main.version=<tag>".
@@ -29,13 +30,16 @@ func main() {
 
 	storageConfigPath := flag.String("snapshot-storage-config", "", "Path to resolved storage configuration shared with PageBroker")
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
+	artifactCleanupS3CredentialsPath, artifactCleanupS3CABundlePath := bindArtifactCleanupS3Flags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
 	bindNewContents := flag.Bool("bind-new-contents", false,
 		"Bind new content to the configured store after all agents support artifact addressing")
 	pageBrokerS3ConfigNamespace := flag.String("pagebroker-s3-config-namespace", "",
-		"Namespace of the ConfigMap PageBroker reads its S3 configuration from")
-	pageBrokerS3ConfigName := flag.String("pagebroker-s3-config-name", "",
+		"Namespace of the ConfigMap PageBroker reads its S3 configuration from; defaults to POD_NAMESPACE")
+	pageBrokerS3ConfigName := flag.String("pagebroker-s3-config-name", DefaultPageBrokerS3ConfigName,
 		"Name of the ConfigMap PageBroker reads its S3 configuration from")
+	releaseName := flag.String("release-name", "",
+		"Helm release name, used to label the PageBroker S3 configuration ConfigMap this binary writes outside Helm's own apply step")
 	flag.Parse()
 	storageCfg, storeID := mustStorageConfig(*storageConfigPath)
 	captureStoreID, err := newContentStoreID(storeID, *bindNewContents)
@@ -43,10 +47,24 @@ func main() {
 		ctrl.Log.Error(err, "invalid content binding configuration")
 		os.Exit(1)
 	}
-	if storageCfg.S3 != nil && (*pageBrokerS3ConfigNamespace == "" || *pageBrokerS3ConfigName == "") {
-		ctrl.Log.Error(fmt.Errorf("missing flag"),
-			"pagebroker-s3-config-namespace and pagebroker-s3-config-name are required with an S3 storage configuration")
-		os.Exit(1)
+	if *pageBrokerS3ConfigNamespace == "" {
+		*pageBrokerS3ConfigNamespace = os.Getenv("POD_NAMESPACE")
+	}
+	if storageCfg.S3 != nil {
+		if *pageBrokerS3ConfigNamespace == "" {
+			ctrl.Log.Error(fmt.Errorf("missing namespace"),
+				"pagebroker-s3-config-namespace is required with an S3 storage configuration "+
+					"when POD_NAMESPACE is not set")
+			os.Exit(1)
+		}
+		artifactCleanupConfig.S3 = &operatortypes.S3Config{
+			Bucket:          storageCfg.S3.Bucket,
+			Prefix:          storageCfg.S3.Prefix,
+			Region:          storageCfg.S3.Region,
+			Endpoint:        storageCfg.S3.Endpoint,
+			CredentialsPath: *artifactCleanupS3CredentialsPath,
+			CABundlePath:    *artifactCleanupS3CABundlePath,
+		}
 	}
 	artifactCleanupConfig.StoreID = storeID
 	if err := artifactCleanupConfig.Validate(); err != nil {
@@ -102,8 +120,12 @@ func main() {
 			ctrl.Log.Error(err, "unable to construct client for PageBroker S3 configuration")
 			os.Exit(1)
 		}
+		labels := map[string]string{"app.kubernetes.io/part-of": "snapshot", "app.kubernetes.io/managed-by": "Helm"}
+		if *releaseName != "" {
+			labels["app.kubernetes.io/instance"] = *releaseName
+		}
 		if err := ensurePageBrokerS3Config(context.Background(), directClient,
-			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, *storageCfg.S3, storeID); err != nil {
+			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, labels, *storageCfg.S3, storeID); err != nil {
 			ctrl.Log.Error(err, "unable to write PageBroker S3 configuration")
 			os.Exit(1)
 		}

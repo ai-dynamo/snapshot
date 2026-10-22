@@ -229,12 +229,11 @@ spec:
             - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
             - --custom-storage-max-pinned-bytes
             - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
-            {{- if .Values.pageBroker.artifactAddressing }}
+            {{- if and .Values.pageBroker.artifactAddressing (eq .Values.storage.type "pvc") }}
             # Enable only with a broker implementing the PVC artifact backend.
             - --storage-config
             - /etc/snapshot/storage.yaml
-            {{- end }}
-            {{- if eq .Values.storage.type "s3" }}
+            {{- else if eq .Values.storage.type "s3" }}
             # Resolved by the operator, not rendered by this chart: the JSON
             # file's storeId requires the Go identity computation the chart
             # cannot reproduce. See operator/cmd/manager/pagebroker_storage_config.go.
@@ -299,7 +298,7 @@ spec:
         # rather than silently starting PageBroker without a storage config.
         - name: pagebroker-s3-config
           configMap:
-            name: {{ include "snapshot.fullname" . }}-pagebroker-storage-config
+            name: {{ include "snapshot.pageBrokerS3ConfigName" . | quote }}
         {{- end }}
         # Runtime socket directory (read-write for checkpoint operations).
         # Same path inside and on the host so the agent dials runtime.socketPath

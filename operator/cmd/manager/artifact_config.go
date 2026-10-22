@@ -26,3 +26,14 @@ func bindArtifactCleanupFlags(flags *flag.FlagSet) *operatortypes.ArtifactCleanu
 		"Configured storage backend maintenance routes work items to, matching storage.type")
 	return cfg
 }
+
+// bindArtifactCleanupS3Flags binds the S3 maintenance backend's own
+// credential settings, which the shared storage.yaml identity fields do not
+// cover: the maintenance client authenticates independently of PageBroker.
+func bindArtifactCleanupS3Flags(flags *flag.FlagSet) (credentialsPath, caBundlePath *string) {
+	credentialsPath = flags.String("artifact-cleanup-s3-credentials-path", "",
+		"Path to a shared AWS credentials file for the S3 maintenance backend")
+	caBundlePath = flags.String("artifact-cleanup-s3-ca-bundle-path", "",
+		"Optional path to a CA bundle for the S3 maintenance backend's endpoint")
+	return credentialsPath, caBundlePath
+}
