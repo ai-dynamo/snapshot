@@ -1036,8 +1036,11 @@ TEST_F(ModelStreamerSessionTest, TerminalFailureDrainsActiveAndQueuedRestores)
   EXPECT_EQ(state.ends, 1U);
 }
 
-TEST_F(ModelStreamerSessionTest, QueuedDeadlineDoesNotWaitForOrStopActiveReads)
+class QueuedCancellationTest : public ModelStreamerSessionTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(QueuedCancellationTest, DoesNotWaitForOrStopActiveReads)
 {
+  const bool deadline = GetParam();
   state.sparse_allocations = true;
   state.allow_responses = false;
   ModelStreamerRestore restore;
@@ -1049,9 +1052,13 @@ TEST_F(ModelStreamerSessionTest, QueuedDeadlineDoesNotWaitForOrStopActiveReads)
     EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted == 1; }));
   }
   Cancellation cancellation;
-  cancellation = cancellation.WithDeadline(Cancellation::Clock::now() + 50ms);
+  if (deadline)
+    cancellation = cancellation.WithDeadline(Cancellation::Clock::now() + 2s);
   auto queued = std::async(std::launch::async, [&] { restore.Stage(inventory, root_ / "queued", cancellation); });
-  const auto queued_status = queued.wait_for(2s);
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::WaitForPending(restore, 1));
+  if (!deadline)
+    cancellation.Cancel();
+  const auto queued_status = queued.wait_for(5s);
   EXPECT_EQ(queued_status, std::future_status::ready);
   EXPECT_EQ(active.wait_for(0ms), std::future_status::timeout);
   {
@@ -1061,10 +1068,14 @@ TEST_F(ModelStreamerSessionTest, QueuedDeadlineDoesNotWaitForOrStopActiveReads)
     state.allow_responses = true;
     state.changed.notify_all();
   }
-  EXPECT_THROW(queued.get(), CancellationError);
+  ExpectCancellation(queued, deadline ? CancellationError::Reason::DEADLINE_EXCEEDED :
+                                      CancellationError::Reason::CANCELLED);
   EXPECT_NO_THROW(active.get());
   EXPECT_FALSE(restore.Failed());
+  EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "success"));
 }
+
+INSTANTIATE_TEST_SUITE_P(CancellationCauses, QueuedCancellationTest, ::testing::Bool());
 
 TEST_F(ModelStreamerSessionTest, SubmissionTimeoutDrainsBeforeReturning)
 {
@@ -1175,13 +1186,16 @@ TEST_P(SharedSessionCancellationTest, ReportsEachRequestsOwnCancellationAfterDra
 INSTANTIATE_TEST_SUITE_P(CancellationCauses, SharedSessionCancellationTest, ::testing::Bool(),
     [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "Deadline" : "ExplicitStop"; });
 
-TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator)
+class StartupCancellationTest : public ModelStreamerSessionTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(StartupCancellationTest, DoesNotFailCoordinator)
 {
+  const bool deadline = GetParam();
   state.hold_start = true;
   Cancellation stop;
   ModelStreamerRestore restore;
   Cancellation cancellation;
-  cancellation = stop;
+  cancellation = deadline ? stop.WithDeadline(Cancellation::Clock::now() + 2s) : stop;
   auto cancelled = std::async(std::launch::async, [&] {
     restore.Stage(Inventory(), root_ / "cancelled", cancellation);
   });
@@ -1189,15 +1203,17 @@ TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator
     std::unique_lock lock(state.mutex);
     EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.starts == 1; }));
   }
-  stop.Cancel();
-  EXPECT_EQ(cancelled.wait_for(2s), std::future_status::ready);
+  if (!deadline)
+    stop.Cancel();
+  EXPECT_EQ(cancelled.wait_for(5s), std::future_status::ready);
   {
     std::lock_guard lock(state.mutex);
     EXPECT_EQ(state.submitted, 0U);
     state.hold_start = false;
     state.changed.notify_all();
   }
-  EXPECT_THROW(cancelled.get(), CancellationError);
+  ExpectCancellation(cancelled, deadline ? CancellationError::Reason::DEADLINE_EXCEEDED :
+                                         CancellationError::Reason::CANCELLED);
   EXPECT_EQ(state.submitted, 0U);
   EXPECT_FALSE(restore.Failed());
   EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "success"));
@@ -1205,6 +1221,8 @@ TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator
   EXPECT_EQ(state.starts, 1U);
   EXPECT_EQ(state.ends, 0U);
 }
+
+INSTANTIATE_TEST_SUITE_P(CancellationCauses, StartupCancellationTest, ::testing::Bool());
 
 // Exercise explicit cancellation and deadline expiry while end() blocks the worker.
 class QueuedTeardownCancellationTest : public ModelStreamerSessionTest,
