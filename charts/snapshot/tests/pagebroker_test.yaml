@@ -442,13 +442,12 @@ tests:
           path: spec.template.spec.containers[?(@.name == "agent")].env
           content:
             name: AWS_SHARED_CREDENTIALS_FILE
-            value: /etc/snapshot-s3-credentials/credentials
+          any: true
       - notContains:
           path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
           content:
             name: s3-credentials
-            mountPath: /etc/snapshot-s3-credentials
-            readOnly: true
+          any: true
       - contains:
           path: spec.template.spec.containers[?(@.name == "pagebroker")].env
           content:
