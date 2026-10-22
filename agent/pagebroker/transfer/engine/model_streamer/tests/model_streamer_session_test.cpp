@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -91,6 +92,8 @@ struct FakeState {
   unsigned mappings = 0;
   int allocated_descriptor = -1;
   std::vector<Path> permission_paths;
+  unsigned permission_calls = 0;
+  unsigned fail_permission_call = 0;
   int start_status = 0;
   bool return_start_handle = true;
   int credential_status = 0;
@@ -131,6 +134,19 @@ bool HasMapping(const Path& path)
   return false;
 }
 
+// Tests run sequentially. Declare before the coordinator so its worker joins
+// before the process-wide mask is restored, including on assertion failure.
+class ScopedUmask {
+ public:
+  explicit ScopedUmask(mode_t mask) : previous_(umask(mask)) {}
+  ~ScopedUmask() { umask(previous_); }
+  ScopedUmask(const ScopedUmask&) = delete;
+  ScopedUmask& operator=(const ScopedUmask&) = delete;
+
+ private:
+  mode_t previous_;
+};
+
 class ModelStreamerSessionTest : public ::testing::Test {
  protected:
   void SetUp() override
@@ -151,6 +167,7 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.mappings = 0;
     state.allocated_descriptor = -1;
     state.permission_paths.clear();
+    state.permission_calls = state.fail_permission_call = 0;
     state.start_status = state.credential_status = 0;
     state.request_status = RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
     state.return_submission_id = true;
@@ -274,6 +291,20 @@ extern "C" int __wrap_posix_fallocate(int descriptor, off_t offset, off_t length
     state.changed.notify_all();
   }
   return result;
+}
+
+extern "C" int __real_fchmod(int descriptor, mode_t mode);
+
+extern "C" int __wrap_fchmod(int descriptor, mode_t mode)
+{
+  {
+    std::lock_guard lock(state.mutex);
+    if (++state.permission_calls == state.fail_permission_call) {
+      errno = EACCES;
+      return -1;
+    }
+  }
+  return __real_fchmod(descriptor, mode);
 }
 
 extern "C" int runai_file_streamer_start(void** value)
@@ -606,6 +637,91 @@ TEST_F(ModelStreamerSessionTest, AllocationFailureDoesNotSubmitNativeWritesAndAl
   EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "retry"));
   EXPECT_EQ(state.submitted, 1U);
 }
+
+TEST_F(ModelStreamerSessionTest, SetsFilePermissionsBeforeSubmissionRegardlessOfUmask)
+{
+  ScopedUmask mask(0077);
+  state.hold_request = true;
+  ModelStreamerRestore restore;
+  const std::vector<fs::perms> modes{
+      fs::perms::none, fs::perms::owner_read,
+      fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read,
+      fs::perms::owner_all | fs::perms::group_read | fs::perms::others_read,
+      fs::perms::unknown};
+  auto inventory = Inventory(2 * modes.size());
+  for (std::size_t i = 0; i < modes.size(); ++i) {
+    inventory.files[2 * i].permissions = modes[i];
+    inventory.files[2 * i + 1].permissions = modes[i];
+    inventory.files[2 * i + 1].size_bytes = 0;
+  }
+  auto result = std::async(std::launch::async, [&] { restore.Stage(inventory, root_ / "permissions"); });
+  {
+    std::unique_lock lock(state.mutex);
+    const bool submitting = state.changed.wait_for(lock, 5s, [] { return state.requests_entered == 1; });
+    EXPECT_TRUE(submitting);
+    if (submitting) {
+      // The fake has not written any data yet. Checking only after Stage would
+      // also pass with the old second permission loop.
+      EXPECT_EQ(state.submitted, 0U);
+      for (const auto& file : inventory.files) {
+        const auto expected = file.permissions == fs::perms::unknown ?
+            fs::perms::owner_read | fs::perms::owner_write : file.permissions;
+        EXPECT_EQ(fs::status(root_ / "permissions" / file.relative_path).permissions(), expected);
+      }
+      EXPECT_EQ(state.permission_calls, 8U);  // Unknown modes leave creation permissions intact.
+    }
+    state.hold_request = false;
+    state.changed.notify_all();
+  }
+  ASSERT_NO_THROW(result.get());
+  EXPECT_FALSE(HasMapping(root_ / "permissions"));
+  for (const auto& file : inventory.files) {
+    const auto path = root_ / "permissions" / file.relative_path;
+    const auto expected = file.permissions == fs::perms::unknown ?
+        fs::perms::owner_read | fs::perms::owner_write : file.permissions;
+    EXPECT_EQ(fs::status(path).permissions(), expected);
+    if (file.size_bytes != 0) {
+      // Grant test-only read access after checking the final mode, including 0000.
+      fs::permissions(path, fs::perms::owner_read, fs::perm_options::add);
+      char data = 0;
+      std::ifstream(path).get(data);
+      EXPECT_EQ(data, 'd');
+    }
+  }
+}
+
+class FilePermissionFailureTest : public ModelStreamerSessionTest,
+                                  public ::testing::WithParamInterface<bool> {};
+
+TEST_P(FilePermissionFailureTest, ReleasesBatchMappingsWithoutSubmittingAndAllowsRetry)
+{
+  auto inventory = Inventory(2);
+  for (auto& file : inventory.files)
+    file.permissions = fs::perms::owner_read;
+  if (GetParam())
+    inventory.files.back().size_bytes = 0;
+  state.fail_permission_call = 2;
+  ModelStreamerRestore restore;
+  try {
+    restore.Stage(inventory, root_ / "failed");
+    FAIL() << "restore ignored the permission-setting failure";
+  }
+  catch (const std::system_error& error) {
+    EXPECT_EQ(error.code(), std::errc::permission_denied);
+  }
+  EXPECT_EQ(state.permission_calls, 2U);
+  EXPECT_EQ(state.starts, 0U);
+  EXPECT_EQ(state.submitted, 0U);
+  EXPECT_FALSE(HasMapping(root_ / "failed"));
+  EXPECT_FALSE(restore.Failed());
+  state.fail_permission_call = 0;
+  EXPECT_NO_THROW(restore.Stage(inventory, root_ / "retry"));
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_FALSE(HasMapping(root_ / "retry"));
+}
+
+INSTANTIATE_TEST_SUITE_P(FileKinds, FilePermissionFailureTest, ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "Empty" : "Mapped"; });
 
 TEST_F(ModelStreamerSessionTest, RestoresManyFilesWithStableSourcesAndPermissions)
 {
