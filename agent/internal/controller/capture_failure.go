@@ -33,11 +33,12 @@ type captureFailure struct {
 // step failed, so it never concludes that a dump completed; a caller that knows
 // the step can narrow this further.
 func classifyCaptureFailure(err error) captureFailure {
-	if errors.Is(err, context.DeadlineExceeded) {
+	cause := captureCause(err)
+	if errors.Is(cause, context.DeadlineExceeded) {
 		return captureFailure{reason: reasonCheckpointTimeout}
 	}
 	var failure *pagebroker.FailureError
-	if !errors.As(err, &failure) {
+	if !errors.As(cause, &failure) {
 		return captureFailure{reason: reasonCheckpointFailed}
 	}
 	switch failure.Code() {
@@ -59,4 +60,24 @@ func classifyCaptureFailure(err error) captureFailure {
 	default:
 		return captureFailure{reason: reasonCheckpointFailed}
 	}
+}
+
+// captureCause strips the cleanup failures the executor joins onto a capture
+// error, so a code from a failed Abort is not read as why the capture failed —
+// an abort reporting TRANSACTION_NOT_FOUND would otherwise look like the staged
+// data had been lost.
+//
+// The executor joins cause first, and errors.Join drops nils, so the first
+// branch is the real cause even when the cleanup is the only thing that failed.
+func captureCause(err error) error {
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		joined, ok := current.(interface{ Unwrap() []error })
+		if !ok {
+			continue
+		}
+		if parts := joined.Unwrap(); len(parts) > 0 {
+			return captureCause(parts[0])
+		}
+	}
+	return err
 }
