@@ -21,6 +21,54 @@ TEST(S3ConfigTest, HasFiniteDefaultsAndNoCredentialValues)
   EXPECT_TRUE(config.transfer.connection.access_key_id.empty());
 }
 
+TEST(S3ConfigTest, OptionalLimitsPreserveDefaults)
+{
+  const auto defaults = ParseS3Config(kConfig);
+  for (const auto& limits : {Json::object(), Json{{"activeTransactions", 4}}}) {
+    auto value = Json::parse(kConfig);
+    value["limits"] = limits;
+    const auto config = ParseS3Config(value.dump());
+    EXPECT_EQ(config.transaction_lifetime, defaults.transaction_lifetime);
+    EXPECT_EQ(config.transfer.upload_limits, defaults.transfer.upload_limits);
+    EXPECT_EQ(config.transfer.restore_timeout, defaults.transfer.restore_timeout);
+    EXPECT_EQ(config.staging_bytes, defaults.staging_bytes);
+  }
+}
+
+TEST(S3ConfigTest, ReportsFieldsWithoutSuppliedValues)
+{
+  auto expect_error = [](const std::string& text, const char* field) {
+    try {
+      ParseS3Config(text);
+      FAIL() << "accepted invalid configuration";
+    }
+    catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string(error.what()).find(field), std::string::npos);
+      EXPECT_EQ(std::string(error.what()).find("private-value"), std::string::npos);
+    }
+  };
+  expect_error("{\"private-value\": invalid}", "JSON");
+  for (const auto* field : {"storeId", "endpoint", "region", "bucket"}) {
+    auto value = Json::parse(kConfig);
+    value.erase(field);
+    expect_error(value.dump(), field);
+    value[field] = {"private-value"};
+    expect_error(value.dump(), field);
+  }
+  for (const auto* field : {"prefix", "addressing", "caFile", "allowHttp"}) {
+    auto value = Json::parse(kConfig);
+    value[field] = {"private-value"};
+    expect_error(value.dump(), field);
+  }
+  auto value = Json::parse(kConfig);
+  value["limits"] = {{"requestSeconds", "private-value"}};
+  expect_error(value.dump(), "requestSeconds");
+  value["limits"] = {{"requestSeconds", 61}};
+  expect_error(value.dump(), "requestSeconds");
+  value["private-value"] = true;
+  expect_error(value.dump(), "unknown S3 configuration field");
+}
+
 TEST(S3ConfigTest, CapsRestoreSubmissionsWithoutExtendingShorterTransactions)
 {
   auto value = Json::parse(kConfig);
@@ -89,7 +137,7 @@ TEST(S3ConfigTest, ValidatesConnectionFieldsBeforeOptionalSettings)
   }
   auto value = Json::parse(kConfig);
   value["allowHttp"] = "invalid-boolean";
-  EXPECT_THROW(ParseS3Config(value.dump()), Json::type_error);
+  EXPECT_THROW(ParseS3Config(value.dump()), std::invalid_argument);
   value = Json::parse(kConfig);
   value["caFile"] = "relative/ca.pem";
   EXPECT_THROW(ParseS3Config(value.dump()), std::invalid_argument);

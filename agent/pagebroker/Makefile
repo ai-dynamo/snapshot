@@ -17,6 +17,7 @@ CRYPTO_FLAGS = $(shell pkg-config --cflags --libs libcrypto)
 AWS_SDK_PREFIX ?= /usr/local
 AWS_FLAGS := -I$(AWS_SDK_PREFIX)/include -L$(AWS_SDK_PREFIX)/lib -Wl,-rpath,$(AWS_SDK_PREFIX)/lib -laws-cpp-sdk-s3-crt -laws-cpp-sdk-core -laws-c-common -pthread
 S3_TEST_VENV := build/s3-test-venv
+CHECKPOINT_TEST_IMAGE ?= ghcr.io/ai-dynamo/snapshot/pagebroker:latest
 STREAMER_SOURCES := model_streamer_config.cpp transfer/engine/model_streamer/model_streamer_restore.cpp
 S3_SOURCES := utils/sha256.cpp s3_config.cpp transfer/s3/s3_client.cpp transfer/s3/s3_storage_backend.cpp transfer/s3/checkpoint_index.cpp
 RESTORE_SOURCES := file_descriptor.cpp $(STREAMER_SOURCES)
@@ -28,7 +29,7 @@ MODEL_STREAMER_SESSION_TEST_SOURCES := $(RESTORE_SOURCES) transfer/engine/model_
 MODEL_STREAMER_SESSION_TEST_WRAP_FLAGS := -Wl,--wrap=posix_fallocate,--wrap=mmap \
 	-Wl,--wrap=_ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE \
 	-Wl,--wrap=_ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE
-TRANSFER_FLAGS := $(MODEL_STREAMER_FLAGS) $(CRYPTO_FLAGS) $(AWS_FLAGS)
+TRANSFER_FLAGS = $(MODEL_STREAMER_FLAGS) $(CRYPTO_FLAGS) $(AWS_FLAGS)
 CPPFLAGS += -I$(MODEL_STREAMER_INCLUDE_DIR)
 
 BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp transfer/engine/posix/posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer/engine/transfer_engine.cpp
@@ -53,7 +54,7 @@ GPU_TEST_SOURCES := $(filter-out gpu/cuda_driver.cpp,$(PAGEBROKER_SOURCES))
 NIXL_FLAGS := -isystem $(NIXL_ROOT)/include -L$(NIXL_ROOT)/lib -lnixl -lnixl_build
 
 .DEFAULT_GOAL := daemon
-.PHONY: daemon generate test test-gpu s3-test-build s3-test s3-fixture-test s3-lifetime-test
+.PHONY: daemon generate test test-gpu s3-test-build s3-test s3-fixture-test s3-lifetime-test checkpoint-test
 
 generate: v1/pagebroker.pb.cc v1/pagebroker.pb.h
 
@@ -125,6 +126,12 @@ s3-test-build: generate
 s3-test: s3-test-build $(S3_TEST_VENV)/.installed
 	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$(AWS_SDK_PREFIX)/lib:$$LD_LIBRARY_PATH" $(S3_TEST_VENV)/bin/python3 tests/s3_integration.py --binary ./build/model-streamer-s3-test
 	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$(AWS_SDK_PREFIX)/lib:$$LD_LIBRARY_PATH" $(S3_TEST_VENV)/bin/python3 tests/s3_integration.py --binary ./build/model-streamer-s3-test --tls
+
+# Compile each time so changes in the Go client and its dependencies are included.
+checkpoint-test: $(S3_TEST_VENV)/.installed
+	go test -c ../internal/pagebroker -o build/checkpoint-client.test
+	$(S3_TEST_VENV)/bin/python3 tests/checkpoint_integration.py --image "$(CHECKPOINT_TEST_IMAGE)" --client build/checkpoint-client.test
+	$(S3_TEST_VENV)/bin/python3 tests/checkpoint_integration.py --image "$(CHECKPOINT_TEST_IMAGE)" --client build/checkpoint-client.test --tls
 
 s3-fixture-test: $(S3_TEST_VENV)/.installed
 	$(S3_TEST_VENV)/bin/python3 -m unittest discover -s tests -p 'test_*.py' -v

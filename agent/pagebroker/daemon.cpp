@@ -760,19 +760,19 @@ RunDaemon(const DaemonOptions& options)
   // worker threads. Cached native settings cannot be changed per operation.
   using namespace snapshot::pagebroker;
   std::optional<S3Config> config;
-  if (!options.storage_config.empty()) {
-    config = ReadS3Config(options.storage_config);
-    if (config->active_transactions >= options.max_concurrent_requests)
-      throw std::invalid_argument("S3 transaction admission must leave a connection available for Abort");
-  }
   ModelStreamerOptions model_streamer;
   try {
+    if (!options.storage_config.empty()) {
+      config = ReadS3Config(options.storage_config);
+      if (config->active_transactions >= options.max_concurrent_requests)
+        throw std::invalid_argument("S3 transaction admission must leave a connection available for Abort");
+    }
     if (!options.model_streamer_config.empty())
       model_streamer = ReadModelStreamerConfig(options.model_streamer_config);
     model_streamer = ResolveModelStreamerOptions(std::move(model_streamer), config ? &*config : nullptr);
   }
   catch (const std::invalid_argument& error) {
-    // The tuning parser only reports schema-owned field names, never values.
+    // Configuration errors report schema-owned field names, never values.
     std::cerr << error.what() << '\n';
     return ExitCode::INVALID_ARGUMENTS;
   }

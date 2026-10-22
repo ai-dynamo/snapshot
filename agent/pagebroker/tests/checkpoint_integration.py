@@ -207,6 +207,20 @@ def run(args):
             invalid = subprocess.run(missing_command + ["--model-streamer-config", str(invalid_path)],
                                      capture_output=True, text=True, timeout=15)
             assert invalid.returncode == 2 and "s3Reader.concurrency" in invalid.stderr, invalid.stderr
+            invalid_storage = root / "invalid-storage.json"
+            invalid_cases = [
+                ('{"private-value": invalid}', "JSON"),
+                (json.dumps({key: value for key, value in config.items() if key != "bucket"}), "bucket"),
+                (json.dumps(dict(config, prefix="../private-value")), "prefix"),
+                (json.dumps(dict(config, limits=dict(requestSeconds="private-value"))), "requestSeconds"),
+                (json.dumps(dict(config, limits=dict(activeTransactions=16))), "admission"),
+            ]
+            for text, field in invalid_cases:
+                invalid_storage.write_text(text)
+                invalid = subprocess.run(missing_command[:-1] + [str(invalid_storage)],
+                                         capture_output=True, text=True, timeout=15)
+                assert invalid.returncode == 2 and field in invalid.stderr, invalid.stderr
+                assert "private-value" not in invalid.stderr, invalid.stderr
             assert not (root / "missing.sock").exists()
             containers = []
             try:
@@ -259,6 +273,9 @@ def run(args):
                 assert not service.client.list_multipart_uploads(Bucket=service.bucket).get("Uploads")
                 assert not service.client.list_objects_v2(Bucket=service.bucket, Prefix=service.prefix + "/probes/").get("Contents")
             finally:
+                with service.changed:
+                    service.blocked.clear()
+                    service.changed.notify_all()
                 for name in containers:
                     subprocess.run(["docker", "logs", name], check=False)
                     subprocess.run(["docker", "stop", "--time", "10", name], check=False, stdout=subprocess.DEVNULL)

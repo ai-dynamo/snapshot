@@ -28,7 +28,7 @@ AGENT_PLATFORM ?= linux/amd64
 .PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
         capture-base-packages verify-base-packages docker-export-agent-bundle \
-        linux-build linux-test pagebroker-check-generated cpu-e2e
+        linux-build linux-test pagebroker-check-generated pagebroker-checkpoint-test cpu-e2e
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
@@ -47,6 +47,10 @@ test:
 	$(MAKE) -C api test
 	$(MAKE) -C agent test
 	$(MAKE) -C operator test
+
+# Uses the packaged daemon image built by docker-build-pagebroker.
+pagebroker-checkpoint-test:
+	$(MAKE) -C agent/pagebroker checkpoint-test CHECKPOINT_TEST_IMAGE="$(REGISTRY)/pagebroker:$(VERSION)"
 
 build:
 	$(MAKE) -C agent build
