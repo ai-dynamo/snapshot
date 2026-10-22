@@ -263,7 +263,7 @@ func (w *NodeController) runCheckpoint(
 	artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
 		cuInterposeRequested, contentUID, artifactPath)
 	if err != nil {
-		return w.markCheckpointFailed(ctx, content, "CheckpointFailed", err)
+		return w.markCheckpointFailed(ctx, content, classifyCaptureFailure(err).reason, err)
 	}
 	return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
 }
