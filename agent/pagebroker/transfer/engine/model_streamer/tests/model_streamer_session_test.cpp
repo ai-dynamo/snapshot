@@ -1017,6 +1017,34 @@ TEST_F(ModelStreamerSessionTest, QueuedDeadlineDoesNotWaitForOrStopActiveReads)
   EXPECT_FALSE(restore.Failed());
 }
 
+TEST_F(ModelStreamerSessionTest, SubmissionTimeoutDrainsBeforeReturning)
+{
+  state.allow_responses = false;
+  state.hold_end = true;
+  Cancellation cancellation;
+  ModelStreamerRestore restore(50ms);
+  auto result = std::async(std::launch::async, [&] {
+    restore.Stage(Inventory(), root_ / "restore", cancellation);
+  });
+  const bool timed_out = WaitForEnd();
+  EXPECT_TRUE(timed_out);
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "restore" / "0"));
+  // Also release a broken implementation that did not enforce the timeout.
+  if (!timed_out)
+    cancellation.Cancel();
+  ReleaseEnd();
+  try {
+    result.get();
+    ADD_FAILURE() << "restore completed without timing out";
+  }
+  catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("timed out"), std::string::npos);
+  }
+  EXPECT_FALSE(HasMapping(root_ / "restore" / "0"));
+  EXPECT_TRUE(restore.Failed());
+}
+
 TEST_F(ModelStreamerSessionTest, ActiveCancellationWaitsForNativeTeardown)
 {
   state.allow_responses = false;
