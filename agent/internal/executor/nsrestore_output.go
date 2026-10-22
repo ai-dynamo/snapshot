@@ -58,7 +58,7 @@ func (o *nsrestoreOutput) failure(runErr, ctxErr error) error {
 func (o *nsrestoreOutput) cause(runErr error) error {
 	var result RestoreInNamespaceResult
 	if err := json.Unmarshal(o.Stdout(), &result); err == nil && result.Error != "" {
-		return errors.New(result.Error)
+		return reportedCause(result)
 	}
 	detail := o.detail()
 	var exitErr *exec.ExitError
@@ -75,6 +75,18 @@ func (o *nsrestoreOutput) cause(runErr error) error {
 	default:
 		return snapshotruntime.WithDetail(fmt.Errorf("nsrestore exited with status %d without reporting a cause", code), detail)
 	}
+}
+
+// reportedCause rebuilds the step nsrestore named, if any, so the host side
+// reports the same step and does not prefix it again with its own. nsrestore
+// renders the step into the error text as well, so that prefix is dropped
+// before the step is reattached.
+func reportedCause(result RestoreInNamespaceResult) error {
+	if result.Step == "" {
+		return errors.New(result.Error)
+	}
+	step := Step(result.Step)
+	return failStep(step, errors.New(strings.TrimPrefix(result.Error, stepPrefix(step))))
 }
 
 // detail prefers a cause line (nsenter, panic) and otherwise the last line
