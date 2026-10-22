@@ -282,7 +282,7 @@ func (w *NodeController) runCheckpoint(
 	artifact, err := w.checkpointFn(dumpCtx, params)
 	if err != nil {
 		logger.Error(err, "Checkpoint failed")
-		if patchErr := w.setSnapshotContentFailed(ctx, content, "CheckpointFailed", err); patchErr != nil {
+		if patchErr := w.setSnapshotContentFailed(ctx, content, classifyCaptureFailure(err).reason, err); patchErr != nil {
 			return fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, patchErr)
 		}
 		return nil

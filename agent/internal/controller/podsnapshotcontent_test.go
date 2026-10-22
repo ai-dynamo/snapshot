@@ -817,7 +817,7 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
-	assert.Equal(t, "CheckpointFailed", cond.Reason)
+	assert.Equal(t, reasonCheckpointFailed, cond.Reason)
 }
 
 func TestExecutorCheckpointInspectionFailureDoesNotKill(t *testing.T) {
@@ -1066,7 +1066,7 @@ func TestReconcileCapture_IndexErrorReturned(t *testing.T) {
 }
 
 // TestRunCheckpoint_TimeoutFailsTheWorkOrder covers the hang guard: a dump that outlives
-// checkpointTimeoutSeconds must end as a terminal CheckpointFailed rather than holding its queue
+// checkpointTimeoutSeconds must end as a terminal CheckpointTimeout rather than holding its queue
 // worker until the agent restarts.
 func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
@@ -1083,7 +1083,7 @@ func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 
 	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond, "a timed-out dump must reach a terminal status")
-	assert.Equal(t, "CheckpointFailed", cond.Reason)
+	assert.Equal(t, reasonCheckpointTimeout, cond.Reason)
 }
 
 // TestRunCheckpoint_OverrunButSuccessfulDumpIsStillReady is the CRIU case: ExecuteDump takes no
