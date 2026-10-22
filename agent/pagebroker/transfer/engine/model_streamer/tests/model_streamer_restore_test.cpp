@@ -48,6 +48,47 @@ TEST(ModelStreamerRestoreTest, RejectsNonS3SourcesBeforeCreatingStaging)
   }
 }
 
+TEST(ModelStreamerRestoreTest, RejectsDuplicateDirectoriesBeforeCreatingStaging)
+{
+  test::TemporaryDirectory root;
+  CheckpointInventory inventory;
+  inventory.directories = {{"parent"}, {"parent"}};
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(inventory, root.path() / "unused"), std::invalid_argument);
+  EXPECT_FALSE(fs::exists(root.path() / "unused"));
+}
+
+TEST(ModelStreamerRestoreTest, RejectsDuplicateFilesBeforeCreatingStaging)
+{
+  test::TemporaryDirectory root;
+  CheckpointInventory inventory;
+  inventory.files = {{"s3://test-bucket/data", "data", 0}, {"s3://test-bucket/data", "data", 0}};
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(inventory, root.path() / "unused"), std::invalid_argument);
+  EXPECT_FALSE(fs::exists(root.path() / "unused"));
+}
+
+TEST(ModelStreamerRestoreTest, RejectsFileDirectoryCollisionsBeforeCreatingStaging)
+{
+  test::TemporaryDirectory root;
+  CheckpointInventory inventory;
+  inventory.directories = {{"data"}};
+  inventory.files = {{"s3://test-bucket/data", "data", 0}};
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(inventory, root.path() / "unused"), std::invalid_argument);
+  EXPECT_FALSE(fs::exists(root.path() / "unused"));
+}
+
+TEST(ModelStreamerRestoreTest, RejectsFileAsParentBeforeCreatingStaging)
+{
+  test::TemporaryDirectory root;
+  CheckpointInventory inventory;
+  inventory.files = {{"s3://test-bucket/parent", "parent", 0}, {"s3://test-bucket/child", "parent/child", 0}};
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(inventory, root.path() / "unused"), std::invalid_argument);
+  EXPECT_FALSE(fs::exists(root.path() / "unused"));
+}
+
 TEST(ModelStreamerRestoreTest, CancellationAndDeadlineRejectBeforeCreatingStaging)
 {
   test::TemporaryDirectory root;
