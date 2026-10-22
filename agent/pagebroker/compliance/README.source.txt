@@ -19,13 +19,16 @@ This image also ships the pinned Model Streamer core and S3 native libraries,
 with their SDK license and release metadata in /legal/model-streamer/.
 The S3 plugin license is also in /legal/model-streamer-s3/.
 OpenSSL libcrypto supports the AWS SDK; its attribution
-is in /legal/openssl/copyright. The uploader uses the S3 CRT client from AWS SDK for C++ 1.11.584,
-source commit bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3:
+is in /legal/openssl/copyright. The uploader uses the S3 CRT client from the
+unmodified AWS SDK for C++ release published at:
 
-  https://github.com/aws/aws-sdk-cpp/tree/bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3
+  https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.708
 
-The SDK build applies patches/aws-sdk-crt-cancellation.patch to retain requests
-until queued cancellation finishes. The patch is also in /legal/aws-sdk/.
+The exact SDK source revision is pinned in the PageBroker Dockerfile and recorded
+in /legal/aws-sdk/REVISION. This release includes the upstream cancellation fix:
+
+  https://github.com/aws/aws-sdk-cpp/pull/3648
+
 The SDK uses the CRT HTTP client, without the libcurl dependency chain.
 The SDK and its pinned CRT submodule notices are in /legal/aws-sdk/. Its
 remaining dynamically linked TLS/compression dependencies come from Ubuntu 24.04 packages;
