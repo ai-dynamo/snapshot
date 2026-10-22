@@ -109,6 +109,12 @@ class ModelStreamerRestore {
   void Run() noexcept;
   // Closes admission under pending_mutex_ and wakes an idle worker.
   void RequestStop() noexcept;
+  // Acquires pending_mutex_, retains the first terminal reason, and wakes the
+  // worker. Returns the recorded reason after releasing the mutex.
+  std::exception_ptr CloseAdmission(std::exception_ptr error) noexcept;
+  // Worker-only: waits under pending_mutex_ for work or closure. Returns the
+  // terminal reason when closed, or null when work can be processed.
+  std::exception_ptr WaitForWork();
   // Starts a native session on the worker thread.
   void Start();
   // Restores files in batches using a byte budget; an oversized file forms its
@@ -119,11 +125,28 @@ class ModelStreamerRestore {
   void SubmitAndWait(const std::shared_ptr<StreamerEntry>& entry);
   // Acquires pending_mutex_ to enqueue or reject, then wakes the worker.
   void QueueSubmission(const std::shared_ptr<StreamerEntry>& entry);
+  // Worker-only: selects under pending_mutex_ without removing the entry, so
+  // failure cleanup retains ownership through native submission and registration.
+  // Sets stopped when admission is closed; otherwise null means no entry fits.
+  std::shared_ptr<StreamerEntry> SelectPendingSubmission(bool& stopped);
+  // Worker-only: removes the selected front entry under pending_mutex_ after
+  // submission handling finishes, including a handled rejection or cancellation.
+  void RemoveHandledSubmission();
+  // Worker-only: removes one cancelled entry and sets error under pending_mutex_.
+  // Returns null and clears error if none; complete its promise after unlocking.
+  std::shared_ptr<StreamerEntry> TakeInterruptedSubmission(std::exception_ptr& error);
+  // Worker-only, after admission closes: removes an entry under pending_mutex_
+  // without allocating during failure cleanup. Complete it after releasing the lock.
+  std::shared_ptr<StreamerEntry> TakePendingSubmission();
   // Admits a bounded group of queued submissions into one native session.
   void SubmitPending();
   // Queued entries have no native readers and can be cancelled independently.
   void DiscardInterruptedPending();
   bool CanAdmit(const StreamerEntry& entry) const;
+  // Worker-only: acquires pending_mutex_ to order the claim against shutdown
+  // and caller cancellation. Returns whether claimed and sets stopped when
+  // admission is closed. Releases the mutex before any native request.
+  bool TryClaimSubmission(StreamerEntry& entry, bool& stopped);
   // Claims under pending_mutex_, then submits and registers without the lock.
   // Returns false if shutdown closed admission; pending_ retains the entry.
   bool AdmitAndSubmit(const std::shared_ptr<StreamerEntry>& entry);
