@@ -35,14 +35,14 @@ constexpr char kAccessKeyIdKey[] = "access_key_id";
 constexpr char kSecretAccessKeyKey[] = "secret_access_key";
 constexpr char kSessionTokenKey[] = "session_token";
 
-// Use the Python streamer's default per-submission target: one quarter of its
-// 40 GB read-ahead budget. A single larger file is submitted on its own.
+// Bound each batch and the bytes admitted concurrently. This 10 GB target
+// avoids submitting a whole large checkpoint at once; a larger file runs alone.
 constexpr uintmax_t kSubmissionByteBudget = 10'000'000'000;
 constexpr unsigned kResponsePollTimeoutMs = 25;
 constexpr auto kCancellationPollInterval = std::chrono::milliseconds(25);
-// Bound each native session even when successful callers return early.
+// Bound outstanding submissions while reusing the native session across restores.
 // Failed submissions retain their mappings until the session drains.
-constexpr std::size_t kSessionSubmissionLimit = 8;
+constexpr std::size_t kActiveSubmissionLimit = 8;
 constexpr char kS3UriPrefix[] = "s3://";
 
 bool
@@ -401,16 +401,17 @@ ModelStreamerRestore::TryClaimSubmission(StreamerEntry& entry, bool& stopped)
 bool
 ModelStreamerRestore::CanAdmit(const StreamerEntry& entry) const
 {
-  // Successful entries have left active_. A completed entry still here failed;
-  // stop admission so the session can drain and release its mappings.
-  if (unfinished_ < active_.size() || session_submissions_ >= kSessionSubmissionLimit)
+  // Stop admission on the first storage error so existing work can drain and
+  // failed mappings can be released after native teardown.
+  if (active_.size() >= kActiveSubmissionLimit ||
+      std::any_of(active_.begin(), active_.end(), [](const auto& item) { return !item.second->first_error.empty(); }))
     return false;
-  // An oversized file may occupy a session by itself.
+  // An oversized file may run by itself.
   if (active_.empty())
     return true;
-  if (session_bytes_ >= kSubmissionByteBudget)
+  if (active_bytes_ >= kSubmissionByteBudget)
     return false;
-  return entry.bytes <= kSubmissionByteBudget - session_bytes_;
+  return entry.bytes <= kSubmissionByteBudget - active_bytes_;
 }
 
 void
@@ -433,9 +434,6 @@ ModelStreamerRestore::SubmitPending()
       return;
     RemoveHandledSubmission();
   }
-  // End an unused session if every request was rejected or cancelled.
-  if (active_.empty())
-    StopStreamer();
 }
 
 void
@@ -474,8 +472,7 @@ ModelStreamerRestore::AdmitAndSubmit(const std::shared_ptr<StreamerEntry>& entry
   const auto [active, inserted] = active_.try_emplace(submission_id);
   if (!inserted)
     throw std::runtime_error("Model Streamer returned a duplicate submission ID");
-  session_bytes_ += entry->bytes;
-  ++session_submissions_;
+  active_bytes_ += entry->bytes;
   ++unfinished_;
   active->second = entry;
   return true;
@@ -592,24 +589,25 @@ ModelStreamerRestore::ProcessWork()
     // Every CPU/S3 range succeeded: native access to this entry has ended,
     // independently of other submissions. Remove it before waking its caller,
     // which may immediately release the mappings and the inventory's source strings.
+    active_bytes_ -= completed->bytes;
     active_.erase(response.submission_id);
     completed->completion.set_value();
   }
 
-  if (unfinished_ == 0)
-    FinishSession();
+  // Healthy idle sessions stay open; only failed entries need a native drain.
+  if (unfinished_ == 0 && !active_.empty())
+    FinishFailedSession();
 }
 
 void
-ModelStreamerRestore::FinishSession()
+ModelStreamerRestore::FinishFailedSession()
 {
   StopStreamer();
   for (auto& [id, entry] : active_) {
     FailEntry(*entry, std::make_exception_ptr(std::runtime_error(entry->first_error)));
   }
   active_.clear();
-  session_bytes_ = 0;
-  session_submissions_ = 0;
+  active_bytes_ = 0;
 }
 
 void
@@ -630,8 +628,7 @@ ModelStreamerRestore::FailAll(std::exception_ptr error) noexcept
   while (auto entry = TakePendingSubmission())
     FailEntry(*entry, error);
   unfinished_ = 0;
-  session_bytes_ = 0;
-  session_submissions_ = 0;
+  active_bytes_ = 0;
 }
 
 void

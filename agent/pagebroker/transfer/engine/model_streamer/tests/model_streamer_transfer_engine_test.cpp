@@ -259,11 +259,14 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
     ASSERT_TRUE(restored);
     EXPECT_EQ(std::string(std::istreambuf_iterator<char>(restored), std::istreambuf_iterator<char>()), "recovered");
     EXPECT_EQ(starts, 2);
+    EXPECT_NO_THROW(engine.StageRestore(prepare(), root / "third"));
+    EXPECT_EQ(starts, 2);
+    EXPECT_EQ(ends, 1);
   }
   EXPECT_EQ(ends, 2);
 }
 
-TEST_F(ModelStreamerTransferEngineTest, ConfiguresBeforeRequestsInEveryNativeSession)
+TEST_F(ModelStreamerTransferEngineTest, ConfiguresOnceForReusedNativeSession)
 {
   fail_first_session = false;
   credential_status = 0;
@@ -285,7 +288,9 @@ TEST_F(ModelStreamerTransferEngineTest, ConfiguresBeforeRequestsInEveryNativeSes
   inventory.files.push_back({"s3://local-test-bucket/source", "data", 4});
   restore.Stage(inventory, root.path() / "first");
   restore.Stage(inventory, root.path() / "second");
-  EXPECT_EQ(credential_calls, 2);
+  EXPECT_EQ(credential_calls, 1);
+  EXPECT_EQ(starts, 1U);
+  EXPECT_EQ(ends, 0U);
   EXPECT_EQ(configured.size(), 5);
   EXPECT_EQ(configured.at("region"), "test-region");
   EXPECT_EQ(configured.at("endpoint"), options.endpoint);

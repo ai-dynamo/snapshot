@@ -131,6 +131,18 @@ TEST_F(ModelStreamerS3Test, RestoresTreeThroughNativePlugin)
             << bytes / (1024.0 * 1024.0 * seconds) << " MiB/s, peak RSS " << usage.ru_maxrss << " KiB\n";
 }
 
+TEST_F(ModelStreamerS3Test, ReusesCoordinatorAcrossSequentialRestores)
+{
+  ModelStreamerRestore restore(options_, std::chrono::seconds(30));
+  // Exceed the concurrent submission limit without recreating the coordinator.
+  for (unsigned i = 0; i < 12; ++i) {
+    const auto destination = root_.path() / std::to_string(i);
+    ASSERT_NO_THROW(restore.Stage(inventory_, destination));
+    CheckTree(destination);
+    fs::remove_all(destination);
+  }
+}
+
 TEST_F(ModelStreamerS3Test, SupportsConcurrentRestores)
 {
   ModelStreamerRestore restore(options_, std::chrono::seconds(30));
