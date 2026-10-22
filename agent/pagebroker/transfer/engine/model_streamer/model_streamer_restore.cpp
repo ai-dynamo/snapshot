@@ -143,13 +143,11 @@ CheckedRestoreFileSize(uintmax_t bytes)
 void
 CreateDirectoryTree(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
-  cancellation.ThrowIfCancelled();
   fs::create_directory(destination);
   for (const auto& directory : inventory.directories) {
     cancellation.ThrowIfCancelled();
     fs::create_directory(destination / directory.relative_path);
   }
-  cancellation.ThrowIfCancelled();
 }
 
 void
@@ -171,7 +169,6 @@ ApplyTreePermissions(const CheckpointInventory& inventory, const Path& destinati
   }
   cancellation.ThrowIfCancelled();
   ApplyPermissions(destination, inventory.root_permissions);
-  cancellation.ThrowIfCancelled();
 }
 }  // namespace
 
@@ -717,9 +714,12 @@ ModelStreamerRestore::Stage(const CheckpointInventory& inventory, const Path& de
 {
   cancellation.ThrowIfCancelled();
   ValidateRestoreInventory(inventory);
+  cancellation.ThrowIfCancelled();
   CreateDirectoryTree(inventory, destination, cancellation);
+  cancellation.ThrowIfCancelled();
   std::call_once(start_once_, [this] { worker_ = std::thread([this] { Run(); }); });
   RestoreFiles(inventory, destination, cancellation);
   ApplyTreePermissions(inventory, destination, cancellation);
+  cancellation.ThrowIfCancelled();
 }
 }  // namespace snapshot::pagebroker
