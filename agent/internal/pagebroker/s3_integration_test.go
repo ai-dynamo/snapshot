@@ -87,6 +87,18 @@ func TestS3CheckpointDaemon(t *testing.T) {
 			t.Fatalf("fixture control %s: %s", action, response.Status)
 		}
 	}
+	// Bound completion waits below the fixture's 20-second hold limit, so its
+	// timeout cannot satisfy tests that keep I/O blocked.
+	await := func(t *testing.T, result <-chan error) error {
+		t.Helper()
+		select {
+		case err := <-result:
+			return err
+		case <-time.After(10 * time.Second):
+			t.Fatal("operation did not complete before the test deadline")
+			return nil
+		}
+	}
 	ids := map[string]string{}
 	target := func(t *testing.T, scenario string) string {
 		t.Helper()
@@ -369,12 +381,11 @@ func TestS3CheckpointDaemon(t *testing.T) {
 				control(t, "wait", id)
 				aborted := make(chan error, 1)
 				go func() { aborted <- client.Abort(ctx, transaction) }()
-				time.Sleep(100 * time.Millisecond)
-				control(t, "release", id)
-				if err := <-aborted; err != nil {
+				if err := await(t, aborted); err != nil {
 					t.Fatal(err)
 				}
-				expectCode(t, <-staged, Failure_INTERNAL_ERROR)
+				expectCode(t, await(t, staged), Failure_INTERNAL_ERROR)
+				control(t, "release", id)
 				expectCode(t, client.Commit(ctx, transaction), Failure_TRANSACTION_NOT_FOUND)
 				if operation == "prepare" {
 					control(t, "assert-no-upload", id)
@@ -425,23 +436,34 @@ func TestS3CheckpointDaemon(t *testing.T) {
 			}
 		}
 	})
-	t.Run("active restore Abort drains the reader", func(t *testing.T) {
+	t.Run("Abort racing active restore drains the reader", func(t *testing.T) {
 		id := publish(t, "blocked-restore", "a payload held by the native reader")
 		control(t, "block", id)
+		defer control(t, "release", id)
 		restored := make(chan error, 1)
-		go func() { _, err := client.restoreArtifact(ctx, "blocked-native", id); restored <- err }()
+		var directory string
+		go func() {
+			var err error
+			directory, err = client.restoreArtifact(ctx, "blocked-native", id)
+			restored <- err
+		}()
 		control(t, "wait", id)
 		aborted := make(chan error, 1)
 		go func() { aborted <- client.Abort(ctx, "blocked-native") }()
-		time.Sleep(100 * time.Millisecond)
+		// Native teardown needs I/O to finish. Exact cancellation ordering is
+		// covered by the controlled ModelStreamerSessionTest tests.
 		control(t, "release", id)
-		if err := <-aborted; err != nil {
+		if err := await(t, aborted); err != nil {
 			t.Fatal(err)
 		}
-		expectCode(t, <-restored, Failure_INTERNAL_ERROR)
+		if err := await(t, restored); err != nil {
+			expectCode(t, err, Failure_INTERNAL_ERROR)
+		} else if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("aborted restore staging remains: %v", err)
+		}
 		verify(t, "after-abort", id, "a payload held by the native reader")
 	})
-	t.Run("active upload Abort", func(t *testing.T) {
+	t.Run("Abort racing active upload", func(t *testing.T) {
 		id := target(t, "blocked-upload")
 		directory, err := client.prepareArtifact(ctx, "blocked-upload", id)
 		if err != nil {
@@ -449,18 +471,44 @@ func TestS3CheckpointDaemon(t *testing.T) {
 		}
 		write(t, directory, strings.Repeat("A", 7*1024*1024))
 		control(t, "block", id)
+		defer control(t, "release", id)
 		committed := make(chan error, 1)
 		go func() { committed <- client.Commit(ctx, "blocked-upload") }()
 		control(t, "wait", id)
 		aborted := make(chan error, 1)
 		go func() { aborted <- client.Abort(ctx, "blocked-upload") }()
-		time.Sleep(100 * time.Millisecond)
+		// Release native I/O before waiting for Abort to drain it. The S3
+		// CancellationDrainsAndLeavesClientUsable test controls the token directly.
 		control(t, "release", id)
-		if err := <-aborted; err != nil {
-			t.Fatal(err)
+		commitErr, abortErr := await(t, committed), await(t, aborted)
+		if commitErr == nil {
+			expectCode(t, abortErr, Failure_TRANSACTION_NOT_FOUND)
+			verify(t, "upload-won", id, strings.Repeat("A", 7*1024*1024))
+		} else {
+			if abortErr != nil {
+				t.Fatal(abortErr)
+			}
+			var failure *FailureError
+			if errors.As(commitErr, &failure) && failure.Code() == Failure_INTERNAL_ERROR {
+				control(t, "assert-unpublished", id)
+			} else {
+				// Cancellation during publication leaves either no index or a
+				// complete checkpoint, never a partially restorable artifact.
+				expectCode(t, commitErr, Failure_OUTCOME_UNKNOWN)
+				_, err := client.metadata(ctx, "upload-outcome", id)
+				if err != nil {
+					expectCode(t, err, Failure_ARTIFACT_NOT_FOUND)
+				} else {
+					if err := client.Abort(ctx, "upload-outcome"); err != nil {
+						t.Fatal(err)
+					}
+					verify(t, "upload-uncertain", id, strings.Repeat("A", 7*1024*1024))
+				}
+			}
 		}
-		expectCode(t, <-committed, Failure_INTERNAL_ERROR)
-		control(t, "assert-unpublished", id)
+		if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("finished upload staging remains: %v", err)
+		}
 	})
 	t.Run("Abort racing publication preserves the known checkpoint", func(t *testing.T) {
 		id := target(t, "publication-abort")
@@ -471,14 +519,14 @@ func TestS3CheckpointDaemon(t *testing.T) {
 		write(t, directory, "published before the response")
 		// Hold the index response after the service has actually written it.
 		control(t, "block", id)
+		defer control(t, "release", id)
 		committed := make(chan error, 1)
 		go func() { committed <- client.Commit(ctx, "publication-abort") }()
 		control(t, "wait", id)
 		aborted := make(chan error, 1)
 		go func() { aborted <- client.Abort(ctx, "publication-abort") }()
-		time.Sleep(100 * time.Millisecond)
 		control(t, "release", id)
-		commitErr, abortErr := <-committed, <-aborted
+		commitErr, abortErr := await(t, committed), await(t, aborted)
 		if commitErr == nil {
 			// A confirmed publication takes precedence over a concurrent Abort.
 			expectCode(t, abortErr, Failure_TRANSACTION_NOT_FOUND)
@@ -511,6 +559,7 @@ func TestS3CheckpointDaemon(t *testing.T) {
 		}
 		write(t, directory, "active upload expires")
 		control(t, "block", id)
+		defer control(t, "release", id)
 		committed := make(chan error, 1)
 		go func() { committed <- short.Commit(ctx, "deadline-upload") }()
 		control(t, "wait", id)

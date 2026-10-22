@@ -60,6 +60,20 @@ Environment(const char* name)
 
 using Json = nlohmann::json;
 constexpr std::size_t kMaxConfigBytes = 65536;
+constexpr auto kMaxTransactionLifetime = std::chrono::hours(2);
+constexpr auto kMaxRequestTimeout = std::chrono::seconds(60);
+
+template<typename T>
+T
+ReadField(const Json& value, const char* key)
+{
+  try {
+    return value.at(key).get<T>();
+  }
+  catch (const Json::exception&) {
+    throw std::invalid_argument(std::string("missing or invalid S3 field: ") + key);
+  }
+}
 
 void
 ValidateConfigFields(const Json& value)
@@ -78,7 +92,8 @@ HasValidConnectionSettings(const S3Connection& connection, const Json& value)
 {
   if (connection.region.empty() || connection.endpoint.empty())
     return false;
-  if (!value.value(kAllowHttpKey, false) && !connection.endpoint.starts_with(kHttpsEndpointPrefix))
+  const bool allow_http = value.contains(kAllowHttpKey) && ReadField<bool>(value, kAllowHttpKey);
+  if (!allow_http && !connection.endpoint.starts_with(kHttpsEndpointPrefix))
     return false;
   return connection.ca_file.empty() || std::filesystem::path(connection.ca_file).is_absolute();
 }
@@ -87,14 +102,14 @@ S3Connection
 ParseConnection(const Json& value)
 {
   S3Connection connection;
-  connection.endpoint = value.at(kEndpointKey).get<std::string>();
-  connection.region = value.at(kRegionKey).get<std::string>();
+  connection.endpoint = ReadField<std::string>(value, kEndpointKey);
+  connection.region = ReadField<std::string>(value, kRegionKey);
 
-  const auto addressing = value.value(kAddressingKey, std::string(kVirtualAddressing));
+  const auto addressing = value.contains(kAddressingKey) ? ReadField<std::string>(value, kAddressingKey) : kVirtualAddressing;
   if (addressing != kPathAddressing && addressing != kVirtualAddressing)
     throw std::invalid_argument("invalid S3 addressing mode");
   connection.use_virtual_addressing = addressing == kVirtualAddressing;
-  connection.ca_file = value.value(kCaFileKey, std::string());
+  connection.ca_file = value.contains(kCaFileKey) ? ReadField<std::string>(value, kCaFileKey) : std::string();
 
   if (!HasValidConnectionSettings(connection, value))
     throw std::invalid_argument("invalid S3 endpoint, region, or CA path");
@@ -146,19 +161,27 @@ ParseTransferLimits(const Json& value, S3Config& config)
         throw std::invalid_argument("unknown S3 limit");
     }
     auto read_limit = [&](const char* key, std::uint64_t fallback, std::uint64_t maximum, std::uint64_t minimum = 1) {
-      return limits.contains(key) ? utils::Unsigned(limits.at(key), maximum, minimum) : fallback;
+      try {
+        return limits.contains(key) ? utils::Unsigned(limits.at(key), maximum, minimum) : fallback;
+      }
+      catch (const std::invalid_argument&) {
+        throw std::invalid_argument(std::string("invalid S3 limit: ") + key);
+      }
     };
-    config.transaction_lifetime = std::chrono::seconds(read_limit(kTransactionSecondsKey, 7200, 7200));
+    config.transaction_lifetime = std::chrono::seconds(read_limit(kTransactionSecondsKey, config.transaction_lifetime.count(),
+        std::chrono::duration_cast<std::chrono::seconds>(kMaxTransactionLifetime).count()));
     config.staging_bytes = read_limit(kStagingBytesKey, config.staging_bytes, 1ULL << 40);
     config.active_transactions = read_limit(kActiveTransactionsKey, config.active_transactions, 1024);
     upload.part_size = read_limit(kUploadPartBytesKey, upload.part_size, 1ULL << 30, 8 * 1024 * 1024);
     upload.buffer_budget = read_limit(kUploadBufferBytesKey, upload.buffer_budget, 16ULL << 30, std::max<std::uint64_t>(1ULL << 30, 2 * upload.part_size));
     upload.target_gbps = read_limit(kUploadTargetGbpsKey, upload.target_gbps, 1000);
     upload.active_files = read_limit(kUploadActiveFilesKey, upload.active_files, 64);
-    upload.request_timeout = std::chrono::seconds(read_limit(kRequestSecondsKey, 60, 60));
+    upload.request_timeout = std::chrono::seconds(read_limit(kRequestSecondsKey,
+        std::chrono::duration_cast<std::chrono::seconds>(upload.request_timeout).count(), kMaxRequestTimeout.count()));
     upload.request_retries = read_limit(kUploadRequestRetriesKey, upload.request_retries, 10, 0);
     const auto request_seconds = std::chrono::duration_cast<std::chrono::seconds>(upload.request_timeout).count();
-    upload.connect_timeout = std::chrono::seconds(read_limit(kUploadConnectSecondsKey, std::min<std::uint64_t>(5, request_seconds), request_seconds));
+    const auto connect_seconds = std::chrono::duration_cast<std::chrono::seconds>(upload.connect_timeout).count();
+    upload.connect_timeout = std::chrono::seconds(read_limit(kUploadConnectSecondsKey, std::min(connect_seconds, request_seconds), request_seconds));
   }
   upload.operation_timeout = config.transaction_lifetime;
   config.transfer.restore_timeout = std::min(config.transfer.restore_timeout,
@@ -189,16 +212,23 @@ ValidateModelStreamerEnvironment(const S3TransferOptions& options)
 S3Config
 ParseS3Config(std::string_view text)
 {
-  const auto value = utils::ParseJson(text, kMaxConfigBytes);
+  Json value;
+  try {
+    value = utils::ParseJson(text, kMaxConfigBytes);
+  }
+  catch (const Json::exception&) {
+    // JSON parser diagnostics can contain supplied configuration values.
+    throw std::invalid_argument("invalid S3 configuration JSON");
+  }
   ValidateConfigFields(value);
 
   S3Config config;
-  config.store_id = value.at(kStoreIdKey).get<std::string>();
+  config.store_id = ReadField<std::string>(value, kStoreIdKey);
   if (!IsValidStoreID(config.store_id))
     throw std::invalid_argument("S3 storeId must be a nonempty bounded identifier");
   config.transfer.connection = ParseConnection(value);
-  config.bucket = value.at(kBucketKey).get<std::string>();
-  config.prefix = value.value(kPrefixKey, std::string());
+  config.bucket = ReadField<std::string>(value, kBucketKey);
+  config.prefix = value.contains(kPrefixKey) ? ReadField<std::string>(value, kPrefixKey) : std::string();
   ValidateStorageLocation(config.bucket, config.prefix);
   ParseTransferLimits(value, config);
   return config;

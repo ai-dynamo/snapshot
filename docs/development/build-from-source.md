@@ -85,20 +85,18 @@ sign-off.
 
 ### PageBroker S3 checkpoint tests
 
-For daemon-level checkpoint protocol checks, build the fixture image and prepare
-the Go client and Python fixture:
+For daemon-level checkpoint protocol checks, use Docker, Go and Python 3 with
+venv support to run:
 
 ```bash
-make docker-build-pagebroker REGISTRY=local VERSION=s3-test \
-  DOCKER_BUILD_ARGS="--load --target s3-test"
-python3 -m venv /tmp/pagebroker-s3-tests
-/tmp/pagebroker-s3-tests/bin/pip install -r agent/pagebroker/tests/requirements.txt
-go test -c ./agent/internal/pagebroker -o /tmp/pagebroker-checkpoint-client.test
-/tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/checkpoint_integration.py \
-  --image local/pagebroker:s3-test --client /tmp/pagebroker-checkpoint-client.test
-/tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/checkpoint_integration.py --tls \
-  --image local/pagebroker:s3-test --client /tmp/pagebroker-checkpoint-client.test
+make docker-build-pagebroker REGISTRY=local VERSION=s3-test DOCKER_BUILD_ARGS="--load"
+make pagebroker-checkpoint-test REGISTRY=local VERSION=s3-test
 ```
+
+The test target prepares the Python environment, builds the Go test client and
+runs the HTTP and TLS fixtures. The `pagebroker-image` CI job runs this target
+after loading the packaged daemon image. The repository-root `make test` runs
+Go unit tests and does not run these fixtures.
 
 The fixture runs native daemons against disposable Moto storage using fake
 credentials. It exercises the real Go client, checkpoint publication, full
