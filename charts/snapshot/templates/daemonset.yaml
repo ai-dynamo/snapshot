@@ -216,10 +216,9 @@ spec:
             {{- if eq .Values.storage.type "s3" }}
             # No local checkpoint directory exists in S3 mode; this positional
             # argument is required by every PageBroker build regardless of
-            # backend. Unconfirmed: whether the S3 backend actually leaves it
-            # unused once --storage-config selects S3, or expects something
-            # else here. Needs validating against a PageBroker build that
-            # implements the S3 backend before this ships.
+            # backend. Confirmed unused once --storage-config selects S3: the
+            # S3 broker construction path never reads it, only the legacy
+            # path does.
             - /var/snapshot/pagebroker-unused-storage-root
             {{- else }}
             - {{ .Values.storage.pvc.basePath | quote }}
