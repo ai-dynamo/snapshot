@@ -13,10 +13,33 @@
 #include <set>
 
 #include "transfer/checkpoint_inventory.hpp"
+#include "transfer/s3/checkpoint_index.hpp"
 #include "utils/json.hpp"
 
 namespace snapshot::pagebroker {
 namespace {
+constexpr char kStoreIdKey[] = "storeId";
+constexpr char kEndpointKey[] = "endpoint";
+constexpr char kRegionKey[] = "region";
+constexpr char kBucketKey[] = "bucket";
+constexpr char kPrefixKey[] = "prefix";
+constexpr char kAddressingKey[] = "addressing";
+constexpr char kCaFileKey[] = "caFile";
+constexpr char kAllowHttpKey[] = "allowHttp";
+constexpr char kLimitsKey[] = "limits";
+constexpr char kTransactionSecondsKey[] = "transactionSeconds";
+constexpr char kStagingBytesKey[] = "stagingBytes";
+constexpr char kActiveTransactionsKey[] = "activeTransactions";
+constexpr char kUploadPartBytesKey[] = "uploadPartBytes";
+constexpr char kUploadBufferBytesKey[] = "uploadBufferBytes";
+constexpr char kUploadTargetGbpsKey[] = "uploadTargetGbps";
+constexpr char kUploadActiveFilesKey[] = "uploadActiveFiles";
+constexpr char kRequestSecondsKey[] = "requestSeconds";
+constexpr char kUploadRequestRetriesKey[] = "uploadRequestRetries";
+constexpr char kUploadConnectSecondsKey[] = "uploadConnectSeconds";
+constexpr char kPathAddressing[] = "path";
+constexpr char kVirtualAddressing[] = "virtual";
+
 bool
 ParseVirtualAddressingEnvironment()
 {
@@ -41,7 +64,7 @@ constexpr std::size_t kMaxConfigBytes = 65536;
 void
 ValidateConfigFields(const Json& value)
 {
-  const std::set<std::string> fields{"storeId", "endpoint", "region", "bucket", "prefix", "addressing", "caFile", "allowHttp", "limits"};
+  const std::set<std::string> fields{kStoreIdKey, kEndpointKey, kRegionKey, kBucketKey, kPrefixKey, kAddressingKey, kCaFileKey, kAllowHttpKey, kLimitsKey};
   if (!value.is_object())
     throw std::invalid_argument("S3 configuration must be an object");
   for (const auto& [key, ignored] : value.items()) {
@@ -55,7 +78,7 @@ HasValidConnectionSettings(const S3Connection& connection, const Json& value)
 {
   if (connection.region.empty() || connection.endpoint.empty())
     return false;
-  if (!value.value("allowHttp", false) && !connection.endpoint.starts_with("https://"))
+  if (!value.value(kAllowHttpKey, false) && !connection.endpoint.starts_with(kHttpsEndpointPrefix))
     return false;
   return connection.ca_file.empty() || std::filesystem::path(connection.ca_file).is_absolute();
 }
@@ -64,14 +87,14 @@ S3Connection
 ParseConnection(const Json& value)
 {
   S3Connection connection;
-  connection.endpoint = value.at("endpoint").get<std::string>();
-  connection.region = value.at("region").get<std::string>();
+  connection.endpoint = value.at(kEndpointKey).get<std::string>();
+  connection.region = value.at(kRegionKey).get<std::string>();
 
-  const auto addressing = value.value("addressing", std::string("virtual"));
-  if (addressing != "path" && addressing != "virtual")
+  const auto addressing = value.value(kAddressingKey, std::string(kVirtualAddressing));
+  if (addressing != kPathAddressing && addressing != kVirtualAddressing)
     throw std::invalid_argument("invalid S3 addressing mode");
-  connection.use_virtual_addressing = addressing == "virtual";
-  connection.ca_file = value.value("caFile", std::string());
+  connection.use_virtual_addressing = addressing == kVirtualAddressing;
+  connection.ca_file = value.value(kCaFileKey, std::string());
 
   if (!HasValidConnectionSettings(connection, value))
     throw std::invalid_argument("invalid S3 endpoint, region, or CA path");
@@ -105,17 +128,17 @@ ValidateStorageLocation(const std::string& bucket, const std::string& prefix)
 {
   if (!IsValidStoragePrefix(prefix))
     throw std::invalid_argument("S3 prefix must be a canonical relative key prefix");
-  S3ObjectLocation{bucket, "index.json"}.Validate();
+  S3ObjectLocation{bucket, kCheckpointIndexName}.Validate();
 }
 
 void
 ParseTransferLimits(const Json& value, S3Config& config)
 {
   auto& upload = config.transfer.upload_limits;
-  if (value.contains("limits")) {
-    const auto& limits = value.at("limits");
-    const std::set<std::string> allowed{"transactionSeconds", "stagingBytes", "activeTransactions", "uploadPartBytes",
-        "uploadBufferBytes", "uploadTargetGbps", "uploadActiveFiles", "requestSeconds", "uploadRequestRetries", "uploadConnectSeconds"};
+  if (value.contains(kLimitsKey)) {
+    const auto& limits = value.at(kLimitsKey);
+    const std::set<std::string> allowed{kTransactionSecondsKey, kStagingBytesKey, kActiveTransactionsKey, kUploadPartBytesKey,
+        kUploadBufferBytesKey, kUploadTargetGbpsKey, kUploadActiveFilesKey, kRequestSecondsKey, kUploadRequestRetriesKey, kUploadConnectSecondsKey};
     if (!limits.is_object())
       throw std::invalid_argument("S3 limits must be an object");
     for (const auto& [key, ignored] : limits.items()) {
@@ -125,17 +148,17 @@ ParseTransferLimits(const Json& value, S3Config& config)
     auto read_limit = [&](const char* key, std::uint64_t fallback, std::uint64_t maximum, std::uint64_t minimum = 1) {
       return limits.contains(key) ? utils::Unsigned(limits.at(key), maximum, minimum) : fallback;
     };
-    config.transaction_lifetime = std::chrono::seconds(read_limit("transactionSeconds", 7200, 7200));
-    config.staging_bytes = read_limit("stagingBytes", config.staging_bytes, 1ULL << 40);
-    config.active_transactions = read_limit("activeTransactions", config.active_transactions, 1024);
-    upload.part_size = read_limit("uploadPartBytes", upload.part_size, 1ULL << 30, 8 * 1024 * 1024);
-    upload.buffer_budget = read_limit("uploadBufferBytes", upload.buffer_budget, 16ULL << 30, std::max<std::uint64_t>(1ULL << 30, 2 * upload.part_size));
-    upload.target_gbps = read_limit("uploadTargetGbps", upload.target_gbps, 1000);
-    upload.active_files = read_limit("uploadActiveFiles", upload.active_files, 64);
-    upload.request_timeout = std::chrono::seconds(read_limit("requestSeconds", 60, 60));
-    upload.request_retries = read_limit("uploadRequestRetries", upload.request_retries, 10, 0);
+    config.transaction_lifetime = std::chrono::seconds(read_limit(kTransactionSecondsKey, 7200, 7200));
+    config.staging_bytes = read_limit(kStagingBytesKey, config.staging_bytes, 1ULL << 40);
+    config.active_transactions = read_limit(kActiveTransactionsKey, config.active_transactions, 1024);
+    upload.part_size = read_limit(kUploadPartBytesKey, upload.part_size, 1ULL << 30, 8 * 1024 * 1024);
+    upload.buffer_budget = read_limit(kUploadBufferBytesKey, upload.buffer_budget, 16ULL << 30, std::max<std::uint64_t>(1ULL << 30, 2 * upload.part_size));
+    upload.target_gbps = read_limit(kUploadTargetGbpsKey, upload.target_gbps, 1000);
+    upload.active_files = read_limit(kUploadActiveFilesKey, upload.active_files, 64);
+    upload.request_timeout = std::chrono::seconds(read_limit(kRequestSecondsKey, 60, 60));
+    upload.request_retries = read_limit(kUploadRequestRetriesKey, upload.request_retries, 10, 0);
     const auto request_seconds = std::chrono::duration_cast<std::chrono::seconds>(upload.request_timeout).count();
-    upload.connect_timeout = std::chrono::seconds(read_limit("uploadConnectSeconds", std::min<std::uint64_t>(5, request_seconds), request_seconds));
+    upload.connect_timeout = std::chrono::seconds(read_limit(kUploadConnectSecondsKey, std::min<std::uint64_t>(5, request_seconds), request_seconds));
   }
   upload.operation_timeout = config.transaction_lifetime;
   config.transfer.restore_timeout = std::min(config.transfer.restore_timeout,
@@ -170,12 +193,12 @@ ParseS3Config(std::string_view text)
   ValidateConfigFields(value);
 
   S3Config config;
-  config.store_id = value.at("storeId").get<std::string>();
+  config.store_id = value.at(kStoreIdKey).get<std::string>();
   if (!IsValidStoreID(config.store_id))
     throw std::invalid_argument("S3 storeId must be a nonempty bounded identifier");
   config.transfer.connection = ParseConnection(value);
-  config.bucket = value.at("bucket").get<std::string>();
-  config.prefix = value.value("prefix", std::string());
+  config.bucket = value.at(kBucketKey).get<std::string>();
+  config.prefix = value.value(kPrefixKey, std::string());
   ValidateStorageLocation(config.bucket, config.prefix);
   ParseTransferLimits(value, config);
   return config;
