@@ -148,6 +148,7 @@ CreateDirectoryTree(const CheckpointInventory& inventory, const Path& destinatio
     cancellation.ThrowIfCancelled();
     fs::create_directory(destination / directory.relative_path);
   }
+  cancellation.ThrowIfCancelled();
 }
 
 void
@@ -716,7 +717,6 @@ ModelStreamerRestore::Stage(const CheckpointInventory& inventory, const Path& de
   ValidateRestoreInventory(inventory);
   cancellation.ThrowIfCancelled();
   CreateDirectoryTree(inventory, destination, cancellation);
-  cancellation.ThrowIfCancelled();
   std::call_once(start_once_, [this] { worker_ = std::thread([this] { Run(); }); });
   RestoreFiles(inventory, destination, cancellation);
   ApplyTreePermissions(inventory, destination, cancellation);
