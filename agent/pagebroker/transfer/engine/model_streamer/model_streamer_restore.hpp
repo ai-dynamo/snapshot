@@ -22,6 +22,9 @@
 #include "cancellation.hpp"
 
 namespace snapshot::pagebroker {
+// Limit elapsed time per native submission; an earlier transaction deadline wins.
+inline constexpr std::chrono::minutes kDefaultModelStreamerSubmissionTimeout{20};
+
 // Explicit values are fixed for one native session. Empty credentials select
 // the native AWS provider chain. Addressing, TLS/CA and worker configuration use
 // the pinned library's process environment, set before constructing sessions.
@@ -41,10 +44,10 @@ struct ModelStreamerSessionOptions {
 class ModelStreamerRestore {
  public:
   // Creates an inactive restore coordinator that starts on its first Stage call.
-  explicit ModelStreamerRestore(std::chrono::milliseconds submission_timeout = std::chrono::hours(2));
+  explicit ModelStreamerRestore(std::chrono::milliseconds submission_timeout = kDefaultModelStreamerSubmissionTimeout);
   explicit ModelStreamerRestore(
       ModelStreamerSessionOptions options,
-      std::chrono::milliseconds submission_timeout = std::chrono::hours(2));
+      std::chrono::milliseconds submission_timeout = kDefaultModelStreamerSubmissionTimeout);
   // Stops and joins the worker. Callers must finish using this object first.
   ~ModelStreamerRestore() noexcept;
   // Prevents copying ownership of the worker and native streamer handle.
