@@ -34,7 +34,11 @@ NVIDIA-authored code uses the Apache-2.0 license and is published at:
 
 Per-component license texts are in /legal/THIRD-PARTY.txt.
 
-Model Streamer's release and pinned upstream build definition are linked in
+Model Streamer uses the native SDK release published at:
+
+  https://github.com/dsx-ai-factory/model-streamer/releases/tag/0.17.0
+
+Its release and pinned upstream build definition are also linked in
 /legal/model-streamer/UPSTREAM.txt. Its release version, SDK checksum, source
 revision and source archive are installed alongside that file.
 
