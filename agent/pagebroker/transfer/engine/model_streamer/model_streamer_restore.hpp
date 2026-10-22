@@ -57,6 +57,7 @@ class ModelStreamerRestore {
   // Reports a terminal worker failure once native access has stopped.
   bool Failed() const noexcept;
   // Creates the destination tree and blocks until all planned data is restored.
+  // Validates inventory paths, directory order and S3 sources before creating the tree.
   void Stage(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation = {});
 
  private:
