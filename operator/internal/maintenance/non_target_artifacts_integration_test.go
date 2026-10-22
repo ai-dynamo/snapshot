@@ -189,6 +189,8 @@ func testPublishedNonTargetFailureAndRestart(t *testing.T, policy snapshotv1alph
 	pod.Status.Phase = corev1.PodFailed
 	pod.Status.ContainerStatuses[1].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}
 	require.NoError(t, cl.Status().Update(ctx, pod))
+	job.Status.Failed = 1 // Job controller accounts for the terminated source Pod.
+	require.NoError(t, cl.Status().Update(ctx, job))
 	if cleanup {
 		require.Eventually(t, func() bool { _, err := os.Lstat(root); return os.IsNotExist(err) }, 5*time.Second, 10*time.Millisecond,
 			"periodic scan must reclaim without a fresh reconcile callback")

@@ -31,7 +31,7 @@ func failedNonTargetAttempt() (*snapshotv1alpha1.SnapshotJob, *batchv1.Job, *cor
 		Spec: snapshotv1alpha1.SnapshotJobSpec{NonTargetArtifacts: &snapshotv1alpha1.NonTargetArtifactPolicy{
 			Containers: []string{"saver"}, OnFailure: snapshotv1alpha1.NonTargetArtifactCleanup,
 		}},
-		Status: snapshotv1alpha1.SnapshotJobStatus{SourceJobUID: "job-uid", Conditions: []metav1.Condition{{
+		Status: snapshotv1alpha1.SnapshotJobStatus{SourceJobUID: "job-uid", PodSnapshotName: "checkpoint", PodSnapshotUID: "snapshot-uid", Conditions: []metav1.Condition{{
 			Type: snapshotv1alpha1.SnapshotJobConditionFailed, Status: metav1.ConditionTrue, Reason: "CaptureFailed",
 		}}},
 	}
@@ -48,7 +48,7 @@ func failedNonTargetAttempt() (*snapshotv1alpha1.SnapshotJob, *batchv1.Job, *cor
 				}},
 			}},
 		}},
-		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}},
+		Status: batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}},
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: sj.Namespace, UID: "pod-uid",
@@ -61,6 +61,19 @@ func failedNonTargetAttempt() (*snapshotv1alpha1.SnapshotJob, *batchv1.Job, *cor
 		}},
 	}
 	return sj, job, pod
+}
+
+func sourcePodSnapshotForAttempt(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) *snapshotv1alpha1.PodSnapshot {
+	return &snapshotv1alpha1.PodSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: sj.Name, Namespace: sj.Namespace, UID: sj.Status.PodSnapshotUID,
+			Labels: map[string]string{
+				snapshotv1alpha1.SnapshotJobOwnerLabel:    sj.Name,
+				snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(sj.UID),
+			}},
+		Spec: snapshotv1alpha1.PodSnapshotSpec{Source: snapshotv1alpha1.PodSnapshotSource{
+			PodRef: snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: []string{"worker"}},
+		}},
+	}
 }
 
 func writeNonTargetArtifact(t *testing.T, base, uid string) string {
@@ -117,6 +130,32 @@ func TestNonTargetArtifactSweepFailureOrdering(t *testing.T) {
 		{"saver waiting", func(_ *snapshotv1alpha1.SnapshotJob, _ *batchv1.Job, pod *corev1.Pod) {
 			pod.Status.ContainerStatuses[1].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{}}
 		}, true},
+		{"deleted earlier Pod leaves only terminated replacement", func(_ *snapshotv1alpha1.SnapshotJob, job *batchv1.Job, pod *corev1.Pod) {
+			job.Status.Failed = 2
+			pod.Name = "replacement"
+			pod.UID = "replacement-uid"
+		}, true},
+		{"replacement cannot stand in for pinned source Pod", func(_ *snapshotv1alpha1.SnapshotJob, _ *batchv1.Job, pod *corev1.Pod) {
+			pod.Name = "replacement"
+			pod.UID = "replacement-uid"
+		}, true},
+		{"replacement not yet counted", func(_ *snapshotv1alpha1.SnapshotJob, job *batchv1.Job, pod *corev1.Pod) {
+			job.Status.Failed = 0
+			pod.Name = "replacement"
+			pod.UID = "replacement-uid"
+		}, true},
+		{"missing durable source PodSnapshot identity", func(sj *snapshotv1alpha1.SnapshotJob, _ *batchv1.Job, _ *corev1.Pod) {
+			sj.Status.PodSnapshotUID = ""
+		}, true},
+		{"replaced source PodSnapshot identity", func(sj *snapshotv1alpha1.SnapshotJob, _ *batchv1.Job, _ *corev1.Pod) {
+			sj.Status.PodSnapshotUID = "other-snapshot"
+		}, true},
+		{"source Job still has an active attempt", func(_ *snapshotv1alpha1.SnapshotJob, job *batchv1.Job, _ *corev1.Pod) {
+			job.Status.Active = 1
+		}, true},
+		{"source Job has an uncounted attempt", func(_ *snapshotv1alpha1.SnapshotJob, job *batchv1.Job, _ *corev1.Pod) {
+			job.Status.UncountedTerminatedPods = &batchv1.UncountedTerminatedPods{Failed: []types.UID{"older-pod"}}
+		}, true},
 		{"pod phase nonterminal", func(_ *snapshotv1alpha1.SnapshotJob, _ *batchv1.Job, pod *corev1.Pod) {
 			pod.Status.Phase = corev1.PodRunning
 		}, true},
@@ -139,6 +178,7 @@ func TestNonTargetArtifactSweepFailureOrdering(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sj, job, pod := failedNonTargetAttempt()
+			snap := sourcePodSnapshotForAttempt(sj, pod)
 			tc.mutate(sj, job, pod)
 			base := t.TempDir()
 			root := writeNonTargetArtifact(t, base, string(sj.UID))
@@ -147,7 +187,7 @@ func TestNonTargetArtifactSweepFailureOrdering(t *testing.T) {
 			require.NoError(t, os.MkdirAll(captureRoot, 0o750))
 			captureFile := filepath.Join(captureRoot, "capture-evidence")
 			require.NoError(t, os.WriteFile(captureFile, []byte("capture bytes"), 0o600))
-			q, _ := newTestQueue(t, base, sj, job, pod)
+			q, _ := newTestQueue(t, base, sj, job, pod, snap)
 			backend, err := q.backend()
 			require.NoError(t, err)
 			require.NoError(t, q.processNonTargetArtifactSweep(context.Background(), backend, log.Log))
@@ -204,6 +244,17 @@ func TestNonTargetArtifactSweepAfterDeadlinePodRemoval(t *testing.T) {
 	}
 }
 
+func TestNonTargetArtifactSweepRetainsWhenSourcePodSnapshotIsGone(t *testing.T) {
+	sj, job, pod := failedNonTargetAttempt()
+	base := t.TempDir()
+	root := writeNonTargetArtifact(t, base, string(sj.UID))
+	q, _ := newTestQueue(t, base, sj, job, pod)
+	backend, err := q.backend()
+	require.NoError(t, err)
+	require.NoError(t, q.processNonTargetArtifactSweep(context.Background(), backend, log.Log))
+	require.DirExists(t, root, "a terminated Pod without its pinned source identity cannot authorize deletion")
+}
+
 func TestNonTargetArtifactRetentionWarningDistinguishesPermanentAndWaiting(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -233,12 +284,13 @@ func TestNonTargetArtifactRetentionWarningDistinguishesPermanentAndWaiting(t *te
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sj, job, pod := failedNonTargetAttempt()
+			snap := sourcePodSnapshotForAttempt(sj, pod)
 			if tc.mutate != nil {
 				tc.mutate(sj, job, pod)
 			}
 			base := t.TempDir()
 			root := writeNonTargetArtifact(t, base, string(sj.UID))
-			objects := []client.Object{sj, pod}
+			objects := []client.Object{sj, pod, snap}
 			if !tc.omitJob {
 				objects = append(objects, job)
 			}
@@ -270,7 +322,7 @@ func TestNonTargetSweepRunsAfterContentSweepReadFailure(t *testing.T) {
 	sj, job, pod := failedNonTargetAttempt()
 	base := t.TempDir()
 	root := writeNonTargetArtifact(t, base, string(sj.UID))
-	q, _ := newTestQueue(t, base, sj, job, pod)
+	q, _ := newTestQueue(t, base, sj, job, pod, sourcePodSnapshotForAttempt(sj, pod))
 	failedLists := 0
 	q.apiReader = interceptor.NewClient(q.client.(client.WithWatch), interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, options ...client.ListOption) error {
@@ -295,7 +347,8 @@ func TestNonTargetArtifactSweepResumesPagedMetadataAfterDeadline(t *testing.T) {
 	base := t.TempDir()
 	root := writeNonTargetArtifact(t, base, string(sj.UID))
 	earlyRoot := writeNonTargetArtifact(t, base, string(earlySJ.UID))
-	q, _ := newTestQueue(t, base, sj, job, pod, earlySJ, earlyJob, earlyPod)
+	q, _ := newTestQueue(t, base, sj, job, pod, sourcePodSnapshotForAttempt(sj, pod),
+		earlySJ, earlyJob, earlyPod, sourcePodSnapshotForAttempt(earlySJ, earlyPod))
 	q.config.ListAttempts = 1
 	pageCalls := make([]string, 0, 6)
 	failLastPage := true
@@ -367,7 +420,7 @@ func TestNonTargetArtifactSweepRetainsDeletedAttemptsAndUnsafeRoots(t *testing.T
 	external := t.TempDir()
 	root := filepath.Join(base, podcontract.NonTargetArtifactsDirectory, string(sj.UID))
 	require.NoError(t, os.Symlink(external, root))
-	q, _ := newTestQueue(t, base, sj, job, pod)
+	q, _ := newTestQueue(t, base, sj, job, pod, sourcePodSnapshotForAttempt(sj, pod))
 	backend, err := q.backend()
 	require.NoError(t, err)
 	require.NoError(t, q.processNonTargetArtifactSweep(context.Background(), backend, log.Log))
@@ -379,7 +432,7 @@ func TestNonTargetArtifactSweepFailsClosedOnAuthoritativePodRead(t *testing.T) {
 	sj, job, pod := failedNonTargetAttempt()
 	base := t.TempDir()
 	root := writeNonTargetArtifact(t, base, string(sj.UID))
-	q, _ := newTestQueue(t, base, sj, job, pod)
+	q, _ := newTestQueue(t, base, sj, job, pod, sourcePodSnapshotForAttempt(sj, pod))
 	q.apiReader = interceptor.NewClient(q.client.(client.WithWatch), interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, options ...client.ListOption) error {
 		if _, pods := list.(*corev1.PodList); pods {
 			return assert.AnError
@@ -401,7 +454,7 @@ func TestNonTargetArtifactSweepBoundsBlockedAttemptsAndReachesLaterCandidates(t 
 		if i < 2 {
 			pod.Status.Phase = corev1.PodRunning
 		}
-		objects = append(objects, sj, job, pod)
+		objects = append(objects, sj, job, pod, sourcePodSnapshotForAttempt(sj, pod))
 		roots = append(roots, writeNonTargetArtifact(t, base, string(sj.UID)))
 	}
 	q, _ := newTestQueue(t, base, objects...)
@@ -423,6 +476,8 @@ func indexedNonTargetAttempt(i int) (*snapshotv1alpha1.SnapshotJob, *batchv1.Job
 	sj.Name = fmt.Sprintf("checkpoint-%d", i)
 	sj.UID = types.UID(fmt.Sprintf("attempt-%d", i))
 	sj.Status.SourceJobUID = types.UID(fmt.Sprintf("job-%d", i))
+	sj.Status.PodSnapshotName = sj.Name
+	sj.Status.PodSnapshotUID = types.UID(fmt.Sprintf("snapshot-%d", i))
 	job.Name, job.UID = sj.Name, sj.Status.SourceJobUID
 	job.OwnerReferences[0].Name, job.OwnerReferences[0].UID = sj.Name, sj.UID
 	job.Spec.Template.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
@@ -451,7 +506,7 @@ func TestNonTargetArtifactSweepStorageErrorDoesNotStarveLaterSweeps(t *testing.T
 	var roots []string
 	for i := 0; i < 2; i++ {
 		sj, job, pod := indexedNonTargetAttempt(i)
-		objects = append(objects, sj, job, pod)
+		objects = append(objects, sj, job, pod, sourcePodSnapshotForAttempt(sj, pod))
 		roots = append(roots, writeNonTargetArtifact(t, base, string(sj.UID)))
 	}
 	q, _ := newTestQueue(t, base, objects...)

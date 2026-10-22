@@ -144,6 +144,7 @@ const nonTargetJobPagesPerSweep = 4
 const nonTargetScanContinuationDelay = 100 * time.Millisecond
 const nonTargetScanRetryDelay = 5 * time.Second
 const noPodWriterProofReason = "source Pod record is absent; writer exit cannot be proven across Kubernetes versions"
+const sourcePodIdentityReason = "original source Pod identity or termination is not proven"
 const missingSourceJobUIDReason = "no source Job UID was recorded"
 const absentSourceJobReason = "source Job is absent; disappearance is not writer-exit proof"
 const sourceJobIdentityMismatchReason = "source Job identity or one-shot policy does not match the attempt"
@@ -152,7 +153,7 @@ const writerEnvironmentMismatchReason = "declared writer lacks the exact attempt
 
 func permanentNonTargetRetention(reason string) bool {
 	switch reason {
-	case noPodWriterProofReason, missingSourceJobUIDReason, absentSourceJobReason, sourceJobIdentityMismatchReason,
+	case noPodWriterProofReason, sourcePodIdentityReason, missingSourceJobUIDReason, absentSourceJobReason, sourceJobIdentityMismatchReason,
 		writerDeclarationMismatchReason, writerEnvironmentMismatchReason:
 		return true
 	default:
@@ -288,6 +289,36 @@ func (q *Queue) nonTargetArtifactWritersStopped(ctx context.Context, sj *snapsho
 		// still terminating. With no Pod record, this operator cannot prove
 		// quiescence across versions. Retain the root for verified manual cleanup.
 		return false, noPodWriterProofReason, nil
+	}
+	if job.Status.Active != 0 || (job.Status.Terminating != nil && *job.Status.Terminating != 0) ||
+		(job.Status.UncountedTerminatedPods != nil &&
+			(len(job.Status.UncountedTerminatedPods.Failed) != 0 || len(job.Status.UncountedTerminatedPods.Succeeded) != 0)) {
+		return false, "source Job still has active or uncounted Pod attempts", nil
+	}
+	// A counted Job attempt can still have a terminating Pod on supported
+	// clusters. Do not let a surviving replacement stand in for the original.
+	counted := job.Status.Failed + job.Status.Succeeded
+	if counted > int32(len(pods.Items)) {
+		return false, noPodWriterProofReason, nil
+	}
+	if counted < int32(len(pods.Items)) {
+		return false, "source Job has not counted all Pod attempts", nil
+	}
+	if len(pods.Items) != 1 || counted != 1 || sj.Status.PodSnapshotName == "" || sj.Status.PodSnapshotUID == "" {
+		return false, sourcePodIdentityReason, nil
+	}
+	snap := &snapshotv1alpha1.PodSnapshot{}
+	if err := q.apiReader.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Status.PodSnapshotName}, snap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, sourcePodIdentityReason, nil
+		}
+		return false, "", fmt.Errorf("read PodSnapshot for source Pod identity: %w", err)
+	}
+	if snap.UID != sj.Status.PodSnapshotUID ||
+		snap.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] != sj.Name ||
+		snap.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] != string(sj.UID) ||
+		snap.Spec.Source.PodRef.Name != pods.Items[0].Name || snap.Spec.Source.PodRef.UID != pods.Items[0].UID {
+		return false, sourcePodIdentityReason, nil
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
