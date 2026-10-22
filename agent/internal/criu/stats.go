@@ -21,9 +21,6 @@ const (
 	statsMagic = 0x57093306
 
 	statsDumpFilename = "stats-dump"
-
-	// CRIU counts pages in 4KiB units on the architectures Snapshot supports.
-	pageBytes = 4096
 )
 
 // DumpStats is the dump half of CRIU's stats-dump image.
@@ -46,9 +43,9 @@ type DumpStats struct {
 	PagesLazy          uint64
 }
 
-// PagesWrittenBytes is PagesWritten converted at CRIU's 4KiB page size.
+// PagesWrittenBytes is PagesWritten converted at the host page size.
 func (s DumpStats) PagesWrittenBytes() uint64 {
-	return s.PagesWritten * pageBytes
+	return s.PagesWritten * uint64(os.Getpagesize())
 }
 
 // ReadDumpStats reads stats-dump from a completed CRIU image directory.

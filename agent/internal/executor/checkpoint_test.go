@@ -550,7 +550,7 @@ func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
 	criuFields := summary["criu"].(map[string]any)
 	assert.Equal(t, (4500 * time.Millisecond).String(), criuFields["memwrite"])
 	assert.Equal(t, (400 * time.Millisecond).String(), criuFields["memdump"])
-	assert.Equal(t, uint64(100*4096), criuFields["pages_written_bytes"])
+	assert.Equal(t, uint64(100)*uint64(os.Getpagesize()), criuFields["pages_written_bytes"])
 	assert.Equal(t, imageBytes, criuFields["image_bytes"])
 	assert.NotContains(t, criuFields, "image_growth")
 
