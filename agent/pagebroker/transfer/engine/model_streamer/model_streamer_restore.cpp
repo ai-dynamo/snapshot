@@ -43,6 +43,7 @@ constexpr auto kCancellationPollInterval = std::chrono::milliseconds(25);
 // Bound each native session even when successful callers return early.
 // Failed submissions retain their mappings until the session drains.
 constexpr std::size_t kSessionSubmissionLimit = 8;
+constexpr char kS3UriPrefix[] = "s3://";
 
 bool
 IsRecoverableRangeStatus(int status)
@@ -96,17 +97,20 @@ ValidateRestoreInventory(const CheckpointInventory& inventory)
     if (!IsSafeRelativePath(directory.relative_path))
       throw std::invalid_argument("restore inventory contains an unsafe directory path");
     const Path parent = directory.relative_path.parent_path();
+    // create_directory() needs each parent to exist before its children.
     if (!parent.empty() && !directories.contains(parent))
       throw std::invalid_argument("restore inventory directories must be ordered parent-first");
-    if (!directories.insert(directory.relative_path).second || !entries.insert(directory.relative_path).second)
+    if (!entries.insert(directory.relative_path).second)
       throw std::invalid_argument("restore inventory contains a duplicate path");
+    directories.insert(directory.relative_path);
   }
   for (const auto& file : inventory.files) {
     // Source locators are remote object addresses; never interpret them as local paths.
     const auto& locator = file.source_locator;
-    const auto slash = locator.find('/', 5);
-    if (!locator.starts_with("s3://") || locator.find('\0') != std::string::npos ||
-        slash == std::string::npos || slash == 5 || slash + 1 == locator.size())
+    constexpr auto prefix_size = sizeof(kS3UriPrefix) - 1;
+    const auto slash = locator.find('/', prefix_size);
+    if (!locator.starts_with(kS3UriPrefix) || locator.find('\0') != std::string::npos ||
+        slash == std::string::npos || slash == prefix_size || slash + 1 == locator.size())
       throw std::invalid_argument("Model Streamer requires an S3 object source");
     if (!IsSafeRelativePath(file.relative_path))
       throw std::invalid_argument("restore inventory contains an unsafe file path");
