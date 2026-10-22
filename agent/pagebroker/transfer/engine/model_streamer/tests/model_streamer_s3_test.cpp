@@ -110,9 +110,22 @@ TEST_F(ModelStreamerS3Test, RestoresRestrictivePermissions)
 {
   ModelStreamerRestore restore(options_, std::chrono::seconds(30));
   auto inventory = NonemptyFile();
-  inventory.files.front().permissions = fs::perms::none;
-  restore.Stage(inventory, root_.path() / "restricted");
-  EXPECT_EQ(fs::status(root_.path() / "restricted/data").permissions(), fs::perms::none);
+  const auto source = inventory.files.front().source_locator;
+  Path fixture_file;
+  for (const auto& file : inventory_.files) {
+    if (file.source_locator == source)
+      fixture_file = Path(Environment("PAGEBROKER_S3_TEST_FIXTURE")) / file.relative_path;
+  }
+  ASSERT_FALSE(fixture_file.empty());
+  for (const auto mode : {fs::perms::none, fs::perms::owner_read}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    inventory.files.front().permissions = mode;
+    const auto destination = root_.path() / std::to_string(static_cast<unsigned>(mode));
+    ASSERT_NO_THROW(restore.Stage(inventory, destination));
+    EXPECT_EQ(fs::status(destination / "data").permissions(), mode);
+    fs::permissions(destination / "data", fs::perms::owner_read, fs::perm_options::add);
+    EXPECT_TRUE(test::FilesEqual(fixture_file, destination / "data"));
+  }
 }
 
 TEST_F(ModelStreamerS3Test, RestoresTreeThroughNativePlugin)
