@@ -199,9 +199,21 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |
+| `storage.s3.endpoint` | S3-compatible endpoint, an absolute http(s) URL, with `storage.type=s3` | `""` |
+| `storage.s3.region` | Bucket region | `""` |
+| `storage.s3.bucket` | Bucket holding the checkpoints | `""` |
+| `storage.s3.prefix` | Key prefix inside the bucket; empty is the bucket root | `""` |
+| `storage.s3.credentialsSecretRef` | Secret holding a shared-credentials file, mounted into PageBroker and the operator | `""` |
+| `storage.s3.credentialsSecretKey` | Key in that Secret holding the credentials file | `credentials` |
+| `storage.s3.addressing` | Bucket addressing PageBroker uses: `virtual` (its default when empty) or `path` | `""` |
+| `storage.s3.allowHttp` | Accept a plain-http endpoint | `false` |
+| `storage.s3.caBundleConfigMapRef` | ConfigMap holding the CA bundle for the endpoint's TLS certificate, mounted into PageBroker and the operator | `""` |
+| `storage.s3.caBundleConfigMapKey` | Key in that ConfigMap holding the bundle | `ca.crt` |
 | `pageBroker.staging.sizeLimit` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for checkpoint (except GPU CustomStorage capture) and staged restore. Leave headroom above it in the writing container's memory limit; the chart's 64Gi default and the agent's 64Gi default memory limit leave none | `64Gi` |
 | `pageBroker.maxConcurrentRequests` | Concurrent control-socket requests the daemon serves | `16` |
 | `pageBroker.artifactAddressing` | Pass store configuration to a compatible PVC artifact backend. Deploy this before enabling `operator.bindNewContents` | `false` |
+| `pageBroker.s3.limits` | PageBroker's S3 transfer and transaction limits, passed through as its `limits` object; `stagingBytes` defaults to the staging cap | `{}` |
+| `pageBroker.modelStreamer` | Model Streamer reader tuning for S3 restores, passed through as the file behind `--model-streamer-config` | `{}` |
 | `pageBroker.resources` | CPU and memory requests/limits for the PageBroker sidecar. The memory limit bounds restore prefetch into staging | 8 CPU / 32Gi request, 32 CPU / 256Gi limit |
 | `daemonset.resources` | CPU and memory requests/limits for the agent. The agent's memory limit also bounds the largest checkpoint image, because CRIU writes it into memory-backed PageBroker staging (direct GPU CustomStorage capture writes to the PVC instead, and is not bound by this) | 2 CPU / 1Gi request, 4 CPU / 64Gi limit |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
