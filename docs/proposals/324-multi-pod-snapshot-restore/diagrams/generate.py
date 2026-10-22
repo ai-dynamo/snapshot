@@ -121,7 +121,7 @@ def svg(name, width, height, title, desc, body):
         + "\n".join(body)
         + "\n</svg>\n"
     )
-    with open(os.path.join(HERE, name), "w") as f:
+    with open(os.path.join(HERE, name), "w", encoding="utf-8") as f:
         f.write(doc)
 
 
@@ -356,9 +356,8 @@ CHECKPOINT = (
         ("m", "L", "C", "Insert Done"),
         ("s", "R", "every relay writes cuinterpose.state and exits 0"),
         ("m", "A", "W", "CUDA lock and checkpoint on every process at once"),
-        ("m", "A", "W", "hold preserved connections in the Pod's network namespace"),
         ("m", "A", "C", "barrier snapshot/net-freeze"),
-        ("m", "A", "W", "CRIU dump with the member table in the manifest, the source ends"),
+        ("m", "A", "W", "CRIU dump: locks the Pod's network at the freeze, member table in the manifest, the source ends"),
         ("m", "A", "O", "member Captured on its PodSnapshotContent"),
         ("m", "A", "C", "Leave(captured)"),
         ("s", "O", "every member Captured: PodSetSnapshot Ready"),
@@ -598,8 +597,8 @@ def phases():
         ("t", "Round: begin, revalidate"),
         ("t", "Rounds: destructive phases"),
         ("g", "CUDA lock and checkpoint"),
-        ("p", "Hold flows, barrier: net-freeze"),
-        ("g", "CRIU dump"),
+        ("p", "Barrier: net-freeze"),
+        ("g", "CRIU dump, network locked"),
     ])
 
     # Restore: sequence, then a fork, then a join.
@@ -658,7 +657,7 @@ def phases():
     svg("phases.svg", W, ly + 34, "Phases of a group checkpoint and a group restore",
         "Checkpoint: the workload quiesces and reports ready-for-snapshot, admission all-gather, an INSPECT round, "
         "admitted barrier, commit, the Started record, CUDA prepare, a revalidation round, destructive cuInterpose "
-        "rounds, CUDA lock and checkpoint, hold and net-freeze barrier, CRIU dump. Restore: admission, admitted "
+        "rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU dump with its network lock. Restore: admission, admitted "
         "barrier, commit, the RestoreStarted record, CRIU restore under a narrow "
         "hold, then in parallel the sockets-restored barrier and CUDA restore with the cuInterpose rounds, then the "
         "endpoint and resume barrier, CUDA resume, and the release barrier, after which the workload resumes; the "
