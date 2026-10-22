@@ -20,6 +20,10 @@ ENGINE_SOURCES = $(COMMON_SOURCES) $(STREAMER_SOURCES) transfer/engine/model_str
 TRANSFER_TEST_SOURCES := tests/transaction_test.cpp transfer/engine/model_streamer/tests/model_streamer_restore_test.cpp tests/temporary_directory_test.cpp
 MODEL_STREAMER_RECOVERY_TEST_SOURCES = $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_transfer_engine_test.cpp
 MODEL_STREAMER_SESSION_TEST_SOURCES := $(RESTORE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_session_test.cpp
+# Cancel deterministically after filesystem operations in the session tests.
+MODEL_STREAMER_SESSION_TEST_WRAP_FLAGS := -Wl,--wrap=posix_fallocate,--wrap=mmap \
+	-Wl,--wrap=_ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE \
+	-Wl,--wrap=_ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE
 TRANSFER_FLAGS := $(MODEL_STREAMER_FLAGS)
 CPPFLAGS += -I$(MODEL_STREAMER_INCLUDE_DIR)
 
@@ -67,7 +71,7 @@ test: generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-
 	./build/pagebroker-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODEL_STREAMER_RECOVERY_TEST_SOURCES) v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS)  -o build/model-streamer-recovery-test
 	./build/model-streamer-recovery-test
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODEL_STREAMER_SESSION_TEST_SOURCES) $(GTEST_FLAGS) -Wl,--wrap=posix_fallocate -o build/model-streamer-session-test
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODEL_STREAMER_SESSION_TEST_SOURCES) $(GTEST_FLAGS) $(MODEL_STREAMER_SESSION_TEST_WRAP_FLAGS) -o build/model-streamer-session-test
 	./build/model-streamer-session-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/storage_manifest.cpp gpu/storage_manifest_test.cpp -o build/gpu-storage-test
 	./build/gpu-storage-test
