@@ -272,14 +272,14 @@ class GpuCompletion {
 }  // namespace
 
 Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine,
-    std::optional<S3Config> config, std::chrono::seconds lifetime)
+    std::optional<S3Config> config, std::chrono::seconds lifetime, ModelStreamerOptions model_streamer)
     : lifetime_(config ? config->transaction_lifetime : lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
   const auto staging_base = staging_root_;
   if (config) {
     resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions);
     staging_root_ /= kS3StagingDirectory;
-    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config)));
+    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config), std::move(model_streamer)));
   } else {
     io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
   }

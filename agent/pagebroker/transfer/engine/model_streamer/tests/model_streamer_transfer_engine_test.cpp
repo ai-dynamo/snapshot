@@ -405,6 +405,15 @@ TEST_F(ModelStreamerTransferEngineTest, S3RecoveryPreservesConnectionAndTimeout)
   EXPECT_EQ(fs::file_size(root_.path() / "recovered/data"), 9);
 }
 
+TEST_F(ModelStreamerTransferEngineTest, RejectsUnappliedProcessSettingsBeforeNativeStartup)
+{
+  ScopedEnvironment concurrency("RUNAI_STREAMER_OBJ_CONCURRENCY", "2");
+  ModelStreamerOptions tuning;
+  tuning.s3_concurrency = 3;
+  EXPECT_THROW(ModelStreamerTransferEngine(Config(), tuning), std::invalid_argument);
+  EXPECT_EQ(starts, 0);
+}
+
 TEST_F(ModelStreamerTransferEngineTest, RejectsConflictingS3SettingsAndInvalidTimeouts)
 {
   options_.connection.use_virtual_addressing = true;
