@@ -64,11 +64,11 @@ struct Session {
   struct Submission {
     std::vector<char*> destinations;
     bool failed = false;
+    uintmax_t bytes = 0;
   };
   std::vector<Response> responses;
   std::map<RunaiFileStreamerSubmissionId, Submission> entries;
   std::size_t next = 0;
-  unsigned submissions = 0;
 };
 struct FakeState {
   std::mutex mutex;
@@ -79,6 +79,7 @@ struct FakeState {
   bool hold_request = false;
   bool allow_responses = true;
   bool pause_after_completion = false;
+  bool pause_after_response = false;
   unsigned completed_submissions = 0;
   int allocation_error = 0;
   int start_status = 0;
@@ -95,7 +96,8 @@ struct FakeState {
   unsigned ends_entered = 0;
   unsigned ends = 0;
   unsigned submitted = 0;
-  unsigned max_submissions = 0;
+  std::size_t max_active_submissions = 0;
+  uintmax_t max_active_bytes = 0;
   std::vector<std::string> sources;
   std::vector<std::vector<std::string>> submission_sources;
   std::vector<uintmax_t> submission_bytes;
@@ -130,6 +132,7 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.hold_request = false;
     state.allow_responses = true;
     state.pause_after_completion = false;
+    state.pause_after_response = false;
     state.completed_submissions = 0;
     state.allocation_error = 0;
     state.start_status = state.credential_status = 0;
@@ -138,7 +141,8 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.storage_failure_submission = 0;
     state.return_start_handle = true;
     state.sparse_allocations = false;
-    state.starts = state.ends_entered = state.ends = state.submitted = state.max_submissions = 0;
+    state.starts = state.ends_entered = state.ends = state.submitted = 0;
+    state.max_active_submissions = state.max_active_bytes = 0;
     state.allocations = state.requests_entered = 0;
     state.response_polls = 0;
     state.sources.clear();
@@ -171,7 +175,7 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.hold_end = false;
     state.changed.notify_all();
   }
-  bool WaitForIdle()
+  bool WaitForStopped()
   {
     std::unique_lock lock(state.mutex);
     return state.changed.wait_for(lock, 5s, [] { return state.ends == state.starts; });
@@ -258,7 +262,6 @@ extern "C" void runai_file_streamer_end(void* value)
     for (auto& [id, entry] : session->entries)
       for (auto* destination : entry.destinations)
         *destination = 'e';
-    state.max_submissions = std::max(state.max_submissions, session->submissions);
     ++state.ends;
     state.changed.notify_all();
   }
@@ -286,7 +289,6 @@ extern "C" int runai_file_streamer_request(
   const auto native_id = ++state.next_id;
   *id = state.return_submission_id ? native_id : 0;
   ++state.submitted;
-  ++session.submissions;
   state.submission_sources.emplace_back();
   state.submission_bytes.push_back(0);
   for (unsigned file = 0; file < files; ++file) {
@@ -299,8 +301,14 @@ extern "C" int runai_file_streamer_request(
     auto* destination = static_cast<char*>(destinations[file]);
     *destination = 'd';
     session.entries[native_id].destinations.push_back(destination);
+    session.entries[native_id].bytes += sizes[file];
     session.responses.push_back(Response{native_id, file, file + 1 == files ? 1 : 0});
   }
+  state.max_active_submissions = std::max(state.max_active_submissions, session.entries.size());
+  uintmax_t active_bytes = 0;
+  for (const auto& [entry_id, entry] : session.entries)
+    active_bytes += entry.bytes;
+  state.max_active_bytes = std::max(state.max_active_bytes, active_bytes);
   state.changed.notify_all();
   return state.request_status;
 }
@@ -330,6 +338,11 @@ extern "C" int runai_file_streamer_response(
     }
     state.changed.notify_all();
   }
+  if (state.pause_after_response) {
+    state.allow_responses = false;
+    state.pause_after_response = false;
+    state.changed.notify_all();
+  }
   if (state.fault == Fault::EARLY_DONE)
     *done = 1;
   if (state.fault == Fault::MISSING_DONE)
@@ -357,27 +370,35 @@ TEST_F(ModelStreamerSessionTest, UnusedCoordinatorDoesNotStartWorker)
   EXPECT_EQ(state.ends, 0U);
 }
 
-TEST_F(ModelStreamerSessionTest, ReusesWorkerAfterEachSessionDrains)
+TEST_F(ModelStreamerSessionTest, ReusesIdleSessionAndWorkerUntilShutdown)
 {
-  ModelStreamerRestore restore;
-  std::thread::id worker;
-  for (unsigned i = 0; i < 8; ++i) {
-    EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / std::to_string(i)));
-    EXPECT_TRUE(WaitForIdle());
-    EXPECT_TRUE(ModelStreamerRestoreTestPeer::HasWorker(restore));
-    std::lock_guard lock(state.mutex);
-    if (i == 0)
-      worker = state.native_thread;
-    EXPECT_EQ(state.native_thread, worker);
-    EXPECT_EQ(state.starts, i + 1);
-    EXPECT_EQ(state.ends, i + 1);
+  {
+    ModelStreamerRestore restore;
+    std::thread::id worker;
+    for (unsigned i = 0; i < 20; ++i) {
+      ASSERT_NO_THROW(restore.Stage(Inventory(), root_ / std::to_string(i)));
+      EXPECT_TRUE(ModelStreamerRestoreTestPeer::HasWorker(restore));
+      EXPECT_FALSE(HasMapping(root_ / std::to_string(i)));
+      std::lock_guard lock(state.mutex);
+      if (i == 0)
+        worker = state.native_thread;
+      EXPECT_EQ(state.native_thread, worker);
+      EXPECT_EQ(state.starts, 1U);
+      EXPECT_EQ(state.ends, 0U);
+    }
+    // A retained handle must not make the idle worker poll native responses.
+    {
+      std::unique_lock lock(state.mutex);
+      const auto polls = state.response_polls;
+      EXPECT_FALSE(state.changed.wait_for(lock, 50ms, [polls] { return state.response_polls != polls; }));
+    }
+    ModelStreamerRestoreTestPeer::RequestStop(restore);
+    ModelStreamerRestoreTestPeer::RequestStop(restore);
+    EXPECT_TRUE(WaitForStopped());
+    EXPECT_THROW(restore.Stage(Inventory(), root_ / "stopped"), std::runtime_error);
+    EXPECT_FALSE(restore.Failed());
   }
-  // Repeated requests to stop must wake the idle worker and remain safe when
-  // the destructor requests stop again and joins it.
-  ModelStreamerRestoreTestPeer::RequestStop(restore);
-  ModelStreamerRestoreTestPeer::RequestStop(restore);
-  EXPECT_THROW(restore.Stage(Inventory(), root_ / "stopped"), std::runtime_error);
-  EXPECT_FALSE(restore.Failed());
+  EXPECT_EQ(state.ends, 1U);
 }
 
 TEST_F(ModelStreamerSessionTest, ShutdownDuringStartupRejectsPendingWithoutSubmitting)
@@ -495,7 +516,6 @@ TEST_F(ModelStreamerSessionTest, SplitsOneInventoryAtByteBudgetWithEmptyFiles)
   }
   ModelStreamerRestore restore;
   ASSERT_NO_THROW(restore.Stage(inventory, root_ / "split"));
-  EXPECT_TRUE(WaitForIdle());
   EXPECT_EQ(state.submission_bytes, (std::vector<uintmax_t>{10'000'000'000, 1}));
   EXPECT_EQ(state.submission_sources, (std::vector<std::vector<std::string>>{
       {inventory.files[1].source_locator, inventory.files[3].source_locator}, {inventory.files[4].source_locator}}));
@@ -519,7 +539,6 @@ TEST_F(ModelStreamerSessionTest, SubmitsOversizedFileAloneAndContinuesInventory)
   inventory.files[0].size_bytes = 10'000'000'001;
   ModelStreamerRestore restore;
   ASSERT_NO_THROW(restore.Stage(inventory, root_ / "oversized"));
-  EXPECT_TRUE(WaitForIdle());
   EXPECT_EQ(state.submission_bytes, (std::vector<uintmax_t>{10'000'000'001, 1}));
   EXPECT_EQ(state.submission_sources, (std::vector<std::vector<std::string>>{
       {inventory.files[0].source_locator}, {inventory.files[1].source_locator}}));
@@ -531,6 +550,37 @@ TEST_F(ModelStreamerSessionTest, SubmitsOversizedFileAloneAndContinuesInventory)
     std::ifstream(staged).get(byte);
     EXPECT_EQ(byte, 'd');
   }
+}
+
+TEST_F(ModelStreamerSessionTest, OversizedSubmissionExcludesOtherReadsUntilCompletion)
+{
+  state.sparse_allocations = true;
+  state.allow_responses = false;
+  state.pause_after_completion = true;
+  ModelStreamerRestore restore;
+  auto inventory = Inventory();
+  inventory.files.front().size_bytes = 10'000'000'001;
+  auto large = std::async(std::launch::async, [&] { restore.Stage(inventory, root_ / "large"); });
+  EXPECT_TRUE(WaitForSubmissions(1));
+  auto small = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "small"); });
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::WaitForPending(restore, 1));
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.submitted, 1U);
+    state.allow_responses = true;
+    state.changed.notify_all();
+  }
+  EXPECT_TRUE(WaitForSubmissions(2));
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.max_active_submissions, 1U);
+    EXPECT_EQ(state.starts, 1U);
+    EXPECT_EQ(state.ends, 0U);
+    state.allow_responses = true;
+    state.changed.notify_all();
+  }
+  EXPECT_NO_THROW(large.get());
+  EXPECT_NO_THROW(small.get());
 }
 
 TEST_F(ModelStreamerSessionTest, LaterBatchFailureReleasesMappingsAndStopsInventory)
@@ -546,7 +596,7 @@ TEST_F(ModelStreamerSessionTest, LaterBatchFailureReleasesMappingsAndStopsInvent
   auto result = std::async(std::launch::async, [&] { restore.Stage(inventory, root_ / "partial"); });
   {
     std::unique_lock lock(state.mutex);
-    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.ends_entered == 2; }));
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.ends_entered == 1; }));
   }
   EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
   EXPECT_FALSE(HasMapping(root_ / "partial/0"));
@@ -622,27 +672,19 @@ INSTANTIATE_TEST_SUITE_P(StartupFaults, ModelStreamerStartupFailureTest,
       return "Unknown";
     });
 
-TEST_F(ModelStreamerSessionTest, SuccessfulSubmissionReleasesMappingsBeforeEndReturns)
+TEST_F(ModelStreamerSessionTest, SuccessfulSubmissionReleasesMappingsWhileSessionStaysOpen)
 {
-  state.hold_end = true;
-  ModelStreamerRestore restore;
-  auto result = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "restore"); });
-  const bool ending = WaitForEnd();
-  EXPECT_TRUE(ending);
-  const bool returned = result.wait_for(2s) == std::future_status::ready;
-  EXPECT_TRUE(returned);
-  if (returned) {
+  {
+    ModelStreamerRestore restore;
+    ASSERT_NO_THROW(restore.Stage(Inventory(), root_ / "restore"));
     EXPECT_FALSE(HasMapping(root_ / "restore"));
+    EXPECT_EQ(state.ends, 0U);
+    EXPECT_FALSE(restore.Failed());
+    char data = 0;
+    std::ifstream(root_ / "restore" / "0").get(data);
+    EXPECT_EQ(data, 'd');
   }
-  ReleaseEnd();
-  ASSERT_NO_THROW(result.get());
-  char data = 0;
-  std::ifstream(root_ / "restore" / "0").get(data);
-  EXPECT_EQ(data, 'd');
-  EXPECT_TRUE(WaitForIdle());
   EXPECT_EQ(state.ends, 1U);
-  EXPECT_FALSE(HasMapping(root_ / "restore"));
-  EXPECT_FALSE(restore.Failed());
 }
 
 TEST_F(ModelStreamerSessionTest, DrainsBeforeReleasingFailures)
@@ -666,18 +708,6 @@ TEST_F(ModelStreamerSessionTest, DrainsBeforeReleasingFailures)
   }
 }
 
-TEST_F(ModelStreamerSessionTest, StartsFreshSessionsWithoutRetainingCompletedMappings)
-{
-  ModelStreamerRestore restore;
-  for (unsigned i = 0; i < 20; ++i) {
-    ASSERT_NO_THROW(restore.Stage(Inventory(), root_ / std::to_string(i)));
-    EXPECT_TRUE(WaitForIdle());
-    EXPECT_EQ(state.ends, i + 1);
-    EXPECT_EQ(state.starts, state.ends);
-    EXPECT_FALSE(HasMapping(root_ / std::to_string(i)));
-  }
-}
-
 struct SubmissionFailure {
   const char* name;
   int status;
@@ -695,7 +725,9 @@ TEST_P(ModelStreamerSubmissionFailureTest, PreservesOwnershipUntilSafeToReturn)
   state.hold_end = true;
   ModelStreamerRestore restore;
   auto result = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "failed"); });
-  EXPECT_TRUE(WaitForEnd());
+  if (failure.terminal) {
+    EXPECT_TRUE(WaitForEnd());
+  }
   const auto status = result.wait_for(failure.terminal ? 0ms : 2s);
   EXPECT_EQ(status, failure.terminal ? std::future_status::timeout : std::future_status::ready);
   if (failure.terminal || status == std::future_status::ready) {
@@ -707,7 +739,6 @@ TEST_P(ModelStreamerSubmissionFailureTest, PreservesOwnershipUntilSafeToReturn)
   EXPECT_THROW(result.get(), std::runtime_error);
   EXPECT_FALSE(HasMapping(root_ / "failed"));
   EXPECT_EQ(restore.Failed(), failure.terminal);
-  EXPECT_TRUE(WaitForIdle());
   EXPECT_EQ(state.response_polls, 0U);
   if (!failure.terminal) {
     {
@@ -716,9 +747,8 @@ TEST_P(ModelStreamerSubmissionFailureTest, PreservesOwnershipUntilSafeToReturn)
       state.return_submission_id = true;
     }
     EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "retry"));
-    EXPECT_TRUE(WaitForIdle());
-    EXPECT_EQ(state.starts, 2U);
-    EXPECT_EQ(state.ends, 2U);
+    EXPECT_EQ(state.starts, 1U);
+    EXPECT_EQ(state.ends, 0U);
     EXPECT_EQ(state.submitted, 1U);
   }
 }
@@ -741,8 +771,8 @@ TEST_F(ModelStreamerSessionTest, StorageFailureAllowsSubsequentRestore)
   EXPECT_EQ(state.ends, 1U);
   state.fault = Fault::NONE;
   EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "success"));
-  EXPECT_TRUE(WaitForIdle());
-  EXPECT_EQ(state.ends, 2U);
+  EXPECT_EQ(state.starts, 2U);
+  EXPECT_EQ(state.ends, 1U);
 }
 
 TEST_F(ModelStreamerSessionTest, DuplicateSubmissionIdRetainsBothEntriesUntilTeardown)
@@ -775,9 +805,10 @@ TEST_F(ModelStreamerSessionTest, DuplicateSubmissionIdRetainsBothEntriesUntilTea
   EXPECT_EQ(state.ends, 1U);
 }
 
-TEST_F(ModelStreamerSessionTest, BoundsSessionAdmissionUnderConcurrentLoad)
+TEST_F(ModelStreamerSessionTest, ReplenishesSubmissionCapacityWhileOtherReadsContinue)
 {
   state.allow_responses = false;
+  state.pause_after_completion = true;
   ModelStreamerRestore restore;
   std::vector<std::future<void>> results;
   for (unsigned i = 0; i < 20; ++i)
@@ -789,12 +820,22 @@ TEST_F(ModelStreamerSessionTest, BoundsSessionAdmissionUnderConcurrentLoad)
     state.allow_responses = true;
     state.changed.notify_all();
   }
+  EXPECT_TRUE(WaitForSubmissions(9));
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.submitted, 9U);
+    EXPECT_EQ(state.completed_submissions, 1U);
+    EXPECT_EQ(state.starts, 1U);
+    EXPECT_EQ(state.ends, 0U);
+    state.allow_responses = true;
+    state.changed.notify_all();
+  }
   for (auto& result : results)
     EXPECT_NO_THROW(result.get());
-  EXPECT_TRUE(WaitForIdle());
-  EXPECT_LE(state.max_submissions, 8U);
+  EXPECT_LE(state.max_active_submissions, 8U);
   EXPECT_EQ(state.submitted, 20U);
-  EXPECT_EQ(state.starts, state.ends);
+  EXPECT_EQ(state.starts, 1U);
+  EXPECT_EQ(state.ends, 0U);
 }
 
 TEST_F(ModelStreamerSessionTest, SuccessfulSubmissionReturnsWhileAnotherContinues)
@@ -835,19 +876,18 @@ TEST_F(ModelStreamerSessionTest, SuccessfulSubmissionReturnsWhileAnotherContinue
   EXPECT_NO_THROW(queued.get());
   EXPECT_NO_THROW(first.get());
   EXPECT_NO_THROW(second.get());
-  EXPECT_TRUE(WaitForIdle());
   EXPECT_FALSE(restore.Failed());
-  EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "next-session"));
-  EXPECT_EQ(state.starts, 2U);
+  EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "same-session"));
+  EXPECT_EQ(state.starts, 1U);
 }
 
-TEST_F(ModelStreamerSessionTest, CompletedFailureStopsAdmissionUntilSessionDrains)
+TEST_F(ModelStreamerSessionTest, FirstRangeFailureStopsAdmissionUntilSessionDrains)
 {
   state.fault = Fault::STORAGE;
   state.allow_responses = false;
-  state.pause_after_completion = true;
+  state.pause_after_response = true;
   ModelStreamerRestore restore;
-  auto first = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "first"); });
+  auto first = std::async(std::launch::async, [&] { restore.Stage(Inventory(2), root_ / "first"); });
   EXPECT_TRUE(WaitForSubmissions(1));
   auto second = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "second"); });
   {
@@ -855,9 +895,9 @@ TEST_F(ModelStreamerSessionTest, CompletedFailureStopsAdmissionUntilSessionDrain
     EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted == 2; }));
     state.allow_responses = true;
     state.changed.notify_all();
-    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.completed_submissions == 1; }));
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return !state.pause_after_response; }));
   }
-  // One batch has failed but the other still holds the session open. A new
+  // One range failed before either submission completed. A new
   // batch must remain pending, so its deadline cannot cancel those native reads.
   auto queued = std::async(std::launch::async, [&] {
     restore.Stage(Inventory(), root_ / "queued", Cancellation(Cancellation::Clock::now() + 100ms));
@@ -926,30 +966,39 @@ TEST_F(ModelStreamerSessionTest, LaterFailureDoesNotRetainSuccessfulSubmission)
   }
 }
 
-TEST_F(ModelStreamerSessionTest, BoundsSessionBytesAcrossSubmissions)
+TEST_F(ModelStreamerSessionTest, ReplenishesByteCapacityWhileOtherReadsContinue)
 {
   state.sparse_allocations = true;
   state.allow_responses = false;
+  state.pause_after_completion = true;
   ModelStreamerRestore restore;
   auto inventory = Inventory();
   // Sparse files exercise admission without allocating or reading gigabytes.
-  inventory.files.front().size_bytes = 6'000'000'000;
+  inventory.files.front().size_bytes = 4'000'000'000;
   std::vector<std::future<void>> results;
   for (unsigned i = 0; i < 3; ++i)
     results.push_back(std::async(std::launch::async, [&, i] { restore.Stage(inventory, root_ / std::to_string(i)); }));
+  EXPECT_TRUE(WaitForSubmissions(2));
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::WaitForPending(restore, 1));
   {
-    std::unique_lock lock(state.mutex);
-    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted != 0; }));
-    EXPECT_EQ(state.submitted, 1U);
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.submitted, 2U);
+    state.allow_responses = true;
+    state.changed.notify_all();
+  }
+  EXPECT_TRUE(WaitForSubmissions(3));
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.completed_submissions, 1U);
+    EXPECT_EQ(state.max_active_submissions, 2U);
+    EXPECT_LE(state.max_active_bytes, 10'000'000'000U);
+    EXPECT_EQ(state.starts, 1U);
+    EXPECT_EQ(state.ends, 0U);
     state.allow_responses = true;
     state.changed.notify_all();
   }
   for (auto& result : results)
     EXPECT_NO_THROW(result.get());
-  EXPECT_TRUE(WaitForIdle());
-  EXPECT_EQ(state.max_submissions, 1U);
-  EXPECT_EQ(state.starts, 3U);
-  EXPECT_EQ(state.ends, 3U);
 }
 
 TEST_F(ModelStreamerSessionTest, TerminalFailureDrainsActiveAndQueuedRestores)
@@ -1153,8 +1202,8 @@ TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator
   EXPECT_FALSE(restore.Failed());
   EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "success"));
   EXPECT_EQ(state.submitted, 1U);
-  EXPECT_TRUE(WaitForIdle());
-  EXPECT_EQ(state.starts, state.ends);
+  EXPECT_EQ(state.starts, 1U);
+  EXPECT_EQ(state.ends, 0U);
 }
 
 // Exercise explicit cancellation and deadline expiry while end() blocks the worker.
@@ -1165,11 +1214,12 @@ TEST_P(QueuedTeardownCancellationTest, ReturnsBeforeTeardownAndNeverSubmitsCance
 {
   const bool deadline = GetParam();
   state.hold_end = true;
+  state.fault = Fault::STORAGE;
   ModelStreamerRestore restore;
   auto active = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "active"); });
   EXPECT_TRUE(WaitForEnd());
-  const bool active_returned = active.wait_for(2s) == std::future_status::ready;
-  EXPECT_TRUE(active_returned);
+  EXPECT_EQ(active.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "active"));
 
   Cancellation cancellation;
   if (deadline)
@@ -1185,9 +1235,6 @@ TEST_P(QueuedTeardownCancellationTest, ReturnsBeforeTeardownAndNeverSubmitsCance
     EXPECT_EQ(state.submitted, 1U);
     EXPECT_EQ(state.ends, 0U);
   }
-  if (active_returned) {
-    EXPECT_FALSE(HasMapping(root_ / "active"));
-  }
   if (queued_status == std::future_status::ready) {
     EXPECT_FALSE(HasMapping(root_ / "queued"));
   }
@@ -1199,9 +1246,14 @@ TEST_P(QueuedTeardownCancellationTest, ReturnsBeforeTeardownAndNeverSubmitsCance
     EXPECT_FALSE(error);
   }
   ReleaseEnd();
-  EXPECT_NO_THROW(active.get());
+  EXPECT_THROW(active.get(), std::runtime_error);
+  EXPECT_FALSE(HasMapping(root_ / "active"));
   ExpectCancellation(queued, deadline ? CancellationError::Reason::DEADLINE_EXCEEDED :
                                        CancellationError::Reason::CANCELLED);
+  {
+    std::lock_guard lock(state.mutex);
+    state.fault = Fault::NONE;
+  }
   EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "recovered"));
   EXPECT_EQ(state.submitted, 2U);
   EXPECT_FALSE(restore.Failed());
