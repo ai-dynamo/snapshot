@@ -4,6 +4,8 @@
 #include "transfer/engine/model_streamer/model_streamer_restore.hpp"
 
 #include <gtest/gtest.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 
 #include <algorithm>
 #include <atomic>
@@ -82,6 +84,13 @@ struct FakeState {
   bool pause_after_response = false;
   unsigned completed_submissions = 0;
   int allocation_error = 0;
+  Cancellation preparation_cancellation;
+  Path cancel_after_directory;
+  Path cancel_after_permissions;
+  bool cancel_after_allocation = false;
+  unsigned mappings = 0;
+  int allocated_descriptor = -1;
+  std::vector<Path> permission_paths;
   int start_status = 0;
   bool return_start_handle = true;
   int credential_status = 0;
@@ -135,6 +144,13 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.pause_after_response = false;
     state.completed_submissions = 0;
     state.allocation_error = 0;
+    state.preparation_cancellation = Cancellation{};
+    state.cancel_after_directory.clear();
+    state.cancel_after_permissions.clear();
+    state.cancel_after_allocation = false;
+    state.mappings = 0;
+    state.allocated_descriptor = -1;
+    state.permission_paths.clear();
     state.start_status = state.credential_status = 0;
     state.request_status = RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
     state.return_submission_id = true;
@@ -201,6 +217,40 @@ class ModelStreamerSessionTest : public ::testing::Test {
 }  // namespace
 
 extern "C" int __real_posix_fallocate(int descriptor, off_t offset, off_t length);
+extern "C" void* __real_mmap(void* address, size_t length, int protection, int flags, int descriptor, off_t offset);
+extern "C" bool __real__ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE(const Path& path);
+extern "C" void __real__ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE(
+    const Path& path, fs::perms permissions, fs::perm_options options);
+
+// Wrap the filesystem entry points called by the restore code, since their
+// underlying mkdir/chmod calls live inside the shared C++ standard library.
+extern "C" bool __wrap__ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE(const Path& path)
+{
+  const bool created = __real__ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE(path);
+  std::lock_guard lock(state.mutex);
+  if (path == state.cancel_after_directory)
+    state.preparation_cancellation.Cancel();
+  return created;
+}
+
+extern "C" void __wrap__ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE(
+    const Path& path, fs::perms permissions, fs::perm_options options)
+{
+  __real__ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE(path, permissions, options);
+  std::lock_guard lock(state.mutex);
+  state.permission_paths.push_back(path);
+  if (path == state.cancel_after_permissions)
+    state.preparation_cancellation.Cancel();
+}
+
+extern "C" void* __wrap_mmap(void* address, size_t length, int protection, int flags, int descriptor, off_t offset)
+{
+  {
+    std::lock_guard lock(state.mutex);
+    ++state.mappings;
+  }
+  return __real_mmap(address, length, protection, flags, descriptor, offset);
+}
 
 extern "C" int __wrap_posix_fallocate(int descriptor, off_t offset, off_t length)
 {
@@ -218,6 +268,9 @@ extern "C" int __wrap_posix_fallocate(int descriptor, off_t offset, off_t length
   if (result == 0) {
     std::lock_guard lock(state.mutex);
     ++state.allocations;
+    state.allocated_descriptor = descriptor;
+    if (state.cancel_after_allocation)
+      state.preparation_cancellation.Cancel();
     state.changed.notify_all();
   }
   return result;
@@ -368,6 +421,82 @@ TEST_F(ModelStreamerSessionTest, UnusedCoordinatorDoesNotStartWorker)
   }
   EXPECT_EQ(state.starts, 0U);
   EXPECT_EQ(state.ends, 0U);
+}
+
+TEST_F(ModelStreamerSessionTest, CancellationDuringDirectoryCreationStopsBeforeStartingWorker)
+{
+  const auto destination = root_ / "cancelled";
+  CheckpointInventory inventory;
+  inventory.directories = {{"first"}, {"second"}};
+  state.cancel_after_directory = destination / "first";
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(inventory, destination, state.preparation_cancellation), CancellationError);
+  EXPECT_TRUE(fs::is_directory(destination / "first"));
+  EXPECT_FALSE(fs::exists(destination / "second"));
+  EXPECT_FALSE(ModelStreamerRestoreTestPeer::HasWorker(restore));
+  EXPECT_EQ(state.starts, 0U);
+}
+
+TEST_F(ModelStreamerSessionTest, CancellationDuringLastDirectoryCreationStopsBeforeStartingWorker)
+{
+  const auto destination = root_ / "cancelled";
+  CheckpointInventory inventory;
+  inventory.directories = {{"last"}};
+  state.cancel_after_directory = destination / "last";
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(inventory, destination, state.preparation_cancellation), CancellationError);
+  EXPECT_TRUE(fs::is_directory(destination / "last"));
+  EXPECT_FALSE(ModelStreamerRestoreTestPeer::HasWorker(restore));
+  EXPECT_EQ(state.starts, 0U);
+}
+
+TEST_F(ModelStreamerSessionTest, CancellationDuringDirectoryPermissionsStopsRemainingUpdates)
+{
+  const auto destination = root_ / "cancelled";
+  CheckpointInventory inventory;
+  inventory.root_permissions = fs::perms::owner_all;
+  inventory.directories = {{"parent", fs::perms::owner_all},
+                           {"parent/child", fs::perms::owner_read | fs::perms::owner_exec},
+                           {"last", fs::perms::owner_all}};
+  state.cancel_after_permissions = destination / "parent/child";
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(inventory, destination, state.preparation_cancellation), CancellationError);
+  EXPECT_EQ(state.permission_paths, (std::vector<Path>{destination / "last", destination / "parent/child"}));
+  EXPECT_EQ(fs::status(destination / "parent/child").permissions(), fs::perms::owner_read | fs::perms::owner_exec);
+  EXPECT_EQ(state.starts, 0U);
+  EXPECT_FALSE(restore.Failed());
+}
+
+TEST_F(ModelStreamerSessionTest, CancellationDuringRootPermissionsIsReported)
+{
+  const auto destination = root_ / "cancelled";
+  CheckpointInventory inventory;
+  inventory.root_permissions = fs::perms::owner_all;
+  state.cancel_after_permissions = destination;
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(inventory, destination, state.preparation_cancellation), CancellationError);
+  EXPECT_EQ(state.permission_paths, (std::vector<Path>{destination}));
+  EXPECT_EQ(state.starts, 0U);
+  EXPECT_FALSE(restore.Failed());
+}
+
+TEST_F(ModelStreamerSessionTest, CancellationDuringAllocationClosesFileWithoutMappingOrSubmitting)
+{
+  const auto destination = root_ / "cancelled";
+  state.cancel_after_allocation = true;
+  ModelStreamerRestore restore;
+  EXPECT_THROW(restore.Stage(Inventory(2), destination, state.preparation_cancellation), CancellationError);
+  EXPECT_EQ(state.allocations, 1U);
+  EXPECT_EQ(state.mappings, 0U);
+  EXPECT_EQ(state.submitted, 0U);
+  EXPECT_EQ(state.starts, 0U);
+  EXPECT_FALSE(fs::exists(destination / "1"));
+  EXPECT_FALSE(HasMapping(destination / "0"));
+  ASSERT_GE(state.allocated_descriptor, 0);
+  errno = 0;
+  EXPECT_EQ(fcntl(state.allocated_descriptor, F_GETFD), -1);
+  EXPECT_EQ(errno, EBADF);
+  EXPECT_FALSE(restore.Failed());
 }
 
 TEST_F(ModelStreamerSessionTest, ReusesIdleSessionAndWorkerUntilShutdown)
