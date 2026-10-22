@@ -233,12 +233,28 @@ ModelStreamerRestore::Failed() const noexcept
 void
 ModelStreamerRestore::RequestStop() noexcept
 {
+  CloseAdmission(stopped_error_);
+}
+
+std::exception_ptr
+ModelStreamerRestore::CloseAdmission(std::exception_ptr error) noexcept
+{
   {
     std::lock_guard lock(pending_mutex_);
     if (!terminal_error_)
-      terminal_error_ = stopped_error_;
+      terminal_error_ = std::move(error);
+    error = terminal_error_;
   }
   work_ready_.notify_one();
+  return error;
+}
+
+std::exception_ptr
+ModelStreamerRestore::WaitForWork()
+{
+  std::unique_lock lock(pending_mutex_);
+  work_ready_.wait(lock, [this] { return terminal_error_ || !pending_.empty() || !active_.empty(); });
+  return terminal_error_;
 }
 
 void
@@ -248,14 +264,9 @@ ModelStreamerRestore::Run() noexcept
   bool failed = false;
   try {
     while (true) {
-      {
-        std::unique_lock lock(pending_mutex_);
-        work_ready_.wait(lock, [this] { return terminal_error_ || !pending_.empty() || !active_.empty(); });
-        if (terminal_error_) {
-          error = terminal_error_;
-          break;
-        }
-      }
+      error = WaitForWork();
+      if (error)
+        break;
       // The native ABI permits concurrent submissions, but request and response
       // calls must be serialized. Only this worker calls the native API.
       ProcessWork();
@@ -263,10 +274,7 @@ ModelStreamerRestore::Run() noexcept
   }
   catch (...) {
     failed = true;
-    std::lock_guard lock(pending_mutex_);
-    if (!terminal_error_)
-      terminal_error_ = std::current_exception();
-    error = terminal_error_;
+    error = CloseAdmission(std::current_exception());
   }
 
   // Close admission before teardown, but allow engine replacement only after
@@ -324,6 +332,64 @@ ModelStreamerRestore::QueueSubmission(const std::shared_ptr<StreamerEntry>& entr
     work_ready_.notify_one();
 }
 
+std::shared_ptr<ModelStreamerRestore::StreamerEntry>
+ModelStreamerRestore::SelectPendingSubmission(bool& stopped)
+{
+  std::lock_guard lock(pending_mutex_);
+  stopped = terminal_error_ != nullptr;
+  if (stopped || pending_.empty() || !CanAdmit(*pending_.front()))
+    return {};
+  return pending_.front();
+}
+
+void
+ModelStreamerRestore::RemoveHandledSubmission()
+{
+  std::lock_guard lock(pending_mutex_);
+  pending_.pop_front();
+}
+
+std::shared_ptr<ModelStreamerRestore::StreamerEntry>
+ModelStreamerRestore::TakeInterruptedSubmission(std::exception_ptr& error)
+{
+  std::lock_guard lock(pending_mutex_);
+  for (auto entry = pending_.begin(); entry != pending_.end(); ++entry) {
+    try {
+      (*entry)->cancellation.ThrowIfCancelled();
+    }
+    catch (const CancellationError&) {
+      error = std::current_exception();
+      auto interrupted = std::move(*entry);
+      pending_.erase(entry);
+      return interrupted;
+    }
+  }
+  error = nullptr;
+  return {};
+}
+
+std::shared_ptr<ModelStreamerRestore::StreamerEntry>
+ModelStreamerRestore::TakePendingSubmission()
+{
+  std::lock_guard lock(pending_mutex_);
+  if (pending_.empty())
+    return {};
+  auto entry = std::move(pending_.front());
+  pending_.pop_front();
+  return entry;
+}
+
+bool
+ModelStreamerRestore::TryClaimSubmission(StreamerEntry& entry, bool& stopped)
+{
+  std::lock_guard lock(pending_mutex_);
+  stopped = terminal_error_ != nullptr;
+  if (stopped)
+    return false;
+  auto expected = Admission::Pending;
+  return entry.admission.compare_exchange_strong(expected, Admission::Claimed);
+}
+
 bool
 ModelStreamerRestore::CanAdmit(const StreamerEntry& entry) const
 {
@@ -344,15 +410,12 @@ ModelStreamerRestore::SubmitPending()
 {
   DiscardInterruptedPending();
   while (true) {
-    std::shared_ptr<StreamerEntry> entry;
-    {
-      std::lock_guard lock(pending_mutex_);
-      if (terminal_error_)
-        return;
-      if (pending_.empty() || !CanAdmit(*pending_.front()))
-        break;
-      entry = pending_.front();
-    }
+    bool stopped = false;
+    const auto entry = SelectPendingSubmission(stopped);
+    if (stopped)
+      return;
+    if (!entry)
+      break;
     if (value_ == nullptr)
       Start();
     // Retain the queued reference until submission and registration finish.
@@ -360,8 +423,7 @@ ModelStreamerRestore::SubmitPending()
     // that the library accepted but we could not register in active_.
     if (!AdmitAndSubmit(entry))
       return;
-    std::lock_guard lock(pending_mutex_);
-    pending_.pop_front();
+    RemoveHandledSubmission();
   }
   // End an unused session if every request was rejected or cancelled.
   if (active_.empty())
@@ -372,25 +434,11 @@ void
 ModelStreamerRestore::DiscardInterruptedPending()
 {
   while (true) {
-    std::shared_ptr<StreamerEntry> interrupted;
     std::exception_ptr error;
-    {
-      std::lock_guard lock(pending_mutex_);
-      for (auto entry = pending_.begin(); entry != pending_.end(); ++entry) {
-        try {
-          (*entry)->cancellation.ThrowIfCancelled();
-        }
-        catch (const CancellationError&) {
-          error = std::current_exception();
-          interrupted = std::move(*entry);
-          pending_.erase(entry);
-          break;
-        }
-      }
-    }
-    if (!interrupted)
+    auto entry = TakeInterruptedSubmission(error);
+    if (!entry)
       return;
-    FailEntry(*interrupted, std::move(error));
+    FailEntry(*entry, std::move(error));
   }
 }
 
@@ -406,15 +454,11 @@ ModelStreamerRestore::AdmitAndSubmit(const std::shared_ptr<StreamerEntry>& entry
     FailEntry(*entry, std::current_exception());
     return true;
   }
-  {
-    std::lock_guard lock(pending_mutex_);
-    if (terminal_error_)
+  bool stopped = false;
+  if (!TryClaimSubmission(*entry, stopped)) {
+    if (stopped)
       return false;
-    // A claim is ordered against shutdown and caller cancellation. Never hold
-    // the mutex during the native request: it may block while other callers cancel.
-    auto expected = Admission::Pending;
-    if (!entry->admission.compare_exchange_strong(expected, Admission::Claimed))
-      return true;  // The caller cancelled and may already have released its buffers.
+    return true;  // The caller cancelled and may already have released its buffers.
   }
 
   const auto submission_id = SubmitToStreamer(*entry);
@@ -574,17 +618,8 @@ ModelStreamerRestore::FailAll(std::exception_ptr error) noexcept
   for (auto& [id, entry] : active_)
     FailEntry(*entry, error);
   active_.clear();
-  while (true) {
-    std::shared_ptr<StreamerEntry> entry;
-    {
-      std::lock_guard lock(pending_mutex_);
-      if (pending_.empty())
-        break;
-      entry = std::move(pending_.front());
-      pending_.pop_front();
-    }
+  while (auto entry = TakePendingSubmission())
     FailEntry(*entry, error);
-  }
   unfinished_ = 0;
   session_bytes_ = 0;
   session_submissions_ = 0;
