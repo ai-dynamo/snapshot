@@ -57,6 +57,7 @@ class E2EConfig:
     release: str
     pvc_name: str
     kubeconfig: str | None
+    context: str | None = None
     cpu_only: bool = False
 
     @property
@@ -82,11 +83,12 @@ class E2EConfig:
             pvc_name=os.environ.get("SNAPSHOT_E2E_PVC_NAME", "snapshot-pvc"),
             kubeconfig=kubeconfig,
             cpu_only=cpu_only,
+            context=os.environ.get("SNAPSHOT_E2E_KUBE_CONTEXT"),
         )
 
 
 def configure(config: E2EConfig) -> None:
-    load_config(config.kubeconfig, None)
+    load_config(config.kubeconfig, config.context)
     if config.cpu_only:
         require_single_cpu_node()
 
