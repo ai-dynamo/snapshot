@@ -99,8 +99,9 @@ ApplyFilePermissions(const FileDescriptor& descriptor, fs::perms permissions)
 }
 
 void
-ValidateRestoreInventory(const CheckpointInventory& inventory)
+ValidateRestoreInventory(const CheckpointInventory& inventory, Cancellation cancellation)
 {
+  cancellation.ThrowIfCancelled();
   std::set<Path> directories;
   std::set<Path> entries;
   for (const auto& directory : inventory.directories) {
@@ -113,6 +114,7 @@ ValidateRestoreInventory(const CheckpointInventory& inventory)
     if (!entries.insert(directory.relative_path).second)
       throw std::invalid_argument("restore inventory contains a duplicate path");
     directories.insert(directory.relative_path);
+    cancellation.ThrowIfCancelled();
   }
   for (const auto& file : inventory.files) {
     // Source locators are remote object addresses; never interpret them as local paths.
@@ -129,6 +131,7 @@ ValidateRestoreInventory(const CheckpointInventory& inventory)
       throw std::invalid_argument("restore inventory file parent is missing");
     if (!entries.insert(file.relative_path).second)
       throw std::invalid_argument("restore inventory contains a duplicate path");
+    cancellation.ThrowIfCancelled();
   }
 }
 
@@ -713,9 +716,7 @@ ModelStreamerRestore::RestoreFiles(const CheckpointInventory& inventory, const P
 void
 ModelStreamerRestore::Stage(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
-  cancellation.ThrowIfCancelled();
-  ValidateRestoreInventory(inventory);
-  cancellation.ThrowIfCancelled();
+  ValidateRestoreInventory(inventory, cancellation);
   CreateDirectoryTree(inventory, destination, cancellation);
   std::call_once(start_once_, [this] { worker_ = std::thread([this] { Run(); }); });
   RestoreFiles(inventory, destination, cancellation);
