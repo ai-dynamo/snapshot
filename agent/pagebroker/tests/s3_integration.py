@@ -174,12 +174,15 @@ def run(args, environment):
             # caches its AWS configuration for the process lifetime.
             untrusted = dict(environment)
             untrusted["AWS_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
-            untrusted["GTEST_FILTER"] = "ModelStreamerS3Test.RejectsUntrustedTLS"
             untrusted["PAGEBROKER_S3_TEST_TLS_REJECT"] = "1"
             rejection = list(command)
             if args.image:
                 rejection[-1:-1] = ["--env", "GTEST_FILTER", "--env", "PAGEBROKER_S3_TEST_TLS_REJECT"]
-            run_native(rejection, untrusted, container_name, 60)
+            # Each native client can spend time draining TLS retries during
+            # teardown. Give each rejection check its own process and watchdog.
+            for test in ("ModelStreamerS3Test.RejectsUntrustedTLS",):
+                untrusted["GTEST_FILTER"] = test
+                run_native(rejection, untrusted, container_name, 120)
 
 
 def main():
