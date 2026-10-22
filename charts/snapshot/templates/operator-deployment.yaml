@@ -95,7 +95,8 @@ spec:
             {{- end }}
             {{- if eq .Values.storage.type "s3" }}
             - {{ printf "--pagebroker-s3-config-namespace=%s" .Release.Namespace | quote }}
-            - {{ printf "--pagebroker-s3-config-name=%s-pagebroker-storage-config" (include "snapshot.fullname" .) | quote }}
+            - {{ printf "--pagebroker-s3-config-name=%s" (include "snapshot.pageBrokerS3ConfigName" .) | quote }}
+            - {{ printf "--release-name=%s" .Release.Name | quote }}
             {{- end }}
           volumeMounts:
             {{- if eq .Values.storage.type "pvc" }}

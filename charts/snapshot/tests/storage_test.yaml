@@ -220,6 +220,9 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: --pagebroker-s3-config-name=snapshot-pagebroker-storage-config
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --release-name=snapshot
       - notContains:
           path: spec.template.spec.containers[0].volumeMounts
           content:

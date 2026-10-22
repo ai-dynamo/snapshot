@@ -33,12 +33,23 @@ type pageBrokerS3Config struct {
 // PageBroker container at --storage-config.
 const PageBrokerS3ConfigKey = "pagebroker-s3-config.json"
 
+// DefaultPageBrokerS3ConfigName is used when the chart does not override the
+// ConfigMap name. The chart always passes an explicit, release-scoped name
+// today; this only matters for a non-Helm deployment.
+const DefaultPageBrokerS3ConfigName = "pagebroker-s3-config"
+
 // ensurePageBrokerS3Config creates or updates the ConfigMap PageBroker's
 // DaemonSet mounts when the S3 backend is configured. It is idempotent and
 // safe to call on every manager startup. The chart does not render this
 // ConfigMap itself: its storeId field requires the Go identity computation
 // PageBroker does not perform for S3 (see api/storage.S3.StoreID).
-func ensurePageBrokerS3Config(ctx context.Context, c client.Client, namespace, name string, s3 storage.S3, storeID string) error {
+//
+// This ConfigMap is created outside Helm's own apply step, so it carries no
+// Helm release ownership annotations and is not removed by `helm uninstall`
+// or visible to `helm diff`; chart-identifying labels are the extent of what
+// this function can attach without a Kubernetes ownerReference, which is not
+// wired up here.
+func ensurePageBrokerS3Config(ctx context.Context, c client.Client, namespace, name string, labels map[string]string, s3 storage.S3, storeID string) error {
 	body, err := json.Marshal(pageBrokerS3Config{
 		StoreID:  storeID,
 		Endpoint: s3.Endpoint,
@@ -51,7 +62,7 @@ func ensurePageBrokerS3Config(ctx context.Context, c client.Client, namespace, n
 	}
 
 	desired := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
 		Data:       map[string]string{PageBrokerS3ConfigKey: string(body)},
 	}
 	existing := &corev1.ConfigMap{}
@@ -61,6 +72,7 @@ func ensurePageBrokerS3Config(ctx context.Context, c client.Client, namespace, n
 	case err != nil:
 		return fmt.Errorf("get PageBroker S3 configuration: %w", err)
 	default:
+		existing.Labels = desired.Labels
 		existing.Data = desired.Data
 		return c.Update(ctx, existing)
 	}

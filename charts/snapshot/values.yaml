@@ -125,6 +125,13 @@ storage:
     # AWS_SECRET_ACCESS_KEY, optionally AWS_SESSION_TOKEN), injected into the
     # agent and PageBroker containers. Leave empty to rely on another
     # provider in the AWS SDK's default chain (e.g. IRSA).
+    #
+    # This does NOT configure the operator's own S3 maintenance backend
+    # (operator/internal/maintenance/backends/s3.go), which authenticates
+    # separately through a shared credentials file at
+    # --artifact-cleanup-s3-credentials-path and cannot use env vars or IRSA
+    # today. Wiring that flag from this value, or unifying the two credential
+    # mechanisms, is a follow-up.
     credentialsSecretRef: ""
 
   # Reserved for future snapshot-owned backends. Unsupported today.
