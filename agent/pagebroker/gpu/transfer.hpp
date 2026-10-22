@@ -6,6 +6,9 @@
 #include <cuda.h>
 #include "cancellation.hpp"
 #include <memory>
+#include <span>
+#include <vector>
+#include "file_descriptor.hpp"
 
 namespace snapshot::pagebroker::cuda {
 struct TransferOptions {
@@ -38,6 +41,43 @@ class TransferBuffers {
                   const Cancellation& cancellation);
   void Restore(int fd, CUdeviceptr device, size_t size, CUstream stream,
                const Cancellation& cancellation);
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+// Independent open descriptions of one extent, one per pool lane, so
+// concurrent lanes do not share filesystem open state. Restore can prepare
+// them before CUDA mappings exist.
+class TransferFile {
+ public:
+  TransferFile(int fd, size_t lanes);
+  int fd() const { return file_.get(); }
+  int lane(size_t index) const { return lanes_.at(index).get(); }
+ private:
+  friend class TransferPool;
+  FileDescriptor file_;
+  std::vector<FileDescriptor> lanes_;
+};
+// A bounded pool of I/O workers shared by ready device extents. Lanes assign
+// chunks from the oldest ready extent first, moving on as soon as its chunks are
+// assigned without waiting for its tail to drain. The total slot count remains
+// options.buffer_count * contexts.size(). Calls may run concurrently and return
+// only after their storage requests and DMA have drained. Lanes use private
+// streams after synchronizing the caller stream. Contexts and the pool must
+// outlive all calls. Stream and token ownership stays with the caller. The pool
+// may keep a TransferFile open briefly after a call returns, and the int
+// overloads open their own descriptions of fd. Checkpoint includes fsync, as
+// with TransferBuffers.
+class TransferPool {
+ public:
+  TransferPool(std::span<const CUcontext> contexts, TransferOptions options, size_t lanes);
+  ~TransferPool();
+  void Restore(std::shared_ptr<const TransferFile> file, CUcontext context, CUdeviceptr device,
+               size_t size, CUstream stream, const Cancellation& cancellation);
+  void Restore(int fd, CUcontext context, CUdeviceptr device, size_t size,
+               CUstream stream, const Cancellation& cancellation);
+  void Checkpoint(int fd, CUcontext context, CUdeviceptr device, size_t size,
+                  CUstream stream, const Cancellation& cancellation);
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
