@@ -1,0 +1,28 @@
+{
+  "timing": {
+    "startup": 300,
+    "warmup_min": 600,
+    "warmup_max": 1800,
+    "warmup_batches": 5,
+    "measured": 14400,
+    "measured_batches": 200,
+    "cadence": 60,
+    "idle": 30,
+    "cooldown": 600,
+    "batch": 300,
+    "cleanup": 120,
+    "drain": 420,
+    "shutdown": 60,
+    "margin": 420,
+    "job": 18000
+  },
+  "evidence": {
+    "interval": 1,
+    "progress_seconds": 10,
+    "retention_seconds": 3600,
+    "reap_seconds": 120,
+    "later_reference_seconds": 3600,
+    "growth_limits": {},
+    "absolute_limits": {}
+  }
+}

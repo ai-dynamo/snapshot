@@ -26,7 +26,7 @@ AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfil
 AGENT_PLATFORM ?= linux/amd64
 
 .PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
-        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker docker-build-pagebroker-smoke \
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker docker-build-pagebroker-smoke docker-build-pagebroker-stress \
         capture-base-packages verify-base-packages docker-export-agent-bundle \
         linux-build linux-test pagebroker-check-generated cpu-e2e
 
@@ -200,5 +200,10 @@ docker-build-pagebroker:
 
 docker-build-pagebroker-smoke:
 	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" \
-	  -f agent/pagebroker/tests/k3s/Dockerfile \
+	  -f agent/pagebroker/tests/k3s/Dockerfile --target runtime \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker-smoke:$(t)) .
+
+docker-build-pagebroker-stress:
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" \
+	  -f agent/pagebroker/tests/k3s/Dockerfile --target stress \
+	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker-stress:$(t)) .
