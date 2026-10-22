@@ -78,6 +78,7 @@ jobs:
             **/go.sum
             go.work.sum
       - run: make build
+      - run: make -C agent pagebroker-bench
 
   check:
     runs-on: ubuntu-24.04
@@ -129,6 +130,7 @@ jobs:
             e2e/tests/test_upgrade_harness.py \
             e2e/tests/test_workload_node_targeting.py \
             e2e/tests/test_workload_scripts.py -vv
+      - run: uv run --locked --project benchmarks --group test pytest benchmarks/tests -q
 
   # Runs on every pull request so cross-cutting changes (shared workflows, the
   # history writer's output shape) cannot silently break the dashboard.
