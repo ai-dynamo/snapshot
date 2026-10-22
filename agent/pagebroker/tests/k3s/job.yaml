@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pagebroker-smoke
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      shareProcessNamespace: true
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pagebroker
+          image: local/pagebroker:replace-before-use
+          imagePullPolicy: Never
+          args:
+            - /shared/pb.sock
+            - /staging
+            - /storage
+            - --custom-storage-engine
+            - "off"
+            - --model-streamer-config
+            - /config/streamer.json
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          volumeMounts:
+            - {name: socket, mountPath: /shared}
+            - {name: staging, mountPath: /staging}
+            - {name: storage, mountPath: /storage}
+            - {name: config, mountPath: /config, readOnly: true}
+        - name: client
+          image: local/pagebroker-smoke:replace-before-use
+          imagePullPolicy: Never
+          args: ["--sample-interval", "1", "--settle-seconds", "5"]
+          env:
+            - {name: PAGEBROKER_SMOKE_MODE, value: filesystem}
+            - {name: PAGEBROKER_SMOKE_SOCKET, value: /shared/pb.sock}
+            - {name: PAGEBROKER_SMOKE_STAGING_ROOT, value: /staging}
+            - {name: PAGEBROKER_SMOKE_STORAGE_ROOT, value: /storage}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - {name: socket, mountPath: /shared}
+            - {name: staging, mountPath: /staging}
+            - {name: storage, mountPath: /storage}
+            - {name: results, mountPath: /results}
+      volumes:
+        - name: socket
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: staging
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: storage
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: config
+          configMap:
+            name: pagebroker-smoke-config
+        - name: results
+          persistentVolumeClaim:
+            claimName: pagebroker-smoke-results
