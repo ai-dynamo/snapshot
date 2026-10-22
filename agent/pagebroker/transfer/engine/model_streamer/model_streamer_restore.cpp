@@ -365,11 +365,8 @@ ModelStreamerRestore::TakeInterruptedSubmission(std::exception_ptr& error)
 {
   std::lock_guard lock(pending_mutex_);
   for (auto entry = pending_.begin(); entry != pending_.end(); ++entry) {
-    try {
-      (*entry)->cancellation.ThrowIfCancelled();
-    }
-    catch (const CancellationError&) {
-      error = std::current_exception();
+    if (const auto reason = (*entry)->cancellation.Reason()) {
+      error = std::make_exception_ptr(CancellationError(*reason));
       auto interrupted = std::move(*entry);
       pending_.erase(entry);
       return interrupted;
@@ -456,14 +453,11 @@ ModelStreamerRestore::DiscardInterruptedPending()
 bool
 ModelStreamerRestore::AdmitAndSubmit(const std::shared_ptr<StreamerEntry>& entry)
 {
-  try {
-    entry->cancellation.ThrowIfCancelled();
-  }
-  catch (const CancellationError&) {
+  if (const auto reason = entry->cancellation.Reason()) {
     // Cancellation can race with session startup or admission. No native
     // request owns this entry yet, so it must not fail other submissions.
-    FailEntry(*entry, std::current_exception());
-    return true;
+    FailEntry(*entry, std::make_exception_ptr(CancellationError(*reason)));
+    return true;  // The entry was handled; remove it and continue with queued work.
   }
   bool stopped = false;
   if (!TryClaimSubmission(*entry, stopped)) {
@@ -537,13 +531,17 @@ ModelStreamerRestore::FailEntry(StreamerEntry& entry, std::exception_ptr error) 
   // A shared session can fail because a different request was cancelled.
   // Only this entry's cancellation can establish its own cancellation reason.
   try {
-    if (const auto reason = entry.cancellation.Reason())
-      throw CancellationError(*reason);
-    try {
-      std::rethrow_exception(error);
+    if (const auto reason = entry.cancellation.Reason()) {
+      error = std::make_exception_ptr(CancellationError(*reason));
     }
-    catch (const CancellationError&) {
-      throw std::runtime_error("Model Streamer session interrupted by another submission's cancellation");
+    else {
+      try {
+        std::rethrow_exception(error);
+      }
+      catch (const CancellationError&) {
+        error = std::make_exception_ptr(
+            std::runtime_error("Model Streamer session interrupted by another submission's cancellation"));
+      }
     }
   }
   catch (...) {
