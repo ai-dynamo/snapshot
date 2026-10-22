@@ -65,6 +65,13 @@ spec:
               populated by the PodSnapshotReconciler (operator) at creation time and is
               immutable thereafter.
             properties:
+              checkpointRetryLimit:
+                description: |-
+                  CheckpointRetryLimit is copied from the PodSnapshot that requested this
+                  capture. Unset means the agent's cluster-wide default applies.
+                format: int32
+                minimum: 0
+                type: integer
               snapshotRef:
                 description: |-
                   PodSnapshotRef is the back-pointer to the bound PodSnapshot. It may span
