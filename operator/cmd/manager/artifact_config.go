@@ -32,7 +32,7 @@ func bindArtifactCleanupFlags(flags *flag.FlagSet) *operatortypes.ArtifactCleanu
 // cover: the maintenance client authenticates independently of PageBroker.
 func bindArtifactCleanupS3Flags(flags *flag.FlagSet) (credentialsPath, caBundlePath *string) {
 	credentialsPath = flags.String("artifact-cleanup-s3-credentials-path", "",
-		"Path to a shared AWS credentials file for the S3 maintenance backend")
+		"Path to a shared credentials file for the S3 maintenance backend")
 	caBundlePath = flags.String("artifact-cleanup-s3-ca-bundle-path", "",
 		"Optional path to a CA bundle for the S3 maintenance backend's endpoint")
 	return credentialsPath, caBundlePath

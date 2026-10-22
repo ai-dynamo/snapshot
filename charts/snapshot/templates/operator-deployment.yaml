@@ -97,6 +97,7 @@ spec:
             - {{ printf "--pagebroker-s3-config-namespace=%s" .Release.Namespace | quote }}
             - {{ printf "--pagebroker-s3-config-name=%s" (include "snapshot.pageBrokerS3ConfigName" .) | quote }}
             - {{ printf "--release-name=%s" .Release.Name | quote }}
+            - {{ printf "--artifact-cleanup-s3-credentials-path=%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
             {{- end }}
           volumeMounts:
             {{- if eq .Values.storage.type "pvc" }}
@@ -106,6 +107,11 @@ spec:
             - name: storage-config
               mountPath: /etc/snapshot
               readOnly: true
+            {{- if eq .Values.storage.type "s3" }}
+            - name: s3-credentials
+              mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
+              readOnly: true
+            {{- end }}
       volumes:
         {{- if eq .Values.storage.type "pvc" }}
         - name: checkpoints
@@ -118,3 +124,11 @@ spec:
             items:
               - key: storage.yaml
                 path: storage.yaml
+        {{- if eq .Values.storage.type "s3" }}
+        - name: s3-credentials
+          secret:
+            secretName: {{ required "storage.s3.credentialsSecretRef is required when storage.type=s3" .Values.storage.s3.credentialsSecretRef }}
+            items:
+              - key: {{ .Values.storage.s3.credentialsSecretKey }}
+                path: {{ .Values.storage.s3.credentialsSecretKey }}
+        {{- end }}

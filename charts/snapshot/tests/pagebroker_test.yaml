@@ -429,7 +429,7 @@ tests:
             - --storage-config
             - /etc/snapshot-s3/pagebroker-s3-config.json
 
-  - it: injects S3 credentials into the agent and PageBroker containers
+  - it: mounts shared S3 credentials as a file into the agent and PageBroker containers
     template: templates/daemonset.yaml
     set:
       storage.type: s3
@@ -439,12 +439,33 @@ tests:
       storage.s3.credentialsSecretRef: snapshot-s3-credentials
     asserts:
       - contains:
-          path: spec.template.spec.containers[?(@.name == "agent")].envFrom
+          path: spec.template.spec.containers[?(@.name == "agent")].env
           content:
-            secretRef:
-              name: snapshot-s3-credentials
+            name: AWS_SHARED_CREDENTIALS_FILE
+            value: /etc/snapshot-s3-credentials/credentials
       - contains:
-          path: spec.template.spec.containers[?(@.name == "pagebroker")].envFrom
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
           content:
-            secretRef:
-              name: snapshot-s3-credentials
+            name: s3-credentials
+            mountPath: /etc/snapshot-s3-credentials
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: AWS_SHARED_CREDENTIALS_FILE
+            value: /etc/snapshot-s3-credentials/credentials
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-credentials
+            mountPath: /etc/snapshot-s3-credentials
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+            secret:
+              secretName: snapshot-s3-credentials
+              items:
+                - key: credentials
+                  path: credentials
