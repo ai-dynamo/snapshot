@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+**
+!api/
+!api/go.mod
+!api/go.sum
+!agent/
+!agent/go.mod
+!agent/go.sum
+!agent/internal/
+!agent/internal/pagebroker/
+!agent/internal/pagebroker/*.go
+!agent/pagebroker/
+!agent/pagebroker/tests/
+!agent/pagebroker/tests/k3s/
+!agent/pagebroker/tests/k3s/run.py
+!agent/pagebroker/tests/k3s/monitor.py

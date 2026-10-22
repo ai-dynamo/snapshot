@@ -25,6 +25,7 @@ class E2EConfig:
     release: str
     pvc_name: str
     kubeconfig: str | None
+    context: str | None = None
 
     @classmethod
     def from_env(cls) -> "E2EConfig":
@@ -41,11 +42,12 @@ class E2EConfig:
             release=os.environ.get("SNAPSHOT_E2E_SNAPSHOT_RELEASE", "snapshot"),
             pvc_name=os.environ.get("SNAPSHOT_E2E_PVC_NAME", "snapshot-pvc"),
             kubeconfig=kubeconfig,
+            context=os.environ.get("SNAPSHOT_E2E_KUBE_CONTEXT"),
         )
 
 
 def configure(config: E2EConfig) -> None:
-    load_config(config.kubeconfig, None)
+    load_config(config.kubeconfig, config.context)
 
 
 def read_namespace(name: str) -> client.V1Namespace:
