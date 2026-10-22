@@ -61,7 +61,7 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <text x="155.0" y="276.0" class="k-t-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">before the commit, or not yet written</text>
 <rect class="k-a" x="330.0" y="240.0" width="250.0" height="52.0" rx="8" stroke-width="0.8"/>
 <text x="455.0" y="257.0" class="k-a-t" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Record written</text>
-<text x="455.0" y="276.0" class="k-a-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">Started at capture, Restoring at restore</text>
+<text x="455.0" y="276.0" class="k-a-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">Started, or RestoreStarted at restore</text>
 <rect class="k-g" x="630.0" y="240.0" width="240.0" height="52.0" rx="8" stroke-width="0.8"/>
 <text x="750.0" y="257.0" class="k-g-t" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">restore-complete</text>
 <text x="750.0" y="276.0" class="k-g-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">restore only, after release</text>
