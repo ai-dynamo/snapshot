@@ -52,3 +52,51 @@ func TestClassifyCaptureFailureSeesThroughWrapping(t *testing.T) {
 		t.Errorf("wrapped UNAVAILABLE classified as %+v", got)
 	}
 }
+
+// The executor joins the cleanup failure onto the capture failure. A dump that
+// failed without a broker code leaves the Abort's code the only one in the
+// tree, so classifying the join reads the cleanup as the reason: a CRIU failure
+// would be recorded as staged data lost.
+func TestClassifyCaptureFailureIgnoresTheCleanupError(t *testing.T) {
+	dump := errors.New("criu dump: frozen task is unreachable")
+	abort := fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
+		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, ""))
+
+	// How executorCheckpoint presents it: the join, wrapped once more.
+	joined := fmt.Errorf("checkpoint: %w", errors.Join(dump, abort))
+
+	if got := classifyCaptureFailure(joined); got.reason != reasonCheckpointFailed {
+		t.Errorf("classifyCaptureFailure() = %+v, want %q from the dump", got, reasonCheckpointFailed)
+	}
+}
+
+// The same join, with a code on both sides: the dump's is the one that counts.
+func TestClassifyCaptureFailurePrefersTheDumpsCode(t *testing.T) {
+	dump := pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR, "storage I/O failed")
+	abort := fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
+		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, ""))
+
+	got := classifyCaptureFailure(fmt.Errorf("checkpoint: %w", errors.Join(dump, abort)))
+	if got.reason != reasonCheckpointFailed || !got.retryable {
+		t.Errorf("classifyCaptureFailure() = %+v, want the dump's retryable STORAGE_ERROR", got)
+	}
+}
+
+// When the capture itself succeeded and only cleanup failed, errors.Join has
+// dropped the nil, so the first branch is the cleanup — and that is the cause.
+func TestClassifyCaptureFailureUsesCleanupWhenItIsTheOnlyFailure(t *testing.T) {
+	abort := fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
+		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, ""))
+
+	got := classifyCaptureFailure(fmt.Errorf("checkpoint: %w", errors.Join(nil, abort)))
+	if got.reason != reasonStagedDataLost {
+		t.Errorf("classifyCaptureFailure() = %+v, want %q", got, reasonStagedDataLost)
+	}
+}
+
+func TestCaptureCauseLeavesAPlainErrorIntact(t *testing.T) {
+	plain := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "")
+	if got := captureCause(fmt.Errorf("checkpoint: %w", plain)); !errors.Is(got, error(plain)) {
+		t.Errorf("captureCause() dropped the chain of an unjoined error: %v", got)
+	}
+}
