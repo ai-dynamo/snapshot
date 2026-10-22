@@ -83,8 +83,9 @@ StreamerError(int response)
 }
 
 void
-ApplyPermissions(const Path& path, fs::perms permissions)
+ApplyPermissions(const Path& path, fs::perms permissions, Cancellation cancellation)
 {
+  cancellation.ThrowIfCancelled();
   if (permissions != fs::perms::unknown)
     fs::permissions(path, permissions, fs::perm_options::replace);
 }
@@ -165,11 +166,10 @@ void
 ApplyTreePermissions(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
   for (auto directory = inventory.directories.rbegin(); directory != inventory.directories.rend(); ++directory) {
-    cancellation.ThrowIfCancelled();
-    ApplyPermissions(destination / directory->relative_path, directory->permissions);
+    ApplyPermissions(destination / directory->relative_path, directory->permissions, cancellation);
   }
+  ApplyPermissions(destination, inventory.root_permissions, cancellation);
   cancellation.ThrowIfCancelled();
-  ApplyPermissions(destination, inventory.root_permissions);
 }
 }  // namespace
 
@@ -720,6 +720,5 @@ ModelStreamerRestore::Stage(const CheckpointInventory& inventory, const Path& de
   std::call_once(start_once_, [this] { worker_ = std::thread([this] { Run(); }); });
   RestoreFiles(inventory, destination, cancellation);
   ApplyTreePermissions(inventory, destination, cancellation);
-  cancellation.ThrowIfCancelled();
 }
 }  // namespace snapshot::pagebroker
