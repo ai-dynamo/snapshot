@@ -83,7 +83,7 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <text x="326.7" y="400.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">deadline}</text>
 <line class="arw" x1="403.3" y1="412.0" x2="252.0" y2="412.0" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ah)"/>
 <text x="326.7" y="472.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">all-gather snapshot/admit {Pod IP, fabric</text>
-<text x="326.7" y="488.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">domain, versions}</text>
+<text x="326.7" y="488.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">domain, versions, cuInterpose}</text>
 <line class="arw" x1="250.0" y1="500.0" x2="401.3" y2="500.0" stroke-width="1.2" marker-end="url(#ah)"/>
 <text x="326.7" y="520.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">payloads of every rank</text>
 <line class="arw" x1="403.3" y1="532.0" x2="252.0" y2="532.0" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ah)"/>

@@ -310,7 +310,7 @@ CHECKPOINT = (
         ("m", "A", "C", "Attach(session UID, member ID) with a Pod-bound token"),
         ("m", "C", "A", "Welcome {epoch, rank, size, members, deadline}", 1),
         ("g", "admission · no side effects"),
-        ("m", "A", "C", "all-gather snapshot/admit {Pod IP, fabric domain, versions}"),
+        ("m", "A", "C", "all-gather snapshot/admit {Pod IP, fabric domain, versions, cuInterpose}"),
         ("m", "C", "A", "payloads of every rank", 1),
         ("m", "A", "L", "run the relay in inspect mode, session socket"),
         ("m", "A", "R", "run the relays in inspect mode, session socket"),
@@ -377,12 +377,12 @@ RESTORE = (
         ("m", "A", "C", "Attach(session UID, member ID) with a Pod-bound token"),
         ("m", "C", "A", "Welcome {epoch, rank, size, members, deadline}", 1),
         ("g", "admission · no side effects"),
-        ("m", "A", "C", "all-gather snapshot/admit {new IP, capture ID, fabric domain, GPUs}"),
+        ("m", "A", "C", "all-gather snapshot/admit {new IP, capture ID, fabric domain, GPUs, cuInterpose}"),
         ("m", "C", "A", "payloads of every rank: IP map with the artifact table, checks", 1),
         ("x",),
         ("m", "A", "C", "barrier snapshot/admitted, once its own checks pass"),
         ("m", "C", "A", "every member admitted: the attempt commits", 1),
-        ("m", "A", "O", "Restored reason Restoring, before anything irreversible"),
+        ("m", "A", "O", "RestoreStarted condition on the restore Pod, before anything irreversible"),
         ("m", "A", "W", "hold only the preserved connections"),
         ("m", "A", "N", "nsrestore with the IP map, session socket, progress pipe"),
         ("s", "N", "CRIU restore, kept peer sockets, group IP remap"),
@@ -420,7 +420,6 @@ RESTORE = (
         ("m", "A", "W", "write the rendezvous endpoint in coordination/"),
         ("m", "A", "C", "barrier snapshot/resume"),
         ("m", "A", "W", "CUDA resume on every process: libraries rendezvous (figure 7)"),
-        ("m", "A", "O", "Restored reason Reconstructed"),
         ("m", "A", "C", "barrier snapshot/release"),
         ("m", "C", "A", "every rank reconstructed, release allowed", 1),
         ("m", "A", "W", "write restore-complete with the attempt ID"),
@@ -472,7 +471,7 @@ FAILURES = (
         ("m", "C", "AB", "event SessionFailed naming rank 1", 1),
         ("m", "AA", "L", "pending Get returns ABORTED", 1),
         ("s", "L", "exit failed"),
-        ("n", "AA", "AB", "each agent acts on its own record: with Started or Restoring it terminates its source or fails "
+        ("n", "AA", "AB", "each agent acts on its own record: with Started or RestoreStarted it terminates its source or fails "
                           "its restore, without one it leaves the workload as found, and after restore-complete it leaves "
                           "the workload running"),
         ("e", "else · agent stream lost or deadline passed"),
@@ -542,7 +541,7 @@ def lifecycle():
     # Member lane.
     b.append(T(30, 208, "Each member, as recorded durably by its agent", "tx", 14, True, "start"))
     b += box(30, 240, 250, 52, "t", "No record", "before the commit, or not yet written")
-    b += box(330, 240, 250, 52, "a", "Record written", "Started at capture, Restoring at restore")
+    b += box(330, 240, 250, 52, "a", "Record written", "Started, or RestoreStarted at restore")
     b += box(630, 240, 240, 52, "g", "restore-complete", "restore only, after release")
     b.append(line(280, 266, 328, 266))
     b.append(T(304, 232, "commit", "tm", 12))
@@ -609,7 +608,7 @@ def phases():
         ("p", "Admission: all-gather, IP map"),
         ("p", "Barrier: admitted"),
         ("COMMIT",),
-        ("g", "Record: Restoring reason"),
+        ("g", "Record: RestoreStarted condition"),
         ("g", "Hold flows, CRIU restore"),
     ])
     lx, lw = x, 150                      # left branch: the barrier
@@ -660,7 +659,7 @@ def phases():
         "Checkpoint: the workload quiesces and reports ready-for-snapshot, admission all-gather, an INSPECT round, "
         "admitted barrier, commit, the Started record, CUDA prepare, a revalidation round, destructive cuInterpose "
         "rounds, CUDA lock and checkpoint, hold and net-freeze barrier, CRIU dump. Restore: admission, admitted "
-        "barrier, commit, the Restoring record, CRIU restore under a narrow "
+        "barrier, commit, the RestoreStarted record, CRIU restore under a narrow "
         "hold, then in parallel the sockets-restored barrier and CUDA restore with the cuInterpose rounds, then the "
         "endpoint and resume barrier, CUDA resume, and the release barrier, after which the workload resumes; the "
         "workload waits from CRIU restore until restore-complete.", b)

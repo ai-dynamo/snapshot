@@ -308,8 +308,9 @@ is, when the last member passes admission, so capture and restore commit at the
 same point and the coordinator never needs to know which steps are
 destructive. Before its member's first irreversible step, each agent records
 durably that the member has crossed its point of no return, as a `Started`
-condition on the member's `PodSnapshotContent` at capture and as the `Restoring`
-reason on the restore Pod at restore, and an agent that cannot write it fails
+condition on the member's `PodSnapshotContent` at capture and as the
+`nvidia.com/RestoreStarted` condition on the restore Pod at restore, both written
+once and never removed, and an agent that cannot write it fails
 the attempt instead of proceeding. That record, never the session, decides
 what a failure does to the member: a member without it is left as
 Snapshot found it, a member with it fails, and a member already released keeps
@@ -339,7 +340,7 @@ built from the session operations rather than added to them:
 | --- | --- | --- |
 | Broadcast | The cuInterpose leader sends each round's command to every relay | One `Insert`, read with a waiting `Get` by every relay |
 | Gather to one rank | Relays return records, results, and new fabric handles to the leader | One key per rank, read by the leader |
-| All-gather | Agents exchange new Pod IPs, capture IDs, fabric domains, and versions at admission | One key per rank, read by every agent after a barrier |
+| All-gather | Agents exchange new Pod IPs, capture IDs, fabric domains, versions, and whether each member runs a relay at admission | One key per rank, read by every agent after a barrier |
 | Barrier | Agents synchronize `admitted`, `net-freeze`, `sockets-restored`, `resume`, and `release` | A named counter whose expected count is the number of members |
 | Publish by key | The owner of a communicator or listening endpoint gives its peers a new identifier | `Insert` by the owner, waiting `Get` by each peer |
 | Session event | The coordinator announces a failure to every agent | Pushed on each agent's stream |
@@ -430,7 +431,8 @@ and the set's UID, which names the session, without any change to the existing
 resources. Each agent
 waits until its workload reports `ready-for-snapshot`, attaches to the session,
 and contributes its Pod IP, its fabric domain when the Pod shares GPU memory
-across nodes, and its component versions to the admission exchange, while the
+across nodes, its component versions, and whether the Pod has opted into
+cuInterpose as SNEP-295 defines, to the admission exchange, while the
 relays run a first round that inspects every process and gathers the records to
 the leader for a global validation. Every agent then posts to the `admitted`
 barrier once its own checks pass, and the agent of the leader's Pod posts only
@@ -493,7 +495,8 @@ comes first and again changes nothing: each
 agent resolves its member's artifact, runs the existing compatibility checks,
 verifies that the restore Pod's remaining startup-probe time covers the
 remaining deadline, and contributes its new Pod IP, the capture ID from its
-artifact, its fabric domain, and its GPU count. Every agent therefore ends
+artifact, its fabric domain, its GPU count, and whether its artifact holds
+cuInterpose state. Every agent therefore ends
 admission holding the complete IP map, built from the member table in its own
 artifact and the new IPs, together with the assurance that all members restore
 the same capture onto a placement that can work. When the operator records a
@@ -504,7 +507,8 @@ restoring with a stale map.
 
 Each agent then posts to the `admitted` barrier once its own checks pass. When
 the barrier completes, the attempt commits, and each agent records the
-`Restoring` reason on its restore Pod before anything irreversible happens, holds the preserved connections
+`nvidia.com/RestoreStarted` condition on its restore Pod before anything
+irreversible happens, holds the preserved connections
 in its Pod, and restores the processes with CRIU using the group IP map. As
 soon as every member has restored its sockets, the `sockets-restored` barrier
 lifts the holds, which keeps that window short and leaves the Pod network open
@@ -554,10 +558,15 @@ expected carrier bytes of each process, which is the amount of shared memory
 that process must copy to or from its host carrier, and, during restore, the
 handle table, which maps every old fabric handle to the one its creator exported
 after re-creating the memory. Members without cuInterpose run no relay, and
-since the admission exchange tells every agent which ranks run one, each agent
-knows which relay leads and passes that rank to its own relay, while the
-leader's gathers wait only for the ranks that run a relay. A Pod that is not
-part of a set keeps today's behavior and never opens a session.
+since every agent learns from the admission exchange which ranks run one, they
+all agree on the leader without an election: an agent that starts a relay
+passes it its own rank, the leader's rank, and the ranks that run a relay, so
+the leader knows itself and its gathers wait only for those ranks. Ranks are
+fixed and a restore takes the flag from the capture's artifacts, so the same
+member leads at capture and at restore, and when no member uses cuInterpose,
+there are no relays and no rounds, and the `admitted` barrier waits for no
+leader's verdict. A Pod that is not part of a set keeps today's behavior and
+never opens a session.
 
 Each phase then runs as a round of Figure 3 through one generic envelope: the
 command names the step and carries arguments that the leader derives from the
@@ -711,11 +720,15 @@ Restore is not idempotent, so an agent that restarts during a restore relies on
 two durable facts rather than on its memory. It first looks for
 `restore-complete` with the attempt's ID: if the file exists, the member was
 released and stays Released, whatever happens to the attempt afterwards. If it
-does not exist, the record decides, and it only ever moves forward: any reason
-from `Restoring` onwards, `Reconstructed` included, means that CRIU may already
-have run, so the agent never starts it again and fails the member, which fails
-the attempt, and only a member whose reason is still `SetPending` or `Admitted`
-can start its first restore within the same attempt. Helpers left by the crashed
+does not exist, the record decides: a restore Pod with the
+`nvidia.com/RestoreStarted` condition may already have been through CRIU, so the
+agent never starts it again and fails the member, which fails the attempt, and
+only a restore Pod without that condition can start its first restore within
+the same attempt. The condition is a record of its own rather than a reason of
+`nvidia.com/Restored`, because later reasons overwrite earlier ones and a fast
+failure could otherwise erase the only proof that CRIU started; the agent writes
+it once, under a field manager of its own, and never removes it, so no later
+status update can drop it. Helpers left by the crashed
 agent, such as `nsrestore` or a relay, lose their inherited sockets and stop at
 their next step, and failing the member terminates whatever they restored.
 During capture, a restarted agent that finds the `Started` condition fails the
@@ -824,15 +837,18 @@ refused. A `PodSetSnapshot` can be restored many times, and each
 `PodSetRestore` is one attempt with its own session, which is also the
 per-restore epoch that CUDA Checkpoint expects. Agents keep reporting where they
 report today, on each member's `PodSnapshotContent` and on each restore Pod's
-`nvidia.com/Restored` condition, and the operator alone aggregates those results
-into the set's status. Member phases progress through `Pending`, `Admitted`,
-`Capturing`, and `Captured` during capture, and through `Pending`, `Admitted`,
-`Restoring`, `Reconstructed`, and `Released` during restore, with `Failed` and a
-reason otherwise; a restore is Ready only when every member is Released. Each
-member's write-once `startedAt` comes from its agent's record, the `Started`
-condition at capture or the `Restoring` reason at restore, and survives a
-later `Failed`, so it tells the owner which workloads Snapshot changed, and the
-set reports `Refused` only when no member has it.
+`nvidia.com/Restored` condition, which keeps its public reasons so that
+`ClassifyRestoreOutcome` reads a set restore exactly like a single one, and the
+operator alone aggregates those results into the set's status. Member phases
+progress through `Pending`, `Admitted`, `Capturing`, and `Captured` during
+capture, and through `Pending`, `Admitted`, `Restoring`, and `Released` during
+restore, with `Failed` and a reason otherwise; a restore is Ready only when every
+member is Released. Each member's write-once `startedAt` is the
+`lastTransitionTime` of its agent's record, the `Started` condition at capture or
+the `nvidia.com/RestoreStarted` condition at restore, both of which are set once
+and never removed, so the operator cannot miss them however fast a member fails
+afterwards. It tells the owner which workloads Snapshot changed, and the set
+reports `Refused` only when no member has it.
 
 | Resource or contract | Change | Purpose |
 | --- | --- | --- |
@@ -840,7 +856,7 @@ set reports `Refused` only when no member has it.
 | Artifact manifest | Adds an optional `podSet` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs, plus each process's rendezvous file path | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
 | Restore Pod contract | New annotation `nvidia.com/restore-set: <PodSetRestore>`, used instead of `restore-from` and `restore-container-map`, which decides the attempt a Pod belongs to; set targets must carry the restore startup probe, and the NRI plugin never runs the original command while the set context is missing | One source of truth, and no race with standalone restore |
 | `restore-complete` file | Adds an `attempt` key holding the `PodSetRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
-| `nvidia.com/Restored` condition | New reasons `SetPending`, `Admitted`, `Restoring`, and `Reconstructed` | Restart safety and status aggregation |
+| Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before CRIU under a field manager of its own and never removed; `nvidia.com/Restored` keeps its public reasons and gains only `SetPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety and an exact `startedAt`, with `ClassifyRestoreOutcome` unchanged |
 | Control volume | Reserves `coordination/` for rendezvous endpoints | Gives every Pod a private and stable endpoint path |
 | Agent DaemonSet | The chart annotates the agent's Pod template with the set protocol versions it supports | Set controllers create member work only after a set-capable agent is fully rolled out |
 | `SnapshotJob` and single-Pod restore | Unchanged | Not applicable |
@@ -959,11 +975,12 @@ session table, including blocking reads, atomics, barriers posted before their
 creation, abort fan-out, idempotent re-issue after a broken stream, namespace
 isolation, and authorization by node; the set
 controllers' validation, identity pinning, target binding and `TargetInUse`,
-aggregation, artifact withdrawal, cancellation, and the finalizer that keeps a
+aggregation, including a restore that fails before the operator ever sees it in
+progress, artifact withdrawal, cancellation, and the finalizer that keeps a
 snapshot while a restore reads it; the agents' phase sequencing, including concurrent members on one
 node, members without cuInterpose, a failed write of the member's record, and a
-restart at every phase, in particular during CRIU, while `Reconstructed`, and
-between `restore-complete` and the status update; and cuInterpose's validation
+restart at every phase, in particular during CRIU, between reconstruction and
+release, and between `restore-complete` and the status update; and cuInterpose's validation
 of multi-rank topologies with teams that span Pods, importers resolved by
 handle, missing ranks, duplicated creators, and a leader other than rank 0.
 
@@ -1308,16 +1325,15 @@ type PodSetRestoreSpec struct {
 	Targets []PodSetRestoreTarget `json:"targets"`
 }
 
-// +kubebuilder:validation:Enum=Pending;Admitted;Restoring;Reconstructed;Released;Failed
+// +kubebuilder:validation:Enum=Pending;Admitted;Restoring;Released;Failed
 type RestorePhase string
 
 const (
-	RestorePending       RestorePhase = "Pending"
-	RestoreAdmitted      RestorePhase = "Admitted"
-	RestoreRestoring     RestorePhase = "Restoring"
-	RestoreReconstructed RestorePhase = "Reconstructed"
-	RestoreReleased      RestorePhase = "Released"
-	RestoreFailed        RestorePhase = "Failed"
+	RestorePending   RestorePhase = "Pending"
+	RestoreAdmitted  RestorePhase = "Admitted"
+	RestoreRestoring RestorePhase = "Restoring"
+	RestoreReleased  RestorePhase = "Released"
+	RestoreFailed    RestorePhase = "Failed"
 )
 
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.pod) || (has(self.pod) && self.pod == oldSelf.pod)",message="target Pod is immutable"
@@ -1342,9 +1358,10 @@ type PodSetRestoreMemberStatus struct {
 	// +optional
 	// +kubebuilder:validation:Format=ipv4
 	TargetPodIP string `json:"targetPodIP,omitempty"`
-	// StartedAt is copied from the time the agent set the Restoring reason,
-	// before the member's first irreversible step. Absent means Snapshot never
-	// changed this restore Pod.
+	// StartedAt is the lastTransitionTime of the restore Pod's
+	// nvidia.com/RestoreStarted condition, which the agent sets before the
+	// member's first irreversible step. Absent means Snapshot never changed
+	// this restore Pod.
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 	// +kubebuilder:default=Pending
@@ -1443,11 +1460,15 @@ const (
 	PodSetLabel       = "nvidia.com/podset"
 	PodSetMemberLabel = "nvidia.com/podset-member"
 
-	// Reasons of the nvidia.com/Restored condition on a set restore Pod.
-	RestoredReasonSetPending    = "SetPending"    // waiting for the PodSetRestore
-	RestoredReasonAdmitted      = "Admitted"      // admitted, nothing destructive yet
-	RestoredReasonRestoring     = "Restoring"     // written before CRIU starts; from here on, never replay
-	RestoredReasonReconstructed = "Reconstructed" // rebuilt, waiting for release; never replay
+	// RestoreStartedCondition is set to True on a set restore Pod before CRIU
+	// starts, under a field manager of its own, and never removed; from then
+	// on the agent never replays CRIU into the Pod. Its lastTransitionTime is
+	// the member's startedAt.
+	RestoreStartedCondition = "nvidia.com/RestoreStarted"
+
+	// RestoreSetPending is an agent-internal wait reason on nvidia.com/Restored
+	// while a set restore Pod waits for its PodSetRestore, like SnapshotPending.
+	RestoreSetPending = "SetPending"
 
 	// CoordinationDir is reserved in the control volume for rendezvous endpoints.
 	CoordinationDir = "coordination"
