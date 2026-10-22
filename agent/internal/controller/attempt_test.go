@@ -14,6 +14,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
@@ -134,4 +136,22 @@ func TestRunCheckpointRecordsEitherOutcome(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The other half of the contract: an outcome that was not recorded must reach
+// the queue as an error, or the failure is lost entirely.
+func TestRunCheckpointReturnsAnUnrecordedFailure(t *testing.T) {
+	content := makeWorkOrder("content-a", "node-a", "a")
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+			return errors.New("apiserver unavailable")
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{err: errors.New("dump failed")}, funcs, content)
+
+	err := w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", 42, false, string(content.UID), t.TempDir())
+
+	require.ErrorContains(t, err, "apiserver unavailable")
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
