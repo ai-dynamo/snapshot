@@ -413,9 +413,8 @@ func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, er
 // FilterProcesses returns the candidate PIDs with a CUDA driver restore thread.
 // Driver initialization can create that thread without a cuInterpose core runtime.
 // Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
-// --get-state, because --get-state incorrectly matches coordinator processes like
-// cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
-// do not have their own CUDA driver restore thread.
+// --get-state, because --get-state incorrectly matches processes that share a /proc
+// namespace with CUDA processes but do not have their own CUDA driver restore thread.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {
@@ -501,29 +500,24 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 	return strings.Join(pairs, ","), nil
 }
 
-// CheckpointProcessTree locks and checkpoints CUDA state for all given PIDs,
-// then persists the launch-job state needed to restore them.
+// CheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
 // On failure, the caller is expected to fail the operation and terminate the workload.
-func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpointDir string, log logr.Logger) (CheckpointPhaseTimings, error) {
+func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) (CheckpointPhaseTimings, error) {
 	var timings CheckpointPhaseTimings
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := lockWithJobFile(ctx, pid, jobFile, log); err != nil {
+		if err := lock(ctx, pid, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := checkpointWithJobFile(ctx, pid, jobFile, log); err != nil {
+		if err := checkpoint(ctx, pid, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
-	}
-	if err := refreshJobFileArtifact(jobFile, checkpointDir); err != nil {
-		timings.TotalDuration = time.Since(start)
-		return timings, err
 	}
 	timings.TotalDuration = time.Since(start)
 

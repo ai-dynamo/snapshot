@@ -22,10 +22,7 @@ import (
 // Dynamo-specific code — and adds only the owner label so the PodSnapshot created
 // later (PR 4) can be mapped back to this SnapshotJob without an ownerReference.
 //
-// No storage is injected (spec §5.3: the agent falls back to its own config), and
-// WrapLaunchJob is always false (spec §5.4: PodSnapshotTemplate has no field to
-// source it from — a caller needing cuda-checkpoint --launch-job wrapping sets it
-// up themselves in spec.podTemplate).
+// No storage is injected (spec §5.3: the agent falls back to its own config).
 func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	// sj.Name is also used as a SnapshotJobOwnerLabel value. Admission caps
 	// metadata.name at the label-value limit;
@@ -62,7 +59,6 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 		SeccompProfile:        podcontract.DefaultSeccompLocalhostProfile,
 		ActiveDeadlineSeconds: sj.Spec.ActiveDeadlineSeconds,
 		TTLSecondsAfterFinish: nil,
-		WrapLaunchJob:         false,
 	})
 }
 

@@ -204,7 +204,7 @@ func TestBuildSourceJob(t *testing.T) {
 			"the target container must mount the control volume the probe and sentinel live in")
 	})
 
-	t.Run("WrapLaunchJob is always false: command/args pass through unchanged", func(t *testing.T) {
+	t.Run("command passes through unchanged", func(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
 
@@ -213,7 +213,7 @@ func TestBuildSourceJob(t *testing.T) {
 
 		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
 		assert.Equal(t, []string{"python3", "-m", "worker"}, main.Command,
-			"PodSnapshotTemplate has no multi-GPU field (spec §5.4) — command must never be wrapped")
+			"the source Job must run the template command as written")
 	})
 
 	t.Run("SnapshotJob name longer than a label value is a terminal spec error", func(t *testing.T) {

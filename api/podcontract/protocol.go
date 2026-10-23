@@ -57,15 +57,6 @@ const (
 	// probe observes it through the control volume.
 	ReadyForSnapshotFile = "ready-for-snapshot"
 
-	// CUDAJobFileName is the stable name under which the
-	// cuda-checkpoint-helper launch-job wrapper persists the CUDA checkpoint job
-	// file inside the control volume.
-	CUDAJobFileName = "cuda-checkpoint-job"
-
-	// CUDAJobFilePath is the full stable path to the persisted CUDA checkpoint
-	// job file.
-	CUDAJobFilePath = SnapshotControlMountPath + "/" + CUDAJobFileName
-
 	// RestoreStandbyModeEnv asked standby-aware workload entrypoints to remain
 	// inert until Snapshot replaced them with restored processes. Snapshot
 	// published the name but never injected it.
