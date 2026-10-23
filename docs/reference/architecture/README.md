@@ -146,7 +146,10 @@ restore time into:
    resolves the destination container's PID, and mounts the agent's binary
    bundle and the checkpoint source into that container's mount namespace. The
    destination container is already alive and idle: the agent's NRI plugin made
-   the restore proxy its PID 1 at creation time, and the proxy is waiting.
+   the restore proxy its PID 1 at creation time, and the proxy is waiting. The
+   plugin also reports the container's ID to the restore queue the moment it
+   starts, so the restore does not wait for kubelet to publish the container in
+   the pod status.
 2. **CRIU restore** — the agent execs `nsrestore` inside the destination's
    namespaces. It applies the rootfs diff, prepares the GPU device mounts, and
    runs the CRIU restore that reads the checkpoint images and rebuilds the
@@ -177,6 +180,7 @@ sequenceDiagram
     K->>A: NRI CreateContainer
     A-->>K: Command replaced with the restore proxy
     K->>D: Start container
+    K->>A: NRI PostStartContainer
     Note over D: The proxy is PID 1 and waits for the restore
     Note over A,D: Agent setup
     A->>A: Preflight snapshot and content, run compatibility gates
