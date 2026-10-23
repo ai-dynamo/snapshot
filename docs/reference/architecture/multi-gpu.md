@@ -815,10 +815,6 @@ Snapshot captures every CUDA process, while the coordinator operates only on pro
   The agent verifies file identity against process mappings before hashing and rejects missing, deleted, replaced, or inconsistent libraries.
 - Library files must remain unchanged throughout capture.
 
-Snapshot stages, validates, and restores native CUDA helper jobfiles when present.
-An absent jobfile is permitted when there are coordinator participants.
-Otherwise, the helper's native multi-GPU jobfile requirement still applies.
-
 ### Configuration
 
 - `--cuinterpose-image` and `--cuinterpose-image-pull-policy` configure the operator's installer image and pull policy.

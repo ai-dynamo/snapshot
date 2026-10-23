@@ -13,7 +13,6 @@
 #include <chrono>
 #include <climits>
 #include <cstdio>
-#include <cstdlib>
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -300,7 +299,6 @@ Artifact::~Artifact() = default;
 struct GpuEngine::GpuEngineState {
   explicit GpuEngineState(const EngineOptions& options)
   {
-    Require(!std::getenv("CUDA_CHECKPOINT_JOB_FILE"), "CUDA_CHECKPOINT_JOB_FILE must be unset");
     if (!checkpoint.SupportsCustomStorage()) {
       return;
     }

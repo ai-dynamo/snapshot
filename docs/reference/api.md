@@ -160,11 +160,10 @@ workload and the node agent share.
 
 Sentinel files inside the volume:
 
-| File                  | Written by | Meaning                                                                                     |
-|-----------------------|------------|---------------------------------------------------------------------------------------------|
-| `ready-for-snapshot`  | Workload   | The model is loaded and it is safe to checkpoint. The source readiness probe gates on this. |
-| `restore-complete`    | Node agent | The restore finished and the workload may resume.                                           |
-| `cuda-checkpoint-job` | Node agent | The persisted CUDA checkpoint job file.                                                     |
+| File                 | Written by | Meaning                                                                                     |
+|----------------------|------------|---------------------------------------------------------------------------------------------|
+| `ready-for-snapshot` | Workload   | The model is loaded and it is safe to checkpoint. The source readiness probe gates on this. |
+| `restore-complete`   | Node agent | The restore finished and the workload may resume.                                           |
 
 A checkpoint always terminates the source process, so there is no
 `snapshot-complete` sentinel. Checkpointing also requires a seccomp profile that
