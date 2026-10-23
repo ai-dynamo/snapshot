@@ -28,6 +28,11 @@ func main() {
 	storageConfigPath := flag.String("snapshot-storage-config", "", "Path to resolved storage configuration shared with PageBroker")
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
+	testFailureAnnotation, err := bindTestHookFlags(flag.CommandLine)
+	if err != nil {
+		ctrl.Log.Error(err, "invalid E2E test hook configuration")
+		os.Exit(1)
+	}
 	flag.Parse()
 	storeID := mustStoreID(*storageConfigPath)
 	artifactCleanupConfig.StoreID = storeID
@@ -77,9 +82,10 @@ func main() {
 	}
 
 	podSnapshotReconciler := &controller.PodSnapshotReconciler{
-		Client:             mgr.GetClient(),
-		NonCacheReadClient: mgr.GetAPIReader(),
-		Recorder:           mgr.GetEventRecorderFor("podsnapshot-controller"),
+		Client:                mgr.GetClient(),
+		NonCacheReadClient:    mgr.GetAPIReader(),
+		Recorder:              mgr.GetEventRecorderFor("podsnapshot-controller"),
+		TestFailureAnnotation: *testFailureAnnotation,
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")
