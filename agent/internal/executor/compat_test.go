@@ -14,6 +14,7 @@ import (
 	"github.com/go-logr/logr/testr"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
@@ -53,7 +54,7 @@ func TestRefuseMIGCapture(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeMIGListing(t, tc.listing)
-			err := refuseMIGCapture(context.Background(), logr.Discard(), 42)
+			err := refuseMIGCapture(logr.Discard(), 42, cuda.ListVisibleGPUs(context.Background(), "/host/proc", 42))
 			if tc.want == "" {
 				require.NoError(t, err)
 				return
@@ -82,7 +83,7 @@ func TestRefuseMIGRestore(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeMIGListing(t, tc.listing)
-			err := refuseMIGRestore(context.Background(), testr.New(t), 42, tc.skip)
+			err := refuseMIGRestore(testr.New(t), 42, cuda.ListVisibleGPUs(context.Background(), "/host/proc", 42), tc.skip)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("refuseMIGRestore() = %v, want nil", err)
