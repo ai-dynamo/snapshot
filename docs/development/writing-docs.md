@@ -78,7 +78,7 @@ this page.
 | Contract | Short requirements that use the exact names the workload sees: environment variables, paths, annotations | About 12 lines |
 | Operations | One section: what it does, the settings, how to check it, where to look when it fails | About 25 lines |
 | Troubleshooting | One section per symptom, titled as the user sees it: the cause in a sentence or two, commands to confirm it, the fix | About 12 lines |
-| Compatibility | One table row: the feature, the minimum versions it needs, and a link to the page that documents it | 1 row |
+| Compatibility | One table row: the feature, the minimum versions it needs, a link to the page that documents it, and, when it is not obvious, what a node below the minimum shows | 1 row |
 | Limitations | One bullet: the limit, and a link to the workaround if there is one | A bullet |
 | CHANGELOG | What is new or changed, what to do on upgrade, a flag on CRD changes, and a link to the details. Do not restate the details | About 5 lines |
 | Guide | Numbered steps with runnable commands on one path. No alternatives, worked examples of options, or production hardening | |
@@ -119,9 +119,10 @@ the subsystem has no page yet, add one. A mechanism is explained once, in its de
 
 ## Version requirements
 
-State a requirement as a minimum version ("580 or newer"), how to check it, and
-what happens below it. A feature that needs more than the baseline gets one row
-in [Compatibility](../reference/compatibility.md); see
+State a requirement as a minimum version ("580 or newer"). Say how to check it
+when that is not obvious, and what a node below it shows, such as a refusal that
+names a compatibility check or a CUDA error code. A feature that needs more than
+the baseline gets one row in [Compatibility](../reference/compatibility.md); see
 [CONTRIBUTING.md](../../CONTRIBUTING.md#documenting-a-feature-specific-version-floor).
 The feature's own page links to that row and does not repeat the number.
 
