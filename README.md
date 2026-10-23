@@ -86,8 +86,7 @@ Before installing Snapshot, make sure the following are in place:
 - A Kubernetes cluster with NVIDIA GPU nodes running Linux kernel 5.13 or newer
 - containerd or CRI-O as the container runtime
 - [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with MIG disabled
-- NVIDIA kernel-mode driver 580 or newer, and the CUDA user-mode driver
-  (`libcuda.so`) version in [Compatibility](docs/reference/compatibility.md)
+- NVIDIA kernel-mode driver 580 or newer
 - A `ReadWriteMany` (RWX) storage class
 - The [Helm](https://helm.sh/docs/intro/install) CLI
 - A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
