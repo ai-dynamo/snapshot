@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/internal/clocktest"
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv"
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv/memory"
 	"github.com/stretchr/testify/assert"
@@ -396,7 +397,7 @@ func TestEndingAndRemovingWaitUntilNoCallIsInsideTheSpace(t *testing.T) {
 		cancelled: make(chan struct{}),
 		release:   make(chan struct{}),
 	}
-	manager, err := NewManager(Config{Store: store, Clock: newSignalClock()})
+	manager, err := NewManager(Config{Store: store, Clock: clocktest.New(baseTime)})
 	require.NoError(t, err)
 	s, err := manager.Ensure(specOf(attemptUID))
 	require.NoError(t, err)

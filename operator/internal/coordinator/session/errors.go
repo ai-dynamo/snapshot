@@ -88,6 +88,10 @@ const (
 	// ReasonCoordinatorLost is the reason to pass Manager.Shutdown when the
 	// coordinator terminates, which members treat as losing it.
 	ReasonCoordinatorLost Reason = "CoordinatorLost"
+
+	// ReasonMemberFailed is the reason the service fails a session with when a
+	// member's stream is lost and no new one attaches within the grace period.
+	ReasonMemberFailed Reason = "MemberFailed"
 )
 
 // AbortError reports that the session failed, and carries the reason. It

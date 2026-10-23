@@ -9,11 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/internal/clocktest"
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv/memory"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/clock"
-	clocktesting "k8s.io/utils/clock/testing"
 )
 
 // The fixtures every test shares: one attempt, two members, and keys inside
@@ -70,53 +69,6 @@ func specOf(uid types.UID, members ...MemberID) Spec {
 		spec.Members = append(spec.Members, Member{ID: id, Rank: rank})
 	}
 	return spec
-}
-
-// signalClock reports every timer and every AfterFunc it hands out, so a test
-// can advance time only once the call under test is waiting on one. Without
-// it, stepping the clock before the timer exists would be lost, and waiting
-// for it to exist would mean sleeping. The report never blocks the code under
-// test, so a test that leaves timers undrained only loses a signal it was not
-// waiting for.
-type signalClock struct {
-	*clocktesting.FakeClock
-	timers chan time.Duration
-}
-
-func newSignalClock() *signalClock {
-	return &signalClock{
-		FakeClock: clocktesting.NewFakeClock(baseTime),
-		timers:    make(chan time.Duration, 64),
-	}
-}
-
-func (c *signalClock) NewTimer(d time.Duration) clock.Timer {
-	timer := c.FakeClock.NewTimer(d)
-	c.signal(d)
-	return timer
-}
-
-func (c *signalClock) AfterFunc(d time.Duration, f func()) clock.Timer {
-	timer := c.FakeClock.AfterFunc(d, f)
-	c.signal(d)
-	return timer
-}
-
-func (c *signalClock) signal(d time.Duration) {
-	select {
-	case c.timers <- d:
-	default:
-	}
-}
-
-// awaitTimer blocks until the code under test has armed a timer.
-func (c *signalClock) awaitTimer(t *testing.T) {
-	t.Helper()
-	select {
-	case <-c.timers:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no timer was armed")
-	}
 }
 
 // operation is one OperationLatency report, with everything a metric may label.
@@ -192,7 +144,7 @@ func (o *recordingObserver) snapshot() recordingObserver {
 type fixture struct {
 	manager  *Manager
 	store    *memory.Store
-	clock    *signalClock
+	clock    *clocktest.Clock
 	observer *recordingObserver
 	session  *Session
 }
@@ -209,7 +161,7 @@ func newFixture(t *testing.T, members ...MemberID) *fixture {
 // newManagerFixture builds a Manager without ensuring any session.
 func newManagerFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{store: memory.New(), clock: newSignalClock(), observer: &recordingObserver{}}
+	f := &fixture{store: memory.New(), clock: clocktest.New(baseTime), observer: &recordingObserver{}}
 	manager, err := NewManager(Config{Store: f.store, Clock: f.clock, Observer: f.observer})
 	require.NoError(t, err)
 	f.manager = manager
@@ -222,7 +174,7 @@ func (f *fixture) ensure(t *testing.T, spec Spec) *Session {
 	s, err := f.manager.Ensure(spec)
 	require.NoError(t, err)
 	if spec.Deadline.After(f.clock.Now()) {
-		f.clock.awaitTimer(t)
+		f.clock.AwaitTimer(t)
 	}
 	return s
 }
@@ -255,7 +207,7 @@ func getAsync(t *testing.T, f *fixture, c Caller, key string, wait time.Duration
 		_, err := f.session.Get(context.Background(), c, key, wait)
 		got <- err
 	}()
-	f.clock.awaitTimer(t)
+	f.clock.AwaitTimer(t)
 	return got
 }
 
