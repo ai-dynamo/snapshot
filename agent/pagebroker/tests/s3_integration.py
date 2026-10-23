@@ -51,6 +51,8 @@ class FaultService:
         return [body]
 
     def __call__(self, environment, start_response):
+        if "list-type=" in environment.get("QUERY_STRING", "") and "rclone/" in environment.get("HTTP_USER_AGENT", ""):
+            return self.error(start_response, "AccessDenied", "403 Forbidden")
         key = environment.get("PATH_INFO", "").split("/", 2)[-1]
         if not key.startswith("roundtrip/"):
             return self.app(environment, start_response)
@@ -193,16 +195,20 @@ class FaultService:
             for retries in (0, 2):
                 count = self.counts[f"metadata-{operation}-{retries}", operation]
                 if count:
-                    assert count == retries + 1, self.counts
+                    # The pinned S3 pacer makes two SDK calls for failed reads.
+                    # PUT is non-rewindable in the SDK and uses copy-level retries.
+                    expected = (retries + 1) * (1 if operation == "put" else 2)
+                    assert count == expected, self.counts
         if self.counts["denied", "put"]:
             assert self.counts["denied", "put"] == 1, self.counts
         if self.counts["part-failure", "create"]:
-            assert self.counts["part-failure", "abort"] == 1, self.counts
+            assert self.counts["part-failure", "create"] <= 3, self.counts
+            assert self.counts["part-failure", "abort"] == self.counts["part-failure", "create"], self.counts
             assert self.counts["part-failure", "complete"] == 0, self.counts
             uploads = client.list_multipart_uploads(Bucket=bucket, Prefix="roundtrip/part-failure/")
             assert not uploads.get("Uploads"), uploads
         if self.counts["abort-failure", "create"]:
-            # CRT owns retry/abort scheduling; no PageBroker cleanup loop.
+            # rclone owns retry/abort scheduling; no PageBroker cleanup loop.
             assert self.counts["abort-failure", "abort"] >= 1, self.counts
             assert client.list_multipart_uploads(Bucket=bucket, Prefix="roundtrip/abort-failure/").get("Uploads")
         for scenario in ("multipart-deadline", "cancel-upload"):
@@ -210,7 +216,8 @@ class FaultService:
                 assert self.counts[scenario, "abort"] >= 1, self.counts
                 assert not client.list_multipart_uploads(Bucket=bucket, Prefix=f"roundtrip/{scenario}/").get("Uploads")
         if self.counts["lost-create", "create"]:
-            assert self.counts["lost-create", "create"] <= 3, self.counts
+            # Two pacer calls, three SDK attempts and three copy attempts.
+            assert self.counts["lost-create", "create"] <= 18, self.counts
             assert client.list_multipart_uploads(Bucket=bucket, Prefix="roundtrip/lost-create/").get("Uploads")
         for scenario in ("lost-complete", "lost-put", "lost-metadata-put"):
             if self.counts[scenario, "complete"] or self.counts[scenario, "put"]:
@@ -381,7 +388,7 @@ def run(args, environment, faults=None):
         if args.resources:
             # ru_maxrss is a process high-water mark: never share a process
             # between probes, or upload allocations can hide metadata growth.
-            for test, size in (("UploadMemoryProbe", 512), ("MetadataMemoryProbe", 512)):
+            for test, size in (("UploadMemoryProbe", 512), ("ConcurrentUploadMemoryProbe", 256), ("MetadataMemoryProbe", 512)):
                 probe = dict(environment)
                 probe["GTEST_FILTER"] = "S3RoundTripTest." + test
                 probe["PAGEBROKER_S3_TEST_MEMORY_MIB"] = str(size)

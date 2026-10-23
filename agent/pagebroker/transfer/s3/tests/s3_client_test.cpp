@@ -6,16 +6,24 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <initializer_list>
 #include <limits>
 #include <utility>
+#include <vector>
 
 #include "tests/temporary_directory.hpp"
 
 namespace snapshot::pagebroker {
 namespace {
+Cancellation
+Deadline(std::chrono::milliseconds duration = std::chrono::seconds(30))
+{
+  return Cancellation(Cancellation::Clock::now() + duration);
+}
+
 S3Connection
 OfflineConnection()
 {
@@ -32,8 +40,117 @@ SmallLimits()
 {
   S3Limits limits;
   limits.part_size = 8 * 1024 * 1024;
-  limits.target_gbps = limits.active_files = 1;
+  limits.active_files = 1;
   return limits;
+}
+
+// These tests run serially; restore the process environment after each case.
+class CredentialEnvironment {
+ public:
+  CredentialEnvironment()
+  {
+    for (const auto* name :
+         {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SHARED_CREDENTIALS_FILE",
+          "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_CA_BUNDLE"}) {
+      const auto* value = std::getenv(name);
+      saved_.push_back({name, value ? std::optional<std::string>(value) : std::nullopt});
+      unsetenv(name);
+    }
+  }
+  ~CredentialEnvironment()
+  {
+    for (const auto& [name, value] : saved_) {
+      if (value)
+        setenv(name.c_str(), value->c_str(), 1);
+      else
+        unsetenv(name.c_str());
+    }
+  }
+
+ private:
+  std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
+};
+
+TEST(S3ClientTest, CapturesEnvironmentCredentialsIncludingSessionToken)
+{
+  CredentialEnvironment environment;
+  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
+  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
+  setenv("AWS_SESSION_TOKEN", "fake-token", 1);
+  const auto snapshot = ResolveS3Credentials({});
+  EXPECT_EQ(snapshot.access_key_id, "fake-key");
+  EXPECT_EQ(snapshot.secret_access_key, "fake-secret");
+  EXPECT_EQ(snapshot.session_token, "fake-token");
+  setenv("AWS_ACCESS_KEY_ID", "replacement", 1);
+  EXPECT_EQ(ResolveS3Credentials(snapshot).access_key_id, "fake-key");
+  EXPECT_EQ(ResolveS3Credentials(OfflineConnection()).access_key_id, "local-test-access-key");
+}
+
+TEST(S3ClientTest, DoesNotDiscoverCredentialsFromFilesOrProfiles)
+{
+  CredentialEnvironment environment;
+  test::TemporaryDirectory directory;
+  const auto path = directory.path() / "credentials";
+  std::ofstream(path) << "[default]\naws_access_key_id=file-key\naws_secret_access_key=file-secret\n";
+  setenv("AWS_SHARED_CREDENTIALS_FILE", path.c_str(), 1);
+  setenv("AWS_PROFILE", "default", 1);
+  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
+  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
+  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
+  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
+  const auto snapshot = ResolveS3Credentials({});
+  EXPECT_EQ(snapshot.access_key_id, "fake-key");
+  EXPECT_EQ(snapshot.secret_access_key, "fake-secret");
+  EXPECT_TRUE(snapshot.session_token.empty());
+}
+
+TEST(S3ClientTest, RejectsPartialCredentialsWithoutMixingSources)
+{
+  CredentialEnvironment environment;
+  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
+  setenv("AWS_SESSION_TOKEN", "fake-token", 1);
+  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
+  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
+  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
+  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
+  auto explicit_connection = OfflineConnection();
+  explicit_connection.secret_access_key.clear();
+  EXPECT_THROW(ResolveS3Credentials(explicit_connection), std::invalid_argument);
+  const auto snapshot = ResolveS3Credentials(OfflineConnection());
+  EXPECT_EQ(snapshot.access_key_id, "local-test-access-key");
+  EXPECT_EQ(snapshot.secret_access_key, "local-test-secret-key");
+  EXPECT_TRUE(snapshot.session_token.empty());
+}
+
+TEST(S3ClientTest, PreservesRegionAndCaStartupSettings)
+{
+  CredentialEnvironment environment;
+  auto connection = OfflineConnection();
+  connection.region.clear();
+  setenv("AWS_DEFAULT_REGION", "default-region", 1);
+  setenv("AWS_CA_BUNDLE", "/fake-ca.pem", 1);
+  auto snapshot = ResolveS3Credentials(connection);
+  EXPECT_EQ(snapshot.region, "default-region");
+  EXPECT_EQ(snapshot.ca_file, "/fake-ca.pem");
+  setenv("AWS_REGION", "preferred-region", 1);
+  EXPECT_EQ(ResolveS3Credentials(connection).region, "preferred-region");
+  connection.region = "explicit-region";
+  connection.ca_file = "/explicit-ca.pem";
+  snapshot = ResolveS3Credentials(connection);
+  EXPECT_EQ(snapshot.region, "explicit-region");
+  EXPECT_EQ(snapshot.ca_file, "/explicit-ca.pem");
+}
+
+TEST(S3ClientTest, RequiresResolvedCredentialsEvenWhenEnvironmentIsAvailable)
+{
+  CredentialEnvironment environment;
+  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
+  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
+  EXPECT_THROW(S3Client({}, SmallLimits()), std::invalid_argument);
+  const auto connection = ResolveS3Credentials({});
+  unsetenv("AWS_ACCESS_KEY_ID");
+  unsetenv("AWS_SECRET_ACCESS_KEY");
+  EXPECT_NO_THROW(S3Client(connection, SmallLimits()));
 }
 
 TEST(S3ClientTest, ValidatesResourceLimitsBeforeConstruction)
@@ -48,27 +165,18 @@ TEST(S3ClientTest, ValidatesResourceLimitsBeforeConstruction)
   auto bad = limits;
   ++bad.buffer_budget;
   EXPECT_NO_THROW(bad.Validate());
-  for (auto memory : {0ULL, 128ULL * 1024 * 1024, (1ULL << 30) - 1}) {
+  for (auto memory : {0ULL, 1ULL, 8ULL * 1024 * 1024 - 1}) {
     bad.buffer_budget = memory;
     EXPECT_THROW(S3Client(OfflineConnection(), bad), std::invalid_argument);
   }
-  bad = limits;
-  bad.target_gbps = 0;
-  EXPECT_THROW(bad.Validate(), std::invalid_argument);
   bad = limits;
   bad.active_files = 0;
   EXPECT_THROW(bad.Validate(), std::invalid_argument);
   bad = limits;
   bad.request_retries = std::numeric_limits<unsigned>::max();
   EXPECT_THROW(bad.Validate(), std::invalid_argument);
-  bad = limits;
-  bad.target_gbps = std::numeric_limits<double>::quiet_NaN();
-  EXPECT_THROW(bad.Validate(), std::invalid_argument);
-  for (auto duration : {std::chrono::milliseconds(0), std::chrono::milliseconds(-1),
-                        std::chrono::milliseconds::max()}) {
-    bad = limits;
-    bad.operation_timeout = duration;
-    EXPECT_THROW(bad.Validate(), std::invalid_argument);
+  for (auto duration :
+       {std::chrono::milliseconds(0), std::chrono::milliseconds(-1), std::chrono::milliseconds::max()}) {
     bad = limits;
     bad.request_timeout = duration;
     EXPECT_THROW(bad.Validate(), std::invalid_argument);
@@ -107,12 +215,16 @@ TEST(S3ClientTest, RejectsIncompleteCredentialsAndMalformedSettings)
 TEST(S3ClientTest, RejectsDestinationsBeforeOpeningSource)
 {
   S3Client uploader(OfflineConnection(), SmallLimits());
-  for (const auto& destination : {
-         S3ObjectLocation{"", "data"}, {"bucket", ""}, {"bucket", "line\nbreak"},
-         {"bucket", std::string("nul\0key", 7)}, {"s3://bucket", "data"}, {"directory--x-s3", "data"},
-         {"bucket", std::string(1025, 'a')}})
-    EXPECT_THROW(uploader.UploadFile("/does-not-exist", destination), std::invalid_argument);
-  EXPECT_THROW(uploader.UploadFile(std::string("source\0suffix", 13), {"bucket", "data"}), std::invalid_argument);
+  for (const auto& destination : {S3ObjectLocation{"", "data"},
+                                  {"bucket", ""},
+                                  {"bucket", "line\nbreak"},
+                                  {"bucket", std::string("nul\0key", 7)},
+                                  {"s3://bucket", "data"},
+                                  {"directory--x-s3", "data"},
+                                  {"bucket", std::string(1025, 'a')}})
+    EXPECT_THROW(uploader.UploadFile("/does-not-exist", destination, Deadline()), std::invalid_argument);
+  EXPECT_THROW(uploader.UploadFile(std::string("source\0suffix", 13), {"bucket", "data"}, Deadline()),
+               std::invalid_argument);
 }
 
 TEST(S3ClientTest, RejectsUnsupportedSourcesWithoutConnecting)
@@ -120,15 +232,15 @@ TEST(S3ClientTest, RejectsUnsupportedSourcesWithoutConnecting)
   S3Client uploader(OfflineConnection(), SmallLimits());
   test::TemporaryDirectory root;
   const S3ObjectLocation destination{"local-test-bucket", "data"};
-  EXPECT_THROW(uploader.UploadFile(root.path() / "missing", destination), std::system_error);
-  EXPECT_THROW(uploader.UploadFile(root.path(), destination), std::invalid_argument);
+  EXPECT_THROW(uploader.UploadFile(root.path() / "missing", destination, Deadline()), std::system_error);
+  EXPECT_THROW(uploader.UploadFile(root.path(), destination, Deadline()), std::invalid_argument);
   const auto fifo = root.path() / "fifo";
   ASSERT_EQ(mkfifo(fifo.c_str(), 0600), 0);
-  EXPECT_THROW(uploader.UploadFile(fifo, destination), std::invalid_argument);
+  EXPECT_THROW(uploader.UploadFile(fifo, destination, Deadline()), std::invalid_argument);
   const auto file = root.path() / "file";
   std::ofstream(file) << "data";
   std::filesystem::create_symlink(file, root.path() / "link");
-  EXPECT_THROW(uploader.UploadFile(root.path() / "link", destination), std::system_error);
+  EXPECT_THROW(uploader.UploadFile(root.path() / "link", destination, Deadline()), std::system_error);
 }
 
 TEST(S3ClientTest, RejectsExpiredAndCancelledWorkBeforeOpeningSource)
@@ -139,54 +251,50 @@ TEST(S3ClientTest, RejectsExpiredAndCancelledWorkBeforeOpeningSource)
   try {
     uploader.UploadFile("/missing", destination, cancellation);
     FAIL() << "deadline was ignored";
+  } catch (const CancellationError& error) {
+    EXPECT_EQ(error.reason, CancellationError::Reason::DEADLINE_EXCEEDED);
   }
-  catch (const S3Error& error) {
-    EXPECT_EQ(error.primary.operation, "PutObject");
-    EXPECT_EQ(error.primary.code, "DeadlineExceeded");
-    EXPECT_EQ(error.remote_state, S3RemoteState::NO_WRITES_ISSUED);
-  }
-  cancellation = Cancellation{};
+  cancellation = Deadline();
   cancellation.Cancel();
   try {
     uploader.UploadFile("/missing", destination, cancellation);
     FAIL() << "cancellation was ignored";
+  } catch (const CancellationError& error) {
+    EXPECT_EQ(error.reason, CancellationError::Reason::CANCELLED);
   }
-  catch (const S3Error& error) {
-    EXPECT_EQ(error.primary.operation, "PutObject");
-    EXPECT_EQ(error.primary.code, "Cancelled");
-    EXPECT_EQ(error.remote_state, S3RemoteState::NO_WRITES_ISSUED);
-  }
+}
+
+TEST(S3ClientTest, RequiresCallerDeadline)
+{
+  S3Client client(OfflineConnection(), SmallLimits());
+  EXPECT_THROW(client.Head({"bucket", "data"}, Cancellation{}), std::invalid_argument);
 }
 
 TEST(S3ClientTest, RejectsInvalidOrCancelledMetadataWithoutConnecting)
 {
   S3Client client(OfflineConnection(), SmallLimits());
   const S3ObjectLocation object{"local-test-bucket", "index.json"};
-  EXPECT_THROW(client.Head({"", "index.json"}), std::invalid_argument);
-  EXPECT_THROW(client.Get(object, std::numeric_limits<std::size_t>::max()), std::invalid_argument);
-  EXPECT_THROW(client.Put(object, "{}", 1), std::invalid_argument);
-  Cancellation cancelled;
+  EXPECT_THROW(client.Head({"", "index.json"}, Deadline()), std::invalid_argument);
+  EXPECT_THROW(client.Get(object, std::numeric_limits<std::size_t>::max(), Deadline()), std::invalid_argument);
+  EXPECT_THROW(client.Put(object, "{}", 1, Deadline()), std::invalid_argument);
+  Cancellation cancelled = Deadline();
   cancelled.Cancel();
   for (const auto& cancellation : {Cancellation(Cancellation::Clock::now()), cancelled}) {
     const auto code = cancellation.DeadlineExceeded() ? "DeadlineExceeded" : "Cancelled";
-    // Get performs HEAD first, so pre-admission cancellation names HeadObject.
     for (const auto& [operation, call] : std::initializer_list<std::pair<const char*, std::function<void()>>>{
-           {"HeadObject", [&] { client.Head(object, cancellation); }},
-           {"HeadObject", [&] { client.Get(object, 1024, cancellation); }},
-           {"PutObject", [&] { client.Put(object, "{}", 1024, cancellation); }}}) {
+             {"HeadObject", [&] { client.Head(object, cancellation); }},
+             {"HeadObject", [&] { client.Get(object, 1024, cancellation); }},
+             {"PutObject", [&] { client.Put(object, "{}", 1024, cancellation); }}}) {
       SCOPED_TRACE(operation);
       SCOPED_TRACE(code);
       try {
         call();
         FAIL() << "cancelled metadata request succeeded";
-      }
-      catch (const S3Error& error) {
-        EXPECT_EQ(error.primary.operation, operation);
-        EXPECT_EQ(error.primary.code, code);
-        EXPECT_EQ(error.remote_state, S3RemoteState::NO_WRITES_ISSUED);
+      } catch (const CancellationError& error) {
+        EXPECT_EQ(error.reason, *cancellation.Reason());
       }
     }
   }
 }
-}  // namespace
-}  // namespace snapshot::pagebroker
+} // namespace
+} // namespace snapshot::pagebroker
