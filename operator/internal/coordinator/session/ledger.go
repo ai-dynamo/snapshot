@@ -72,7 +72,7 @@ func (l *ledger) recallLocked(r Request) (*outcome, bool, error) {
 	if recorded, ok := l.requests[key]; ok {
 		return recorded, true, nil
 	}
-	if err := l.budget.charge(cost(requestOverhead, len(r.ID))); err != nil {
+	if err := l.budget.charge(recordCost(r)); err != nil {
 		return nil, false, fmt.Errorf("request %q: %w", r.ID, err)
 	}
 	pending := &outcome{done: make(chan struct{})}
@@ -89,7 +89,7 @@ func (l *ledger) forget(r Request) {
 	key := dedupKey{caller: r.Caller, id: r.ID}
 	if _, ok := l.requests[key]; ok {
 		delete(l.requests, key)
-		l.budget.refund(cost(requestOverhead, len(r.ID)))
+		l.budget.refund(recordCost(r))
 	}
 }
 

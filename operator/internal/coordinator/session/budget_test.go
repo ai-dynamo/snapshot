@@ -5,9 +5,11 @@ package session
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv"
+	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,7 +61,15 @@ func TestTheBudgetChargesWhatEachEntryCosts(t *testing.T) {
 			write: func(ctx context.Context, s *Session) error {
 				return s.Insert(ctx, requestOf(memberA, "request-1"), key, value)
 			},
-			want: cost(requestOverhead, len("request-1")) + cost(keyOverhead, len(key), len(value)),
+			want: cost(requestOverhead, len("request-1"), len(memberA)) + cost(keyOverhead, len(key), len(value)),
+		},
+		{
+			name: "a recorded request, with every string its caller names",
+			write: func(ctx context.Context, s *Session) error {
+				return s.Insert(ctx, Request{Caller: longLibrary, ID: "request-1"}, longLibraryKey, value)
+			},
+			want: cost(requestOverhead, len("request-1"), len(memberA), len(longLibrary.Library),
+				len(longLibrary.Version)) + cost(keyOverhead, len(longLibraryKey), len(value)),
 		},
 	}
 	for _, tt := range tests {
@@ -217,3 +227,25 @@ func TestTheBudgetIsForgottenWhenTheSessionEnds(t *testing.T) {
 	assert.Empty(t, f.session.ledger.usage.keys)
 	assert.Empty(t, f.session.ledger.usage.barriers)
 }
+
+func TestAForgottenRecordGivesBackWhatItWasCharged(t *testing.T) {
+	f := newManagerFixtureOn(t, &flakyStore{Store: memory.New(), failures: 1})
+	s := f.ensure(t, specOf(attemptUID))
+	r := Request{Caller: longLibrary, ID: "request-1"}
+
+	require.ErrorIs(t, s.Insert(context.Background(), r, longLibraryKey, []byte("value")), errBackendDown)
+
+	assert.Zero(t, used(s), "a failure with no identity leaves no record, and no charge")
+}
+
+// longLibrary is a library caller whose names leave room for little else in a
+// key, so a record of its requests holds far more than the request's id.
+var longLibrary = Caller{
+	Member:  memberA,
+	Role:    RoleLibrary,
+	Library: strings.Repeat("l", 500),
+	Version: strings.Repeat("v", 500),
+}
+
+// longLibraryKey is a key in longLibrary's namespace.
+var longLibraryKey = libraryNamespace + longLibrary.Library + "/" + longLibrary.Version + "/k"
