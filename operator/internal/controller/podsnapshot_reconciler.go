@@ -48,10 +48,14 @@ const (
 	// sourcePodTerminalGrace, because a checkpoint that terminates its source produces exactly this
 	// pod state shortly before the agent writes content Ready.
 	podSnapshotReasonSourcePodGone = "SourcePodGone"
+
+	// podSnapshotReasonSourcePodUnscheduled is the Pending reason while the source pod waits for a
+	// node. The pod watch re-enqueues on spec.nodeName changes, so no requeue is needed.
+	podSnapshotReasonSourcePodUnscheduled = "SourcePodUnscheduled"
 )
 
-// errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled to a node; the
-// reconcile returns it so controller-runtime requeues with backoff rather than failing the snapshot.
+// errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled to a node — expected
+// pending state, not a failure.
 var errPodSnapshotPodUnscheduled = errors.New("source pod is not yet scheduled to a node")
 
 // errPodSnapshotStalePodRef signals the live pod is a same-named recreation (UID mismatch) — a
@@ -294,7 +298,8 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 	}
 	if err = validateSourcePod(snap, pod); err != nil {
 		if errors.Is(err, errPodSnapshotPodUnscheduled) {
-			return ctrl.Result{}, err // controller-runtime backs off and requeues on a returned error
+			return sr.recordPendingReason(ctx, snap, podSnapshotReasonSourcePodUnscheduled,
+				fmt.Sprintf("waiting for source pod %q to be scheduled to a node", pod.Name))
 		}
 		if errors.Is(err, errPodSnapshotStalePodRef) {
 			return sr.failPodSnapshot(ctx, snap, "StalePodReference", err)
@@ -334,15 +339,16 @@ func (sr *PodSnapshotReconciler) getSourcePod(ctx context.Context, snap *snapsho
 	return pod, nil
 }
 
-// validateSourcePod requires the pod to be scheduled and, when the PodSnapshot pins a source pod UID,
-// to match it (rejecting a same-named recreation). It returns one of two sentinels:
-// errPodSnapshotPodUnscheduled (retryable) or errPodSnapshotStalePodRef (terminal).
+// validateSourcePod requires the pod, when the PodSnapshot pins a source pod UID, to match it
+// (rejecting a same-named recreation), and to be scheduled. It returns one of two sentinels:
+// errPodSnapshotStalePodRef (terminal) or errPodSnapshotPodUnscheduled (pending). The UID check
+// comes first: a stale reference is terminal whether or not the replacement ever schedules.
 func validateSourcePod(snap *snapshotv1alpha1.PodSnapshot, pod *corev1.Pod) error {
-	if pod.Spec.NodeName == "" {
-		return errPodSnapshotPodUnscheduled
-	}
 	if wantUID := snap.Spec.Source.PodRef.UID; wantUID != "" && pod.UID != wantUID {
 		return fmt.Errorf("%w: live pod %q UID %q, want %q", errPodSnapshotStalePodRef, pod.Name, pod.UID, wantUID)
+	}
+	if pod.Spec.NodeName == "" {
+		return errPodSnapshotPodUnscheduled
 	}
 	return nil
 }
@@ -468,6 +474,17 @@ func (sr *PodSnapshotReconciler) markFailed(snap *snapshotv1alpha1.PodSnapshot, 
 // before reaching here once Failed is set, so this is only hit while Failed is absent or False.
 func (sr *PodSnapshotReconciler) markPending(snap *snapshotv1alpha1.PodSnapshot, reason, message string) bool {
 	return sr.setCondition(snap, snapshotv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message)
+}
+
+// recordPendingReason persists a Pending reason, writing status only when it changed.
+func (sr *PodSnapshotReconciler) recordPendingReason(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, reason, message string) (ctrl.Result, error) {
+	if !sr.markPending(snap, reason, message) {
+		return ctrl.Result{}, nil
+	}
+	if err := sr.Status().Update(ctx, snap); err != nil {
+		return ctrl.Result{}, fmt.Errorf("record pending reason %s: %w", reason, err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // failPodSnapshot marks the PodSnapshot Failed terminally (Failed=True, Ready=False) and records

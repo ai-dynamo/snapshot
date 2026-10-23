@@ -100,22 +100,42 @@ func reconcileSnapshot(t *testing.T, r *PodSnapshotReconciler, name string) ctrl
 	return res
 }
 
-func TestSnapshotReconciler_PodUnscheduledBacksOff(t *testing.T) {
+func TestSnapshotReconciler_PodUnscheduledWaitsPending(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid-9")}}
 	r := makeSnapshotReconciler(s, snap, pod)
+	key := types.NamespacedName{Namespace: "inference", Name: snap.Name}
 
-	// Unscheduled pod: return the sentinel error so controller-runtime backs off and requeues; no
-	// content is created and the snapshot is not failed.
-	_, err := r.Reconcile(context.Background(),
-		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: snap.Name}})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errPodSnapshotPodUnscheduled)
+	// Unscheduled is expected pending state: no error, no requeue (the pod watch wakes it on
+	// scheduling), no content, and a visible Pending reason.
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Zero(t, res.RequeueAfter)
 
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), key, updated))
+	ready := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, podSnapshotReasonSourcePodUnscheduled, ready.Reason)
+	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 	var contents snapshotv1alpha1.PodSnapshotContentList
 	require.NoError(t, r.List(context.Background(), &contents))
 	assert.Empty(t, contents.Items)
+
+	// Re-reconciling with nothing changed writes nothing.
+	reconcileSnapshot(t, r, snap.Name)
+	second := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), key, second))
+	assert.Equal(t, updated.ResourceVersion, second.ResourceVersion)
+
+	// Scheduling unblocks binding.
+	pod.Spec.NodeName = "node-a"
+	require.NoError(t, r.Update(context.Background(), pod))
+	reconcileSnapshot(t, r, snap.Name)
+	bound := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), key, bound))
+	assert.Equal(t, "podsnapshotcontent-snap-uid", ptr.Deref(bound.Status.BoundPodSnapshotContentName, ""))
 }
 
 func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
@@ -166,23 +186,29 @@ func TestSnapshotReconciler_BuildPodSnapshotContentCopiesContainersVerbatim(t *t
 
 func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {
 	s := snapshotReconcilerScheme()
-	snap := makeSnapshotForReconcile()
-	// The PodSnapshot pins a source pod UID that does not match the live pod (pod-uid-9):
-	// a same-named recreation must not be captured as the wrong workload.
-	snap.Spec.Source.PodRef.UID = types.UID("old-pod-uid")
-	r := makeSnapshotReconciler(s, snap, scheduledPod())
+	// The PodSnapshot pins a source pod UID that does not match the live pod (pod-uid-9): a same-named
+	// recreation must not be captured as the wrong workload, whether or not it has been scheduled yet.
+	for name, nodeName := range map[string]string{"scheduled": "node-a", "unscheduled": ""} {
+		t.Run(name, func(t *testing.T) {
+			snap := makeSnapshotForReconcile()
+			snap.Spec.Source.PodRef.UID = types.UID("old-pod-uid")
+			pod := scheduledPod()
+			pod.Spec.NodeName = nodeName
+			r := makeSnapshotReconciler(s, snap, pod)
 
-	reconcileSnapshot(t, r, snap.Name)
+			reconcileSnapshot(t, r, snap.Name)
 
-	updated := &snapshotv1alpha1.PodSnapshot{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
-	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, cond)
-	assert.Equal(t, "StalePodReference", cond.Reason)
+			updated := &snapshotv1alpha1.PodSnapshot{}
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+			cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+			require.NotNil(t, cond)
+			assert.Equal(t, "StalePodReference", cond.Reason)
 
-	var contents snapshotv1alpha1.PodSnapshotContentList
-	require.NoError(t, r.List(context.Background(), &contents))
-	assert.Empty(t, contents.Items)
+			var contents snapshotv1alpha1.PodSnapshotContentList
+			require.NoError(t, r.List(context.Background(), &contents))
+			assert.Empty(t, contents.Items)
+		})
+	}
 }
 
 func TestSnapshotReconciler_MissingSourcePodFails(t *testing.T) {
