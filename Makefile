@@ -29,7 +29,7 @@ AGENT_BASE_PACKAGES = agent/compliance/base-packages$(if $(filter linux/arm64,$(
 .PHONY: tidy generate test test-integration build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
         capture-base-packages verify-base-packages docker-export-agent-bundle \
-        linux-build linux-test pagebroker-check-generated cpu-e2e
+        linux-build linux-test proto-check-generated cpu-e2e
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
@@ -101,7 +101,7 @@ verify-crds:
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run
 # after the mutating stages and before the clean-tree assert.
-check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint verify-toc
+check: verify-crds install-tools generate proto-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint verify-toc
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
@@ -115,8 +115,8 @@ govulncheck: $(GOVULNCHECK)
 helm-lint: $(HELM)
 	$(HELM) lint charts/snapshot/
 
-pagebroker-check-generated:
-	$(MAKE) -C agent pagebroker-check-generated
+proto-check-generated:
+	$(MAKE) -C agent proto-check-generated
 
 # Refresh or check the generated tables of contents in Snapshot Enhancement
 # Proposals (SNEPs). Keeping this separate makes authoring proposals convenient while

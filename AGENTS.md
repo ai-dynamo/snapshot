@@ -69,7 +69,7 @@ make generate     # regenerate CRDs from api/ types
 ```
 
 `make check` is the one that matters before opening a pull request. It runs, in
-order: `verify-crds`, `install-tools`, `generate`, `pagebroker-check-generated`,
+order: `verify-crds`, `install-tools`, `generate`, `proto-check-generated`,
 `add-license-headers`, `fmt`, `tidy`, `verify-license-headers`, `lint`,
 `govulncheck`, and `helm-lint`. It deliberately does not run in parallel
 (`.NOTPARALLEL:`) because the stages mutate files that later stages read.

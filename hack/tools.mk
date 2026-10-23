@@ -32,6 +32,9 @@ ADDLICENSE     := $(TOOLS_BIN_DIR)/addlicense
 GOVULNCHECK    := $(TOOLS_BIN_DIR)/govulncheck
 HELM           := $(TOOLS_BIN_DIR)/helm
 PROTOC         := $(TOOLS_BIN_DIR)/protoc
+# protoc finds the well-known types, such as google/protobuf/duration.proto, in
+# an include/ directory beside its binary, so the release's copy goes there.
+PROTOC_WKT_DIR := $(TOOLS_BIN_DIR)/include/google/protobuf
 MDTOC          := $(TOOLS_BIN_DIR)/mdtoc
 MDTOC_VERSION_STAMP := $(TOOLS_BIN_DIR)/.mdtoc-version
 SETUP_ENVTEST  := $(TOOLS_BIN_DIR)/setup-envtest
@@ -71,11 +74,18 @@ $(PROTOC):
 	 curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_RELEASE)/protoc-$(PROTOC_RELEASE)-linux-x86_64.zip -o "$$tmp/protoc.zip"; \
  echo '3a4c1e5f2516c639d3079b1586e703fc7bcfa2136d58bda24d1d54f949c315e8  '"$$tmp/protoc.zip" | sha256sum -c -; \
 	 unzip -q "$$tmp/protoc.zip" -d "$$tmp"; \
+	 rm -rf $(PROTOC_WKT_DIR); mkdir -p $(dir $(PROTOC_WKT_DIR)); \
+	 cp -R "$$tmp/include/google/protobuf" $(PROTOC_WKT_DIR); \
 	 install -m 755 "$$tmp/bin/protoc" $(PROTOC)
 
+# The well-known types are installed before the binary, so a binary implies
+# them. A binary installed before they were fails the second check, which says
+# how to reinstall it.
 .PHONY: protoc
 protoc: $(PROTOC)
 	@test "$$($(PROTOC) --version)" = "libprotoc $(PROTOC_VERSION)"
+	@test -f $(PROTOC_WKT_DIR)/duration.proto || \
+	  (echo "ERROR: $(PROTOC) has no well-known types beside it — delete it and rerun"; exit 1)
 
 # Recheck the requested version on every invocation. The install only runs when
 # the recorded version changes, so a deliberate MDTOC_VERSION update replaces
