@@ -5,13 +5,14 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
 
 // ledger is everything a session records beside its space: how it ended, which
-// members have left, the outcome of every request a caller may retry, and what
-// library callers hold against their quotas.
+// members have left, the outcome of every request a caller may retry, and the
+// byte budget everything the session holds is charged to.
 //
 // It is kept in one type because it is all of a session's state apart from the
 // space itself. A persistent backend would have to persist it with the space,
@@ -23,13 +24,15 @@ type ledger struct {
 	mu sync.Mutex
 	// ended is nil while the session is open and holds the terminal error —
 	// ErrClosed, or an *AbortError naming the reason — once it is not.
-	ended           error
-	left            map[MemberID]struct{}
-	requests        map[dedupKey]*outcome
-	libraryRequests int
+	ended    error
+	left     map[MemberID]struct{}
+	requests map[dedupKey]*outcome
 
-	// usage has its own mutex, held across a library write; it is never
-	// taken together with mu.
+	// budget is charged by the space's writes and by recallLocked alike. It
+	// is a counter, so charging it under mu takes no second mutex.
+	budget budget
+	// usage mirrors the space for the budget. Its mutex is held across a
+	// write's call to the backend, and never together with mu.
 	usage usage
 }
 
@@ -62,22 +65,56 @@ func (l *ledger) end(err error) bool {
 }
 
 // recallLocked returns the outcome recorded for r, and whether one was. For a
-// new request it records a pending outcome, which a library caller may do only
-// within MaxLibraryRequests. The caller holds mu.
+// new request it records a pending outcome, charging the budget for a record
+// the session keeps for its lifetime. The caller holds mu.
 func (l *ledger) recallLocked(r Request) (*outcome, bool, error) {
 	key := dedupKey{caller: r.Caller, id: r.ID}
 	if recorded, ok := l.requests[key]; ok {
 		return recorded, true, nil
 	}
-	if r.Caller.Role == RoleLibrary {
-		if l.libraryRequests >= MaxLibraryRequests {
-			return nil, false, fmt.Errorf("%d library requests recorded: %w", l.libraryRequests, ErrTooMany)
-		}
-		l.libraryRequests++
+	if err := l.budget.charge(cost(requestOverhead, len(r.ID))); err != nil {
+		return nil, false, fmt.Errorf("request %q: %w", r.ID, err)
 	}
 	pending := &outcome{done: make(chan struct{})}
 	l.requests[key] = pending
 	return pending, false, nil
+}
+
+// forget drops the record of a request whose outcome cannot be replayed, and
+// gives its bytes back, so a retry runs the request again. A record the end of
+// the session already dropped is left alone.
+func (l *ledger) forget(r Request) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := dedupKey{caller: r.Caller, id: r.ID}
+	if _, ok := l.requests[key]; ok {
+		delete(l.requests, key)
+		l.budget.refund(cost(requestOverhead, len(r.ID)))
+	}
+}
+
+// identityOf returns what a record keeps of an error: the *AbortError, or the
+// sentinel the error matches, and never the wrapped message, which names the
+// key. A replayed error therefore matches the same sentinel as the original. It
+// reports false for an error with no identity, such as a backend failure, which
+// is not worth replaying.
+func identityOf(err error) (error, bool) {
+	if err == nil {
+		return nil, true
+	}
+	var aborted *AbortError
+	if errors.As(err, &aborted) {
+		return aborted, true
+	}
+	for _, sentinel := range []error{
+		ErrNotFound, ErrNotYet, ErrExists, ErrMismatch, ErrNotCounter, ErrBarrierCount,
+		ErrClosed, ErrNotMember, ErrForbidden, ErrTooLarge, ErrTooMany, ErrInvalid,
+	} {
+		if errors.Is(err, sentinel) {
+			return sentinel, true
+		}
+	}
+	return nil, false
 }
 
 // reset empties everything only an open session needs, keeping how it ended.
@@ -85,9 +122,9 @@ func (l *ledger) reset() {
 	l.mu.Lock()
 	l.left = make(map[MemberID]struct{})
 	l.requests = make(map[dedupKey]*outcome)
-	l.libraryRequests = 0
 	l.mu.Unlock()
 	l.usage.reset()
+	l.budget.used.Store(0)
 }
 
 // set records the outcome and releases every retry waiting for it. A request

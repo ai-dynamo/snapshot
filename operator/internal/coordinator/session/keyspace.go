@@ -32,37 +32,13 @@ const (
 // every role.
 const MaxKeyLength = 1024
 
-// What library callers may hold in one session. A workload process is not
-// trusted, and the coordinator holds every attempt in the cluster in one
-// address space, so these caps bound what a flood can cost: a library that
-// reaches them fails its own attempt and nothing else. They apply to library
-// callers only. Snapshot's own components are bounded by the membership, and
-// keeping them outside the caps means a workload flood can never starve them.
-const (
-	// MaxLibraryKeys bounds how many keys library callers hold at once.
-	MaxLibraryKeys = 16384
-
-	// MaxLibraryBytes bounds the values library callers hold at once.
-	MaxLibraryBytes = 64 << 20
-
-	// MaxLibraryBarriers bounds how many barriers library callers bring into
-	// being.
-	MaxLibraryBarriers = 1024
-
-	// MaxLibraryBarrierParticipants bounds how many participants one library
-	// barrier counts.
-	MaxLibraryBarrierParticipants = 4096
-
-	// MaxLibraryParticipants bounds the participants of every library barrier
-	// together. Without it, barriers times participants per barrier would
-	// allow four million entries.
-	MaxLibraryParticipants = 16384
-
-	// MaxLibraryRequests bounds how many library requests one session records
-	// for replay. Reaching it fails the request rather than applying it
-	// without the replay a retry depends on.
-	MaxLibraryRequests = 65536
-)
+// MaxSessionBytes bounds everything one session holds, for every role: each key
+// and its value, each barrier, each participant, and each request recorded for
+// replay, at what cost charges for it. The coordinator holds every attempt in
+// the cluster in one address space, so this is what one attempt can cost it. A
+// flood from a workload process can exhaust its own session's budget, which at
+// worst fails that attempt, never another one.
+const MaxSessionBytes = 256 << 20
 
 // LibraryNCCL names the NCCL Checkpoint compatibility endpoint.
 const LibraryNCCL = "nccl"

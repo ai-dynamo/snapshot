@@ -63,7 +63,7 @@ type Request struct {
 	// Caller is who is asking.
 	Caller Caller
 
-	// ID replays the recorded outcome when the same member repeats it. An
+	// ID replays the recorded outcome when the same caller repeats it. An
 	// empty ID applies the operation every time.
 	ID RequestID
 }
