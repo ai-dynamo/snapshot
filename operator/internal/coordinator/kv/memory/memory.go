@@ -40,12 +40,17 @@ func (st *Store) Space(uid types.UID) kv.Space {
 	return sp
 }
 
-// Drop implements kv.Store. A caller still holding the dropped space reaches
-// memory nobody else will, which the contract on Drop rules out anyway.
+// Drop implements kv.Store. It empties the space as well as forgetting it, so
+// whoever still holds the space, such as a session that has ended but is not
+// removed yet, keeps nothing of what it held.
 func (st *Store) Drop(_ context.Context, uid types.UID) error {
 	st.mu.Lock()
-	defer st.mu.Unlock()
+	sp, ok := st.spaces[uid]
 	delete(st.spaces, uid)
+	st.mu.Unlock()
+	if ok {
+		sp.empty()
+	}
 	return nil
 }
 
@@ -66,11 +71,19 @@ type watch struct {
 }
 
 func newSpace() *space {
-	return &space{
-		values:   make(map[string][]byte),
-		waiters:  make(map[string]*watch),
-		barriers: make(map[string]*barrier),
-	}
+	sp := &space{}
+	sp.empty()
+	return sp
+}
+
+// empty replaces everything the space holds with nothing, releasing the old
+// maps along with what they reference.
+func (sp *space) empty() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	sp.values = make(map[string][]byte)
+	sp.waiters = make(map[string]*watch)
+	sp.barriers = make(map[string]*barrier)
 }
 
 // Insert implements kv.Values.
