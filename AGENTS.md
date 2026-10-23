@@ -233,7 +233,8 @@ add a version requirement such as a minimum driver or CUDA version, read
 [docs/development/writing-docs.md](docs/development/writing-docs.md).
 Before you introduce a name (a field, Helm value, annotation, label,
 environment variable, event reason, flag, file, or a new term in prose), read
-[docs/development/naming.md](docs/development/naming.md).
+[docs/development/naming.md](docs/development/naming.md). A name that a user
+sees describes the capability, not the mechanism behind it.
 
 ## Working style
 

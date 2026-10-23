@@ -136,7 +136,8 @@ The feature's own page links to that row and does not repeat the number.
    author. List it in your PR description and leave it out of the docs.
 3. Translate loose wording from the issue or PR, such as "snapshot", "dump",
    "helper", or "saved state", into the terms in
-   [Naming conventions](naming.md).
+   [Naming conventions](naming.md). Describe a feature by what it does for the
+   reader, not by the mechanism behind it.
 4. Edit a sentence when the change makes it false or incomplete. Leave the rest
    of the page alone.
 
