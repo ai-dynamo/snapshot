@@ -1,0 +1,377 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+// The protocol between a Snapshot agent and the coordinator. Each stream carries
+// one member's part in one attempt of a set capture or restore. The member's
+// agent opens it, and multiplexes on it the requests of the agent itself, of the
+// member's cuInterpose relay, and of the member's workload libraries, stamping
+// each request with the origin it came from.
+//
+// The comments in this file are the protocol's specification. Error codes are
+// the contract; error messages are for humans, and no client parses them.
+package snapshot.coordinator.v1alpha1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/ai-dynamo/snapshot/agent/pkg/coordinator/v1alpha1;coordinatorv1alpha1";
+
+// Coordinator holds one session per attempt.
+service Coordinator {
+  // Attach carries one member's part in one attempt. The rules below bind both
+  // sides.
+  //
+  // 1. Handshake. The client's first message is Hello, sent exactly once. The
+  //    server answers with Welcome, or with Ended when the session has already
+  //    ended. After Welcome, the client sends Requests and Cancels, and the
+  //    server sends Responses, until the server sends Ended or the stream ends.
+  //
+  // 2. Request IDs. A Request's id is non-empty and unique for its member across
+  //    the whole attempt, including across agent restarts: the agent combines a
+  //    value drawn at random when it starts with a counter, so a restarted agent
+  //    never reuses an id its predecessor sent. The coordinator records the
+  //    outcome of a write under its id and replays it when the id is re-issued,
+  //    so a write re-issued after a broken stream applies once. A Request with
+  //    no id, or with an id already pending on the stream, ends the stream with
+  //    INVALID_ARGUMENT, since no Response to it could be told apart from
+  //    another's.
+  //
+  // 3. Ordering. Requests on a stream run concurrently and complete in any
+  //    order, so a blocked read never stalls the others. A client that needs
+  //    one request applied before another waits for the first one's Response.
+  //
+  // 4. At most one Response. A Request gets at most one Response, with its id.
+  //    It gets none when its stream is superseded (rule 8), or when the server
+  //    reads it after the session ended (rule 5); and a stream that breaks,
+  //    ends with a gRPC status, or that the client gives up (rule 9), may end
+  //    before a pending Request's Response is sent. After reattaching, a client
+  //    re-issues every Request it holds no Response for.
+  //    - Cancel answers a pending Get or AwaitBarrier with CANCELLED, unless it
+  //      completed first. A Cancel for an id that is not pending is ignored.
+  //    - Cancelling a write does not undo it. A write runs to completion once it
+  //      starts, so its Response is its real outcome, and re-issuing its id
+  //      replays that outcome.
+  //    - AwaitBarrier has no wait of its own. A client bounds it by cancelling.
+  //
+  // 5. Ended is last. When the session ends, every Request the server read
+  //    before it ended gets its Response first, then the server sends Ended,
+  //    which carries the Error every later operation would report: CLOSED, or
+  //    ABORTED with the reason. Ended is the last message, and the stream then
+  //    ends with OK. A Request the server reads after the session ended may get
+  //    an ABORTED or CLOSED Response, or none; Ended settles every request still
+  //    unanswered. A client never reattaches after Ended.
+  //
+  // 6. Stream failures. The stream ends with a gRPC status only when it cannot
+  //    carry the session. The status says whether the client stops or retries:
+  //    - INVALID_ARGUMENT: a malformed Hello, any message before Hello, a second
+  //      Hello, a message with nothing in it, or a Request with no id or with an
+  //      id already pending on the stream. The client is broken, and stops.
+  //    - UNAUTHENTICATED or PERMISSION_DENIED: the peer may not act for the
+  //      member, or the session has no such member. The client stops.
+  //    - UNAVAILABLE: the coordinator could not decide whether the peer may act
+  //      for the member, such as when a TokenReview failed. The client retries.
+  //    - NOT_FOUND: the coordinator does not know the attempt yet, on a first
+  //      attach with epoch 0, including when its authorization cannot place the
+  //      attempt yet. The client retries until the deadline, since its work may
+  //      reach it before the coordinator sees the set resource.
+  //    - ABORTED: another stream for the same member won (rule 8).
+  //    - RESOURCE_EXHAUSTED: the client left more requests unanswered than the
+  //      coordinator holds for one stream (rule 10).
+  //    Everything the session decides travels in-band, as an Error or as Ended.
+  //
+  // 7. Reattaching. A client whose stream broke opens a new one with the epoch
+  //    of the last Welcome it received, and re-issues its pending requests with
+  //    their ids.
+  //    - With that epoch, the server answers Welcome, the same as the first.
+  //    - With any other nonzero epoch, the coordinator has restarted and lost
+  //      whatever this member had. The server fails the session it holds for
+  //      the attempt, if any, with reason CoordinatorLost, and answers Ended. A
+  //      Hello for a member that session does not have fails nothing, and gets
+  //      PERMISSION_DENIED (rule 6).
+  //    - With the current epoch for a session the coordinator no longer holds,
+  //      the server answers Ended: ABORTED, reason CoordinatorLost.
+  //
+  // 8. One stream per member. A member's newest stream wins, newest by when the
+  //    server read its Hello. It supersedes an older stream, whose pending
+  //    requests are cancelled without Responses and which ends with ABORTED. A
+  //    stream whose Hello the server read earlier, but whose handshake finished
+  //    later, such as after a slow authorization, ends with ABORTED instead of
+  //    superseding the newer one.
+  //
+  // 9. Grace period. When a member's stream ends before Ended and was not
+  //    superseded, whether it broke, the client closed it, or the client broke
+  //    the protocol (rule 6), the server waits a few seconds for a new stream.
+  //    If none attaches and the session is still open, the server fails the
+  //    session with reason MemberFailed on the member's behalf. Leaving does
+  //    not exempt a member, because a released member's relay and libraries
+  //    keep using its stream until the session closes. A client that closes its
+  //    sending side before Ended gives the stream up: the server cancels its
+  //    pending requests, ends the stream with OK without waiting to answer
+  //    them, and starts the grace period. A client may give the stream up this
+  //    way after the session ended too, until Ended has been sent; the server
+  //    then ends the stream with OK at once.
+  //
+  // 10. Limits. The largest legal message is a CompareAndSwap carrying two
+  //     values of the largest size Snapshot's components may store, 32 MiB, and
+  //     both sides accept messages of MaxMessageSize, 65 MiB. A value over its
+  //     origin's limit gets TOO_LARGE as long as its message fits in
+  //     MaxMessageSize; past that, gRPC fails the stream. So a client refuses an
+  //     over-limit value itself, and the NCCL Checkpoint compatibility endpoint
+  //     refuses values over 65,535 bytes before forwarding them.
+  //     The agent bounds the requests it forwards, per Pod process, and keeps
+  //     headroom for its own; the coordinator runs every request it reads. As a
+  //     backstop against a broken client, a stream with more than 4,096
+  //     requests unanswered at once, whether running or with a Response not yet
+  //     sent because the client is not reading, ends with RESOURCE_EXHAUSTED.
+  rpc Attach(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// ClientMessage is one message from the agent.
+message ClientMessage {
+  oneof message {
+    Hello hello = 1;
+    Request request = 2;
+    Cancel cancel = 3;
+  }
+}
+
+// ServerMessage is one message from the coordinator.
+message ServerMessage {
+  oneof message {
+    Welcome welcome = 1;
+    Response response = 2;
+    Ended ended = 3;
+  }
+}
+
+// Hello opens the stream for one member of one attempt.
+message Hello {
+  // The UID of the set resource, which identifies the attempt and its session.
+  string session = 1;
+  // The member the stream acts for.
+  string member = 2;
+  // Zero on a first attach, and the epoch of the last Welcome on a reattach.
+  uint64 epoch = 3;
+}
+
+// Welcome is everything the member needs to take part.
+message Welcome {
+  // Identifies the coordinator instance holding the session, so a client can
+  // tell a reconnect from a restarted coordinator.
+  uint64 epoch = 1;
+  // The member's rank.
+  int32 rank = 2;
+  // The whole membership, ordered by rank, so members[i].rank is i.
+  repeated Member members = 3;
+  // Bounds the whole attempt.
+  google.protobuf.Timestamp deadline = 4;
+}
+
+// Member is one member of an attempt.
+message Member {
+  string id = 1;
+  int32 rank = 2;
+}
+
+// Request is one operation, on behalf of one origin within the stream's member.
+message Request {
+  // Non-empty, and unique for the member across the attempt; see Attach.
+  string id = 1;
+  // Who asked, which decides the keys the request reaches.
+  Origin origin = 2;
+  // Exactly one operation.
+  oneof operation {
+    Insert insert = 10;
+    Get get = 11;
+    Unset unset = 12;
+    Increment increment = 13;
+    Decrement decrement = 14;
+    CompareAndSwap compare_and_swap = 15;
+    CreateBarrier create_barrier = 16;
+    PostBarrier post_barrier = 17;
+    AwaitBarrier await_barrier = 18;
+    Leave leave = 19;
+    Fail fail = 20;
+  }
+}
+
+// Origin is the component a request came from. The agent stamps it; a workload
+// process never chooses its own.
+message Origin {
+  Role role = 1;
+  // For ROLE_LIBRARY: the library and its version, which scope the request to
+  // the namespace cuda/<library>/<version>/. The NCCL Checkpoint compatibility
+  // endpoint sends library "nccl" with no version, which scopes it to nccl/.
+  string library = 2;
+  string version = 3;
+}
+
+// Role decides which keys an origin reaches and what of the session's lifecycle
+// it may drive.
+enum Role {
+  // Never sent; a request with it gets INVALID.
+  ROLE_UNSPECIFIED = 0;
+  // The member's agent. It reaches snapshot/, and alone may Leave.
+  ROLE_AGENT = 1;
+  // The member's cuInterpose relay. It reaches cuinterpose/.
+  ROLE_RELAY = 2;
+  // A workload process, through a communication library's rendezvous
+  // interface. It reaches only its library's namespace, and may neither Leave
+  // nor Fail.
+  ROLE_LIBRARY = 3;
+}
+
+// Insert stores a value if the key is absent. Inserting the value a key already
+// holds succeeds; a different value gets EXISTS.
+message Insert {
+  string key = 1;
+  bytes value = 2;
+}
+
+// Get returns the value at a key, waiting up to wait for it to appear. An absent
+// or zero wait gets NOT_FOUND at once for an absent key, and an expired wait
+// gets NOT_YET. A negative or malformed wait gets INVALID.
+message Get {
+  string key = 1;
+  google.protobuf.Duration wait = 2;
+}
+
+// Unset removes a key, whether or not it was set.
+message Unset {
+  string key = 1;
+}
+
+// Increment adds one to a counter and returns the new value. An absent key
+// counts as zero, and a value that is not a counter gets NOT_COUNTER. A counter
+// is a signed 64-bit integer in eight bytes, big-endian, in two's complement,
+// which the Go package's EncodeCounter and DecodeCounter implement.
+message Increment {
+  string key = 1;
+}
+
+// Decrement takes one from a counter, on the same terms as Increment.
+message Decrement {
+  string key = 1;
+}
+
+// CompareAndSwap replaces the value at a key only if it is the one expected. An
+// absent key gets NOT_FOUND, and another value gets MISMATCH.
+message CompareAndSwap {
+  string key = 1;
+  bytes expected = 2;
+  bytes value = 3;
+}
+
+// CreateBarrier fixes how many distinct participants a barrier waits for.
+// Creating it again with the same count succeeds; a different count, or one
+// below one, gets BARRIER_COUNT. A barrier releases once and stays released.
+message CreateBarrier {
+  string name = 1;
+  int32 count = 2;
+}
+
+// PostBarrier records one participant, which counts once however often it
+// posts. An agent and a relay post as their member; a library posts as its
+// process. Posting before the barrier is created is valid.
+message PostBarrier {
+  string name = 1;
+  string participant = 2;
+}
+
+// AwaitBarrier completes once the barrier has released. Awaiting before the
+// barrier is created is valid. It has no wait of its own; see Attach.
+message AwaitBarrier {
+  string name = 1;
+}
+
+// Leave records that the member's agent is done. The session closes once every
+// member has left. The member's relay and libraries keep using the stream until
+// then.
+message Leave {}
+
+// Fail ends the session with a reason. An agent or a relay may fail it. The
+// reason must be a valid Kubernetes condition reason: a letter, then letters,
+// digits, '_', ',', or ':', ending with a letter, a digit, or '_', in at most
+// 1,024 bytes. Any other reason gets INVALID.
+message Fail {
+  string reason = 1;
+}
+
+// Cancel asks the server to give up a pending request; see Attach.
+message Cancel {
+  string id = 1;
+}
+
+// Response answers one request.
+message Response {
+  // The request's id.
+  string id = 1;
+  // The operation's outcome. A successful operation that returns nothing
+  // leaves it unset.
+  oneof result {
+    Error error = 2;
+    // What Get returns.
+    bytes value = 3;
+    // What Increment and Decrement return.
+    int64 counter = 4;
+  }
+}
+
+// Ended reports that the session has ended. It is the last message on the
+// stream; see Attach.
+message Ended {
+  // CLOSED, or ABORTED with the reason: what every later operation reports.
+  Error error = 1;
+}
+
+// Error is an operation's failure, or how the session ended.
+message Error {
+  Code code = 1;
+  // For ABORTED only: why the session failed, such as MemberFailed,
+  // DeadlineExceeded, or CoordinatorLost.
+  string reason = 2;
+  // A description for humans, which no client parses.
+  string message = 3;
+}
+
+// Code is what a client acts on.
+enum Code {
+  // Never sent.
+  CODE_UNSPECIFIED = 0;
+  // The key does not exist, and the request did not wait for it.
+  CODE_NOT_FOUND = 1;
+  // The key had not appeared when the wait expired.
+  CODE_NOT_YET = 2;
+  // The key already holds another value.
+  CODE_EXISTS = 3;
+  // A compare-and-swap found another value than the one expected.
+  CODE_MISMATCH = 4;
+  // The key holds a value that is not a counter.
+  CODE_NOT_COUNTER = 5;
+  // A barrier count is below one, or differs from the barrier's.
+  CODE_BARRIER_COUNT = 6;
+  // The session failed; the Error carries the reason.
+  CODE_ABORTED = 7;
+  // The session closed because every member left.
+  CODE_CLOSED = 8;
+  // The member is not part of the attempt.
+  CODE_NOT_MEMBER = 9;
+  // The origin may not reach the key or do what it asked.
+  CODE_FORBIDDEN = 10;
+  // A value, a key, a barrier name, or a participant is over its limit.
+  CODE_TOO_LARGE = 11;
+  // The session's byte budget is reached. It covers the whole attempt:
+  // everything every member stores, recorded requests included.
+  CODE_TOO_MANY = 12;
+  // The request is malformed, such as one whose origin has no role or whose
+  // wait is negative.
+  CODE_INVALID = 13;
+  // The request was cancelled before it completed: by a Cancel, by its stream
+  // ending, or by its stream's deadline passing.
+  CODE_CANCELLED = 14;
+  // The coordinator failed in a way the request could not cause. It is
+  // logged.
+  CODE_INTERNAL = 15;
+}

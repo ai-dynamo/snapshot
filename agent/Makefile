@@ -6,9 +6,18 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .DEFAULT_GOAL := build
 
-.PHONY: build go-build cuinterpose-build cuinterpose-test cuda-checkpoint-helper test test-go test-pagebroker tidy lint fmt pagebroker-generate pagebroker-check-generated
+.PHONY: build go-build cuinterpose-build cuinterpose-test cuda-checkpoint-helper test test-go test-pagebroker tidy lint fmt proto-generate proto-check-generated
 
 PROTOC_GEN_GO := $(TOOLS_BIN_DIR)/protoc-gen-go
+PROTOC_GEN_GO_GRPC := $(TOOLS_BIN_DIR)/protoc-gen-go-grpc
+
+# Every package generated from a .proto, and the files generation writes. Both
+# plugins are pinned as tool directives in go.mod, and protoc in tools.mk, so
+# every host generates the same bytes.
+PROTO_PACKAGES := ./internal/pagebroker ./pkg/coordinator/v1alpha1
+PROTO_GENERATED := internal/pagebroker/pagebroker.pb.go \
+	pkg/coordinator/v1alpha1/coordinator.pb.go \
+	pkg/coordinator/v1alpha1/coordinator_grpc.pb.go
 CUDA_ROOT ?= /usr/local/cuda
 GOARCH ?= amd64
 
@@ -49,12 +58,18 @@ tidy:
 lint: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) run --timeout=5m ./...
 
-pagebroker-generate: protoc $(PROTOC_GEN_GO)
-	PATH="$(TOOLS_BIN_DIR):$$PATH" go generate ./internal/pagebroker
+proto-generate: protoc $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
+	PATH="$(TOOLS_BIN_DIR):$$PATH" go generate $(PROTO_PACKAGES)
 
-pagebroker-check-generated: pagebroker-generate
-	git diff --exit-code -- internal/pagebroker/pagebroker.pb.go
+# git status rather than git diff, so a generated file that was never committed
+# fails the check too.
+proto-check-generated: proto-generate
+	@test -z "$$(git status --porcelain -- $(PROTO_GENERATED))" || \
+	  (echo "ERROR: generated protobuf code is stale — run 'make -C agent proto-generate' and commit"; \
+	   git status --porcelain -- $(PROTO_GENERATED); git diff -- $(PROTO_GENERATED); exit 1)
 
 
-$(PROTOC_GEN_GO): go.mod
+# go install tool builds every tool directive at once; each plugin names the
+# same recipe so either one missing rebuilds both.
+$(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC): go.mod
 	GOBIN=$(TOOLS_BIN_DIR) go install tool
