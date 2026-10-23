@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
@@ -508,6 +509,67 @@ func TestCheckpointBoundSendsArtifactTarget(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "stop after target validation")
 	waitPageBrokerTest(t, server)
+}
+
+func TestCheckpointTimingSummarySplitsCUDAAndCRIU(t *testing.T) {
+	imageBytes := int64(7_000_000_000)
+	summary := checkpointTimingSummary(checkpointSummaryInput{
+		Wall:         7289 * time.Millisecond,
+		GPUDeviceMap: 36 * time.Millisecond,
+		Timings: &checkpointPhaseTimings{
+			CUDAPhasesMeasured:     true,
+			CUDALockDuration:       100 * time.Millisecond,
+			CUDACopyDuration:       1500 * time.Millisecond,
+			CUDAJobFileDuration:    65 * time.Millisecond,
+			CUDACheckpointDuration: 1665 * time.Millisecond,
+			CRIUDumpDuration:       5197 * time.Millisecond,
+			CRIUStats: &criu.DumpStats{
+				Freezing:     12 * time.Millisecond,
+				Frozen:       2 * time.Second,
+				MemDump:      400 * time.Millisecond,
+				MemWrite:     4500 * time.Millisecond,
+				PagesWritten: 100,
+			},
+			CRIUImageBytes:         &imageBytes,
+			OverlayCaptureDuration: 343 * time.Millisecond,
+			OverlayDiffBytes:       49 << 20,
+			AccountingDuration:     20 * time.Millisecond,
+		},
+		Switch: 200 * time.Microsecond,
+	})
+
+	phases := summary["phases"].(map[string]string)
+	assert.Equal(t, (5197 * time.Millisecond).String(), phases["criu_dump"])
+	assert.Equal(t, (1665 * time.Millisecond).String(), phases["cuda_checkpoint"])
+	assert.Equal(t, (20 * time.Millisecond).String(), phases["artifact_accounting"])
+
+	cudaFields := summary["cuda"].(map[string]string)
+	assert.Equal(t, (100 * time.Millisecond).String(), cudaFields["lock"])
+	assert.Equal(t, (1500 * time.Millisecond).String(), cudaFields["copy"])
+
+	criuFields := summary["criu"].(map[string]any)
+	assert.Equal(t, (4500 * time.Millisecond).String(), criuFields["memwrite"])
+	assert.Equal(t, (400 * time.Millisecond).String(), criuFields["memdump"])
+	assert.Equal(t, uint64(100)*uint64(os.Getpagesize()), criuFields["pages_written_bytes"])
+	assert.Equal(t, imageBytes, criuFields["image_bytes"])
+	assert.NotContains(t, criuFields, "image_growth")
+
+	overlay := summary["overlay"].(map[string]any)
+	assert.Equal(t, int64(49<<20), overlay["diff_bytes"])
+}
+
+func TestCheckpointTimingSummaryOmitsUnmeasuredCUDA(t *testing.T) {
+	summary := checkpointTimingSummary(checkpointSummaryInput{
+		Wall: 2 * time.Second,
+		Timings: &checkpointPhaseTimings{
+			CUDACheckpointDuration: 800 * time.Millisecond,
+			CRIUDumpDuration:       time.Second,
+		},
+	})
+
+	assert.NotContains(t, summary, "cuda")
+	phases := summary["phases"].(map[string]string)
+	assert.Equal(t, (800 * time.Millisecond).String(), phases["cuda_checkpoint"])
 }
 
 func TestCheckpointNeedsSourceKill(t *testing.T) {
