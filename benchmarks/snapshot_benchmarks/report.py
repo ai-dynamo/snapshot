@@ -67,6 +67,80 @@ def _fmt_driver(identity: dict) -> str:
     return "-"
 
 
+def _capture_sections(results: list[dict]) -> list[str]:
+    """Capture breakdown. Skips results that have no checkpoint agent log."""
+    lines = [
+        "## Where the capture time goes",
+        "",
+        "Wall, CUDA, CRIU, and overlay come from the capture-node agent's "
+        "Checkpoint timing summary. CUDA lock is the device freeze; CUDA copy "
+        "moves device state into host memory before CRIU runs. Those CUDA "
+        "columns are blank when the capture used PageBroker CustomStorage, "
+        "which records the CUDA total and does not measure the split. CRIU "
+        "memdump is CRIU reading the frozen process; CRIU memwrite is CRIU "
+        "writing pages. Those two CRIU timers overlap the CRIU wall and are "
+        "not added to it. Checkpoint (API) is the one-second Kubernetes Ready "
+        "timestamp and is coarser than Wall.",
+        "",
+        "| Model | Wall (s) | CUDA lock | CUDA copy | CRIU wall | CRIU freeze | "
+        "CRIU memdump | CRIU memwrite | Overlay | Checkpoint (API) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for result in results:
+        capture = result.get("checkpoint_agent_log") or {}
+        if not capture:
+            continue
+        model = result.get("model") or {}
+        checkpoint = result.get("checkpoint") or {}
+        phases = capture.get("phases") or {}
+        lines.append(
+            "| {label} | {wall} | {lock} | {copy} | {criu} | {freeze} | {memdump} | "
+            "{memwrite} | {overlay} | {api} |".format(
+                label=model.get("label", "-"),
+                wall=_fmt(capture.get("duration")),
+                lock=_fmt(capture.get("cuda_lock")),
+                copy=_fmt(capture.get("cuda_copy")),
+                criu=_fmt(phases.get("criu_dump")),
+                freeze=_fmt(capture.get("criu_freezing")),
+                memdump=_fmt(capture.get("criu_memdump")),
+                memwrite=_fmt(capture.get("criu_memwrite")),
+                overlay=_fmt(phases.get("overlay_capture")),
+                api=_fmt(checkpoint.get("checkpoint_seconds")),
+            )
+        )
+    lines.append("")
+    lines.extend(
+        [
+            "## How the CRIU image was written",
+            "",
+            "Memwrite GB/s divides CRIU's written page bytes (`pages_written`) "
+            "by CRIU's memwrite timer. The CRIU image column is the apparent "
+            "size of the image directory. That directory also holds metadata "
+            "and pages `pages_written` does not count, so it is not turned "
+            "into a rate against the dump wall.",
+            "",
+            "| Model | Pages written | CRIU image | Overlay diff | Memwrite GB/s |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for result in results:
+        capture = result.get("checkpoint_agent_log") or {}
+        if not capture:
+            continue
+        model = result.get("model") or {}
+        lines.append(
+            "| {label} | {pages} | {image} | {overlay} | {memwrite_rate} |".format(
+                label=model.get("label", "-"),
+                pages=_fmt_bytes(capture.get("criu_pages_written_bytes")),
+                image=_fmt_bytes(capture.get("criu_image_bytes")),
+                overlay=_fmt_bytes(capture.get("overlay_diff_bytes")),
+                memwrite_rate=_fmt(capture.get("memwrite_gigabytes_per_second")),
+            )
+        )
+    lines.append("")
+    return lines
+
+
 def render(results: list[dict]) -> str:
     if not results:
         return "no results found\n"
@@ -136,6 +210,10 @@ def render(results: list[dict]) -> str:
         )
     lines.append("")
 
+    if any(r.get("checkpoint_agent_log") for r in results):
+        lines.extend(_capture_sections(results))
+
+
     lines.append("## Where the restore time goes")
     lines.append("")
     lines.append(
@@ -178,7 +256,10 @@ def render(results: list[dict]) -> str:
     agent_log_warnings = [
         (r.get("model", {}).get("label", "?"), w)
         for r in results
-        for w in ((r.get("agent_log_phases") or {}).get("parse_warnings") or [])
+        for w in (
+            ((r.get("agent_log_phases") or {}).get("parse_warnings") or [])
+            + ((r.get("checkpoint_agent_log") or {}).get("parse_warnings") or [])
+        )
     ]
     if warnings or agent_log_warnings:
         lines.append("## Warnings")
