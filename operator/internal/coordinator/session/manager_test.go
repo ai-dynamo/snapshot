@@ -6,6 +6,7 @@ package session
 import (
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -276,4 +277,104 @@ func TestAManagerDefaultsItsClockAndObserver(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.Insert(ctx, requestOf(memberA, ""), agentKey, []byte("handle")))
 	require.NoError(t, s.Leave(ctx, agentOf(memberA)))
+}
+
+func TestManagerFailEndsAnOpenSessionWithoutACaller(t *testing.T) {
+	f := newFixture(t)
+	pending := getAsync(t, f, agentOf(memberA), agentKey, 2*deadlineIn)
+
+	require.NoError(t, f.manager.Fail(context.Background(), attemptUID, ReasonMemberFailed))
+
+	assertAbortedWith(t, await(t, pending), ReasonMemberFailed)
+	assertAbortedWith(t, f.session.Err(), ReasonMemberFailed)
+	assert.Zero(t, f.clock.Waiters(), "failing the session stops its deadline")
+}
+
+func TestManagerFailReportsWhatItCannotFail(t *testing.T) {
+	tests := []struct {
+		name  string
+		end   func(*fixture) error
+		check func(*testing.T, error)
+	}{
+		{
+			name:  "an unknown attempt",
+			end:   func(f *fixture) error { return f.manager.Remove(context.Background(), attemptUID) },
+			check: func(t *testing.T, err error) { require.ErrorIs(t, err, ErrUnknownSession) },
+		},
+		{
+			name:  "a closed session",
+			end:   func(f *fixture) error { return f.session.Leave(context.Background(), agentOf(memberA)) },
+			check: func(t *testing.T, err error) { require.ErrorIs(t, err, ErrClosed) },
+		},
+		{
+			name: "a failed session",
+			end: func(f *fixture) error {
+				return f.session.Fail(context.Background(), agentOf(memberA), failureReason)
+			},
+			check: func(t *testing.T, err error) { assertAbortedWith(t, err, failureReason) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t, memberA)
+			require.NoError(t, tt.end(f))
+
+			tt.check(t, f.manager.Fail(context.Background(), attemptUID, ReasonCoordinatorLost))
+		})
+	}
+}
+
+func TestEveryReasonMustBeAConditionReason(t *testing.T) {
+	tests := []struct {
+		reason Reason
+		valid  bool
+	}{
+		{reason: "MemberFailed", valid: true},
+		{reason: "A", valid: true},
+		{reason: "Lost:node_1,rack_2", valid: true},
+		{reason: "Ends_", valid: true},
+		{reason: Reason(strings.Repeat("R", 1024)), valid: true},
+		{reason: ""},
+		{reason: "1Lost"},
+		{reason: "member failed"},
+		{reason: "Lost-node"},
+		{reason: "Ends,"},
+		{reason: Reason(strings.Repeat("R", 1025))},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.reason)[:min(len(tt.reason), 24)], func(t *testing.T) {
+			ctx := context.Background()
+			calls := map[string]func(*fixture) error{
+				"Session.Fail":     func(f *fixture) error { return f.session.Fail(ctx, agentOf(memberA), tt.reason) },
+				"Manager.Fail":     func(f *fixture) error { return f.manager.Fail(ctx, attemptUID, tt.reason) },
+				"Manager.Shutdown": func(f *fixture) error { return f.manager.Shutdown(ctx, tt.reason) },
+			}
+			for name, call := range calls {
+				f := newFixture(t)
+
+				err := call(f)
+
+				if tt.valid {
+					require.NoError(t, err, name)
+					continue
+				}
+				require.ErrorIs(t, err, ErrInvalid, name)
+				require.NoError(t, f.session.Err(), "%s: an invalid reason leaves the session open", name)
+			}
+		})
+	}
+}
+
+func TestRemoveWithAContextAlreadyDoneStillRemoves(t *testing.T) {
+	f := newFixture(t)
+	require.NoError(t, f.session.Insert(context.Background(), requestOf(memberA, ""), agentKey, []byte("handle")))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, f.manager.Remove(ctx, attemptUID), "a session done by now is removed, whatever ctx says")
+
+	_, err := f.manager.Session(attemptUID)
+	require.ErrorIs(t, err, ErrUnknownSession)
+	_, err = f.stored(attemptUID, agentKey)
+	require.ErrorIs(t, err, ErrNotFound, "the space is dropped even though ctx was done")
 }

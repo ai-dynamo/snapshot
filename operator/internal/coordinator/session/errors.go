@@ -6,6 +6,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv"
 )
@@ -73,8 +74,30 @@ var (
 
 // Reason names why a session failed. Members supply their own; the reasons
 // below are the ones the engine supplies itself, and they match the condition
-// reasons the operator reports on the set resource.
+// reasons the operator reports on the set resource. Every reason must be a valid
+// condition reason, so it can be reported as one and used as a metric label.
 type Reason string
+
+// The rule for a Kubernetes condition reason, which apimachinery holds but does
+// not export.
+const (
+	reasonPattern   = `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`
+	maxReasonLength = 1024
+)
+
+// validateReason reports ErrInvalid for a reason that is not a valid condition
+// reason. Failing a session is rare, so the pattern is compiled per call
+// rather than kept in a package variable.
+func validateReason(reason Reason) error {
+	if len(reason) > maxReasonLength {
+		return fmt.Errorf("a reason of %d bytes is over the %d-byte limit: %w", len(reason), maxReasonLength,
+			ErrInvalid)
+	}
+	if !regexp.MustCompile(reasonPattern).MatchString(string(reason)) {
+		return fmt.Errorf("reason %q is not a condition reason: %w", reason, ErrInvalid)
+	}
+	return nil
+}
 
 // The reasons the engine fails a session with.
 const (
