@@ -32,6 +32,8 @@ const (
 
 var commitRetryLimit = 30 * time.Second
 
+var abortRetryLimit = 2 * time.Second
+
 // Client speaks the local PageBroker protocol. Filesystem operations run against
 // the current broker; artifact-addressed operations require a storage backend.
 type Client struct {
@@ -130,8 +132,44 @@ func (c Client) commit(ctx context.Context, transactionID string) (*CommitComple
 	return response.GetCommitComplete(), nil
 }
 
+// Abort releases a live transaction, retrying transport errors. A transaction
+// the broker no longer has counts as success.
 func (c Client) Abort(ctx context.Context, transactionID string) error {
-	return c.abort(ctx, transactionID)
+	err := c.abort(ctx, transactionID)
+	if isRetryableTransportError(err) {
+		err = c.retryAbort(ctx, transactionID, err)
+	}
+	return ignoreAlreadyReleased(err)
+}
+
+func (c Client) retryAbort(ctx context.Context, transactionID string, first error) error {
+	retryCtx, cancel := context.WithTimeout(ctx, abortRetryLimit)
+	defer cancel()
+	for {
+		select {
+		case <-retryCtx.Done():
+			return first
+		case <-time.After(commitRetryDelay):
+		}
+		err := c.abort(retryCtx, transactionID)
+		// A definitive answer stands even if the budget expired reaching it.
+		if err == nil || TransactionGone(err) {
+			return err
+		}
+		if retryCtx.Err() != nil {
+			return first
+		}
+		if !isRetryableTransportError(err) {
+			return err
+		}
+	}
+}
+
+func ignoreAlreadyReleased(err error) error {
+	if TransactionGone(err) {
+		return nil
+	}
+	return err
 }
 
 func (c Client) abort(ctx context.Context, transactionID string, files ...*os.File) error {

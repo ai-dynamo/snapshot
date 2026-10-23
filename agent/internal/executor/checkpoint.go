@@ -121,19 +121,26 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	broker := pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
 	committed := false
 	preparationAttempted := false
+	dumpComplete := false
 	var gpu *pagebroker.CustomStorageExecution
 	defer func() {
 		if gpu != nil {
 			defer gpu.Close()
 		}
-		if preparationAttempted && !committed {
-			if gpu != nil {
-				if err := gpu.Abort(ctx); err != nil {
-					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint: %w", err))
-				}
-			} else {
-				retErr = abortCheckpointTransaction(broker, transactionID, retErr)
+		if !preparationAttempted || committed {
+			return
+		}
+		// gpu.Abort is also that execution's teardown, so the GPU path always
+		// releases.
+		if gpu == nil && dumpComplete && pagebroker.CommitWorthRetrying(retErr) {
+			return
+		}
+		if gpu != nil {
+			if err := gpu.Abort(ctx); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint: %w", err))
 			}
+		} else {
+			retErr = abortCheckpointTransaction(broker, transactionID, retErr)
 		}
 	}()
 	var executionContext *pagebroker.GpuContext
@@ -171,10 +178,12 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return nil, err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
+	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
 	if err != nil {
 		return nil, checkpointNeedsSourceKill(err)
 	}
+
+	dumpComplete = true
 
 	switchStart := time.Now()
 	artifact, err = commitCheckpointArtifact(ctx, broker, transactionID, bound, req.StoreID)
@@ -416,6 +425,10 @@ func configureCheckpoint(
 
 	return criuOpts, m, nil
 }
+
+// captureCheckpointFunc is overridden in tests: captureCheckpoint runs CRIU
+// against a live process tree, which a unit test cannot satisfy.
+var captureCheckpointFunc = captureCheckpoint
 
 func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
