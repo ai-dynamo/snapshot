@@ -18,23 +18,20 @@ Source for PageBroker and the third-party components distributed in this image:
 This image also ships the pinned Model Streamer core and S3 native libraries,
 with their SDK license and release metadata in /legal/model-streamer/.
 The S3 plugin license is also in /legal/model-streamer-s3/.
-OpenSSL libcrypto supports the AWS SDK; its attribution
-is in /legal/openssl/copyright. The uploader uses the S3 CRT client from the
-unmodified AWS SDK for C++ release published at:
+The uploader and metadata client execute the unmodified rclone release:
 
-  https://github.com/aws/aws-sdk-cpp/releases/tag/1.11.708
+  https://github.com/rclone/rclone/releases/tag/v1.75.2
 
-The exact SDK source revision is pinned in the PageBroker Dockerfile and recorded
-in /legal/aws-sdk/REVISION. This release includes the upstream cancellation fix:
-
-  https://github.com/aws/aws-sdk-cpp/pull/3648
-
-The SDK uses the CRT HTTP client, without the libcurl dependency chain.
-The SDK and its pinned CRT submodule notices are in /legal/aws-sdk/. Its
-remaining dynamically linked TLS/compression dependencies come from Ubuntu 24.04 packages;
-their copyright files are in /legal/packages/. Package copyright files identify
-their upstream sources and license terms. These dependencies are copied from
-the same build stage as the SDK, not from the host.
+The Dockerfile downloads the official Linux amd64 executable and pins its release
+archive by SHA-256. It does not compile or modify rclone. The matching source
+archive and module downloads are used only to collect attribution. /legal/rclone
+contains the source archive, MIT license, Go license, module dependency notices,
+executable build information and release/source archive checksums.
+The PageBroker executable does not link the AWS C++ SDK. Model Streamer's
+prebuilt S3 plugin still contains its own AWS implementation.
+OpenSSL libcrypto remains available for downstream checkpoint hashing;
+its attribution is in /legal/openssl/copyright. The JSON parser's attribution
+is in /legal/nlohmann-json/copyright.
 
 The base image
 contains third-party components of its own -- glibc, libstdc++ and libgcc,

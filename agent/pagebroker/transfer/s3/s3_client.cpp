@@ -4,85 +4,102 @@
 #include "s3_client.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
-#include <aws/core/Aws.h>
-#include <aws/io/io.h>
-#include <aws/core/auth/AWSCredentialsProvider.h>
-#include <aws/core/auth/AWSCredentialsProviderChain.h>
-#include <aws/core/client/DefaultRetryStrategy.h>
-#include <aws/core/config/ConfigAndCredentialsCacheManager.h>
-#include <aws/s3-crt/S3CrtClient.h>
-#include <aws/s3-crt/model/GetObjectRequest.h>
-#include <aws/s3-crt/model/HeadObjectRequest.h>
-#include <aws/s3-crt/model/PutObjectRequest.h>
-
 #include <algorithm>
-#include <cctype>
-#include <cmath>
-#include <cstdlib>
-#include <fstream>
-#include <future>
+#include <array>
 #include <cerrno>
-#include <condition_variable>
-#include <exception>
+#include <charconv>
+#include <climits>
+#include <cstdlib>
+#include <iterator>
 #include <limits>
-#include <mutex>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <system_error>
 #include <utility>
-#include <vector>
 
 #include "file_descriptor.hpp"
+
+#ifndef PAGEBROKER_RCLONE_PATH
+#define PAGEBROKER_RCLONE_PATH "/usr/local/bin/rclone"
+#endif
 
 namespace snapshot::pagebroker {
 namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::uint64_t kMiB = 1024 * 1024;
-constexpr char kAllocationTag[] = "PageBrokerS3";
+constexpr char kSizeField[] = "Size";
+constexpr char kDirectoryField[] = "IsDir";
+constexpr char kMessageField[] = "msg";
+constexpr char kStatusPrefix[] = "StatusCode: ";
+constexpr char kRemotePrefix[] = "pagebroker:";
+constexpr char kInputPath[] = "/proc/self/fd/0";
+constexpr std::size_t kMetadataStatLimit = 16 * 1024;
 
-class SdkLease {
- public:
-  SdkLease() { UpdateUsers(true); }
-  ~SdkLease() { UpdateUsers(false); }
-  SdkLease(const SdkLease&) = delete;
-  SdkLease& operator=(const SdkLease&) = delete;
+constexpr const char* kCommonArguments[] = {"--config",
+                                            "/dev/null",
+                                            "--use-json-log",
+                                            "--log-level",
+                                            "ERROR",
+                                            "--stats",
+                                            "0",
+                                            "--s3-no-check-bucket",
+                                            "--s3-no-head",
+                                            "--s3-encoding",
+                                            "None",
+                                            "--buffer-size",
+                                            "0",
+                                            "--transfers",
+                                            "1",
+                                            "--checkers",
+                                            "1",
+                                            "--retries",
+                                            "1"};
+constexpr const char* kCopyArguments[] = {"--ignore-times", "--no-check-dest"};
+constexpr char kCopyLinksFlag[] = "--copy-links";
+constexpr const char* kReadArguments[] = {"--files-from-raw", kInputPath, "--no-traverse"};
+constexpr const char* kStatArguments[] = {"--no-modtime", "--no-mimetype", "--files-only", "--recursive"};
+constexpr const char* kHttpArguments[] = {"--s3-use-data-integrity-protections=false",
+                                          "--s3-use-unsigned-payload=true"};
+constexpr const char* kCreateOnlyArguments[] = {"--header-upload", "If-None-Match: *"};
+constexpr char kPathStyleFlag[] = "--s3-force-path-style=";
+constexpr char kUploadCutoffFlag[] = "--s3-upload-cutoff";
+constexpr char kChunkSizeFlag[] = "--s3-chunk-size";
+constexpr char kUploadConcurrencyFlag[] = "--s3-upload-concurrency";
+constexpr char kLowLevelRetriesFlag[] = "--low-level-retries";
+constexpr char kConnectTimeoutFlag[] = "--contimeout";
+constexpr char kTimeoutFlag[] = "--timeout";
+constexpr char kCaFlag[] = "--ca-cert";
+constexpr char kCopyCommand[] = "copyto";
+constexpr char kBatchCommand[] = "copy";
+constexpr std::size_t kUploadListLimit = 16 * 1024 * 1024;
+constexpr char kStatCommand[] = "lsjson";
+constexpr char kReadCommand[] = "cat";
+constexpr char kRemoteTypeEnv[] = "RCLONE_CONFIG_PAGEBROKER_TYPE=s3";
+constexpr char kRemoteProviderEnv[] = "RCLONE_CONFIG_PAGEBROKER_PROVIDER=AWS";
+constexpr char kExplicitAuthEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENV_AUTH=false";
+constexpr char kRemoteAccessKeyEnv[] = "RCLONE_CONFIG_PAGEBROKER_ACCESS_KEY_ID=";
+constexpr char kRemoteSecretKeyEnv[] = "RCLONE_CONFIG_PAGEBROKER_SECRET_ACCESS_KEY=";
+constexpr char kRemoteTokenEnv[] = "RCLONE_CONFIG_PAGEBROKER_SESSION_TOKEN=";
+constexpr char kRemoteRegionEnv[] = "RCLONE_CONFIG_PAGEBROKER_REGION=";
+constexpr char kRemoteEndpointEnv[] = "RCLONE_CONFIG_PAGEBROKER_ENDPOINT=";
+constexpr char kDisableImdsEnv[] = "AWS_EC2_METADATA_DISABLED=true";
+constexpr char kDisableAwsConfigEnv[] = "AWS_CONFIG_FILE=/dev/null";
+constexpr char kDisableAwsFileEnv[] = "AWS_SHARED_CREDENTIALS_FILE=/dev/null";
+constexpr char kDirectoryBucketSuffix[] = "--x-s3";
 
- private:
-  static void UpdateUsers(bool acquire)
-  {
-    static std::mutex mutex;
-    static unsigned users = 0;
-    static Aws::SDKOptions options;
-    std::lock_guard lock(mutex);
-    // Model Streamer's hidden SDK copy manages its own lifetime.
-    if (acquire) {
-      if (users == 0)
-        Aws::InitAPI(options);
-      ++users;
-    } else if (--users == 0)
-      Aws::ShutdownAPI(options);
-  }
-};
-
-class BoundedBuffer : public std::streambuf {
- public:
-  explicit BoundedBuffer(std::size_t limit) : bytes_(limit + 1) { Reset(); }
-  void Reset() { setp(bytes_.data(), bytes_.data() + bytes_.size()); }
-  std::string Bytes() const { return {pbase(), pptr()}; }
-
- private:
-  std::vector<char> bytes_;
-};
-
-bool
-HasInvalidText(const std::string& value)
-{
-  if (value.find('\0') != std::string::npos)
-    return true;
-  return value.find_first_of("\n\r") != std::string::npos;
-}
+constexpr char kFalse[] = "false";
+constexpr char kTrue[] = "true";
+constexpr char kBytesSuffix[] = "B";
+constexpr char kMillisecondsSuffix[] = "ms";
 
 bool
 IsSupportedObjectLocation(const S3ObjectLocation& object)
@@ -98,316 +115,237 @@ IsSupportedObjectLocation(const S3ObjectLocation& object)
     return false;
   if (bucket.back() == '.' || bucket.back() == '-')
     return false;
-  return bucket.find("..") == std::string::npos && !bucket.ends_with("--x-s3");
+  return bucket.find("..") == std::string::npos && !bucket.ends_with(kDirectoryBucketSuffix);
 }
 
-bool
-HasCompleteCredentials(const S3Connection& connection)
+// Only expose HTTP status, never rclone's raw logs or server text.
+int
+HttpStatus(const std::string& logs)
 {
-  if (connection.access_key_id.empty() != connection.secret_access_key.empty())
-    return false;
-  return connection.session_token.empty() || !connection.access_key_id.empty();
-}
-
-bool
-HasSupportedEndpoint(const std::string& endpoint)
-{
-  if (endpoint.empty())
-    return true;
-  return endpoint.starts_with("https://") || endpoint.starts_with("http://");
-}
-
-bool
-HasValidResourceLimits(const S3Limits& limits)
-{
-  if (limits.part_size < 8 * kMiB || limits.part_size > 5 * 1024 * kMiB)
-    return false;
-  if (limits.buffer_budget < 1024 * kMiB)
-    return false;
-  if (limits.buffer_budget < 2 * limits.part_size)
-    return false;
-  if (limits.buffer_budget > std::numeric_limits<std::size_t>::max())
-    return false;
-  if (limits.active_files == 0)
-    return false;
-  if (limits.request_retries > 10)
-    return false;
-  return std::isfinite(limits.target_gbps) && limits.target_gbps > 0 && limits.target_gbps <= 1000;
-}
-
-bool
-IsValidTimeout(std::chrono::milliseconds timeout)
-{
-  if (timeout.count() <= 0 || timeout > std::chrono::hours(24))
-    return false;
-  return timeout.count() <= std::numeric_limits<long>::max();
-}
-
-bool
-FitsMultipartLimits(std::uint64_t size, std::uint64_t part_size)
-{
-  if (size > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()))
-    return false;
-  return size / part_size + (size % part_size != 0) <= 10'000;
-}
-
-bool
-HasConsistentObjectSize(std::size_t actual, std::uint64_t expected, std::size_t maximum, long long declared)
-{
-  if (actual != expected || actual > maximum)
-    return false;
-  return declared == static_cast<long long>(actual);
-}
-
-void
-ValidateText(const std::string& value)
-{
-  if (HasInvalidText(value))
-    throw std::invalid_argument("S3 settings cannot contain NUL or line breaks");
-}
-
-struct Operation {
-  Operation(const char* name, std::chrono::milliseconds timeout, Cancellation cancellation = {})
-      : name(name), cancellation(cancellation.WithDeadline(Clock::now() + timeout)) {}
-
-  bool Continue() const noexcept
-  {
-    return !cancellation.IsCancelled();
+  int http_status = 0;
+  std::istringstream lines(logs);
+  std::string line;
+  while (std::getline(lines, line)) {
+    const auto json = nlohmann::json::parse(line, nullptr, false);
+    if (!json.is_object() || !json.contains(kMessageField) || !json[kMessageField].is_string())
+      continue;
+    const auto message = json[kMessageField].get<std::string>();
+    const auto status = message.find(kStatusPrefix);
+    if (status != std::string::npos) {
+      int value = 0;
+      const auto* begin = message.data() + status + sizeof(kStatusPrefix) - 1;
+      const auto result = std::from_chars(begin, message.data() + message.size(), value);
+      if (result.ec == std::errc{} && value >= 100 && value <= 599)
+        http_status = value;
+    }
   }
+  return http_status;
+}
 
-  void Check() const
-  {
-    if (const auto reason = cancellation.Reason())
-      throw S3Error({name, *reason == CancellationError::Reason::DEADLINE_EXCEEDED ? "DeadlineExceeded" : "Cancelled"});
+FileDescriptor
+InputBytes(const std::string& bytes)
+{
+  FileDescriptor file(memfd_create("pagebroker-s3-input", MFD_CLOEXEC));
+  if (file.get() < 0)
+    throw std::system_error(errno, std::generic_category(), "create S3 input");
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    const auto count = write(file.get(), bytes.data() + offset, bytes.size() - offset);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      throw std::system_error(errno, std::generic_category(), "write S3 input");
+    offset += count;
   }
+  if (lseek(file.get(), 0, SEEK_SET) < 0)
+    throw std::system_error(errno, std::generic_category(), "rewind S3 input");
+  return file;
+}
 
-  const std::string name;
-  const Cancellation cancellation;
+std::string
+Remote(const S3ObjectLocation& object)
+{
+  return kRemotePrefix + object.bucket + "/" + object.key;
+}
+
+// Exact-key lookups avoid bucket listing and wildcard interpretation.
+std::vector<std::string>
+ReadArguments(const char* command, const S3ObjectLocation& object)
+{
+  std::vector<std::string> arguments{command, kRemotePrefix + object.bucket};
+  arguments.insert(arguments.end(), std::begin(kReadArguments), std::end(kReadArguments));
+  return arguments;
+}
+
+constexpr char kAccessKeyEnv[] = "AWS_ACCESS_KEY_ID";
+constexpr char kSecretKeyEnv[] = "AWS_SECRET_ACCESS_KEY";
+constexpr char kTokenEnv[] = "AWS_SESSION_TOKEN";
+constexpr char kRegionEnv[] = "AWS_REGION";
+constexpr char kDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
+
+std::string
+Environment(const char* name)
+{
+  const auto* value = std::getenv(name);
+  return value ? value : "";
+}
+
+constexpr char kExecutable[] = PAGEBROKER_RCLONE_PATH;
+constexpr std::size_t kDiagnosticsLimit = 64 * 1024;
+constexpr auto kTerminationGrace = std::chrono::seconds(2);
+constexpr int kPollMilliseconds = 20;
+
+FileDescriptor
+HighDescriptor(int descriptor)
+{
+  const auto duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, 10);
+  if (duplicate < 0)
+    throw std::system_error(errno, std::generic_category(), "duplicate rclone descriptor");
+  return FileDescriptor(duplicate);
+}
+
+struct Pipe {
+  Pipe() : read_end(-1), write_end(-1)
+  {
+    int descriptors[2];
+    if (pipe2(descriptors, O_CLOEXEC) < 0)
+      throw std::system_error(errno, std::generic_category(), "create rclone pipe");
+    FileDescriptor read(descriptors[0]), write(descriptors[1]);
+    read_end = HighDescriptor(read.get());
+    write_end = HighDescriptor(write.get());
+    if (fcntl(read_end.get(), F_SETFL, O_NONBLOCK) < 0)
+      throw std::system_error(errno, std::generic_category(), "configure rclone pipe");
+  }
+  FileDescriptor read_end, write_end;
 };
 
-// A lease bounds admitted file transfers and metadata operations, not CRT parts.
-class Slots {
+// Fallback on local errors also kills and reaps. No detached children or threads
+// may retain the source after UploadFiles returns.
+class Child {
  public:
-  struct Lease {
-    Lease(Slots& pool, std::size_t slot) : pool(&pool), slot(slot) {}
-    Lease(Lease&& other) noexcept : pool(std::exchange(other.pool, nullptr)), slot(other.slot) {}
-    Lease(const Lease&) = delete;
-    ~Lease()
-    {
-      if (pool) {
-        std::lock_guard lock(pool->mutex_);
-        pool->available_.push_back(slot);
-        pool->changed_.notify_all();
+  explicit Child(pid_t pid) : pid_(pid) {}
+  ~Child()
+  {
+    if (pid_ > 0) {
+      kill(pid_, SIGKILL);
+      while (waitpid(pid_, nullptr, 0) < 0 && errno == EINTR) {
       }
     }
-    Slots* pool;
-    std::size_t slot;
-  };
-
-  explicit Slots(std::size_t count)
-  {
-    available_.reserve(count);
-    for (std::size_t i = 0; i < count; ++i)
-      available_.push_back(i);
   }
-
-  Lease Acquire(const Operation& operation)
+  bool Poll(int& status)
   {
-    std::unique_lock lock(mutex_);
-    changed_.wait_until(lock, operation.cancellation.Token(), operation.cancellation.Deadline(),
-                        [&] { return !available_.empty() || !operation.Continue(); });
-    operation.Check();
-    const auto slot = available_.back();
-    available_.pop_back();
-    return {*this, slot};
+    const auto result = waitpid(pid_, &status, WNOHANG);
+    if (result < 0 && errno != EINTR)
+      throw std::system_error(errno, std::generic_category(), "wait for rclone");
+    if (result == pid_) {
+      pid_ = -1;
+      return true;
+    }
+    return false;
+  }
+  void Signal(int signal) const
+  {
+    if (pid_ > 0)
+      kill(pid_, signal);
   }
 
  private:
-  std::mutex mutex_;
-  std::condition_variable_any changed_;
-  std::vector<std::size_t> available_;
+  pid_t pid_;
 };
 
-template<class Error>
-S3RequestFailure
-RequestFailure(const char* operation, const Error& error)
-{
-  // SDK/server messages can echo caller inputs; retain structured diagnostics
-  // instead of logging response bodies, authorization headers, or credentials.
-  std::string code = error.GetExceptionName().c_str();
-  if (code.empty())
-    code = "SDKError(" + std::to_string(static_cast<int>(error.GetErrorType())) + ")";
-  return {operation, std::move(code), static_cast<int>(error.GetResponseCode()), error.GetRequestId().c_str()};
-}
-
-[[noreturn]] void
-RethrowUploadError(std::exception_ptr failure)
-{
-  try {
-    std::rethrow_exception(failure);
-  }
-  catch (const S3Error&) {
-    throw;
-  }
-  catch (...) {
-    std::throw_with_nested(S3Error({"upload", "LocalFailure"}));
-  }
-}
-
+// Limit work per poll so a noisy child cannot starve cancellation checks. Logs
+// are kept only in a bounded tail and never forwarded directly to callers.
 bool
-SameTimestamp(const timespec& left, const timespec& right)
+Drain(int descriptor, std::string& bytes, std::size_t limit, bool diagnostics)
 {
-  return left.tv_sec == right.tv_sec && left.tv_nsec == right.tv_nsec;
-}
-
-bool
-SourceUnchanged(const struct stat& current, const struct stat& original)
-{
-  if (current.st_size != original.st_size)
-    return false;
-  if (!SameTimestamp(current.st_mtim, original.st_mtim))
-    return false;
-  return SameTimestamp(current.st_ctim, original.st_ctim);
-}
-
-void
-CheckSource(int descriptor, const struct stat& original)
-{
-  struct stat current;
-  if (fstat(descriptor, &current) < 0)
-    throw std::system_error(errno, std::generic_category(), "stat S3 upload source");
-  if (!SourceUnchanged(current, original))
-    throw S3Error({"read source", "SourceChanged"});
-}
-// Adapted from runai-model-streamer cpp/s3/client/client.cc (ae93548):
-// keep the endpoint scheme separate, and use the same AWS credential constructors.
-bool
-StartsWithCaseInsensitive(const Aws::String& value, const Aws::String& prefix)
-{
-  if (value.size() < prefix.size())
-    return false;
-  for (std::size_t i = 0; i < prefix.size(); ++i) {
-    if (std::tolower(static_cast<unsigned char>(value[i])) !=
-        std::tolower(static_cast<unsigned char>(prefix[i])))
-      return false;
-  }
-  return true;
-}
-
-Aws::S3Crt::S3CrtClientConfiguration
-ClientConfiguration(const S3Connection& connection, const S3Limits& limits)
-{
-  Aws::S3Crt::S3CrtClientConfiguration config(Aws::Client::ClientConfigurationInitValues{
-      !connection.region.empty() && !connection.access_key_id.empty()});
-  if (!connection.region.empty())
-    config.region = connection.region;
-  config.endpointOverride = connection.endpoint;
-  for (const auto& prefix : {Aws::String("https://"), Aws::String("http://")}) {
-    if (StartsWithCaseInsensitive(config.endpointOverride, prefix)) {
-      config.endpointOverride.erase(0, prefix.size());
-      config.scheme = prefix == "https://" ? Aws::Http::Scheme::HTTPS : Aws::Http::Scheme::HTTP;
-      if (config.endpointOverride.empty() || config.endpointOverride.front() == ':')
-        throw std::invalid_argument("S3 endpoint has no host");
-      break;
+  std::array<char, 8192> buffer;
+  for (unsigned i = 0; i < 16; ++i) {
+    const auto count = read(descriptor, buffer.data(), buffer.size());
+    if (count == 0)
+      return true;
+    if (count < 0) {
+      if (errno == EINTR)
+        continue;
+      if (errno == EAGAIN)
+        return false;
+      throw std::system_error(errno, std::generic_category(), "read rclone output");
     }
+    if (!diagnostics && static_cast<std::size_t>(count) > limit - bytes.size())
+      throw S3ResponseError("rclone response exceeds size limit");
+    bytes.append(buffer.data(), count);
+    if (diagnostics && bytes.size() > limit)
+      bytes.erase(0, bytes.size() - limit);
   }
-  config.useVirtualAddressing = connection.use_virtual_addressing;
-  config.caFile = connection.ca_file;
-  if (config.caFile.empty()) {
-    if (const auto* ca = std::getenv("AWS_CA_BUNDLE"))
-      config.caFile = ca;
-    else
-      config.caFile = Aws::Config::GetCachedConfigValue(Aws::Auth::GetConfigProfileName(), "ca_bundle");
-  }
-  if (!config.caFile.empty() && !std::filesystem::is_regular_file(config.caFile))
-    throw std::invalid_argument("S3 CA certificate file does not exist");
-  config.verifySSL = true;
-  config.partSize = limits.part_size;
-  config.multipartUploadThreshold = limits.part_size;
-  config.memoryLimitBytes = limits.buffer_budget;
-  config.throughputTargetGbps = limits.target_gbps;
-  config.connectTimeoutMs = limits.connect_timeout.count();
-  // HeadObject uses the SDK HTTP client, while GET/PUT use CRT. Bound both
-  // retry paths so metadata failures honor the same per-request policy.
-  config.retryStrategy = std::make_shared<Aws::Client::DefaultRetryStrategy>(limits.request_retries);
-  config.httpRequestTimeoutMs = limits.request_timeout.count();
-  // Like Model Streamer, requestTimeoutMs is a low-speed interval, not a
-  // total operation deadline. CRT imposes a minimum three-second interval.
-  config.requestTimeoutMs = limits.request_timeout.count();
-  config.lowSpeedLimit = 1;
-  using Retry = Aws::S3Crt::S3CrtClientConfiguration::CrtRetryStrategyConfig::CrtRetryStrategyType;
-  config.crtRetryStrategyConfig.crtRetryStrategyType = Retry::EXPONENTIAL_BACKOFF;
-  config.crtRetryStrategyConfig.config.maxRetries = std::max(1U, limits.request_retries);
-  if (limits.request_retries == 0) {
-    config.crtConfigFactories.retryStrategyCreateFn = [](const auto& settings) {
-      auto* strategy = Aws::S3Crt::S3CrtClientConfiguration::S3CrtConfigFactories::defaultFactories.retryStrategyCreateFn(settings);
-      if (!strategy)
-        throw std::runtime_error("cannot create S3 retry strategy");
-      // The pinned CRT's NO_RETRY denies the initial token too, so no request
-      // reaches S3. Retain CRT's asynchronous admission and token lifetime,
-      // overriding only the public retry hook to refuse subsequent attempts.
-      static auto no_retries = [strategy] {
-        auto callbacks = *strategy->vtable;
-        callbacks.schedule_retry = [](aws_retry_token*, aws_retry_error_type,
-                                      aws_retry_strategy_on_retry_ready_fn*, void*) {
-          return aws_raise_error(AWS_IO_MAX_RETRIES_EXCEEDED);
-        };
-        return callbacks;
-      }();
-      strategy->vtable = &no_retries;
-      return strategy;
-    };
-  }
-  return config;
+  return false;
 }
 
-}  // namespace
+} // namespace
 
 S3Connection
 ResolveS3Credentials(S3Connection connection)
 {
   connection.Validate();
-  if (!connection.access_key_id.empty())
-    return connection;
-  SdkLease sdk;
-  Aws::Auth::DefaultAWSCredentialsProviderChain providers;
-  const auto credentials = providers.GetAWSCredentials();
-  connection.access_key_id = credentials.GetAWSAccessKeyId().c_str();
-  connection.secret_access_key = credentials.GetAWSSecretKey().c_str();
-  connection.session_token = credentials.GetSessionToken().c_str();
+  if (connection.access_key_id.empty()) {
+    connection.access_key_id = Environment(kAccessKeyEnv);
+    connection.secret_access_key = Environment(kSecretKeyEnv);
+    connection.session_token = Environment(kTokenEnv);
+  }
   if (connection.access_key_id.empty() || connection.secret_access_key.empty())
     throw std::invalid_argument("external S3 credentials are missing");
+  if (connection.region.empty()) {
+    connection.region = Environment(kRegionEnv);
+    if (connection.region.empty())
+      connection.region = Environment(kDefaultRegionEnv);
+  }
+  if (connection.ca_file.empty())
+    connection.ca_file = Environment(kAwsCaBundleEnv);
   connection.Validate();
   return connection;
 }
 
 void
-S3ObjectLocation::Validate() const
+S3Connection::Validate() const
 {
-  ValidateText(bucket);
-  ValidateText(key);
-  if (!IsSupportedObjectLocation(*this))
-    throw std::invalid_argument("S3 upload requires an ordinary bucket name and a supported nonempty key");
+  for (const auto* value : {&region, &endpoint, &ca_file, &access_key_id, &secret_access_key, &session_token}) {
+    if (value->find('\0') != std::string::npos || value->find_first_of("\n\r") != std::string::npos)
+      throw std::invalid_argument("S3 settings cannot contain NUL or line breaks");
+  }
+  if (access_key_id.empty() != secret_access_key.empty() || (!session_token.empty() && access_key_id.empty()))
+    throw std::invalid_argument("S3 explicit credentials require an access key and secret key");
+  if (!endpoint.empty() && !endpoint.starts_with(kHttpsEndpointPrefix) && !endpoint.starts_with(kHttpEndpointPrefix))
+    throw std::invalid_argument("S3 endpoint requires an http or https scheme");
 }
 
 void
-S3Connection::Validate() const
+S3ObjectLocation::Validate() const
 {
-  for (const auto* value : {&region, &endpoint, &ca_file, &access_key_id, &secret_access_key, &session_token})
-    ValidateText(*value);
-  if (!HasCompleteCredentials(*this))
-    throw std::invalid_argument("S3 explicit credentials require an access key and secret key");
-  if (!HasSupportedEndpoint(endpoint))
-    throw std::invalid_argument("S3 endpoint requires an http or https scheme");
+  for (const auto* value : {&bucket, &key}) {
+    if (value->find('\0') != std::string::npos || value->find_first_of("\n\r") != std::string::npos)
+      throw std::invalid_argument("S3 object location cannot contain NUL or line breaks");
+  }
+  if (!IsSupportedObjectLocation(*this))
+    throw std::invalid_argument("S3 upload requires an ordinary bucket name and a supported nonempty key");
+  // rclone treats keys as paths. Reject spelling it would normalize rather than
+  // reading or overwriting a different object. Checkpoint keys are canonical.
+  std::istringstream components(key);
+  std::string component;
+  while (std::getline(components, component, '/')) {
+    if (component.empty() || component == "." || component == "..")
+      throw std::invalid_argument("S3 object key must be a canonical relative path");
+  }
+  if (key.back() == '/')
+    throw std::invalid_argument("S3 object key cannot end in a slash");
 }
 
 void
 S3Limits::Validate() const
 {
-  if (!HasValidResourceLimits(*this))
+  if (part_size < 8 * kMiB || part_size > 5 * 1024 * kMiB || active_files == 0 ||
+      buffer_budget / part_size < active_files || buffer_budget > std::numeric_limits<std::size_t>::max() ||
+      request_retries > 10)
     throw std::invalid_argument("invalid S3 upload resource limits");
-  for (auto timeout : {connect_timeout, request_timeout, operation_timeout}) {
-    if (!IsValidTimeout(timeout))
+  for (auto timeout : {connect_timeout, request_timeout}) {
+    if (timeout.count() <= 0 || timeout > std::chrono::hours(24) || timeout.count() > std::numeric_limits<long>::max())
       throw std::invalid_argument("S3 timeouts must be positive and at most 24 hours");
   }
 }
@@ -416,157 +354,210 @@ void
 S3Limits::ValidateFileSize(std::uint64_t size) const
 {
   Validate();
-  if (!FitsMultipartLimits(size, part_size))
+  if (size > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) ||
+      size / part_size + (size % part_size != 0) > 10'000)
     throw std::invalid_argument("S3 file exceeds the configured 10000-part limit");
 }
 
-S3Error::S3Error(S3RequestFailure failure)
-    : std::runtime_error(failure.operation + ": " + failure.code), primary(std::move(failure))
-{
-}
-
-struct S3Client::Impl {
-  Impl(const S3Connection& connection, S3Limits limits)
-      : limits(limits), files(limits.active_files)
+// A permit bounds admitted operations through preparation, execution and cleanup.
+struct S3Client::Operation {
+  Operation(S3Client& owner, Cancellation cancellation) : owner(owner), cancellation(cancellation)
   {
-    const auto config = ClientConfiguration(connection, limits);
-    if (connection.access_key_id.empty())
-      client = std::make_unique<Aws::S3Crt::S3CrtClient>(config);
-    else
-      client = std::make_unique<Aws::S3Crt::S3CrtClient>(
-          Aws::Auth::AWSCredentials(connection.access_key_id, connection.secret_access_key, connection.session_token), config);
-  }
-
-  template<class Request, class Call>
-  auto MetadataRequest(Request& request, const S3ObjectLocation& object, Cancellation cancellation, Call call)
-  {
-    object.Validate();
-    request.WithBucket(object.bucket).WithKey(object.key);
-    auto operation = std::make_shared<Operation>(request.GetServiceRequestName(), limits.operation_timeout, cancellation);
-    return RequestResult(request, operation, call);
-  }
-
-  template<class Request, class Call>
-  auto RequestResult(Request& request, const std::shared_ptr<Operation>& operation, Call call)
-  {
-    auto slot = files.Acquire(*operation);
-    operation->Check();
-    request.SetContinueRequestHandler([operation](const Aws::Http::HttpRequest*) { return operation->Continue(); });
-    auto outcome = call(request);
-    operation->Check();
-    return outcome;
-  }
-
-  Aws::S3Crt::Model::PutObjectOutcome Upload(Aws::S3Crt::Model::PutObjectRequest& request,
-                                           const std::shared_ptr<Operation>& operation)
-  {
-    request.SetContinueRequestHandler([operation](const Aws::Http::HttpRequest*) { return operation->Continue(); });
-    auto completion = std::make_shared<std::promise<Aws::S3Crt::Model::PutObjectOutcome>>();
-    auto finished = completion->get_future();
-    client->PutObjectAsync(request, [completion](const auto*, const auto&, const auto& outcome, const auto&) {
-      completion->set_value(outcome);
+    if (cancellation.Deadline() == Clock::time_point::max())
+      throw std::invalid_argument("S3 operations require a caller deadline");
+    std::unique_lock lock(owner.mutex_);
+    owner.changed_.wait_until(lock, this->cancellation.Token(), this->cancellation.Deadline(), [&] {
+      return owner.active_ < owner.limits_.active_files || this->cancellation.IsCancelled();
     });
-    // The pinned SDK invokes this completion from its request shutdown callback.
-    // Cancellation/deadline callbacks stop work; draining still owns the stream.
-    // A stalled connection is interrupted by CRT's low-speed timeout.
-    return finished.get();
+    cancellation.ThrowIfCancelled();
+    ++owner.active_;
   }
-
-  S3UploadResult UploadFile(const std::filesystem::path& path, const S3ObjectLocation& destination,
-                            Cancellation cancellation)
+  ~Operation()
   {
-    destination.Validate();
-    if (path.native().find('\0') != std::string::npos)
-      throw std::invalid_argument("S3 source path cannot contain NUL");
-    auto operation = std::make_shared<Operation>("PutObject", limits.operation_timeout, cancellation);
-    auto admitted = files.Acquire(*operation);
-    FileDescriptor source(open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
-    if (source.get() < 0)
-      throw std::system_error(errno, std::generic_category(), "open S3 upload source");
-    struct stat status;
-    if (fstat(source.get(), &status) < 0)
-      throw std::system_error(errno, std::generic_category(), "stat S3 upload source");
-    if (!S_ISREG(status.st_mode) || status.st_size < 0)
-      throw std::invalid_argument("S3 upload source must be a regular file");
-    const auto size = static_cast<std::uint64_t>(status.st_size);
-    limits.ValidateFileSize(size);
-    CheckSource(source.get(), status);
-    operation->Check();
-    auto remote_state = S3RemoteState::NO_WRITES_ISSUED;
-    try {
-      // Open the already-validated inode, not the caller's path a second time.
-      // A seekable stream lets CRT rewind retries without retaining the whole file.
-      auto body = Aws::MakeShared<Aws::FStream>(kAllocationTag,
-          ("/proc/self/fd/" + std::to_string(source.get())).c_str(), std::ios::in | std::ios::binary);
-      if (!*body)
-        throw S3Error({"read source", "OpenFailed"});
-      Aws::S3Crt::Model::PutObjectRequest request;
-      request.WithBucket(destination.bucket).WithKey(destination.key).WithContentLength(size);
-      request.SetContentType("application/octet-stream");
-      request.SetBody(body);
-      operation->Check();
-      remote_state = S3RemoteState::UNKNOWN;
-      const auto outcome = Upload(request, operation);
-      if (outcome.IsSuccess())
-        remote_state = S3RemoteState::COMPLETED;
-      operation->Check();
-      CheckSource(source.get(), status);
-      if (!outcome.IsSuccess())
-        throw S3Error(RequestFailure("PutObject", outcome.GetError()));
-      return {destination, size};
-    }
-    catch (...) {
-      try {
-        RethrowUploadError(std::current_exception());
-      }
-      catch (S3Error& error) {
-        error.destination = destination;
-        error.remote_state = remote_state;
-        // CRT owns the multipart ID and aborts on failure. Its public outcome
-        // does not verify cleanup, including lost initiation/completion replies.
-        if (remote_state == S3RemoteState::UNKNOWN && size > limits.part_size)
-          error.cleanup_state = S3CleanupState::UNCONFIRMED;
-        throw;
-      }
-    }
+    std::lock_guard lock(owner.mutex_);
+    --owner.active_;
+    owner.changed_.notify_one();
   }
+  Operation(const Operation&) = delete;
+  Operation& operator=(const Operation&) = delete;
 
-  // Declaration order ensures all SDK-owned objects die before ShutdownAPI.
-  SdkLease sdk;
-  const S3Limits limits;
-  Slots files;
-  std::unique_ptr<Aws::S3Crt::S3CrtClient> client;
+  S3Client& owner;
+  const Cancellation cancellation;
 };
 
-S3Client::S3Client(S3Connection connection, S3Limits limits)
+S3Client::S3Client(S3Connection connection, S3Limits limits) : limits_(limits)
 {
   connection.Validate();
-  limits.Validate();
-  impl_ = std::make_unique<Impl>(connection, limits);
+  limits_.Validate();
+  if (connection.access_key_id.empty())
+    throw std::invalid_argument("rclone requires resolved startup S3 credentials");
+  if (!connection.ca_file.empty() && !std::filesystem::is_regular_file(connection.ca_file))
+    throw std::invalid_argument("S3 CA certificate file does not exist");
+  // The child receives only the startup snapshot, never ambient credential sources.
+  environment_ = {kRemoteTypeEnv,
+                  kRemoteProviderEnv,
+                  kExplicitAuthEnv,
+                  kRemoteAccessKeyEnv + connection.access_key_id,
+                  kRemoteSecretKeyEnv + connection.secret_access_key,
+                  kRemoteTokenEnv + connection.session_token,
+                  kRemoteRegionEnv + connection.region,
+                  kRemoteEndpointEnv + connection.endpoint,
+                  kDisableImdsEnv,
+                  kDisableAwsConfigEnv,
+                  kDisableAwsFileEnv};
+  // Each batch transfers one file at a time, using at most four multipart buffers.
+  const auto concurrency = std::min<std::uint64_t>(4, limits.buffer_budget / limits.active_files / limits.part_size);
+  arguments_.assign(std::begin(kCommonArguments), std::end(kCommonArguments));
+  const std::string part_bytes = std::to_string(limits.part_size) + kBytesSuffix;
+  arguments_.insert(arguments_.end(),
+                    {std::string(kPathStyleFlag) + (connection.use_virtual_addressing ? kFalse : kTrue),
+                     kUploadCutoffFlag, part_bytes, kChunkSizeFlag, part_bytes, kUploadConcurrencyFlag,
+                     std::to_string(concurrency), kLowLevelRetriesFlag, std::to_string(limits.request_retries + 1),
+                     kConnectTimeoutFlag, std::to_string(limits.connect_timeout.count()) + kMillisecondsSuffix,
+                     kTimeoutFlag, std::to_string(limits.request_timeout.count()) + kMillisecondsSuffix});
+  if (connection.endpoint.starts_with(kHttpEndpointPrefix))
+    arguments_.insert(arguments_.end(), std::begin(kHttpArguments), std::end(kHttpArguments));
+  if (!connection.ca_file.empty())
+    arguments_.insert(arguments_.end(), {kCaFlag, connection.ca_file});
 }
 
-S3Client::~S3Client() noexcept = default;
-
-S3UploadResult
-S3Client::UploadFile(const std::filesystem::path& source, const S3ObjectLocation& destination,
-                       Cancellation cancellation)
+std::string
+S3Client::Execute(Operation& operation, std::vector<std::string> command, int input, std::size_t output_limit)
 {
-  return impl_->UploadFile(source, destination, cancellation);
+  command.insert(command.end(), arguments_.begin(), arguments_.end());
+  std::vector<char*> argv{const_cast<char*>(kExecutable)};
+  for (const auto& argument : command)
+    argv.push_back(const_cast<char*>(argument.c_str()));
+  argv.push_back(nullptr);
+  std::vector<char*> envp;
+  for (const auto& variable : environment_)
+    envp.push_back(const_cast<char*>(variable.c_str()));
+  envp.push_back(nullptr);
+  auto stdin_fd = HighDescriptor(input);
+  Pipe output, diagnostics;
+  const auto parent = getpid();
+  const int in = stdin_fd.get(), out = output.write_end.get(), err = diagnostics.write_end.get();
+  // Build all state in the parent. The child does no allocation, logging,
+  // locking, filesystem traversal or C++ cleanup between fork and execve.
+  sigset_t empty_mask;
+  sigemptyset(&empty_mask);
+  struct sigaction default_action {};
+  default_action.sa_handler = SIG_DFL;
+  sigemptyset(&default_action.sa_mask);
+  operation.cancellation.ThrowIfCancelled();
+  const auto pid = fork();
+  if (pid < 0)
+    throw S3Error();
+  if (pid == 0) {
+    if (dup2(in, STDIN_FILENO) < 0 || dup2(out, STDOUT_FILENO) < 0 || dup2(err, STDERR_FILENO) < 0 ||
+        syscall(SYS_close_range, 3U, UINT_MAX, 0U) < 0 || sigprocmask(SIG_SETMASK, &empty_mask, nullptr) < 0 ||
+        sigaction(SIGTERM, &default_action, nullptr) < 0 || sigaction(SIGINT, &default_action, nullptr) < 0 ||
+        sigaction(SIGPIPE, &default_action, nullptr) < 0 || prctl(PR_SET_PDEATHSIG, SIGKILL) < 0)
+      _exit(127);
+    if (getppid() != parent)
+      _exit(127);
+    execve(kExecutable, argv.data(), envp.data());
+    _exit(127);
+  }
+  Child child(pid);
+  output.write_end = FileDescriptor(-1);
+  diagnostics.write_end = FileDescriptor(-1);
+  std::string output_bytes, diagnostic_bytes;
+  bool output_done = false, diagnostics_done = false, reaped = false;
+  int status = 0;
+  auto kill_at = Clock::time_point::max();
+  while (!reaped || !output_done || !diagnostics_done) {
+    if (operation.cancellation.IsCancelled() && kill_at == Clock::time_point::max()) {
+      child.Signal(SIGTERM);
+      kill_at = Clock::now() + kTerminationGrace;
+    }
+    if (Clock::now() >= kill_at)
+      child.Signal(SIGKILL);
+    if (!output_done)
+      output_done = Drain(output.read_end.get(), output_bytes, output_limit, false);
+    if (!diagnostics_done)
+      diagnostics_done = Drain(diagnostics.read_end.get(), diagnostic_bytes, kDiagnosticsLimit, true);
+    if (!reaped)
+      reaped = child.Poll(status);
+    if (!reaped || !output_done || !diagnostics_done) {
+      pollfd descriptors[] = {{output_done ? -1 : output.read_end.get(), POLLIN, 0},
+                              {diagnostics_done ? -1 : diagnostics.read_end.get(), POLLIN, 0}};
+      if (poll(descriptors, 2, kPollMilliseconds) < 0 && errno != EINTR)
+        throw std::system_error(errno, std::generic_category(), "poll rclone output");
+    }
+  }
+  const auto exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+  operation.cancellation.ThrowIfCancelled();
+  if (exit_code != 0)
+    throw S3Error(HttpStatus(diagnostic_bytes));
+  return output_bytes;
+}
+
+void
+S3Client::UploadFiles(const std::filesystem::path& source_root, const S3ObjectLocation& destination_prefix,
+                      const std::vector<S3UploadFile>& files, Cancellation cancellation)
+{
+  destination_prefix.Validate();
+  if (source_root.empty() || source_root.native().find('\0') != std::string::npos)
+    throw std::invalid_argument("invalid S3 source directory");
+  Operation operation(*this, cancellation);
+  const auto root = std::filesystem::absolute(source_root);
+  std::filesystem::path component;
+  for (const auto& part : root) {
+    cancellation.ThrowIfCancelled();
+    component /= part;
+    if (!std::filesystem::is_directory(std::filesystem::symlink_status(component)))
+      throw std::invalid_argument("S3 source must be a directory without symlinks");
+  }
+  std::string list;
+  for (const auto& file : files) {
+    cancellation.ThrowIfCancelled();
+    const auto relative = file.relative_path.generic_string();
+    S3ObjectLocation{destination_prefix.bucket, destination_prefix.key + "/" + relative}.Validate();
+    if (relative.size() + 1 > kUploadListLimit - list.size())
+      throw std::invalid_argument("S3 upload file list exceeds size limit");
+    component = root;
+    for (const auto& part : file.relative_path) {
+      cancellation.ThrowIfCancelled();
+      component /= part;
+      if (std::filesystem::is_symlink(std::filesystem::symlink_status(component)))
+        throw std::invalid_argument("S3 upload source contains a symlink");
+    }
+    if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(component)) ||
+        std::filesystem::file_size(component) != file.size_bytes)
+      throw std::invalid_argument("S3 upload source is missing, not regular, or has the wrong size");
+    limits_.ValidateFileSize(file.size_bytes);
+    list += relative + "\n";
+  }
+  cancellation.ThrowIfCancelled();
+  if (files.empty())
+    return;
+  const auto input = InputBytes(list);
+  std::vector<std::string> command{kBatchCommand, root.string(), Remote(destination_prefix)};
+  command.insert(command.end(), std::begin(kCopyArguments), std::end(kCopyArguments));
+  command.insert(command.end(), std::begin(kReadArguments), std::end(kReadArguments));
+  Execute(operation, std::move(command), input.get(), 0);
 }
 
 std::optional<std::uint64_t>
 S3Client::Head(const S3ObjectLocation& object, Cancellation cancellation)
 {
-  Aws::S3Crt::Model::HeadObjectRequest request;
-  const auto result = impl_->MetadataRequest(request, object, cancellation, [&](const auto& value) { return impl_->client->HeadObject(value); });
-  if (!result.IsSuccess()) {
-    if (result.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND)
-      return std::nullopt;
-    throw S3Error(RequestFailure("HeadObject", result.GetError()));
-  }
-  if (result.GetResult().GetContentLength() < 0)
-    throw S3ResponseError("negative S3 object size");
-  return result.GetResult().GetContentLength();
+  object.Validate();
+  Operation operation(*this, cancellation);
+  const auto filter = InputBytes(object.key + "\n");
+  auto command = ReadArguments(kStatCommand, object);
+  command.insert(command.end(), std::begin(kStatArguments), std::end(kStatArguments));
+  const auto bytes = Execute(operation, std::move(command), filter.get(), kMetadataStatLimit);
+  const auto entries = nlohmann::json::parse(bytes, nullptr, false);
+  if (!entries.is_array() || entries.size() > 1)
+    throw S3ResponseError("invalid S3 object size response");
+  if (entries.empty())
+    return std::nullopt;
+  const auto& value = entries.front();
+  if (!value.is_object() || !value.contains(kSizeField) || !value[kSizeField].is_number_integer() ||
+      !value.contains(kDirectoryField) || value[kDirectoryField] != false || value[kSizeField].get<std::int64_t>() < 0)
+    throw S3ResponseError("invalid S3 object size response");
+  return value[kSizeField].get<std::uint64_t>();
 }
 
 std::optional<std::string>
@@ -579,56 +570,35 @@ S3Client::Get(const S3ObjectLocation& object, std::size_t max_bytes, Cancellatio
     return std::nullopt;
   if (*size > max_bytes)
     throw S3ResponseError("S3 object exceeds size limit");
-  // CRT issues a ranged GET, which is unsatisfiable for a zero-length object.
   if (*size == 0)
     return std::string{};
-  BoundedBuffer buffer(*size);
-  Aws::S3Crt::Model::GetObjectRequest request;
-  request.SetResponseStreamFactory([&buffer] {
-    buffer.Reset();
-    return Aws::New<Aws::IOStream>(kAllocationTag, &buffer);
-  });
-  auto result = impl_->MetadataRequest(request, object, cancellation, [&](const auto& value) { return impl_->client->GetObject(value); });
-  if (!result.IsSuccess()) {
-    if (result.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND)
-      return std::nullopt;
-    throw S3Error(RequestFailure("GetObject", result.GetError()));
+  // An exact files-from list plus no-traverse uses NewObject, never ListBucket,
+  // even if the object disappears between HEAD and GET. No glob interpretation.
+  std::string bytes;
+  {
+    Operation operation(*this, cancellation);
+    const auto filter = InputBytes(object.key + "\n");
+    bytes = Execute(operation, ReadArguments(kReadCommand, object), filter.get(), *size);
   }
-  auto bytes = buffer.Bytes();
-  if (!HasConsistentObjectSize(bytes.size(), *size, max_bytes, result.GetResult().GetContentLength()))
+  if (bytes.empty() && !Head(object, cancellation))
+    return std::nullopt;
+  if (bytes.size() != *size)
     throw S3ResponseError("S3 object size changed or exceeds limit");
   return bytes;
 }
 
 void
-S3Client::Put(const S3ObjectLocation& object, const std::string& bytes, std::size_t max_bytes, Cancellation cancellation)
+S3Client::Put(const S3ObjectLocation& object, const std::string& bytes, std::size_t max_bytes,
+              Cancellation cancellation)
 {
-  if (bytes.size() > max_bytes || bytes.size() > impl_->limits.part_size)
+  object.Validate();
+  if (bytes.size() > max_bytes || bytes.size() > limits_.part_size)
     throw std::invalid_argument("metadata exceeds size limit or single-PUT threshold");
-  Aws::S3Crt::Model::PutObjectRequest request;
-  request.WithIfNoneMatch("*");
-  request.SetContentLength(bytes.size());
-  request.SetContentType("application/json");
-  auto body = Aws::MakeShared<Aws::StringStream>(kAllocationTag);
-  body->write(bytes.data(), bytes.size());
-  request.SetBody(body);
-  auto remote_state = S3RemoteState::NO_WRITES_ISSUED;
-  try {
-    const auto result = impl_->MetadataRequest(request, object, cancellation, [&](const auto& value) {
-      remote_state = S3RemoteState::UNKNOWN;
-      auto outcome = impl_->client->PutObject(value);
-      if (outcome.IsSuccess())
-        remote_state = S3RemoteState::COMPLETED;
-      return outcome;
-    });
-    if (!result.IsSuccess())
-      throw S3Error(RequestFailure("PutObject", result.GetError()));
-  }
-  catch (S3Error& error) {
-    error.destination = object;
-    error.remote_state = remote_state;
-    throw;
-  }
+  Operation operation(*this, cancellation);
+  const auto source = InputBytes(bytes);
+  std::vector<std::string> command{kCopyCommand, kInputPath, Remote(object), kCopyLinksFlag};
+  command.insert(command.end(), std::begin(kCopyArguments), std::end(kCopyArguments));
+  command.insert(command.end(), std::begin(kCreateOnlyArguments), std::end(kCreateOnlyArguments));
+  Execute(operation, std::move(command), source.get(), 0);
 }
-
-}  // namespace snapshot::pagebroker
+} // namespace snapshot::pagebroker

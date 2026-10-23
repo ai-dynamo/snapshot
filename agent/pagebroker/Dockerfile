@@ -98,55 +98,38 @@ ADD --checksum=sha256:5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf
 FROM scratch AS model-streamer-sdk
 COPY --from=model-streamer-install /opt/model-streamer-sdk/ /
 
-# The S3 client has its own SDK; the Model Streamer plugin's SDK symbols are
-# private. Pin the source and its submodules rather than a host-installed SDK.
-FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS aws-sdk
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates cmake git libssl-dev zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
-RUN git init /src/aws-sdk-cpp \
-    && cd /src/aws-sdk-cpp \
-    && git remote add origin https://github.com/aws/aws-sdk-cpp.git \
-    && git fetch --depth 1 origin e03a5aa84e101193f10ef8b40ba14951f5ace625 \
-    && git checkout --detach FETCH_HEAD \
-    && git submodule update --init --recursive --depth 1
-RUN cmake -S /src/aws-sdk-cpp -B /src/aws-sdk-cpp/build -DCMAKE_BUILD_TYPE=Release \
-       -DCMAKE_INSTALL_PREFIX=/opt/aws-sdk -DCMAKE_INSTALL_LIBDIR=lib \
-       -DBUILD_ONLY=s3-crt -DUSE_CRT_HTTP_CLIENT=ON -DBUILD_SHARED_LIBS=ON \
-       -DENABLE_TESTING=OFF -DAUTORUN_UNIT_TESTS=OFF \
-    && cmake --build /src/aws-sdk-cpp/build --parallel 4 \
-    && cmake --install /src/aws-sdk-cpp/build
+# Download an unmodified upstream executable. The Go stage collects notices
+# from the matching release's module graph; it does not rebuild or patch rclone.
+FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS rclone-install
+ARG PAGEBROKER_RCLONE_VERSION=1.75.2
+ADD --checksum=sha256:349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702 https://downloads.rclone.org/v${PAGEBROKER_RCLONE_VERSION}/rclone-v${PAGEBROKER_RCLONE_VERSION}-linux-amd64.zip /tmp/rclone.zip
+ADD --checksum=sha256:68afd7f68c84bd978966feae2116339aa7bf454b39c573910c462e87c3774d5a https://codeload.github.com/rclone/rclone/tar.gz/refs/tags/v${PAGEBROKER_RCLONE_VERSION} /tmp/rclone.tar.gz
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && unzip -q /tmp/rclone.zip -d /tmp \
+    && mkdir -p /rclone/bin /rclone/legal /src/rclone \
+    && cp /tmp/rclone-v${PAGEBROKER_RCLONE_VERSION}-linux-amd64/rclone /rclone/bin/ \
+    && tar -xzf /tmp/rclone.tar.gz --strip-components=1 -C /src/rclone \
+    && cp /tmp/rclone.tar.gz /rclone/legal/source.tar.gz \
+    && cp /src/rclone/COPYING /rclone/legal/LICENSE \
+    && cp /usr/local/go/LICENSE /rclone/legal/Go-LICENSE \
+    && /rclone/bin/rclone version > /rclone/legal/VERSION \
+    && go version -m /rclone/bin/rclone > /rclone/legal/BUILD-INFO \
+    && sha256sum /tmp/rclone.zip /tmp/rclone.tar.gz > /rclone/legal/SHA256SUMS
+WORKDIR /src/rclone
+RUN go mod download all \
+    && find /go/pkg/mod -type f \( -iname 'license*' -o -iname 'notice*' -o -iname 'copying*' \) \
+       ! -path '/go/pkg/mod/cache/*' | sort > /tmp/notices \
+    && while IFS= read -r notice; do \
+         printf '\nCOMPONENT NOTICE: %s\n' "${notice#/go/pkg/mod/}" && cat "$notice" || exit 1; \
+       done < /tmp/notices > /rclone/legal/THIRD-PARTY-NOTICES.txt
 
-# Include the HTTP/TLS dependency closure in the shell-free runtime. The base
-# already supplies the C/C++ runtime. Keep package attribution with each copy.
-RUN set -eu; \
-    mkdir -p /runtime/lib /runtime/legal/aws-sdk /runtime/legal/packages; \
-    cp -a /opt/aws-sdk/lib/*.so* /runtime/lib/; \
-    cp /src/aws-sdk-cpp/LICENSE /runtime/legal/aws-sdk/; \
-    git -C /src/aws-sdk-cpp rev-parse HEAD > /runtime/legal/aws-sdk/REVISION; \
-    find /src/aws-sdk-cpp/crt -name LICENSE -o -name NOTICE | while read -r notice; do \
-      relative=${notice#/src/aws-sdk-cpp/}; \
-      mkdir -p "/runtime/legal/aws-sdk/$(dirname "$relative")"; \
-      cp "$notice" "/runtime/legal/aws-sdk/$relative"; \
-    done; \
-    LD_LIBRARY_PATH=/opt/aws-sdk/lib ldd /opt/aws-sdk/lib/*.so > /tmp/aws-ldd; \
-    if grep -q 'not found' /tmp/aws-ldd; then cat /tmp/aws-ldd; exit 1; fi; \
-    awk '$2 == "=>" && substr($3, 1, 1) == "/" { print $3 }' /tmp/aws-ldd | sort -u > /tmp/aws-libraries; \
-    while read -r library; do \
-      case "$library" in \
-        */libc.so.*|*/libm.so.*|*/libstdc++.so.*|*/libgcc_s.so.*|*/libpthread.so.*|*/libdl.so.*|*/librt.so.*) continue ;; \
-        /opt/aws-sdk/*) continue ;; \
-      esac; \
-      cp -L "$library" /runtime/lib/; \
-      package=$(dpkg-query -S "$(readlink -f "$library")" | head -1 | cut -d: -f1); \
-      mkdir -p "/runtime/legal/packages/$package"; \
-      cp "/usr/share/doc/$package/copyright" "/runtime/legal/packages/$package/"; \
-    done < /tmp/aws-libraries
+# Native developers can export the same executable and attribution.
+FROM scratch AS rclone-artifacts
+COPY --from=rclone-install /rclone/ /
 
-FROM aws-sdk AS build-dependencies
-
-COPY --from=aws-sdk /opt/aws-sdk /usr/local
-RUN rm -rf /src/aws-sdk-cpp && ldconfig
+FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build-dependencies
+COPY --from=rclone-install /rclone/bin/rclone /usr/local/bin/rclone
 
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
 COPY --from=model-streamer-install /opt/model-streamer-sdk/include/ /usr/local/include/
@@ -159,10 +142,13 @@ COPY compliance/ compliance/
 # later layer cannot fetch the source of the version installed here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    ca-certificates \
     libaio-dev \
     libgtest-dev \
     libprotobuf-dev \
     libssl-dev \
+    nlohmann-json3-dev=3.11.3-1 \
+    openssl \
     pkg-config \
     protobuf-compiler \
     && sh compliance/collect-sources.sh /legal/source/protobuf libprotobuf-dev \
@@ -234,8 +220,9 @@ ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 COPY --from=build /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/local/lib/libcrypto.so.3
 COPY --from=build /usr/share/doc/libssl-dev/copyright /legal/openssl/copyright
-COPY --from=aws-sdk /runtime/lib/ /usr/local/lib/
-COPY --from=aws-sdk /runtime/legal/ /legal/
+COPY --from=rclone-install /rclone/bin/rclone /usr/local/bin/rclone
+COPY --from=rclone-install /rclone/legal/ /legal/rclone/
+COPY --from=build /usr/share/doc/nlohmann-json3-dev/copyright /legal/nlohmann-json/copyright
 COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/ /legal/model-streamer/
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamers3.so /usr/local/lib/libstreamers3.so
