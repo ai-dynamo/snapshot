@@ -68,14 +68,26 @@ const (
 	vclusterUIDAnnotation       = "vcluster.loft.sh/object-uid"
 )
 
-// DestinationResolver returns the containers a restore Pod restores into.
-type DestinationResolver interface {
+// Restorer is the agent's restore controller, as the plugin sees it.
+type Restorer interface {
+	// RestoreDestinations returns the containers a restore Pod restores into.
 	RestoreDestinations(ctx context.Context, pod *corev1.Pod) ([]string, error)
+	// RestoreContainerStarted reports a destination container that is now
+	// running, so its restore starts without waiting for the Pod status.
+	RestoreContainerStarted(pod ktypes.NamespacedName, uid ktypes.UID, container, containerID string)
+}
+
+// destination is a restore destination container the plugin shaped, by the
+// identity its restore controller knows the Pod by.
+type destination struct {
+	pod       ktypes.NamespacedName
+	uid       ktypes.UID
+	container string
 }
 
 // Plugin is the NRI plugin.
 type Plugin struct {
-	resolver      DestinationResolver
+	restorer      Restorer
 	log           logr.Logger
 	hostNamespace string
 	// openControlDir, proxyPath and socketPath are replaced in tests. An
@@ -88,17 +100,20 @@ type Plugin struct {
 	// stub and closed are set when Start registers.
 	stub   stub.Stub
 	closed chan struct{}
+	// created maps the ID of each destination container the plugin shaped to
+	// its destination, until the container starts or is removed.
+	created sync.Map
 }
 
-// NewPlugin returns a plugin that resolves destinations through resolver. If
+// NewPlugin returns a plugin that resolves destinations through restorer. If
 // hostNamespace is set, the plugin acts only on Pods in that namespace on the
 // node. Set it when other clusters share the nodes, such as vCluster tenants:
 // the runtime calls every plugin for every Pod on the node, and restore Pods of
 // another cluster would fail here. One vCluster's Pods all run in one host
 // namespace.
-func NewPlugin(resolver DestinationResolver, log logr.Logger, hostNamespace string) *Plugin {
+func NewPlugin(restorer Restorer, log logr.Logger, hostNamespace string) *Plugin {
 	return &Plugin{
-		resolver:       resolver,
+		restorer:       restorer,
 		log:            log,
 		hostNamespace:  hostNamespace,
 		openControlDir: snapshotruntime.OpenPodControlDir,
@@ -203,7 +218,7 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 
 	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
-	destinations, err := p.resolver.RestoreDestinations(lookupCtx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+	destinations, err := p.restorer.RestoreDestinations(lookupCtx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:        name,
 		Namespace:   namespace,
 		UID:         ktypes.UID(uid),
@@ -230,8 +245,31 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 
 	adjust := &api.ContainerAdjustment{}
 	adjust.SetArgs([]string{podcontract.RestoreProxyPath})
+	p.created.Store(ctr.GetId(), destination{
+		pod:       ktypes.NamespacedName{Namespace: namespace, Name: name},
+		uid:       ktypes.UID(uid),
+		container: ctr.GetName(),
+	})
 	log.Info("Restore proxy is PID 1", "control_dir", dir.Name())
 	return adjust, nil, nil
+}
+
+// PostStartContainer tells the restore controller that a destination container
+// it shaped is running. kubelet publishes that in the Pod status only later,
+// and in a vCluster tenant the controller cannot find the container in the
+// runtime by its Pod name, which the runtime knows by the host Pod's.
+func (p *Plugin) PostStartContainer(_ context.Context, _ *api.PodSandbox, ctr *api.Container) error {
+	if d, ok := p.created.LoadAndDelete(ctr.GetId()); ok {
+		d := d.(destination)
+		p.restorer.RestoreContainerStarted(d.pod, d.uid, d.container, ctr.GetId())
+	}
+	return nil
+}
+
+// RemoveContainer forgets a destination container that never started.
+func (p *Plugin) RemoveContainer(_ context.Context, _ *api.PodSandbox, ctr *api.Container) error {
+	p.created.Delete(ctr.GetId())
+	return nil
 }
 
 // podIdentity returns the Pod's namespace, name and UID in its own cluster.

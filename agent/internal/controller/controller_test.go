@@ -1105,6 +1105,68 @@ func TestContainerPollingDoesNotSetInProgressBeforeExecution(t *testing.T) {
 	assert.False(t, hasPodStatusApply(w))
 }
 
+// In a vCluster tenant the runtime knows the container by the host Pod's name,
+// so the runtime lookup never matches; the NRI report must resolve it.
+func TestResolveRestoreContainerIDUsesContainerStartedUnderNRI(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	pod.Status.ContainerStatuses[0].ContainerID = ""
+	podKey := client.ObjectKeyFromObject(pod)
+
+	t.Run("reported before the pass", func(t *testing.T) {
+		w := makeTestController(t, pod)
+		w.RestoreContainerStarted(podKey, pod.UID, "main", "nri-container")
+		assert.Equal(t, 1, w.restoreQueue.Len(), "the Pod is requeued at once")
+
+		containerID, requeue := w.resolveRestoreContainerID(context.Background(), pod, "main", podKey.String())
+
+		assert.Equal(t, "nri-container", containerID)
+		assert.False(t, requeue)
+		containerID, _ = w.resolveRestoreContainerID(canceledContext(), pod, "main", podKey.String())
+		assert.Empty(t, containerID, "a report is used once")
+	})
+
+	t.Run("reported while the pass polls", func(t *testing.T) {
+		w := makeTestController(t, pod)
+		go func() {
+			time.Sleep(5 * restoreContainerResolveInterval)
+			w.RestoreContainerStarted(podKey, pod.UID, "main", "nri-container")
+		}()
+		start := time.Now()
+
+		containerID, requeue := w.resolveRestoreContainerID(context.Background(), pod, "main", podKey.String())
+
+		assert.Equal(t, "nri-container", containerID)
+		assert.False(t, requeue)
+		assert.Less(t, time.Since(start), restoreContainerResolveTimeout/10, "not after the runtime poll gives up")
+	})
+
+	t.Run("another Pod's report", func(t *testing.T) {
+		w := makeTestController(t, pod)
+		w.RestoreContainerStarted(podKey, "other-uid", "main", "nri-container")
+
+		containerID, _ := w.resolveRestoreContainerID(canceledContext(), pod, "main", podKey.String())
+
+		assert.Empty(t, containerID)
+	})
+
+	t.Run("forgotten with the Pod", func(t *testing.T) {
+		w := makeTestController(t, pod)
+		w.RestoreContainerStarted(podKey, pod.UID, "main", "nri-container")
+		w.forgetRestorePod(pod)
+
+		containerID, _ := w.resolveRestoreContainerID(canceledContext(), pod, "main", podKey.String())
+
+		assert.Empty(t, containerID)
+	})
+}
+
+// canceledContext makes resolveRestoreContainerID check once and return.
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
 func TestPreflightRestoreValidatesContentBacklink(t *testing.T) {
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	tests := map[string]func(*snapshotv1alpha1.PodSnapshotContent){

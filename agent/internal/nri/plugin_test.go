@@ -16,30 +16,43 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	ktypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-type fakeResolver struct {
+type started struct {
+	pod         ktypes.NamespacedName
+	uid         ktypes.UID
+	container   string
+	containerID string
+}
+
+type fakeRestorer struct {
 	destinations []string
 	err          error
 	calls        int
 	pod          *corev1.Pod
+	started      []started
 }
 
-func (r *fakeResolver) RestoreDestinations(_ context.Context, pod *corev1.Pod) ([]string, error) {
+func (r *fakeRestorer) RestoreDestinations(_ context.Context, pod *corev1.Pod) ([]string, error) {
 	r.calls++
 	r.pod = pod
 	return r.destinations, r.err
 }
 
+func (r *fakeRestorer) RestoreContainerStarted(pod ktypes.NamespacedName, uid ktypes.UID, container, containerID string) {
+	r.started = append(r.started, started{pod, uid, container, containerID})
+}
+
 // testPlugin installs into a temporary directory instead of kubelet's.
-func testPlugin(t *testing.T, resolver *fakeResolver) (*Plugin, string) {
+func testPlugin(t *testing.T, restorer *fakeRestorer) (*Plugin, string) {
 	t.Helper()
 	root := t.TempDir()
 	proxy := filepath.Join(root, "proxy-src")
 	require.NoError(t, os.WriteFile(proxy, []byte("proxy binary"), 0o755))
-	p := NewPlugin(resolver, testr.New(t), "")
+	p := NewPlugin(restorer, testr.New(t), "")
 	p.proxyPath = proxy
 	p.openControlDir = func(podUID, containerName string) (*os.File, error) {
 		dir := filepath.Join(root, podUID, containerName)
@@ -70,14 +83,14 @@ func TestCreateContainerScope(t *testing.T) {
 		"one of two destinations": {annotations: restoreFrom, container: "engine-1", destinations: []string{"engine-0", "engine-1"}, wantShaped: true, wantLookup: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			resolver := &fakeResolver{destinations: tc.destinations}
-			p, root := testPlugin(t, resolver)
+			restorer := &fakeRestorer{destinations: tc.destinations}
+			p, root := testPlugin(t, restorer)
 
 			adjust, updates, err := p.CreateContainer(context.Background(), restoreSandbox(tc.annotations), &api.Container{Name: tc.container})
 
 			require.NoError(t, err)
 			assert.Nil(t, updates)
-			assert.Equal(t, tc.wantLookup, resolver.calls > 0)
+			assert.Equal(t, tc.wantLookup, restorer.calls > 0)
 			installed := filepath.Join(root, "pod-uid", tc.container, podcontract.RestoreProxyBinaryName)
 			if !tc.wantShaped {
 				assert.Nil(t, adjust)
@@ -96,27 +109,27 @@ func TestCreateContainerScope(t *testing.T) {
 	}
 }
 
-func TestCreateContainerPassesPodIdentityToResolver(t *testing.T) {
+func TestCreateContainerPassesPodIdentityToRestorer(t *testing.T) {
 	t.Run("plain cluster", func(t *testing.T) {
 		annotations := map[string]string{
 			podcontract.RestoreFromAnnotation:         "snapshot-a",
 			podcontract.RestoreContainerMapAnnotation: "main=engine-0",
 		}
-		resolver := &fakeResolver{destinations: []string{"engine-0"}}
-		p, _ := testPlugin(t, resolver)
+		restorer := &fakeRestorer{destinations: []string{"engine-0"}}
+		p, _ := testPlugin(t, restorer)
 
 		_, _, err := p.CreateContainer(context.Background(), restoreSandbox(annotations), &api.Container{Name: "engine-0"})
 
 		require.NoError(t, err)
-		assert.Equal(t, "restore-worker", resolver.pod.Name)
-		assert.Equal(t, "inference", resolver.pod.Namespace)
-		assert.Equal(t, "pod-uid", string(resolver.pod.UID))
-		assert.Equal(t, annotations, resolver.pod.Annotations)
+		assert.Equal(t, "restore-worker", restorer.pod.Name)
+		assert.Equal(t, "inference", restorer.pod.Namespace)
+		assert.Equal(t, "pod-uid", string(restorer.pod.UID))
+		assert.Equal(t, annotations, restorer.pod.Annotations)
 	})
 
 	t.Run("vCluster", func(t *testing.T) {
-		resolver := &fakeResolver{destinations: []string{"main"}}
-		p, root := testPlugin(t, resolver)
+		restorer := &fakeRestorer{destinations: []string{"main"}}
+		p, root := testPlugin(t, restorer)
 		sandbox := &api.PodSandbox{
 			Name: "restore-worker-x-inference-x-tenant", Namespace: "tenant", Uid: "host-uid",
 			Annotations: map[string]string{
@@ -131,9 +144,9 @@ func TestCreateContainerPassesPodIdentityToResolver(t *testing.T) {
 
 		require.NoError(t, err)
 		require.NotNil(t, adjust)
-		assert.Equal(t, "inference", resolver.pod.Namespace)
-		assert.Equal(t, "restore-worker", resolver.pod.Name)
-		assert.Equal(t, "pod-uid", string(resolver.pod.UID))
+		assert.Equal(t, "inference", restorer.pod.Namespace)
+		assert.Equal(t, "restore-worker", restorer.pod.Name)
+		assert.Equal(t, "pod-uid", string(restorer.pod.UID))
 		assert.FileExists(t, filepath.Join(root, "host-uid", "main", podcontract.RestoreProxyBinaryName),
 			"kubelet's directories use the host Pod's UID")
 	})
@@ -152,8 +165,8 @@ func TestCreateContainerHostNamespace(t *testing.T) {
 		"another namespace": {hostNamespace: "tenant", wantShaped: false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			resolver := &fakeResolver{destinations: []string{"main"}}
-			p, root := testPlugin(t, resolver)
+			restorer := &fakeRestorer{destinations: []string{"main"}}
+			p, root := testPlugin(t, restorer)
 			p.hostNamespace = tc.hostNamespace
 
 			adjust, _, err := p.CreateContainer(context.Background(), restoreSandbox(restoreFrom), &api.Container{Name: "main"})
@@ -162,7 +175,7 @@ func TestCreateContainerHostNamespace(t *testing.T) {
 			installed := filepath.Join(root, "pod-uid", "main", podcontract.RestoreProxyBinaryName)
 			if !tc.wantShaped {
 				assert.Nil(t, adjust)
-				assert.Zero(t, resolver.calls, "no API reads for another cluster's Pod")
+				assert.Zero(t, restorer.calls, "no API reads for another cluster's Pod")
 				assert.NoFileExists(t, installed)
 				return
 			}
@@ -178,7 +191,7 @@ func TestCreateContainerFailsClosed(t *testing.T) {
 	restoreFrom := map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"}
 
 	t.Run("destination lookup fails", func(t *testing.T) {
-		p, _ := testPlugin(t, &fakeResolver{err: errors.New("PodSnapshot not found")})
+		p, _ := testPlugin(t, &fakeRestorer{err: errors.New("PodSnapshot not found")})
 
 		adjust, _, err := p.CreateContainer(context.Background(), restoreSandbox(restoreFrom), &api.Container{Name: "main"})
 
@@ -187,13 +200,70 @@ func TestCreateContainerFailsClosed(t *testing.T) {
 	})
 
 	t.Run("proxy binary missing", func(t *testing.T) {
-		p, _ := testPlugin(t, &fakeResolver{destinations: []string{"main"}})
+		p, _ := testPlugin(t, &fakeRestorer{destinations: []string{"main"}})
 		p.proxyPath = filepath.Join(t.TempDir(), "missing")
 
 		adjust, _, err := p.CreateContainer(context.Background(), restoreSandbox(restoreFrom), &api.Container{Name: "main"})
 
 		require.Error(t, err)
 		assert.Nil(t, adjust)
+	})
+}
+
+// The controller restores as soon as the destination runs, by the identity it
+// knows the Pod by, rather than waiting for kubelet's status.
+func TestPostStartContainerReportsDestinations(t *testing.T) {
+	vclusterSandbox := &api.PodSandbox{
+		Name: "restore-worker-x-inference-x-tenant", Namespace: "tenant", Uid: "host-uid",
+		Annotations: map[string]string{
+			podcontract.RestoreFromAnnotation: "snapshot-a",
+			vclusterNamespaceAnnotation:       "inference",
+			vclusterNameAnnotation:            "restore-worker",
+			vclusterUIDAnnotation:             "pod-uid",
+		},
+	}
+	main := &api.Container{Id: "ctr-main", Name: "main"}
+	sidecar := &api.Container{Id: "ctr-sidecar", Name: "sidecar"}
+
+	t.Run("destination", func(t *testing.T) {
+		restorer := &fakeRestorer{destinations: []string{"main"}}
+		p, _ := testPlugin(t, restorer)
+		_, _, err := p.CreateContainer(context.Background(), vclusterSandbox, main)
+		require.NoError(t, err)
+		assert.Empty(t, restorer.started, "not before the container runs")
+
+		require.NoError(t, p.PostStartContainer(context.Background(), vclusterSandbox, main))
+		require.NoError(t, p.PostStartContainer(context.Background(), vclusterSandbox, main))
+
+		assert.Equal(t, []started{{
+			pod:         ktypes.NamespacedName{Namespace: "inference", Name: "restore-worker"},
+			uid:         "pod-uid",
+			container:   "main",
+			containerID: "ctr-main",
+		}}, restorer.started, "reported once, by the tenant identity")
+	})
+
+	t.Run("other containers", func(t *testing.T) {
+		restorer := &fakeRestorer{destinations: []string{"main"}}
+		p, _ := testPlugin(t, restorer)
+		_, _, err := p.CreateContainer(context.Background(), vclusterSandbox, sidecar)
+		require.NoError(t, err)
+
+		require.NoError(t, p.PostStartContainer(context.Background(), vclusterSandbox, sidecar))
+
+		assert.Empty(t, restorer.started)
+	})
+
+	t.Run("removed before it started", func(t *testing.T) {
+		restorer := &fakeRestorer{destinations: []string{"main"}}
+		p, _ := testPlugin(t, restorer)
+		_, _, err := p.CreateContainer(context.Background(), vclusterSandbox, main)
+		require.NoError(t, err)
+
+		require.NoError(t, p.RemoveContainer(context.Background(), vclusterSandbox, main))
+		require.NoError(t, p.PostStartContainer(context.Background(), vclusterSandbox, main))
+
+		assert.Empty(t, restorer.started)
 	})
 }
 
@@ -221,7 +291,7 @@ func TestInstallProxyReplacesAnEarlierCopy(t *testing.T) {
 
 // Without NRI, Start fails at once, and the agent restores without the proxy.
 func TestStartFailsWithoutNRI(t *testing.T) {
-	p, _ := testPlugin(t, &fakeResolver{})
+	p, _ := testPlugin(t, &fakeRestorer{})
 	p.socketPath = filepath.Join(t.TempDir(), "nri.sock") // nothing listens here
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -259,7 +329,7 @@ func TestDropsArgs(t *testing.T) {
 
 func TestConfigure(t *testing.T) {
 	t.Run("a runtime that applies args keeps the default events", func(t *testing.T) {
-		p, _ := testPlugin(t, &fakeResolver{})
+		p, _ := testPlugin(t, &fakeRestorer{})
 		p.runtimeNRIVersion = func() string { return "v0.11.0" }
 
 		events, err := p.Configure(context.Background(), "", "containerd", "v2.2.1")
@@ -270,7 +340,7 @@ func TestConfigure(t *testing.T) {
 
 	// Registration fails, as without NRI, and restores run without the proxy.
 	t.Run("a runtime that drops args is refused", func(t *testing.T) {
-		p, _ := testPlugin(t, &fakeResolver{})
+		p, _ := testPlugin(t, &fakeRestorer{})
 		p.runtimeNRIVersion = func() string { return "v0.8.0" }
 
 		_, err := p.Configure(context.Background(), "", "containerd", "v2.1.5")
