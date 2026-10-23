@@ -4,8 +4,10 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -571,31 +573,57 @@ func TestApplyRootfsDiff(t *testing.T) {
 		}
 	})
 
-	t.Run("staged local copy is removed after extract", func(t *testing.T) {
-		upperDir := t.TempDir()
-		checkpointDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(upperDir, "generated.txt"), []byte("runtime data"), 0644); err != nil {
-			t.Fatalf("write upperdir file: %v", err)
-		}
-		if _, err := CaptureRootfsDiff(upperDir, checkpointDir, RootfsDiffOptions{}); err != nil {
-			t.Fatalf("CaptureRootfsDiff: %v", err)
-		}
+}
 
-		before, err := filepath.Glob(filepath.Join(os.TempDir(), rootfsDiffFilename+".*.tmp"))
-		if err != nil {
-			t.Fatalf("glob staged copies: %v", err)
-		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testBundle(t), testr.New(t)); err != nil {
-			t.Fatalf("ApplyRootfsDiff: %v", err)
-		}
-		after, err := filepath.Glob(filepath.Join(os.TempDir(), rootfsDiffFilename+".*.tmp"))
-		if err != nil {
-			t.Fatalf("glob staged copies: %v", err)
-		}
-		if len(after) != len(before) {
-			t.Fatalf("staged local copies leaked: before %v after %v", before, after)
-		}
-	})
+func TestReadAhead(t *testing.T) {
+	// More chunks than are read ahead, and a partial last chunk.
+	want := make([]byte, readAheadChunks*readAheadChunkBytes*2+12345)
+	for i := range want {
+		want[i] = byte(i * 31)
+	}
+	path := filepath.Join(t.TempDir(), "archive")
+	if err := os.WriteFile(path, want, 0644); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open archive: %v", err)
+	}
+	defer f.Close()
+
+	stream := newReadAhead(f, int64(len(want)))
+	got, err := io.ReadAll(stream)
+	stream.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("read %d bytes that differ from the %d in the file", len(got), len(want))
+	}
+
+	// WriteTo hands out whole chunks, as tar's pipe gets them.
+	stream = newReadAhead(f, int64(len(want)))
+	var written bytes.Buffer
+	n, err := stream.WriteTo(&written)
+	stream.Close()
+	if err != nil || n != int64(len(want)) || !bytes.Equal(written.Bytes(), want) {
+		t.Fatalf("WriteTo = %d, %v, want the %d bytes of the file", n, err, len(want))
+	}
+
+	// A file shorter than its recorded size fails instead of ending early.
+	stream = newReadAhead(f, int64(len(want))+1)
+	_, err = io.ReadAll(stream)
+	stream.Close()
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("read past the end = %v, want io.ErrUnexpectedEOF", err)
+	}
+
+	// Closing before the end stops reading ahead.
+	stream = newReadAhead(f, int64(len(want)))
+	if _, err := stream.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	stream.Close()
 }
 
 func TestCaptureDeletedFiles(t *testing.T) {
