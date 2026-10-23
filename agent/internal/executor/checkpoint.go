@@ -285,16 +285,18 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	var gpuDevicePaths map[string]string
 	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
-		if err := refuseMIGCapture(ctx, log, pid); err != nil {
+		gpuStart := time.Now()
+		// One nvidia-smi answers both the MIG check and GPU discovery.
+		visible := cuda.ListVisibleGPUs(ctx, snapshotruntime.HostProcPath, pid)
+		if err := refuseMIGCapture(log, pid, visible); err != nil {
 			return nil, 0, err
 		}
-		gpuStart := time.Now()
 		var env []string
 		if ociSpec != nil && ociSpec.Process != nil {
 			env = ociSpec.Process.Env
 		}
 		gpus, err = cuda.DiscoverGPUs(ctx, req.Clientset, req.PodName, req.PodNamespace,
-			req.ContainerName, snapshotruntime.HostProcPath, pid, env, log)
+			req.ContainerName, env, visible, log)
 		gpuDeviceMapDuration = time.Since(gpuStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
