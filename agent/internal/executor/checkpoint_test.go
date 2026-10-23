@@ -144,7 +144,7 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 func TestGPUCheckpointCannotFallBackWhenExecutionIsMissing(t *testing.T) {
 	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{}, &types.CheckpointManifest{CUDA: types.CUDAManifest{CustomStorage: true}},
 		&types.CheckpointContainerSnapshot{CUDAHostPIDs: []int{12}, CUDANSPIDs: []int{12}},
-		t.TempDir(), "", logr.Discard(), nil, 0)
+		t.TempDir(), logr.Discard(), nil, 0)
 	require.ErrorContains(t, err, "missing PageBroker CustomStorage execution context")
 }
 
@@ -380,7 +380,7 @@ func TestCapturePreparesOnlyCoordinatorParticipants(t *testing.T) {
 			_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
 				&types.CheckpointManifest{CuInterpose: identity},
 				&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1}, CUDANSPIDs: []int{1}},
-				t.TempDir(), "", logr.Discard(), nil, 0)
+				t.TempDir(), logr.Discard(), nil, 0)
 			require.ErrorContains(t, err, tc.wantError)
 		})
 	}
@@ -612,7 +612,7 @@ func TestCheckpointCommitFailureReleasesOnlySettledFailures(t *testing.T) {
 			originalCapture := captureCheckpointFunc
 			t.Cleanup(func() { captureCheckpointFunc = originalCapture })
 			captureCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
-				*types.CheckpointContainerSnapshot, string, string, logr.Logger, *pagebroker.CustomStorageExecution,
+				*types.CheckpointContainerSnapshot, string, logr.Logger, *pagebroker.CustomStorageExecution,
 				int,
 			) (*checkpointPhaseTimings, error) {
 				return &checkpointPhaseTimings{}, nil
@@ -698,7 +698,7 @@ func TestCheckpointKeepsStagingWhenTheCommitCannotDial(t *testing.T) {
 	originalCapture := captureCheckpointFunc
 	t.Cleanup(func() { captureCheckpointFunc = originalCapture })
 	captureCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
-		*types.CheckpointContainerSnapshot, string, string, logr.Logger, *pagebroker.CustomStorageExecution, int,
+		*types.CheckpointContainerSnapshot, string, logr.Logger, *pagebroker.CustomStorageExecution, int,
 	) (*checkpointPhaseTimings, error) {
 		// The dump completes just as the capture's context dies, so the commit
 		// that follows cannot dial.
@@ -763,7 +763,7 @@ func TestCaptureCheckpointRepeatsTheDump(t *testing.T) {
 			}
 
 			timings, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
-				&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+				&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(),
 				logr.Discard(), nil, tc.limit)
 
 			assert.Equal(t, tc.wantDumps, dumps, "number of dumps")
@@ -801,7 +801,7 @@ func TestCaptureCheckpointStopsWhenTheTreeIsNoLongerDumpable(t *testing.T) {
 	}
 
 	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
-		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(),
 		logr.Discard(), nil, 5)
 
 	require.Error(t, err)
@@ -827,7 +827,7 @@ func TestCaptureCheckpointDoesNotRepeatWithoutTheRecordedTree(t *testing.T) {
 	}
 
 	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
-		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(),
 		logr.Discard(), nil, 5)
 
 	require.Error(t, err)
@@ -872,7 +872,7 @@ func TestCaptureCheckpointStopsWhenTheContextIsDone(t *testing.T) {
 			}
 
 			_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
-				&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+				&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(),
 				logr.Discard(), nil, 5)
 
 			require.Error(t, err)
@@ -900,7 +900,7 @@ func TestCaptureCheckpointSkipsTheTreeWhenNoRetriesRemain(t *testing.T) {
 	}
 
 	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
-		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
+		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(),
 		logr.Discard(), nil, 0)
 
 	require.Error(t, err)

@@ -113,16 +113,6 @@ answer before the checkpoint becomes destructive.
 - The delivery mount is writable
 - The coordinator is not running
 
-### staging CUDA job file
-
-For a driver-managed GPU checkpoint, the agent copies the CUDA checkpoint job
-file out of the container and checks that it lists every GPU.
-
-**Likely causes:**
-
-- The workload has not reached its quiescent point, so the job file is missing or stale
-- The GPU count in the file differs from the devices discovered
-
 ### configuring CRIU dump and writing checkpoint manifest
 
 The agent builds CRIU's dump options from the inspected container and writes

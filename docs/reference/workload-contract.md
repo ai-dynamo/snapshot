@@ -38,8 +38,7 @@ through an environment variable and signals across it with sentinel files.
 | `SNAPSHOT_RESTORE_STANDBY` | deprecated | Restore containers no longer run their own command, so nothing has to stay inert. Snapshot never set it. |
 | `<framework>-restore-ready` | workload writes | A workload-chosen sentinel meaning "restored and serving." The restore pod's readiness probe gates on it. |
 
-The agent-owned side of this shared directory (and its `cuda-checkpoint-job`
-file) is described in
+The agent-owned side of this shared directory is described in
 [The snapshot-control volume](api.md#the-snapshot-control-volume).
 The restore-pod side (annotations, the restore proxy, startup gate) is the
 [Restore Pod Contract](restore-pod-contract.md).

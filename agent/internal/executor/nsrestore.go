@@ -94,17 +94,6 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"manage_cgroups_mode", m.CRIUDump.CRIU.ManageCgroupsMode,
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
-	cudaJobFile := ""
-	if !m.CUDA.IsEmpty() && !m.CUDA.CustomStorage {
-		cudaJobFile, err = cuda.JobFileFromCheckpoint(opts.CheckpointPath)
-		if err != nil {
-			return nil, failStep(StepPrepareGPURestore, err)
-		}
-		if err := cuda.CheckJobFile(cudaJobFile, len(m.CUDA.SourceGPUUUIDs), m.CuInterpose.UsesCoordinator()); err != nil {
-			return nil, failStep(StepPrepareGPURestore, err)
-		}
-	}
-
 	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
 		return nil, failStep(StepPrepareCRIURestore, err)
 	}
@@ -113,7 +102,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		return nil, failStep(StepPrepareCRIURestore, err)
 	}
 
-	executeTimings, restoredPID, cleanupErr, err := executeRestore(ctx, criuOpts, m, opts, cudaJobFile, log)
+	executeTimings, restoredPID, cleanupErr, err := executeRestore(ctx, criuOpts, m, opts, log)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +135,6 @@ func executeRestore(
 	criuOpts *criurpc.CriuOpts,
 	m *types.CheckpointManifest,
 	opts RestoreOptions,
-	cudaJobFile string,
 	log logr.Logger,
 ) (timings *nsrestorePhaseTimings, restoredPID int, cleanupErr error, retErr error) {
 	timings = &nsrestorePhaseTimings{}
@@ -159,18 +147,6 @@ func executeRestore(
 		log.Error(err, "Failed to apply deleted files")
 	}
 	timings.overlayCaptureDuration = time.Since(overlayStart)
-	cudaRestoreJobFile := ""
-	if cudaJobFile != "" {
-		liveJobFile, err := cuda.PrepareLiveJobFile(cudaJobFile)
-		if err != nil {
-			return nil, 0, nil, failStep(StepPrepareGPURestore, fmt.Errorf("prepare CUDA checkpoint job file: %w", err))
-		}
-		cudaRestoreJobFile = liveJobFile
-		if err := os.Setenv(cuda.JobFileEnv, cudaRestoreJobFile); err != nil {
-			return nil, 0, nil, failStep(StepPrepareGPURestore, fmt.Errorf("set CUDA checkpoint job file environment: %w", err))
-		}
-	}
-
 	gpuMounts, err := criu.PrepareGPUDeviceMounts(opts.GPUMountAliases, log)
 	if err != nil {
 		return nil, 0, nil, failStep(StepPrepareGPURestore, fmt.Errorf("prepare GPU device mounts: %w", err))
@@ -265,15 +241,6 @@ func executeRestore(
 	timings.criuPrepareDuration = prepare
 	timings.criuRestoreDuration = restore
 
-	if cudaRestoreJobFile != "" {
-		uid, gid, err := snapshotruntime.ReadProcessFilesystemIDs("/proc", restoredPID)
-		if err != nil {
-			return nil, 0, nil, failStep(StepRestoreCUDA, fmt.Errorf("read restored process credentials: %w", err))
-		}
-		if err := cuda.SetLiveJobFileOwner(cudaRestoreJobFile, uid, gid); err != nil {
-			return nil, 0, nil, failStep(StepRestoreCUDA, fmt.Errorf("set CUDA checkpoint job file ownership: %w", err))
-		}
-	}
 	processes, err := snapshotruntime.ReadProcessTable("/proc")
 	if err != nil {
 		return nil, 0, nil, failStep(StepRestoreCRIU, fmt.Errorf("failed to read restored process table: %w", err))
@@ -317,12 +284,7 @@ func executeRestore(
 			// Kept serial: running the CustomStorage restores in parallel slows them.
 			err = restoreCustomStorage(ctx, opts, m.CUDA.PIDs, restorePIDs, log)
 		} else {
-			concurrency := len(restorePIDs)
-			if cudaJobFile != "" {
-				// The launch-job file is not thread safe.
-				concurrency = 1
-			}
-			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, concurrency, log)
+			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, len(restorePIDs), log)
 		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {

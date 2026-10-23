@@ -18,7 +18,6 @@ cuda-checkpoint-helper --action checkpoint --pid 1234
 
 The accepted actions are `lock`, `checkpoint`, `restore`, and `unlock`.
 
-`--job-file <path>` sets `CUDA_CHECKPOINT_JOB_FILE` for the driver operation.
 `--timeout <ms>` applies to lock operations. Restore accepts
 `--device-map <uuids>` for device remapping. See `main.c` for argument validation.
 

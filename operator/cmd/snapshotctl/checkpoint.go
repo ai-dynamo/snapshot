@@ -20,13 +20,12 @@ import (
 )
 
 type checkpointOptions struct {
-	ManifestPath       string
-	Namespace          string
-	KubeContext        string
-	SnapshotName       string
-	Container          string
-	CudaCheckpointWrap bool
-	Timeout            time.Duration
+	ManifestPath string
+	Namespace    string
+	KubeContext  string
+	SnapshotName string
+	Container    string
+	Timeout      time.Duration
 }
 
 type result struct {
@@ -75,7 +74,6 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		TargetContainer: containerName,
 		SeccompProfile:  podcontract.DefaultSeccompLocalhostProfile,
 		Name:            checkpointJobName,
-		WrapLaunchJob:   opts.CudaCheckpointWrap,
 	})
 	if err != nil {
 		return nil, err
