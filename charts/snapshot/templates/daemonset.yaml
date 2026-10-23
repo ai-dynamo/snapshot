@@ -201,6 +201,16 @@ spec:
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: {{ printf "%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
             {{- end }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.addressing }}
+            # PageBroker refuses to start unless this agrees with the JSON's addressing.
+            - name: RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING
+              value: {{ ternary "1" "0" (eq .Values.storage.s3.addressing "virtual") | quote }}
+            {{- end }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
+            # PageBroker refuses to start unless this equals the JSON's caFile.
+            - name: AWS_CA_BUNDLE
+              value: {{ include "snapshot.s3CABundlePath" . | quote }}
+            {{- end }}
             {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
           args:
             - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
@@ -230,6 +240,10 @@ spec:
             - --storage-config
             - /etc/snapshot-s3/pagebroker-s3-config.json
             {{- end }}
+            {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.modelStreamer }}
+            - --model-streamer-config
+            - {{ include "snapshot.modelStreamerConfigPath" . }}
+            {{- end }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
@@ -250,6 +264,16 @@ spec:
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
             - name: s3-credentials
               mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
+              readOnly: true
+            {{- end }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
+            - name: s3-ca-bundle
+              mountPath: {{ include "snapshot.s3CABundleMountDir" . }}
+              readOnly: true
+            {{- end }}
+            {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.modelStreamer }}
+            - name: model-streamer-config
+              mountPath: {{ include "snapshot.modelStreamerMountDir" . }}
               readOnly: true
             {{- end }}
       volumes:
@@ -302,6 +326,22 @@ spec:
             items:
               - key: {{ .Values.storage.s3.credentialsSecretKey }}
                 path: {{ .Values.storage.s3.credentialsSecretKey }}
+        {{- end }}
+        {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
+        - name: s3-ca-bundle
+          configMap:
+            name: {{ .Values.storage.s3.caBundleConfigMapRef }}
+            items:
+              - key: {{ .Values.storage.s3.caBundleConfigMapKey }}
+                path: {{ .Values.storage.s3.caBundleConfigMapKey }}
+        {{- end }}
+        {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.modelStreamer }}
+        - name: model-streamer-config
+          configMap:
+            name: {{ include "snapshot.fullname" . }}-config
+            items:
+              - key: model-streamer.json
+                path: model-streamer.json
         {{- end }}
         # Runtime socket directory (read-write for checkpoint operations).
         # Same path inside and on the host so the agent dials runtime.socketPath

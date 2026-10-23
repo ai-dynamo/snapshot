@@ -258,6 +258,52 @@ survive an uninstall.
 `storage.type` currently supports `pvc`. Object-storage backends (`s3`, `oci`) are
 reserved in the chart for future use and are not supported today.
 
+### S3 settings PageBroker reads
+
+With `storage.type: s3` and a PageBroker image that implements the S3 backend,
+the chart gives PageBroker its S3 configuration in two parts. The operator
+writes the JSON file PageBroker reads at `--storage-config`: the store identity
+fields (`storeId`, `endpoint`, `region`, `bucket`, `prefix`) from `storage.yaml`,
+and the connection and transfer settings below from the chart's
+`pagebroker-s3.yaml`. The DaemonSet sets the environment PageBroker checks those
+settings against. PageBroker reads all of it once at startup, so changing any of
+these values needs a PageBroker restart.
+
+| Value | PageBroker input | Default |
+|-------|------------------|---------|
+| `storage.s3.addressing` | `addressing` in the JSON, and `RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING` (`0` for `path`, `1` for `virtual`) in the environment | PageBroker's `virtual` |
+| `storage.s3.allowHttp` | `allowHttp` in the JSON. The chart refuses a plain-http endpoint unless it is set | `false` |
+| `storage.s3.caBundleConfigMapRef`, `storage.s3.caBundleConfigMapKey` | The bundle mounted at `/etc/snapshot-s3-ca/<key>`, named by `caFile` in the JSON and by `AWS_CA_BUNDLE` in the environment. The operator's maintenance client gets the same bundle | system trust |
+| `pageBroker.s3.limits` | The `limits` object in the JSON, passed through as given | see below |
+| `pageBroker.modelStreamer` | A second JSON file, mounted at `/etc/snapshot-model-streamer/model-streamer.json` and passed with `--model-streamer-config` | no file |
+
+`pageBroker.s3.limits` accepts PageBroker's own keys, with its bounds:
+
+| Key | Default | Bounds |
+|-----|---------|--------|
+| `transactionSeconds` | 7200 | 1 to 7200 |
+| `stagingBytes` | the staging volume cap, `pageBroker.staging.sizeLimit` after headroom | 1 byte to 1 TiB |
+| `activeTransactions` | 8 | 1 to 1024, below `pageBroker.maxConcurrentRequests` |
+| `uploadPartBytes` | 16 MiB | 8 MiB to 1 GiB |
+| `uploadBufferBytes` | 1 GiB | 1 to 16 GiB, at least twice `uploadPartBytes` |
+| `uploadTargetGbps` | 10 | 1 to 1000 |
+| `uploadActiveFiles` | 2 | 1 to 64 |
+| `requestSeconds` | 60 | 1 to 60 |
+| `uploadRequestRetries` | 3 | 0 to 10 |
+| `uploadConnectSeconds` | the smaller of 5 and `requestSeconds` | 1 to `requestSeconds` |
+
+The chart fills `stagingBytes` from the staging volume cap unless it is set, so
+PageBroker refuses a staged restore the volume cannot hold instead of filling
+it. The chart rejects a key PageBroker does not know, an `activeTransactions` at
+or above `maxConcurrentRequests`, and an `addressing` other than `path` or
+`virtual`; PageBroker enforces the remaining bounds at startup.
+
+`pageBroker.modelStreamer` is written as given. Its keys are PageBroker's Model
+Streamer input contract: `readChunkBytes`, `processGroupSize`, an `s3Reader`
+object (`concurrency`, `targetGbps`, `maxConnections`, `maxInflightMiB`,
+`maxRetries`, `retryWindowSeconds`, `lowSpeedTimeoutMs`, `lowSpeedBytesPerSecond`)
+and a `logging` object (`level`, `toStderr`). Every key is optional.
+
 ### PageBroker restore source
 
 `pageBroker.restoreMode` selects the restore source for every restore:
