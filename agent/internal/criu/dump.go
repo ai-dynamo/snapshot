@@ -94,44 +94,53 @@ func BuildDumpOptions(
 	return criuOpts, nil
 }
 
+// DumpExecution is the agent's view of one CRIU dump.
+//
+// Duration is the wall time of the dump RPC. CRIU's own memdump/memwrite
+// timers are read afterwards from stats-dump; see DumpStats.
+type DumpExecution struct {
+	Duration time.Duration
+}
+
 // ExecuteDump opens the image directory FD, runs the CRIU dump, and cleans up.
 func ExecuteDump(
 	criuOpts *criurpc.CriuOpts,
 	checkpointDir string,
 	settings *types.CRIUSettings,
 	log logr.Logger,
-) (time.Duration, error) {
+) (DumpExecution, error) {
 	imageDir, imageDirFD, err := openPathForCRIU(checkpointDir)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open image directory: %w", err)
+		return DumpExecution{}, fmt.Errorf("failed to open image directory: %w", err)
 	}
 	defer imageDir.Close()
 	criuOpts.ImagesDirFd = proto.Int32(imageDirFD)
 
-	criuDumpStart := time.Now()
 	criuClient := criulib.MakeCriu()
 	if settings != nil && strings.TrimSpace(settings.BinaryPath) != "" {
 		if _, err := os.Stat(settings.BinaryPath); err != nil {
-			return 0, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
+			return DumpExecution{}, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
 		}
 		criuClient.SetCriuPath(settings.BinaryPath)
 	}
-	if err := criuClient.Dump(criuOpts, nil); err != nil {
-		dumpDuration := time.Since(criuDumpStart)
+
+	criuDumpStart := time.Now()
+	dumpErr := criuClient.Dump(criuOpts, nil)
+	criuDumpDuration := time.Since(criuDumpStart)
+	if dumpErr != nil {
 		dumpLogPath := filepath.Join(checkpointDir, dumpLogFilename)
-		log.Error(err, "CRIU dump failed",
-			"duration", dumpDuration,
+		log.Error(dumpErr, "CRIU dump failed",
+			"duration", criuDumpDuration,
 			"checkpoint_dir", checkpointDir,
 			"dump_log_path", dumpLogPath,
 			"skip_mnt", criuOpts.GetSkipMnt(),
 			"dump_log_tail", readLogTail(dumpLogPath),
 		)
-		return 0, fmt.Errorf("CRIU dump failed: %w", err)
+		return DumpExecution{}, fmt.Errorf("CRIU dump failed: %w", dumpErr)
 	}
 
-	criuDumpDuration := time.Since(criuDumpStart)
 	log.Info("CRIU dump completed", "duration", criuDumpDuration)
-	return criuDumpDuration, nil
+	return DumpExecution{Duration: criuDumpDuration}, nil
 }
 
 func readLogTail(path string) string {
