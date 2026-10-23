@@ -423,7 +423,7 @@ func TestEndingAndRemovingWaitUntilNoCallIsInsideTheSpace(t *testing.T) {
 
 	close(store.release)
 
-	require.NoError(t, await(t, inserted), "a write that started completes")
+	assertAbortedWith(t, await(t, inserted), failureReason)
 	require.NoError(t, await(t, failed))
 	require.NoError(t, await(t, removed))
 	assert.Zero(t, store.dropsSeenInside.Load(), "nothing dropped the space while the write was inside it")
@@ -489,14 +489,18 @@ type gatedSpace struct {
 	store *gatedStore
 }
 
+// Insert behaves like a backend that honors cancellation: once released, it
+// returns its context's error, since the session's end cancelled it.
 func (g gatedSpace) Insert(ctx context.Context, key string, value []byte) error {
 	close(g.store.entered)
 	<-ctx.Done()
 	close(g.store.cancelled)
 	<-g.store.release
-	err := g.Space.Insert(ctx, key, value)
 	g.store.dropsSeenInside.Store(g.store.drops.Load())
-	return err
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return g.Space.Insert(ctx, key, value)
 }
 
 // assertOpen reports that a session has not ended.

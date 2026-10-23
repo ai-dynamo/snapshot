@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv"
@@ -85,25 +86,30 @@ func TestGetReturnsWhenTheContextIsCancelled(t *testing.T) {
 }
 
 func TestGetWakesEveryWaiterOnOneKey(t *testing.T) {
-	const waiters = 16
-	f := newFixture(t)
-	values := make(chan []byte, waiters)
-	var wg sync.WaitGroup
-	for range waiters {
-		wg.Go(func() {
-			value, err := f.session.Get(context.Background(), agentOf(memberB), agentKey, deadlineIn)
-			assert.NoError(t, err)
-			values <- value
-		})
-	}
+	// The bubble lets the insert wait until every Get is durably blocked, so
+	// each one is woken rather than finding the key already there.
+	synctest.Test(t, func(t *testing.T) {
+		const waiters = 16
+		f := newFixture(t)
+		values := make(chan []byte, waiters)
+		var wg sync.WaitGroup
+		for range waiters {
+			wg.Go(func() {
+				value, err := f.session.Get(context.Background(), agentOf(memberB), agentKey, deadlineIn)
+				assert.NoError(t, err)
+				values <- value
+			})
+		}
+		synctest.Wait()
 
-	require.NoError(t, f.session.Insert(context.Background(), requestOf(memberA, ""), agentKey, []byte("handle")))
-	wg.Wait()
-	close(values)
+		require.NoError(t, f.session.Insert(context.Background(), requestOf(memberA, ""), agentKey, []byte("handle")))
+		wg.Wait()
+		close(values)
 
-	for value := range values {
-		assert.Equal(t, []byte("handle"), value)
-	}
+		for value := range values {
+			assert.Equal(t, []byte("handle"), value)
+		}
+	})
 }
 
 func TestCountersCountAnAbsentKeyAsZero(t *testing.T) {
@@ -319,11 +325,15 @@ func TestAnEmptyRequestIDAppliesEveryTime(t *testing.T) {
 }
 
 func TestAWriteCompletesWhenItsCallerHasGivenUp(t *testing.T) {
-	f := newFixture(t)
+	// A backend that honors cancellation, since the memory backend ignores
+	// contexts and would apply the write whether or not the session shields it
+	// from its caller.
+	f := newManagerFixtureOn(t, honoringStore{memory.New()})
+	s := f.ensure(t, specOf(attemptUID))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := f.session.Insert(ctx, requestOf(memberA, "request-1"), agentKey, []byte("handle"))
+	err := s.Insert(ctx, requestOf(memberA, "request-1"), agentKey, []byte("handle"))
 
 	require.NoError(t, err, "a write runs to completion, so the outcome a retry replays is the real one")
 	stored, err := f.stored(attemptUID, agentKey)
