@@ -37,14 +37,17 @@ dependency rather than duplicating it.
   today), each loading and patching the corresponding `docs/guides/<engine>/`
   deployment YAML directly, so the benchmark can't drift from the documented
   manual flow
-- `snapshot_benchmarks/logs.py` — parses the node agent's "Restore timing
-  summary" log line for sub-second-precision phase timing
+- `snapshot_benchmarks/logs.py` — parses the node agent's restore and
+  checkpoint timing summaries, including the CUDA lock/copy split and the
+  CRIU memdump/memwrite split
 - `snapshot_benchmarks/metadata.py` — collects GPU/driver/storage/placement
   metadata for every run
 - `snapshot_benchmarks/cli.py` — `run` / `sweep` / `metadata` / `report`
   subcommands
 - `models.yaml` — the default model sweep (the 7 models published in
   `benchmarks.md`)
+- `models-qwen3-scale.yaml` — five Qwen3 sizes with fixed runtime settings
+  for a single-GPU size-scaling experiment
 - `results/` — gitignored, per-invocation raw JSON output
 
 ## Quick start
@@ -53,4 +56,9 @@ dependency rather than duplicating it.
 uv run --project benchmarks python -m snapshot_benchmarks metadata
 uv run --project benchmarks python -m snapshot_benchmarks run \
   --model-label "Qwen3 0.6B" --image <registry>/vllm-snapshot:<tag>
+
+# Repeat every scale point three times; all 15 JSON files share one directory.
+uv run --project benchmarks python -m snapshot_benchmarks sweep \
+  --models benchmarks/models-qwen3-scale.yaml --repeats 3 \
+  --image <registry>/vllm-snapshot:<tag>
 ```

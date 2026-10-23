@@ -128,3 +128,11 @@ def test_boolean_environment_rejects_invalid_input(monkeypatch, name, value):
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=f"{name} must be true or false"):
         k8s.bool_env(name)
+
+def test_workload_pods_pin_hostname_when_set(monkeypatch):
+    monkeypatch.delenv("SNAPSHOT_E2E_AVOID_MIG", raising=False)
+    monkeypatch.setenv("SNAPSHOT_E2E_NODE_HOSTNAME", "node-a")
+
+    selector = workloads.workload_scheduling()["nodeSelector"]
+
+    assert selector["kubernetes.io/hostname"] == "node-a"
