@@ -435,6 +435,11 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 			w.restoreQueue.AddAfter(key, restoreSafetyRequeueInterval)
 		}
 	}()
+	// Registered after the Done defer so it runs first, leaving requeue false.
+	var panicked *corev1.Pod
+	defer recoverPanic(w.log, "restore work order", func(err error) {
+		w.failRestoreAfterPanic(ctx, key, panicked, err)
+	}, "pod", key.String())
 
 	pod, err := w.restorePodLister.Pods(key.Namespace).Get(key.Name)
 	if apierrors.IsNotFound(err) {
@@ -446,6 +451,7 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		return
 	}
 	pod = pod.DeepCopy()
+	panicked = pod
 	if w.skipRequestedAfterRefusal(pod) {
 		// The skip request is the way back for a pod the gates turned down, so
 		// it has to clear the in-process marker as well as the condition below.
@@ -703,7 +709,8 @@ func (w *NodeController) resolveRestoreArtifact(
 		return nil, err
 	}
 	if !ready {
-		return nil, newRestorePendingError("ArtifactPending", fmt.Sprintf("Waiting for artifact %s", path))
+		// Ready guarantees a usable artifact; absence is stale state, not a retryable dependency.
+		return nil, fmt.Errorf("artifact %s for Ready PodSnapshotContent %s is missing", path, content.Name)
 	}
 	return &restoreArtifact{
 		SnapshotName:        target.SnapshotName,
@@ -756,6 +763,11 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	for i, mapping := range plan.mappings {
 		i, destination := i, mapping.Destination
 		workers.Go(func() {
+			// sync.WaitGroup.Go recovers only to re-panic, so a panic here
+			// would kill the agent. Report it as a failed destination instead.
+			results[i] = restoreResult{destination: destination, state: restoreResultFailed,
+				reason: "agent panicked restoring this container"}
+			defer recoverPanic(w.log, "restore destination", nil, "pod", podKey, "destination", destination)
 			results[i] = w.restoreDestination(ctx, pod, plan, destination, podKey, recovering)
 		})
 	}
@@ -985,8 +997,12 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //     CRIU-restored process resumes inside the polling loop that waits on
 //     this file, exits quiescence, and resumes the engine. On failure, write
 //     restore-failed and kill the placeholder instead.
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) error {
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) (retErr error) {
 	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
+	// Without this the placeholder keeps waiting for a restore that panicked.
+	defer recoverPanic(op.log, "restore", func(err error) {
+		retErr = op.failRestore(ctx, err)
+	}, "destination", destination)
 	if recovering {
 		completed, err := op.recoverCompletedRestore(ctx)
 		if err != nil {
@@ -1350,6 +1366,11 @@ func (w *NodeController) runCaptureQueue(ctx context.Context) {
 // meanwhile collapse into one redelivery after Done.
 func (w *NodeController) processCaptureQueueItem(ctx context.Context, name string) {
 	defer w.captureQueue.Done(name)
+	// A panic here would otherwise kill every other capture and restore on
+	// this node.
+	defer recoverPanic(w.log, "capture work order", func(err error) {
+		w.failCaptureAfterPanic(ctx, name, err)
+	}, "content", name)
 
 	if err := w.reconcileCapture(ctx, name); err != nil {
 		w.log.Error(err, "Failed to reconcile capture work order", "content", name)

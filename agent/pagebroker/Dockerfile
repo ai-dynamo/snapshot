@@ -56,6 +56,11 @@ RUN git -C /tmp/nvtx rev-parse HEAD > /NVTX_COMMIT
 
 FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build
 
+WORKDIR /src
+COPY compliance/ compliance/
+# Fetch sources in the install layer so a cached install never pairs with a
+# newer archive index. Ubuntu drops superseded versions from the index, so a
+# later layer cannot fetch the source of the version installed here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libaio-dev \
@@ -63,6 +68,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf-dev \
     pkg-config \
     protobuf-compiler \
+    && sh compliance/collect-sources.sh /legal/source/protobuf libprotobuf-dev \
+    && sh compliance/collect-sources.sh /legal/source/libaio libaio1t64 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=cuda-headers /usr/local/cuda/include/ /opt/cuda/include/
@@ -72,7 +79,6 @@ COPY --from=nixl /nixl-runtime/lib/ /nixl-runtime-check/
 ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 
-WORKDIR /src
 COPY . .
 # Run CPU tests and compile GPU tests. GPU tests run separately.
 RUN make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
@@ -92,11 +98,6 @@ RUN arch="$(uname -m)" \
          && ! grep -q 'not found' /tmp/dependencies || { cat /tmp/dependencies; exit 1; }; \
        done \
     && mv /usr/local/lib-build /usr/local/lib
-
-# Keep source and attribution aligned with the exact libraries being shipped.
-RUN sh compliance/collect-sources.sh /legal/source/protobuf libprotobuf-dev \
-    && sh compliance/collect-sources.sh /legal/source/libaio libaio1t64 \
-    && rm -rf /var/lib/apt/lists/*
 
 FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS sources
 COPY --from=build /legal/source /legal/source

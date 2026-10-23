@@ -4,7 +4,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -731,33 +730,12 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
-
+	output := newNSRestoreOutput(os.Stderr)
+	output.Attach(cmd)
 	if err := cmd.Run(); err != nil {
-		return nil, nsrestoreFailure(stdout.Bytes(), err)
+		return nil, output.failure(err, ctx.Err())
 	}
-
-	var result RestoreInNamespaceResult
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, stdout.String())
-	}
-	if result.RestoredPID <= 0 {
-		return nil, fmt.Errorf("nsrestore returned invalid PID %d", result.RestoredPID)
-	}
-
-	return &result, nil
-}
-
-// nsrestoreFailure prefers the cause nsrestore reports on stdout over the bare
-// exit status, so restore status and events name what actually failed.
-func nsrestoreFailure(stdout []byte, runErr error) error {
-	var result RestoreInNamespaceResult
-	if err := json.Unmarshal(stdout, &result); err == nil && result.Error != "" {
-		return errors.New(result.Error)
-	}
-	return fmt.Errorf("%w\nstdout: %s", runErr, stdout)
+	return output.result()
 }
 
 const firstExtraFileDescriptor = 3

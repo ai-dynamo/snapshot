@@ -1521,20 +1521,6 @@ func TestCustomStorageFilesReachChild(t *testing.T) {
 	}
 }
 
-func TestNSRestoreFailure(t *testing.T) {
-	runErr := errors.New("exit status 1")
-
-	err := nsrestoreFailure([]byte(`{"restoredPID":0,"error":"CRIU restore failed: mnt-v2: Can't stat mountpoint /cache/vllm"}`+"\n"), runErr)
-	if err == nil || err.Error() != "CRIU restore failed: mnt-v2: Can't stat mountpoint /cache/vllm" {
-		t.Fatalf("nsrestoreFailure(reported) = %v", err)
-	}
-
-	err = nsrestoreFailure([]byte("panic: boom"), runErr)
-	if !errors.Is(err, runErr) || !strings.Contains(err.Error(), "stdout: panic: boom") {
-		t.Fatalf("nsrestoreFailure(unstructured) = %v", err)
-	}
-}
-
 // Only an AppArmor profile or "none" needs securityfs, and only where it is
 // missing.
 func TestMountSecurityFSForCRIUMountsOnlyWhenNeeded(t *testing.T) {
