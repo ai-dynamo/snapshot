@@ -3,10 +3,10 @@
 
 apiVersion: v1
 kind: ConfigMap
-{{- if ne .Values.storage.type "pvc" }}
-{{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc is currently implemented" .Values.storage.type) }}
+{{- if and (ne .Values.storage.type "pvc") (ne .Values.storage.type "s3") }}
+{{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc and s3 are currently implemented" .Values.storage.type) }}
 {{- end }}
-{{- if ne .Values.storage.pvc.basePath "/checkpoints" }}
+{{- if and (eq .Values.storage.type "pvc") (ne .Values.storage.pvc.basePath "/checkpoints") }}
 {{- fail "snapshot.storage.pvc.basePath is fixed at /checkpoints so the privileged mount helper can enforce its source allowlist" }}
 {{- end }}
 {{- if and .Values.operator.bindNewContents (not .Values.pageBroker.artifactAddressing) }}
@@ -21,11 +21,23 @@ data:
   # Resolved backend settings for operator/PageBroker, not AgentConfig. Keeping
   # this separate lets another resolver supply them without changing agent APIs.
   storage.yaml: |
+    {{- if eq .Values.storage.type "pvc" }}
     pvc:
       namespace: {{ .Release.Namespace | quote }}
       claimName: {{ required "storage.pvc.name is required" .Values.storage.pvc.name | quote }}
       # The entire claim is used; this is not the container-local mount path.
       basePath: "/"
+    {{- else }}
+    # Raw connection fields only: the operator computes the store ID from
+    # these (api/storage.S3.StoreID) and writes it separately into the
+    # ConfigMap PageBroker actually reads. See
+    # operator/cmd/manager/pagebroker_storage_config.go.
+    s3:
+      endpoint: {{ required "storage.s3.endpoint is required" .Values.storage.s3.endpoint | quote }}
+      region: {{ required "storage.s3.region is required" .Values.storage.s3.region | quote }}
+      bucket: {{ required "storage.s3.bucket is required" .Values.storage.s3.bucket | quote }}
+      prefix: {{ .Values.storage.s3.prefix | default "" | quote }}
+    {{- end }}
   config.yaml: |
     storage:
       type: {{ .Values.storage.type | quote }}

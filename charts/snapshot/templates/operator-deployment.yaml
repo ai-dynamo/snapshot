@@ -93,19 +93,42 @@ spec:
             {{- if .Values.operator.bindNewContents }}
             - --bind-new-contents=true
             {{- end }}
+            {{- if eq .Values.storage.type "s3" }}
+            - {{ printf "--pagebroker-s3-config-namespace=%s" .Release.Namespace | quote }}
+            - {{ printf "--pagebroker-s3-config-name=%s" (include "snapshot.pageBrokerS3ConfigName" .) | quote }}
+            - {{ printf "--release-name=%s" .Release.Name | quote }}
+            - {{ printf "--artifact-cleanup-s3-credentials-path=%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
+            {{- end }}
           volumeMounts:
+            {{- if eq .Values.storage.type "pvc" }}
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}
+            {{- end }}
             - name: storage-config
               mountPath: /etc/snapshot
               readOnly: true
+            {{- if eq .Values.storage.type "s3" }}
+            - name: s3-credentials
+              mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
+              readOnly: true
+            {{- end }}
       volumes:
+        {{- if eq .Values.storage.type "pvc" }}
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
+        {{- end }}
         - name: storage-config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
             items:
               - key: storage.yaml
                 path: storage.yaml
+        {{- if eq .Values.storage.type "s3" }}
+        - name: s3-credentials
+          secret:
+            secretName: {{ required "storage.s3.credentialsSecretRef is required when storage.type=s3" .Values.storage.s3.credentialsSecretRef }}
+            items:
+              - key: {{ .Values.storage.s3.credentialsSecretKey }}
+                path: {{ .Values.storage.s3.credentialsSecretKey }}
+        {{- end }}

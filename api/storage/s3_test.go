@@ -115,9 +115,10 @@ func TestNormalizedS3Prefix(t *testing.T) {
 	}
 }
 
-// S3 has no PageBroker-side identity computation to cross-check: #416 reads
-// storeId as a literal config field rather than deriving it. There is no
-// cross-language parity vector for it, unlike PVC's testdata/identity.json.
+// S3 has no PageBroker-side identity computation to cross-check: PageBroker's
+// S3 backend reads storeId as a literal config field rather than deriving it.
+// There is no cross-language parity vector for it, unlike PVC's
+// testdata/identity.json.
 func TestS3StoreIDHasStorePrefix(t *testing.T) {
 	id, err := validS3().StoreID()
 	if err != nil {
