@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
@@ -369,16 +370,21 @@ func restoreTarCmd(bundleDir string, args ...string) (*exec.Cmd, error) {
 
 // ApplyRootfsDiff extracts rootfs-diff.tar into the target root.
 //
-// The archive is copied to local disk first. tar walks members with many small
-// reads; doing that directly from NFS is much slower than one sequential copy
-// plus a local extract.
+// tar reads the archive from a pipe that readAhead fills. tar alone would read
+// it member by member, and a single sequential reader on NFS waits a round
+// trip for every readahead window: a cold 308 MB archive took 3.6 s that way.
 func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logger) error {
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
-	info, err := os.Stat(rootfsDiffPath)
+	archive, err := os.Open(rootfsDiffPath)
 	if os.IsNotExist(err) {
 		log.V(1).Info("No rootfs-diff.tar, skipping")
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("failed to open rootfs diff: %w", err)
+	}
+	defer archive.Close()
+	info, err := archive.Stat()
 	if err != nil {
 		return fmt.Errorf("failed to stat rootfs diff: %w", err)
 	}
@@ -386,12 +392,6 @@ func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logg
 		log.V(1).Info("rootfs-diff.tar is empty, skipping")
 		return nil
 	}
-
-	localPath, cleanup, err := stageRootfsDiffLocally(rootfsDiffPath)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
 
 	// --skip-old-files: silently skip files that already exist in the restore target.
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
@@ -408,43 +408,154 @@ func ApplyRootfsDiff(checkpointPath, targetRoot, bundleDir string, log logr.Logg
 	cmd, err := restoreTarCmd(bundleDir,
 		"--xattrs", "--xattrs-include=user.*", "--xattrs-include=security.capability",
 		"--numeric-owner", "--skip-old-files", "--blocking-factor=2048",
-		"-C", targetRoot, "-xf", localPath)
+		"-C", targetRoot, "-xf", "-")
 	if err != nil {
 		return err
 	}
+	stream := newReadAhead(archive, info.Size())
+	defer stream.Close()
+	tarIn, archiveOut, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("failed to create rootfs diff pipe: %w", err)
+	}
+	// tar reads 1 MiB records, and a pipe holds 64 KiB by default, so each
+	// record would take many reads and context switches: a 300 MB archive
+	// extracted in 0.28 s through a default pipe and 0.19 s through a 4 MiB
+	// one, as fast as from a file. Root may exceed fs.pipe-max-size, and a
+	// smaller pipe is only slower, so a failure here is ignored.
+	_, _ = unix.FcntlInt(archiveOut.Fd(), unix.F_SETPIPE_SZ, readAheadChunkBytes)
+	cmd.Stdin = tarIn
 	// tar prefixes its messages with the path it was invoked by.
 	output := NewProcessOutput(os.Stderr, filepath.Join(bundleDir, nsmount.BundleTar)+":")
 	output.Attach(cmd)
-	if err := cmd.Run(); err != nil {
+	err = cmd.Start()
+	tarIn.Close()
+	if err != nil {
+		archiveOut.Close()
+		return fmt.Errorf("failed to start tar: %w", err)
+	}
+	// A write fails once tar exits, so the copy cannot outlive it.
+	copied := make(chan struct{})
+	go func() {
+		defer close(copied)
+		_, _ = stream.WriteTo(archiveOut)
+		archiveOut.Close()
+	}()
+	err = cmd.Wait()
+	<-copied
+	if stream.err != nil {
+		return fmt.Errorf("failed to read rootfs diff: %w", stream.err)
+	}
+	if err != nil {
 		return WithDetail(fmt.Errorf("tar extract failed: %w", err), output.Detail())
 	}
 	return nil
 }
 
-func stageRootfsDiffLocally(src string) (string, func(), error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to open rootfs diff: %w", err)
-	}
-	defer in.Close()
+// On NFS, 4 MiB reads four at a time read a cold 308 MB archive in about
+// 80 ms, as fast as larger chunks or more readers.
+const (
+	readAheadChunkBytes = 4 << 20
+	readAheadChunks     = 4
+)
 
-	tmp, err := os.CreateTemp("", rootfsDiffFilename+".*.tmp")
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create local rootfs diff: %w", err)
-	}
-	tmpPath := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpPath) }
+// readAhead reads a file in order while the next chunks are already being
+// read, at most readAheadChunks at a time. A short read fails the stream
+// rather than ending it early.
+type readAhead struct {
+	pending <-chan chan readResult
+	stop    chan struct{}
+	current []byte
+	err     error
+}
 
-	if _, err := io.Copy(tmp, in); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return "", nil, fmt.Errorf("failed to stage rootfs diff locally: %w", err)
+type readResult struct {
+	data []byte
+	err  error
+}
+
+func newReadAhead(f *os.File, size int64) *readAhead {
+	pending := make(chan chan readResult, readAheadChunks-1)
+	r := &readAhead{pending: pending, stop: make(chan struct{})}
+	go func() {
+		defer close(pending)
+		for off := int64(0); off < size; off += readAheadChunkBytes {
+			result := make(chan readResult, 1)
+			select {
+			case pending <- result:
+			case <-r.stop:
+				return
+			}
+			go func() {
+				data := make([]byte, min(readAheadChunkBytes, size-off))
+				n, err := f.ReadAt(data, off)
+				switch {
+				case n == len(data):
+					err = nil
+				case errors.Is(err, io.EOF):
+					// The file is shorter than its recorded size. A plain EOF
+					// would end the stream as though it were complete.
+					err = io.ErrUnexpectedEOF
+				}
+				result <- readResult{data: data, err: err}
+			}()
+		}
+	}()
+	return r
+}
+
+func (r *readAhead) Read(p []byte) (int, error) {
+	if err := r.fill(); err != nil {
+		return 0, err
 	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("failed to close local rootfs diff: %w", err)
+	n := copy(p, r.current)
+	r.current = r.current[n:]
+	return n, nil
+}
+
+// WriteTo writes whole chunks, so a pipe gets one write per chunk.
+func (r *readAhead) WriteTo(w io.Writer) (int64, error) {
+	var written int64
+	for {
+		if err := r.fill(); err == io.EOF {
+			return written, nil
+		} else if err != nil {
+			return written, err
+		}
+		n, err := w.Write(r.current)
+		written += int64(n)
+		r.current = r.current[n:]
+		if err != nil {
+			return written, err
+		}
 	}
-	return tmpPath, cleanup, nil
+}
+
+// fill makes current the next chunk once the last one is consumed.
+func (r *readAhead) fill() error {
+	if len(r.current) > 0 {
+		return nil
+	}
+	if r.err != nil {
+		return r.err
+	}
+	result, ok := <-r.pending
+	if !ok {
+		return io.EOF
+	}
+	next := <-result
+	if next.err != nil {
+		r.err = next.err
+		return r.err
+	}
+	r.current = next.data
+	return nil
+}
+
+// Close stops reading ahead. Reads already started finish and are dropped.
+func (r *readAhead) Close() error {
+	close(r.stop)
+	return nil
 }
 
 // ApplyDeletedFiles removes files marked as deleted in the checkpoint.
