@@ -63,6 +63,12 @@ other two jobs. Running all three before pushing means CI holds no surprises.
 only downloaded for that platform. On other hosts, run `make linux-build` and
 `make linux-test`, which execute in a container, and let CI run the full gate.
 
+**Document the change where readers look for it.** Each kind of fact has one
+page, and a change usually adds a few table rows and a few sentences. See
+[Writing documentation](docs/development/writing-docs.md) for where
+a change goes and [Naming conventions](docs/development/naming.md) for names and
+terms.
+
 **Write conventional commit messages.** Subjects follow
 [Conventional Commits](https://www.conventionalcommits.org/): a type — one of
 `feat`, `fix`, `docs`, `ci`, `build`, `refactor`, `perf`, `test`, `chore` — an

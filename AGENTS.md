@@ -226,6 +226,15 @@ Specifically:
 When a task genuinely needs a credential, read it from an environment variable
 and document the variable name — never the value.
 
+## Documentation and names
+
+Before you add or change Markdown under `docs/`, a README, or `CHANGELOG.md`, or
+add a version requirement such as a minimum driver or CUDA version, read
+[docs/development/writing-docs.md](docs/development/writing-docs.md).
+Before you introduce a name (a field, Helm value, annotation, label,
+environment variable, event reason, flag, file, or a new term in prose), read
+[docs/development/naming.md](docs/development/naming.md).
+
 ## Working style
 
 - Match the surrounding code. The repository favors explanatory comments on

@@ -188,6 +188,8 @@ operations, indexed below.
 
 - [Building from source](docs/development/build-from-source.md) — build the images and install locally.
 - [Benchmarks](docs/development/benchmarks.md) — how startup performance is measured.
+- [Writing documentation](docs/development/writing-docs.md) — where a change goes and how to write it.
+- [Naming conventions](docs/development/naming.md) — terms and naming patterns for the API, chart, and docs.
 
 **More**
 
