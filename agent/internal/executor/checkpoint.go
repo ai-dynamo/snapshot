@@ -96,7 +96,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	var finalDir string
 	if bound {
 		if err := coordination.ValidateBinding(req.StoreID, req.ContentUID, req.ContainerName); err != nil {
-			return nil, fmt.Errorf("validate storage binding: %w", err)
+			return nil, failStep(StepResolveCheckpointPath, fmt.Errorf("validate storage binding: %w", err))
 		}
 		target = &pagebroker.ArtifactTarget{
 			StoreId: req.StoreID,
@@ -109,12 +109,12 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		var err error
 		finalDir, err = nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
 		if err != nil {
-			return nil, fmt.Errorf("resolve checkpoint artifact path: %w", err)
+			return nil, failStep(StepResolveCheckpointPath, err)
 		}
 	}
 	state, gpuDeviceMapDuration, err := inspect(ctx, rt, log, req)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepInspectSource, err)
 	}
 	usePageBrokerGPU := cfg.CustomStorageAvailable && len(state.CUDAHostPIDs) > 0
 	transactionID := uuid.NewString()
@@ -140,7 +140,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if usePageBrokerGPU {
 		executionContext, err = pagebroker.NewGPUContext(state.CUDANSPIDs, cuda.GPUUUIDs(state.GPUs), "")
 		if err != nil {
-			return nil, err
+			return nil, failStep(StepBuildGPUContext, err)
 		}
 	}
 	preparationAttempted = true
@@ -148,27 +148,27 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	tmpDir, gpu, err = prepareCheckpointTarget(ctx, broker, transactionID, bound, target, finalDir, executionContext)
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
-		return nil, fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+		return nil, failStep(StepPrepareCheckpoint, err)
 	}
 
 	state.CuInterpose, err = inspectCuInterpose(ctx, state, req.CuInterposeRequested)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepInspectCuInterpose, err)
 	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 && !usePageBrokerGPU {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir)
 		if err != nil {
-			return nil, err
+			return nil, failStep(StepStageCUDAJobFile, err)
 		}
 		if err := cuda.CheckJobFile(cudaJobFile, len(state.GPUs.Devices), state.CuInterpose.UsesCoordinator()); err != nil {
-			return nil, err
+			return nil, failStep(StepStageCUDAJobFile, err)
 		}
 	}
 
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, usePageBrokerGPU)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepConfigureCheckpoint, err)
 	}
 
 	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
@@ -179,7 +179,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	switchStart := time.Now()
 	artifact, err = commitCheckpointArtifact(ctx, broker, transactionID, bound, req.StoreID)
 	if err != nil {
-		return nil, fmt.Errorf("commit PageBroker checkpoint: %w", err)
+		return nil, failStep(StepCommitCheckpoint, err)
 	}
 	committed = true
 	switchDuration := time.Since(switchStart)
@@ -423,20 +423,20 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	// GPU capture must finish before CRIU and filesystem capture.
 	gpuDuration, err := captureGPU(ctx, data, state, checkpointDir, cudaJobFile, log, gpu)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepCheckpointGPU, err)
 	}
 	timings.CUDACheckpointDuration = gpuDuration
 
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepDumpCRIU, err)
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 
 	if state.UpperDir != "" {
 		overlayCaptureStart := time.Now()
 		if err := captureOverlay(state.UpperDir, data.Overlay, checkpointDir, log); err != nil {
-			return nil, err
+			return nil, failStep(StepCaptureOverlay, err)
 		}
 		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 	}

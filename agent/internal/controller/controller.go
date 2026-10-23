@@ -836,6 +836,14 @@ func tallyRestoreResults(results []restoreResult) restoreTally {
 	return tally
 }
 
+// logWithStep adds the failing step as a structured key when the error names one.
+func logWithStep(log logr.Logger, err error) logr.Logger {
+	if step := executor.StepOf(err); step != "" {
+		return log.WithValues("step", string(step))
+	}
+	return log
+}
+
 // verdict concludes one pass, still in progress or terminal, from the counts
 // alone.
 func (t restoreTally) verdict(snapshotName string) restoreVerdict {
@@ -937,7 +945,7 @@ func (w *NodeController) restoreDestination(
 		}
 		result.state = restoreResultFailed
 		result.reason = err.Error()
-		log.Error(err, "Restore controller worker failed")
+		logWithStep(log, err).Error(err, "Restore controller worker failed")
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 		return result
 	}
@@ -1033,7 +1041,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if !errors.As(err, &cleanupErr) {
 			return op.failRestore(ctx, err)
 		}
-		op.log.Error(cleanupErr, "Restore completed with cleanup errors")
+		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
 	return op.completeRestore(ctx, restored)
@@ -1107,7 +1115,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 
 func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) error {
 	w := op.controller
-	op.log.Error(restoreErr, "External restore failed")
+	logWithStep(op.log, restoreErr).Error(restoreErr, "External restore failed")
 	// Re-resolve because restore may fail before discovering the placeholder PID.
 	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
 	if err != nil {
