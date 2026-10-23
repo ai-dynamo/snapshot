@@ -28,6 +28,26 @@ roadmap.
   namespace. An installation with it empty acts on every restore Pod on its
   nodes.
 
+## Driver version compatibility
+
+- On UMD 580 (verified on 580.126.09), restore fails for any checkpointed
+  process holding multicast (NCCL NVLS / symmetric-memory) groups: restore
+  fails in `RestoreMulticastDevices` with `CUDA_ERROR_INVALID_DEVICE`. On
+  multicast-capable systems this affects default multi-GPU vLLM TP>=2
+  deployments (multi-GPU support is on the roadmap; recorded here because
+  the defect is in the CUDA driver, not in Snapshot), even with NVLS and
+  symmetric-memory allreduce disabled, because vLLM's custom-allreduce path
+  always creates a multicast group. NVIDIA reports this as an r580-UMD
+  defect that should be fixed in r595 and above; the 580 KMD can be kept.
+  Tested on 4xH20 (KMD 580.126.09), same UMD on the target processes and the
+  host CLI: 610.57.04 passes vLLM TP2 and TP4 checkpoint/restore 20/20 rounds
+  with CUDA graphs preserved; 615.71.09 passes TP2 20/20 (TP4 not tested).
+- The host-side `cuda-checkpoint` CLI must not remain on UMD 580 while target
+  processes use a newer UMD: with the CLI on 580.126.09 and targets on
+  615.71.09, freeze hangs; the same UMD on both sides passes. Mixed
+  combinations newer than 580 (e.g. 610 CLI + 615 target) have not been
+  tested.
+
 ## GPU device selection and restore paths
 
 Explicit `NVIDIA_VISIBLE_DEVICES` index or full-UUID lists take precedence over
