@@ -146,25 +146,43 @@ func (m *Manager) Remove(ctx context.Context, uid types.UID) error {
 		return nil
 	}
 	s.finish(ctx, &AbortError{Reason: ReasonCancelled})
-	select {
-	case <-s.Done():
-	case <-ctx.Done():
-		return fmt.Errorf("remove attempt %s: %w", uid, ctx.Err())
+	if err := awaitDone(ctx, s); err != nil {
+		return fmt.Errorf("remove attempt %s: %w", uid, err)
 	}
-	if err := m.store.Drop(ctx, uid); err != nil {
+	// The space is dropped even if ctx is done by now: the session has ended,
+	// and nothing else would drop it.
+	if err := m.store.Drop(context.WithoutCancel(ctx), uid); err != nil {
 		return fmt.Errorf("drop attempt %s: %w", uid, err)
 	}
 	m.forget(s)
 	return nil
 }
 
+// Fail fails the session of an attempt on the coordinator's own authority, with
+// no member asking. The service calls it when a member's grace period expires,
+// and when a reattach shows the coordinator restarted; the reconciler will call
+// it for attempts a restarted coordinator can no longer serve. The reason must
+// be a valid condition reason. Fail reports ErrUnknownSession for an attempt
+// with no session, and how the session ended for one that already has, as
+// Session.Fail does.
+func (m *Manager) Fail(ctx context.Context, uid types.UID, reason Reason) error {
+	if err := validateReason(reason); err != nil {
+		return err
+	}
+	s, ok := m.lookup(uid)
+	if !ok {
+		return fmt.Errorf("attempt %s: %w", uid, ErrUnknownSession)
+	}
+	return s.abort(ctx, reason)
+}
+
 // Shutdown fails every open session with reason, for the coordinator's graceful
 // termination, and makes every session ensured afterwards start failed with it
-// too. ReasonCoordinatorLost is the reason members expect from a coordinator
-// that goes away.
+// too. The reason must be a valid condition reason; ReasonCoordinatorLost is the
+// one members expect from a coordinator that goes away.
 func (m *Manager) Shutdown(ctx context.Context, reason Reason) error {
-	if reason == "" {
-		return fmt.Errorf("a manager is shut down with a reason: %w", ErrInvalid)
+	if err := validateReason(reason); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	m.shutdown = reason
@@ -209,6 +227,22 @@ func (m *Manager) forget(s *Session) {
 	defer m.mu.Unlock()
 	if m.sessions[s.uid] == s {
 		delete(m.sessions, s.uid)
+	}
+}
+
+// awaitDone waits until s is done or ctx is. When both are, the session wins:
+// it is removed all the same, so reporting ctx's error would mislead.
+func awaitDone(ctx context.Context, s *Session) error {
+	select {
+	case <-s.Done():
+		return nil
+	case <-ctx.Done():
+	}
+	select {
+	case <-s.Done():
+		return nil
+	default:
+		return ctx.Err()
 	}
 }
 

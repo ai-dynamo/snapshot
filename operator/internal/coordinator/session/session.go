@@ -183,18 +183,29 @@ func (s *Session) Leave(ctx context.Context, c Caller) error {
 	return nil
 }
 
-// Fail ends the session with a reason. Every pending call, and every later
-// one, reports an *AbortError carrying it. An agent or a relay may fail the
-// session; failing one that has already ended reports how it ended instead.
+// Fail ends the session with a reason, which must be a valid condition reason.
+// Every pending call, and every later one, reports an *AbortError carrying it.
+// An agent or a relay may fail the session; failing one that has already ended
+// reports how it ended instead.
 func (s *Session) Fail(ctx context.Context, c Caller, reason Reason) error {
-	if reason == "" {
-		return fmt.Errorf("a session is failed with a reason: %w", ErrInvalid)
+	if err := validateReason(reason); err != nil {
+		return err
 	}
 	if err := s.admit(c, Caller.authorizeFail); err != nil {
 		return err
 	}
-	s.finish(ctx, &AbortError{Reason: reason})
-	return nil
+	return s.abort(ctx, reason)
+}
+
+// abort fails the session with a validated reason, or reports how it ended if
+// it already has.
+func (s *Session) abort(ctx context.Context, reason Reason) error {
+	if s.finish(ctx, &AbortError{Reason: reason}) {
+		return nil
+	}
+	s.ledger.mu.Lock()
+	defer s.ledger.mu.Unlock()
+	return s.ledger.ended
 }
 
 // matches reports whether a validated spec describes this session's attempt as
@@ -241,11 +252,16 @@ func (s *Session) checkLocked(c Caller) error {
 	return nil
 }
 
-// finish ends the session and stops its deadline.
-func (s *Session) finish(ctx context.Context, err error) {
-	if s.end(ctx, err) && s.timer != nil {
+// finish ends the session and stops its deadline, and reports whether this
+// call ended it.
+func (s *Session) finish(ctx context.Context, err error) bool {
+	if !s.end(ctx, err) {
+		return false
+	}
+	if s.timer != nil {
 		s.timer.Stop()
 	}
+	return true
 }
 
 // expire is the deadline's callback. It cannot stop its own timer, since a
