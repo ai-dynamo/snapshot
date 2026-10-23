@@ -34,6 +34,9 @@ commit-level history for each release is on its
 
 ### Added
 
+- `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
+  and opt into cleanup after failure; omission or `Retain` preserves output.
+  CRD change: deploy the matching CRD and operator together.
 - `PodSnapshotContent.status.source` records what a checkpoint was captured on:
   the source node's name, architecture and kernel version, the captured
   container's image, image digest and CPU and memory limits, and the NVIDIA

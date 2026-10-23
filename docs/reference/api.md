@@ -133,7 +133,7 @@ A non-target container can write output to the shared checkpoint PVC. Declare it
 
 Snapshot injects `SNAPSHOT_JOB_UID` and `SNAPSHOT_NON_TARGET_ARTIFACT_SUBDIR` (`non-target-artifacts/<SnapshotJob UID>`, relative to the PVC root). Supply the PVC mount, write beneath that directory, and finish before the container exits. It must be writable by the container and removable by the operator. Restore consumers find the attempt through the `PodSnapshot`'s `nvidia.com/snapshot-job-uid` label.
 
-On failure, `Retain` (the default) keeps the output. `Cleanup` deletes it only when the `SnapshotJob` is `Failed` and all source Pod containers are confirmed stopped. If proof is missing, such as after Pod removal, Snapshot retains the directory and emits a `NonTargetArtifactsRetained` warning. Verify writer exit before manual removal. Successful output is caller-managed. This applies only to the shared PVC, not S3 or capture artifacts. Deploy the matching CRD and operator together.
+On failure, `Retain` (the default) keeps the output. `Cleanup` deletes it only when the `SnapshotJob` is `Failed` and all source Pod containers are confirmed stopped. If proof cannot arrive, such as after Pod removal, Snapshot retains the directory and emits a `NonTargetArtifactsRetained` warning once per attempt per operator process. Verify writer exit before manual removal. Successful output is caller-managed. This applies only to the shared PVC, not S3 or capture artifacts.
 
 ## Labels
 
