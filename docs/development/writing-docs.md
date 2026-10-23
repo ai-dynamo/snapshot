@@ -23,7 +23,7 @@ description.
 | --- | --- |
 | Which fields, annotations, labels, or conditions exist, and what are their defaults? | [API reference](../reference/api.md) |
 | Which Helm values exist? | [API reference](../reference/api.md#configuration) and the [chart README](../../charts/snapshot/README.md) |
-| Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | The README [prerequisites](../../README.md#prerequisites) for the baseline, and [Compatibility](../reference/compatibility.md) for a feature that needs more |
+| Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Compatibility](../reference/compatibility.md) for the driver and CUDA versions, baseline and per feature, and the README [prerequisites](../../README.md#prerequisites) for the rest of the cluster requirements |
 | What must my workload or Pod do? | [Workload contract](../reference/workload-contract.md), [Restore Pod contract](../reference/restore-pod-contract.md) |
 | How do I install, configure, upgrade, or clean up? | [`docs/operations/`](../operations) |
 | How do I get a first checkpoint and restore working? | [Usage guides](../guides/README.md) |
