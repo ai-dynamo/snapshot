@@ -62,9 +62,9 @@ var (
 	// or that a key, a barrier name, or a participant exceeds MaxKeyLength.
 	ErrTooLarge = errors.New("too large")
 
-	// ErrTooMany reports that library callers hold as much as one session
-	// allows them: keys, bytes, barriers, participants, or recorded requests.
-	ErrTooMany = errors.New("library quota reached")
+	// ErrTooMany reports that a write would take the session past its byte
+	// budget, MaxSessionBytes, which covers everything the session holds.
+	ErrTooMany = errors.New("session budget reached")
 
 	// ErrInvalid reports a malformed argument, or a spec that contradicts the
 	// one a session was ensured with.

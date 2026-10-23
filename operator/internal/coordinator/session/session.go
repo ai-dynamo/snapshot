@@ -50,9 +50,9 @@ type Session struct {
 	deadline time.Time
 
 	store kv.Store
+	// space is the attempt's space as every caller writes it: charged to the
+	// session's budget.
 	space kv.Space
-	// library is space as library callers see it, held to their quotas.
-	library kv.Space
 
 	clock    clock.WithDelayedExecution
 	observer Observer
@@ -97,14 +97,13 @@ func newSession(spec Spec, epoch Epoch, store kv.Store, cl clock.WithDelayedExec
 		ranks:    ranks,
 		deadline: spec.Deadline,
 		store:    store,
-		space:    store.Space(spec.UID),
 		clock:    cl,
 		observer: observer,
 		ctx:      ctx,
 		cancel:   cancel,
 		done:     make(chan struct{}),
 	}
-	s.library = quotaSpace{Space: s.space, usage: &s.ledger.usage}
+	s.space = budgetSpace{space: store.Space(spec.UID), budget: &s.ledger.budget, usage: &s.ledger.usage}
 	s.ledger.reset()
 	return s
 }
@@ -317,7 +316,7 @@ func (s *Session) call(ctx context.Context, c Caller, f func(context.Context, kv
 	defer s.inflight.Done()
 	joined, release := s.join(ctx)
 	defer release()
-	return f(joined, s.spaceFor(c))
+	return f(joined, s.space)
 }
 
 // mutate runs one write for r. A retried request returns the outcome recorded
@@ -339,11 +338,27 @@ func (s *Session) mutate(ctx context.Context, r Request, op Operation,
 	}
 	unbound := context.WithoutCancel(ctx)
 	joined, release := s.join(unbound)
-	value, err := apply(joined, s.spaceFor(r.Caller))
+	value, err := apply(joined, s.space)
 	release()
 	s.inflight.Done()
-	pending.set(value, err)
+	s.record(r, pending, value, err)
 	return value, s.settle(unbound, err)
+}
+
+// record sets the outcome of a request that carries an identifier. The record
+// keeps the error's identity and never its message, which names the key. An
+// error with no identity, such as a backend failure, is not kept, so a retry
+// runs the request again; a retry already waiting gets the error as it is.
+func (s *Session) record(r Request, pending *outcome, value int64, err error) {
+	if pending == nil {
+		return
+	}
+	kept, ok := identityOf(err)
+	if !ok {
+		s.ledger.forget(r)
+		kept = err
+	}
+	pending.set(value, kept)
 }
 
 // join returns a context that is done when ctx is or when the session ends,
@@ -372,16 +387,6 @@ func (s *Session) settle(ctx context.Context, err error) error {
 	default:
 		return err
 	}
-}
-
-// spaceFor returns the space as c sees it. A library caller's writes are held
-// to the library quotas; Snapshot's own components write directly, bounded by
-// the membership instead.
-func (s *Session) spaceFor(c Caller) kv.Space {
-	if c.Role == RoleLibrary {
-		return s.library
-	}
-	return s.space
 }
 
 // observeOperation reports one operation's latency, with no lock held.

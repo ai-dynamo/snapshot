@@ -5,11 +5,15 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/internal/clocktest"
+	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv"
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv/memory"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -140,10 +144,10 @@ func (o *recordingObserver) snapshot() recordingObserver {
 	}
 }
 
-// fixture is one Manager over an in-memory store, usually with one session.
+// fixture is one Manager over a store, usually with one session.
 type fixture struct {
 	manager  *Manager
-	store    *memory.Store
+	store    kv.Store
 	clock    *clocktest.Clock
 	observer *recordingObserver
 	session  *Session
@@ -158,10 +162,17 @@ func newFixture(t *testing.T, members ...MemberID) *fixture {
 	return f
 }
 
-// newManagerFixture builds a Manager without ensuring any session.
+// newManagerFixture builds a Manager over the memory store without ensuring any
+// session.
 func newManagerFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{store: memory.New(), clock: clocktest.New(baseTime), observer: &recordingObserver{}}
+	return newManagerFixtureOn(t, memory.New())
+}
+
+// newManagerFixtureOn builds a Manager over store without ensuring any session.
+func newManagerFixtureOn(t *testing.T, store kv.Store) *fixture {
+	t.Helper()
+	f := &fixture{store: store, clock: clocktest.New(baseTime), observer: &recordingObserver{}}
 	manager, err := NewManager(Config{Store: f.store, Clock: f.clock, Observer: f.observer})
 	require.NoError(t, err)
 	f.manager = manager
@@ -183,6 +194,34 @@ func (f *fixture) ensure(t *testing.T, spec Spec) *Session {
 // the session left there.
 func (f *fixture) stored(uid types.UID, key string) ([]byte, error) {
 	return f.store.Space(uid).Get(context.Background(), key)
+}
+
+// errBackendDown is what flakyStore reports, as a backend outage would: an
+// error no sentinel names.
+var errBackendDown = errors.New("the backend is unreachable")
+
+// flakyStore fails the first failures Inserts as a backend outage would, then
+// behaves.
+type flakyStore struct {
+	kv.Store
+	failures int32
+	failed   atomic.Int32
+}
+
+func (f *flakyStore) Space(uid types.UID) kv.Space {
+	return flakySpace{Space: f.Store.Space(uid), store: f}
+}
+
+type flakySpace struct {
+	kv.Space
+	store *flakyStore
+}
+
+func (s flakySpace) Insert(ctx context.Context, key string, value []byte) error {
+	if s.store.failed.Add(1) <= s.store.failures {
+		return fmt.Errorf("key %q: %w", key, errBackendDown)
+	}
+	return s.Space.Insert(ctx, key, value)
 }
 
 // await returns what a blocking call reported, failing the test if it never

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv"
+	"github.com/ai-dynamo/snapshot/operator/internal/coordinator/kv/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -204,7 +205,7 @@ func TestRetriedRequestsReplayTheirOutcome(t *testing.T) {
 	}
 }
 
-func TestRetriedRequestsReplayAFailure(t *testing.T) {
+func TestARetryReplaysTheFailureWithoutWhatItNamed(t *testing.T) {
 	const retried = RequestID("request-1")
 	f := newFixture(t)
 	ctx := context.Background()
@@ -214,7 +215,23 @@ func TestRetriedRequestsReplayAFailure(t *testing.T) {
 	replayed := f.session.Insert(ctx, requestOf(memberA, retried), agentKey, []byte("third"))
 
 	require.ErrorIs(t, first, ErrExists)
-	assert.Equal(t, first, replayed, "a retry reports the outcome that was recorded, not a fresh one")
+	assert.Contains(t, first.Error(), agentKey, "the caller who made the request learns which key")
+	require.ErrorIs(t, replayed, ErrExists, "a retry reports the outcome that was recorded, not a fresh one")
+	assert.NotContains(t, replayed.Error(), agentKey, "a record keeps the error's identity, never the key")
+}
+
+func TestARetryRunsAgainAfterAFailureWithNoIdentity(t *testing.T) {
+	const retried = RequestID("request-1")
+	f := newManagerFixtureOn(t, &flakyStore{Store: memory.New(), failures: 1})
+	s := f.ensure(t, specOf(attemptUID))
+	ctx, r := context.Background(), requestOf(memberA, retried)
+
+	require.ErrorIs(t, s.Insert(ctx, r, agentKey, []byte("handle")), errBackendDown)
+	require.NoError(t, s.Insert(ctx, r, agentKey, []byte("handle")), "an unrecorded failure is not replayed")
+
+	stored, err := f.stored(attemptUID, agentKey)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("handle"), stored)
 }
 
 func TestConcurrentRetriesOfOneRequestApplyOnce(t *testing.T) {

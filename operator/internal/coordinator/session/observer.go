@@ -57,7 +57,7 @@ type Observer interface {
 }
 
 // nopObserver is the default: a Manager with no Observer configured reports
-// nothing. Metrics arrive with the service that serves sessions.
+// nothing. Metrics arrive with the coordinator binary.
 type nopObserver struct{}
 
 func (nopObserver) SessionOpened(types.UID)                                    {}

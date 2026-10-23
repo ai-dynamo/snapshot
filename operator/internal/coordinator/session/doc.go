@@ -18,13 +18,13 @@
 //
 // Storage sits below this package, behind the small interfaces of package kv: a
 // Store of per-attempt spaces, each offering values, waits, and barriers. A
-// session reaches its keys and barriers only through kv.Space, so a backend such
-// as Redis could replace the in-memory one without changing anything here.
+// session reaches its keys and barriers only through kv.Space, so a backend
+// such as Redis could replace the in-memory one without changing anything here.
 // Everything Snapshot decides stays in this package: callers, roles, and
-// namespaces; value limits and quotas; request replay; who may attach, leave,
-// fail, and post as whom; the deadline, the terminal states, and the Observer.
-// The gRPC service, the authentication that stamps a caller's role, and the
-// reconciler that follows the set resources all sit above it.
+// namespaces; value limits and the byte budget; request replay; who may attach,
+// leave, fail, and post as whom; the deadline, the terminal states, and the
+// Observer. The gRPC service, the authentication that stamps a caller's role,
+// and the reconciler that follows the set resources all sit above it.
 //
 // # Lifecycle
 //
@@ -55,7 +55,7 @@
 // only takes part in. An agent and a relay post to a barrier only as their own
 // member, so a barrier counting members counts each member once.
 //
-// # Namespaces and quotas
+// # Namespaces and the budget
 //
 // Every key and every barrier name lives in the namespace of the caller's
 // role, so a workload process can neither read nor forge the keys of Snapshot's
@@ -68,10 +68,11 @@
 //
 // Values are opaque bytes, limited to MaxLibraryValue in a library namespace
 // and to MaxValue elsewhere, and every key, barrier name, and participant to
-// MaxKeyLength. Library callers are also held to quotas per session,
-// MaxLibraryKeys and the limits beside it, so a flood from a workload exhausts
-// its own attempt and never the coordinator. Snapshot's own components are
-// bounded by the membership instead, and no workload flood can starve them.
+// MaxKeyLength. Everything a session holds, whoever writes it, is charged to
+// one byte budget, MaxSessionBytes: keys and values, barriers, participants,
+// and the requests it records for replay. A flood from a workload process can
+// exhaust its own session's budget, which at worst fails that attempt, never
+// another one.
 //
 // # Retries
 //
