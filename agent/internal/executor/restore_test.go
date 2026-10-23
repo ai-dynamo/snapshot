@@ -1140,6 +1140,108 @@ func TestRestoreStepsNameTheFailingPhase(t *testing.T) {
 	}
 }
 
+func TestRestoreKeepsTheStepNSRestoreNamed(t *testing.T) {
+	tests := []struct {
+		name  string
+		nsErr error
+		want  Step
+	}{
+		{name: "inner step is kept", nsErr: failStep(StepApplyRootfsDiff, errors.New("rootfs diff failed: tar: boom")), want: StepApplyRootfsDiff},
+		{name: "unnamed failure gets the launch step", nsErr: errors.New("nsrestore was killed (signal: killed)"), want: StepRunNSRestore},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+				types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+			if err := types.WriteManifest(directory, manifest); err != nil {
+				t.Fatal(err)
+			}
+			originalExec := execNSRestoreFunc
+			t.Cleanup(func() { execNSRestoreFunc = originalExec })
+			execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+				return nil, tt.nsErr
+			}
+
+			listener := listenPageBroker(t)
+			server := make(chan error, 1)
+			go func() {
+				for _, step := range []string{"stage", "abort"} {
+					connection, err := listener.Accept()
+					if err != nil {
+						server <- err
+						return
+					}
+					request, err := readPageBrokerTestRequest(connection)
+					if err != nil {
+						connection.Close()
+						server <- err
+						return
+					}
+					response := &pagebroker.Response{}
+					switch step {
+					case "stage":
+						response.Result = &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}}
+					case "abort":
+						if request.GetAbort() == nil {
+							err = errors.New("expected Abort after the failed restore")
+						}
+						response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+					}
+					if err == nil {
+						err = replyPageBrokerTest(connection, request, response)
+					}
+					connection.Close()
+					if err != nil {
+						server <- err
+						return
+					}
+				}
+				server <- nil
+			}()
+
+			ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+			defer cancel()
+			_, err = Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+				PageBrokerControlSocketPath: listener.Addr().String(),
+				PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
+			}, &cleanupMounter{events: make(chan string, 8)})
+			if got := StepOf(err); got != tt.want {
+				t.Fatalf("StepOf(%v) = %q, want %q", err, got, tt.want)
+			}
+			if !strings.HasPrefix(err.Error(), "while "+string(tt.want)+": ") {
+				t.Fatalf("restore error = %q, want it to open with the step", err.Error())
+			}
+			if tt.want != StepRunNSRestore && strings.Contains(err.Error(), string(StepRunNSRestore)) {
+				t.Fatalf("restore error = %q, want no second step prefix", err.Error())
+			}
+			waitPageBrokerTest(t, server)
+		})
+	}
+}
+
+func TestFailStepUnlessNamed(t *testing.T) {
+	cause := errors.New("boom")
+	if got := StepOf(failStepUnlessNamed(StepRunNSRestore, cause)); got != StepRunNSRestore {
+		t.Fatalf("StepOf(unnamed) = %q", got)
+	}
+	named := failStep(StepRestoreCRIU, cause)
+	if got := failStepUnlessNamed(StepRunNSRestore, named); got != named {
+		t.Fatalf("failStepUnlessNamed(named) = %v, want the error unchanged", got)
+	}
+	if failStepUnlessNamed(StepRunNSRestore, nil) != nil {
+		t.Fatal("failStepUnlessNamed(nil) must stay nil")
+	}
+}
+
 func TestRestoreCommitFailureIsACleanupError(t *testing.T) {
 	base := t.TempDir()
 	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")

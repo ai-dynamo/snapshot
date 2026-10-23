@@ -195,8 +195,9 @@ placeholder for nsrestore to read. Causes are the same as for the bundle mount.
 ### running nsrestore
 
 The agent uses nsenter to start nsrestore inside the placeholder's namespaces.
-nsrestore applies the rootfs diff, runs the CRIU restore and restores CUDA
-state. The cause tells you which of those stopped:
+A failure that nsrestore itself reports arrives under one of the six steps
+that follow this one; this step is left for a run that never got that far or
+ended from outside:
 
 - `nsenter could not start nsrestore inside the placeholder (exit 127, ...)`:
   the placeholder's root filesystem could not run the binary handed to it.
@@ -205,14 +206,103 @@ state. The cause tells you which of those stopped:
   not a missing binary. nsenter's own message follows the colon.
 - `agent binary: open /snapshot-binaries/nsrestore: no such file or directory`:
   the agent image itself is missing the binary. Check the agent image tag.
-- `CRIU restore failed: ...`: the last error CRIU logged. The agent log holds
-  the key lines of `restore.log`.
+- `nsrestore was killed (signal: killed)`: nsrestore ended by signal before it
+  could report. The agent log holds its last lines.
 - `...; the restore timeout expired`: the restore ran past
   `config.restore.restoreTimeoutSeconds`. The cause before the semicolon is
-  what was running when time ran out, often `CRIU restore failed: context
-  canceled`. Raise the timeout, or find what stalled in the agent log.
+  what was running when time ran out, and it may carry one of the steps
+  below. Raise the timeout, or find what stalled in the agent log.
 - `...; the restore was cancelled`: the restore was withdrawn or the agent
   shut down before nsrestore finished.
+
+An agent image older than the one that introduced the inner steps reports
+every nsrestore failure under this step.
+
+### reading checkpoint manifest inside the placeholder
+
+nsrestore reads `manifest.json` again from the checkpoint as mounted inside the
+placeholder and checks that the PageBroker execution handed to it matches what
+the checkpoint needs.
+
+Likely causes: the staged checkpoint differs from the one the agent validated,
+usually a storage mount that changed under it; an agent and nsrestore from
+different builds.
+
+Compare the checkpoint directory on the node with the artifact PageBroker
+reports, and check that the agent and nsrestore come from the same image.
+
+### preparing CRIU restore
+
+nsrestore rewrites the checkpointed network addresses for the restore pod's IP,
+checks the LSM labels recorded at checkpoint against the profile requested for
+the placeholder, and builds CRIU's restore options from the manifest.
+
+Likely causes: the restore pod has an AppArmor or SELinux profile that does not
+match the labels the checkpoint recorded; the manifest records a mount or
+cgroup layout the restore options cannot express.
+
+Check the restore pod's security context against the source pod's, and the
+`lsm_profile` the agent logged at the start of nsrestore.
+
+### applying rootfs diff
+
+nsrestore extracts the rootfs diff captured at checkpoint over the
+placeholder's root filesystem, so files the workload wrote or changed are back
+before CRIU recreates the process. The cause carries tar's first message.
+
+Likely causes: the placeholder image differs from the source image, so a path
+in the diff cannot be created; a read-only root filesystem on the restore pod;
+a diff entry the placeholder lacks permission to write.
+
+Check that the restore pod uses the same image as the checkpointed pod and
+that its root filesystem is writable.
+
+### preparing GPU restore
+
+For a GPU checkpoint, nsrestore prepares the CUDA checkpoint job file, the GPU
+device mounts the checkpoint recorded, and opens the CUDA helper and the
+cuinterpose coordinator from the agent bundle before CRIU replaces the mount
+namespace.
+
+Likely causes: a job file that lists a different GPU count than the restore
+pod has; GPU device paths the placeholder cannot see; a bundle mount that went
+away because the placeholder restarted.
+
+```bash
+kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
+```
+
+### restoring with CRIU
+
+nsrestore clears the restore sentinels, mounts securityfs where CRIU needs it
+to detect AppArmor, and runs the CRIU restore. The cause is the last error CRIU
+logged; the agent log holds the key lines of `restore.log`.
+
+Likely causes: a file, socket or mount the process had open at checkpoint is
+not present in the placeholder; a listening port already taken; a kernel or
+CRIU version that cannot recreate a resource the dump recorded; an AppArmor
+profile CRIU cannot apply.
+
+Look past CRIU's nonfatal probes, such as the TUN message above, to the final
+errors in the agent log. Check the restore pod against the
+[framework guides](../guides/README.md).
+
+### restoring CUDA state
+
+After CRIU has recreated the process tree, nsrestore maps the checkpointed CUDA
+PIDs onto the restored ones, restores GPU device mounts, and restores GPU
+memory through the driver's checkpoint tool or through PageBroker for
+CustomStorage, then releases the cuinterpose coordinator when the shim is in
+use.
+
+Likely causes: the restored process tree does not contain the PIDs the
+checkpoint recorded; the restore pod's GPUs do not match the checkpoint's device
+map; the driver refused the restore; PageBroker could not serve the GPU
+memory.
+
+The agent log carries the CUDA restore output and, for CustomStorage, the
+PageBroker result. Check the restore pod's GPU allocation against the
+checkpoint's.
 
 ### committing PageBroker restore
 

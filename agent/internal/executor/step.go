@@ -14,19 +14,25 @@ import (
 type Step string
 
 const (
-	StepResolveArtifact    Step = "resolving checkpoint artifact"
-	StepReadManifest       Step = "reading checkpoint manifest"
-	StepValidateManifest   Step = "validating checkpoint manifest against the restore request"
-	StepVerifyCuInterpose  Step = "verifying cuinterpose library identity"
-	StepInspectPlaceholder Step = "inspecting placeholder container"
-	StepBuildGPUContext    Step = "building GPU context"
-	StepMountBundle        Step = "mounting agent bundle into placeholder"
-	StepMountCuInterpose   Step = "mounting cuinterpose into placeholder"
-	StepPrepareRestore     Step = "preparing PageBroker restore"
-	StepMountRestoreSource Step = "mounting PageBroker restore source"
-	StepRunNSRestore       Step = "running nsrestore"
-	StepCommitRestore      Step = "committing PageBroker restore"
-	StepValidateRestored   Step = "validating restored process"
+	StepResolveArtifact           Step = "resolving checkpoint artifact"
+	StepReadManifest              Step = "reading checkpoint manifest"
+	StepValidateManifest          Step = "validating checkpoint manifest against the restore request"
+	StepVerifyCuInterpose         Step = "verifying cuinterpose library identity"
+	StepInspectPlaceholder        Step = "inspecting placeholder container"
+	StepBuildGPUContext           Step = "building GPU context"
+	StepMountBundle               Step = "mounting agent bundle into placeholder"
+	StepMountCuInterpose          Step = "mounting cuinterpose into placeholder"
+	StepPrepareRestore            Step = "preparing PageBroker restore"
+	StepMountRestoreSource        Step = "mounting PageBroker restore source"
+	StepRunNSRestore              Step = "running nsrestore"
+	StepReadManifestInPlaceholder Step = "reading checkpoint manifest inside the placeholder"
+	StepPrepareCRIURestore        Step = "preparing CRIU restore"
+	StepApplyRootfsDiff           Step = "applying rootfs diff"
+	StepPrepareGPURestore         Step = "preparing GPU restore"
+	StepRestoreCRIU               Step = "restoring with CRIU"
+	StepRestoreCUDA               Step = "restoring CUDA state"
+	StepCommitRestore             Step = "committing PageBroker restore"
+	StepValidateRestored          Step = "validating restored process"
 
 	StepResolveCheckpointPath Step = "resolving checkpoint artifact path"
 	StepInspectSource         Step = "inspecting source container"
@@ -47,7 +53,9 @@ type StepError struct {
 	Err  error
 }
 
-func (e *StepError) Error() string { return fmt.Sprintf("while %s: %v", e.Step, e.Err) }
+func (e *StepError) Error() string { return stepPrefix(e.Step) + e.Err.Error() }
+
+func stepPrefix(step Step) string { return fmt.Sprintf("while %s: ", step) }
 
 func (e *StepError) Unwrap() error { return e.Err }
 
@@ -56,6 +64,15 @@ func failStep(step Step, err error) error {
 		return nil
 	}
 	return &StepError{Step: step, Err: err}
+}
+
+// failStepUnlessNamed wraps err with step only when err does not already
+// name one, so a step reported from inside nsrestore is kept as is.
+func failStepUnlessNamed(step Step, err error) error {
+	if StepOf(err) != "" {
+		return err
+	}
+	return failStep(step, err)
 }
 
 // StepOf returns the step a failure came from, or "" when it carries none.
