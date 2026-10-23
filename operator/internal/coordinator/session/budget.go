@@ -31,7 +31,8 @@ const (
 	participantOverhead = 64
 
 	// requestOverhead is one recorded request: its map entry, keyed by the
-	// caller and the id, and the outcome it keeps.
+	// caller and the id, and the outcome it keeps. recordCost adds the
+	// strings the key holds.
 	requestOverhead = 192
 )
 
@@ -43,6 +44,14 @@ func cost(overhead int, sizes ...int) int64 {
 		total += size
 	}
 	return int64(total)
+}
+
+// recordCost is what recording r costs. The record's key holds the request's
+// id and its whole Caller, whose library and version strings the caller
+// chooses.
+func recordCost(r Request) int64 {
+	c := r.Caller
+	return cost(requestOverhead, len(r.ID), len(c.Member), len(c.Library), len(c.Version))
 }
 
 // budget is the bytes a session holds, which MaxSessionBytes bounds. The
