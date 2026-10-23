@@ -155,23 +155,12 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return nil, err
 	}
-	cudaJobFile := ""
-	if len(state.CUDAHostPIDs) > 0 && !usePageBrokerGPU {
-		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir)
-		if err != nil {
-			return nil, err
-		}
-		if err := cuda.CheckJobFile(cudaJobFile, len(state.GPUs.Devices), state.CuInterpose.UsesCoordinator()); err != nil {
-			return nil, err
-		}
-	}
-
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, usePageBrokerGPU)
 	if err != nil {
 		return nil, err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log, gpu)
 	if err != nil {
 		return nil, checkpointNeedsSourceKill(err)
 	}
@@ -417,11 +406,11 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger, gpu *pagebroker.CustomStorageExecution) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// GPU capture must finish before CRIU and filesystem capture.
-	gpuDuration, err := captureGPU(ctx, data, state, checkpointDir, cudaJobFile, log, gpu)
+	gpuDuration, err := captureGPU(ctx, data, state, checkpointDir, log, gpu)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +468,7 @@ func captureOverlay(upperDir string, overlay types.OverlayManifest, checkpointDi
 }
 
 func captureGPU(ctx context.Context, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot,
-	checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution,
+	checkpointDir string, log logr.Logger, gpu *pagebroker.CustomStorageExecution,
 ) (time.Duration, error) {
 	if len(state.CUDAHostPIDs) == 0 {
 		return 0, nil
@@ -511,7 +500,7 @@ func captureGPU(ctx context.Context, data *types.CheckpointManifest, state *type
 		logGPUResult(log, result)
 		return time.Since(start), nil
 	}
-	timings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
+	timings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, log)
 	if err != nil {
 		return 0, fmt.Errorf("CUDA checkpoint failed: %w", err)
 	}
