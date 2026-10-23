@@ -47,10 +47,11 @@ type Store interface {
 	// empty if it does not exist yet.
 	Space(uid types.UID) Space
 
-	// Drop discards the attempt's space and everything in it. The caller
-	// cancels every blocking call on the space, and waits for every call to
-	// return, before dropping it, so a backend need not wake anything. Dropping
-	// a space that does not exist succeeds.
+	// Drop discards the attempt's space and everything in it, including for
+	// whoever still holds the Space. The caller cancels every blocking call on
+	// the space, and waits for every call to return, before dropping it, so a
+	// backend need not wake anything. Dropping a space that does not exist
+	// succeeds.
 	Drop(ctx context.Context, uid types.UID) error
 }
 
