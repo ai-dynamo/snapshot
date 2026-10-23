@@ -48,7 +48,7 @@ func TestGetCompletesWhenTheKeyIsInserted(t *testing.T) {
 		value, err := f.session.Get(context.Background(), agentOf(memberB), agentKey, deadlineIn)
 		got <- result{value: value, err: err}
 	}()
-	f.clock.awaitTimer(t)
+	f.clock.AwaitTimer(t)
 
 	require.NoError(t, f.session.Insert(context.Background(), requestOf(memberA, ""), agentKey, []byte("handle")))
 
@@ -74,7 +74,7 @@ func TestGetReturnsWhenTheContextIsCancelled(t *testing.T) {
 		_, err := f.session.Get(ctx, agentOf(memberA), agentKey, deadlineIn)
 		got <- err
 	}()
-	f.clock.awaitTimer(t)
+	f.clock.AwaitTimer(t)
 
 	cancel()
 
