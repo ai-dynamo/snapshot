@@ -457,30 +457,41 @@ func TestLSMProfileFromSpec(t *testing.T) {
 }
 
 func TestInspectRestoreTakesThePlaceholdersLSMProfile(t *testing.T) {
-	manifest := types.NewCheckpointManifest(
-		"content-uid-123",
-		"main",
-		types.CRIUDumpManifest{},
-		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
-		types.OverlayManifest{},
-		types.HostManifest{},
-	)
+	newManifest := func(dump types.CRIUDumpManifest) *types.CheckpointManifest {
+		return types.NewCheckpointManifest(
+			"content-uid-123",
+			"main",
+			dump,
+			types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+			types.OverlayManifest{},
+			types.HostManifest{},
+		)
+	}
 	rt := &restoreFakeRuntime{apparmorProfile: "cri-containerd.apparmor.d"}
-
-	snap, _, err := inspectRestore(context.Background(), rt, testr.New(t), RestoreRequest{
+	req := RestoreRequest{
 		ContentUID:               "content-uid-123",
 		ContainerID:              "placeholder-id",
 		PodName:                  "restore-pod",
 		PodNamespace:             "default",
 		ArtifactContainerName:    "main",
 		DestinationContainerName: "main",
-	}, manifest)
+	}
 
+	snap, _, err := inspectRestore(context.Background(), rt, testr.New(t), req, newManifest(types.CRIUDumpManifest{LSMLabels: true}))
 	if err != nil {
 		t.Fatalf("inspectRestore: %v", err)
 	}
 	if snap.LSMProfile != "apparmor:cri-containerd.apparmor.d" {
 		t.Fatalf("LSMProfile = %q", snap.LSMProfile)
+	}
+
+	// An unlabeled checkpoint would restore unconfined, and the compatibility
+	// bypass does not change that.
+	req.SkipCompatCheck = true
+	_, _, err = inspectRestore(context.Background(), rt, testr.New(t), req, newManifest(types.CRIUDumpManifest{}))
+	var incompatible *compat.IncompatibleError
+	if !errors.As(err, &incompatible) || incompatible.Mismatches[0].Check != compat.CheckLSMLabels {
+		t.Fatalf("inspectRestore(unlabeled) = %v, want an lsm-labels refusal", err)
 	}
 }
 

@@ -602,6 +602,9 @@ func inspectRestore(
 
 	targetRoot := fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID)
 	lsmProfile := lsmProfileFromSpec(ociSpec)
+	if err := refuseUnlabeledRestore(manifest, lsmProfile); err != nil {
+		return nil, 0, err
+	}
 
 	var (
 		targetGPUs       compat.GPUInfo
