@@ -628,16 +628,18 @@ func inspectRestore(
 		if len(manifest.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
-		if err := refuseMIGRestore(ctx, log, placeholderPID, req.SkipCompatCheck); err != nil {
+		discoverStart := time.Now()
+		// One nvidia-smi answers both the MIG check and GPU discovery.
+		visible := cuda.ListVisibleGPUs(ctx, snapshotruntime.HostProcPath, placeholderPID)
+		if err := refuseMIGRestore(log, placeholderPID, visible, req.SkipCompatCheck); err != nil {
 			return nil, 0, err
 		}
-		discoverStart := time.Now()
 		var env []string
 		if ociSpec != nil && ociSpec.Process != nil {
 			env = ociSpec.Process.Env
 		}
 		targetGPUs, err = cuda.DiscoverGPUs(ctx, req.Clientset, req.PodName, req.PodNamespace,
-			req.DestinationContainerName, snapshotruntime.HostProcPath, placeholderPID, env, log)
+			req.DestinationContainerName, env, visible, log)
 		discoverDuration = time.Since(discoverStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
