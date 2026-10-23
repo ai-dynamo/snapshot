@@ -196,6 +196,21 @@ func (f *fixture) stored(uid types.UID, key string) ([]byte, error) {
 	return f.store.Space(uid).Get(context.Background(), key)
 }
 
+// honoringStore behaves like a backend that honors cancellation: its Insert
+// fails with its context's error once the context is done, instead of applying.
+type honoringStore struct{ kv.Store }
+
+func (h honoringStore) Space(uid types.UID) kv.Space { return honoringSpace{h.Store.Space(uid)} }
+
+type honoringSpace struct{ kv.Space }
+
+func (s honoringSpace) Insert(ctx context.Context, key string, value []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Space.Insert(ctx, key, value)
+}
+
 // errBackendDown is what flakyStore reports, as a backend outage would: an
 // error no sentinel names.
 var errBackendDown = errors.New("the backend is unreachable")

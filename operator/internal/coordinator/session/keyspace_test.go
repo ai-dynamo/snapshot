@@ -159,14 +159,26 @@ func TestANameIsLimitedInLength(t *testing.T) {
 }
 
 func TestACompareAndSwapChecksBothValuesAgainstTheLimit(t *testing.T) {
-	f := newFixture(t, memberA)
-	ctx := context.Background()
-	library := Request{Caller: ncclOf(memberA)}
-	require.NoError(t, f.session.Insert(ctx, library, ncclKey, []byte("old")))
+	over := make([]byte, MaxLibraryValue+1)
+	tests := []struct {
+		name            string
+		expected, value []byte
+	}{
+		{name: "an oversized value", expected: []byte("old"), value: over},
+		{name: "an oversized expected value", expected: over, value: []byte("new")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t, memberA)
+			ctx := context.Background()
+			library := Request{Caller: ncclOf(memberA)}
+			require.NoError(t, f.session.Insert(ctx, library, ncclKey, []byte("old")))
 
-	err := f.session.CompareAndSwap(ctx, library, ncclKey, []byte("old"), make([]byte, MaxLibraryValue+1))
+			err := f.session.CompareAndSwap(ctx, library, ncclKey, tt.expected, tt.value)
 
-	require.ErrorIs(t, err, ErrTooLarge)
+			require.ErrorIs(t, err, ErrTooLarge)
+		})
+	}
 }
 
 func TestWhoIsNotAMemberReachesNothing(t *testing.T) {

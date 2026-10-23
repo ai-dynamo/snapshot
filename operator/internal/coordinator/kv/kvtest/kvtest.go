@@ -11,6 +11,11 @@
 // The suite is deterministic: it never sleeps, and it observes a barrier
 // without blocking by awaiting it under a context that is already done, which
 // a backend answers at once for a barrier that has released.
+//
+// It does not tell apart a wait that finds its key or its release already there
+// from one a later write wakes, since that takes knowing the waiter is
+// registered, which only a backend's own tests can see. Each backend's own
+// tests cover the wake-up path; memory's do with testing/synctest.
 package kvtest
 
 import (
