@@ -396,7 +396,9 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
-        assert snap.condition(after_restart, "Failed").get("status") == "True"
+        after_restart_failed = snap.condition(after_restart, "Failed")
+        assert after_restart_failed and after_restart_failed.get("status") == "True"
+        assert after_restart_failed.get("reason") == "JobFailed"
         assert snap.condition(after_restart, "Completed").get("status") != "True"
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
@@ -488,7 +490,9 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
         after_restart = snap.get_custom_object(
             client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
         )
-        assert snap.condition(after_restart, "Failed").get("status") == "True"
+        after_restart_failed = snap.condition(after_restart, "Failed")
+        assert after_restart_failed and after_restart_failed.get("status") == "True"
+        assert after_restart_failed.get("reason") == "CaptureFailed"
         assert snap.condition(after_restart, "Completed").get("status") != "True"
         assert snap.condition(after_restart, "Captured").get("status") == "False"
     except Exception:
