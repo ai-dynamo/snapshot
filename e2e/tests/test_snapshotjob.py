@@ -333,8 +333,36 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
             workloads.snapshotjob_helper_pod_template(
                 config=config,
                 run=run,
-                helper_command="sleep 20; echo '[helper] failing'; exit 3",
+                helper_command=(
+                    f"while [ ! -f {workloads.HELPER_SYNC_DIR}/helper-release ]; "
+                    "do sleep 0.1; done; echo '[helper] failing'; exit 3"
+                ),
             ),
+        )
+
+        captured_sj = snap.wait_for_condition(
+            config.namespace,
+            snapshotjob_name,
+            plural=snap.SNAPSHOTJOBS,
+            condition_type="Captured",
+            timeout=600,
+        )
+        assert snap.condition(captured_sj, "Captured").get("status") == "True"
+        completed = snap.condition(captured_sj, "Completed")
+        assert completed is not None and completed.get("status") != "True"
+        assert completed.get("reason") == "WaitingForPodCompletion"
+
+        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        snap.wait_for_container_running(
+            config.namespace,
+            source_pod.metadata.name,
+            container="helper",
+        )
+        k8s.exec_command(
+            config.namespace,
+            source_pod.metadata.name,
+            f"touch {workloads.HELPER_SYNC_DIR}/helper-release",
+            container="helper",
         )
 
         sj = snap.wait_for_condition(
@@ -389,12 +417,37 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
             config=config,
             run=run,
             helper_command=f"touch {workloads.HELPER_SYNC_DIR}/helper-finished; exit 0",
-            wait_for_helper_before_capture=True,
+            wait_for_capture_release=True,
         )
         template["metadata"]["annotations"] = {
             "snapshot-e2e.nvidia.com/fail-capture": "true",
         }
         snap.create_snapshotjob(config.namespace, snapshotjob_name, template)
+
+        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        helper_exit_code = snap.wait_for_container_exit(
+            config.namespace,
+            source_pod.metadata.name,
+            container="helper",
+        )
+        assert helper_exit_code == 0
+        snap.wait_for_container_running(
+            config.namespace,
+            source_pod.metadata.name,
+            container=workloads.CONTAINER,
+        )
+        assert snap.file_present(
+            config.namespace,
+            source_pod.metadata.name,
+            f"{workloads.HELPER_SYNC_DIR}/helper-finished",
+            container=workloads.CONTAINER,
+        )
+        k8s.exec_command(
+            config.namespace,
+            source_pod.metadata.name,
+            f"touch {workloads.HELPER_SYNC_DIR}/capture-release",
+            container=workloads.CONTAINER,
+        )
 
         sj = snap.wait_for_condition(
             config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, condition_type="Failed", timeout=180
@@ -420,13 +473,6 @@ def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
             item.get("spec", {}).get("snapshotRef", {}).get("namespace") == config.namespace
             and item.get("spec", {}).get("snapshotRef", {}).get("name") == snapshotjob_name
             for item in contents
-        )
-        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
-        assert snap.file_present(
-            config.namespace,
-            source_pod.metadata.name,
-            f"{workloads.HELPER_SYNC_DIR}/helper-finished",
-            container=workloads.CONTAINER,
         )
         # The helper marker is in a test-owned emptyDir, so deleting its source
         # pod is the observable cleanup boundary for this failed attempt.

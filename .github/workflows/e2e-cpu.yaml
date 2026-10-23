@@ -101,15 +101,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.27.3"
-          cache: true
-          cache-dependency-path: |
-            **/go.sum
-            go.work.sum
-
       # k3d is needed before the builds, not just before the cluster: the
       # registry they push to is one it creates.
       - name: Install k3d
@@ -169,12 +160,6 @@ jobs:
             DOCKER_BUILD_ARGS="--push --build-arg GO_BUILD_TAGS=snapshot_e2e ${cache_flags}"
           hack/ci-phase.sh "Build operator image" "${start}" \
             "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
-
-      - name: Run operator tests
-        working-directory: operator
-        run: |
-          go test ./...
-          go test -tags snapshot_e2e ./...
 
       - name: Build agent image
         timeout-minutes: 50

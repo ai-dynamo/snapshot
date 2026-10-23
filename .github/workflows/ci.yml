@@ -64,6 +64,9 @@ jobs:
             **/go.sum
             go.work.sum
       - run: make test
+      - name: Test operator E2E build
+        working-directory: operator
+        run: go test -tags snapshot_e2e ./...
       - run: make test-integration
 
   build:

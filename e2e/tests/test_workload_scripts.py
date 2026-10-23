@@ -158,7 +158,13 @@ def test_snapshotjob_helper_waits_before_signalling_capture_readiness(
         wait_for_helper_before_capture=False,
         wait_for_capture_release=True,
     )
-    assert "readinessProbe" not in release_gated_template["spec"]["containers"][0]
+    release_gated_target = release_gated_template["spec"]["containers"][0]
+    release_command = release_gated_target["command"][2]
+    capture_release = (
+        f"while [ ! -f {workloads.HELPER_SYNC_DIR}/capture-release ]; do sleep 0.1; done"
+    )
+    assert release_command.index(capture_release) < release_command.index(capture_ready)
+    assert "readinessProbe" not in release_gated_target
 
 
 @pytest.mark.workload
