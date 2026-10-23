@@ -131,6 +131,15 @@ impl ProcessState {
         result
     }
 
+    /// The converted malloc or IPC import whose VA reservation contains `address`.
+    pub(crate) fn malloc_region(&self, address: CUdeviceptr) -> Option<&MallocRegion> {
+        self.malloc_regions
+            .range(..=address)
+            .next_back()
+            .filter(|(start, region)| address - **start < region.extent as u64)
+            .map(|(_, region)| region)
+    }
+
     pub(crate) fn unmap_malloc(&mut self, address: CUdeviceptr) -> Result<()> {
         let mapping = self
             .malloc_regions
@@ -300,8 +309,13 @@ pub(crate) fn decode(handle: CUipcMemHandle) -> Result<(AllocationReference, usi
 }
 
 impl MallocRegion {
+    /// cuIpcGetMemHandle accepts only mallocs, not IPC imports.
+    pub(crate) fn is_import(&self) -> bool {
+        self.opens != 0
+    }
+
     pub(crate) fn export_handle(&self, reference: AllocationReference) -> Result<CUipcMemHandle> {
-        if self.opens != 0 {
+        if self.is_import() {
             return Err(CUresult::CUDA_ERROR_INVALID_VALUE.into());
         }
         let handle = VirtualIpcMemHandle {
