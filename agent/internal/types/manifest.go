@@ -81,12 +81,17 @@ func NewHostManifest(kernelVersion string) HostManifest {
 	}
 }
 
-// CRIUDumpManifest stores the resolved dump-time CRIU mount plan used for restore.
+// CRIUDumpManifest stores the resolved dump-time CRIU mount plan used for
+// restore, and what the dump recorded about security labels.
 type CRIUDumpManifest struct {
 	CRIU     CRIUSettings      `yaml:"criu"`
 	ExtMnt   map[string]string `yaml:"extMnt,omitempty"`
 	External []string          `yaml:"external,omitempty"`
 	SkipMnt  []string          `yaml:"skipMnt,omitempty"`
+	// LSMLabels is set when the dump recorded a security label for every
+	// process with credentials, as criu.RecordedLSMLabels reads the images.
+	// A checkpoint captured before it was recorded reads as unlabeled.
+	LSMLabels bool `yaml:"lsmLabels,omitempty"`
 }
 
 func NewCRIUDumpManifest(criuOpts *criurpc.CriuOpts, settings CRIUSettings) CRIUDumpManifest {

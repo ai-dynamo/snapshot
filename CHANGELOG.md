@@ -50,9 +50,11 @@ commit-level history for each release is on its
 ### Changed
 
 - Restoring into a container that has an AppArmor profile or SELinux label now
-  requires a checkpoint that saved the processes' labels. Checkpoints taken by
-  earlier agent versions on AppArmor nodes don't have them and must be taken
-  again.
+  requires a checkpoint that saved the processes' labels. Capture records
+  whether it did in the manifest, and a restore without that record is refused
+  up front under the new `lsm-labels` check, which the compatibility bypass does
+  not waive. Checkpoints taken by earlier agent versions don't have the record
+  and must be taken again.
 - The agent drives checkpoints from a workqueue rather than per-checkpoint
   `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one
