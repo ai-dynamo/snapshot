@@ -108,9 +108,6 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
 		return nil, failStep(StepPrepareCRIURestore, err)
 	}
-	if err := criu.CheckRecordedLSMLabels(opts.CheckpointPath, opts.LSMProfile); err != nil {
-		return nil, failStep(StepPrepareCRIURestore, err)
-	}
 	criuOpts, err := criu.BuildRestoreOpts(m, opts.CgroupRoot, opts.LSMProfile, log)
 	if err != nil {
 		return nil, failStep(StepPrepareCRIURestore, err)

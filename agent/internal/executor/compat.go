@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
@@ -44,6 +45,19 @@ func refuseMIGRestore(ctx context.Context, log logr.Logger, pid int, skipCompatC
 		Check:  compat.CheckMIGSlice,
 		Source: "whole GPU",
 		Target: "MIG slice " + strings.Join(migSlices, ", "),
+	}})
+}
+
+// refuseUnlabeledRestore is the inspect gate's security label rule. It reads
+// only the manifest, and the compatibility bypass does not waive it.
+func refuseUnlabeledRestore(manifest *types.CheckpointManifest, lsmProfile string) error {
+	if lsmProfile == criu.LSMProfileNone || manifest.CRIUDump.LSMLabels {
+		return nil
+	}
+	return compat.NewIncompatibleError(compat.GateInspect, []compat.Mismatch{{
+		Check:  compat.CheckLSMLabels,
+		Source: "no recorded process labels",
+		Target: lsmProfile,
 	}})
 }
 

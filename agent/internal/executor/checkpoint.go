@@ -452,6 +452,16 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 
+	// Recorded from the images CRIU wrote, so the manifest states what the
+	// dump did rather than what the node was expected to allow.
+	data.CRIUDump.LSMLabels, err = criu.RecordedLSMLabels(checkpointDir)
+	if err != nil {
+		return nil, fmt.Errorf("read the dump's security labels: %w", err)
+	}
+	if err := types.WriteManifest(checkpointDir, data); err != nil {
+		return nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
+	}
+
 	if state.UpperDir != "" {
 		overlayCaptureStart := time.Now()
 		if err := captureOverlay(state.UpperDir, data.Overlay, checkpointDir, log); err != nil {

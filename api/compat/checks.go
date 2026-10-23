@@ -259,6 +259,14 @@ var gpuCountCheck = check{
 // everywhere else.
 const CheckMIGSlice Check = "mig-slice"
 
+// CheckLSMLabels refuses a restore into a container with an AppArmor profile
+// or SELinux label from a checkpoint whose dump recorded no labels. CRIU applies
+// the target's label only to processes it recorded one for, so the workload
+// would run unconfined. It sits outside the policy table, and the compatibility
+// bypass does not waive it: skipping it would lift the Pod's security policy,
+// not accept a riskier restore.
+const CheckLSMLabels Check = "lsm-labels"
+
 // CheckDriverVersion refuses a restore on a driver build other than the captured
 // one. Build granularity is not caution for its own sake: upstream reproduces a
 // restore failure between 560.35.03 and 560.35.05.

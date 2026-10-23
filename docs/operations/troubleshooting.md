@@ -140,10 +140,12 @@ Restore with the agent version that took the checkpoint, or re-checkpoint.
 ### inspecting placeholder container
 
 The agent resolves the placeholder container through the node runtime, reads
-its mounts, cgroup root and image, and maps the checkpoint's GPUs onto the GPUs
-visible in the placeholder. Mismatches that make the node unable to run the
-checkpoint are refused with reason `RestoreIncompatible` rather than failed
-here.
+its mounts, cgroup root, image and security profile, and maps the checkpoint's
+GPUs onto the GPUs visible in the placeholder. Mismatches that make the node
+unable to run the checkpoint are refused with reason `RestoreIncompatible`
+rather than failed here. That includes a placeholder with an AppArmor or SELinux
+profile when the checkpoint recorded no security labels (check `lsm-labels`):
+re-checkpoint with an agent that records them.
 
 Likely causes: the placeholder container exited or restarted before the agent
 reached it; the runtime did not answer; the placeholder has fewer GPUs
@@ -249,15 +251,13 @@ reports, and check that the agent and nsrestore come from the same image.
 
 ### preparing CRIU restore
 
-nsrestore checks the LSM labels recorded at checkpoint against the
-placeholder's profile and builds CRIU's restore options from the manifest.
+nsrestore builds CRIU's restore options from the manifest and the placeholder's
+security profile.
 
-Likely causes: the restore pod has an AppArmor or SELinux profile that does not
-match the labels the checkpoint recorded; the manifest records a mount or
-cgroup layout the restore options cannot express.
+Likely cause: the manifest records a mount or cgroup layout the restore options
+cannot express.
 
-Check the restore pod's security context against the source pod's, and the
-`lsm_profile` the agent logged at the start of nsrestore.
+Compare the restore pod's volumes with the source pod's.
 
 ### applying rootfs diff
 
