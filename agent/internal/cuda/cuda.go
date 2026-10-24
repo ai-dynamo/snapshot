@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,13 +112,15 @@ type VisibleGPUs struct {
 // VisibleGPULister answers what one container sees of the node's GPUs.
 type VisibleGPULister func() (VisibleGPUs, error)
 
-// ListVisibleGPUs returns a lister for the container whose host PID is pid. It
-// runs nvidia-smi -L inside the container's mount and PID namespaces on its
-// first call, and hands every later call the same answer. nvidia-smi spends
-// most of its time initializing NVML, 0.1 to 0.2 s on an eight-GPU node, so a
-// capture or restore lists once for both its MIG check and GPU discovery.
+// ListVisibleGPUs returns a lister for the container whose host PID is pid. On
+// its first call it reads the container's cards from the driver's procfs, or,
+// when that cannot answer exactly (MIG), runs nvidia-smi -L inside the
+// container's mount and PID namespaces; every later call gets the same answer.
+// nvidia-smi spends most of its time initializing NVML, 0.1 to 0.2 s on an idle
+// eight-GPU node and seconds while other processes start CUDA, so a capture or
+// restore lists once for both its MIG check and GPU discovery.
 //
-// The model comes from the same call as the UUIDs, and the driver version
+// The model comes from the same source as the UUIDs, and the driver version
 // from the kernel module's version file: nothing else on the restore path
 // gets to look at the source node's GPUs, so what is not read here cannot be
 // compared later. nvidia-smi runs only against the module version it was
@@ -129,6 +132,9 @@ type VisibleGPULister func() (VisibleGPUs, error)
 // allocates them instead of the device plugin.
 func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int) VisibleGPULister {
 	return sync.OnceValues(func() (VisibleGPUs, error) {
+		if visible, ok := listProcfsGPUs(hostProcPath, pid); ok {
+			return visible, nil
+		}
 		ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
 		defer cancel()
 
@@ -142,6 +148,66 @@ func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int) VisibleG
 		}
 		return visible, nil
 	})
+}
+
+// listProcfsGPUs reads the cards a container can open from the driver's procfs:
+// the cards under its /proc/driver/nvidia/gpus whose /dev/nvidia<minor> it has,
+// in PCI bus order, which is the order nvidia-smi -L lists them in. It avoids
+// NVML, which brings up every GPU it can open and takes seconds when other
+// processes on the node, such as a GMS sidecar, start CUDA at the same time.
+// It reports !ok whenever it cannot answer exactly, including when the
+// container has MIG capability nodes, because procfs does not list slices.
+func listProcfsGPUs(hostProcPath string, pid int) (VisibleGPUs, bool) {
+	root := filepath.Join(hostProcPath, strconv.Itoa(pid), "root")
+	if caps, err := os.ReadDir(filepath.Join(root, "dev", "nvidia-caps")); err == nil && len(caps) > 0 {
+		return VisibleGPUs{}, false
+	}
+	gpusDir := filepath.Join(root, "proc", "driver", "nvidia", "gpus")
+	entries, err := os.ReadDir(gpusDir)
+	if err != nil {
+		return VisibleGPUs{}, false
+	}
+	busIDs := make([]string, 0, len(entries))
+	devices := map[string]compat.GPUDevice{}
+	for _, entry := range entries {
+		information, err := os.ReadFile(filepath.Join(gpusDir, entry.Name(), "information"))
+		if err != nil {
+			return VisibleGPUs{}, false
+		}
+		fields := parseProcfsGPUInformation(string(information))
+		uuid, minor := fields["GPU UUID"], fields["Device Minor"]
+		if uuid == "" || minor == "" {
+			return VisibleGPUs{}, false
+		}
+		if _, err := os.Stat(filepath.Join(root, "dev", "nvidia"+minor)); err != nil {
+			continue
+		}
+		busID := strings.ToLower(entry.Name())
+		busIDs = append(busIDs, busID)
+		devices[busID] = compat.GPUDevice{UUID: uuid, ProductName: fields["Model"]}
+	}
+	if len(busIDs) == 0 {
+		return VisibleGPUs{}, false
+	}
+	sort.Strings(busIDs)
+	var visible VisibleGPUs
+	for _, busID := range busIDs {
+		visible.GPUs.Devices = append(visible.GPUs.Devices, devices[busID])
+	}
+	visible.GPUs.DriverVersion = readDriverVersion(hostProcPath)
+	return visible, true
+}
+
+// parseProcfsGPUInformation reads a card's information file, lines of
+// "Key: \t value", such as "GPU UUID: \t GPU-..." and "Device Minor: \t 6".
+func parseProcfsGPUInformation(information string) map[string]string {
+	fields := map[string]string{}
+	for _, line := range strings.Split(information, "\n") {
+		if key, value, ok := strings.Cut(line, ":"); ok {
+			fields[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	return fields
 }
 
 // readDriverVersion returns the loaded kernel module's version, or nothing

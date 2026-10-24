@@ -1104,3 +1104,72 @@ func TestOrderDRAUUIDsByRuntimeRejectsMismatches(t *testing.T) {
 		})
 	}
 }
+
+func TestListProcfsGPUs(t *testing.T) {
+	writeCard := func(t *testing.T, root, busID, uuid, minor string) {
+		t.Helper()
+		dir := filepath.Join(root, "proc", "driver", "nvidia", "gpus", busID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		information := "Model: \t\t NVIDIA B200\nGPU UUID: \t " + uuid + "\nBus Location: \t " + busID + "\nDevice Minor: \t " + minor + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "information"), []byte(information), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setup := func(t *testing.T) (string, string) {
+		t.Helper()
+		hostProc := t.TempDir()
+		root := filepath.Join(hostProc, "42", "root")
+		if err := os.MkdirAll(filepath.Join(root, "dev"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Minors do not follow bus order, as on real nodes.
+		writeCard(t, root, "0000:29:00.0", "GPU-b", "0")
+		writeCard(t, root, "0000:18:00.0", "GPU-a", "6")
+		writeCard(t, root, "0000:3a:00.0", "GPU-hidden", "3")
+		for _, minor := range []string{"0", "6"} {
+			if err := os.WriteFile(filepath.Join(root, "dev", "nvidia"+minor), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return hostProc, root
+	}
+
+	t.Run("cards the container can open, in bus order", func(t *testing.T) {
+		hostProc, _ := setup(t)
+		visible, ok := listProcfsGPUs(hostProc, 42)
+		if !ok {
+			t.Fatal("expected a procfs answer")
+		}
+		var uuids []string
+		for _, device := range visible.GPUs.Devices {
+			uuids = append(uuids, device.UUID)
+			if device.ProductName != "NVIDIA B200" {
+				t.Fatalf("product name = %q", device.ProductName)
+			}
+		}
+		if strings.Join(uuids, ",") != "GPU-a,GPU-b" {
+			t.Fatalf("uuids = %v", uuids)
+		}
+	})
+
+	t.Run("MIG capability nodes defer to nvidia-smi", func(t *testing.T) {
+		hostProc, root := setup(t)
+		if err := os.MkdirAll(filepath.Join(root, "dev", "nvidia-caps"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "dev", "nvidia-caps", "nvidia-cap1"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := listProcfsGPUs(hostProc, 42); ok {
+			t.Fatal("expected no procfs answer with MIG capability nodes")
+		}
+	})
+
+	t.Run("no readable procfs defers to nvidia-smi", func(t *testing.T) {
+		if _, ok := listProcfsGPUs(t.TempDir(), 42); ok {
+			t.Fatal("expected no procfs answer")
+		}
+	})
+}
