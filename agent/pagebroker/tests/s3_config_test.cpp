@@ -77,12 +77,11 @@ TEST(S3ConfigTest, CapsRestoreSubmissionsWithoutExtendingShorterTransactions)
     value["limits"] = {{"transactionSeconds", seconds}};
     const auto config = ParseS3Config(value.dump());
     EXPECT_EQ(config.transaction_lifetime, std::chrono::seconds(seconds));
-    EXPECT_EQ(config.transfer.upload_limits.operation_timeout, std::chrono::seconds(seconds));
     EXPECT_EQ(config.transfer.restore_timeout, std::chrono::seconds(seconds < 1200 ? seconds : 1200));
   }
 }
 
-TEST(S3ConfigTest, ConfiguresSdkRetriesAndConnectionTimeoutIndependently)
+TEST(S3ConfigTest, ConfiguresRcloneRetriesAndConnectionTimeoutIndependently)
 {
   auto value = Json::parse(kConfig);
   value["limits"] = {{"requestSeconds", 2}};
@@ -107,22 +106,25 @@ TEST(S3ConfigTest, ConfiguresSdkRetriesAndConnectionTimeoutIndependently)
   EXPECT_THROW(ParseS3Config(value.dump()), std::invalid_argument);
 }
 
-TEST(S3ConfigTest, UsesCrtUploadTuningAndRejectsOldWorkerCount)
+TEST(S3ConfigTest, BoundsAggregateRcloneBuffersAndRejectsObsoleteSettings)
 {
   auto value = Json::parse(kConfig);
-  value["limits"] = {{"uploadTargetGbps", 25}, {"uploadPartBytes", 8 * 1024 * 1024},
-                     {"uploadBufferBytes", 1024ULL * 1024 * 1024 + 1}};
+  value["limits"] = {{"uploadPartBytes", 8 * 1024 * 1024},
+                     {"uploadBufferBytes", 24 * 1024 * 1024}, {"uploadActiveFiles", 3}};
   const auto config = ParseS3Config(value.dump());
-  EXPECT_EQ(config.transfer.upload_limits.target_gbps, 25);
-  EXPECT_EQ(config.transfer.upload_limits.part_size, 8 * 1024 * 1024);
-  value["limits"]["uploadWorkers"] = 4;
+  EXPECT_EQ(config.transfer.upload_limits.buffer_budget, 24U * 1024 * 1024);
+  EXPECT_EQ(config.transfer.upload_limits.active_files, 3U);
+  value["limits"]["uploadBufferBytes"] = 24 * 1024 * 1024 - 1;
   EXPECT_THROW(ParseS3Config(value.dump()), std::invalid_argument);
-  value["limits"] = {{"uploadPartBytes", 5 * 1024 * 1024}};
-  EXPECT_THROW(ParseS3Config(value.dump()), std::invalid_argument);
-  for (auto target : {0, 1001}) {
-    value["limits"] = {{"uploadTargetGbps", target}};
+  value["limits"] = {{"uploadPartBytes", 8 * 1024 * 1024},
+                     {"uploadBufferBytes", 8 * 1024 * 1024}, {"uploadActiveFiles", 1}};
+  EXPECT_NO_THROW(ParseS3Config(value.dump()));
+  for (const auto* field : {"uploadTargetGbps", "uploadWorkers"}) {
+    value["limits"] = {{field, 4}};
     EXPECT_THROW(ParseS3Config(value.dump()), std::invalid_argument);
   }
+  value["limits"] = {{"uploadPartBytes", 5 * 1024 * 1024}};
+  EXPECT_THROW(ParseS3Config(value.dump()), std::invalid_argument);
 }
 
 TEST(S3ConfigTest, ValidatesConnectionFieldsBeforeOptionalSettings)

@@ -64,7 +64,7 @@ TEST_F(ModelStreamerConfigTest, UploadTuningDoesNotChangeReaderMemoryOrConnectio
 {
   S3Config storage;
   storage.transfer.upload_limits.buffer_budget = 2ULL * 1024 * 1024 * 1024;
-  storage.transfer.upload_limits.target_gbps = 25;
+  storage.transfer.upload_limits.active_files = 4;
   const auto options = ResolveModelStreamerOptions({}, &storage);
   EXPECT_EQ(options.s3_max_inflight_mib, 128);
   EXPECT_EQ(options.s3_max_connections, 4);
@@ -85,7 +85,7 @@ TEST_F(ModelStreamerConfigTest, ResolvesJsonBeforeEnvironmentBeforeUploadFallbac
   EXPECT_EQ(options.s3_max_inflight_mib, 32);
   EXPECT_EQ(options.s3_max_retries, 0);
   EXPECT_EQ(options.s3_concurrency, 3);
-  EXPECT_EQ(storage.transfer.upload_limits.target_gbps, 10);
+  EXPECT_EQ(storage.transfer.upload_limits.active_files, 2U);
   EXPECT_EQ(storage.transfer.upload_limits.buffer_budget, 1024ULL * 1024 * 1024);
   EXPECT_EQ(std::string(std::getenv("RUNAI_STREAMER_S3_MAX_CONNECTIONS")), "invalid-but-overridden");
   ConfigureModelStreamerEnvironment(options, &storage);

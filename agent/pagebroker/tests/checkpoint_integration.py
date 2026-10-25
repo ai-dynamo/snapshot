@@ -5,6 +5,7 @@
 """Exercise the real Go checkpoint client against two packaged native daemons."""
 
 import argparse
+import configparser
 from collections import Counter, defaultdict
 import contextlib
 import json
@@ -101,8 +102,8 @@ class CheckpointService:
         uid = self.labels.get(checkpoint_id, checkpoint_id)
         method = environment["REQUEST_METHOD"]
         query = parse_qs(environment.get("QUERY_STRING", ""), keep_blank_values=True)
-        # CRT handles GET/PUT itself; metadata HEAD still uses the SDK client.
-        native = environment.get("HTTP_USER_AGENT", "").startswith(("aws-sdk-cpp/", "CRTS3NativeClient/"))
+        # Track the rclone uploader and Model Streamer's native S3 reader.
+        native = environment.get("HTTP_USER_AGENT", "").startswith(("rclone/", "aws-sdk-cpp/", "CRTS3NativeClient/"))
         with self.changed:
             self.counts[uid, method] += 1
             auth = environment.get("HTTP_AUTHORIZATION", "")
@@ -223,16 +224,14 @@ def run(args):
                 assert "private-value" not in invalid.stderr, invalid.stderr
             assert not (root / "missing.sock").exists()
             containers = []
+            commands = []
             try:
                 for number in range(3):
                     name = "pagebroker-checkpoint-" + uuid.uuid4().hex
                     command = ["docker", "run", "--rm", "--detach", "--network=host", "--name", name,
                                "--user", f"{os.getuid()}:{os.getgid()}", "--mount", f"type=bind,source={root},target={root}"]
-                    command += ["--env", f"AWS_SHARED_CREDENTIALS_FILE={credentials}",
-                                "--env", "AWS_PROFILE=default", "--env", "AWS_EC2_METADATA_DISABLED=true"]
-                    if number == 2:
-                        command += ["--env", "AWS_ACCESS_KEY_ID=local-test-access-key",
-                                    "--env", "AWS_SECRET_ACCESS_KEY=local-test-secret-key"]
+                    command += ["--env", "AWS_ACCESS_KEY_ID=local-test-access-key",
+                                "--env", "AWS_SECRET_ACCESS_KEY=local-test-secret-key"]
                     if args.tls:
                         ca = environment["AWS_CA_BUNDLE"]
                         command += ["--mount", f"type=bind,source={ca},target={ca},readonly"]
@@ -254,12 +253,25 @@ def run(args):
                                 storage_args + streamer_args if number == 1 else storage_args)
                     subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
                     containers.append(name)
+                    commands.append(command)
                 deadline = time.monotonic() + 15
                 while not all((root / f"{number}.sock").exists() for number in range(3)):
                     if time.monotonic() > deadline:
                         raise RuntimeError("native daemons did not create sockets")
                     time.sleep(0.05)
-                service.restart = lambda: subprocess.run(["docker", "restart", containers[1]], check=True, stdout=subprocess.DEVNULL)
+                def restart():
+                    # Deployment code resolves credentials and supplies a fresh startup environment.
+                    provider = configparser.ConfigParser()
+                    provider.read(credentials)
+                    updated = provider["default"]
+                    command = [
+                        "AWS_ACCESS_KEY_ID=" + updated["aws_access_key_id"] if arg.startswith("AWS_ACCESS_KEY_ID=") else
+                        "AWS_SECRET_ACCESS_KEY=" + updated["aws_secret_access_key"] if arg.startswith("AWS_SECRET_ACCESS_KEY=") else arg
+                        for arg in commands[1]
+                    ]
+                    subprocess.run(["docker", "stop", "--time", "10", containers[1]], check=True, stdout=subprocess.DEVNULL)
+                    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+                service.restart = restart
                 environment.update(PAGEBROKER_CHECKPOINT_SHORT_SOCKET=str(root / "2.sock"), PAGEBROKER_CHECKPOINT_SOCKET=str(root / "0.sock"),
                                    PAGEBROKER_CHECKPOINT_SECOND_SOCKET=str(root / "1.sock"),
                                    PAGEBROKER_CHECKPOINT_CREDENTIALS=str(credentials),

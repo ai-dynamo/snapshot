@@ -604,7 +604,7 @@ func TestS3CheckpointDaemon(t *testing.T) {
 		if err := other.Abort(ctx, "orphan"); err != nil {
 			t.Fatal(err)
 		}
-		// The restarted daemon resolves the replacement file for both SDK and reader.
+		// The deployment restarts the daemon with replacement credentials for uploader and reader.
 		id = target(t, "credentials-restarted")
 		directory, err = other.prepareArtifact(ctx, "credentials-restarted", id)
 		if err != nil {

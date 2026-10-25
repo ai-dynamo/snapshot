@@ -32,7 +32,6 @@ constexpr char kStagingBytesKey[] = "stagingBytes";
 constexpr char kActiveTransactionsKey[] = "activeTransactions";
 constexpr char kUploadPartBytesKey[] = "uploadPartBytes";
 constexpr char kUploadBufferBytesKey[] = "uploadBufferBytes";
-constexpr char kUploadTargetGbpsKey[] = "uploadTargetGbps";
 constexpr char kUploadActiveFilesKey[] = "uploadActiveFiles";
 constexpr char kRequestSecondsKey[] = "requestSeconds";
 constexpr char kUploadRequestRetriesKey[] = "uploadRequestRetries";
@@ -153,7 +152,7 @@ ParseTransferLimits(const Json& value, S3Config& config)
   if (value.contains(kLimitsKey)) {
     const auto& limits = value.at(kLimitsKey);
     const std::set<std::string> allowed{kTransactionSecondsKey, kStagingBytesKey, kActiveTransactionsKey, kUploadPartBytesKey,
-        kUploadBufferBytesKey, kUploadTargetGbpsKey, kUploadActiveFilesKey, kRequestSecondsKey, kUploadRequestRetriesKey, kUploadConnectSecondsKey};
+        kUploadBufferBytesKey, kUploadActiveFilesKey, kRequestSecondsKey, kUploadRequestRetriesKey, kUploadConnectSecondsKey};
     if (!limits.is_object())
       throw std::invalid_argument("S3 limits must be an object");
     for (const auto& [key, ignored] : limits.items()) {
@@ -173,8 +172,7 @@ ParseTransferLimits(const Json& value, S3Config& config)
     config.staging_bytes = read_limit(kStagingBytesKey, config.staging_bytes, 1ULL << 40);
     config.active_transactions = read_limit(kActiveTransactionsKey, config.active_transactions, 1024);
     upload.part_size = read_limit(kUploadPartBytesKey, upload.part_size, 1ULL << 30, 8 * 1024 * 1024);
-    upload.buffer_budget = read_limit(kUploadBufferBytesKey, upload.buffer_budget, 16ULL << 30, std::max<std::uint64_t>(1ULL << 30, 2 * upload.part_size));
-    upload.target_gbps = read_limit(kUploadTargetGbpsKey, upload.target_gbps, 1000);
+    upload.buffer_budget = read_limit(kUploadBufferBytesKey, upload.buffer_budget, 16ULL << 30, upload.part_size);
     upload.active_files = read_limit(kUploadActiveFilesKey, upload.active_files, 64);
     upload.request_timeout = std::chrono::seconds(read_limit(kRequestSecondsKey,
         std::chrono::duration_cast<std::chrono::seconds>(upload.request_timeout).count(), kMaxRequestTimeout.count()));
@@ -183,7 +181,6 @@ ParseTransferLimits(const Json& value, S3Config& config)
     const auto connect_seconds = std::chrono::duration_cast<std::chrono::seconds>(upload.connect_timeout).count();
     upload.connect_timeout = std::chrono::seconds(read_limit(kUploadConnectSecondsKey, std::min(connect_seconds, request_seconds), request_seconds));
   }
-  upload.operation_timeout = config.transaction_lifetime;
   config.transfer.restore_timeout = std::min(config.transfer.restore_timeout,
       std::chrono::duration_cast<std::chrono::milliseconds>(config.transaction_lifetime));
   upload.Validate();
