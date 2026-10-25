@@ -207,3 +207,11 @@ docker-build-operator:
 docker-build-pagebroker:
 	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/pagebroker/Dockerfile \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker:$(t)) agent/pagebroker/
+
+# Integration coverage is separate from each component's unit-test target.
+.PHONY: pagebroker-integration-test pagebroker-checkpoint-test
+pagebroker-integration-test:
+	$(MAKE) -C hack/pagebroker-integration test REGISTRY="$(REGISTRY)" VERSION="$(VERSION)"
+
+pagebroker-checkpoint-test:
+	$(MAKE) -C hack/pagebroker-integration checkpoint-test REGISTRY="$(REGISTRY)" VERSION="$(VERSION)"
