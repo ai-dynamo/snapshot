@@ -30,6 +30,18 @@ main(int argc, char** argv)
       return 8;
   }
   const std::string remote(argv[3]);
+  if (remote == "pagebroker:bucket/buffer-limit") {
+    auto has_argument = [&](const std::string& flag, const std::string& value) {
+      for (int i = 4; i + 1 < argc; ++i) {
+        if (argv[i] == flag && argv[i + 1] == value)
+          return true;
+      }
+      return false;
+    };
+    return has_argument("--max-buffer-memory", "9437184B") &&
+           has_argument("--s3-chunk-size", "8388609B") &&
+           has_argument("--s3-upload-concurrency", "4") ? 0 : 10;
+  }
   if (remote == "pagebroker:bucket/batch") {
     std::ofstream(root / "launches", std::ios::app) << "launch\n";
     std::string first, second, extra;

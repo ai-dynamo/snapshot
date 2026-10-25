@@ -127,10 +127,12 @@ s3-lifetime-test:
 build/rclone-test-child: transfer/s3/tests/rclone_test_child.cpp | build
 	$(CXX) $(CXXFLAGS) $< -o $@
 
+# Wrappers observe admission waits and expire a notified waiter deterministically.
 rclone-process-test: build/rclone-test-child
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -DPAGEBROKER_RCLONE_PATH='"$(abspath build/rclone-test-child)"' \
 		transfer/s3/s3_client.cpp file_descriptor.cpp \
-		transfer/s3/tests/rclone_process_test.cpp $(GTEST_FLAGS) -o build/rclone-process-test
+		transfer/s3/tests/rclone_process_test.cpp $(GTEST_FLAGS) \
+		-Wl,--wrap=pthread_cond_clockwait,--wrap=_ZNSt6chrono3_V212steady_clock3nowEv -o build/rclone-process-test
 	./build/rclone-process-test
 
 .PHONY: rclone-process-test

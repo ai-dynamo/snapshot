@@ -61,8 +61,9 @@ struct S3UploadFile {
 // and retries of its requests. rclone owns multipart scheduling and buffering.
 struct S3Limits {
   std::uint64_t part_size = 16 * 1024 * 1024;
-  // Aggregate multipart buffer budget; at least one part per active batch.
-  // Go runtime, TLS and small metadata buffers are additional fixed overhead.
+  // Active buffer budget split equally between concurrent rclone processes.
+  // Each share must fit one part plus rclone's allocation padding.
+  // Idle buffer caches, process overhead, metadata, and file lists are additional.
   std::uint64_t buffer_budget = 1024ULL * 1024 * 1024;
   // Concurrent CLI operations. Each payload batch transfers one file at a time.
   unsigned active_files = 2;

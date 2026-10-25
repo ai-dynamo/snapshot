@@ -50,11 +50,14 @@ credentials; there is no automatic refresh.
 
 `active_files` bounds concurrent CLI processes, including metadata operations.
 A payload batch occupies one slot and transfers one file at a time. Independent
-batches can run concurrently; each shares the aggregate multipart buffer budget.
-`part_size` sets both the multipart threshold and chunk size. The buffer budget
-is divided between admitted uploads, with up to four parts per process and no
-additional rclone transfer buffer. Go/TLS overhead and bounded metadata output
-are additional memory. The CRT throughput target has no replacement setting.
+batches can run concurrently. Each process receives `buffer_budget / active_files`
+through rclone's `--max-buffer-memory`, with up to four parts uploaded concurrently
+and no additional transfer buffer. `part_size` sets both the multipart
+threshold and chunk size. Each process's budget must fit one part rounded up to
+the next whole MiB, including an extra MiB for an already aligned part. This lets
+rclone finish reading a part before uploading it. The budget limits active
+buffers; idle buffer caches, Go/TLS overhead, metadata, and file lists use
+additional memory. The CRT throughput target has no replacement setting.
 `request_retries + 1` sets rclone's low-level attempts; top-level command
 retries are disabled. The pinned S3 backend always makes up to two pacer calls,
 even with `request_retries = 0`. Failed metadata reads therefore make up to

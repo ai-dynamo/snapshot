@@ -8,12 +8,10 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
@@ -74,6 +72,8 @@ constexpr char kPathStyleFlag[] = "--s3-force-path-style=";
 constexpr char kUploadCutoffFlag[] = "--s3-upload-cutoff";
 constexpr char kChunkSizeFlag[] = "--s3-chunk-size";
 constexpr char kUploadConcurrencyFlag[] = "--s3-upload-concurrency";
+constexpr unsigned kUploadConcurrency = 4;
+constexpr char kBufferMemoryFlag[] = "--max-buffer-memory";
 constexpr char kLowLevelRetriesFlag[] = "--low-level-retries";
 constexpr char kConnectTimeoutFlag[] = "--contimeout";
 constexpr char kTimeoutFlag[] = "--timeout";
@@ -340,8 +340,11 @@ S3ObjectLocation::Validate() const
 void
 S3Limits::Validate() const
 {
+  // Rclone reserves whole MiB pages and may read one extra page to detect EOF.
+  // Each child needs enough buffer memory to finish reading at least one part.
   if (part_size < 8 * kMiB || part_size > 5 * 1024 * kMiB || active_files == 0 ||
-      buffer_budget / part_size < active_files || buffer_budget > std::numeric_limits<std::size_t>::max() ||
+      buffer_budget / active_files < (part_size / kMiB + 1) * kMiB ||
+      buffer_budget > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
       request_retries > 10)
     throw std::invalid_argument("invalid S3 upload resource limits");
   for (auto timeout : {connect_timeout, request_timeout}) {
@@ -376,7 +379,7 @@ struct S3Client::Operation {
   {
     std::lock_guard lock(owner.mutex_);
     --owner.active_;
-    owner.changed_.notify_one();
+    owner.changed_.notify_all();
   }
   Operation(const Operation&) = delete;
   Operation& operator=(const Operation&) = delete;
@@ -405,14 +408,14 @@ S3Client::S3Client(S3Connection connection, S3Limits limits) : limits_(limits)
                   kDisableImdsEnv,
                   kDisableAwsConfigEnv,
                   kDisableAwsFileEnv};
-  // Each batch transfers one file at a time, using at most four multipart buffers.
-  const auto concurrency = std::min<std::uint64_t>(4, limits.buffer_budget / limits.active_files / limits.part_size);
   arguments_.assign(std::begin(kCommonArguments), std::end(kCommonArguments));
   const std::string part_bytes = std::to_string(limits.part_size) + kBytesSuffix;
   arguments_.insert(arguments_.end(),
                     {std::string(kPathStyleFlag) + (connection.use_virtual_addressing ? kFalse : kTrue),
                      kUploadCutoffFlag, part_bytes, kChunkSizeFlag, part_bytes, kUploadConcurrencyFlag,
-                     std::to_string(concurrency), kLowLevelRetriesFlag, std::to_string(limits.request_retries + 1),
+                     std::to_string(kUploadConcurrency), kBufferMemoryFlag,
+                     std::to_string(limits.buffer_budget / limits.active_files) + kBytesSuffix,
+                     kLowLevelRetriesFlag, std::to_string(limits.request_retries + 1),
                      kConnectTimeoutFlag, std::to_string(limits.connect_timeout.count()) + kMillisecondsSuffix,
                      kTimeoutFlag, std::to_string(limits.request_timeout.count()) + kMillisecondsSuffix});
   if (connection.endpoint.starts_with(kHttpEndpointPrefix))

@@ -466,6 +466,7 @@ TEST_F(S3RoundTripTest, ZeroRetriesDisablesRetries)
 TEST_F(S3RoundTripTest, CancellationDrainsAndLeavesClientUsable)
 {
   limits_.request_retries = 0;
+  limits_.buffer_budget = limits_.active_files * 9ULL * 1024 * 1024;
   S3Client uploader(connection_, limits_);
   Cancellation cancellation = Deadline();
   auto upload = std::async(std::launch::async, [&] {
@@ -537,6 +538,28 @@ TEST_F(S3RoundTripTest, RejectsUntrustedTLS)
   EXPECT_THROW(restore_reader.Stage(inventory, temporary_.path() / "untrusted-restore"), std::runtime_error);
 }
 
+TEST_F(S3RoundTripTest, ConcurrentMultipartUploadsCompleteWithTightBufferBudgets)
+{
+  limits_.active_files = 2;
+  limits_.buffer_budget = 18 * 1024 * 1024 + 1;
+  for (auto part_size : {8ULL * 1024 * 1024, 8ULL * 1024 * 1024 + 1}) {
+    SCOPED_TRACE(part_size);
+    limits_.part_size = part_size;
+    S3Client client(connection_, limits_);
+    const auto first_object = Destination("buffer-limit", std::to_string(part_size) + "-first");
+    const auto second_object = Destination("buffer-limit", std::to_string(part_size) + "-second");
+    const auto source = fixture_ / "nested/large";
+    auto first = std::async(std::launch::async, [&] {
+      return Upload(client, source, first_object, Deadline(std::chrono::seconds(15)));
+    });
+    auto second = std::async(std::launch::async, [&] {
+      return Upload(client, source, second_object, Deadline(std::chrono::seconds(15)));
+    });
+    VerifyFile(first.get(), first_object, source, std::to_string(part_size) + "-first");
+    VerifyFile(second.get(), second_object, source, std::to_string(part_size) + "-second");
+  }
+}
+
 TEST_F(S3RoundTripTest, UploadMemoryProbe)
 {
   const auto requested = Environment("PAGEBROKER_S3_TEST_MEMORY_MIB");
@@ -579,7 +602,7 @@ TEST_F(S3RoundTripTest, ConcurrentUploadMemoryProbe)
     file.write(chunk.data(), chunk.size());
   file.close();
   limits_.active_files = 2;
-  limits_.buffer_budget = 2 * limits_.part_size;
+  limits_.buffer_budget = 18 * 1024 * 1024;
   ProcessMemory memory;
   S3Client client(connection_, limits_);
   auto first = std::async(std::launch::async,
@@ -589,7 +612,7 @@ TEST_F(S3RoundTripTest, ConcurrentUploadMemoryProbe)
   EXPECT_EQ(first.get(), 256ULL * 1024 * 1024);
   EXPECT_EQ(second.get(), 256ULL * 1024 * 1024);
   // Allow runtime overhead for the parent and both children, but not whole-file
-  // buffering. The multipart buffers share the configured 16 MiB budget.
+  // buffering. Each rclone process receives a 9 MiB active-buffer limit.
   EXPECT_LT(memory.Peak(), limits_.buffer_budget + 3 * 80ULL * 1024 * 1024);
 }
 

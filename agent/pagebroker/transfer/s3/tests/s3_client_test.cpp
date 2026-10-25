@@ -186,6 +186,23 @@ TEST(S3ClientTest, ValidatesResourceLimitsBeforeConstruction)
   }
 }
 
+TEST(S3ClientTest, RequiresBufferPaddingForEveryRcloneProcess)
+{
+  auto limits = SmallLimits();
+  limits.active_files = 2;
+  for (auto part_size : {8ULL * 1024 * 1024, 8ULL * 1024 * 1024 + 1}) {
+    limits.part_size = part_size;
+    limits.buffer_budget = 18 * 1024 * 1024 - 1;
+    EXPECT_THROW(limits.Validate(), std::invalid_argument);
+    ++limits.buffer_budget;
+    EXPECT_NO_THROW(limits.Validate());
+    ++limits.buffer_budget;
+    EXPECT_NO_THROW(limits.Validate());
+  }
+  limits.buffer_budget = std::numeric_limits<std::uint64_t>::max();
+  EXPECT_THROW(limits.Validate(), std::invalid_argument);
+}
+
 TEST(S3ClientTest, ValidatesMultipartBoundariesWithoutAllocation)
 {
   const auto limits = SmallLimits();
