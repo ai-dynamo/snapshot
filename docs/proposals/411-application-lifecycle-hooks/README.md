@@ -13,9 +13,7 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
-  - [Defaults and user probes](#defaults-and-user-probes)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
-    - [Backward compatibility and migration](#backward-compatibility-and-migration)
 - [Design Details](#design-details)
   - [API](#api)
     - [Per-container configuration](#per-container-configuration)
@@ -26,7 +24,6 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
   - [Security](#security)
     - [RBAC](#rbac)
     - [Transport isolation](#transport-isolation)
-  - [Configuration](#configuration)
   - [Monitoring](#monitoring)
   - [Test Plan](#test-plan)
 - [Alternatives](#alternatives)
@@ -55,7 +52,6 @@ timing settings.
 
 - Configure both PodSnapshot and SnapshotJob through the same contract API.
 - Preserve each captured container’s contract with its checkpoint for all restores.
-- Preserve the existing file integration when no contract is configured.
 
 ### Non-Goals
 
@@ -68,53 +64,38 @@ timing settings.
 
 Each container can define an `applicationContract` directly in its settings:
 
-- `quiesceProbe` checks whether the application is safe to capture.
+- `captureReadinessProbe` checks whether the application is safe to capture.
 - `restoreRelease` tells the application it may resume after Snapshot restores
   its process and GPU state.
 
 Both actions are optional. The application decides when it is safe to capture,
 how to recover after restore, and when it is ready to serve requests.
 
-### Defaults and user probes
+The agent waits for `captureReadinessProbe` to succeed before capturing the
+container. Success means the application is safe to capture. If the probe is
+omitted, the agent waits for the selected container to be ready. `restoreRelease`
+adds an application notification after process and GPU restoration.
 
-Leaving out `applicationContract` keeps the existing file behavior. When a
-contract is provided, each missing action has its own behavior:
-
-- No `quiesceProbe`: wait for the selected container to be ready. As before,
-  this does not wait for other containers or Pod readiness gates.
-- No `restoreRelease`: do not notify the application after restore.
-
-An empty contract (`applicationContract: {}`) uses both of these behaviors.
-
-Preserve user-defined readiness, startup, and liveness probes on source and
-destination containers. When a probe is not configured, retain Snapshot's
-existing default probe logic.
+Changes to startup, readiness, and liveness probe handling belong in a separate issue.
 
 ### Limitations, Risks, and Mitigations
 
 Snapshot currently captures one container per PodSnapshot. The API allows
-settings for multiple containers so it can support them later. An HTTP control endpoint
-must work before release, including after restore at a new Pod IP.
+settings for multiple containers so it can support them later.
 
-| Risk | Required handling |
+The HTTP endpoint must be reachable by the agent at the destination Pod IP,
+before application release. A listener bound only to the source Pod's IP may
+not work after restore. The deployment must allow the agent's traffic through
+any applicable network restrictions.
+
+| Risk | Consequence and handling |
 | --- | --- |
-| Application reports ready too early | The application must remain safe to capture after reporting readiness. Integration tests must verify restore and inference. |
-| Incorrect saved contract | Fix the settings and capture again. Existing checkpoints keep their saved settings; this proposal does not add restore overrides. |
-| Lost release response | Applications must handle repeated notifications. If the deadline expires, Snapshot may terminate an application that already received the notification. |
-| Custom probes during recovery | Workload owners must allow enough time for recovery and keep readiness false until the application can serve. |
-| Shared HTTP endpoint | Containers in a Pod share its IP. If they use the same port and path, release requests carry no container identity. The application must coordinate which restored containers may resume. |
-| Unprotected HTTP listener | The deployment restricts endpoint access. |
-
-#### Backward compatibility and migration
-
-Checkpoints without saved contract settings keep the old release behavior,
-regardless of the cluster default. Two capture changes may require workload updates:
-
-- User probes are preserved. Workloads that relied on Snapshot replacing or
-  removing them must adjust their probes.
-- The default file contract checks `ready-for-snapshot` directly, independently
-  of container readiness. An explicit contract without `quiesceProbe` uses
-  selected-container readiness instead.
+| Application reports ready too early | The checkpoint may be unusable. The application must stay safe to capture after reporting readiness; integration tests must verify restore and inference. |
+| Incorrect saved contract | Restore may fail. Fix the settings and capture again; existing checkpoints keep their saved settings. |
+| Lost release response | Snapshot may retry an accepted notification, or fail the restore and clean up at the deadline. Applications must handle repeated notifications safely. |
+| Same-Pod port conflict | Restored copies cannot bind the same address and port in a shared network namespace. This Pod constraint applies regardless of release transport; this SNEP does not add conflict detection. |
+| Shared HTTP endpoint | Requests carry no container identity. The application must coordinate which restored containers may resume. |
+| Unprotected HTTP listener | Other callers could release the application. The deployment must restrict endpoint access. |
 
 Upgrade participating agents before enabling contracts: older agents ignore the
 new fields.
@@ -166,7 +147,7 @@ spec:
   containers:
     - name: main
       applicationContract:
-        quiesceProbe:
+        captureReadinessProbe:
           httpGet:
             path: /checkpoint/status
             port: 8000
@@ -209,17 +190,17 @@ spec:
 Each container defines its contract using the following types.
 
 ```go
-// +kubebuilder:validation:XValidation:rule="!(has(self.quiesceProbe) && has(self.quiesceProbe.file) && has(self.restoreRelease) && has(self.restoreRelease.file)) || self.quiesceProbe.file.path != self.restoreRelease.file.path",message="probe and release file paths must differ"
+// +kubebuilder:validation:XValidation:rule="!(has(self.captureReadinessProbe) && has(self.captureReadinessProbe.file) && has(self.restoreRelease) && has(self.restoreRelease.file)) || self.captureReadinessProbe.file.path != self.restoreRelease.file.path",message="probe and release file paths must differ"
 type ApplicationContract struct {
 	// +optional
-	QuiesceProbe *QuiesceProbe `json:"quiesceProbe,omitempty"`
+	CaptureReadinessProbe *CaptureReadinessProbe `json:"captureReadinessProbe,omitempty"`
 	// +optional
 	RestoreRelease *RestoreRelease `json:"restoreRelease,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.file) != has(self.httpGet)",message="select exactly one of file or httpGet"
-type QuiesceProbe struct {
-	QuiesceProbeHandler `json:",inline"`
+type CaptureReadinessProbe struct {
+	CaptureReadinessProbeHandler `json:",inline"`
 
 	// +optional
 	// +kubebuilder:default=0
@@ -239,7 +220,7 @@ type QuiesceProbe struct {
 	SuccessThreshold int32 `json:"successThreshold,omitempty"`
 }
 
-type QuiesceProbeHandler struct {
+type CaptureReadinessProbeHandler struct {
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 	// +optional
@@ -286,14 +267,16 @@ type LifecycleHTTPAction struct {
 }
 ```
 
-When present, `quiesceProbe` requires exactly one of `file` or `httpGet`, and
+When present, `captureReadinessProbe` requires exactly one of `file` or `httpGet`, and
 `restoreRelease` requires exactly one of `file` or `httpPost`.
 
-Defaults are `initialDelaySeconds: 0`, `periodSeconds: 1`,
-`timeoutSeconds: 1`, and `successThreshold: 1`. The initial delay can be zero;
-other values must be positive. For both actions, `periodSeconds` sets the interval
-between attempts and `timeoutSeconds` limits each attempt. The probe requires
-`successThreshold` consecutive successes.
+`captureReadinessProbe` defaults to `initialDelaySeconds: 0`, `periodSeconds: 1`,
+`timeoutSeconds: 1`, and `successThreshold: 1`. `restoreRelease` defaults to
+`periodSeconds: 1` and `timeoutSeconds: 1`.
+
+The initial delay can be zero; other values must be positive. For both actions,
+`periodSeconds` sets the interval between attempts and `timeoutSeconds` limits
+each attempt. The probe requires `successThreshold` consecutive successes.
 
 There is no `failureThreshold`. After a failed check, reset the success count
 and keep waiting without restarting the container. Also reset the count if the
@@ -304,9 +287,12 @@ File and HTTP paths are limited to 4096 characters.
 File paths must be absolute within the selected container's filesystem; they
 do not depend on `SNAPSHOT_CONTROL_DIR`. Reject `.` and `..` path components.
 Probe and release paths must differ. Snapshot's internal control files remain
-reserved; the default contract's readiness and release markers are allowed.
+reserved and cannot be used as custom release paths.
 The agent enforces reserved paths and filesystem isolation at runtime.
-The application must provide the release file's parent directory.
+The application must provide the release file's parent directory. The agent
+creates a marker only if absent, without overwriting an existing file, and makes
+new markers readable by the user running the application. An existing regular file counts as
+success; symlinks and other file types are rejected.
 
 HTTP paths must begin with `/` and cannot include a host, query string, or
 fragment. Ports range from 1 through 65535. Only HTTP is supported; the agent
@@ -319,18 +305,18 @@ bodies are not part of this API.
 | --- | --- |
 | File probe | The marker exists as a regular file. |
 | HTTP probe | GET returns `200`. |
-| File release | The agent atomically publishes the marker at the configured path in the restored container. |
+| File release | The marker exists as a regular file after the agent creates it or finds it. |
 | HTTP release | POST with an empty body returns `200` or `204`. This means the application accepted the notification; recovery may still be running. |
 
 GET and POST response bodies are ignored; no attempt ID is sent. All unsuccessful
-HTTP release requests, including connection failures, are retried until the
+HTTP release requests, including `404` and connection failures, are retried until the
 restore deadline. Shared HTTP endpoints receive no container identifier and must
 coordinate the required releases.
 
 #### Checkpoint metadata
 
-Add `containers` to `PodSnapshotContent.spec`. Before capture, fill in missing
-contracts and timing values from the defaults. Save the resulting settings for
+Add `containers` to `PodSnapshotContent.spec`. Before capture, apply timing
+defaults to configured actions. Save the resulting settings for
 every selected container in the content spec, where they cannot be changed.
 The agent also saves these settings in the checkpoint metadata.
 
@@ -343,14 +329,12 @@ type PodSnapshotContentSpec struct {
 }
 ```
 
-For new checkpoints, every entry contains an `applicationContract`. Use `{}`
-when neither action is needed. When importing a checkpoint, keep its saved
-settings. Checkpoints without this metadata use the old release behavior.
+When importing a checkpoint, keep its saved contract settings.
 
 During restore, match each source container's saved settings to its destination
 container. Each restored copy uses those settings with its own Pod IP and
 container filesystem. Restore reads the contract from the checkpoint, not from
-the destination Pod, current defaults, or the original PodSnapshot.
+the destination Pod or the original PodSnapshot.
 
 ### Capture and restore execution
 
@@ -358,9 +342,9 @@ the destination Pod, current defaults, or the original PodSnapshot.
 
 ```mermaid
 flowchart TD
-    A[Fill in defaults and save each contract] --> B{Contract has quiesceProbe?}
+    A[Apply timing defaults and save each contract] --> B{Contract has captureReadinessProbe?}
     B -->|Yes| C[Check until successThreshold consecutive successes]
-    B -->|No| D[Wait for selected container readiness]
+    B -->|No| D[Use existing selected-container readiness check]
     C --> E[Check that the source has not changed]
     D --> E
     E --> F[Capture process and GPU state]
@@ -372,16 +356,23 @@ after reporting readiness.
 
 **Restore and release**
 
+The existing file protocol remains: `restore-complete` hands the restored PID
+to the restore proxy, and `restore-failed` reports failure. Applications that
+already wait on these files continue to do so. The configured application release
+is a separate step; overall success is recorded after it succeeds.
+
 ```mermaid
 flowchart TD
-    A[Restore process and GPU state] --> B{restoreRelease configured?}
+    A[Restore process and GPU state] --> P[Write restore-complete for the proxy]
+    P --> B{restoreRelease configured?}
     B -->|Yes| C[Notify application using file or HTTP]
-    C --> D[Complete restore after notification succeeds]
-    B -->|No| E[Complete restore without notification]
+    C --> D[Record overall success]
+    B -->|No| D
 ```
 
-All restore attempts use the checkpoint's saved settings. The application must
-handle repeated release notifications without repeating their effects
+Track application release completion separately from the internal marker so
+retries never repeat process restoration. All restore attempts use the
+checkpoint's saved settings. The application must handle repeated release notifications without repeating their effects
 (idempotence). A successful response means the notification was accepted.
 The application may still need time to recover before it can serve requests.
 
@@ -418,28 +409,6 @@ metadata, and keep response bodies and application memory out of logs and Events
 **Open question:** should HTTP authentication be supported initially, and how
 should capture and restore obtain credentials? The API has no credential fields.
 
-### Configuration
-
-When `applicationContract` is omitted, use the existing file integration with
-these settings:
-
-```yaml
-applicationContract:
-  quiesceProbe:
-    file:
-      path: /snapshot-control/ready-for-snapshot
-  restoreRelease:
-    file:
-      path: /snapshot-control/restore-complete
-```
-
-A supplied contract replaces the whole default contract. Missing actions stay
-unset. Fill in defaults before capture and save the result with the checkpoint,
-so later changes to defaults do not affect its restores.
-
-**Open question:** how should administrators configure the installation default
-now that contracts are inline? This proposal does not yet define that mechanism.
-
 ### Monitoring
 
 Report waiting for capture readiness and release failures in snapshot and restore
@@ -452,20 +421,18 @@ Log routine unsuccessful probe polls only at debug level.
   defaults, rejection of spec changes, unique names, and names that match selected containers.
   Check that each container’s settings reach the checkpoint from SnapshotJob.
 - **Capture:** test success thresholds, source restarts, cancellation, deadlines,
-  and selected-container readiness fallback. Verify user probe preservation and
-  existing default probe behavior when probes are omitted, alongside direct file checks.
-- **Contracts:** test omitted versus empty contracts, resolved defaults, and
-  saved settings that cannot be changed. Verify imported content and repeated restores
-  use the artifact's settings even after defaults change or the original request
-  is deleted. Check per-container mapping and reuse across restored copies.
-  Old artifacts retain legacy release behavior regardless of the default.
+  and the existing capture check when the probe is omitted. Verify that startup,
+  readiness, and liveness probe handling remains unchanged.
+- **Contracts:** verify saved settings cannot be changed. Imported content and
+  repeated restores must use those settings even after the original request is
+  deleted. Check per-container mapping and reuse across restored copies.
 - **Recovery:** inject failures around runtime restore, release, persistence,
   and writing the startup marker. Verify that retries keep the original deadline,
   repair state after recorded success, and do not repeat CRIU restore. Cover concurrent
-  agents, omitted release, and legacy marker recovery.
+  agents and internal marker recovery.
 - **Transports:** test status codes, ignored bodies, retries, redirect/proxy and
   host-network rejection, absolute file paths outside the control directory,
-  symlink/traversal rejection, and stale markers. Verify target-container path
+  symlink/traversal rejection, readable markers, no overwrites, and stale markers. Verify target-container path
   resolution, shared-mount effects, and shared-HTTP coordination.
 - **Integrations:** validate file and HTTP with inference after restore. Cover
   new Pod IPs, release before serving, recovery that continues after release,
