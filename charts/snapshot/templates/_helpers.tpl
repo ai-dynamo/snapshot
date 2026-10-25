@@ -79,6 +79,53 @@ Use the same agent image for the DaemonSet and cuinterpose installer.
 {{- end }}
 
 {{/*
+Convert a Kubernetes quantity to bytes, or empty when it is not a form we parse.
+*/}}
+{{- define "snapshot.quantityBytes" -}}
+{{- $q := . | toString -}}
+{{- if hasSuffix "Ki" $q }}{{ mulf (trimSuffix "Ki" $q | float64) 1024 | int64 }}
+{{- else if hasSuffix "Mi" $q }}{{ mulf (trimSuffix "Mi" $q | float64) 1048576 | int64 }}
+{{- else if hasSuffix "Gi" $q }}{{ mulf (trimSuffix "Gi" $q | float64) 1073741824 | int64 }}
+{{- else if hasSuffix "Ti" $q }}{{ mulf (trimSuffix "Ti" $q | float64) 1099511627776 | int64 }}
+{{- else if hasSuffix "k" $q }}{{ mulf (trimSuffix "k" $q | float64) 1000 | int64 }}
+{{- else if hasSuffix "M" $q }}{{ mulf (trimSuffix "M" $q | float64) 1000000 | int64 }}
+{{- else if hasSuffix "G" $q }}{{ mulf (trimSuffix "G" $q | float64) 1000000000 | int64 }}
+{{- else if hasSuffix "T" $q }}{{ mulf (trimSuffix "T" $q | float64) 1000000000000 | int64 }}
+{{- else if regexMatch "^[0-9]+$" $q }}{{ $q }}
+{{- end }}
+{{- end }}
+
+{{/*
+The staging sizeLimit, lowered to leave the agent room to survive filling it.
+Sizing is in docs/operations/storage.md. Falls back when pageBroker.staging is
+explicitly null, as helm upgrade --reuse-values leaves it.
+*/}}
+{{- define "snapshot.stagingSizeLimit" -}}
+{{- $configured := ((.Values.pageBroker).staging | default dict).sizeLimit | default "56Gi" -}}
+{{- /* Both containers write this volume — the agent on checkpoint, PageBroker
+       on staged restore — and the pages charge to whichever wrote them, so the
+       smaller limit is the one that has to hold. */ -}}
+{{- $limitBytes := "" -}}
+{{- range $container := list (((.Values.daemonset).resources).limits).memory (((.Values.pageBroker).resources).limits).memory -}}
+{{- if $container -}}
+{{- $bytes := include "snapshot.quantityBytes" $container -}}
+{{- if $bytes -}}
+{{- if or (not $limitBytes) (lt (int64 $bytes) (int64 $limitBytes)) }}{{- $limitBytes = $bytes -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $configuredBytes := include "snapshot.quantityBytes" $configured -}}
+{{- if or (not $limitBytes) (not $configuredBytes) -}}
+{{- $configured -}}
+{{- else -}}
+{{- /* Reserve 8Gi for the agent process and CRIU, or an eighth of a smaller limit. */ -}}
+{{- $reserve := min (include "snapshot.quantityBytes" "8Gi" | int64) (div (int64 $limitBytes) 8) -}}
+{{- $maxBytes := sub (int64 $limitBytes) $reserve -}}
+{{- if le (int64 $configuredBytes) $maxBytes }}{{ $configured }}{{ else }}{{ $maxBytes }}{{ end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 */}}
 {{- define "snapshot.validateRuntime" -}}

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <system_error>
@@ -28,6 +29,8 @@ class Broker {
   void CancelGpuWork();
   Response HandleRequest(const Request& request);
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
+  using Clock = std::function<std::chrono::steady_clock::time_point()>;
+  void SetClock(Clock clock);
 
  private:
   using Engines = std::vector<std::unique_ptr<TransferEngine>>;
@@ -74,5 +77,6 @@ class Broker {
   std::mutex terminal_transactions_mutex_;
   std::deque<TerminalTransaction> terminal_transactions_;
   uintmax_t reserved_staging_bytes_ = 0;
+  Clock now_ = [] { return std::chrono::steady_clock::now(); };
 };
 }  // namespace snapshot::pagebroker

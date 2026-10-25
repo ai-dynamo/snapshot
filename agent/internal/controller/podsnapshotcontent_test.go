@@ -31,6 +31,7 @@ import (
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -105,19 +106,20 @@ func TestReconcileCapture_CuInterposeOptInReachesCapture(t *testing.T) {
 
 // fakeCheckpointer records calls behind the checkpointFn seam and returns a configured error.
 type fakeCheckpointer struct {
-	mu     sync.Mutex
-	called bool
-	params CheckpointParams
-	err    error
+	mu       sync.Mutex
+	called   bool
+	params   CheckpointParams
+	err      error
+	artifact *pagebroker.PublishedArtifact
 }
 
 // fn is the checkpointFn seam the NodeController invokes for the dump.
-func (fc *fakeCheckpointer) fn(_ context.Context, params CheckpointParams) error {
+func (fc *fakeCheckpointer) fn(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	fc.called = true
 	fc.params = params
-	return fc.err
+	return fc.artifact, fc.err
 }
 
 // wasCalled reports whether the seam was invoked.
@@ -150,21 +152,22 @@ func contentScheme(t *testing.T) *runtime.Scheme {
 func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Object) *NodeController {
 	t.Helper()
 	s := contentScheme(t)
-	idx := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
-	for _, o := range objs {
-		if sc, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {
-			require.NoError(t, idx.Add(mustUnstructured(t, sc)))
-		}
-	}
 	w := &NodeController{
 		config:    &snapshottypes.AgentConfig{NodeName: "node-a", Storage: snapshottypes.StorageSpec{Type: "pvc", BasePath: t.TempDir()}},
 		clientset: k8sfake.NewClientset(),
 		client: crfake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
 			WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).Build(),
-		runtime:        &fakeRuntime{},
-		log:            logr.Discard(),
-		contentIndexer: idx,
-		captureQueue:   newTestCaptureQueue(t),
+		runtime:      &fakeRuntime{},
+		log:          logr.Discard(),
+		captureQueue: newTestCaptureQueue(t),
+	}
+	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
+	for _, o := range objs {
+		if _, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {
+			stored := &snapshotv1alpha1.PodSnapshotContent{}
+			require.NoError(t, w.client.Get(context.Background(), client.ObjectKeyFromObject(o), stored))
+			require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, stored)))
+		}
 	}
 	w.checkpointFn = fc.fn
 	return w
@@ -234,14 +237,7 @@ func TestSingleTargetContainer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			content := &snapshotv1alpha1.PodSnapshotContent{
-				Spec: snapshotv1alpha1.PodSnapshotContentSpec{
-					Source: snapshotv1alpha1.PodSnapshotContentSource{
-						PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", Containers: tc.containers},
-					},
-				},
-			}
-			got, err := singleTargetContainer(content)
+			got, err := singleTargetContainer(tc.containers)
 			if tc.wantErr {
 				require.Error(t, err)
 				return
@@ -388,7 +384,7 @@ func TestReconcileCapture_ConcurrentTriggerCannotFailARunningCapture(t *testing.
 
 	dumping := make(chan struct{})
 	finish := make(chan struct{})
-	w.checkpointFn = func(ctx context.Context, params CheckpointParams) error {
+	w.checkpointFn = func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		close(dumping)
 		<-finish
 		// The dump kills the source: by the time it returns, the pod is terminal.
@@ -833,7 +829,7 @@ func TestExecutorCheckpointInspectionFailureDoesNotKill(t *testing.T) {
 		_ = target.Wait()
 	}()
 
-	err := w.executorCheckpoint(context.Background(), CheckpointParams{
+	_, err := w.executorCheckpoint(context.Background(), CheckpointParams{
 		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:      "worker-0",
 			Namespace: "inference",
@@ -1061,6 +1057,7 @@ func TestReconcileCapture_IndexErrorReturned(t *testing.T) {
 	// Indexer without podRefIndex registered → ByIndex returns an error; reconcile surfaces it
 	// so the queue retries, and writes no status.
 	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, content)))
 
 	require.Error(t, w.reconcileCapture(context.Background(), content.Name))
 
@@ -1076,9 +1073,9 @@ func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content)
 	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}
-	w.checkpointFn = func(ctx context.Context, _ CheckpointParams) error {
+	w.checkpointFn = func(ctx context.Context, _ CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		<-ctx.Done() // a dump that honours cancellation, e.g. cuda-checkpoint
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 
@@ -1096,9 +1093,9 @@ func TestRunCheckpoint_OverrunButSuccessfulDumpIsStillReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}
-	w.checkpointFn = func(context.Context, CheckpointParams) error {
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		time.Sleep(1200 * time.Millisecond)
-		return nil // overran the deadline but reports success
+		return nil, nil // overran the deadline but reports success
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 

@@ -46,7 +46,11 @@ def test_snapshot_e2e_environment_is_ready() -> None:
             f"is not readable: {k8s.api_error_detail(exc)}"
         )
     assert pvc.status.phase != "Lost"
-    assert pvc.spec.access_modes == ["ReadWriteMany"]
+    if config.cpu_only:
+        assert pvc.spec.access_modes == ["ReadWriteOnce"]
+    else:
+        # Match the GPU installer's existing contract for pre-existing claims.
+        assert "ReadWriteMany" in pvc.spec.access_modes
 
     operators = k8s.list_snapshot_pods(
         config.namespace,

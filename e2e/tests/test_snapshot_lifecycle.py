@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import pytest
 from kubernetes import client
@@ -374,6 +375,9 @@ def test_one_cpu_snapshot_restores_into_two_containers(
             )
             assert f"source_token={run.source_token}" in output
             assert f"restore_token={restore_tokens[destination]}" in output
+            snap.assert_restored_workload_mounts(
+                config.namespace, run.restore_pod, container=destination
+            )
 
         assert_restore_events(
             config.namespace,
@@ -389,6 +393,103 @@ def test_one_cpu_snapshot_restores_into_two_containers(
         ]
         for destination in ("engine-0", "engine-1"):
             assert any(destination in message for message in requested_messages)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_restored_workload_logs_and_exit_reach_kubernetes(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # The restore proxy is the container's PID 1. It forwards nothing itself:
+    # the restored workload writes to the container's log, and the container
+    # ends with the workload's exit code.
+    if not snap.restore_proxy():
+        pytest.skip("the container follows the restored workload only with the restore proxy")
+    try:
+        _, source_node, _ = create_valid_checkpoint(config, run, gpu=False)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node)
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+
+        # The source's lines went to the source Pod's log, so any line here
+        # was written after the restore.
+        snap.wait_for(
+            f"restored output in the log of {run.restore_pod}",
+            lambda: True
+            if "[source] observation seq=" in k8s.pod_logs(config.namespace, run.restore_pod)
+            else None,
+            timeout=60,
+            poll_interval=2,
+        )
+
+        k8s.exec_command(
+            config.namespace, run.restore_pod, f"echo 7 > {snap.EXIT_REQUEST}"
+        )
+        assert snap.wait_for_container_exit(config.namespace, run.restore_pod) == 7
+        # kubelet sets the Pod's phase after it finishes tearing the Pod down,
+        # a little after the container's own status shows the exit.
+        def failed() -> object | None:
+            pod = k8s.read_pod(config.namespace, run.restore_pod)
+            return pod if pod.status.phase == "Failed" else None
+
+        pod = snap.wait_for(f"pod {run.restore_pod} to fail", failed, timeout=60, poll_interval=2)
+        assert pod.status.container_statuses[0].restart_count == 0
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_restored_workload_keeps_its_own_mount_at_the_securityfs_path(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # The agent mounts securityfs for CRIU at this path while it restores. A
+    # workload with its own mount there must get that mount back, not
+    # securityfs.
+    path = "/sys/kernel/security"
+    try:
+        k8s.create_pod(
+            with_empty_dir(snap.source_pod(config=config, run=run, gpu=False), path)
+        )
+        source = snap.wait_for_pod_ready(config.namespace, run.source_pod)
+        snap.wait_for_file(config.namespace, run.source_pod, snap.SOURCE_READY)
+        snap.create_podsnapshot(
+            config.namespace, run.snapshot_name, run.source_pod, source.metadata.uid
+        )
+        snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            with_empty_dir(
+                snap.restore_pod(
+                    config=config, run=run, gpu=False, source_node=source.spec.node_name
+                ),
+                path,
+            )
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+        snap.assert_restored_workload_mounts(
+            config.namespace, run.restore_pod, empty_dir=path
+        )
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -460,6 +561,9 @@ def test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot(
     that the failure sticks to the pod and does not spread to the snapshot,
     which is still a correct record of a capture that did succeed.
     """
+    probe = k8s.bool_env("SNAPSHOT_E2E_RESTORE_FAILURE_PROBE")
+    if probe and not config.cpu_only:
+        raise ValueError("restore-failure qualification requires CPU-only mode")
     try:
         _, source_node, _ = create_valid_checkpoint(config, run, gpu=False)
         _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
@@ -476,9 +580,22 @@ def test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot(
                 source_node=source_node,
             )
         )
+        # Normal CI proves the damaged checkpoint reports a hard failure. The
+        # opt-in negative control instead demands success from that same real
+        # failure, so pytest and the workflow must turn red. Limit the probe's
+        # wait; it must not consume the normal ten-minute restore timeout.
         snap.wait_for_restored_condition(
-            config.namespace, run.restore_pod, "False", "RestoreFailed"
+            config.namespace,
+            run.restore_pod,
+            "True" if probe else "False",
+            "RestoreSucceeded" if probe else "RestoreFailed",
+            timeout=60 if probe else 600,
         )
+        if probe:
+            # If corruption did not cause a restore failure, leave this probe
+            # green so the qualification reviewer can reject that evidence.
+            # Do not force red independently of the real restore result.
+            return
 
         pod_snapshot, content = snap.wait_for_snapshot_ready(
             config.namespace,
@@ -785,6 +902,7 @@ def test_snapshot_deletion_cascades_content_and_artifact_cleanup(
 
 
 @pytest.mark.cpu
+@pytest.mark.serial  # waits on the operator's node-wide sweep
 @pytest.mark.snapshot_success
 def test_orphan_sweep_reclaims_uid_root(
     config: k8s.E2EConfig,
@@ -846,6 +964,15 @@ def create_ready_source(
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)
     snap.wait_for_file(config.namespace, run.source_pod, snap.SOURCE_READY)
     return pod, pod.spec.node_name
+
+
+def with_empty_dir(pod: dict[str, Any], path: str) -> dict[str, Any]:
+    # An emptyDir at path in the Pod's first container.
+    pod["spec"]["volumes"].append({"name": "own-mount", "emptyDir": {}})
+    pod["spec"]["containers"][0]["volumeMounts"].append(
+        {"name": "own-mount", "mountPath": path}
+    )
+    return pod
 
 
 def snapshot_annotations(pod: object) -> dict[str, str]:

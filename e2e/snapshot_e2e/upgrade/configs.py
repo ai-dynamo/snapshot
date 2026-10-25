@@ -62,7 +62,12 @@ class UpgradeConfig:
             timeout=settings.helm_timeout,
             chart=str(CHART_DIR),
             reset_then_reuse_values=self.reset_then_reuse_values,
-            helm_overrides=setup.parse_helm_overrides(None, os.environ.get("SNAPSHOT_E2E_HELM_SET")),
+            # The same as the install's: a plain upgrade resets the values.
+            helm_overrides=setup.snapshot_helm_overrides(
+                os.environ.get("SNAPSHOT_E2E_MODE", ""),
+                os.environ.get("SNAPSHOT_E2E_HOST_NAMESPACE", ""),
+                None,
+            ),
         )
 
 

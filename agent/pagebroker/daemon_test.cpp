@@ -1053,3 +1053,105 @@ TEST_F(DaemonTransportTest, RejectsGpuAdmissionFromAControlHandlerDuringShutdown
 }
 
 }  // namespace
+
+TEST_F(BrokerTest, RejectsArtifactCheckpointBeforeStagingThenAllowsLegacyFallback)
+{
+  auto request = RequestFor("artifact-checkpoint");
+  auto* operation = request.mutable_prepare_staged_checkpoint();
+  auto* target = operation->mutable_target();
+  target->set_store_id("store-v1-" + std::string(64, 'a'));
+  target->mutable_artifact()->set_artifact_uid("content-1");
+  target->mutable_artifact()->set_container_name("main");
+  const auto rejected = broker().HandleRequest(request);
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_EQ(rejected.request_id(), request.request_id());
+  EXPECT_EQ(rejected.transaction_id(), request.transaction_id());
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "checkpoint" / request.transaction_id()));
+  EXPECT_FALSE(fs::exists(root_ / "storage" / "output"));
+
+  // Rejection did not allocate a transaction; a legacy call on the same ID succeeds.
+  // selector is a oneof, so setting destination here also clears target.
+  Configure(operation->mutable_destination(), operation->mutable_io_engine(), root_ / "storage" / "output");
+  EXPECT_TRUE(broker().HandleRequest(request).has_staged_checkpoint_directory());
+}
+
+TEST_F(BrokerTest, RejectsArtifactRestoreBeforeReadingThenAllowsLegacyFallback)
+{
+  auto request = RequestFor("artifact-restore");
+  auto* operation = request.mutable_staged_restore();
+  auto* artifact = operation->mutable_artifact();
+  artifact->set_store_id("store-v1-" + std::string(64, 'a'));
+  artifact->set_artifact_handle("artifacts/content-1/containers/main");
+  const auto rejected = broker().HandleRequest(request);
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "restore" / request.transaction_id()));
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+  // selector is a oneof, so setting source here also clears artifact.
+  Configure(operation->mutable_source(), operation->mutable_io_engine(), source_);
+  EXPECT_TRUE(broker().HandleRequest(request).has_staged_restore_directory());
+}
+
+TEST_F(BrokerTest, RejectsUnsupportedArtifactSelectorsWithOrWithoutEngine)
+{
+  auto request = RequestFor("empty-target");
+  request.mutable_prepare_staged_checkpoint()->mutable_target();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+  request.mutable_prepare_staged_checkpoint()->mutable_io_engine()->mutable_posix_copy();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+
+  request = RequestFor("empty-artifact");
+  request.mutable_staged_restore()->mutable_artifact();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+  request.mutable_staged_restore()->mutable_io_engine()->mutable_posix_copy();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+
+  request = RequestFor("metadata-subject");
+  request.mutable_get_artifact_metadata();
+  EXPECT_EQ(broker().HandleRequest(request).failure().message(), "metadata subject is required");
+}
+
+TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
+{
+  auto request = RequestFor("metadata");
+  auto* artifact = request.mutable_get_artifact_metadata()->mutable_artifact();
+  artifact->set_store_id("store-v1-" + std::string(64, 'a'));
+  artifact->set_artifact_handle("artifacts/content-1/containers/main");
+  const auto rejected = broker().HandleRequest(request);
+  ASSERT_TRUE(rejected.has_failure());
+  EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_EQ(rejected.failure().message(), "artifact metadata retrieval is not implemented");
+  EXPECT_EQ(rejected.request_id(), request.request_id());
+  EXPECT_EQ(rejected.transaction_id(), request.transaction_id());
+
+  auto* target = request.mutable_get_artifact_metadata()->mutable_target();
+  target->set_store_id("store-v1-" + std::string(64, 'a'));
+  target->mutable_artifact()->set_artifact_uid("content-1");
+  target->mutable_artifact()->set_container_name("main");
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+
+  request.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+}
+
+TEST_F(BrokerTest, CommitAndAbortReportExpiredTransactions)
+{
+  auto request = RequestFor("expired-live");
+  auto* operation = request.mutable_prepare_staged_checkpoint();
+  Configure(operation->mutable_destination(), operation->mutable_io_engine(), root_ / "storage" / "output");
+  ASSERT_TRUE(broker().HandleRequest(request).has_staged_checkpoint_directory());
+
+  const auto later = std::chrono::steady_clock::now() + std::chrono::hours(2) + std::chrono::minutes(5);
+  broker().SetClock([later] { return later; });
+  request.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_EXPIRED);
+  request.mutable_abort();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_EXPIRED);
+  EXPECT_FALSE(fs::exists(root_ / "storage" / "output"));
+
+  broker().ReapExpiredTransactions(later);
+  request.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}

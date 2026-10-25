@@ -200,3 +200,78 @@ def test_from_minor_versions_rejects_zero(
 def test_from_modes_exclude_fallback_main(resolver: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit):
         run_main(monkeypatch, resolver, "--fallback-main", "--from", "v0.1.0")
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(resolver: ModuleType, monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    fake = FakeClock()
+    monkeypatch.setattr(resolver.time, "monotonic", fake.monotonic)
+    monkeypatch.setattr(resolver.time, "sleep", fake.sleep)
+    return fake
+
+
+def test_wait_resolves_once_images_are_published(
+    resolver: ModuleType, monkeypatch: pytest.MonkeyPatch, clock: FakeClock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tag = "v0.0.0-g1a2b3c4d"
+    monkeypatch.setenv("GITHUB_SHA", "1a2b3c4d" + "0" * 32)
+    checks = iter([False, False, True])
+    monkeypatch.setattr(resolver, "published_for_all", lambda tag, headers: next(checks))
+
+    assert run_main(monkeypatch, resolver, "--wait-seconds", "1200") == 0
+
+    assert clock.sleeps == [resolver.POLL_INTERVAL_SECONDS] * 2
+    assert f"Resolved Snapshot image tag: {tag}" in capsys.readouterr().out
+
+
+def test_wait_gives_up_after_the_deadline(
+    resolver: ModuleType, monkeypatch: pytest.MonkeyPatch, clock: FakeClock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("GITHUB_SHA", "1a2b3c4d" + "0" * 32)
+    publish(monkeypatch, resolver, {})
+
+    assert run_main(monkeypatch, resolver, "--wait-seconds", "100") == 1
+
+    assert sum(clock.sleeps) == 100
+    assert "is not published for: snapshot/operator, snapshot/agent, snapshot/pagebroker" in capsys.readouterr().err
+
+
+def test_wait_defaults_to_failing_immediately(
+    resolver: ModuleType, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> None:
+    monkeypatch.setenv("GITHUB_SHA", "1a2b3c4d" + "0" * 32)
+    publish(monkeypatch, resolver, {})
+
+    assert run_main(monkeypatch, resolver) == 1
+    assert clock.sleeps == []
+
+
+def test_wait_refetches_package_listings(resolver: ModuleType, monkeypatch: pytest.MonkeyPatch, clock: FakeClock) -> None:
+    tag = "v0.0.0-g1a2b3c4d"
+    listings = iter([[], [{"metadata": {"container": {"tags": [tag]}}}]])
+    monkeypatch.setattr(resolver, "PACKAGES", ("snapshot/operator",))
+    monkeypatch.setattr(
+        resolver.urllib.request,
+        "urlopen",
+        lambda request, timeout: io.BytesIO(json.dumps(next(listings) if "page=1" in request.full_url else []).encode()),
+    )
+
+    assert resolver.wait_for_published(tag, {}, 60)
+
+
+def test_wait_excludes_fallback_main(resolver: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(SystemExit):
+        run_main(monkeypatch, resolver, "--fallback-main", "--wait-seconds", "60")

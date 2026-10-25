@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/go-logr/logr"
@@ -48,12 +49,26 @@ const (
 	BundleLibDir = "lib"
 	// BundleLibcDir holds the matched loader and glibc, used only by BundleTar.
 	BundleLibcDir = "libc"
-	// BundleLoader is the ELF interpreter in BundleLibcDir. The agent is
-	// linux/amd64 only, so the name is fixed.
-	BundleLoader = "ld-linux-x86-64.so.2"
 	// BundleTar extracts rootfs diffs during restore.
 	BundleTar = "tar"
+	// ArchARM64 is the GOARCH value for linux/arm64.
+	ArchARM64 = "arm64"
+	// LoaderAMD64 is the ELF interpreter name on linux/amd64.
+	LoaderAMD64 = "ld-linux-x86-64.so.2"
+	// LoaderARM64 is the ELF interpreter name on linux/arm64.
+	LoaderARM64 = "ld-linux-aarch64.so.1"
 )
+
+// BundleLoader is the ELF interpreter in BundleLibcDir for the architecture
+// the agent was built for.
+var BundleLoader = bundleLoader(runtime.GOARCH)
+
+func bundleLoader(goarch string) string {
+	if goarch == ArchARM64 {
+		return LoaderARM64
+	}
+	return LoaderAMD64
+}
 
 // MountPoint represents an active bind-mount of a directory inside a foreign
 // namespace. The caller must call Unmount or Release when done.

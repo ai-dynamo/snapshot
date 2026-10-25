@@ -8,6 +8,7 @@ import (
 	"errors"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
@@ -67,6 +69,98 @@ func TestPreflightCompatibilityComparesTheRecordedEnvironment(t *testing.T) {
 	require.Len(t, r.comparison.calls, 1)
 	assert.Equal(t, compat.GatePreflight, r.comparison.calls[0].gate)
 	assert.Equal(t, []string{"/etc/hosts", "/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
+}
+
+// Bound content has no local manifest path; the gate fetches it from
+// PageBroker the same way the restore path itself does, so a bound checkpoint
+// gets the same preflight scrutiny as a legacy one.
+func TestPreflightCompatibilityFetchesTheManifestForBoundContentFromPageBroker(t *testing.T) {
+	r := newGatedRestore(t)
+	artifact := &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer}
+	manifest := &types.CheckpointManifest{
+		Artifact: types.ArtifactManifest{ContentUID: "mounted-content", ContainerName: gatedRestoreContainer},
+		CRIUDump: types.CRIUDumpManifest{
+			ExtMnt: map[string]string{"/model-cache": "/model-cache"},
+		},
+	}
+	var requested *pagebroker.PublishedArtifact
+	r.controller.fetchManifestFn = func(_ context.Context, a *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		requested = a
+		return manifest, nil
+	}
+
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+		SourceContainerName: gatedRestoreContainer,
+		PublishedArtifact:   artifact,
+	}, gatedRestoreMappings(), false)
+
+	require.NoError(t, err)
+	assert.Same(t, artifact, requested)
+	require.Len(t, r.comparison.calls, 1)
+	assert.Equal(t, compat.GatePreflight, r.comparison.calls[0].gate)
+	assert.Equal(t, []string{"/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
+}
+
+// A broker that accepts the metadata request and never answers must not hold
+// the restore worker: the preflight fetch runs under its own deadline.
+func TestPreflightCompatibilityBoundsTheManifestFetch(t *testing.T) {
+	r := newGatedRestore(t)
+	var deadline time.Time
+	var hasDeadline bool
+	r.controller.fetchManifestFn = func(ctx context.Context, _ *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return nil, errors.New("no reply from PageBroker")
+	}
+
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+		SourceContainerName: gatedRestoreContainer,
+		PublishedArtifact:   &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer},
+	}, gatedRestoreMappings(), false)
+
+	require.NoError(t, err)
+	require.True(t, hasDeadline)
+	assert.WithinDuration(t, time.Now().Add(restorePreflightManifestTimeout), deadline, 5*time.Second)
+}
+
+// This is the regression the gate exists to catch: a bound capture restored
+// into less memory than it was taken with has to be refused before any CRIU
+// work, exactly like a legacy one.
+func TestPreflightCompatibilityRefusesBoundContentOnMismatch(t *testing.T) {
+	mismatch := compat.Mismatch{Check: "memory-limit", Source: "32Gi", Target: "1Gi"}
+	r := newGatedRestore(t, mismatch)
+	r.controller.fetchManifestFn = func(context.Context, *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		return &types.CheckpointManifest{
+			Artifact: types.ArtifactManifest{ContentUID: "mounted-content", ContainerName: gatedRestoreContainer},
+		}, nil
+	}
+
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+		SourceContainerName: gatedRestoreContainer,
+		PublishedArtifact:   &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer},
+	}, gatedRestoreMappings(), false)
+
+	var incompatible *compat.IncompatibleError
+	require.ErrorAs(t, err, &incompatible)
+	assert.Equal(t, []compat.Mismatch{mismatch}, incompatible.Mismatches)
+}
+
+// A bound artifact PageBroker cannot (yet) produce a manifest for is treated
+// the same as an unreadable local one: not an incompatibility, since the
+// restore path itself reports the real error.
+func TestPreflightCompatibilityAllowsAnUnreachableBoundManifest(t *testing.T) {
+	r := newGatedRestore(t, compat.Mismatch{Check: "kernel-version"})
+	r.controller.fetchManifestFn = func(context.Context, *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		return nil, errors.New("artifact not found")
+	}
+
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+		SourceContainerName: gatedRestoreContainer,
+		PublishedArtifact:   &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer},
+	}, gatedRestoreMappings(), false)
+
+	require.NoError(t, err)
+	assert.Empty(t, r.comparison.calls, "comparison ran without a manifest")
+	require.Len(t, r.events(t, restoreCompatUncheckedReason), 1)
 }
 
 // The gate compares the checkpoint against every destination, so each target

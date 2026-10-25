@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -241,6 +242,37 @@ func installFakeNSenter(t *testing.T, body string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func TestNsenterNvidiaSMI(t *testing.T) {
+	installFakeNSenter(t, `
+test "$#" = 6
+test "$1" = "--mount=/host/proc/42/ns/mnt"
+test "$2" = "--pid=/host/proc/42/ns/pid"
+test "$3" = "--"
+test "$4" = "nvidia-smi"
+test "$5" = "-i"
+test "$6" = "0"
+printf 'raw output\n'
+`)
+
+	got, err := nsenterNvidiaSMI(context.Background(), "/host/proc/", 42, "-i", "0")
+	if err != nil {
+		t.Fatalf("nsenterNvidiaSMI: %v", err)
+	}
+	if string(got) != "raw output\n" {
+		t.Fatalf("nsenterNvidiaSMI() = %q, want the command's stdout unchanged", got)
+	}
+}
+
+func TestNsenterNvidiaSMIReturnsCommandFailure(t *testing.T) {
+	installFakeNSenter(t, "exit 17\n")
+
+	_, err := nsenterNvidiaSMI(context.Background(), "/host/proc", 42, "-L")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 17 || !strings.Contains(err.Error(), "pid 42") {
+		t.Fatalf("nsenterNvidiaSMI error = %v, want exit status 17 wrapped with pid 42", err)
+	}
+}
+
 func TestDiscoverVisibleGPUs(t *testing.T) {
 	installFakeNSenter(t, `
 test "$#" = 6
@@ -275,6 +307,88 @@ func TestDiscoverVisibleGPUsReturnCommandFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "pid 42") {
 		t.Fatalf("DiscoverVisibleGPUs error = %q, want pid", err)
+	}
+}
+
+func TestParseNvidiaSmiMIGSlices(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   []string
+	}{
+		{
+			name:   "a whole GPU is no slice",
+			output: "GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)\n",
+		},
+		{
+			name: "a slice nested under its card",
+			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)\n" +
+				"  MIG 1g.5gb      Device  0: (UUID: MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f)\n",
+			want: []string{"1g.5gb MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f"},
+		},
+		{
+			name: "every slice of every card",
+			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)\n" +
+				"  MIG 3g.20gb     Device  0: (UUID: MIG-11111111-2222-3333-4444-555555555555)\n" +
+				"  MIG 1g.5gb      Device  1: (UUID: MIG-66666666-7777-8888-9999-000000000000)\n" +
+				"GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-0d1a5b2c-3e4f-5a6b-7c8d-9e0f1a2b3c4d)\n",
+			want: []string{
+				"3g.20gb MIG-11111111-2222-3333-4444-555555555555",
+				"1g.5gb MIG-66666666-7777-8888-9999-000000000000",
+			},
+		},
+		{
+			name: "the R450 UUID form",
+			output: "GPU 0: A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)\n" +
+				"  MIG 1g.5gb Device 0: (UUID: MIG-GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f/7/0)\n",
+			want: []string{"1g.5gb MIG-GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f/7/0"},
+		},
+		{
+			name:   "a slice line without a UUID is still a slice",
+			output: "  MIG 1g.5gb      Device  0:\n",
+			want:   []string{"MIG 1g.5gb Device 0:"},
+		},
+		{
+			name:   "no devices",
+			output: "\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseNvidiaSmiMIGSlices(tc.output); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseNvidiaSmiMIGSlices() = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDiscoverMIGSlices(t *testing.T) {
+	installFakeNSenter(t, `
+test "$#" = 5
+test "$1" = "--mount=/host/proc/42/ns/mnt"
+test "$2" = "--pid=/host/proc/42/ns/pid"
+test "$3" = "--"
+test "$4" = "nvidia-smi"
+test "$5" = "-L"
+printf '%s\n' 'GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)'
+printf '%s\n' '  MIG 1g.5gb      Device  0: (UUID: MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f)'
+`)
+
+	got, err := DiscoverMIGSlices(context.Background(), "/host/proc/", 42)
+	if err != nil {
+		t.Fatalf("DiscoverMIGSlices: %v", err)
+	}
+	want := []string{"1g.5gb MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiscoverMIGSlices() = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverMIGSlicesReturnsCommandFailure(t *testing.T) {
+	installFakeNSenter(t, "exit 17\n")
+
+	if _, err := DiscoverMIGSlices(context.Background(), "/host/proc", 42); err == nil || !strings.Contains(err.Error(), "pid 42") {
+		t.Fatalf("DiscoverMIGSlices error = %v, want the nsenter failure for pid 42", err)
 	}
 }
 

@@ -84,6 +84,35 @@ def test_snapshotjob_cpu_source_observes_before_ready_and_ignores_sentinel(
 
 
 @pytest.mark.workload
+def test_cpu_source_logs_and_exits_on_request(tmp_path: Path) -> None:
+    # The restored-workload e2e test reads these lines from the restore Pod's
+    # log, and ends the workload through the exit request.
+    control_dir = tmp_path / "snapshot-control"
+    state_dir = tmp_path / "e2e-state"
+    control_dir.mkdir()
+    proc = subprocess.Popen(
+        ["bash", "-c", render_cpu_source(control_dir, state_dir)],
+        env={**os.environ, workloads.SOURCE_TOKEN_ENV: "unit-source-token"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (control_dir / "ready-for-snapshot").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        (state_dir / "exit-request").write_text("7\n")
+        output, _ = proc.communicate(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    assert proc.returncode == 7
+    assert "[source] observation seq=0" in output
+
+
+@pytest.mark.workload
 @pytest.mark.parametrize("gpu", [False, True])
 def test_no_workload_waits_on_snapshot_complete(gpu: bool) -> None:
     for script in (
@@ -138,10 +167,9 @@ def test_restore_manifests_use_canonical_control_mount_and_startup_gate(
         "cat",
         workloads.RESTORE_DONE,
     ]
-    # The standby flag is what keeps the placeholder from loading a model
-    # itself; it must be injected under its single canonical name.
-    standby_env = {"name": "SNAPSHOT_RESTORE_STANDBY", "value": "1"}
-    assert standby_env in single_container["env"]
+    # The restore proxy replaces the command, so nothing needs the old
+    # standby flag, under either name.
+    assert all("RESTORE_STANDBY" not in e["name"] for e in single_container["env"])
     assert all(not e["name"].startswith("DYN_") for e in single_container["env"])
 
     multi, _ = workloads.multi_restore_pod(
@@ -155,5 +183,5 @@ def test_restore_manifests_use_canonical_control_mount_and_startup_gate(
             "cat",
             workloads.RESTORE_DONE,
         ]
-        assert standby_env in container["env"]
+        assert all("RESTORE_STANDBY" not in e["name"] for e in container["env"])
         assert all(not e["name"].startswith("DYN_") for e in container["env"])
