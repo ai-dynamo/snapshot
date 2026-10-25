@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,35 +82,38 @@ func TestAttemptCheckpointPassesTheResolvedTarget(t *testing.T) {
 	}
 }
 
-// The attempt bounds the dump with its own deadline, leaving the caller's
-// context free to record the outcome afterwards.
-func TestAttemptCheckpointBoundsTheDumpNotTheCaller(t *testing.T) {
-	callerCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var dumpDeadlineSet bool
+// A retry loop applies one budget around its attempts. An attempt that started
+// a deadline of its own would reset that budget on every try, so retries could
+// outlast it however many times they ran.
+func TestAttemptCheckpointInheritsTheCallersBudget(t *testing.T) {
+	var dumpDeadline time.Time
+	var dumpHasDeadline bool
 	w := &NodeController{
+		// Far shorter than the caller's budget, so an attempt imposing its own
+		// deadline is visible rather than masked by the earlier parent deadline.
 		config: &types.AgentConfig{Checkpoint: types.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}},
 		checkpointFn: func(ctx context.Context, _ CheckpointParams) (*pagebroker.PublishedArtifact, error) {
-			_, dumpDeadlineSet = ctx.Deadline()
+			dumpDeadline, dumpHasDeadline = ctx.Deadline()
 			return nil, nil
 		},
 	}
+	budget, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	want, _ := budget.Deadline()
 
-	if _, err := w.attemptCheckpoint(callerCtx, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
+	if _, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
 		"main", "cid", 1, false, "uid", "/a"); err != nil {
 		t.Fatalf("attemptCheckpoint() = %v", err)
 	}
-	if !dumpDeadlineSet {
-		t.Error("dump ran without the configured deadline")
+
+	if !dumpHasDeadline {
+		t.Fatal("the dump ran without the caller's budget")
 	}
-	if callerCtx.Err() != nil {
-		t.Error("attempt cancelled the caller's context")
+	if !dumpDeadline.Equal(want) {
+		t.Errorf("dump deadline = %v, want the caller's %v", dumpDeadline, want)
 	}
 }
 
-// runCheckpoint composes the attempt with its outcome. Either way it returns nil:
-// the error is the queue's retry signal, and the outcome lives on the work order.
 func TestRunCheckpointRecordsEitherOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -154,4 +158,26 @@ func TestRunCheckpointReturnsAnUnrecordedFailure(t *testing.T) {
 
 	require.ErrorContains(t, err, "apiserver unavailable")
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
+// A budget that runs out during the dump comes back as the attempt's error. The
+// attempt records nothing for it — this controller has no client, so an attempt
+// reaching for status would have nothing to write with.
+func TestAttemptCheckpointReportsAnExhaustedBudget(t *testing.T) {
+	w := &NodeController{
+		config: &types.AgentConfig{},
+		checkpointFn: func(ctx context.Context, _ CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	budget, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
+		"main", "cid", 1, false, "uid", "/a")
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("attemptCheckpoint() = %v, want %v", err, context.DeadlineExceeded)
+	}
 }

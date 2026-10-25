@@ -253,7 +253,14 @@ func (w *NodeController) runCheckpoint(
 	contentUID string,
 	artifactPath string,
 ) error {
-	artifact, err := w.attemptCheckpoint(ctx, content, pod, containerName, containerID, containerPID,
+	captureCtx := ctx
+	if timeout := w.config.Checkpoint.CheckpointTimeout(); timeout > 0 {
+		var cancel context.CancelFunc
+		captureCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
 		cuInterposeRequested, contentUID, artifactPath)
 	if err != nil {
 		return w.markCheckpointFailed(ctx, content, "CheckpointFailed", err)
@@ -262,6 +269,8 @@ func (w *NodeController) runCheckpoint(
 }
 
 // attemptCheckpoint runs one dump and reports what happened, writing no status.
+// It imposes no deadline of its own: the caller owns the capture's budget, so
+// retrying does not hand each attempt a fresh one.
 func (w *NodeController) attemptCheckpoint(
 	ctx context.Context,
 	content *snapshotv1alpha1.PodSnapshotContent,
@@ -272,14 +281,6 @@ func (w *NodeController) attemptCheckpoint(
 	contentUID string,
 	artifactPath string,
 ) (*pagebroker.PublishedArtifact, error) {
-	// The caller's ctx governs status writes, so a dump that fails on its deadline is still recorded.
-	dumpCtx := ctx
-	if timeout := w.config.Checkpoint.CheckpointTimeout(); timeout > 0 {
-		var cancel context.CancelFunc
-		dumpCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-
 	storeID := ""
 	if content.Spec.Storage != nil {
 		storeID = content.Spec.Storage.StoreID
@@ -298,7 +299,7 @@ func (w *NodeController) attemptCheckpoint(
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
 	// would discard a usable checkpoint and, being terminal, block recovery from ever promoting it.
-	return w.checkpointFn(dumpCtx, params)
+	return w.checkpointFn(ctx, params)
 }
 
 // markCheckpointFailed makes a failed attempt terminal.
