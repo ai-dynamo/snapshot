@@ -43,7 +43,7 @@ process in `docs/proposals/README.md`.
 | Path | Go module | What lives there |
 | --- | --- | --- |
 | `api/` | yes | CRD types (`PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`) and generated CRD YAML in `api/v1alpha1/crds` |
-| `agent/` | yes | Node-level daemon that drives CRIU and CUDA checkpointing. **Linux/amd64 only** |
+| `agent/` | yes | Node-level daemon that drives CRIU and CUDA checkpointing. **Linux only (amd64, arm64)** |
 | `operator/` | yes | Cluster controller that reconciles the CRDs |
 | `charts/snapshot/` | — | Helm chart; `charts/snapshot/crds` is a generated copy of the CRDs |
 | `e2e/` | — | Python end-to-end suite (uv/pyproject), not Go |
@@ -55,7 +55,7 @@ Three separate Go modules — `api`, `agent`, and `operator` — each with its o
 
 ## Build and test
 
-Run everything from the repository root. Go 1.27.2 — the version is pinned in
+Run everything from the repository root. Go 1.27.3 — the version is pinned in
 `hack/tools.mk`, `go.work`, all three `go.mod` files, `agent/Dockerfile`, and
 the workflows, and they must agree.
 
@@ -78,8 +78,8 @@ To scope work to one module, use its own Makefile — `make -C operator test`.
 
 ### Building the agent from macOS
 
-The agent is Linux/amd64-only (`cuda-checkpoint` ships no other architecture),
-so it does not build natively on a Mac. Use the containerized targets:
+The agent is Linux-only (amd64 and arm64), so it does not build natively on a
+Mac. Use the containerized targets:
 
 ```bash
 make linux-build   # builds agent/ inside a golang container

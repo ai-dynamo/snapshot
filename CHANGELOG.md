@@ -34,6 +34,9 @@ commit-level history for each release is on its
 
 ### Added
 
+- `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
+  and opt into cleanup after failure; omission or `Retain` preserves output.
+  CRD change: deploy the matching CRD and operator together.
 - `PodSnapshotContent.status.source` records what a checkpoint was captured on:
   the source node's name, architecture, kernel version and the instruction
   sets its CPU offers, the captured container's image, image digest and CPU
@@ -47,10 +50,45 @@ commit-level history for each release is on its
 
 ### Changed
 
+- Restoring into a container that has an AppArmor profile or SELinux label now
+  requires a checkpoint that saved the processes' labels. Checkpoints taken by
+  earlier agent versions on AppArmor nodes don't have them and must be taken
+  again.
 - The agent drives checkpoints from a workqueue rather than per-checkpoint
   `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one
   more release before removal in v0.3.0+.
+- A checkpoint or restore on a MIG slice is refused up front, under the new
+  `mig-slice` check, because Snapshot supports whole GPUs only. A checkpoint
+  fails before anything is locked, leaving the source process running, with the
+  slice named on the `PodSnapshotContent` `Failed` condition; a restore is
+  refused as incompatible at the inspect gate, and
+  `nvidia.com/snapshot-skip-compat-check` waives it like any other check.
+  Previously nothing named MIG: under
+  DRA, GPU discovery failed with `DRA GPU allocation has no resolvable UUIDs`,
+  and elsewhere a slice was recorded as its parent card.
+- Restore semantics: Snapshot replaces the command of every restore destination
+  container with its restore proxy, `/snapshot-control/snapshot-restore-proxy`.
+  The proxy is the container's PID 1: it waits for the restore, forwards signals
+  to the restored process, and exits with its exit code, so the container ends
+  when the restored workload does. The node agent sets the command through NRI
+  when the container is created, and fails the restore if the proxy is not
+  PID 1. The proxy needs NRI v0.10 or newer, enabled in the container runtime:
+  containerd 2.2 or newer. On a node without it, the agent restores without the
+  proxy, as before, and restore Pods need an inert command there. Restore Pods
+  on nodes with the proxy keep the source's command, which never
+  runs, and are expected to use `restartPolicy: Never`: a restored container
+  that starts again ends in `CrashLoopBackOff`. The agent mounts the runtime's
+  NRI socket directory, `/var/run/nri`, and the new chart value
+  `daemonset.nriHostNamespace` limits it to one host namespace, for clusters
+  that share nodes, such as vCluster tenants: each installation sets its own.
+
+### Deprecated
+
+- `SNAPSHOT_RESTORE_STANDBY` (`podcontract.RestoreStandbyModeEnv`): restore
+  containers no longer run their own command, so nothing needs to stay inert.
+  Snapshot never injected it. The `DYN_SNAPSHOT_RESTORE_STANDBY` alias is still
+  removed in the next release.
 
 ## [0.1.0] - 2026-09-06
 

@@ -43,30 +43,34 @@ when it binds a `PodSnapshot`; callers never create it.
 
 `spec`:
 
-| Field                   | Type         | Required | Description                                                                 |
-|-------------------------|--------------|----------|-----------------------------------------------------------------------------|
-| `snapshotRef.namespace` | string       | yes      | Namespace of the bound `PodSnapshot`.                                       |
-| `snapshotRef.name`      | string       | yes      | Name of the bound `PodSnapshot`.                                            |
-| `snapshotRef.uid`       | string       | no       | UID recorded at binding time, to detect a delete-and-recreate.              |
-| `source.podRef`         | PodReference | yes      | The pod to dump (`name` / `uid` / `containers`).                            |
-| `source.nodeName`       | string       | yes      | Node the source pod runs on; selects the node agent that performs the dump. |
+| Field                   | Type         | Required | Description                                                                                                                                                                                                      |
+|-------------------------|--------------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `snapshotRef.namespace` | string       | yes      | Namespace of the bound `PodSnapshot`.                                                                                                                                                                            |
+| `snapshotRef.name`      | string       | yes      | Name of the bound `PodSnapshot`.                                                                                                                                                                                 |
+| `snapshotRef.uid`       | string       | no       | UID recorded at binding time, to detect a delete-and-recreate.                                                                                                                                                   |
+| `source.podRef`         | PodReference | yes      | The pod to dump (`name` / `uid` / `containers`).                                                                                                                                                                 |
+| `source.nodeName`       | string       | yes      | Node the source pod runs on; selects the node agent that performs the dump.                                                                                                                                      |
+| `storage.storeID`       | string       | no       | Backend-neutral store binding, immutable with the rest of `spec`. When `storage` is present, the ID must be `store-v1-` followed by 64 lowercase hexadecimal characters. Omitted by legacy filesystem producers. |
 
 `status`:
 
-| Field                                           | Type             | Description                                                                                                                                                                                                                                |
-|-------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `conditions`                                    | []Condition      | `Ready` (artifact captured and usable for restore) and `Failed` (capture failed terminally).                                                                                                                                               |
-| `source`                                        | CheckpointSource | What the checkpoint was captured on, written with `Ready`. Informational only: the restore compatibility gates compare the artifact's manifest, not this block. Every field below is optional and absent when the value could not be read. |
-| `source.node.name`                              | string           | Node the source pod ran on.                                                                                                                                                                                                                |
-| `source.node.architecture`                      | string           | Node CPU architecture, as `GOARCH` spells it.                                                                                                                                                                                              |
-| `source.node.kernelVersion`                     | string           | Node kernel release.                                                                                                                                                                                                                       |
-| `source.node.cpuFeatures`                       | []string         | Instruction-set flags from the node's `/proc/cpuinfo` that every processor reported, such as `avx2` or `avx512f`, sorted.                                                                                                                  |
-| `source.pod.image`                              | string           | Container image reference the capture ran.                                                                                                                                                                                                 |
-| `source.pod.imageDigest`                        | string           | Identifies which build of the image ran, which a mutable tag does not.                                                                                                                                                                     |
-| `source.pod.memory`                             | string           | Container memory limit; absent if it had none.                                                                                                                                                                                             |
-| `source.pod.cpu`                                | string           | Container CPU limit; absent if it had none.                                                                                                                                                                                                |
-| `source.devices.nvidia.driverVersion`           | string           | NVIDIA driver the capture ran against.                                                                                                                                                                                                     |
-| `source.devices.nvidia.instances[].productName` | string           | GPU model as `nvidia-smi` reports it, one entry per GPU the captured container could see.                                                                                                                                                  |
+| Field                                           | Type                         | Description                                                                                                                                                                                                                                |
+|-------------------------------------------------|------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `conditions`                                    | []Condition                  | `Ready` (artifact captured and usable for restore) and `Failed` (capture failed terminally).                                                                                                                                               |
+| `source`                                        | CheckpointSource             | What the checkpoint was captured on, written with `Ready`. Informational only: the restore compatibility gates compare the artifact's manifest, not this block. Every field below is optional and absent when the value could not be read. |
+| `source.node.name`                              | string                       | Node the source pod ran on.                                                                                                                                                                                                                |
+| `source.node.architecture`                      | string                       | Node CPU architecture, as `GOARCH` spells it.                                                                                                                                                                                              |
+| `source.node.kernelVersion`                     | string                       | Node kernel release.                                                                                                                                                                                                                       |
+| `source.node.cpuFeatures`                       | []string                     | Instruction-set flags from the node's `/proc/cpuinfo` that every processor reported, such as `avx2` or `avx512f`, sorted.                                                                                                                  |
+| `source.pod.image`                              | string                       | Container image reference the capture ran.                                                                                                                                                                                                 |
+| `source.pod.imageDigest`                        | string                       | Identifies which build of the image ran, which a mutable tag does not.                                                                                                                                                                     |
+| `source.pod.memory`                             | string                       | Container memory limit; absent if it had none.                                                                                                                                                                                             |
+| `source.pod.cpu`                                | string                       | Container CPU limit; absent if it had none.                                                                                                                                                                                                |
+| `source.devices.nvidia.driverVersion`           | string                       | NVIDIA driver the capture ran against.                                                                                                                                                                                                     |
+| `source.devices.nvidia.instances[].productName` | string                       | GPU model as `nvidia-smi` reports it, one entry per GPU the captured container could see.                                                                                                                                                  |
+| `storage.artifacts`                             | []PublishedContainerArtifact | Optional confirmed publications, keyed by `containerName`. Requires `spec.storage`; container names must be captured targets. Does not replace Ready/Failed conditions.                                                                    |
+| `storage.artifacts[].containerName`             | string                       | Required container name; entries must be unique.                                                                                                                                                                                           |
+| `storage.artifacts[].artifactHandle`            | string                       | Required opaque publication locator within the bound store, up to 4096 characters. Callers must not interpret it as a filesystem path.                                                                                                     |
 
 ### SnapshotJob
 
@@ -80,6 +84,8 @@ declarative object.
 | `podTemplate`                          | PodTemplateSpec | yes      | —          | The workload to run and capture. The controller injects the snapshot contract (control volume, readiness probe, seccomp); image, command, GPU resources, and sidecars are the caller's. |
 | `podSnapshotTemplate.targetContainers` | []string        | no       | `["main"]` | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must name a container present in `podTemplate`.                                                                             |
 | `activeDeadlineSeconds`                | int64           | no       | `3600`     | Total time allowed for scheduling, quiesce, and dump; applied to the batch/v1 Job.                                                                                                      |
+| `nonTargetArtifacts.containers`        | []string        | no       | —          | Non-target containers that write artifacts to the shared checkpoint PVC. Must be nonempty if `nonTargetArtifacts` is set.                                                               |
+| `nonTargetArtifacts.onFailure`         | string          | no       | `Retain`   | `Retain` keeps a failed attempt's artifacts. `Cleanup` lets the operator delete them once all writers have stopped.                                                                     |
 
 `podSnapshotTemplate` itself is required; its only field, `targetContainers`,
 defaults. The object's `metadata.name` must be at most 63 characters (it is used
@@ -121,6 +127,14 @@ the node agent, not set by the caller:
 | Pod condition         | Description                                                                                                                                                         |
 |-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `nvidia.com/Restored` | Added to the pod by the node agent once a restore is under way; becomes `True` when the restore completes. Observe it alongside pod readiness to confirm a restore. |
+
+## Advanced: non-target artifacts
+
+A non-target container can write output to the shared checkpoint PVC. Declare it in `spec.nonTargetArtifacts.containers` (regular containers only, excluding capture targets). Do not combine this field with the legacy `nvidia.com/snapshot-non-target-artifact-containers` annotation.
+
+Snapshot injects `SNAPSHOT_JOB_UID` and `SNAPSHOT_NON_TARGET_ARTIFACT_SUBDIR` (`non-target-artifacts/<SnapshotJob UID>`, relative to the PVC root). Supply the PVC mount, write beneath that directory, and finish before the container exits. It must be writable by the container and removable by the operator. Restore consumers find the attempt through the `PodSnapshot`'s `nvidia.com/snapshot-job-uid` label.
+
+On failure, `Retain` (the default) keeps the output. `Cleanup` deletes it only when the `SnapshotJob` is `Failed` and all source Pod containers are confirmed stopped. If proof cannot arrive, such as after Pod removal, Snapshot retains the directory and emits a `NonTargetArtifactsRetained` warning once per attempt per operator process. Verify writer exit before manual removal. Successful output is caller-managed. This applies only to the shared PVC, not S3 or capture artifacts.
 
 ## Labels
 
@@ -230,7 +244,7 @@ payload checksums.
 
 `config.*` renders into the agent ConfigMap.
 
-- `config.overlay.exclusions` — rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`.
+- `config.overlay.exclusions` — rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
 - `config.checkpoint.checkpointTimeoutSeconds` — maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
 - `config.restore.restoreTimeoutSeconds` — maximum seconds for a restore before the agent marks it failed. Default `7200`.
 

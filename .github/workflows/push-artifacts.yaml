@@ -30,6 +30,17 @@ permissions: {}
 env:
   # Passed through to make, so the references we sign are the ones it pushed.
   REGISTRY: ghcr.io/ai-dynamo/snapshot
+  # Layer cache, one tag per image. Not type=gha: the Actions cache is capped
+  # at 10 GiB per repository and the Go module caches alone exceed that, so
+  # buildx entries were evicted before any later run could read them and every
+  # build in every workflow started cold. A registry has no such ceiling, and
+  # it is readable from the pull request workflows, which the Actions cache
+  # was not across refs.
+  #
+  # Only this workflow writes it, and it runs on main and release branches
+  # alone. A pull request that could write a shared cache could also poison
+  # every build that reads it afterwards.
+  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
 
 jobs:
 
@@ -37,7 +48,7 @@ jobs:
   # All other jobs depend on this one, so they cascade-skip automatically.
   version:
     name: Compute version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: >
       github.event_name != 'workflow_run' ||
       (
@@ -49,6 +60,8 @@ jobs:
       version: ${{ steps.compute.outputs.version }}
       tags: ${{ steps.compute.outputs.tags }}
       head_sha: ${{ steps.compute.outputs.head_sha }}
+      release: ${{ steps.compute.outputs.release }}
+      matrix: ${{ steps.compute.outputs.matrix }}
     steps:
       - name: Compute version and tags
         id: compute
@@ -89,13 +102,29 @@ jobs:
           fi
           echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
 
+          # A release builds every image natively for amd64 and arm64 and joins
+          # them under one tag. Any other run stays amd64 only, because the e2e
+          # suites consume the amd64 images.
+          if [ -n "${INPUT}" ]; then RELEASE=true; else RELEASE=false; fi
+          echo "release=${RELEASE}" >> "$GITHUB_OUTPUT"
+          legs=()
+          for image in operator pagebroker agent; do
+            legs+=("{\"image\":\"${image}\",\"arch\":\"amd64\",\"runner\":\"ubuntu-24.04\"}")
+          done
+          if [ "${RELEASE}" = true ]; then
+            for image in operator pagebroker agent; do
+              legs+=("{\"image\":\"${image}\",\"arch\":\"arm64\",\"runner\":\"ubuntu-24.04-arm\"}")
+            done
+          fi
+          echo "matrix=[$(IFS=,; echo "${legs[*]}")]" >> "$GITHUB_OUTPUT"
+
   validate:
     name: Validate release commit
     needs: version
     permissions:
       # Required to check out the selected release commit.
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,7 +133,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -117,25 +146,20 @@ jobs:
   # Identical apart from the `include` entries, so one job keeps the attestation
   # flags and pinned SHAs in step by construction rather than by review.
   build-image:
-    name: Build and push ${{ matrix.image }} image
+    name: Build and push ${{ matrix.image }} image (${{ matrix.arch }})
     needs: [version, validate]
     permissions:
       # Checkout the validated source and publish its image to GHCR.
       contents: read
       packages: write
       id-token: write
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     # Sized for the agent: CRIU from source on a CUDA base, plus an SBOM scan.
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: operator
-          - image: pagebroker
-          - image: agent
-            # Dockerfile exits 1 on other arches
-            build_args: --platform=linux/amd64
+        include: ${{ fromJSON(needs.version.outputs.matrix) }}
     steps:
       # Check out the exact commit that passed CI, not whatever is at HEAD now.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -163,23 +187,51 @@ jobs:
         id: build
         env:
           IMAGE: ${{ matrix.image }}
-          BUILD_ARGS: ${{ matrix.build_args }}
+          ARCH: ${{ matrix.arch }}
+          RELEASE: ${{ needs.version.outputs.release }}
           TAGS: ${{ needs.version.outputs.tags }}
+          # The branch whose cache this run owns, falling back to main on a
+          # tag. release.yaml calls this workflow on a `release: published`
+          # event, where ref_name is the tag rather than a branch.
+          CACHE_BRANCH: ${{ github.event.workflow_run.head_branch || (github.ref_type == 'tag' && 'main' || github.ref_name) }}
+          # And a release reads without writing: a tag never recurs, so a
+          # cache published under one is a cache no later build ever names.
+          CACHE_MODE: ${{ github.ref_type == 'tag' && 'read' || 'write' }}
         run: |
+          set -euo pipefail
+          # Assigned, not inlined into the argument: a command substitution
+          # that fails inside a simple command does not trip `set -e`, so an
+          # inline call would drop --cache-to and still publish the image,
+          # leaving every later build cold with nothing in the log to say why.
+          cache_key="${IMAGE}"
+          if [ "${ARCH}" != amd64 ]; then cache_key="${IMAGE}-${ARCH}"; fi
+          cache_flags="$(hack/ci-cache-flags.sh "${CACHE_MODE}" "${cache_key}" "${CACHE_BRANCH}")"
+          # A release pushes each architecture by digest only. The
+          # publish-index job adds the tags, so no tag ever points at one
+          # architecture.
+          if [ "${RELEASE}" = true ]; then
+            push_flags="--output type=image,name=${REGISTRY}/${IMAGE},push-by-digest=true,name-canonical=true,push=true"
+            tags=""
+          else
+            push_flags="--push"
+            tags="${TAGS}"
+          fi
           make "docker-build-${IMAGE}" \
             REGISTRY="${REGISTRY}" \
-            TAGS="${TAGS}" \
-            DOCKER_BUILD_ARGS="--push ${BUILD_ARGS} \
+            TAGS="${tags}" \
+            AGENT_PLATFORM="linux/${ARCH}" \
+            DOCKER_BUILD_ARGS="${push_flags} \
               --provenance=mode=max \
               --sbom=true \
               --metadata-file=buildx.json \
-              --cache-from=type=gha,scope=${IMAGE} \
-              --cache-to=type=gha,scope=${IMAGE},mode=max"
+              ${cache_flags}"
           DIGEST="$(jq -er '."containerimage.digest"' buildx.json)"
-          echo "${DIGEST}" > "digest-${IMAGE}.txt"
+          echo "${DIGEST}" > "digest-${IMAGE}-${ARCH}.txt"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
+      # A release signs the joined index in publish-index instead.
       - name: Sign image
+        if: needs.version.outputs.release != 'true'
         env:
           IMAGE: ${{ matrix.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -187,6 +239,78 @@ jobs:
 
       # Matrix legs share one set of job outputs, last leg winning, so digests
       # travel as files. The release job needs the digest captured here.
+      - name: Publish digest for the release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: digest-${{ matrix.image }}-${{ matrix.arch }}.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── Multi-arch index (releases only) ────────────────────────────────────────
+  publish-index:
+    name: Publish ${{ matrix.image }} multi-arch index
+    needs: [version, build-image]
+    if: needs.version.outputs.release == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [operator, pagebroker, agent]
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Download the per-architecture digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-${{ matrix.image }}-*
+          merge-multiple: true
+          path: digests
+
+      # Fails unless the index lists exactly amd64 and arm64, so a leg that
+      # pushed nothing cannot publish a single-architecture release tag.
+      - name: Join the architectures under the release tags
+        id: index
+        env:
+          IMAGE: ${{ matrix.image }}
+          TAGS: ${{ needs.version.outputs.tags }}
+        run: |
+          set -euo pipefail
+          tag_args=()
+          for tag in ${TAGS}; do tag_args+=(-t "${REGISTRY}/${IMAGE}:${tag}"); done
+          docker buildx imagetools create "${tag_args[@]}" \
+            "${REGISTRY}/${IMAGE}@$(cat "digests/digest-${IMAGE}-amd64.txt")" \
+            "${REGISTRY}/${IMAGE}@$(cat "digests/digest-${IMAGE}-arm64.txt")"
+          first_tag="${TAGS%% *}"
+          DIGEST="$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE}:${first_tag}" --format '{{.Manifest.Digest}}')"
+          archs="$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE}@${DIGEST}" --raw \
+            | jq -r '[.manifests[].platform | select(.architecture != "unknown") | .architecture] | sort | join(",")')"
+          test "${archs}" = "amd64,arm64" || { echo "index lists '${archs}', expected amd64,arm64" >&2; exit 1; }
+          echo "${DIGEST}" > "digest-${IMAGE}.txt"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign index
+        env:
+          IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: cosign sign --yes "${REGISTRY}/${IMAGE}@${DIGEST}"
+
       - name: Publish digest for the release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -198,7 +322,12 @@ jobs:
   # ── Helm chart (OCI push to GHCR) ──────────────────────────────────────────
   release-helm:
     name: Package and push Helm chart
-    needs: [version, validate, build-image]
+    needs: [version, validate, build-image, publish-index]
+    # publish-index is skipped outside a release, which would skip this job.
+    if: >-
+      ${{ !cancelled() && needs.validate.result == 'success' &&
+      needs.build-image.result == 'success' &&
+      contains(fromJSON('["success","skipped"]'), needs.publish-index.result) }}
     permissions:
       # Checkout the validated chart and publish it to GHCR.
       contents: read
@@ -206,7 +335,7 @@ jobs:
       id-token: write
     outputs:
       chart: ${{ steps.push.outputs.chart }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -281,15 +410,18 @@ jobs:
   # releases have somewhere to attach them.
   release-assets:
     name: Attach SBOMs and checksums to the release
-    needs: [version, build-image, release-helm]
-    if: inputs.version != ''
+    needs: [version, build-image, publish-index, release-helm]
+    if: >-
+      ${{ !cancelled() && inputs.version != '' &&
+      needs.publish-index.result == 'success' &&
+      needs.release-helm.result == 'success' }}
     permissions:
       # Upload assets to the GitHub release for this tag.
       contents: write
       # Let syft read the published images from GHCR.
       packages: read
       id-token: write
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Confirm the release exists
@@ -335,10 +467,14 @@ jobs:
         run: |
           for image in operator agent pagebroker; do
             digest="$(cat "digests/digest-${image}.txt")"
-            syft scan --platform linux/amd64 \
-              -o "spdx-json=assets/sbom-${image}.spdx.json" \
-              -o "cyclonedx-json=assets/sbom-${image}.cdx.json" \
-              "registry:${REGISTRY}/${image}@${digest}"
+            for arch in amd64 arm64; do
+              # amd64 keeps its original file names.
+              suffix=""; if [ "${arch}" = arm64 ]; then suffix="-arm64"; fi
+              syft scan --platform "linux/${arch}" \
+                -o "spdx-json=assets/sbom-${image}${suffix}.spdx.json" \
+                -o "cyclonedx-json=assets/sbom-${image}${suffix}.cdx.json" \
+                "registry:${REGISTRY}/${image}@${digest}"
+            done
           done
 
       # One signature over SHA256SUMS transitively covers every asset. cosign v3
@@ -353,6 +489,9 @@ jobs:
             sbom-operator.spdx.json sbom-operator.cdx.json \
             sbom-agent.spdx.json sbom-agent.cdx.json \
             sbom-pagebroker.spdx.json sbom-pagebroker.cdx.json \
+            sbom-operator-arm64.spdx.json sbom-operator-arm64.cdx.json \
+            sbom-agent-arm64.spdx.json sbom-agent-arm64.cdx.json \
+            sbom-pagebroker-arm64.spdx.json sbom-pagebroker-arm64.cdx.json \
             "${CHART}" > SHA256SUMS
           cat SHA256SUMS
           cosign sign-blob --yes \
@@ -374,6 +513,12 @@ jobs:
             sbom-agent.cdx.json \
             sbom-pagebroker.spdx.json \
             sbom-pagebroker.cdx.json \
+            sbom-operator-arm64.spdx.json \
+            sbom-operator-arm64.cdx.json \
+            sbom-agent-arm64.spdx.json \
+            sbom-agent-arm64.cdx.json \
+            sbom-pagebroker-arm64.spdx.json \
+            sbom-pagebroker-arm64.cdx.json \
             "${CHART}" \
             SHA256SUMS \
             SHA256SUMS.sigstore.json

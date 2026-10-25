@@ -72,17 +72,42 @@ IsSafePathComponent(const std::string& value)
 const StorageBackend&
 ValidateStagedRestore(const StagedRestoreRequest& request)
 {
-  if (!request.has_source() || request.source().kind_case() == StorageBackend::KIND_NOT_SET)
-    throw std::invalid_argument("restore source is required");
-  return request.source();
+  switch (request.selector_case()) {
+    case StagedRestoreRequest::kSource:
+      if (request.source().kind_case() == StorageBackend::KIND_NOT_SET)
+        throw std::invalid_argument("restore source is required");
+      return request.source();
+    case StagedRestoreRequest::kArtifact:
+      // No backend serves store-bound artifacts yet.
+      throw std::invalid_argument("artifact-addressed restore is not implemented");
+    case StagedRestoreRequest::SELECTOR_NOT_SET:
+    default:
+      throw std::invalid_argument("restore source is required");
+  }
+}
+
+void
+ValidateArtifactMetadata(const GetArtifactMetadataRequest& request)
+{
+  if (request.selector_case() == GetArtifactMetadataRequest::SELECTOR_NOT_SET)
+    throw std::invalid_argument("metadata subject is required");
 }
 
 const StorageBackend&
 ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
 {
-  if (!request.has_destination() || request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
-    throw std::invalid_argument("checkpoint destination is required");
-  return request.destination();
+  switch (request.selector_case()) {
+    case PrepareStagedCheckpointRequest::kDestination:
+      if (request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
+        throw std::invalid_argument("checkpoint destination is required");
+      return request.destination();
+    case PrepareStagedCheckpointRequest::kTarget:
+      // No backend serves store-bound artifacts yet.
+      throw std::invalid_argument("artifact-addressed checkpoint is not implemented");
+    case PrepareStagedCheckpointRequest::SELECTOR_NOT_SET:
+    default:
+      throw std::invalid_argument("checkpoint destination is required");
+  }
 }
 
 FileDescriptor
@@ -316,6 +341,12 @@ Broker::CleanupTransactionDirectory(const std::string& id, Transaction& transact
 }
 
 void
+Broker::SetClock(Clock clock)
+{
+  now_ = std::move(clock);
+}
+
+void
 Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
 {
   for (const auto& [id, transaction] : TransactionSnapshot()) {
@@ -478,6 +509,10 @@ Broker::HandleRequest(const Request& request)
       case Request::kAbort:
         response = Abort(request);
         break;
+      case Request::kGetArtifactMetadata:
+        ValidateArtifactMetadata(request.get_artifact_metadata());
+        response = Fail(request, Failure::INVALID_REQUEST, "artifact metadata retrieval is not implemented");
+        break;
       default:
         response = Fail(request, Failure::INVALID_REQUEST, "unsupported operation");
         break;
@@ -602,6 +637,9 @@ Broker::Commit(const Request& request)
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::ABORTED) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   }
+  if (transaction->expired(now_(), kLiveTransactionLifetime)) {
+    return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
+  }
   if (transaction->state() == Transaction::State::PREPARING) {
     return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction is preparing");
   }
@@ -680,6 +718,9 @@ Broker::Abort(const Request& request)
   }
   if (transaction->state() == Transaction::State::ABORTED) {
     return AbortSucceeded(request);
+  }
+  if (transaction->expired(now_(), kLiveTransactionLifetime)) {
+    return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
   }
   if (const auto operation = transaction->gpu_operation) {
     BeginAbort(*transaction);

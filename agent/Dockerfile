@@ -6,7 +6,7 @@
 # Build targets. Two named build contexts are required for the agent: `api`
 # (the agent module depends on it via `replace => ../api`) and `compliance`
 # (attribution helpers shared with the operator image):
-#   docker build --platform linux/amd64 --target agent \
+#   docker build --platform linux/amd64 --target agent \   (or linux/arm64)
 #     --build-context api=../api --build-context compliance=../hack/compliance \
 #     -t snapshot-agent:latest .
 #
@@ -18,13 +18,13 @@
 # Build Arguments
 # =============================================================================
 ARG DOCKER_PROXY
-ARG GO_VERSION=1.27.2
+ARG GO_VERSION=1.27.3
 # Digest of golang:${GO_VERSION}. A digest is content-addressed, so it resolves
 # identically through DOCKER_PROXY pull-through mirrors. Docker resolves
 # tag@digest by digest and never checks the tag against it, so the two must be
 # updated together — the go-base stage asserts they agree rather than trusting
 # the tag.
-ARG GO_IMAGE_DIGEST=sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+ARG GO_IMAGE_DIGEST=sha256:6928d94d1142af58816fed5a62338d605a266ccd53a0deaab6b1096f19059261
 # Keep in step with GOLANGCI_LINT_VERSION in hack/tools.mk. Used by the linter
 # stage, which is a developer target (`--target linter`) and so is not covered
 # by the CI `check` job.
@@ -35,7 +35,7 @@ ARG GOLANGCI_LINT_VERSION=v2.14.0
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
-ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
+ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:843a5e81ed49ad2a2787aa10e48e926dc1f9440522a122ec2a637c27039fc77d
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
 
 # =============================================================================
@@ -44,7 +44,7 @@ ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.0
 FROM ${DOCKER_PROXY}library/golang:${GO_VERSION}@${GO_IMAGE_DIGEST} AS go-base
 
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ARG GO_VERSION
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
@@ -103,7 +103,7 @@ RUN CGO_ENABLED=0 go test ./... -v
 FROM go-base AS builder
 
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
@@ -147,12 +147,13 @@ COPY --from=gcc-15 /usr/local/bin/ /opt/gcc-15/bin/
 COPY --from=gcc-15 /usr/local/lib/gcc/ /opt/gcc-15/lib/gcc/
 COPY --from=gcc-15 /usr/local/libexec/gcc/ /opt/gcc-15/libexec/gcc/
 COPY --from=gcc-15 /usr/local/lib64/ /opt/gcc-15/lib64/
-RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
+RUN arch="$(uname -m)" \
+    && test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
     && apt-get update && apt-get install -y --no-install-recommends \
        musl-tools make gcc binutils \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install cbindgen --version 0.29.4 --locked \
-    && rustup target add x86_64-unknown-linux-musl \
+    && rustup target add "${arch}-unknown-linux-musl" \
     && rustup component add rust-src rustfmt clippy
 WORKDIR /cuinterpose
 COPY cmd/cuinterpose/ ./
@@ -187,6 +188,18 @@ RUN /usr/local/bin/cuinterpose-launch --library /usr/local/lib/snapshot/libcuint
 
 FROM scratch AS cuinterpose-export
 COPY --from=cuinterpose-builder /cuinterpose/build/ /
+
+# The GPU test binary runs on a GPU host from build/, beside the artifacts it tests.
+FROM cuinterpose-builder AS cuinterpose-gpu-tests-builder
+RUN cd rust \
+    && cargo test --locked -p cuinterpose-gpu-tests --test gpu --target "$(uname -m)-unknown-linux-gnu" \
+       --no-run --message-format=json > /tmp/gpu-tests.json \
+    && executable=$(sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' /tmp/gpu-tests.json) \
+    && install -m 0755 "$executable" /cuinterpose-gpu-tests
+
+# The export holds the binary with the artifacts from the same build, so they match.
+FROM cuinterpose-export AS cuinterpose-gpu-tests
+COPY --from=cuinterpose-gpu-tests-builder /cuinterpose-gpu-tests /cuinterpose-gpu-tests
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -244,11 +257,11 @@ RUN tar -czf /criu-src.tar.gz -C /tmp --exclude-vcs criu
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS runtime-deps
 
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
-RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Snapshot supports x86_64 only, not ${TARGETARCH}" >&2; exit 1; \
-    fi
+RUN case "${TARGETARCH}" in amd64|arm64) ;; *) \
+      echo "ERROR: Snapshot supports amd64 and arm64, not ${TARGETARCH}" >&2; exit 1 ;; \
+    esac
 
 # Install CRIU runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -273,13 +286,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # =============================================================================
 # Stage: Sources - corresponding source for everything added over the base
 # =============================================================================
+# =============================================================================
+# Stage: Base packages - the committed baseline still describes the base image
+# =============================================================================
+# The source delta below is computed against the committed baseline, so a
+# base-image bump without a re-capture would silently skew it: packages the new
+# base added would look like ours, and packages it dropped would vanish from
+# the delta. The build would still succeed, with wrong compliance content.
+#
+# Checked here rather than by a `docker run` before the build. buildx already
+# has this image; a Docker daemon running the check separately does not, and
+# that second pull cost a minute and a half of every CI run. As a stage it is
+# cached on the base digest and the baseline, so it costs nothing until one of
+# them changes.
+FROM ${AGENT_BASE_IMAGE} AS base-packages
+
+ARG TARGETARCH
+COPY compliance/base-packages-manifest.sh /tmp/base-packages-manifest.sh
+COPY compliance/base-packages.tsv compliance/base-packages.arm64.tsv /tmp/
+
+RUN set -e; \
+    if [ "${TARGETARCH}" = arm64 ]; then baseline=/tmp/base-packages.arm64.tsv; else baseline=/tmp/base-packages.tsv; fi; \
+    sh /tmp/base-packages-manifest.sh >/tmp/actual.tsv; \
+    diff -u "${baseline}" /tmp/actual.tsv || { \
+      echo "ERROR: ${baseline} is stale for this base image — run 'make capture-base-packages AGENT_PLATFORM=linux/${TARGETARCH}' and commit" >&2; \
+      exit 1; \
+    }; \
+    cp "${baseline}" /tmp/baseline.tsv
+
 FROM runtime-deps AS sources
 
-COPY compliance/base-packages.tsv /tmp/base-packages.tsv
+# From the stage that checked it rather than from the context, so a stale
+# baseline fails the build instead of quietly skewing the delta below.
+COPY --from=base-packages /tmp/baseline.tsv /tmp/baseline.tsv
 COPY compliance/collect-sources.sh /tmp/collect-sources.sh
 
 # Debian/Ubuntu source for the delta against the NGC base image.
-RUN sh /tmp/collect-sources.sh /tmp/base-packages.tsv /sources/dpkg
+RUN sh /tmp/collect-sources.sh /tmp/baseline.tsv /sources/dpkg
 
 # CRIU source, at the exact ref this image was built from.
 COPY --from=criu-builder /criu-src.tar.gz /sources/criu/criu-src.tar.gz
@@ -382,12 +425,18 @@ RUN set -eu; \
     done
 
 # Matched loader + glibc for the bundled tar, which runtime.restoreTarCmd
-# invokes as `ld-linux-x86-64.so.2 --library-path ... tar`. This is what lets
+# invokes as `<loader> --library-path ... tar`, where the loader is
+# ld-linux-x86-64.so.2 or ld-linux-aarch64.so.1 (nsmount.BundleLoader). This is what lets
 # tar run on placeholders older than AGENT_BASE_IMAGE. Keep it out of lib/ —
 # see the bundle layout comment in agent/internal/nsmount/injector.go.
+ARG TARGETARCH
 RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) LOADER_NAME=ld-linux-x86-64.so.2 ;; \
+      arm64) LOADER_NAME=ld-linux-aarch64.so.1 ;; \
+    esac; \
     mkdir -p /snapshot-binaries/libc; \
-    cp -L /lib64/ld-linux-x86-64.so.2 /snapshot-binaries/libc/; \
+    cp -L "$(ldd /snapshot-binaries/tar | awk '/ld-linux/ && !/=>/ {print $1}')" "/snapshot-binaries/libc/${LOADER_NAME}"; \
     ldd /snapshot-binaries/tar | awk '/=> \//{print $3}' \
     | grep -E '/(libc|libm|libmvec|libdl|libpthread|librt|libresolv)[.-]' \
     | xargs -r -I{} cp -Ln {} /snapshot-binaries/libc/
@@ -398,7 +447,10 @@ RUN set -eu; \
 # and only fail on a placeholder older than AGENT_BASE_IMAGE, which is the bug
 # this arrangement exists to prevent.
 RUN set -eu; \
-    LOADER=/snapshot-binaries/libc/ld-linux-x86-64.so.2; \
+    case "${TARGETARCH}" in \
+      amd64) LOADER=/snapshot-binaries/libc/ld-linux-x86-64.so.2 ;; \
+      arm64) LOADER=/snapshot-binaries/libc/ld-linux-aarch64.so.1 ;; \
+    esac; \
     LIBPATH=/snapshot-binaries/libc:/snapshot-binaries/lib; \
     escaped=$("$LOADER" --library-path "$LIBPATH" --list /snapshot-binaries/tar \
               | awk '/=>/{print $3}' | grep -v '^/snapshot-binaries/' || true); \
@@ -425,3 +477,16 @@ RUN mkdir -p /checkpoints /var/run/snapshot
 USER root
 
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
+
+# =============================================================================
+# Stage: Bundle export - the restore bundle on its own
+# =============================================================================
+# hack/verify-bundle-glibc.sh checks the bundle against an older userspace than
+# the agent is built on. It used to read the bundle out of the agent image,
+# which required that image to be in a Docker daemon; CI no longer loads it
+# there, because unpacking a CUDA-based image costs more than the check does.
+# Exporting the bundle alone keeps the check cheap:
+#
+#   docker buildx build --target bundle-export --output type=local,dest=<dir> .
+FROM scratch AS bundle-export
+COPY --from=agent /snapshot-binaries/ /

@@ -35,13 +35,13 @@ through an environment variable and signals across it with sentinel files.
 | `SNAPSHOT_CONTROL_DIR` | agent → workload | Path to the shared directory (mounted at `/snapshot-control`). The workload reads it here rather than hard-coding the path. |
 | `ready-for-snapshot` | workload writes | The workload is quiesced and safe to checkpoint. The source pod's readiness probe gates on this file. |
 | `restore-complete` | agent writes, workload waits | The workload's state is restored; it may resume. |
-| `SNAPSHOT_RESTORE_STANDBY` | producer → workload | When `1`, this process is a restore placeholder: the workload must stay inert and not initialize. |
+| `SNAPSHOT_RESTORE_STANDBY` | deprecated | Restore containers no longer run their own command, so nothing has to stay inert. Snapshot never set it. |
 | `<framework>-restore-ready` | workload writes | A workload-chosen sentinel meaning "restored and serving." The restore pod's readiness probe gates on it. |
 
 The agent-owned side of this shared directory (and its `cuda-checkpoint-job`
 file) is described in
 [The snapshot-control volume](api.md#the-snapshot-control-volume).
-The restore-pod side — annotations, standby, startup gate — is the
+The restore-pod side — annotations, the restore proxy, startup gate — is the
 [Restore Pod contract](restore-pod-contract.md).
 
 ## The capture and restore steps
@@ -85,12 +85,13 @@ workload useful and operable.
 
 ### Restore (restored workload)
 
-8. **MUST**, when `SNAPSHOT_RESTORE_STANDBY=1`, have the workload's entrypoint
-   skip its normal initialization and idle instead (for example, sleep without
-   starting the engine). The agent restores the checkpointed process into this
-   container as a sibling PID via CRIU, outside the entrypoint's control; an
-   entrypoint that initializes anyway starts a second, competing copy of the
-   model in the same container.
+8. **MUST NOT** rely on its entrypoint running in the restore container.
+   Snapshot replaces the restore container's command with its restore proxy,
+   which waits for the restore and then follows the restored process. The
+   restored process continues from the checkpoint; nothing the entrypoint does
+   at startup happens again. On nodes without the restore proxy, the restore
+   Pod's own inert command runs instead; see
+   [Nodes without the restore proxy](restore-pod-contract.md#nodes-without-the-restore-proxy).
 9. **MUST** wait for `restore-complete` before touching the engine.
 10. **MUST** bring the engine back to a serving-ready state in this order: let
     `cuda-checkpoint` restore GPU memory (CUDA contexts, streams, and device
@@ -124,8 +125,8 @@ working checkpoint, just a larger or colder one.
 |------------|------|------|--------------|--------|
 | Warm up | SHOULD | one `generate` | `LLM.generate` (two prompts) | one `generate` |
 | Stop in-flight work | MUST | `pause_generation()` | synchronous `generate` returns idle | `pause_generation()` |
-| Park GPU memory | SHOULD | `sleep()` (sleep mode) | `gc.collect()`; state stays resident | `release_memory_occupation()` (memory saver) |
-| Restore GPU memory | MUST | `wake_up()` | — (resident) | `resume_memory_occupation()` |
+| Park GPU memory | SHOULD | `release_kv_cache_memory()` (sleep mode) | `_collective_rpc("sleep", (["kv_cache"],))` + `gc.collect()` | `release_memory_occupation(tags=["kv_cache"])` (memory saver) |
+| Restore GPU memory | MUST | `wake_up()` | `_collective_rpc("wakeup", (["kv_cache"],))` | `resume_memory_occupation(tags=["kv_cache"])` |
 | Resume | MUST | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` |
 
 The three are the engines the guides document, not the limit of what the
@@ -136,7 +137,7 @@ and meets the pod and runtime requirements below is snapshot-ready. See
 ## Pod requirements
 
 The source pod gives the workload the shared directory and the conditions
-checkpointing needs. The framework `deployment.yaml` files referenced from the
+checkpointing needs. The framework capture manifests referenced from the
 [usage guides](../guides/README.md) are the complete reference; the load-bearing
 fields are:
 
@@ -148,10 +149,67 @@ fields are:
   Ready only once it is safe to checkpoint.
 
 Restore pods carry different requirements — the `nvidia.com/restore-from`
-annotation, an inert placeholder command, and the optional standby and
-startup-gate settings.
+annotation, the source's command (Snapshot replaces it with its restore proxy),
+`restartPolicy: Never`, and the optional startup gate.
 Producing them programmatically is the
 [Restore Pod contract](restore-pod-contract.md).
+
+## Multi-GPU workloads
+
+A workload that uses several GPUs meets the same contract, with its GPUs on a
+single node; multi-node workloads are not supported. The source pod also enables
+multi-GPU support with the `nvidia.com/snapshot-multi-gpu: enabled` annotation.
+What else it carries depends on what creates it:
+
+- **A `SnapshotJob`** needs only the annotation, on
+  `spec.podTemplate.metadata.annotations`. The controller prepares the source Pod
+  for multi-GPU capture.
+- **A pod that Snapshot does not create** — such as a Deployment checkpointed
+  through a `PodSnapshot` — must prepare itself. It copies the multi-GPU
+  libraries from the Snapshot agent image with an init container, and starts the
+  workload through the launcher those libraries include:
+
+  ```yaml
+  template:
+    metadata:
+      annotations:
+        nvidia.com/snapshot-multi-gpu: enabled
+    spec:
+      initContainers:
+        - name: snapshot-cuda-install
+          image: ${SNAPSHOT_AGENT_IMAGE}
+          command:
+            - /bin/cp
+          args:
+            - --preserve=mode
+            - --
+            - /usr/local/lib/snapshot/libcuinterpose.so
+            - /usr/local/lib/snapshot/libcuinterpose_core.so
+            - /usr/local/bin/cuinterpose-launch
+            - /tmp/snapshot-cuda/
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+      containers:
+        - name: main
+          command:
+            - /tmp/snapshot-cuda/cuinterpose-launch
+            - --library
+            - /tmp/snapshot-cuda/libcuinterpose.so
+            - --
+            - python3
+            - /snapshot-app/app.py
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+              readOnly: true
+      volumes:
+        - name: snapshot-cuda
+          emptyDir: {}
+  ```
+
+The eight-GPU recipes in the [usage guides](../guides/README.md#choose-your-recipe)
+are complete examples of both.
 
 ## Runtime compatibility
 
@@ -161,8 +219,9 @@ reference images this is why the build starts from the framework's tested runtim
 image and sets a few environment variables. A packaging method that skips the
 custom image still has to meet these:
 
-- **glibc floor and `x86_64`.** The restore bundle requires a recent glibc, which
-  the reference runtime images already clear. Snapshot is x86_64-only today.
+- **glibc floor and architecture.** The restore bundle requires a recent glibc,
+  which the reference runtime images already clear. The workload image must
+  match the node architecture (x86_64 or arm64).
 - **All file handles must be reopenable.** Disable caches that leave handles CRIU
   cannot reopen after restore — for example `HF_HUB_DISABLE_XET=1`, and loading
   models from a local cache with `HF_HUB_OFFLINE=1`.
@@ -199,7 +258,7 @@ restores it with no Snapshot-side change. To bring one:
    rely on a synchronous request returning idle, as TensorRT-LLM does.
 2. **Implement the capture and restore steps over the shared directory** — read
    `SNAPSHOT_CONTROL_DIR`, clear then write `ready-for-snapshot` once quiesced,
-   honor `SNAPSHOT_RESTORE_STANDBY`, wait on `restore-complete`, and
+   wait on `restore-complete`, and
    write a `<framework>-restore-ready` sentinel once the API is serving.
 3. **Clear the [runtime-compatibility](#runtime-compatibility) constraints** and
    **meet the [pod requirements](#pod-requirements)**, then package it by

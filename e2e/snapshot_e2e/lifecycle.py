@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import time
 from datetime import datetime, timezone
@@ -18,14 +19,17 @@ from kubernetes.client import ApiException
 from snapshot_e2e import k8s
 from snapshot_e2e.workloads import CONTAINER
 from snapshot_e2e.workloads import CONTROL_DIR
+from snapshot_e2e.workloads import CUDA_HOLD
+from snapshot_e2e.workloads import EXIT_REQUEST
 from snapshot_e2e.workloads import FILE_TOKEN
 from snapshot_e2e.workloads import OBSERVATIONS
 from snapshot_e2e.workloads import RESTORE_DONE
-from snapshot_e2e.workloads import RESTORE_INITIAL_TOKEN
+from snapshot_e2e.workloads import RESTORE_PROXY
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import multi_restore_pod
 from snapshot_e2e.workloads import restore_pod
+from snapshot_e2e.workloads import restore_proxy
 from snapshot_e2e.workloads import source_pod
 
 
@@ -39,6 +43,8 @@ PROGRESS_INTERVAL_SECONDS = 30
 TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 AGENT_CHECKPOINT_DIR = "/checkpoints"
 AGENT_CONTAINER = "agent"
+# /proc in the restored container. Tests point it elsewhere.
+PROC_ROOT = "/proc"
 
 
 class LifecycleTimeoutError(AssertionError, TimeoutError):
@@ -142,6 +148,7 @@ def create_snapshotjob(
     *,
     target_containers: list[str] | None = None,
     active_deadline_seconds: int | None = None,
+    non_target_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "podTemplate": pod_template,
@@ -149,6 +156,8 @@ def create_snapshotjob(
     }
     if active_deadline_seconds is not None:
         spec["activeDeadlineSeconds"] = active_deadline_seconds
+    if non_target_artifacts is not None:
+        spec["nonTargetArtifacts"] = non_target_artifacts
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "SnapshotJob",
@@ -198,6 +207,26 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
         return k8s.pod_readiness_detail(pod)
 
     return wait_for(f"pod {namespace}/{name} Ready", ready, timeout, detail=detail)
+
+
+def wait_for_container_exit(
+    namespace: str, name: str, container: str = CONTAINER, timeout: int = 120
+) -> int:
+    """Wait for a container to end, and return its exit code."""
+
+    def exited() -> int | None:
+        pod = k8s.read_pod(namespace, name)
+        for status in pod.status.container_statuses or []:
+            if status.name == container and status.state and status.state.terminated:
+                return status.state.terminated.exit_code
+        return None
+
+    return wait_for(
+        f"container {container} of pod {namespace}/{name} to exit",
+        exited,
+        timeout,
+        poll_interval=2,
+    )
 
 
 def file_present(namespace: str, pod: str, path: str) -> bool:
@@ -1008,6 +1037,32 @@ def checkpoint_agent_pod(config: k8s.E2EConfig, node: str) -> str:
     return agents[0].metadata.name
 
 
+# What the agent logs at start: its NRI plugin registered, or the agent
+# restores without the restore proxy.
+PROXY_REGISTERED_LOG = "Registered with the container runtime"
+PROXY_FALLBACK_LOG = "Restoring without the restore proxy"
+
+
+def restore_proxy_on(config: k8s.E2EConfig, node: str) -> bool:
+    """Whether restores on node run through the restore proxy.
+
+    SNAPSHOT_E2E_RESTORE_PROXY=auto asks the node's agent, for clusters whose
+    nodes may or may not support the proxy. Any other value is restore_proxy().
+    """
+    if os.environ.get("SNAPSHOT_E2E_RESTORE_PROXY") != "auto":
+        return restore_proxy()
+    agent = checkpoint_agent_pod(config, node)
+    # The whole log: the lines are from the agent's start.
+    log = k8s.pod_logs(config.namespace, agent, tail_lines=None, container=AGENT_CONTAINER)
+    if PROXY_REGISTERED_LOG in log:
+        return True
+    if PROXY_FALLBACK_LOG in log:
+        return False
+    raise AssertionError(
+        f"agent {agent} logged neither {PROXY_REGISTERED_LOG!r} nor {PROXY_FALLBACK_LOG!r}"
+    )
+
+
 def assert_restored_state(
     namespace: str,
     pod: str,
@@ -1017,16 +1072,33 @@ def assert_restored_state(
     checkpoint_observations: int,
     gpu: bool,
     container: str | None = None,
+    proxy: bool = True,
 ) -> str:
+    """Check the restored workload's state, inside the restored container.
+
+    With proxy, also check that the restore proxy is PID 1, and that
+    restore-complete names the restored workload. Agents from before the
+    proxy, in upgrade tests, and nodes without it restore without it.
+    """
+    proxy = proxy and restore_proxy()
     expected_gpu = source_token if gpu else "disabled"
+    # The restored process: the CUDA program, or the CPU loop, whose script
+    # names the observations file.
+    restored_command = CUDA_HOLD if gpu else OBSERVATIONS
     success_marker = "__snapshot_restored_state_verified__"
+    proxy_checks = f"""
+    test "$(tr -d '\\0' < {PROC_ROOT}/1/cmdline)" = {RESTORE_PROXY}
+    restored_pid="$(sed -n 's/^pid=//p' {RESTORE_DONE})"
+    test -n "$restored_pid"
+    tr '\\0' ' ' < "{PROC_ROOT}/$restored_pid/cmdline" | grep -qF {shlex.quote(restored_command)}
+    """
     command = f"""
     set -euo pipefail
     source_token={shlex.quote(source_token)}
     restore_token={shlex.quote(restore_token)}
     expected_gpu={shlex.quote(expected_gpu)}
     test -f {RESTORE_DONE}
-    test "$(cat {RESTORE_INITIAL_TOKEN})" = "$restore_token"
+    {proxy_checks if proxy else ""}
     test "$(cat {FILE_TOKEN})" = "$source_token"
     grep -F "cpu=$source_token" {OBSERVATIONS}
     grep -F "file=$source_token" {OBSERVATIONS}
@@ -1050,6 +1122,47 @@ def assert_restored_state(
         f"restored state check failed for {namespace}/{pod}:\n{output}"
     )
     return output
+
+
+def assert_restored_workload_mounts(
+    namespace: str,
+    pod: str,
+    *,
+    container: str | None = None,
+    empty_dir: str | None = None,
+) -> None:
+    """Check the restored workload's mount table, not the container's.
+
+    The agent mounts securityfs for CRIU while it restores, and the restored
+    workload must not see it. With empty_dir, the workload must also still
+    have its own empty mount at that path.
+    """
+    success_marker = "__snapshot_restored_mounts_verified__"
+    # Each read is its own assignment, so set -e stops the script when the
+    # read fails. A failing read inside an if or a test would not.
+    empty_dir_checks = f"""
+    printf '%s\\n' "$mounts" | awk -v path={shlex.quote(empty_dir or "")} \\
+      '$5 == path {{ found = 1 }} END {{ exit !found }}'
+    entries="$(ls -A {PROC_ROOT}/$restored_pid/root{empty_dir})"
+    test -z "$entries"
+    """
+    command = f"""
+    set -euo pipefail
+    restored_pid="$(sed -n 's/^pid=//p' {RESTORE_DONE})"
+    test -n "$restored_pid"
+    mounts="$(cat {PROC_ROOT}/$restored_pid/mountinfo)"
+    if printf '%s\\n' "$mounts" | grep -F " - securityfs "; then
+      echo "the restored workload sees securityfs"
+      exit 1
+    fi
+    {empty_dir_checks if empty_dir else ""}
+    echo {success_marker}
+    """
+    output = k8s.exec_command(namespace, pod, command, container=container)
+    # As in assert_restored_state, only the final marker proves every check ran.
+    assert success_marker in output.splitlines(), (
+        f"restored mount check failed for {namespace}/{pod}:\n{output}"
+    )
 
 
 def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:

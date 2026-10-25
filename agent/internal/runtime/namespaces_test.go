@@ -75,6 +75,21 @@ exec "$@"
 	}
 }
 
+func TestCommandInNamespacesNamesTheFileItCouldNotOpen(t *testing.T) {
+	mountNS, err := os.Open("/proc/self/ns/mnt")
+	require.NoError(t, err)
+	defer mountNS.Close()
+	dir := t.TempDir()
+
+	_, _, err = CommandInNamespaces(context.Background(), os.Getpid(), mountNS, dir, filepath.Join(dir, "missing"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.Contains(t, err.Error(), "agent binary: open "+filepath.Join(dir, "missing"))
+
+	_, _, err = CommandInNamespaces(context.Background(), os.Getpid(), mountNS, filepath.Join(dir, "gone"), "/bin/sleep")
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.Contains(t, err.Error(), "container root: open "+filepath.Join(dir, "gone"))
+}
+
 func TestCommandInNamespacesCancellationKillsForkedChild(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))

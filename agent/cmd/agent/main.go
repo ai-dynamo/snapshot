@@ -17,9 +17,11 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/controller"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
+	"github.com/ai-dynamo/snapshot/agent/internal/nri"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
@@ -85,8 +87,25 @@ func main() {
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}
-	if runErr := nodeController.Run(rootCtx); runErr != nil {
-		fatal(agentLog, runErr, "Snapshot node controller exited with error")
+	// The controller, and the plugin when it registers, run until shutdown. If
+	// either stops early, the agent exits and the DaemonSet restarts it.
+	group, groupCtx := errgroup.WithContext(rootCtx)
+	// The plugin registers before the controller runs, so every restore knows
+	// whether the node has the restore proxy.
+	plugin := nri.NewPlugin(nodeController, rootLog.WithName("nri"), os.Getenv(nri.HostNamespaceEnv))
+	if err := plugin.Start(groupCtx); err != nil {
+		agentLog.Error(err, "Restoring without the restore proxy: restore containers keep their own command as PID 1")
+		nodeController.RestoreWithoutProxy()
+	} else {
+		group.Go(func() error {
+			return untilShutdown(rootCtx, "NRI plugin", plugin.Wait(groupCtx))
+		})
+	}
+	group.Go(func() error {
+		return untilShutdown(rootCtx, "snapshot node controller", nodeController.Run(groupCtx))
+	})
+	if runErr := group.Wait(); runErr != nil {
+		fatal(agentLog, runErr, "Snapshot agent exited with error")
 	}
 
 	agentLog.Info("Agent stopped")
@@ -108,6 +127,15 @@ func waitForPageBroker(ctx context.Context, client pagebroker.Client) (*pagebrok
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// untilShutdown turns an early, error-free return into an error, so the
+// errgroup stops the other component instead of running on half an agent.
+func untilShutdown(rootCtx context.Context, name string, err error) error {
+	if err == nil && rootCtx.Err() == nil {
+		return errors.New(name + " stopped unexpectedly")
+	}
+	return err
 }
 
 func fatal(log logr.Logger, err error, msg string, keysAndValues ...interface{}) {

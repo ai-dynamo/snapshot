@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: restore proxy NRI plugin
+templates:
+  - templates/daemonset.yaml
+tests:
+  # The directory, not the socket: on a node without NRI, a socket-typed
+  # hostPath would keep the Pod from starting and hide the reason. The agent
+  # starts instead, and exits with an error saying NRI is missing.
+  - it: mounts the NRI socket directory
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: nri
+            mountPath: /var/run/nri
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nri
+            hostPath:
+              path: /var/run/nri
+              type: DirectoryOrCreate
+
+  - it: acts on every restore Pod by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: SNAPSHOT_NRI_HOST_NAMESPACE
+          any: true
+
+  - it: limits the NRI plugin to one host namespace
+    set:
+      daemonset.nriHostNamespace: snapshot-e2e-vc
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: SNAPSHOT_NRI_HOST_NAMESPACE
+            value: snapshot-e2e-vc
+
+  # CRIU finds the node's LSM through securityfs, to record AppArmor labels.
+  - it: mounts the node's securityfs read-only
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: securityfs
+            mountPath: /sys/kernel/security
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: securityfs
+            hostPath:
+              path: /sys/kernel/security
+              type: Directory

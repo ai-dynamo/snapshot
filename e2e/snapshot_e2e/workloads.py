@@ -22,10 +22,18 @@ SOURCE_READY = f"{CONTROL_DIR}/ready-for-snapshot"
 # depend on it.
 SNAPSHOT_COMPLETE = f"{CONTROL_DIR}/snapshot-complete"
 RESTORE_DONE = f"{CONTROL_DIR}/restore-complete"
-RESTORE_INITIAL_TOKEN = f"{CONTROL_DIR}/initial-restore-token"
+# The agent's NRI plugin makes the restore proxy PID 1 in restore containers,
+# in place of the container's command.
+RESTORE_PROXY = f"{CONTROL_DIR}/snapshot-restore-proxy"
+# The command restore containers need on nodes without the restore proxy.
+INERT_COMMAND = ["sleep", "infinity"]
+# The process the CUDA workload runs as, from CUDA_SOURCE.
+CUDA_HOLD = "/tmp/cuda_hold"
 STATE_DIR = "/tmp/e2e-state"
 FILE_TOKEN = f"{STATE_DIR}/file-token"
 OBSERVATIONS = f"{STATE_DIR}/observations.log"
+# The CPU loop exits with the code written here, so a test can end it.
+EXIT_REQUEST = f"{STATE_DIR}/exit-request"
 SOURCE_TOKEN_ENV = "SNAPSHOT_E2E_SOURCE_TOKEN"
 RESTORE_TOKEN_ENV = "SNAPSHOT_E2E_RESTORE_TOKEN"
 
@@ -138,7 +146,7 @@ def restore_pod(
     # snapshot_name defaults to the lifecycle flow's test-created PodSnapshot
     # (run.snapshot_name); a SnapshotJob-produced PodSnapshot is named after
     # the SnapshotJob instead, so those tests pass it explicitly.
-    spec = base_pod_spec(config, run, restore_command(run.image, gpu), gpu, memory_limit)
+    spec = base_pod_spec(config, run, RESTORE_COMMAND, gpu, memory_limit)
     spec["securityContext"] = {
         "seccompProfile": {
             "type": "Localhost",
@@ -146,7 +154,6 @@ def restore_pod(
         }
     }
     spec["containers"][0]["env"] = [
-        {"name": "SNAPSHOT_RESTORE_STANDBY", "value": "1"},
         {"name": "SNAPSHOT_CONTROL_DIR", "value": CONTROL_DIR},
         {"name": RESTORE_TOKEN_ENV, "value": run.restore_token},
     ]
@@ -185,7 +192,7 @@ def multi_restore_pod(
         destination: f"{run.restore_token}-{destination}"
         for destination in destinations
     }
-    spec = base_pod_spec(config, run, restore_command(run.image, False), False)
+    spec = base_pod_spec(config, run, RESTORE_COMMAND, False)
     spec["securityContext"] = {
         "seccompProfile": {
             "type": "Localhost",
@@ -206,7 +213,6 @@ def multi_restore_pod(
                 }
             ],
             "env": [
-                {"name": "SNAPSHOT_RESTORE_STANDBY", "value": "1"},
                 {"name": "SNAPSHOT_CONTROL_DIR", "value": CONTROL_DIR},
                 {"name": RESTORE_TOKEN_ENV, "value": restore_tokens[destination]},
             ],
@@ -255,6 +261,8 @@ def base_pod_spec(
     # agent's own pod, not the workload pod — see checkpoint_agent_pod() /
     # checkpoint_artifact_path() in lifecycle.py), a real caller's pod no
     # longer needs to carry this volume at all.
+    if gpu and config.cpu_only:
+        raise ValueError("GPU workloads cannot run in CPU-only E2E mode")
     container: dict[str, Any] = {
         "name": CONTAINER,
         "image": run.image,
@@ -283,7 +291,7 @@ def base_pod_spec(
         # Kubernetes default 30s graceful termination window between tests.
         "terminationGracePeriodSeconds": 1,
         "containers": [container],
-        **workload_scheduling(),
+        **workload_scheduling(cpu_only=config.cpu_only),
         "volumes": volumes,
     }
     if gpu:
@@ -295,7 +303,21 @@ def base_pod_spec(
     return spec
 
 
-def workload_scheduling() -> dict[str, Any]:
+def restore_proxy() -> bool:
+    """Whether the agents restore through the restore proxy.
+
+    SNAPSHOT_E2E_RESTORE_PROXY=false is for nodes without NRI v0.10 or newer,
+    where the agent restores without it. For auto, see
+    lifecycle.restore_proxy_on.
+    """
+    return os.environ.get("SNAPSHOT_E2E_RESTORE_PROXY", "true") != "false"
+
+
+def workload_scheduling(*, cpu_only: bool | None = None) -> dict[str, Any]:
+    if cpu_only is None:
+        cpu_only = k8s.cpu_only_mode()
+    if cpu_only:
+        return {}
     # Keep all workload pods on GPU nodes so the shared RWO checkpoint PVC binds in
     # a zone where both source and restore pods can schedule.
     node_selector = {
@@ -431,25 +453,10 @@ def snapshotjob_exit_pod_template(
     return {"metadata": {"labels": {**run.labels}}, "spec": spec}
 
 
-def restore_command(image: str, gpu: bool) -> str:
-    # Restore starts from a live placeholder container. The agent nsenters into
-    # it later, so this command may run briefly; record the initial restore token
-    # and then wait for restore-complete. The agent may start restore soon after
-    # the placeholder starts, so use an init container if this pre-restore write
-    # ever needs to be guaranteed.
-    return f"""set -euo pipefail
-echo "[restore] image={image}"
-restore_token="${{{RESTORE_TOKEN_ENV}}}"
-echo "[restore] initial_restore_token=$restore_token"
-printf '%s\\n' "$restore_token" > {RESTORE_INITIAL_TOKEN}
-echo "[restore] waiting for restore-complete"
-while [ ! -f {RESTORE_DONE} ]; do sleep 1; done
-echo "[restore] restore-complete"
-test -f {FILE_TOKEN}
-test -s {OBSERVATIONS}
-cat {OBSERVATIONS}
-sleep infinity
-"""
+# The agent's NRI plugin replaces the restore container's command with the
+# restore proxy. Agents from before the proxy, in upgrade tests, and nodes
+# without it restore into the running container instead, so the command idles.
+RESTORE_COMMAND = "exec sleep infinity\n"
 
 
 # CPU_SOURCE stores one token in two places: a shell variable, which is process
@@ -466,8 +473,12 @@ unset {SOURCE_TOKEN_ENV}
 printf '%s\\n' "$cpu_token" > {FILE_TOKEN}
 seq=0
 while true; do
+  if [ -f {EXIT_REQUEST} ]; then
+    exit "$(cat {EXIT_REQUEST})"
+  fi
   file_token="$(cat {FILE_TOKEN} 2>/dev/null || true)"
   printf 'observation seq=%s cpu=%s file=%s gpu=disabled\\n' "$seq" "$cpu_token" "$file_token" >> {OBSERVATIONS}
+  echo "[source] observation seq=$seq"
   if [ "$seq" -eq 0 ]; then
     echo ready > {SOURCE_READY}
   fi
@@ -584,6 +595,6 @@ int main(void) {{
   }}
 }}
 C_EOF
-cc /tmp/cuda_hold.c -ldl -o /tmp/cuda_hold
-exec /tmp/cuda_hold
+cc /tmp/cuda_hold.c -ldl -o {CUDA_HOLD}
+exec {CUDA_HOLD}
 """

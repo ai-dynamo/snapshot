@@ -18,8 +18,12 @@ namespaces. Workload pods never mount checkpoint storage.
 
 ## Prerequisites
 
-- Kubernetes cluster with x86_64 GPU nodes
-- NVIDIA GPU Operator 26.3 or newer, with NVIDIA driver 580.xx or newer
+- Kubernetes cluster with x86_64 or arm64 GPU nodes
+- NVIDIA GPU Operator 26.3 or newer
+- NVIDIA kernel-mode driver 580 or newer, and CUDA user-mode driver
+  (`libcuda.so`) 615 or newer. With an older kernel-mode driver, point
+  `LD_LIBRARY_PATH` at a 615 or newer `libcuda.so` in both the workload and
+  PageBroker.
 - **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
 
@@ -186,7 +190,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `pageBroker.maxPinnedBytes` | Total pinned memory limit, including allocation rounding. Zero sets no limit | `0` |
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
 | `daemonset.runtimeClassName` | RuntimeClass for the agent pod. Set `""` to omit it when the NVIDIA runtime is containerd's default and no `nvidia` RuntimeClass exists | `nvidia` |
-| `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 128Mi limit |
+| `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 256Mi limit |
 | `operator.nodeSelector` | Node selector for the operator pod | `{}` |
 | `operator.affinity` | Affinity rules for the operator pod | `{}` |
 | `operator.tolerations` | Tolerations for the operator pod | `[]` |
@@ -223,6 +227,13 @@ GPU, or 32 GiB on an eight-GPU node, plus overhead. A lower resource request
 does not reduce this allocation. Set the memory limit to cover the rings,
 process memory, and CPU staging. See the
 [engine design](../../docs/proposals/238-pagebroker-gpu-engine/README.md).
+
+The existing `storage.pvc` values and release namespace also produce the resolved
+`storage.yaml` configuration mounted into the operator and PageBroker. The agent
+retains its existing `config.yaml` without a PVC identity block. Store identity
+uses the claim-relative root `/`, not `storage.pvc.basePath`'s `/checkpoints` mount
+path. No new storage-selection values or storage-class CRD are introduced; see
+[storage configuration](../../docs/operations/storage.md#configuration).
 
 See [values.yaml](./values.yaml) for the full configuration surface.
 

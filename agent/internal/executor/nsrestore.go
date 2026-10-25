@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
@@ -31,6 +34,7 @@ type RestoreOptions struct {
 	CUDADeviceMap          string
 	GPUMountAliases        map[string]string
 	CgroupRoot             string
+	LSMProfile             string
 	TargetPodIP            string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
@@ -64,6 +68,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"checkpoint_path", opts.CheckpointPath,
 		"has_cuda_map", opts.CUDADeviceMap != "",
 		"cgroup_root", opts.CgroupRoot,
+		"lsm_profile", opts.LSMProfile,
 		"target_pod_ip_present", opts.TargetPodIP != "",
 	)
 	m, err := types.ReadManifest(opts.CheckpointPath)
@@ -101,7 +106,10 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
 		return nil, err
 	}
-	criuOpts, err := criu.BuildRestoreOpts(m, opts.CheckpointPath, opts.CgroupRoot, log)
+	if err := criu.CheckRecordedLSMLabels(opts.CheckpointPath, opts.LSMProfile); err != nil {
+		return nil, err
+	}
+	criuOpts, err := criu.BuildRestoreOpts(m, opts.CgroupRoot, opts.LSMProfile, log)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +236,19 @@ func executeRestore(
 		}
 	}
 
-	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, log)
+	if err := criu.RemoveKdatCache("/"); err != nil {
+		return nil, 0, nil, fmt.Errorf("remove CRIU's kernel cache from the restore target: %w", err)
+	}
+	unmountSecurityFS, err := mountSecurityFSForCRIU(securityFSPath, opts.LSMProfile, log)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer func() {
+		if err := unmountSecurityFS(); err != nil {
+			log.Error(err, "failed to unmount securityfs")
+		}
+	}()
+	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, unmountSecurityFS, log)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -345,4 +365,59 @@ func restoreCustomStorage(ctx context.Context, opts RestoreOptions, capturedPIDs
 	}
 	logGPUResult(log, result)
 	return nil
+}
+
+const (
+	// securityFSPath is where securityfs is mounted, and where CRIU looks for
+	// AppArmor before it applies an apparmor lsm_profile.
+	securityFSPath = "/sys/kernel/security"
+
+	// securityFSUnmountTimeout bounds the securityfs unmount. CRIU waits for
+	// it, and a timeout aborts the restore.
+	securityFSUnmountTimeout = 10 * time.Second
+)
+
+// mountSecurityFSForCRIU mounts securityfs read-only where it is missing, so
+// CRIU can detect AppArmor, including for "none:" restores on AppArmor hosts.
+// The returned unmount detaches it from the caller's mount namespace, within
+// securityFSUnmountTimeout. It is safe to call more than once.
+func mountSecurityFSForCRIU(path, lsmProfile string, log logr.Logger) (unmount func() error, err error) {
+	noop := func() error { return nil }
+	if !strings.HasPrefix(lsmProfile, "apparmor:") && lsmProfile != criu.LSMProfileNone {
+		return noop, nil
+	}
+	if _, err := os.Stat(filepath.Join(path, "apparmor")); err == nil {
+		return noop, nil
+	}
+	if err := unix.Mount("securityfs", path, "securityfs",
+		unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
+		return nil, fmt.Errorf("mount securityfs at %s for lsm_profile %q: %w", path, lsmProfile, err)
+	}
+	log.V(1).Info("Mounted securityfs for CRIU", "path", path)
+	var once sync.Once
+	var unmountErr error
+	return func() error {
+		once.Do(func() {
+			err := within(securityFSUnmountTimeout, func() error { return unix.Unmount(path, unix.MNT_DETACH) })
+			if err != nil {
+				unmountErr = fmt.Errorf("unmount securityfs at %s: %w", path, err)
+				return
+			}
+			log.V(1).Info("Unmounted securityfs", "path", path)
+		})
+		return unmountErr
+	}, nil
+}
+
+// within runs fn, and returns an error if it takes longer than timeout. fn
+// keeps running after that, and its result is dropped.
+func within(timeout time.Duration, fn func() error) error {
+	errC := make(chan error, 1)
+	go func() { errC <- fn() }()
+	select {
+	case err := <-errC:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("no answer in %s", timeout)
+	}
 }
