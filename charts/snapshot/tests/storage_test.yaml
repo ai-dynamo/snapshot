@@ -207,6 +207,23 @@ tests:
       - notMatchRegex:
           path: data["storage.yaml"]
           pattern: "pvc:"
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'storage:\s+type: "pvc"\s+basePath: "/checkpoints"'
+
+  - it: allows binding new S3 content without pageBroker.artifactAddressing
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-new-contents=true
 
   - it: tells the operator where to write PageBroker's S3 configuration and drops the PVC mount
     template: templates/operator-deployment.yaml
@@ -267,7 +284,7 @@ tests:
                   path: credentials
 
   - it: rejects an S3 install missing the shared credentials secret
-    template: templates/operator-deployment.yaml
+    template: templates/configmap.yaml
     set:
       storage.type: s3
       storage.s3.endpoint: https://s3.example.com

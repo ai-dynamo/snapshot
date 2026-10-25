@@ -127,7 +127,7 @@ spec:
         {{- if eq .Values.storage.type "s3" }}
         - name: s3-credentials
           secret:
-            secretName: {{ required "storage.s3.credentialsSecretRef is required when storage.type=s3" .Values.storage.s3.credentialsSecretRef }}
+            secretName: {{ .Values.storage.s3.credentialsSecretRef }}
             items:
               - key: {{ .Values.storage.s3.credentialsSecretKey }}
                 path: {{ .Values.storage.s3.credentialsSecretKey }}

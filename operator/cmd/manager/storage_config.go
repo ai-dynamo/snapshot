@@ -86,6 +86,14 @@ func configuredStoreID(cfg storage.Config, configPath string) (string, error) {
 		}
 		return storeID, nil
 	case cfg.S3 != nil:
+		// Normalize in place: downstream consumers (the PageBroker S3
+		// ConfigMap and the maintenance backend) read cfg.S3.Prefix directly
+		// and must see the same key space the store ID was hashed from.
+		normalizedPrefix, err := cfg.S3.NormalizedPrefix()
+		if err != nil {
+			return "", err
+		}
+		cfg.S3.Prefix = normalizedPrefix
 		return cfg.S3.StoreID()
 	default:
 		return "", fmt.Errorf("storage configuration must select a backend (pvc or s3)")

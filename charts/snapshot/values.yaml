@@ -124,8 +124,8 @@ storage:
     # Secret holding a shared credentials file (the common S3-SDK INI format:
     # a [default] profile with aws_access_key_id/aws_secret_access_key, the
     # literal key names that format uses) at the key named
-    # by credentialsSecretKey. Mounted as a file into the agent, PageBroker
-    # and operator containers alike, rather than injected as env vars: a
+    # by credentialsSecretKey. Mounted as a file into the PageBroker and
+    # operator containers, rather than injected as env vars: a
     # mounted Secret's file is refreshed by kubelet when the Secret changes,
     # without restarting the pod, so rotation does not require a restart as
     # long as the reading code re-reads it. The operator's S3 maintenance

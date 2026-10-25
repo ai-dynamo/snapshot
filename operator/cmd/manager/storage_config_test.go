@@ -159,6 +159,23 @@ func TestConfiguredStoreID(t *testing.T) {
 	}
 }
 
+func TestConfiguredStoreIDNormalizesS3Prefix(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "storage.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(s3StorageYAML+"  prefix: containers//./\n"), 0o600))
+	cfg, err := loadStorageConfig(configPath)
+	require.NoError(t, err)
+	storeID, err := configuredStoreID(cfg, configPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, storeID)
+
+	// ensurePageBrokerS3Config and the maintenance backend both read
+	// cfg.S3.Prefix directly; it must match what StoreID hashed.
+	normalized, err := cfg.S3.NormalizedPrefix()
+	require.NoError(t, err)
+	assert.Equal(t, "containers", normalized)
+	assert.Equal(t, normalized, cfg.S3.Prefix)
+}
+
 func TestConfiguredStoreIDMissingFileDoesNotFallBackToLegacy(t *testing.T) {
 	id, err := storeIDFromPath(filepath.Join(t.TempDir(), "missing.yaml"))
 	require.ErrorIs(t, err, os.ErrNotExist)

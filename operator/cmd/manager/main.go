@@ -120,7 +120,7 @@ func main() {
 			ctrl.Log.Error(err, "unable to construct client for PageBroker S3 configuration")
 			os.Exit(1)
 		}
-		labels := map[string]string{"app.kubernetes.io/part-of": "snapshot", "app.kubernetes.io/managed-by": "Helm"}
+		labels := map[string]string{"app.kubernetes.io/part-of": "snapshot", "app.kubernetes.io/managed-by": "snapshot-operator"}
 		if *releaseName != "" {
 			labels["app.kubernetes.io/instance"] = *releaseName
 		}
