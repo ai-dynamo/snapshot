@@ -19,11 +19,16 @@ ParseJson(std::string_view text, std::size_t limit)
 {
   if (text.empty() || text.size() > limit)
     throw std::invalid_argument("JSON exceeds size limit");
+  // Bound nesting and parser work independently of the input byte limit.
+  // Events include container boundaries, keys, and values. The event budget
+  // accommodates 10,000 checkpoint entries (eight events per file) plus metadata.
+  constexpr int kMaxJsonDepth = 12;
+  constexpr std::size_t kMaxJsonParseEvents = 160128;
   std::vector<std::set<std::string>> keys;
   std::size_t events = 0;
   using Json = nlohmann::json;
   return Json::parse(text, [&](int depth, Json::parse_event_t event, Json& value) {
-    if (depth > 12 || ++events > 160128)
+    if (depth > kMaxJsonDepth || ++events > kMaxJsonParseEvents)
       throw std::invalid_argument("JSON exceeds structural limits");
     if (event == Json::parse_event_t::object_start)
       keys.emplace_back();

@@ -4,6 +4,7 @@
 #include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
 
 #include <gtest/gtest.h>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -403,6 +404,18 @@ TEST_F(ModelStreamerTransferEngineTest, S3RecoveryPreservesConnectionAndTimeout)
   EXPECT_EQ(configured, original);
   EXPECT_EQ(credential_calls, 3);
   EXPECT_EQ(fs::file_size(root_.path() / "recovered/data"), 9);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, AcceptsMatchingAddressingSettings)
+{
+  for (const auto* value : {static_cast<const char*>(nullptr), "1", "0"}) {
+    ScopedEnvironment addressing(kS3VirtualAddressingEnv, value);
+    options_.connection.use_virtual_addressing = !value || std::string_view(value) == "1";
+    EXPECT_NO_THROW(ModelStreamerTransferEngine{Config()});
+    options_.connection.use_virtual_addressing = !options_.connection.use_virtual_addressing;
+    EXPECT_THROW(ModelStreamerTransferEngine{Config()}, std::invalid_argument);
+  }
+  EXPECT_EQ(starts, 0);
 }
 
 TEST_F(ModelStreamerTransferEngineTest, RejectsConflictingS3SettingsAndInvalidTimeouts)

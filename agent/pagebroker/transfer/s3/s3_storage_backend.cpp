@@ -34,8 +34,7 @@ S3StorageBackend::S3StorageBackend(S3Config config) : config_(std::move(config))
 {
   if (config_.bucket.empty() || config_.store_id.empty())
     throw std::invalid_argument("S3 checkpoint storage is not configured");
-  config_.transfer.connection.Validate();
-  config_.transfer.upload_limits.Validate();
+  config_.transfer.Validate();
   // Every checkpoint needs this payload key, which is longer than the index key.
   // Check longer capture-specific paths when building the inventory.
   PublishedArtifact artifact;

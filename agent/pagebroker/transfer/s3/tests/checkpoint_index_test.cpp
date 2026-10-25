@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -41,6 +42,19 @@ TEST(CheckpointIndexTest, RoundTripsOnlyFileInventory)
   }
   EXPECT_FALSE(json.contains("storeID"));
   EXPECT_TRUE(ParseCheckpointIndex(text).files.front().source_locator.empty());
+}
+
+TEST(CheckpointIndexTest, ParsesMaximumEntryCountWithinStructuralBudget)
+{
+  auto inventory = Inventory();
+  inventory.directories.clear();
+  inventory.files.resize(1);
+  for (std::size_t i = 1; i < kMaxCheckpointEntries; ++i)
+    inventory.files.push_back({"", "file-" + std::to_string(i), 0, fs::perms::owner_read});
+  std::sort(inventory.files.begin(), inventory.files.end(),
+      [](const auto& a, const auto& b) { return a.relative_path < b.relative_path; });
+  const auto text = SerializeCheckpointIndex(inventory);
+  EXPECT_EQ(ParseCheckpointIndex(text).files.size(), kMaxCheckpointEntries);
 }
 
 TEST(CheckpointIndexTest, RejectsUnsafePathsAndInvalidMetadata)

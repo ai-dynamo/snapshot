@@ -15,14 +15,16 @@ inline constexpr char kS3VirtualAddressingDisabled[] = "0";
 // Shares connection settings between SDK uploads and native Model Streamer
 // restores while keeping their resource limits and timeouts separate.
 struct S3TransferOptions {
+  void Validate() const;
+
   S3Connection connection;
   S3Limits upload_limits;
   // Bounds each native restore submission, including its response wait.
   std::chrono::milliseconds restore_timeout = kDefaultModelStreamerSubmissionTimeout;
 };
 
-// Checks restore timeout and upload/restore agreement with the process environment.
-void ValidateS3TransferConfiguration(const S3TransferOptions& options);
+// Checks upload/restore agreement with the Model Streamer process environment.
+void ValidateModelStreamerEnvironment(const S3TransferOptions& options);
 
 // Typed settings for one store, supplied by the caller before constructing
 // the broker or transfer engine.

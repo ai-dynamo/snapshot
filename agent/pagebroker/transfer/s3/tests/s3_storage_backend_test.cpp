@@ -25,6 +25,25 @@ TestConfig()
   return config;
 }
 
+TEST(S3StorageBackendTest, ValidatesTransferOptionsAtConstruction)
+{
+  auto config = TestConfig();
+  config.transfer.connection.endpoint = "invalid-endpoint";
+  EXPECT_THROW(S3StorageBackend{config}, std::invalid_argument);
+  config = TestConfig();
+  config.transfer.upload_limits.active_files = 0;
+  EXPECT_THROW(S3StorageBackend{config}, std::invalid_argument);
+  for (const auto timeout : {std::chrono::milliseconds(0), std::chrono::milliseconds(-1),
+                            std::chrono::milliseconds(std::chrono::hours(24)) + std::chrono::milliseconds(1)}) {
+    config = TestConfig();
+    config.transfer.restore_timeout = timeout;
+    EXPECT_THROW(S3StorageBackend{config}, std::invalid_argument);
+  }
+  config = TestConfig();
+  config.transfer.restore_timeout = std::chrono::hours(24);
+  EXPECT_NO_THROW(S3StorageBackend{config});
+}
+
 TEST(S3StorageBackendTest, RejectsDirectRestoreBeforeRemoteIO)
 {
   const auto config = TestConfig();

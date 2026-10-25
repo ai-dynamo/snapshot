@@ -46,7 +46,7 @@ RethrowS3TransferError(std::exception_ptr exception, Cancellation cancellation)
 ModelStreamerTransferEngine::ModelStreamerTransferEngine(S3Config config)
     : store_(std::move(config)), restore_(CreateRestore())
 {
-  ValidateS3TransferConfiguration(store_.config().transfer);
+  ValidateModelStreamerEnvironment(store_.config().transfer);
 }
 
 std::shared_ptr<ModelStreamerRestore>
