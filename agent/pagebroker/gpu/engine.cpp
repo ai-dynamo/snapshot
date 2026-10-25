@@ -75,15 +75,53 @@ struct PrimaryContext {
   CUcontext handle = nullptr;
 };
 
+std::string
+DeviceUUID(CUdevice device)
+{
+  CUuuid device_uuid;
+  CheckCuda(cuDeviceGetUuid(&device_uuid, device), "get GPU UUID");
+  std::array<unsigned char, 16> bytes{};
+  std::copy(std::begin(device_uuid.bytes), std::end(device_uuid.bytes), bytes.begin());
+  return storage::FormatGPUUUID(bytes);
+}
+
+// Name a GPU for the log by index, and by UUID when the driver can still read it.
+std::string
+DeviceLabel(int index, CUdevice device)
+{
+  std::string label = "GPU " + std::to_string(index);
+  try {
+    label += " (" + DeviceUUID(device) + ")";
+  } catch (const std::runtime_error&) {
+  }
+  return label;
+}
+
+// Run one GPU's setup step. A CUDA failure skips that GPU, so one faulted or
+// full GPU does not stop captures and restores on the others. Operations that
+// target a skipped GPU fail in ValidateDevices.
+template <typename Step>
+bool
+SetUpOrSkip(const std::string& gpu, Step step)
+{
+  try {
+    step();
+    return true;
+  } catch (const FatalError&) {
+    throw;
+  } catch (const std::runtime_error& error) {
+    std::fprintf(stderr, "skip %s: %s; captures and restores on this GPU will fail\n", gpu.c_str(), error.what());
+    // The step may have made this GPU's context current, and the caller is
+    // about to release it.
+    (void)cuCtxSetCurrent(nullptr);
+    return false;
+  }
+}
+
 struct Device {
   Device(CUdevice device, transfer::TransferOptions options)
-      : context(device), buffers(options)
+      : context(device), uuid(DeviceUUID(device)), buffers(options)
   {
-    CUuuid device_uuid;
-    CheckCuda(cuDeviceGetUuid(&device_uuid, device), "get GPU UUID");
-    std::array<unsigned char, 16> bytes{};
-    std::copy(std::begin(device_uuid.bytes), std::end(device_uuid.bytes), bytes.begin());
-    uuid = storage::FormatGPUUUID(bytes);
   }
 
   // Member order releases buffers before the retained context, including
@@ -92,6 +130,7 @@ struct Device {
   std::string uuid;
   std::timed_mutex mutex;
   transfer::TransferBuffers buffers;
+  size_t ring_bytes = 0;
 };
 
 class TargetClaim {
@@ -311,25 +350,34 @@ struct GpuEngine::GpuEngineState {
     }
     const transfer::TransferOptions settings{options.buffer_count, options.chunk_bytes, true};
     transfer::TransferMemoryBytes(settings, count, options.max_pinned_bytes);
+    std::map<CUdevice, std::string> labels;
     for (int index = 0; index < count; ++index) {
       CUdevice id;
       CheckCuda(cuDeviceGet(&id, index), "get GPU device");
-      devices.emplace(id, std::make_unique<Device>(id, settings));
+      labels[id] = DeviceLabel(index, id);
+      SetUpOrSkip(labels[id], [&] {
+        auto device = std::make_unique<Device>(id, settings);
+        device->ring_bytes = transfer::TransferBuffers::AllocationBytes(device->context.handle, settings);
+        devices.emplace(id, std::move(device));
+      });
     }
+    // The pinned-memory limit is configuration, not a GPU fault, so it still
+    // stops PageBroker. It counts only the GPUs that were kept.
     size_t total_bytes = 0;
     for (const auto& [id, device] : devices) {
       (void)id;
-      const size_t bytes = transfer::TransferBuffers::AllocationBytes(device->context.handle, settings);
+      const size_t bytes = device->ring_bytes;
       Require(bytes <= std::numeric_limits<size_t>::max() - total_bytes, "total pinned allocation overflow");
       total_bytes += bytes;
       Require(!options.max_pinned_bytes || total_bytes <= options.max_pinned_bytes,
               "total pinned allocation exceeds max-pinned-bytes");
     }
-    for (const auto& [id, device] : devices) {
-      (void)id;
-      device->buffers.Initialize(device->context.handle);
+    for (auto it = devices.begin(); it != devices.end();) {
+      auto& device = *it->second;
+      const bool ready = SetUpOrSkip(labels[it->first], [&] { device.buffers.Initialize(device.context.handle); });
+      it = ready ? std::next(it) : devices.erase(it);
     }
-    available = true;
+    available = !devices.empty();
   }
 
   Device& DeviceForContext(CUcontext context)

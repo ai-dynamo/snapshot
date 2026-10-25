@@ -34,6 +34,21 @@ The `snapshot-agent` runs privileged with `hostPID`, `hostIPC`, and `hostNetwork
 If the namespace enforces a restrictive Pod Security level, the agent — or a
 restore pod — can be rejected. See [Security](security.md).
 
+## A GPU checkpoint or restore fails with `target GPU is unavailable`
+
+When the driver supports CustomStorage, PageBroker sets up every GPU on the
+node when it starts. A GPU that fails setup, for example a faulted GPU or one
+with too little free memory, is skipped, and work on the node's other GPUs
+continues. Only checkpoints and restores that use the skipped GPU fail. The
+PageBroker log names it:
+
+```bash
+kubectl logs <agent-pod> -n <ns> -c pagebroker | grep '^skip GPU'
+```
+
+Once the GPU is healthy and has free memory again, restart the agent pod so
+PageBroker sets it up.
+
 ## CRIU reports `Unable to create tun`
 
 `Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory`
