@@ -113,6 +113,19 @@ func TestCPUFeaturesCheck(t *testing.T) {
 			source: features("avx2", "avx512f"),
 			target: features("hypervisor", "constant_tsc"),
 		},
+		{
+			name: "neither side recorded CPU features",
+		},
+		{
+			name:   "source recorded an empty list",
+			source: Environment{CPUFeatures: []string{}},
+			target: features("avx2"),
+		},
+		{
+			name:   "target recorded an empty list",
+			source: features("avx2", "avx512f"),
+			target: Environment{CPUFeatures: []string{}},
+		},
 	}
 
 	for _, tc := range tests {

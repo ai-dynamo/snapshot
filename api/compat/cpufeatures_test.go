@@ -47,6 +47,10 @@ func TestInstructionSetFeatures(t *testing.T) {
 		{
 			name: "nothing recorded",
 		},
+		{
+			name:  "an empty list is unknown",
+			flags: []string{},
+		},
 	}
 
 	for _, tc := range tests {
