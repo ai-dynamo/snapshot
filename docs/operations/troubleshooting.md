@@ -10,8 +10,15 @@ status and the agent logs:
 
 ```bash
 kubectl get podsnapshot <name> -n <ns>
-kubectl logs daemonset/snapshot-agent -n <ns> --all-containers
+node=$(kubectl get pod <source-pod> -n <ns> -o jsonpath='{.spec.nodeName}')
+agent=$(kubectl get pods -n <snapshot-ns> -l app.kubernetes.io/component=snapshot-agent \
+  --field-selector spec.nodeName=$node -o name)
+kubectl logs $agent -n <snapshot-ns> --all-containers
 ```
+
+The agent that handled the checkpoint is the one on the source pod's node;
+reading the DaemonSet picks an arbitrary pod. [Reading a failure
+message](#reading-a-failure-message) explains the lookup.
 
 A common cause is a replica manifest that does not follow the [framework
 guides](../guides/README.md) -- missing the control volume, seccomp profile,
@@ -35,8 +42,14 @@ the agent's `CRIU restore tail` diagnostics.
 
 Every checkpoint and restore failure names the step it came from, in the form
 `while <step>: <cause>`. The step tells you which part of the flow stopped; the
-cause is what the tool at that step reported. The sections below are organised
-by step.
+cause is what the tool at that step reported. Step names say which component
+was running, CRIU, PageBroker, nsenter, because that is whose log holds the
+detail and what to search for. The sections below are organised by step.
+
+Several steps name the placeholder: the restore pod's container, which waits
+with no workload of its own until the agent puts the checkpointed process into
+it. The [restore Pod contract](../reference/restore-pod-contract.md) describes
+how it is set up.
 
 For a restore, the message is on the pod's `nvidia.com/Restored` condition and
 on a `RestoreWorkerFailed` event, one entry per destination container:
@@ -198,8 +211,9 @@ The agent uses nsenter to start nsrestore inside the placeholder's namespaces.
 nsrestore applies the rootfs diff, runs the CRIU restore and restores CUDA
 state. The cause tells you which of those stopped:
 
-- `nsenter could not start nsrestore inside the placeholder (exit 127, ...)`:
-  the placeholder's root filesystem could not run the binary handed to it.
+- `nsenter could not start nsrestore inside the placeholder (exit 127, ...)`,
+  or `(exit 126, not executable)`: the placeholder's root filesystem could not
+  run the binary handed to it.
   nsrestore comes from the agent image, not the workload image, so this is
   usually a placeholder without `/proc` mounted or an unusual root filesystem,
   not a missing binary. nsenter's own message follows the colon.
