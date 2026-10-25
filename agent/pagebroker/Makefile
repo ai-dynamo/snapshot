@@ -12,13 +12,10 @@ PROTO := v1/pagebroker.proto
 GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
 BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp transfer/engine/posix/posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer/engine/transfer_engine.cpp
 BROKER_TEST_SOURCES := tests/broker_transfer_test.cpp tests/broker_checkpoint_test.cpp tests/broker_cleanup_test.cpp tests/broker_transfer_fixture.cpp tests/broker_gpu_test.cpp
-# Wrap mkdir for broker directory-creation hooks and StageRestore to hold a
-# filesystem transfer until cancellation in the daemon SIGTERM test. GPU wrappers
-# inject execution failures for broker response tests without requiring CUDA.
+# Wrap mkdir and GPU calls to inject failures without requiring CUDA.
 BROKER_TEST_WRAP_FLAGS := -Wl,--wrap=mkdir \
 	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine10CheckpointERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE \
-	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine7RestoreERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE \
-	-Wl,--wrap=_ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_19CheckpointInventoryERKNSt10filesystem7__cxx114pathENS0_12CancellationE
+	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine7RestoreERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE
 COMMON_SOURCES := file_descriptor.cpp transfer/filesystem/filesystem_storage.cpp
 IO_SOURCES := io_engine.cpp
 GPU_SOURCES := gpu/engine.cpp gpu/checkpoint.cpp gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp
