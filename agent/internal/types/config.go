@@ -129,10 +129,10 @@ func (c *CheckpointSpec) ResolveRetryLimit(requested *int32) int {
 	if requested != nil {
 		return int(*requested)
 	}
-	if c.RetryLimit == nil {
-		return DefaultCheckpointRetryLimit
+	if c.RetryLimit != nil {
+		return *c.RetryLimit
 	}
-	return *c.RetryLimit
+	return DefaultCheckpointRetryLimit
 }
 
 func (c *CheckpointSpec) Validate() error {
