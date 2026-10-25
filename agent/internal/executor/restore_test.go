@@ -1553,7 +1553,7 @@ func TestRestoreCommitFailureAfterSuccessfulUnmountReturnsCleanupError(t *testin
 	if !errors.As(err, &cleanupErr) {
 		t.Fatalf("restore error = %v, want a *RestoreCleanupError wrapping the Commit failure", err)
 	}
-	if !strings.Contains(err.Error(), "commit PageBroker restore") {
+	if !strings.Contains(err.Error(), "committing PageBroker restore") {
 		t.Fatalf("restore error = %v, want it to carry the Commit failure", err)
 	}
 	if restored.RestoredPID != 4242 {
