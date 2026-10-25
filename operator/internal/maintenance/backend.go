@@ -21,6 +21,14 @@ type Backend interface {
 	Candidates(ctx context.Context, logger logr.Logger) (map[string]struct{}, error)
 }
 
+// NonTargetArtifactBackend adds failed SnapshotJob non-target artifact cleanup for stores that support
+// the managed non-target artifact namespace. S3 artifact maintenance does not own it.
+type NonTargetArtifactBackend interface {
+	Backend
+	DeleteNonTargetArtifacts(ctx context.Context, jobUID string) error
+	NonTargetArtifactCandidates(ctx context.Context, logger logr.Logger) (map[string]struct{}, error)
+}
+
 // BackendRegistry looks up a Backend by Name(), case-insensitively.
 type BackendRegistry struct {
 	backends map[string]Backend

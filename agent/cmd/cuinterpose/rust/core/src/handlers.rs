@@ -33,21 +33,19 @@ pub fn cuMemCreate(
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *prop };
-    let supported = properties.requestedHandleTypes
-        == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
-    if !supported && properties.requestedHandleTypes.0 != 0 {
-        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
-    }
-    if supported {
-        vmm::validate_properties(&properties)?;
-    }
+    let tracked = vmm::tracked(&properties)?;
     let mut state = active()?;
-    let reference = if supported {
+    let reference = if tracked {
         Some(state.new_reference()?)
     } else {
         None
     };
-    let context = if supported { driver::context()? } else { 0 };
+    let context = if tracked { driver::context()? } else { 0 };
+    let home_device = if tracked {
+        vmm::home_device(&properties, context)?
+    } else {
+        None
+    };
     let mut driver = 0;
     let create = crate::driver::symbols::cuMemCreate()?;
     crate::driver::result(unsafe { create(&mut driver, size, &properties, flags) })?;
@@ -60,6 +58,8 @@ pub fn cuMemCreate(
             size,
             properties,
             shared: false,
+            peer_access_granted: false,
+            home_device,
             context,
         })),
         None => driver,
@@ -196,7 +196,7 @@ pub fn cuMemSetAccess(
         .collect();
     unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
     for (start, access) in updates {
-        state.mappings.get_mut(&start).unwrap().access = access;
+        state.set_mapping_access(start, access);
     }
     Ok(())
 }
@@ -435,6 +435,8 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
         size: extent,
         properties,
         shared: false,
+        peer_access_granted: false,
+        home_device: Some(device),
         context,
     }));
     let opens = 0;

@@ -107,21 +107,75 @@ func DiscoverVisibleGPUs(ctx context.Context, hostProcPath string, pid int, time
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	output, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "--query-gpu=gpu_uuid,name,driver_version", "--format=csv,noheader")
+	if err != nil {
+		return compat.GPUInfo{}, err
+	}
+	return parseNvidiaSmiGPUs(string(output)), nil
+}
+
+// DiscoverMIGSlices lists the MIG slices a container can see, by running
+// nvidia-smi -L inside its mount and PID namespaces. No DiscoverGPUs path can
+// stand in for it: DRA drops a slice's MIG- UUID, and --query-gpu reports the
+// card a slice is carved from as though it were whole.
+func DiscoverMIGSlices(ctx context.Context, hostProcPath string, pid int) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
+	defer cancel()
+
+	output, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "-L")
+	if err != nil {
+		return nil, err
+	}
+	return parseNvidiaSmiMIGSlices(string(output)), nil
+}
+
+func nsenterNvidiaSMI(ctx context.Context, hostProcPath string, pid int, args ...string) ([]byte, error) {
 	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
 	pidPath := fmt.Sprintf("%s/%d/ns/pid", strings.TrimRight(hostProcPath, "/"), pid)
 	cmd := exec.CommandContext(
 		ctx,
 		"nsenter",
-		fmt.Sprintf("--mount=%s", mountPath),
-		fmt.Sprintf("--pid=%s", pidPath),
-		"--",
-		"nvidia-smi", "--query-gpu=gpu_uuid,name,driver_version", "--format=csv,noheader",
+		append([]string{
+			fmt.Sprintf("--mount=%s", mountPath),
+			fmt.Sprintf("--pid=%s", pidPath),
+			"--",
+			"nvidia-smi",
+		}, args...)...,
 	)
 	output, err := cmd.Output()
 	if err != nil {
-		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
+		return nil, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
 	}
-	return parseNvidiaSmiGPUs(string(output)), nil
+	return output, nil
+}
+
+// parseNvidiaSmiMIGSlices reads the line nvidia-smi -L nests under a card for
+// each of its slices, "  MIG 1g.10gb Device 0: (UUID: MIG-...)", as
+// "1g.10gb MIG-...". A line it cannot take apart is still a slice, so it is
+// reported as printed rather than dropped.
+func parseNvidiaSmiMIGSlices(output string) []string {
+	var slices []string
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "MIG" {
+			continue
+		}
+		slice := strings.Join(fields, " ")
+		if uuid := listedUUID(fields); uuid != "" && len(fields) > 1 {
+			slice = fields[1] + " " + uuid
+		}
+		slices = append(slices, slice)
+	}
+	return slices
+}
+
+func listedUUID(fields []string) string {
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "(UUID:" {
+			return strings.TrimSuffix(fields[i+1], ")")
+		}
+	}
+	return ""
 }
 
 // parseNvidiaSmiGPUs reads the unquoted CSV nvidia-smi writes. Splitting on

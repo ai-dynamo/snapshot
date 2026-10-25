@@ -72,7 +72,7 @@ env:
 jobs:
   upgrade-gate:
     name: Select upgrade pairs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -120,7 +120,7 @@ jobs:
 
       - name: Resolve version to upgrade to
         id: to
-        timeout-minutes: 3
+        timeout-minutes: 23
         env:
           GH_TOKEN: ${{ github.token }}
           SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
@@ -129,7 +129,7 @@ jobs:
           if [[ -n "${SNAPSHOT_TAG}" ]]; then
             tag="${SNAPSHOT_TAG}"
           else
-            python3 hack/resolve-snapshot-image-tag.py
+            python3 hack/resolve-snapshot-image-tag.py --wait-seconds 1200
             tag="v0.0.0-g$(git rev-parse --short=8 HEAD)"
           fi
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"

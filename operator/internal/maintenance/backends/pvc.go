@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/go-logr/logr"
 )
 
@@ -40,9 +42,59 @@ func (b *PVCBackend) Candidates(_ context.Context, logger logr.Logger) (map[stri
 	return enumerateSweepCandidates(b.basePath, logger)
 }
 
+// NonTargetArtifactCandidates enumerates only the reserved SnapshotJob non-target artifact namespace.
+func (b *PVCBackend) NonTargetArtifactCandidates(_ context.Context, logger logr.Logger) (map[string]struct{}, error) {
+	return enumerateOwnedRoots(b.basePath, podcontract.NonTargetArtifactsDirectory, logger)
+}
+
+// DeleteNonTargetArtifacts removes the whole directory of one positively failed attempt.
+// The maintenance caller must first prove the writers have stopped.
+func (b *PVCBackend) DeleteNonTargetArtifacts(_ context.Context, jobUID string) error {
+	if _, err := podcontract.NonTargetArtifactSubdir(jobUID); err != nil {
+		return err
+	}
+	return removeOwnedRoot(b.basePath, podcontract.NonTargetArtifactsDirectory, jobUID)
+}
+
 // removeArtifactRoot refuses non-ordinary (e.g. symlinked) directories.
 func removeArtifactRoot(basePath, contentUID string) error {
-	artifactsRoot, err := artifact.ResolveRoot(basePath)
+	return removeOwnedRoot(basePath, "", contentUID)
+}
+
+func resolveOwnedParent(basePath, directory string) (string, error) {
+	if directory == "" {
+		return artifact.ResolveRoot(basePath)
+	}
+	if err := artifact.ValidateBasePath(basePath); err != nil {
+		return "", err
+	}
+	if err := artifact.ValidatePathElement("artifact directory", directory); err != nil {
+		return "", err
+	}
+	root := filepath.Join(basePath, directory)
+	if err := artifact.ValidateContainment(basePath, root); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+func resolveOwnedRoot(basePath, directory, uid string) (string, string, error) {
+	root, err := resolveOwnedParent(basePath, directory)
+	if err != nil {
+		return "", "", err
+	}
+	if err := artifact.ValidatePathElement("artifact owner UID", uid); err != nil {
+		return "", "", err
+	}
+	owned := filepath.Join(root, uid)
+	if err := artifact.ValidateContainment(root, owned); err != nil {
+		return "", "", err
+	}
+	return root, owned, nil
+}
+
+func removeOwnedRoot(basePath, directory, uid string) error {
+	artifactsRoot, root, err := resolveOwnedRoot(basePath, directory, uid)
 	if err != nil {
 		return err
 	}
@@ -51,10 +103,6 @@ func removeArtifactRoot(basePath, contentUID string) error {
 			return nil
 		}
 		return fmt.Errorf("%w: %w", ErrUnsafeArtifact, err)
-	}
-	root, err := artifact.ResolveContentRoot(basePath, contentUID)
-	if err != nil {
-		return err
 	}
 	if err := artifact.ValidateDirectory(root); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%w: %w", ErrUnsafeArtifact, err)
@@ -67,7 +115,11 @@ func removeArtifactRoot(basePath, contentUID string) error {
 
 // enumerateSweepCandidates skips unsafe entries rather than deleting them.
 func enumerateSweepCandidates(basePath string, logger logr.Logger) (map[string]struct{}, error) {
-	artifactsRoot, err := artifact.ResolveRoot(basePath)
+	return enumerateOwnedRoots(basePath, "", logger)
+}
+
+func enumerateOwnedRoots(basePath, directory string, logger logr.Logger) (map[string]struct{}, error) {
+	artifactsRoot, err := resolveOwnedParent(basePath, directory)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +143,7 @@ func enumerateSweepCandidates(basePath string, logger logr.Logger) (map[string]s
 			logger.Error(err, "Ignoring unsafe artifact directory entry", "entry", name)
 			continue
 		}
-		path, err := artifact.ResolveContentRoot(basePath, name)
+		_, path, err := resolveOwnedRoot(basePath, directory, name)
 		if err != nil {
 			logger.Error(err, "Ignoring unresolved artifact directory entry", "entry", name)
 			continue

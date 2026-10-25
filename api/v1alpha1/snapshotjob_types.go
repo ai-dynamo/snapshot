@@ -109,9 +109,36 @@ func IsSnapshotJobTerminal(j *SnapshotJob) bool {
 	return IsSnapshotJobCompleted(j) || IsSnapshotJobFailed(j)
 }
 
-// +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
+// NonTargetArtifactOnFailurePolicy controls only attempt-owned non-target bytes.
+// +kubebuilder:validation:Enum=Retain;Cleanup
+type NonTargetArtifactOnFailurePolicy string
+
+const (
+	NonTargetArtifactRetain  NonTargetArtifactOnFailurePolicy = "Retain"
+	NonTargetArtifactCleanup NonTargetArtifactOnFailurePolicy = "Cleanup"
+)
+
+// NonTargetArtifactPolicy opts regular non-target containers into attempt-owned
+// storage. Cleanup is permitted only for a positively failed attempt after
+// writer termination is proven; omitted onFailure retains the bytes.
+type NonTargetArtifactPolicy struct {
+	// Containers names the regular non-target containers publishing extra bytes.
+	// +kubebuilder:validation:MinItems=1
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Containers []string `json:"containers"`
+
+	// OnFailure governs only these containers' UID-owned artifact directory.
+	// +optional
+	OnFailure NonTargetArtifactOnFailurePolicy `json:"onFailure,omitempty"`
+}
 
 // SnapshotJobSpec defines the desired state of SnapshotJob.
+// +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
+// +kubebuilder:validation:XValidation:rule="!has(self.nonTargetArtifacts) || !has(self.podTemplate.metadata) || !has(self.podTemplate.metadata.annotations) || !('nvidia.com/snapshot-non-target-artifact-containers' in self.podTemplate.metadata.annotations)",message="nonTargetArtifacts and the legacy container annotation cannot both be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.nonTargetArtifacts) || self.nonTargetArtifacts.containers.all(c, !(c in self.podSnapshotTemplate.targetContainers))",message="nonTargetArtifacts.containers must not name capture targets"
 type SnapshotJobSpec struct {
 	// PodTemplate defines the workload to run and capture. The controller injects
 	// the snapshot contract (control volume, readiness probe, seccomp, sidecar
@@ -119,7 +146,7 @@ type SnapshotJobSpec struct {
 	// command, GPU resources, sidecars, DRA claims, shared memory — is the
 	// caller's responsibility.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.annotations) || !('nvidia.com/cuda-shared-memory-support' in self.metadata.annotations) || self.metadata.annotations['nvidia.com/cuda-shared-memory-support'].trim() in ['enabled', 'disabled']",message="annotation nvidia.com/cuda-shared-memory-support must be enabled or disabled"
+	// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.annotations) || !('nvidia.com/snapshot-multi-gpu' in self.metadata.annotations) || self.metadata.annotations['nvidia.com/snapshot-multi-gpu'].trim() in ['enabled', 'disabled']",message="annotation nvidia.com/snapshot-multi-gpu must be enabled or disabled"
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
 
 	// ActiveDeadlineSeconds bounds the total time allowed for pod scheduling,
@@ -128,6 +155,13 @@ type SnapshotJobSpec struct {
 	// +kubebuilder:default=3600
 	// +kubebuilder:validation:Minimum=1
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+
+	// NonTargetArtifacts declares regular non-target writers and their opt-in
+	// failed-attempt cleanup policy. Omission retains their bytes and does not
+	// change capture-artifact or source-object deletion. The controller derives
+	// the source Pod annotation from this typed declaration.
+	// +optional
+	NonTargetArtifacts *NonTargetArtifactPolicy `json:"nonTargetArtifacts,omitempty"`
 
 	// PodSnapshotTemplate defines the properties of the PodSnapshot produced by
 	// this job. The controller fills in spec.source from the pod it creates.

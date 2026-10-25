@@ -3,10 +3,12 @@
 
 name: Prune Registry
 
-# Every push to main publishes a v0.0.0-g<sha8> image, so untagged manifests
-# accumulate indefinitely. hack/prune-ghcr.py deletes only digests that are both
-# untagged and unreachable from any tagged version — see its module docstring for
-# why "untagged" alone would break published releases.
+# Every push to main publishes a v0.0.0-g<sha8> image and moves the layer cache
+# tags onto new manifests, so untagged manifests accumulate indefinitely.
+# hack/prune-ghcr.py deletes only digests that are both untagged and unreachable
+# from any tagged version — see its module docstring for why "untagged" alone
+# would break published releases, and why the cache is kept for days rather than
+# months.
 on:
   schedule:
     # Fridays 04:00 UTC. Off-hours, so a bad run is noticed before the next release.
@@ -21,6 +23,10 @@ on:
         description: 'Keep untagged versions newer than this many days'
         type: string
         default: '90'
+      cache_keep_days:
+        description: 'Same, for the layer cache, which turns over far faster'
+        type: string
+        default: '7'
 
 permissions: {}
 
@@ -31,7 +37,7 @@ concurrency:
 jobs:
   prune:
     name: Prune untagged GHCR versions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       # Read the source of the prune script.
       contents: read
@@ -58,8 +64,10 @@ jobs:
             ${{ (github.event_name == 'workflow_dispatch'
                  && inputs.dry_run == false) && 'false' || 'true' }}
           KEEP_DAYS: ${{ inputs.keep_days || '90' }}
+          CACHE_KEEP_DAYS: ${{ inputs.cache_keep_days || '7' }}
         run: |
           python3 hack/prune-ghcr.py \
             --org "${GITHUB_REPOSITORY%%/*}" \
             --keep-days "${KEEP_DAYS}" \
+            --cache-keep-days "${CACHE_KEEP_DAYS}" \
             --dry-run "${DRY_RUN}"

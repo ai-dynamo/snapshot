@@ -4,6 +4,8 @@
 //! Validate participants, coordinate CUDA lifecycle phases, and publish state.
 
 mod state;
+#[cfg(test)]
+mod test_records;
 mod topology;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -15,6 +17,7 @@ use cuinterpose_protocol::{
 use std::collections::BTreeSet;
 use std::os::unix::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use topology::AllocationSummary;
 
 #[derive(Parser)]
@@ -45,16 +48,22 @@ enum RecordRequest {
     BeginCheckpoint,
 }
 
+/// Bound the wait for a participant's reply. Saving and loading allocation contents
+/// can take far longer than a control request.
+fn request_timeout(request: &Request) -> Duration {
+    match request {
+        Request::Execute { operation, .. } => protocol::operation_timeout(*operation),
+        Request::SaveAllocations { .. } => protocol::operation_timeout(Operation::SaveAllocations),
+        _ => protocol::control_timeout(),
+    }
+}
+
 // Transport errors retain their cause. Remote refusals are application errors.
 fn exchange(endpoint: &Path, request: &Request) -> Result<Response> {
     let display = endpoint.display();
     let socket = protocol::connect(endpoint, protocol::control_timeout())
         .with_context(|| format!("{display}: {request:?}: connect failed"))?;
-    let timeout = Some(match request {
-        Request::Execute { operation, .. } => protocol::operation_timeout(*operation),
-        Request::SaveAllocations { .. } => protocol::operation_timeout(Operation::SaveAllocations),
-        _ => protocol::control_timeout(),
-    });
+    let timeout = Some(request_timeout(request));
     socket
         .set_read_timeout(timeout)
         .with_context(|| format!("{display}: {request:?}: set read timeout failed"))?;
@@ -145,7 +154,7 @@ fn command_all(
         .map(|peer| {
             allocations
                 .iter()
-                .filter(|a| a.shared && a.owner_pid == peer.namespace_pid)
+                .filter(|a| a.uses_host_carrier() && a.owner_pid == peer.namespace_pid)
                 .try_fold(0u64, |sum, a| {
                     sum.checked_add(a.size).context("allocation size overflow")
                 })
@@ -165,7 +174,7 @@ fn command_all(
             let owners = if operation == Operation::SaveAllocations {
                 allocations
                     .iter()
-                    .filter(|a| a.shared && a.holders.contains(&peer.namespace_pid))
+                    .filter(|a| a.uses_host_carrier() && a.holders.contains(&peer.namespace_pid))
                     .map(|a| AllocationOwner {
                         allocation: a.reference,
                         owner_pid: a.owner_pid,
@@ -351,6 +360,76 @@ fn main() -> std::process::ExitCode {
         Err(error) => {
             eprintln!("cuinterpose-coordinator: {error:#}");
             std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    /// Marks the child process that checks timeouts in its own environment.
+    const CHILD: &str = "CUINTERPOSE_TIMEOUT_TEST_CHILD";
+
+    #[test]
+    fn save_and_load_use_the_carrier_timeout_and_other_requests_the_control_timeout() {
+        // Setting variables here would race other tests, so the test binary runs this test
+        // again in a child process. Its timeouts differ from each other and from the
+        // defaults, so ignoring or misnaming either variable changes the result.
+        if std::env::var_os(CHILD).is_none() {
+            let name = "tests::save_and_load_use_the_carrier_timeout_and_other_requests_the_control_timeout";
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name])
+                .env(CHILD, "1")
+                .env("SNAPSHOT_CONTROL_TIMEOUT_SECONDS", "20")
+                .env("SNAPSHOT_CARRIER_TIMEOUT_SECONDS", "7200")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // A filter that matches no test also succeeds.
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let [control, carrier] = [20, 7200].map(Duration::from_secs);
+        let namespace_pid = 1;
+        let execute = |operation| Request::Execute {
+            namespace_pid,
+            operation,
+        };
+        let cases = [
+            (Request::BeginCheckpoint { namespace_pid }, control),
+            (Request::Inspect { namespace_pid }, control),
+            (
+                Request::Export {
+                    namespace_pid,
+                    allocation: test_records::A,
+                },
+                control,
+            ),
+            (
+                Request::SaveAllocations {
+                    namespace_pid,
+                    owners: Vec::new(),
+                },
+                carrier,
+            ),
+            (execute(Operation::PrepareMulticast), control),
+            (execute(Operation::SaveAllocations), carrier),
+            (execute(Operation::PrepareUnicast), control),
+            (execute(Operation::LoadAllocations), carrier),
+            (execute(Operation::RestoreUnicast), control),
+            (execute(Operation::RestoreMulticastCreators), control),
+            (execute(Operation::RestoreMulticastImporters), control),
+            (execute(Operation::RestoreMulticastDevices), control),
+            (execute(Operation::RestoreMulticastBindings), control),
+        ];
+        for (request, expected) in cases {
+            assert_eq!(request_timeout(&request), expected, "{request:?}");
         }
     }
 }

@@ -182,3 +182,20 @@ func TestMountFailure(t *testing.T) {
 		t.Fatalf("Mount() error = %v, want %v", err, wantErr)
 	}
 }
+
+func TestBundleLoader(t *testing.T) {
+	tests := []struct {
+		goarch string
+		want   string
+	}{
+		{"amd64", LoaderAMD64},
+		{ArchARM64, LoaderARM64},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goarch, func(t *testing.T) {
+			if got := bundleLoader(tt.goarch); got != tt.want {
+				t.Fatalf("bundleLoader(%q) = %q, want %q", tt.goarch, got, tt.want)
+			}
+		})
+	}
+}

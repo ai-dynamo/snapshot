@@ -60,9 +60,14 @@ pub enum BindingVersion {
 pub enum Record {
     Allocation {
         allocation: AllocationReference,
-        /// Shared backing needs one host-carrier copy, saved by a holder selected
-        /// from the complete checkpoint group. Private memory uses native CUDA.
+        /// Another process exports or imports this backing.
         shared: bool,
+        /// Another GPU in this process received access to this backing.
+        ///
+        /// Shared or peer-accessed backing needs one host-carrier copy, saved by a
+        /// holder selected from the complete checkpoint group. Other memory uses
+        /// native CUDA.
+        peer_access_granted: bool,
         size: u64,
         /// `CUmemAllocationProp::type_`.
         allocation_type: u32,

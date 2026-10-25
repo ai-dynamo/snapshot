@@ -78,7 +78,7 @@ tests:
             persistentVolumeClaim:
               claimName: snapshot-pvc
 
-  - it: shares one memory-backed volume between the agent and the sidecar, capped at the agent memory limit by default
+  - it: shares one memory-backed volume between the agent and the sidecar, capped below the agent memory limit by default
     template: templates/daemonset.yaml
     asserts:
       - contains:
@@ -97,15 +97,16 @@ tests:
             name: pagebroker
             emptyDir:
               medium: Memory
-              sizeLimit: "64Gi"
+              sizeLimit: "56Gi"
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 64Gi
 
-  - it: honours a pageBroker.staging.sizeLimit override
+  - it: honours a pageBroker.staging.sizeLimit override that keeps the headroom
     template: templates/daemonset.yaml
     set:
       pageBroker.staging.sizeLimit: 128Gi
+      daemonset.resources.limits.memory: 160Gi
     asserts:
       - contains:
           path: spec.template.spec.volumes
@@ -115,7 +116,7 @@ tests:
               medium: Memory
               sizeLimit: "128Gi"
 
-  - it: falls back to the 64Gi default when reused values carry no pageBroker.staging map
+  - it: falls back to the chart default when reused values carry no pageBroker.staging map
     template: templates/daemonset.yaml
     set:
       pageBroker.staging: null
@@ -126,7 +127,7 @@ tests:
             name: pagebroker
             emptyDir:
               medium: Memory
-              sizeLimit: "64Gi"
+              sizeLimit: "56Gi"
 
   - it: reserves resources for the GPU engine and staging
     template: templates/daemonset.yaml

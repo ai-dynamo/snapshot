@@ -35,6 +35,10 @@ struct DeviceMapping {
 };
 // Validate the complete participant set before any CUDA operation starts.
 void ValidateParticipants(std::span<const uint32_t> captured_pids, std::span<const Participant> participants);
+// Order restore setup by participant index. Participants with GPU data extents
+// come first so their transfers can overlap the setup of participants without
+// data. Each group keeps its input order.
+std::vector<size_t> RestoreSetupOrder(std::span<const size_t> extent_counts);
 
 struct EngineOptions {
   size_t buffer_count = 32;

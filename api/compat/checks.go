@@ -275,6 +275,13 @@ var gpuCountCheck = check{
 	},
 }
 
+// CheckMIGSlice refuses a MIG slice at capture and at restore alike, because
+// Snapshot supports whole GPUs only. It sits outside the policy table: it
+// compares nothing against the other side, and it has to run ahead of GPU
+// discovery, which fails on a slice under DRA and reports its parent card
+// everywhere else.
+const CheckMIGSlice Check = "mig-slice"
+
 // CheckDriverVersion refuses a restore on a driver build other than the captured
 // one. Build granularity is not caution for its own sake: upstream reproduces a
 // restore failure between 560.35.03 and 560.35.05.

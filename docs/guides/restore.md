@@ -5,63 +5,93 @@ restored pods carry the `nvidia.com/restore-from` annotation, naming the
 `PodSnapshot` to restore from; the node agent restores the checkpointed state into
 the container during pod startup.
 
-## Prerequisites
-
-- A ready `PodSnapshot` exists (see [Checkpoint a replica](checkpoint.md)).
-- The restored replica reuses the source's snapshot-ready pod spec, provided as a
-  ready-to-apply `restore-deployment.yaml` for [each framework](#example).
-
-## Example
-
-Each build-and-deploy guide ships a ready-to-apply `restore-deployment.yaml` next
-to its `deployment.yaml`: the same manifest with an
-`nvidia.com/restore-from` annotation added naming the `PodSnapshot` to restore
-from, and the container command replaced with an inert `sleep infinity`.
-Download the one for the framework in use:
-
-- [vLLM `restore-deployment.yaml`](vllm/restore-deployment.yaml)
-- [SGLang `restore-deployment.yaml`](sglang/restore-deployment.yaml)
-- [TensorRT-LLM `restore-deployment.yaml`](tensorrt-llm/restore-deployment.yaml)
-
-Set the namespace where the restored replica will run — the same one holding the
-`PodSnapshot`:
+This is stage 3 of the [usage guides](README.md). It starts from the ready
+`PodSnapshot` that [checkpoint](checkpoint.md) produced:
 
 ```bash
-export SNAPSHOT_NAMESPACE=<namespace>
-kubectl get namespace "$SNAPSHOT_NAMESPACE"
+kubectl get podsnapshot --namespace "$WORKLOAD_NAMESPACE"
 ```
 
-In the manifest, set the container `image` to the one built for the source and set
-the `restore-from` annotation to the `PodSnapshot` name, then apply it and watch the
-rollout (the Deployment is named `<framework>-restored`):
+## 1. Choose the restore profile
+
+The restored replica reuses the source's snapshot-ready pod spec. Each framework
+ships two restore profiles under `restore/`. Choose the one that matches the
+source's GPU count:
+
+| Framework | 1 GPU | 8 GPUs |
+|-----------|-------|--------|
+| vLLM | [1-gpu.yaml](vllm/restore/1-gpu.yaml) | [8-gpu.yaml](vllm/restore/8-gpu.yaml) |
+| SGLang | [1-gpu.yaml](sglang/restore/1-gpu.yaml) | [8-gpu.yaml](sglang/restore/8-gpu.yaml) |
+| TensorRT-LLM | [1-gpu.yaml](tensorrt-llm/restore/1-gpu.yaml) | [8-gpu.yaml](tensorrt-llm/restore/8-gpu.yaml) |
+
+A profile works for every model of its framework and GPU count, because the
+model configuration comes from the checkpoint. It also works for captures made
+with or without `SnapshotJob`. Keep the container `image` the same as the
+source's.
+
+## 2. Set the snapshot to restore from
+
+Every profile carries the annotation `nvidia.com/restore-from: ${SNAPSHOT_NAME}`,
+a placeholder for the `PodSnapshot` to restore from. Open your profile and replace
+`${SNAPSHOT_NAME}` with your recipe's snapshot name from the
+[recipe table](README.md#choose-your-recipe), then save the file. Whichever method
+you used, that is the `SnapshotJob`'s name, which its `PodSnapshot` shares, or the
+name you gave the `PodSnapshot` in
+[Checkpoint, Option 1](checkpoint.md#option-1--podsnapshot-checkpoint-a-running-replica).
+If you named your `PodSnapshot` something else, use that name instead.
+
+## 3. Restore
+
+Apply the profile you edited, then watch the rollout. The Deployment
+is named `<framework>-1gpu-restored` or `<framework>-8gpu-restored`, as the
+[recipe table](README.md#choose-your-recipe) lists:
 
 ```bash
 kubectl apply \
-  --namespace "$SNAPSHOT_NAMESPACE" \
-  --filename restore-deployment.yaml
+  --namespace "$WORKLOAD_NAMESPACE" \
+  --filename vllm/restore/1-gpu.yaml
 
 kubectl rollout status \
-  --namespace "$SNAPSHOT_NAMESPACE" \
-  deployment/<framework>-restored \
+  --namespace "$WORKLOAD_NAMESPACE" \
+  deployment/vllm-1gpu-restored \
   --timeout=30m
 ```
 
-The container starts as an inert `sleep infinity` placeholder, as the
-[restore Pod contract](../reference/restore-pod-contract.md) requires: the agent
-restores the checkpointed process into it as a sibling, so running the
-application there would only load a second copy of the model. Readiness
-therefore waits on the framework's post-restore sentinel — `vllm-restore-ready`
-and its equivalents — not the `ready-for-snapshot` file the source pod writes.
+Snapshot replaces the container's command with its restore proxy, as the
+[restore Pod contract](../reference/restore-pod-contract.md) describes, so the
+application does not start from scratch. The proxy waits for the restore, then
+follows the restored process: the container ends when the restored process
+does. Readiness waits on the framework's post-restore sentinel —
+`vllm-restore-ready` and its equivalents — not the `ready-for-snapshot` file the
+source pod writes.
+
+On nodes without NRI v0.10 or newer, there is no restore proxy. Before applying
+the profile, edit it to change the container's command to
+`["sleep", "infinity"]`, remove its `args`, and add a liveness probe on the
+framework's API. See
+[Nodes without the restore proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
+
+A Pod gets one restore. The guides use a Deployment, which restarts containers,
+so if the restored process exits, the container ends in `CrashLoopBackOff`
+instead of starting again. Delete the Pod to restore a new replica.
+
+## 4. Verify the restored replica
 
 The node agent adds a `nvidia.com/Restored` condition to the pod once the restore
-completes — watch it, along with pod readiness, to confirm. If the restored
-workload serves an API, sending a request is a good end-to-end check that it
-resumed correctly.
+completes — watch it, along with pod readiness, to confirm:
 
-The restored process resumes from the checkpointed state, skipping model loading
-and warm-up. In practice, higher-level systems create these restored Deployments
-rather than applying them by hand. To generate restore pods programmatically —
-from a controller, operator, or serving platform — implement the
+```bash
+kubectl get pods --namespace "$WORKLOAD_NAMESPACE" \
+  --selector app=vllm-1gpu-restored \
+  --output jsonpath='{.items[0].status.conditions[?(@.type=="nvidia.com/Restored")].status}'
+```
+
+It prints `True`. If the restore does not complete, see
+[Troubleshooting](../operations/troubleshooting.md).
+
+In practice, higher-level systems create these restored Deployments rather than
+applying them by hand. To generate restore pods programmatically — from a
+controller, operator, or serving platform — implement the
 [restore Pod contract](../reference/restore-pod-contract.md), which specifies the
 required annotations, control volume, and `SNAPSHOT_CONTROL_DIR`, plus the
 optional startup gate and seccomp profile a restored pod may carry.

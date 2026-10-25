@@ -22,16 +22,18 @@ import (
 
 const (
 	// PageBroker control requests and responses are limited to 64 KiB.
-	maxMessageSize    = 64 << 10
-	messageHeaderSize = 4
-	commitRetryDelay  = 100 * time.Millisecond
-	dialRetryDelay    = 100 * time.Millisecond
-	dialRetryLimit    = 30 * time.Second
+	maxMessageSize        = 64 << 10
+	maxFailureMessageSize = 1024
+	messageHeaderSize     = 4
+	commitRetryDelay      = 100 * time.Millisecond
+	dialRetryDelay        = 100 * time.Millisecond
+	dialRetryLimit        = 30 * time.Second
 )
 
 var commitRetryLimit = 30 * time.Second
 
-// Client uses the deployment-wide filesystem/POSIX PageBroker plan.
+// Client speaks the local PageBroker protocol. Filesystem operations run against
+// the current broker; artifact-addressed operations require a storage backend.
 type Client struct {
 	ControlSocketPath string
 }
@@ -46,7 +48,10 @@ func (c Client) StagedRestore(ctx context.Context, transactionID, source string)
 
 func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destination string) (string, error) {
 	response, err := c.request(ctx, transactionID, &Request_PrepareStagedCheckpoint{
-		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
+		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{
+			Selector: &PrepareStagedCheckpointRequest_Destination{Destination: filesystem(destination)},
+			IoEngine: posixCopy(),
+		},
 	})
 	if err != nil {
 		return "", err
@@ -87,37 +92,42 @@ func directRestoreReady(response *Response) error {
 }
 
 func (c Client) Commit(ctx context.Context, transactionID string) error {
-	err := c.commit(ctx, transactionID)
+	_, err := c.commitWithRetry(ctx, transactionID)
+	return err
+}
+
+func (c Client) commitWithRetry(ctx context.Context, transactionID string) (*CommitComplete, error) {
+	result, err := c.commit(ctx, transactionID)
 	if !isRetryableTransportError(err) {
-		return err
+		return result, err
 	}
 	return c.retryCommit(ctx, transactionID)
 }
 
-func (c Client) retryCommit(ctx context.Context, transactionID string) error {
+func (c Client) retryCommit(ctx context.Context, transactionID string) (*CommitComplete, error) {
 	retryCtx, cancel := context.WithTimeout(ctx, commitRetryLimit)
 	defer cancel()
 	for {
 		select {
 		case <-retryCtx.Done():
-			return retryCtx.Err()
+			return nil, retryCtx.Err()
 		case <-time.After(commitRetryDelay):
 		}
-		if err := c.commit(retryCtx, transactionID); !isRetryableTransportError(err) {
-			return err
+		if result, err := c.commit(retryCtx, transactionID); !isRetryableTransportError(err) {
+			return result, err
 		}
 	}
 }
 
-func (c Client) commit(ctx context.Context, transactionID string) error {
+func (c Client) commit(ctx context.Context, transactionID string) (*CommitComplete, error) {
 	response, err := c.request(ctx, transactionID, &Request_Commit{Commit: &CommitRequest{}})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if response.GetCommitComplete() == nil {
-		return fmt.Errorf("unexpected PageBroker commit response")
+		return nil, fmt.Errorf("unexpected PageBroker commit response")
 	}
-	return nil
+	return response.GetCommitComplete(), nil
 }
 
 func (c Client) Abort(ctx context.Context, transactionID string) error {
@@ -166,11 +176,15 @@ func (c Client) dial(ctx context.Context) (net.Conn, error) {
 }
 
 func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
-	response, _, err := c.requestResponse(ctx, transactionID, &Request{Command: command}, files...)
+	response, _, err := c.requestResponse(ctx, newRequest(transactionID, command), files...)
 	return response, err
 }
 
-func (c Client) requestResponse(ctx context.Context, transactionID string, request *Request, files ...*os.File) (*Response, *os.File, error) {
+func (c Client) requestResponse(ctx context.Context, request *Request, files ...*os.File) (*Response, *os.File, error) {
+	// Check framing before dialing. GPU exchanges bypass this path; writeRequest checks their size.
+	if proto.Size(request) > maxMessageSize {
+		return nil, nil, errMessageTooLarge
+	}
 	var connection net.Conn
 	var err error
 	if request.GetCapabilities() != nil {
@@ -183,27 +197,31 @@ func (c Client) requestResponse(ctx context.Context, transactionID string, reque
 		return nil, nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err), dial: true}
 	}
 	defer connection.Close()
-	return exchangeResponse(ctx, connection.(*net.UnixConn), transactionID, request, files...)
+	return exchangeResponse(ctx, connection.(*net.UnixConn), request, files...)
 }
 
-func exchange(ctx context.Context, connection *net.UnixConn, transactionID string, command isRequest_Command, files ...*os.File) (*Response, error) {
-	response, _, err := exchangeResponse(ctx, connection, transactionID, &Request{Command: command}, files...)
+func newRequest(transactionID string, command isRequest_Command) *Request {
+	requestID := uuid.NewString()
+	request := &Request{RequestId: &requestID, Command: command}
+	if transactionID != "" {
+		request.TransactionId = &transactionID
+	}
+	return request
+}
+
+func exchange(ctx context.Context, connection *net.UnixConn, request *Request, files ...*os.File) (*Response, error) {
+	response, _, err := exchangeResponse(ctx, connection, request, files...)
 	return response, err
 }
 
 // exchangeResponse returns a broker pidfd only when the request sets RequestBrokerPidfd.
-func exchangeResponse(ctx context.Context, connection *net.UnixConn, transactionID string, request *Request, files ...*os.File) (*Response, *os.File, error) {
+func exchangeResponse(ctx context.Context, connection *net.UnixConn, request *Request, files ...*os.File) (*Response, *os.File, error) {
 	stopCancel := context.AfterFunc(ctx, func() {
 		_ = connection.CloseWrite()
 		_ = connection.Close()
 	})
 	defer stopCancel()
 
-	requestID := uuid.NewString()
-	request.RequestId = &requestID
-	if transactionID != "" {
-		request.TransactionId = &transactionID
-	}
 	message, err := proto.Marshal(request)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal PageBroker request: %w", err)
@@ -230,11 +248,19 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, transaction
 	if err := proto.Unmarshal(message, response); err != nil {
 		return nil, nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
 	}
-	if response.GetRequestId() != requestID || response.GetTransactionId() != transactionID {
+	if response.GetRequestId() != request.GetRequestId() || response.GetTransactionId() != request.GetTransactionId() {
 		return nil, nil, fmt.Errorf("PageBroker response identifiers do not match request")
 	}
 	if failure := response.GetFailure(); failure != nil {
-		return nil, nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
+		// Legacy handlers return filesystem exception text, which can include long
+		// paths; those codes are bounded by the frame size alone. Storage-extension
+		// codes promise the smaller 1024-byte bound. proto.Unmarshal above already
+		// rejects any string field that is not valid UTF-8.
+		message := failure.GetMessage()
+		if isStorageFailure(failure.GetCode()) && len(message) > maxFailureMessageSize {
+			message = "message omitted: exceeds the storage failure bound"
+		}
+		return nil, nil, &FailureError{code: failureCode(failure.GetCode()), message: message}
 	}
 	if len(receivedFiles) > 1 || (len(receivedFiles) == 1 && !request.GetRequestBrokerPidfd()) {
 		return nil, nil, fmt.Errorf("unexpected PageBroker response descriptors")
@@ -250,7 +276,10 @@ func exchangeResponse(ctx context.Context, connection *net.UnixConn, transaction
 }
 
 func stagedRestore(source string) isRequest_Command {
-	return &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()}}
+	return &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{
+		Selector: &StagedRestoreRequest_Source{Source: filesystem(source)},
+		IoEngine: posixCopy(),
+	}}
 }
 
 func directRestore(source string) isRequest_Command {

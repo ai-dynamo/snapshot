@@ -37,11 +37,14 @@ var physicalNVIDIADeviceName = regexp.MustCompile(`^nvidia[0-9]+$`)
 
 // ExecuteRestore opens the image/work directory FDs, configures inherited
 // resources, and calls go-criu Restore. Returns the namespace-relative PID.
+// preRestore, if set, runs once CRIU has checked its options and before it
+// creates any process or mount; an error from it aborts the restore.
 func ExecuteRestore(
 	criuOpts *criurpc.CriuOpts,
 	m *types.CheckpointManifest,
 	checkpointPath string,
 	bundleDir string,
+	preRestore func() error,
 	log logr.Logger,
 ) (int32, func() error, time.Duration, time.Duration, error) {
 	settings := m.CRIUDump.CRIU
@@ -96,12 +99,12 @@ func ExecuteRestore(
 		criuOpts.WorkDirFd = proto.Int32(workDirFD)
 	}
 
-	overridePath, err := rewriteCRIULibDir(criuOpts.ConfigFile, scratchDir, bundleDir)
+	confPath, err := writeRestoreCRIUConf(&settings, scratchDir, bundleDir)
 	if err != nil {
 		cleanupAfterError()
 		return 0, nil, prepare, 0, err
 	}
-	criuOpts.ConfigFile = proto.String(overridePath)
+	criuOpts.ConfigFile = proto.String(confPath)
 
 	criuBin, err := bundledCRIUPath(bundleDir)
 	if err != nil {
@@ -121,7 +124,7 @@ func ExecuteRestore(
 
 	inheritedFiles = registerInheritFDs(c, m.K8s.StdioFDs, log)
 
-	notify := &restoreNotify{log: log}
+	notify := &restoreNotify{log: log, preRestore: preRestore}
 	log.V(1).Info("Executing go-criu Restore call")
 	restoreStart := time.Now()
 	if err := c.Restore(criuOpts, notify); err != nil {
@@ -145,7 +148,7 @@ func ExecuteRestore(
 
 // BuildRestoreOpts assembles CriuOpts for a CRIU restore from the checkpoint manifest.
 // ImagesDirFd and WorkDirFd are left unset — ExecuteRestore opens them at restore time.
-func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroupRoot string, log logr.Logger) (*criurpc.CriuOpts, error) {
+func BuildRestoreOpts(m *types.CheckpointManifest, cgroupRoot, lsmProfile string, log logr.Logger) (*criurpc.CriuOpts, error) {
 	extMounts, err := buildRestoreExtMounts(m)
 	if err != nil {
 		return nil, err
@@ -186,9 +189,12 @@ func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroup
 		}
 	}
 
-	criuConfPath := filepath.Join(checkpointPath, criuConfFilename)
-	if _, err := os.Stat(criuConfPath); err == nil {
-		criuOpts.ConfigFile = proto.String(criuConfPath)
+	// The restore target's own security label, for every restored process.
+	// Signals between the container's processes depend on it too. The labels
+	// recorded at dump time are not kept, child or stacked AppArmor profiles
+	// included, as in runc's restore.
+	if lsmProfile != "" {
+		criuOpts.LsmProfile = proto.String(lsmProfile)
 	}
 
 	return criuOpts, nil
@@ -505,33 +511,23 @@ func restoreScratchDir(workDir string) (string, func(), error) {
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
 
-// rewriteCRIULibDir writes a criu.conf override that redirects the plugin libdir
-// to the injected bundle. The dump-time libdir points to the agent filesystem and
-// is unreachable inside the placeholder namespace; the override replaces it.
-// existingConfigFile is nil when the checkpoint was dumped without a criu.conf;
-// in that case the override is written from an empty base so CRIU always finds
-// its plugins at the injected path. scratchDir is the restore scratch from
-// restoreScratchDir (workDir or a criu-restore-* temp).
-func rewriteCRIULibDir(existingConfigFile *string, scratchDir, criuBundleDir string) (string, error) {
+// writeRestoreCRIUConf writes the CRIU config file for a restore, for the
+// options that cannot be passed via RPC. It is built from the manifest's
+// settings and never read from the checkpoint: CRIU applies the file over the
+// RPC options, so a file from the checkpoint could override them. libdir is
+// the injected bundle's, because the dump-time one points to the agent
+// filesystem, unreachable inside the placeholder namespace. scratchDir is the
+// restore scratch from restoreScratchDir (workDir or a criu-restore-* temp).
+func writeRestoreCRIUConf(settings *types.CRIUSettings, scratchDir, criuBundleDir string) (string, error) {
 	if scratchDir == "" {
 		return "", fmt.Errorf("CRIU restore scratch directory is empty")
 	}
-
-	var baseConf string
-	if existingConfigFile != nil {
-		data, err := os.ReadFile(*existingConfigFile)
-		if err != nil {
-			return "", fmt.Errorf("read criu config %s: %w", *existingConfigFile, err)
-		}
-		baseConf = string(data)
+	confPath := filepath.Join(scratchDir, "criu-restore.conf")
+	conf := overrideLibDir(buildCRIUConf(settings), filepath.Join(criuBundleDir, "criu-plugins"))
+	if err := os.WriteFile(confPath, []byte(conf), 0644); err != nil {
+		return "", fmt.Errorf("write criu restore config to %s: %w", confPath, err)
 	}
-
-	overridePath := filepath.Join(scratchDir, "criu-restore.conf")
-	conf := overrideLibDir(baseConf, filepath.Join(criuBundleDir, "criu-plugins"))
-	if err := os.WriteFile(overridePath, []byte(conf), 0644); err != nil {
-		return "", fmt.Errorf("write criu libdir override to %s: %w", overridePath, err)
-	}
-	return overridePath, nil
+	return confPath, nil
 }
 
 // bundledCRIUPath returns the path to the criu binary inside bundleDir.
@@ -578,11 +574,17 @@ func closeFiles(files []*os.File) {
 type restoreNotify struct {
 	criulib.NoNotify
 	restoredPID int32
+	preRestore  func() error
 	log         logr.Logger
 }
 
+// PreRestore runs after CRIU detected the kernel's features and checked its
+// options, and before it creates any process or mount.
 func (n *restoreNotify) PreRestore() error {
 	n.log.V(1).Info("CRIU pre-restore")
+	if n.preRestore != nil {
+		return n.preRestore()
+	}
 	return nil
 }
 
