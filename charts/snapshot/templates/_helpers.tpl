@@ -195,9 +195,12 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      pagebroker-s3.yaml change, so an upgrade doesn't leave either running on
      stale config. Hashes the raw values rather than including configmap.yaml,
      which would re-run its required()/fail() checks from this context and
-     misattribute their errors to the including template. */}}
+     misattribute their errors to the including template. Includes the
+     rendered stagingSizeLimit, not just pageBroker.staging.sizeLimit: the
+     default stagingBytes is derived from it together with both containers'
+     memory limits, so a change to either limit must also roll both. */}}
 {{- define "snapshot.operatorConfigChecksum" -}}
-{{- toYaml (dict "storage" .Values.storage "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.modelStreamer) | sha256sum -}}
+{{- toYaml (dict "storage" .Values.storage "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.modelStreamer "stagingSizeLimit" (include "snapshot.stagingSizeLimit" .)) | sha256sum -}}
 {{- end -}}
 {{- define "snapshot.modelStreamerConfigPath" -}}{{ include "snapshot.modelStreamerMountDir" . }}/model-streamer.json{{- end -}}
 
