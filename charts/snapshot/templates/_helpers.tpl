@@ -233,10 +233,12 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- fail (printf "pageBroker.s3.limits.%s is not a PageBroker S3 limit" $key) -}}
 {{- end -}}
 {{- end -}}
+{{- $activeTransactions := int64 8 -}}
 {{- if hasKey $limits "activeTransactions" -}}
-{{- if ge (int64 $limits.activeTransactions) (int64 .Values.pageBroker.maxConcurrentRequests) -}}
-{{- fail "pageBroker.s3.limits.activeTransactions must be below pageBroker.maxConcurrentRequests" -}}
+{{- $activeTransactions = int64 $limits.activeTransactions -}}
 {{- end -}}
+{{- if ge $activeTransactions (int64 .Values.pageBroker.maxConcurrentRequests) -}}
+{{- fail "pageBroker.s3.limits.activeTransactions must be below pageBroker.maxConcurrentRequests" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
