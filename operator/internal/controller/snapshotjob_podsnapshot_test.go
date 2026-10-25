@@ -801,3 +801,35 @@ func TestSnapshotJobOwnerFromPodSnapshotObjRejectsWrongType(t *testing.T) {
 	_, err := snapshotJobOwnerFromPodSnapshotObj(&corev1.Pod{})
 	require.Error(t, err)
 }
+
+// SnapshotJob is the path most captures take, so a retry limit set on its
+// template is the only way most callers can ask for one.
+func TestBuildPodSnapshotCarriesTheRetryLimit(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "warm-worker-abcde", Namespace: "inference", UID: types.UID("pod-uid")},
+	}
+
+	for _, tc := range []struct {
+		name      string
+		requested *int32
+	}{
+		{"an explicit limit reaches the PodSnapshot", ptr.To(int32(2))},
+		{"an explicit zero is a request, not absence", ptr.To(int32(0))},
+		{"absent stays absent, deferring to the cluster default", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sj := minimalSnapshotJob()
+			sj.Spec.PodSnapshotTemplate.CheckpointRetryLimit = tc.requested
+
+			snap, err := buildPodSnapshot(sj, pod)
+			require.NoError(t, err)
+
+			if tc.requested == nil {
+				assert.Nil(t, snap.Spec.CheckpointRetryLimit)
+				return
+			}
+			require.NotNil(t, snap.Spec.CheckpointRetryLimit)
+			assert.Equal(t, *tc.requested, *snap.Spec.CheckpointRetryLimit)
+		})
+	}
+}
