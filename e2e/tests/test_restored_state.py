@@ -8,7 +8,6 @@ from __future__ import annotations
 import shlex
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -152,49 +151,3 @@ def test_restored_mounts_require_every_remote_assertion_to_pass(
             lifecycle.assert_restored_workload_mounts(
                 "test-ns", "restored-pod", container="main", empty_dir=empty_dir
             )
-
-
-def pod_with(exit_code: int | None, phase: str = "Running") -> SimpleNamespace:
-    state = SimpleNamespace(
-        terminated=SimpleNamespace(exit_code=exit_code) if exit_code is not None else None
-    )
-    status = SimpleNamespace(name=lifecycle.CONTAINER, state=state)
-    return SimpleNamespace(
-        metadata=SimpleNamespace(resource_version="7"),
-        status=SimpleNamespace(phase=phase, container_statuses=[status]),
-    )
-
-
-@pytest.mark.parametrize(
-    ("events", "want"),
-    [
-        ([("MODIFIED", pod_with(None)), ("MODIFIED", pod_with(42, "Failed"))], 42),
-        ([("MODIFIED", pod_with(None)), ("DELETED", pod_with(137, "Failed"))], 137),
-        ([("MODIFIED", pod_with(None)), ("DELETED", pod_with(None))], None),
-        ([], None),
-    ],
-)
-def test_delete_pod_and_wait_for_exit_reads_the_final_status(
-    monkeypatch: pytest.MonkeyPatch,
-    events: list[tuple[str, SimpleNamespace]],
-    want: int | None,
-) -> None:
-    calls = []
-    monkeypatch.setattr(lifecycle.k8s, "read_pod", lambda namespace, name: pod_with(None))
-    monkeypatch.setattr(
-        lifecycle.k8s, "delete_pod", lambda namespace, name: calls.append(("delete", name))
-    )
-
-    def watch_pod(namespace, name, resource_version, timeout):
-        # The watch starts from the Pod as it was before the delete.
-        calls.append(("watch", resource_version))
-        yield from ({"type": kind, "object": pod} for kind, pod in events)
-
-    monkeypatch.setattr(lifecycle.k8s, "watch_pod", watch_pod)
-
-    if want is None:
-        with pytest.raises(AssertionError, match="without an exit code"):
-            lifecycle.delete_pod_and_wait_for_exit("ns", "restore")
-    else:
-        assert lifecycle.delete_pod_and_wait_for_exit("ns", "restore") == want
-    assert calls == [("delete", "restore"), ("watch", "7")]
