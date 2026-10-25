@@ -49,6 +49,13 @@ commit-level history for each release is on its
 
 ### Changed
 
+- Checkpoint and restore failure messages open with the step they came from,
+  as `while <step>: <cause>`, on the pod's `nvidia.com/Restored` condition, the
+  `PodSnapshotContent` `Failed` condition, the restore events and the agent
+  log, which also carries the step as a structured `step` key. Alerts or log
+  filters that match on the previous wrap text need updating. The
+  troubleshooting guide has one entry per step, including the steps inside
+  nsrestore.
 - Restoring into a container that has an AppArmor profile or SELinux label now
   requires a checkpoint that saved the processes' labels. Checkpoints taken by
   earlier agent versions on AppArmor nodes don't have them and must be taken
