@@ -147,3 +147,39 @@ func TestSkipCompatCheckFromAnnotations(t *testing.T) {
 		t.Error("an unannotated pod asked to skip the compatibility gate")
 	}
 }
+
+func TestRestoreCompleteRoundTrip(t *testing.T) {
+	data := FormatRestoreComplete(RestoreComplete{PID: 4242})
+	if string(data) != "pid=4242\n" {
+		t.Fatalf("FormatRestoreComplete() = %q", data)
+	}
+	got, err := ParseRestoreComplete(data)
+	if err != nil || got.PID != 4242 {
+		t.Fatalf("ParseRestoreComplete() = %+v, %v", got, err)
+	}
+}
+
+func TestParseRestoreComplete(t *testing.T) {
+	t.Run("ignores unknown keys and blank lines", func(t *testing.T) {
+		got, err := ParseRestoreComplete([]byte("future=x\n\n pid=7 \n"))
+		if err != nil || got.PID != 7 {
+			t.Fatalf("ParseRestoreComplete() = %+v, %v", got, err)
+		}
+	})
+
+	for name, data := range map[string]string{
+		"empty":         "",
+		"legacy done":   "done\n",
+		"missing pid":   "future=x\n",
+		"non-numeric":   "pid=abc\n",
+		"zero":          "pid=0\n",
+		"negative":      "pid=-1\n",
+		"duplicate pid": "pid=1\npid=2\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := ParseRestoreComplete([]byte(data)); err == nil {
+				t.Fatalf("ParseRestoreComplete(%q) = %+v, want error", data, got)
+			}
+		})
+	}
+}

@@ -26,6 +26,10 @@ const (
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
 	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
 
+	// CuInterposeAnnotation enables multi-GPU support, which runs checkpoint
+	// targets under the CUDA interposer.
+	CuInterposeAnnotation = "nvidia.com/snapshot-multi-gpu"
+
 	// DefaultSeccompLocalhostProfile is the kubelet-local profile installed by
 	// the Snapshot Helm chart to block io_uring for CRIU.
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"
@@ -62,24 +66,105 @@ const (
 	// job file.
 	CUDAJobFilePath = SnapshotControlMountPath + "/" + CUDAJobFileName
 
-	// RestoreStandbyModeEnv asks standby-aware workload entrypoints to remain
-	// inert until Snapshot replaces them with restored processes. Snapshot
-	// publishes the name so producers and workloads agree on it, but does not
-	// inject this workload-specific setting.
+	// RestoreStandbyModeEnv asked standby-aware workload entrypoints to remain
+	// inert until Snapshot replaced them with restored processes. Snapshot
+	// published the name but never injected it.
+	//
+	// Deprecated: Snapshot now replaces a restore container's command with
+	// RestoreProxyPath, so the entrypoint never runs and nothing needs to stay
+	// inert. Restore Pods can keep the source's command.
 	RestoreStandbyModeEnv = "SNAPSHOT_RESTORE_STANDBY"
 
 	// LegacyRestoreStandbyModeEnv is the previous name of RestoreStandbyModeEnv,
 	// kept for existing workload integrations that still read it. Snapshot
 	// publishes the name but does not inject it.
 	//
-	// Deprecated: use RestoreStandbyModeEnv. This alias is removed in the next
+	// Deprecated: see RestoreStandbyModeEnv. This alias is removed in the next
 	// release.
 	LegacyRestoreStandbyModeEnv = "DYN_SNAPSHOT_RESTORE_STANDBY"
 
 	// RestoreCompleteFile is written by the Snapshot agent when restore has
-	// completed and the workload may resume.
+	// completed and the workload may resume. Its contents are key=value lines
+	// built by FormatRestoreComplete; workloads that only gate on the file's
+	// existence may ignore them.
 	RestoreCompleteFile = "restore-complete"
+
+	// RestoreFailedFile is written by the Snapshot agent before it kills a
+	// destination container whose restore failed. The failing container never
+	// acts on it; a later container in the same Pod reads it as proof that the
+	// Pod's one restore was already used.
+	RestoreFailedFile = "restore-failed"
+
+	// RestoreCompletePIDKey names the restored process's PID, relative to the
+	// destination container's PID namespace, in RestoreCompleteFile.
+	RestoreCompletePIDKey = "pid"
+
+	// RestoreProxyBinaryName is the PID 1 process Snapshot runs in restore
+	// destination containers. It waits for RestoreCompleteFile, then follows
+	// the restored process and exits with its status.
+	RestoreProxyBinaryName = "snapshot-restore-proxy"
+
+	// RestoreProxyPath is the proxy as the container sees it, in the control
+	// volume. It is the whole command of a restore destination container.
+	RestoreProxyPath = SnapshotControlMountPath + "/" + RestoreProxyBinaryName
 )
+
+// Exit codes reserved by the restore proxy. Every other code is the restored
+// workload's own, or 128 plus the signal number that killed it.
+const (
+	// RestoreNotRepeatableExitCode means this Pod's one restore is spent: the
+	// proxy found RestoreCompleteFile or RestoreFailedFile at start, left by an
+	// earlier container, or RestoreFailedFile appeared while it waited.
+	RestoreNotRepeatableExitCode = 112
+
+	// RestoreProxyErrorExitCode means the proxy could not follow the restored
+	// process, for example because RestoreCompleteFile was malformed or the
+	// restored PID was not its child.
+	RestoreProxyErrorExitCode = 113
+)
+
+// RestoreComplete is the content of RestoreCompleteFile.
+type RestoreComplete struct {
+	// PID is the restored process, relative to the destination container's
+	// PID namespace.
+	PID int
+}
+
+// FormatRestoreComplete renders the content of RestoreCompleteFile.
+func FormatRestoreComplete(rc RestoreComplete) []byte {
+	return []byte(RestoreCompletePIDKey + "=" + strconv.Itoa(rc.PID) + "\n")
+}
+
+// ParseRestoreComplete reads the content of RestoreCompleteFile. Unknown keys
+// are ignored so the agent can add fields without breaking older readers.
+func ParseRestoreComplete(data []byte) (RestoreComplete, error) {
+	var rc RestoreComplete
+	for line := range strings.Lines(string(data)) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return RestoreComplete{}, fmt.Errorf("invalid %s line %q: expected key=value", RestoreCompleteFile, line)
+		}
+		if key != RestoreCompletePIDKey {
+			continue
+		}
+		if rc.PID != 0 {
+			return RestoreComplete{}, fmt.Errorf("duplicate %s key %q", RestoreCompleteFile, key)
+		}
+		pid, err := strconv.Atoi(value)
+		if err != nil || pid <= 0 {
+			return RestoreComplete{}, fmt.Errorf("invalid %s %s %q", RestoreCompleteFile, key, value)
+		}
+		rc.PID = pid
+	}
+	if rc.PID == 0 {
+		return RestoreComplete{}, fmt.Errorf("%s has no %s", RestoreCompleteFile, RestoreCompletePIDKey)
+	}
+	return rc, nil
+}
 
 // ContainerMapping maps the one captured source container to a restore
 // destination in the target Pod.

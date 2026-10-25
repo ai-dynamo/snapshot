@@ -4,11 +4,8 @@
 #
 # Builds the consolidated third-party attribution file at /legal/THIRD-PARTY.txt.
 #
-# The PageBroker image is distroless and adds no system packages, so the
-# statically linked protobuf is the whole of its third-party content. The
-# license text is read from the copyright file collect-sources.sh placed next
-# to the corresponding source, so attribution and source always describe the
-# same version.
+# Read notices beside the matching source. The protobuf directory remains
+# the first argument. Additional dependency directories follow the output path.
 
 set -eu
 
@@ -31,9 +28,8 @@ This file lists third-party open-source software redistributed in this
 container image, together with the license text for each component.
 
 SCOPE: this covers what this image adds on top of its base image. This image
-adds no system packages; the only third-party component is protobuf, linked
-statically into /usr/local/bin/pagebroker. Base-image components are
-attributed by that image.
+includes protobuf, linked statically into /usr/local/bin/pagebroker. Additional components are listed
+below when included. Base-image components are attributed by that image.
 
 CORRESPONDING SOURCE: upstream source for the component listed below ships
 inside this image under /legal/source/. See /legal/source/README.txt.
@@ -44,10 +40,24 @@ HEADER
 
     printf '================================================================================\n'
     printf 'COMPONENT: protobuf\n'
-    printf 'VERSION:   %s (Debian source version)\n' "$(cat "$SOURCE/VERSION")"
+    version=$(cat "$SOURCE/VERSION")
+    printf 'VERSION:   %s (Debian source version)\n' "$version"
     printf 'SOURCE:    /legal/source/protobuf/\n'
     printf '================================================================================\n\n'
     cat "$SOURCE/copyright"
+    if [ "$#" -gt 2 ]; then
+        shift 2
+        for component in "$@"; do
+            printf '\n================================================================================\n'
+            printf 'COMPONENT: %s\n' "$(basename "$component")"
+            version=$(cat "$component/VERSION")
+            printf 'VERSION: %s\nSOURCE: %s/\n\n' "$version" "$component"
+            cat "$component/copyright"
+            if [ -f "$component/THIRD-PARTY-NOTICES.txt" ]; then
+                cat "$component/THIRD-PARTY-NOTICES.txt"
+            fi
+        done
+    fi
 } > "$OUT"
 
 echo "Wrote $OUT"

@@ -66,6 +66,22 @@ permissions:
   packages: read
 
 jobs:
+  check:
+    name: Validate repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: true
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - run: make check
+
   # Datadog's GPU monitoring (system-probe + NVML) is a suspected interferer
   # for CRIU/CUDA checkpoint and restore. Switch it off for the whole run in
   # one gate, restore it in a separate always-run job -- a per-job toggle
@@ -74,6 +90,7 @@ jobs:
   # overlapping runs hand off correctly).
   datadog-gate:
     name: datadog gpu monitoring off
+    needs: check
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 5
     concurrency:
@@ -102,10 +119,10 @@ jobs:
 
   e2e:
     name: ${{ matrix.framework }}
-    needs: datadog-gate
+    needs: [check, datadog-gate]
     runs-on: prod-deploy-tester-v1
-    # Above the sum of this job's own step timeout-minutes (117, dominated by
-    # the 50-min test step) plus margin: a job-level timeout kills the whole
+    # Above the sum of this job's own step timeout-minutes (123, dominated by
+    # the 56-min test step) plus margin: a job-level timeout kills the whole
     # job, including the failure() diagnostics upload and always() vCluster
     # cleanup, which is exactly the safety net a slow run needs most.
     timeout-minutes: 140
@@ -134,6 +151,10 @@ jobs:
       SNAPSHOT_E2E_PVC_SIZE: 64Gi
       SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
       SNAPSHOT_E2E_MODE: vcluster
+      SNAPSHOT_E2E_AVOID_MIG: "true"
+      # Expect the restore proxy where the agent has it: GPU nodes with
+      # containerd older than 2.2, or NRI disabled, restore without it.
+      SNAPSHOT_E2E_RESTORE_PROXY: auto
       SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
       SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
       SNAPSHOT_E2E_HELM_TIMEOUT: 6m
@@ -214,7 +235,7 @@ jobs:
       - name: Install Python tooling (ARM64)
         if: ${{ steps.selected.outputs.run == 'true' && runner.arch == 'ARM64' }}
         timeout-minutes: 3
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.10.11"
           checksum: "23003df007937dd607409c8ddf010baa82bad2673e60e254632ca5b04edcce13"
@@ -224,7 +245,7 @@ jobs:
       - name: Install Python tooling (X64)
         if: ${{ steps.selected.outputs.run == 'true' && runner.arch == 'X64' }}
         timeout-minutes: 3
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.10.11"
           checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
@@ -233,7 +254,7 @@ jobs:
 
       - name: Resolve Snapshot image tag
         if: ${{ steps.selected.outputs.run == 'true' && (inputs.snapshot_tag || '') == '' }}
-        timeout-minutes: 3
+        timeout-minutes: 23
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -251,7 +272,7 @@ jobs:
           # of its own; fall back to main's, loudly. main and release refs
           # stay strict: a nightly must test the commit it checked out.
           case "${GITHUB_REF_NAME}" in
-            main|release/*) python3 hack/resolve-snapshot-image-tag.py ;;
+            main|release/*) python3 hack/resolve-snapshot-image-tag.py --wait-seconds 1200 ;;
             *) python3 hack/resolve-snapshot-image-tag.py --fallback-main ;;
           esac
 
@@ -346,7 +367,8 @@ jobs:
           uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
       # The inner timeout must exceed the phase budgets in
-      # e2e/snapshot_e2e/frameworks.py plus the request timeout (45 min with
+      # e2e/snapshot_e2e/frameworks.py plus the three semantic requests and
+      # source prompt rendering (50 min with
       # sglang's 600s restore_timeout_seconds override). SIGINT reaches the
       # whole process group, so pytest raises KeyboardInterrupt, runs its
       # fixture finalizers (benchmark result, cluster cleanup), and exits
@@ -354,10 +376,10 @@ jobs:
       - name: Run ${{ matrix.framework }} checkpoint/restore test
         if: ${{ steps.selected.outputs.run == 'true' }}
         id: framework_test
-        timeout-minutes: 50
+        timeout-minutes: 56
         run: |
           set -uo pipefail
-          timeout --signal=INT --kill-after=150s 46m \
+          timeout --signal=INT --kill-after=150s 52m \
             uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
           status=$?
           if [[ "${status}" -eq 124 ]]; then
@@ -366,7 +388,7 @@ jobs:
               --case "${{ matrix.framework }}" \
               --test test_framework_checkpoint_restore_serves_inference \
               --outcome timed_out \
-              --message "pytest exceeded the 46 minute benchmark timeout"
+              --message "pytest exceeded the 52 minute benchmark timeout"
           fi
           exit "${status}"
 
@@ -382,6 +404,17 @@ jobs:
             --test test_framework_checkpoint_restore_serves_inference \
             --outcome infrastructure_failed \
             --message "pytest produced no benchmark result; step outcome=${TEST_STEP_OUTCOME}"
+
+      # Pytest can succeed with skipped cases. A selected backend only qualifies
+      # when its own result passed in this run attempt; stale workspace files or
+      # synthesized failure records must never stand in for restored inference.
+      - name: Require passing ${{ matrix.framework }} result
+        if: ${{ always() && steps.selected.outputs.run == 'true' }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history require-pass \
+            --artifacts-dir "${SNAPSHOT_E2E_BENCHMARK_DIR}" \
+            --case "${{ matrix.framework }}"
 
       - name: Upload benchmark result
         if: ${{ always() && steps.selected.outputs.run == 'true' }}
@@ -472,7 +505,7 @@ jobs:
     name: compare framework benchmark history
     needs: e2e
     if: ${{ !cancelled() && !(github.event_name == 'schedule' && github.ref == 'refs/heads/main') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       actions: read
@@ -543,7 +576,7 @@ jobs:
     # synthesize and permanently publish infrastructure_failed records that
     # identity dedup then stops a re-run from replacing.
     if: ${{ !cancelled() && github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
       group: snapshot-e2e-benchmark-history

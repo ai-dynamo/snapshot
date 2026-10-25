@@ -23,6 +23,8 @@ race as a contract.
 
 from __future__ import annotations
 
+import shlex
+import time
 from typing import Any
 
 import pytest
@@ -172,13 +174,15 @@ def test_snapshotjob_captures_and_restore_recovers_state(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_success
-def test_snapshotjob_cpu_only_captures(
+def test_snapshotjob_cpu_captures_and_restore_recovers_state(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    # First non-GPU SnapshotJob coverage: capture and artifact only, no
-    # restore round trip (that is the GPU test's job).
+    # The same round trip as the GPU test, minus the device state: nothing in
+    # the two-stage completion gate, the artifact, or the restore path depends
+    # on a GPU being present.
     try:
         snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
@@ -186,9 +190,6 @@ def test_snapshotjob_cpu_only_captures(
             snapshotjob_name,
             workloads.snapshotjob_pod_template(config=config, run=run, gpu=False),
         )
-
-        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
-        source_pod_name = source_pod.metadata.name
 
         sj = snap.wait_for_condition(
             config.namespace,
@@ -199,24 +200,76 @@ def test_snapshotjob_cpu_only_captures(
         )
         assert_snapshotjob_completed(sj)
 
+        pod_snapshot_name = sj["status"]["podSnapshotName"]
+        assert pod_snapshot_name == snapshotjob_name
+
         _, content = snap.wait_for_snapshot_ready(
             config.namespace,
-            sj["status"]["podSnapshotName"],
+            pod_snapshot_name,
             timeout=60,
         )
-        source_node = content["spec"]["source"]["nodeName"]
+        # The source pod is named by the content rather than observed live: a
+        # CPU capture finishes in a few seconds and the controller deletes the
+        # source Job along with it, so the pod can be gone before a poll sees
+        # it. The GPU test can watch for the pod because its workload takes
+        # long enough to be caught; here the recorded name is the only one that
+        # is guaranteed to still be readable.
+        #
+        # That makes the manifest check below a comparison between two things
+        # the system wrote, so the independent anchor is the assertion above:
+        # the PodSnapshot carries the name this test chose for the SnapshotJob.
+        source = content["spec"]["source"]
+        source_node = source["nodeName"]
+        source_pod_name = source["podRef"]["name"]
+        assert source["podRef"]["containers"] == [workloads.CONTAINER]
         manifest = snap.checkpoint_artifact_manifest(
             config, source_node, content["metadata"]["uid"]
         )
+        assert "criuDump:" in manifest
         assert f"podName: {source_pod_name}" in manifest
+
+        artifact_listing = snap.checkpoint_artifact_listing(
+            config, source_node, content["metadata"]["uid"]
+        )
+        assert "./inventory.img" in artifact_listing
+        assert "./manifest.yaml" in artifact_listing
 
         snap.wait_for_pod_deleted(config.namespace, source_pod_name, timeout=120)
         assert k8s.read_job(config.namespace, snapshotjob_name) is None
+
+        k8s.create_pod(
+            workloads.restore_pod(
+                config=config,
+                run=run,
+                gpu=False,
+                source_node=source_node,
+                snapshot_name=pod_snapshot_name,
+            )
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+
+        # checkpoint_observations=1: the workload writes observation seq=0
+        # before signalling ready, so at least one observation is guaranteed
+        # in the captured state without any pre-capture polling.
+        output = snap.assert_restored_state(
+            config.namespace,
+            run.restore_pod,
+            source_token=run.source_token,
+            restore_token=run.restore_token,
+            checkpoint_observations=1,
+            gpu=False,
+        )
+        assert f"source_token={run.source_token}" in output
+        assert f"restore_token={run.restore_token}" in output
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_snapshotjob_waits_for_helper_then_completes(
     config: k8s.E2EConfig,
@@ -251,6 +304,7 @@ def test_snapshotjob_waits_for_helper_then_completes(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_when_helper_fails_after_capture(
     config: k8s.E2EConfig,
@@ -297,6 +351,7 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_deadline_exceeded_when_helper_overruns(
     config: k8s.E2EConfig,
@@ -337,6 +392,121 @@ def test_snapshotjob_deadline_exceeded_when_helper_overruns(
         raise
 
 
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_snapshotjob_deadline_removed_pod_retains_non_target_artifacts(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # A Job deadline can remove its source Pod before maintenance observes
+    # terminal container statuses. The opt-in policy must fail closed in that
+    # case, even if the Job itself reports Failed.
+    try:
+        name = run.snapshotjob_name
+        created = snap.create_snapshotjob(
+            config.namespace,
+            name,
+            workloads.snapshotjob_helper_pod_template(
+                config=config,
+                run=run,
+                helper_command="sleep infinity",
+            ),
+            active_deadline_seconds=60,
+            non_target_artifacts={"containers": ["helper"], "onFailure": "Cleanup"},
+        )
+        uid = created["metadata"]["uid"]
+        source = snap.wait_for_job_source_pod(config.namespace, name)
+        source_name = source.metadata.name
+        def source_node() -> str | None:
+            return k8s.read_pod(config.namespace, source_name).spec.node_name
+
+        node = snap.wait_for("source Pod node assignment", source_node, 120)
+        failed_job = snap.wait_for_condition(
+            config.namespace, name, plural=snap.SNAPSHOTJOBS,
+            condition_type="Failed", timeout=300,
+        )
+        assert snap.condition(failed_job, "Failed")["reason"] == "DeadlineExceeded"
+
+        def source_job_failed() -> bool | None:
+            job = k8s.read_job(config.namespace, name)
+            if job and job.status and any(
+                c.type == "Failed" and c.status == "True"
+                for c in job.status.conditions or []
+            ):
+                return True
+            return None
+
+        snap.wait_for("terminal source Job", source_job_failed, 120)
+
+        # If the Job controller retained a terminal Pod, remove only that
+        # stopped record to exercise the same no-Pod proof boundary.
+        def stopped_or_gone() -> bool | None:
+            try:
+                pod = k8s.read_pod(config.namespace, source_name)
+            except ApiException as exc:
+                if exc.status == 404:
+                    return True
+                raise
+            if pod.status.phase not in {"Failed", "Succeeded"}:
+                return None
+            statuses = {s.name: s for s in pod.status.container_statuses or []}
+            if all(statuses.get(c.name) and statuses[c.name].state.terminated for c in pod.spec.containers):
+                return True
+            return None
+
+        snap.wait_for("source Pod termination or removal", stopped_or_gone, 120)
+        try:
+            k8s.read_pod(config.namespace, source_name)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+        else:
+            client.CoreV1Api().delete_namespaced_pod(source_name, config.namespace)
+            snap.wait_for_pod_deleted(config.namespace, source_name)
+
+        agent = snap.checkpoint_agent_pod(config, node)
+        root = f"{snap.AGENT_CHECKPOINT_DIR}/non-target-artifacts/{uid}"
+        marker = f"{root}/retained-e2e-marker"
+        # Model bytes left by a helper after Pod GC. Create them after the Pod
+        # is gone so the sweep cannot remove the root in the earlier safe phase.
+        try:
+            k8s.exec_command(
+                config.namespace, agent,
+                f"mkdir -p {shlex.quote(root)} && printf proof > {shlex.quote(marker)}",
+                container=snap.AGENT_CONTAINER,
+            )
+
+            def retention_warning() -> bool | None:
+                if any(
+                    event.reason == "NonTargetArtifactsRetained" and event.involved_object.uid == uid
+                    for event in k8s.list_events(config.namespace)
+                ):
+                    return True
+                return None
+
+            snap.wait_for("non-target artifact retention warning", retention_warning, 120)
+            # The warning can precede the marker. Let at least one more scan
+            # pass to prove the no-Pod policy preserves the bytes afterward.
+            time.sleep(12)
+            output = k8s.exec_command(
+                config.namespace, agent,
+                f"test -f {shlex.quote(marker)} && printf retained",
+                container=snap.AGENT_CONTAINER,
+            )
+            assert output == "retained", "the failed attempt's root must remain after Pod removal"
+        finally:
+            # This test owns the synthetic root; never leave it on the shared PVC.
+            k8s.exec_command(
+                config.namespace, agent,
+                f"rm -rf -- {shlex.quote(root)}",
+                container=snap.AGENT_CONTAINER,
+            )
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_deadline_exceeded_when_never_ready(
     config: k8s.E2EConfig,
@@ -371,6 +541,7 @@ def test_snapshotjob_deadline_exceeded_when_never_ready(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_deadline_exceeded_when_pod_unschedulable(
     config: k8s.E2EConfig,
@@ -408,6 +579,7 @@ def test_snapshotjob_deadline_exceeded_when_pod_unschedulable(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_on_job_name_conflict(
     config: k8s.E2EConfig,
@@ -468,6 +640,7 @@ def test_snapshotjob_fails_on_job_name_conflict(
         k8s.delete_job(config.namespace, snapshotjob_name)
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_on_podsnapshot_name_conflict(
     config: k8s.E2EConfig,
@@ -504,6 +677,7 @@ def test_snapshotjob_fails_on_podsnapshot_name_conflict(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_when_job_deleted(
     config: k8s.E2EConfig,
@@ -544,6 +718,7 @@ def test_snapshotjob_fails_when_job_deleted(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_when_workload_exits_nonzero_before_capture(
     config: k8s.E2EConfig,
@@ -576,6 +751,7 @@ def test_snapshotjob_fails_when_workload_exits_nonzero_before_capture(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_fails_when_workload_exits_zero_before_capture(
     config: k8s.E2EConfig,
@@ -608,6 +784,7 @@ def test_snapshotjob_fails_when_workload_exits_zero_before_capture(
         raise
 
 
+@pytest.mark.cpu
 @pytest.mark.snapshot_failure
 def test_snapshotjob_spec_admission(
     config: k8s.E2EConfig,

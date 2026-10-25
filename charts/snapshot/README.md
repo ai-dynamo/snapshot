@@ -18,8 +18,12 @@ namespaces. Workload pods never mount checkpoint storage.
 
 ## Prerequisites
 
-- Kubernetes cluster with x86_64 GPU nodes
-- NVIDIA GPU Operator 26.3 or newer, with NVIDIA driver 580.xx or newer
+- Kubernetes cluster with x86_64 or arm64 GPU nodes
+- NVIDIA GPU Operator 26.3 or newer
+- NVIDIA kernel-mode driver 580 or newer, and CUDA user-mode driver
+  (`libcuda.so`) 615 or newer. With an older kernel-mode driver, point
+  `LD_LIBRARY_PATH` at a 615 or newer `libcuda.so` in both the workload and
+  PageBroker.
 - **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
 
@@ -181,14 +185,25 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `image.agent.repository` | Agent image repository | `ghcr.io/ai-dynamo/snapshot/agent` |
 | `image.agent.tag` | Agent and PageBroker image tag (empty = chart appVersion) | `""` |
 | `image.pageBroker.repository` | PageBroker sidecar image repository. Always pulled at `image.agent.tag` | `ghcr.io/ai-dynamo/snapshot/pagebroker` |
+| `pageBroker.transferBufferCount` | Persistent transfer slots per visible GPU | `32` |
+| `pageBroker.transferChunkBytes` | Bytes per transfer slot | `134217728` |
+| `pageBroker.maxPinnedBytes` | Total pinned memory limit, including allocation rounding. Zero sets no limit | `0` |
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
-| `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 128Mi limit |
+| `daemonset.runtimeClassName` | RuntimeClass for the agent pod. Set `""` to omit it when the NVIDIA runtime is containerd's default and no `nvidia` RuntimeClass exists | `nvidia` |
+| `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 256Mi limit |
+| `operator.nodeSelector` | Node selector for the operator pod | `{}` |
+| `operator.affinity` | Affinity rules for the operator pod | `{}` |
+| `operator.tolerations` | Tolerations for the operator pod | `[]` |
 | `storage.type` | Snapshot-owned storage backend | `pvc` |
 | `storage.pvc.create` | Create `snapshot-pvc` instead of using an existing shared PVC | `true` |
 | `storage.pvc.name` | Shared RWX checkpoint PVC mounted by every agent | `snapshot-pvc` |
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |
+| `pageBroker.staging.sizeLimit` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for checkpoint (except GPU CustomStorage capture) and staged restore. Leave headroom above it in the writing container's memory limit; the chart's 64Gi default and the agent's 64Gi default memory limit leave none | `64Gi` |
+| `pageBroker.maxConcurrentRequests` | Concurrent control-socket requests the daemon serves | `16` |
+| `pageBroker.resources` | CPU and memory requests/limits for the PageBroker sidecar. The memory limit bounds restore prefetch into staging | 8 CPU / 32Gi request, 32 CPU / 256Gi limit |
+| `daemonset.resources` | CPU and memory requests/limits for the agent. The agent's memory limit also bounds the largest checkpoint image, because CRIU writes it into memory-backed PageBroker staging (direct GPU CustomStorage capture writes to the PVC instead, and is not bound by this) | 2 CPU / 1Gi request, 4 CPU / 64Gi limit |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
@@ -200,6 +215,25 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
+
+PageBroker handles every capture and restore. GPU capture uses CustomStorage
+when the driver supports it, otherwise it uses the driver-managed format.
+Restore follows the saved artifact format.
+
+PageBroker adds an 8 CPU and 32 GiB memory request to each agent pod. A node
+must have this capacity plus the agent's own request, or the pod stays Pending.
+Set `pageBroker.resources` for the node profile. The default transfer rings reserve 4 GiB per
+GPU, or 32 GiB on an eight-GPU node, plus overhead. A lower resource request
+does not reduce this allocation. Set the memory limit to cover the rings,
+process memory, and CPU staging. See the
+[engine design](../../docs/proposals/238-pagebroker-gpu-engine/README.md).
+
+The existing `storage.pvc` values and release namespace also produce the resolved
+`storage.yaml` configuration mounted into the operator and PageBroker. The agent
+retains its existing `config.yaml` without a PVC identity block. Store identity
+uses the claim-relative root `/`, not `storage.pvc.basePath`'s `/checkpoints` mount
+path. No new storage-selection values or storage-class CRD are introduced; see
+[storage configuration](../../docs/operations/storage.md#configuration).
 
 See [values.yaml](./values.yaml) for the full configuration surface.
 

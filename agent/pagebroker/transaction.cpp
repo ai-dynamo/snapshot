@@ -22,6 +22,9 @@ void
 Transaction::set_state(State state)
 {
   state_ = state;
+  if ((state == State::COMMITTED || state == State::ABORTED) && gpu_operation) {
+    gpu_operation->target_descriptors.clear();
+  }
   if (state == State::PREPARING)
     staging_started_at_ = std::chrono::steady_clock::now();
 }
@@ -56,7 +59,7 @@ Transaction::retain_terminal()
 bool
 Transaction::expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const
 {
-  return state_ == State::STAGED && now - staging_started_at_ >= lifetime;
+  return (state_ == State::STAGED || state_ == State::ABORTING) && now - staging_started_at_ >= lifetime;
 }
 
 }  // namespace snapshot::pagebroker

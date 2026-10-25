@@ -19,16 +19,56 @@ from snapshot_e2e.infra.preflight import load_config
 SNAPSHOT_LABEL = "app.kubernetes.io/name=snapshot"
 
 
+def bool_env(name: str) -> bool:
+    value = os.environ.get(name, "false")
+    if value not in ("", "false", "true"):
+        raise ValueError(f"{name} must be true or false")
+    return value == "true"
+
+
+def cpu_only_mode() -> bool:
+    return bool_env("SNAPSHOT_E2E_CPU_ONLY")
+
+
+def require_single_cpu_node() -> None:
+    nodes = client.CoreV1Api().list_node().items
+    if len(nodes) != 1:
+        raise ValueError("CPU-only E2E requires exactly one Kubernetes node")
+    node = nodes[0]
+    ready = any(
+        c.type == "Ready" and c.status == "True" for c in node.status.conditions or []
+    )
+    if node.spec.unschedulable or not ready:
+        raise ValueError("CPU-only E2E requires a ready, schedulable node")
+    # CPU workloads declare no tolerations for blocking node taints. A Ready
+    # node can still leave every source/restore pod Pending.
+    blocking = [
+        f"{taint.key}={taint.value or ''}:{taint.effect}"
+        for taint in node.spec.taints or []
+        if taint.effect in ("NoSchedule", "NoExecute")
+    ]
+    if blocking:
+        raise ValueError(f"CPU-only E2E node has blocking taints: {', '.join(blocking)}")
+
+
 @dataclass(frozen=True)
 class E2EConfig:
     namespace: str
     release: str
     pvc_name: str
     kubeconfig: str | None
+    cpu_only: bool = False
+
+    @property
+    def pvc_access_mode(self) -> str:
+        return "ReadWriteOnce" if self.cpu_only else "ReadWriteMany"
 
     @classmethod
     def from_env(cls) -> "E2EConfig":
         mode = os.environ.get("SNAPSHOT_E2E_MODE", "direct")
+        cpu_only = cpu_only_mode()
+        if cpu_only and mode != "direct":
+            raise ValueError("CPU-only E2E requires direct mode")
         if mode == "vcluster":
             kubeconfig = os.environ.get(
                 "SNAPSHOT_E2E_TARGET_KUBECONFIG"
@@ -41,11 +81,14 @@ class E2EConfig:
             release=os.environ.get("SNAPSHOT_E2E_SNAPSHOT_RELEASE", "snapshot"),
             pvc_name=os.environ.get("SNAPSHOT_E2E_PVC_NAME", "snapshot-pvc"),
             kubeconfig=kubeconfig,
+            cpu_only=cpu_only,
         )
 
 
 def configure(config: E2EConfig) -> None:
     load_config(config.kubeconfig, None)
+    if config.cpu_only:
+        require_single_cpu_node()
 
 
 def read_namespace(name: str) -> client.V1Namespace:
@@ -175,7 +218,7 @@ def pod_logs(
     namespace: str,
     name: str,
     *,
-    tail_lines: int = 120,
+    tail_lines: int | None = 120,
     container: str | None = None,
 ) -> str:
     try:
@@ -213,14 +256,22 @@ def exec_command(
 PAYLOAD_MARKER = "e2e-payload-follows"
 
 
-def exec_payload(namespace: str, pod: str, command: str) -> str:
+def exec_payload(
+    namespace: str,
+    pod: str,
+    command: str,
+    *,
+    container: str | None = None,
+) -> str:
     """Exec output with whatever the login shell printed first dropped.
 
     exec_command merges stderr into the stream, so a container whose profile
     writes anything breaks every caller that parses the result rather than
     matching a substring in it.
     """
-    output = exec_command(namespace, pod, f"echo {PAYLOAD_MARKER}; {command}")
+    output = exec_command(
+        namespace, pod, f"echo {PAYLOAD_MARKER}; {command}", container=container
+    )
     _, marker, payload = output.partition(PAYLOAD_MARKER)
     if not marker:
         raise AssertionError(f"exec output carried no payload marker: {output!r}")
@@ -333,3 +384,31 @@ def daemonset_readiness_detail(daemonset: client.V1DaemonSet) -> str:
 
 def api_error_detail(exc: ApiException) -> str:
     return f"status={exc.status}, reason={exc.reason}, body={exc.body}"
+
+
+def pod_status_writers(pod: client.V1Pod) -> list[str]:
+    writers = []
+    for entry in pod.metadata.managed_fields or []:
+        status = (entry.fields_v1 or {}).get("f:status") or {}
+        fields = sorted(key.removeprefix("f:") for key in status)
+        if not fields:
+            continue
+        conditions = sorted(
+            key.split('"type":"', 1)[-1].rstrip('"}')
+            for key in (status.get("f:conditions") or {})
+            if key.startswith("k:")
+        )
+        writers.append(
+            f"{entry.manager} {entry.operation} subresource={entry.subresource} at={entry.time} "
+            f"status={fields} conditions={conditions}"
+        )
+    return writers
+
+
+def status_sync_errors(namespace: str) -> list[client.CoreV1Event]:
+    return [
+        event
+        for event in list_events(namespace, field_selector={"type": "Warning"})
+        if event.reason == "SyncError"
+    ]
+

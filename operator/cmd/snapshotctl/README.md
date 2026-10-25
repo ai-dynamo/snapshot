@@ -53,16 +53,14 @@ accept a Kubernetes `Pod` manifest, not a Deployment or Job manifest.
 That pod manifest must:
 
 - describe the worker pod you want to checkpoint or restore
-- use the placeholder image for checkpoint-aware flows
+- use the workload's regular image; the node agent supplies the restore tooling
 - match the runtime-relevant worker settings you care about preserving
-- provide an inert, long-running entrypoint for each restore destination
 
 `snapshotctl restore` applies Snapshot's generic
 [restore Pod contract](../../../docs/reference/restore-pod-contract.md), including the
 annotations, control volume, environment, startup gate, and seccomp profile. It
-does not replace container commands or inject a workload-specific standby
-environment variable. A platform-specific entrypoint convention remains the
-platform's responsibility.
+keeps the container commands: the node agent replaces each restore
+destination's command with its restore proxy when the container is created.
 
 In practice, start from the real worker pod spec you would normally run, then
 keep only the pod-level fields needed to recreate that worker accurately.

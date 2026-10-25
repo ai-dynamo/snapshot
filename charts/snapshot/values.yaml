@@ -25,10 +25,19 @@ operator:
   resources:
     limits:
       cpu: 500m
-      memory: 128Mi
+      memory: 256Mi
     requests:
       cpu: 50m
       memory: 64Mi
+
+  # Node selector for the operator pod
+  nodeSelector: {}
+
+  # Affinity rules for the operator pod
+  affinity: {}
+
+  # Tolerations for the operator pod
+  tolerations: []
 
   artifactCleanup:
     # Frequency of pending finalizer recovery and authoritative orphan artifact scans.
@@ -39,6 +48,8 @@ operator:
     listAttempts: 3
     # Concurrent maintenance workers processing delete-content and sweep work items.
     workers: 5
+    # Maximum time one work item may run before it is abandoned and retried.
+    taskTimeout: 10m
 
 # `helm upgrade` leaves CRDs alone by design; the crd-installer init container
 # closes that gap on every rollout, and is a no-op when nothing changed.
@@ -75,7 +86,8 @@ runtime:
 openshift:
   enabled: false
 
-# Storage configuration for checkpoints
+# Installation-level storage configuration. The chart resolves these values for
+# the operator and PageBroker; backend details are not part of the agent API.
 storage:
   # Storage type stays snapshot-owned for future backend expansion.
   # Only pvc is implemented today.
@@ -85,14 +97,15 @@ storage:
   pvc:
     # Create a new PVC (set to false if using existing PVC)
     create: true
-    # PVC name used by the agent checkpoint store
+    # Checkpoint PVC name, in the Helm release namespace. Name and namespace
+    # identify the store; create/size/storageClass only control provisioning.
     name: snapshot-pvc
     # PVC size
     size: 1Ti
     # Storage class (leave empty for default)
     storageClass: ""
-    # Fixed PVC mount path inside every snapshot-agent pod. The privileged
-    # mount helper independently enforces this source root.
+    # Fixed container-local PVC mount path, not a store identity input. Artifacts
+    # use the claim root (/); the privileged helper enforces this local mount.
     basePath: /checkpoints
 
   # Reserved for future snapshot-owned backends. Unsupported today.
@@ -103,11 +116,26 @@ storage:
   oci:
     uri: ""
 
+# PageBroker sidecar: stages checkpoint images in memory and publishes them to
+# the checkpoint PVC it shares with the agent. See docs/operations/storage.md.
 pageBroker:
-  enabled: false
-  command: []
-  args: []
+  # Restore directly from the checkpoint directory, or opt into a staged copy.
+  restoreMode: direct
   maxConcurrentRequests: 16
+  staging:
+    # RAM on the node, unbounded without this cap. Lowered to fit when it does
+    # not leave the writing container room; see docs/operations/storage.md.
+    sizeLimit: 56Gi
+  # Allocate and register the full ring before accepting GPU work.
+  # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
+  transferBufferCount: 32
+  # 128 MiB per slot. Must be a positive multiple of 4096 bytes.
+  transferChunkBytes: 134217728
+  # Zero is uncapped. This limit includes CUDA allocation-granularity rounding.
+  maxPinnedBytes: 0
+  # Requires 32 GiB of free allocatable memory, plus the agent request.
+  # Override for each node profile. Budget 4 GiB per GPU plus process and staging
+  # overhead. A lower request does not reduce the pinned ring allocation.
   resources:
     requests:
       cpu: 8
@@ -121,15 +149,30 @@ daemonset:
   # Agent and nsrestore log level (trace, debug, info, warn, error)
   snapshotLogLevel: info
 
+  # Limits the restore proxy to Pods in this host namespace on the node, and
+  # leaves other restore Pods alone. Set it when other clusters share the
+  # nodes, such as vCluster tenants: in a vCluster, set it to the vCluster's
+  # host namespace. Every Snapshot install on the shared nodes must set its
+  # own; an install with it empty acts on every restore Pod on its nodes.
+  nriHostNamespace: ""
+
   # The shipped agent image is public on GHCR. Set this only when an image
   # override is hosted in a private registry.
   imagePullSecrets: []
 
-  # Resource limits and requests
+  # RuntimeClass for the agent pod. CUDA checkpoint/restore requires the NVIDIA
+  # container runtime, which the GPU Operator exposes as RuntimeClass "nvidia".
+  # Set to "" when the NVIDIA runtime is already containerd's default and no
+  # such RuntimeClass exists; the field is then left out of the pod spec.
+  runtimeClassName: nvidia
+
+  # Resource limits and requests. CRIU writes the checkpoint image into the
+  # memory-backed PageBroker staging volume from this container, so
+  # limits.memory also bounds the largest checkpoint image.
   resources:
     limits:
       cpu: 4
-      memory: 4Gi
+      memory: 64Gi
     requests:
       cpu: 2
       memory: 1Gi
@@ -206,7 +249,10 @@ config:
   overlay:
     # Rootfs diff tar exclusions. Absolute-looking paths are normalized
     # relative to the tar root, and patterns starting with * are passed
-    # through as tar globs unchanged.
+    # through as tar globs unchanged. A file the checkpointed processes hold
+    # open or mapped at dump time is archived even when an exclusion matches
+    # it, so CRIU can reopen it. Other excluded files are not restored; the
+    # workload must recreate them if needed.
     exclusions:
       - /proc
       - /sys
@@ -214,6 +260,14 @@ config:
       - "*/.cache/huggingface"
       - "*/__pycache__"
       - "*.pyc"
+
+  checkpoint:
+    # Maximum seconds before the agent marks a checkpoint failed.
+    checkpointTimeoutSeconds: 3600
+    # Times a failed capture may be retried in place, beyond the first attempt.
+    # A PodSnapshot can override it with spec.checkpointRetryLimit; 0 keeps
+    # retry opt-in, so upgrading changes no existing capture's behaviour.
+    retryLimit: 0
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed

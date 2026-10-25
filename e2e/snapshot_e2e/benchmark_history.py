@@ -25,6 +25,7 @@ from snapshot_e2e.benchmark import (
     TEST_TOTAL,
     VALID_OUTCOMES,
     format_timestamp,
+    result_path,
     source_from_environment,
 )
 
@@ -699,6 +700,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     aggregate_parser.add_argument("--summary-file", type=Path)
     aggregate_parser.add_argument("--publish", action="store_true")
 
+    require_pass_parser = subparsers.add_parser(
+        "require-pass", help="require a passing result for the exact current run attempt"
+    )
+    require_pass_parser.add_argument("--artifacts-dir", type=Path, required=True)
+    require_pass_parser.add_argument("--case", required=True)
+    require_pass_parser.add_argument("--suite", default=DEFAULT_SUITE)
+    require_pass_parser.add_argument("--test", default=DEFAULT_TEST)
+    require_pass_parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
+    require_pass_parser.add_argument(
+        "--run-attempt", type=int, default=os.environ.get("GITHUB_RUN_ATTEMPT")
+    )
+
     rebuild_parser = subparsers.add_parser(
         "rebuild", help="rebuild monthly indexes and the manifest from raw results"
     )
@@ -714,6 +727,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--run-id or GITHUB_RUN_ID is required")
     if args.run_attempt is None:
         parser.error("--run-attempt or GITHUB_RUN_ATTEMPT is required")
+    if args.command == "require-pass":
+        identity = {
+            "suite": args.suite,
+            "case": args.case,
+            "test": args.test,
+            "runId": str(args.run_id),
+            "runAttempt": int(args.run_attempt),
+        }
+        path = result_path(
+            args.artifacts_dir,
+            args.suite,
+            args.case,
+            args.test,
+            str(args.run_id),
+            int(args.run_attempt),
+        )
+        try:
+            result = validate_result(json.loads(path.read_text()), origin=str(path))
+            if any(result["identity"][key] != value for key, value in identity.items()):
+                raise ResultValidationError("result identity does not match the requested run")
+            if result["outcome"] != "passed":
+                raise ResultValidationError(
+                    f"expected passed, got {result['outcome']} for {args.case}"
+                )
+        except (OSError, ValueError) as exc:
+            parser.exit(1, f"Standalone framework qualification failed: {exc}\n")
+        print(f"Verified passing result for {args.case}: {path}")
+        return 0
+
     generated_at = _parse_cli_timestamp(args.generated_at)
     output = aggregate(
         artifacts_dir=args.artifacts_dir,

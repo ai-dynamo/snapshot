@@ -10,6 +10,7 @@ dependencies = [
   "kubernetes>=32.0.1,<37.0.0",
   "packaging>=24.2,<26",
   "pytest>=8.4.0,<9",
+  "pytest-xdist>=3.6.1,<4",
   "PyYAML>=6.0.2,<7",
 ]
 
@@ -19,8 +20,11 @@ markers = [
   "snapshot_success: functional snapshot/restore success checks",
   "snapshot_failure: functional snapshot/restore failure checks",
   "gpu: tests that require a GPU workload",
+  "cpu: tests that run on a CPU-only cluster",
+  "serial: must not run beside other tests; the CPU job runs these after the rest",
   "workload: cluster-free checks of the workload scripts themselves",
   "framework: checkpoint/restore of an inference framework guide workload",
+  "upgrade: state created on an older Snapshot version and validated after upgrading",
 ]
 testpaths = ["tests"]
 addopts = "-p pytester"

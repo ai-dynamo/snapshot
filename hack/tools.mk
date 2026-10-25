@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-GO_VERSION             ?= 1.27.1
+GO_VERSION             ?= 1.27.3
 
 CONTROLLER_GEN_VERSION ?= v0.19.0
-GOLANGCI_LINT_VERSION  ?= v2.13.2
+GOLANGCI_LINT_VERSION  ?= v2.14.0
 ADDLICENSE_VERSION     ?= v1.1.1
 GOVULNCHECK_VERSION    ?= v1.8.0
 HELM_VERSION           ?= v3.17.3
@@ -12,6 +12,10 @@ HELM_VERSION           ?= v3.17.3
 override PROTOC_VERSION := 3.21.12
 PROTOC_RELEASE := 21.12
 MDTOC_VERSION          ?= v1.4.0
+SETUP_ENVTEST_VERSION  ?= v0.25.1
+# Matches the k8s.io/api version operator/go.mod pins, so the fake apiserver
+# understands the same schema the operator was built and tested against.
+ENVTEST_K8S_VERSION    ?= 1.37.0
 
 # Install tools into an explicit bin dir and put it ahead on PATH so callers
 # (including submakes) resolve the pinned binaries. Defaults to GOPATH/bin.
@@ -30,6 +34,7 @@ HELM           := $(TOOLS_BIN_DIR)/helm
 PROTOC         := $(TOOLS_BIN_DIR)/protoc
 MDTOC          := $(TOOLS_BIN_DIR)/mdtoc
 MDTOC_VERSION_STAMP := $(TOOLS_BIN_DIR)/.mdtoc-version
+SETUP_ENVTEST  := $(TOOLS_BIN_DIR)/setup-envtest
 
 # A tool that type-checks our source has to be built with at least our Go
 # version: golangci-lint refuses to start when it was built with an older one,
@@ -86,5 +91,8 @@ $(MDTOC): force-mdtoc-version-check
 	  printf '%s\n' "$(MDTOC_VERSION)" > "$(MDTOC_VERSION_STAMP)"; \
 	fi
 
+$(SETUP_ENVTEST):
+	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
+
 .PHONY: install-tools
-install-tools: $(CONTROLLER_GEN) $(GOLANGCI_LINT) $(ADDLICENSE) $(GOVULNCHECK) $(HELM) $(MDTOC)
+install-tools: $(CONTROLLER_GEN) $(GOLANGCI_LINT) $(ADDLICENSE) $(GOVULNCHECK) $(HELM) $(MDTOC) $(SETUP_ENVTEST)

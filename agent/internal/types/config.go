@@ -6,6 +6,7 @@ package types
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -17,13 +18,15 @@ const CheckpointBasePath = "/checkpoints"
 
 // AgentConfig holds static checkpoint settings plus runtime fields populated at startup.
 type AgentConfig struct {
-	NodeName          string          `yaml:"-"`
-	HostKernelVersion string          `yaml:"-"`
-	Storage           StorageSpec     `yaml:"storage"`
-	Overlay           OverlaySettings `yaml:"overlay"`
-	PageBroker        PageBrokerSpec  `yaml:"pageBroker"`
-	Restore           RestoreSpec     `yaml:"restore"`
-	CRIU              CRIUSettings    `yaml:"criu"`
+	NodeName               string          `yaml:"-"`
+	HostKernelVersion      string          `yaml:"-"`
+	CustomStorageAvailable bool            `yaml:"-"`
+	Storage                StorageSpec     `yaml:"storage"`
+	Overlay                OverlaySettings `yaml:"overlay"`
+	PageBroker             PageBrokerSpec  `yaml:"pageBroker"`
+	Checkpoint             CheckpointSpec  `yaml:"checkpoint"`
+	Restore                RestoreSpec     `yaml:"restore"`
+	CRIU                   CRIUSettings    `yaml:"criu"`
 }
 
 func (c *AgentConfig) LoadEnvOverrides() {
@@ -45,8 +48,16 @@ func (c *AgentConfig) Validate() error {
 		return &ConfigError{Field: "storage.basePath", Message: fmt.Sprintf("storage.basePath must be %q", CheckpointBasePath)}
 	}
 	c.Storage.BasePath = basePath
-	if c.PageBroker.Enabled && strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
-		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required when PageBroker is enabled"}
+	if strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
+		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required"}
+	}
+	c.PageBroker.RestoreMode = strings.ToLower(strings.TrimSpace(c.PageBroker.RestoreMode))
+	switch c.PageBroker.RestoreMode {
+	case "":
+		c.PageBroker.RestoreMode = "direct"
+	case "staged", "direct":
+	default:
+		return &ConfigError{Field: "pageBroker.restoreMode", Message: "pageBroker.restoreMode must be staged or direct"}
 	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
@@ -62,6 +73,9 @@ func (c *AgentConfig) Validate() error {
 			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, or empty", c.CRIU.ImageIoMode, "writeback", "direct"),
 		}
 	}
+	if err := c.Checkpoint.Validate(); err != nil {
+		return err
+	}
 	return c.Restore.Validate()
 }
 
@@ -72,8 +86,72 @@ type StorageSpec struct {
 }
 
 type PageBrokerSpec struct {
-	Enabled           bool   `yaml:"enabled"`
+	// RestoreMode selects the restore source. Empty defaults to direct.
+	RestoreMode       string `yaml:"restoreMode"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
+}
+
+// DefaultCheckpointTimeoutSeconds bounds a dump for a config written before the field existed.
+const DefaultCheckpointTimeoutSeconds = 3600
+
+// DefaultCheckpointRetryLimit keeps retry opt-in, so upgrading changes no existing capture.
+const DefaultCheckpointRetryLimit = 0
+
+// maxTimeoutSeconds is the largest value that survives conversion to a time.Duration, which counts
+// nanoseconds in an int64. Past it the multiplication wraps negative, and a negative timeout reads
+// as "no timeout" at every call site — so an absurd value would silently remove the bound it asked
+// for. Roughly 292 years; nothing legitimate comes near it.
+const maxTimeoutSeconds = int64(math.MaxInt64) / int64(time.Second)
+
+// CheckpointSpec holds settings for the CRIU dump.
+type CheckpointSpec struct {
+	// A pointer so absent and zero are distinguishable: every config predating this field omits
+	// it, and an agent upgraded ahead of its ConfigMap has to start — with the guard on.
+	CheckpointTimeoutSeconds *int `yaml:"checkpointTimeoutSeconds"`
+
+	// RetryLimit is the cluster-wide default number of in-place retries for a failed capture,
+	// used when the capture request names none. Absent is read as DefaultCheckpointRetryLimit.
+	RetryLimit *int `yaml:"retryLimit"`
+}
+
+// CheckpointTimeout bounds one dump, defaulting when the config omits it.
+func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
+	if c.CheckpointTimeoutSeconds == nil {
+		return DefaultCheckpointTimeoutSeconds * time.Second
+	}
+	return time.Duration(*c.CheckpointTimeoutSeconds) * time.Second
+}
+
+// ResolveRetryLimit returns the retries a capture may take. The request's own value wins when it
+// has one — including an explicit 0, which asks for no retry — and absent falls back to the
+// cluster default.
+func (c *CheckpointSpec) ResolveRetryLimit(requested *int32) int {
+	if requested != nil {
+		return int(*requested)
+	}
+	if c.RetryLimit != nil {
+		return *c.RetryLimit
+	}
+	return DefaultCheckpointRetryLimit
+}
+
+func (c *CheckpointSpec) Validate() error {
+	if c.RetryLimit != nil && *c.RetryLimit < 0 {
+		return &ConfigError{Field: "retryLimit", Message: "retryLimit must not be negative"}
+	}
+	if c.CheckpointTimeoutSeconds == nil {
+		return nil
+	}
+	if *c.CheckpointTimeoutSeconds <= 0 {
+		return &ConfigError{Field: "checkpointTimeoutSeconds", Message: "checkpointTimeoutSeconds must be greater than zero"}
+	}
+	if int64(*c.CheckpointTimeoutSeconds) > maxTimeoutSeconds {
+		return &ConfigError{
+			Field:   "checkpointTimeoutSeconds",
+			Message: fmt.Sprintf("checkpointTimeoutSeconds must not exceed %d", maxTimeoutSeconds),
+		}
+	}
+	return nil
 }
 
 // RestoreSpec holds settings for the CRIU restore process.
@@ -96,6 +174,12 @@ func (c *RestoreSpec) RestoreTimeout() time.Duration {
 func (c *RestoreSpec) Validate() error {
 	if c.RestoreTimeoutSeconds <= 0 {
 		return &ConfigError{Field: "restoreTimeoutSeconds", Message: "restoreTimeoutSeconds must be greater than zero"}
+	}
+	if int64(c.RestoreTimeoutSeconds) > maxTimeoutSeconds {
+		return &ConfigError{
+			Field:   "restoreTimeoutSeconds",
+			Message: fmt.Sprintf("restoreTimeoutSeconds must not exceed %d", maxTimeoutSeconds),
+		}
 	}
 	return nil
 }

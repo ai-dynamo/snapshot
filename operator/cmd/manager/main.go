@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -24,14 +25,25 @@ var version = "dev"
 func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
+	storageConfigPath := flag.String("snapshot-storage-config", "", "Path to resolved storage configuration shared with PageBroker")
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
+	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
 	flag.Parse()
+	storeID := mustStoreID(*storageConfigPath)
+	artifactCleanupConfig.StoreID = storeID
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
 		os.Exit(1)
 	}
+	if err := cuInterposeConfig.Validate(); err != nil {
+		ctrl.Log.Error(err, "invalid cuinterpose configuration")
+		os.Exit(1)
+	}
 
 	ctrl.Log.Info("starting snapshot operator", "version", version)
+	if storeID != "" {
+		ctrl.Log.Info("configured PVC store", "storeID", storeID)
+	}
 
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -75,6 +87,7 @@ func main() {
 	}
 
 	maintenanceQueue, err := maintenance.NewQueue(
+		context.Background(),
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		mgr.GetEventRecorderFor("podsnapshotcontent-artifact-cleanup"),
@@ -95,9 +108,10 @@ func main() {
 	}
 
 	snapshotJobReconciler := &controller.SnapshotJobReconciler{
-		Client:             mgr.GetClient(),
-		NonCacheReadClient: mgr.GetAPIReader(),
-		Recorder:           mgr.GetEventRecorderFor("snapshotjob-controller"),
+		Client:               mgr.GetClient(),
+		NonCacheReadClient:   mgr.GetAPIReader(),
+		Recorder:             mgr.GetEventRecorderFor("snapshotjob-controller"),
+		CuInterposeContainer: *cuInterposeConfig,
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")

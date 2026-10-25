@@ -21,27 +21,58 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Written by push-artifacts.yaml on main; read-only here. See the comment on
+  # CACHE_REF_PREFIX there for why this is not the Actions cache.
+  CACHE_REF_PREFIX: ghcr.io/ai-dynamo/snapshot/cache
+  # The branch this change targets, whose cache it reads. base_ref is set on a
+  # pull request; ref_name covers a push to main.
+  CACHE_BRANCH: ${{ github.base_ref || github.ref_name }}
+
 jobs:
+  cuinterpose:
+    name: cuinterpose CPU checks
+    needs: check
+    runs-on: ubuntu-24.04
+    env:
+      SNAPSHOT_CUINTERPOSE_TEST_IMAGE: snapshot-cuinterpose-test:ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make -C agent cuinterpose-test TEST_IMAGE="$SNAPSHOT_CUINTERPOSE_TEST_IMAGE"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: true
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - name: Check generated installer against the image payload
+        working-directory: operator
+        run: go test ./internal/protocol -run '^TestCuInterposeInstallerImage' -count=1 -v
+
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
             go.work.sum
       - run: make test
+      - run: make test-integration
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -49,12 +80,12 @@ jobs:
       - run: make build
 
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -65,12 +96,12 @@ jobs:
   # framework guide manifests against the restore-pod contract. Seconds to
   # run, so they gate every pull request rather than only the GPU e2e flows.
   e2e-static:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV_LINK_MODE: copy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.10.11"
           checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
@@ -78,18 +109,31 @@ jobs:
           download-from-astral-mirror: "false"
       - run: |
           uv run --locked --project e2e pytest \
+            e2e/tests/test_agent_container.py \
+            e2e/tests/test_cpu_restore_failure_probe.py \
             e2e/tests/test_benchmark.py \
             e2e/tests/test_benchmark_outcomes.py \
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
+            e2e/tests/test_inference.py \
+            e2e/tests/test_pod_status_writers.py \
+            e2e/tests/test_prune_ghcr.py \
+            e2e/tests/test_required_tests.py \
+            e2e/tests/test_resolve_snapshot_image_tag.py \
+            e2e/tests/test_restored_state.py \
             e2e/tests/test_runtime_image_id.py \
+            e2e/tests/test_setup_chart_command.py \
+            e2e/tests/test_setup_helm_overrides.py \
+            e2e/tests/test_upgrade_e2e_gate.py \
+            e2e/tests/test_upgrade_harness.py \
+            e2e/tests/test_workload_node_targeting.py \
             e2e/tests/test_workload_scripts.py -vv
 
   # Runs on every pull request so cross-cutting changes (shared workflows, the
   # history writer's output shape) cannot silently break the dashboard.
   benchmark-dashboard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -115,7 +159,7 @@ jobs:
 
   helm-test:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: helm plugin install https://github.com/helm-unittest/helm-unittest
@@ -123,11 +167,30 @@ jobs:
 
   pagebroker-image:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Read-only, and deliberately so: this job reads the layer cache that
+      # push-artifacts.yaml writes from main. Letting a pull request write it
+      # would let one poison every build that reads it afterwards.
+      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # A pull request from a fork gets a token that cannot read the package.
+      # cache-from treats that as a miss and builds cold, which is what this
+      # job did unconditionally before, so there is nothing to fall back from.
+      - name: Log in to GHCR
+        continue-on-error: true
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - run: |
-          make docker-build-pagebroker \
-            DOCKER_BUILD_ARGS="--cache-from=type=gha,scope=pagebroker \
-              --cache-to=type=gha,scope=pagebroker,mode=max"
+          set -euo pipefail
+          # Assigned, not inlined into the argument: a command substitution
+          # that fails inside a simple command does not trip `set -e`, so an
+          # inline call would drop the cache flags and still build.
+          cache_flags="$(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
+          make docker-build-pagebroker DOCKER_BUILD_ARGS="${cache_flags}"

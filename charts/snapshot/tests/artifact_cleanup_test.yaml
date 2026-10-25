@@ -31,6 +31,9 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].args[5]
           value: --artifact-cleanup-backend-type=pvc
+      - equal:
+          path: spec.template.spec.containers[0].args[6]
+          value: --artifact-cleanup-task-timeout=10m
 
   - it: carries every non-default cleanup setting to the operator
     set:
@@ -38,6 +41,7 @@ tests:
       operator.artifactCleanup.batchSize: 7
       operator.artifactCleanup.listAttempts: 4
       operator.artifactCleanup.workers: 8
+      operator.artifactCleanup.taskTimeout: 3m
     asserts:
       - equal:
           path: spec.template.spec.containers[0].args[1]
@@ -54,6 +58,9 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].args[5]
           value: --artifact-cleanup-backend-type=pvc
+      - equal:
+          path: spec.template.spec.containers[0].args[6]
+          value: --artifact-cleanup-task-timeout=3m
 
   - it: hardens the root-running artifact cleanup manager
     asserts:
@@ -75,7 +82,7 @@ tests:
           value: 50m
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
-          value: 128Mi
+          value: 256Mi
 
   - it: omits the manager seccomp profile for the OpenShift anyuid SCC
     set:

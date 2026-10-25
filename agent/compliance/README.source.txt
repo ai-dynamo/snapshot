@@ -14,6 +14,16 @@ Upstream source for the third-party components redistributed in this image.
   go/vendor/   Source for the Go modules linked into the binaries in this
                image; modules.txt records the exact module set.
 
+CuInterpose frontend, core, coordinator, and launcher sources are in
+/legal/cuinterpose/source. Every vendored Rust dependency, the standard-library
+sources, and the pinned toolchain's license notices are in /legal/cuinterpose/rust.
+Cargo.lock records the exact dependency set, including build/test and other-target
+sources that are not linked into the Linux runtime. NOTICES.txt contains each
+vendored component's license texts and notices plus Rust's runtime inventory, and
+is included in /legal/THIRD-PARTY.txt. The builder pins Rust 1.95.0 by container
+digest and records its version in toolchain-version.txt. Keeping the matching
+standard-library source is part of this image's source-bundling policy.
+
 Source for the base image's own contents is published by NVIDIA and is not
 duplicated here:
 

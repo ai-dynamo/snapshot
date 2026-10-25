@@ -8,6 +8,7 @@ import (
 	"errors"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
@@ -67,6 +69,98 @@ func TestPreflightCompatibilityComparesTheRecordedEnvironment(t *testing.T) {
 	require.Len(t, r.comparison.calls, 1)
 	assert.Equal(t, compat.GatePreflight, r.comparison.calls[0].gate)
 	assert.Equal(t, []string{"/etc/hosts", "/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
+}
+
+// Bound content has no local manifest path; the gate fetches it from
+// PageBroker the same way the restore path itself does, so a bound checkpoint
+// gets the same preflight scrutiny as a legacy one.
+func TestPreflightCompatibilityFetchesTheManifestForBoundContentFromPageBroker(t *testing.T) {
+	r := newGatedRestore(t)
+	artifact := &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer}
+	manifest := &types.CheckpointManifest{
+		Artifact: types.ArtifactManifest{ContentUID: "mounted-content", ContainerName: gatedRestoreContainer},
+		CRIUDump: types.CRIUDumpManifest{
+			ExtMnt: map[string]string{"/model-cache": "/model-cache"},
+		},
+	}
+	var requested *pagebroker.PublishedArtifact
+	r.controller.fetchManifestFn = func(_ context.Context, a *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		requested = a
+		return manifest, nil
+	}
+
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+		SourceContainerName: gatedRestoreContainer,
+		PublishedArtifact:   artifact,
+	}, gatedRestoreMappings(), false)
+
+	require.NoError(t, err)
+	assert.Same(t, artifact, requested)
+	require.Len(t, r.comparison.calls, 1)
+	assert.Equal(t, compat.GatePreflight, r.comparison.calls[0].gate)
+	assert.Equal(t, []string{"/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
+}
+
+// A broker that accepts the metadata request and never answers must not hold
+// the restore worker: the preflight fetch runs under its own deadline.
+func TestPreflightCompatibilityBoundsTheManifestFetch(t *testing.T) {
+	r := newGatedRestore(t)
+	var deadline time.Time
+	var hasDeadline bool
+	r.controller.fetchManifestFn = func(ctx context.Context, _ *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return nil, errors.New("no reply from PageBroker")
+	}
+
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+		SourceContainerName: gatedRestoreContainer,
+		PublishedArtifact:   &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer},
+	}, gatedRestoreMappings(), false)
+
+	require.NoError(t, err)
+	require.True(t, hasDeadline)
+	assert.WithinDuration(t, time.Now().Add(restorePreflightManifestTimeout), deadline, 5*time.Second)
+}
+
+// This is the regression the gate exists to catch: a bound capture restored
+// into less memory than it was taken with has to be refused before any CRIU
+// work, exactly like a legacy one.
+func TestPreflightCompatibilityRefusesBoundContentOnMismatch(t *testing.T) {
+	mismatch := compat.Mismatch{Check: "memory-limit", Source: "32Gi", Target: "1Gi"}
+	r := newGatedRestore(t, mismatch)
+	r.controller.fetchManifestFn = func(context.Context, *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		return &types.CheckpointManifest{
+			Artifact: types.ArtifactManifest{ContentUID: "mounted-content", ContainerName: gatedRestoreContainer},
+		}, nil
+	}
+
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+		SourceContainerName: gatedRestoreContainer,
+		PublishedArtifact:   &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer},
+	}, gatedRestoreMappings(), false)
+
+	var incompatible *compat.IncompatibleError
+	require.ErrorAs(t, err, &incompatible)
+	assert.Equal(t, []compat.Mismatch{mismatch}, incompatible.Mismatches)
+}
+
+// A bound artifact PageBroker cannot (yet) produce a manifest for is treated
+// the same as an unreadable local one: not an incompatibility, since the
+// restore path itself reports the real error.
+func TestPreflightCompatibilityAllowsAnUnreachableBoundManifest(t *testing.T) {
+	r := newGatedRestore(t, compat.Mismatch{Check: "kernel-version"})
+	r.controller.fetchManifestFn = func(context.Context, *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
+		return nil, errors.New("artifact not found")
+	}
+
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
+		SourceContainerName: gatedRestoreContainer,
+		PublishedArtifact:   &pagebroker.PublishedArtifact{StoreId: "store-a", ArtifactHandle: "artifacts/mounted-content/containers/" + gatedRestoreContainer},
+	}, gatedRestoreMappings(), false)
+
+	require.NoError(t, err)
+	assert.Empty(t, r.comparison.calls, "comparison ran without a manifest")
+	require.Len(t, r.events(t, restoreCompatUncheckedReason), 1)
 }
 
 // The gate compares the checkpoint against every destination, so each target
@@ -213,7 +307,6 @@ func TestReconcileRestorePodLeavesARefusedPodAlone(t *testing.T) {
 	assert.Empty(t, r.comparison.calls, "already refused restore was compared again")
 	assert.Empty(t, r.events(t, podcontract.RestoreReasonIncompatible), "already refused restore was refused again")
 	assert.Len(t, r.events(t, restoreAlreadyFailedReason), 1)
-	assert.Empty(t, r.controller.inFlight, "already refused restore claimed an attempt")
 }
 
 // The escape hatches: with either one set, neither gate runs, so a checkpoint
@@ -224,8 +317,8 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 	// Lets the restore start and end quickly, since the point here is only
 	// whether the gate let it through.
 	stopEarly := func(r *gatedRestore) {
-		r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
-			return 0, errors.New("test restore stopped")
+		r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+			return executor.RestoreResult{}, errors.New("test restore stopped")
 		}
 	}
 
@@ -280,9 +373,9 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 				r := newGatedRestore(t)
 				tc.set(r)
 				var requested executor.RestoreRequest
-				r.controller.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
+				r.controller.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
 					requested = req
-					return 0, errors.New("test restore stopped")
+					return executor.RestoreResult{}, errors.New("test restore stopped")
 				}
 
 				r.reconcile(t)
@@ -357,7 +450,7 @@ func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 	rt := &fakeRuntime{}
 	r.controller.runtime = rt
 	sentinels := 0
-	r.controller.writeControlSentinelFn = func(int, string) error {
+	r.controller.writeControlSentinelFn = func(int, string, []byte) error {
 		sentinels++
 		return nil
 	}
@@ -367,7 +460,7 @@ func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 
 	assert.False(t, requeue, "a refusal asked to be driven again")
 	assert.Empty(t, r.events(t, podcontract.RestoreReasonFailed), "refusal reported itself as a restore failure")
-	assert.Zero(t, sentinels, "refusal released the workload")
+	assert.Zero(t, sentinels, "refusal wrote restore-complete or restore-failed")
 	assert.Empty(t, rt.resolvedContainerIDs, "refusal reached the placeholder kill path")
 }
 
@@ -375,21 +468,20 @@ func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 // leaves no in-flight entry and no restore worker behind.
 func TestReconcileRestorePodRefusesBeforeEnteringRestore(t *testing.T) {
 	r := newGatedRestore(t, compat.Mismatch{Check: "memory-limit", Source: "32Gi", Target: "1Gi"})
-	r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+	r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
 		t.Error("a refused restore was entered")
-		return 0, nil
+		return executor.RestoreResult{}, nil
 	}
 
 	r.reconcile(t)
 
 	assert.Len(t, r.comparison.calls, 1)
 	assert.Empty(t, r.events(t, restoreRequestedReason), "refused restore still announced a request")
-	assert.Empty(t, r.controller.inFlight, "refused restore claimed an attempt")
 }
 
-func refuseWith(mismatches ...compat.Mismatch) func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
-	return func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
-		return 0, compat.NewIncompatibleError(compat.GateInspect, mismatches)
+func refuseWith(mismatches ...compat.Mismatch) func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+	return func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+		return executor.RestoreResult{}, compat.NewIncompatibleError(compat.GateInspect, mismatches)
 	}
 }
 

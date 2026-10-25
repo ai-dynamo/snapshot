@@ -20,15 +20,16 @@ DOCKER_BUILD_ARGS ?=
 # committed package baseline would describe a different image than we build on.
 AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfile)
 
-# The agent is x86_64-only (cuda-checkpoint ships no other arch) and the package
-# baseline is captured for this platform, so pin it rather than inheriting
-# whatever the buildx builder defaults to.
+# The agent supports linux/amd64 and linux/arm64, and the package baseline is
+# captured per platform, so pin it rather than inheriting whatever the buildx
+# builder defaults to.
 AGENT_PLATFORM ?= linux/amd64
+AGENT_BASE_PACKAGES = agent/compliance/base-packages$(if $(filter linux/arm64,$(AGENT_PLATFORM)),.arm64).tsv
 
-.PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
+.PHONY: tidy generate test test-integration build lint verify-generate verify-crds verify-toc update-toc verify-troubleshooting-steps check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
-        capture-base-packages verify-base-packages \
-        linux-build linux-test pagebroker-check-generated
+        capture-base-packages verify-base-packages docker-export-agent-bundle \
+        linux-build linux-test pagebroker-check-generated cpu-e2e
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
@@ -47,6 +48,10 @@ test:
 	$(MAKE) -C api test
 	$(MAKE) -C agent test
 	$(MAKE) -C operator test
+
+# Only the operator has envtest-backed admission tests today.
+test-integration:
+	$(MAKE) -C operator test-integration
 
 build:
 	$(MAKE) -C agent build
@@ -96,7 +101,7 @@ verify-crds:
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run
 # after the mutating stages and before the clean-tree assert.
-check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint verify-toc
+check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint verify-toc verify-troubleshooting-steps
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
@@ -122,6 +127,11 @@ update-toc: $(MDTOC)
 verify-toc: $(MDTOC)
 	@sh hack/verify-toc.sh
 
+# Each step the agent can name in a checkpoint or restore failure has a
+# troubleshooting entry; the list is read from agent/internal/executor/step.go.
+verify-troubleshooting-steps:
+	@sh hack/verify-troubleshooting-steps.sh
+
 # Run build/test inside a Linux container (local dev only; CI runs on Linux natively).
 linux-build:
 	docker run --rm \
@@ -129,7 +139,9 @@ linux-build:
 	  -e HOME=/tmp -e GOCACHE=/tmp/go-build \
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
-	  make -C agent build
+	  make -C agent go-build
+	# buildx uses the host Docker connection, which is not passed into the Go container.
+	$(MAKE) -C agent cuinterpose-build
 
 linux-test:
 	docker run --rm \
@@ -138,34 +150,58 @@ linux-test:
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
 	  make -C agent test
+	$(MAKE) -C agent cuinterpose-test
+
+# Build, spin up a k3d cluster, install Snapshot, and run the CPU e2e suite.
+# Needs a linux/amd64 Docker daemon; CI runs the same sequence in e2e-cpu.yaml.
+cpu-e2e:
+	@bash hack/cpu-e2e.sh
 
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
 # changes; verify-base-packages fails the agent build if you forget.
 capture-base-packages:
-	@sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" agent/compliance/base-packages.tsv "$(AGENT_PLATFORM)"
-	@echo "baseline: $$(grep -vc '^#' agent/compliance/base-packages.tsv) packages"
+	@sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" $(AGENT_BASE_PACKAGES) "$(AGENT_PLATFORM)"
+	@echo "baseline: $$(grep -vc '^#' $(AGENT_BASE_PACKAGES)) packages"
 
-# The source delta is computed against the committed baseline, so a base-image
-# bump without a re-capture would silently skew it: packages the new base added
-# would look like ours, and packages it dropped would vanish from the delta. The
-# build would still succeed, with wrong compliance content. Fail instead.
+# Standalone check of the committed baseline, for a base-image bump you want to
+# validate without building the agent. The build enforces it either way: the
+# Dockerfile's base-packages stage runs the same script and fails the same way,
+# which is why this is not a prerequisite of docker-build-agent. Doing it there
+# costs nothing on a warm cache; doing it here needs its own pull.
 verify-base-packages:
 	@set -e; \
 	tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
 	sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" "$$tmp" "$(AGENT_PLATFORM)"; \
-	diff -u agent/compliance/base-packages.tsv "$$tmp" || \
-	  (echo "ERROR: agent/compliance/base-packages.tsv is stale for $(AGENT_BASE_IMAGE) — run 'make capture-base-packages' and commit"; exit 1)
+	diff -u $(AGENT_BASE_PACKAGES) "$$tmp" || \
+	  (echo "ERROR: $(AGENT_BASE_PACKAGES) is stale for $(AGENT_BASE_IMAGE) — run 'make capture-base-packages AGENT_PLATFORM=$(AGENT_PLATFORM)' and commit"; exit 1)
 
-docker-build-agent: verify-base-packages
-	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
+# Shared by the agent image and the bundle export below, which must resolve to
+# the same build up to the agent stage. Held in one variable because a flag
+# that drifted between them would send the export down a different cache path:
+# it would go cold, and then verify a bundle that is not the one being pushed.
+# Only --target and the output differ.
+AGENT_BUILD_FLAGS = --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
 	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
-	  --build-context=api=./api --build-context=compliance=./hack/compliance \
+	  --build-context=api=./api --build-context=compliance=./hack/compliance
+
+docker-build-agent:
+	docker buildx build $(DOCKER_BUILD_ARGS) $(AGENT_BUILD_FLAGS) \
 	  --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
 
+# The restore bundle, extracted to BUNDLE_DEST, for hack/verify-bundle-glibc.sh.
+# Same build as above up to the agent stage, so a warm cache makes this close
+# to free; the point is to get the bundle without putting a CUDA-based image
+# into a Docker daemon just to copy one directory out of it.
+BUNDLE_DEST ?= ./.agent-bundle
+docker-export-agent-bundle:
+	docker buildx build $(DOCKER_BUILD_ARGS) $(AGENT_BUILD_FLAGS) \
+	  --target bundle-export \
+	  --output "type=local,dest=$(BUNDLE_DEST)" agent/
+
 docker-build-operator:
-	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f operator/Dockerfile \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/operator:$(t)) .
 
 docker-build-pagebroker:

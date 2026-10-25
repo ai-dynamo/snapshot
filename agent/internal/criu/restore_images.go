@@ -18,6 +18,7 @@ import (
 	sk_inet "github.com/checkpoint-restore/go-criu/v8/crit/images/sk-inet"
 	sk_unix "github.com/checkpoint-restore/go-criu/v8/crit/images/sk-unix"
 	"golang.org/x/sys/unix"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -95,28 +96,34 @@ func prepareRestoreImageDirForRestoreIDWithMount(
 }
 
 func decodeFilesImage(checkpointPath string) (*crit.CriuImage, error) {
-	path := filepath.Join(checkpointPath, filesImageFilename)
+	return decodeImage(checkpointPath, filesImageFilename, &fdinfo.FileEntry{})
+}
+
+// decodeImage decodes the CRIU image named filename in checkpointPath. Only a
+// regular file is read; a symlink in its place is refused.
+func decodeImage(checkpointPath, filename string, entryType proto.Message) (*crit.CriuImage, error) {
+	path := filepath.Join(checkpointPath, filename)
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open %s: %w", filesImageFilename, err)
+		return nil, fmt.Errorf("failed to open %s: %w", filename, err)
 	}
-	filesImage := os.NewFile(uintptr(fd), path)
-	info, err := filesImage.Stat()
+	imageFile := os.NewFile(uintptr(fd), path)
+	info, err := imageFile.Stat()
 	if err != nil {
-		_ = filesImage.Close()
-		return nil, fmt.Errorf("failed to stat %s: %w", filesImageFilename, err)
+		_ = imageFile.Close()
+		return nil, fmt.Errorf("failed to stat %s: %w", filename, err)
 	}
 	if !info.Mode().IsRegular() {
-		_ = filesImage.Close()
-		return nil, fmt.Errorf("%s is not a regular file", filesImageFilename)
+		_ = imageFile.Close()
+		return nil, fmt.Errorf("%s is not a regular file", filename)
 	}
-	image, decodeErr := crit.New(filesImage, nil, "", false, false).Decode(&fdinfo.FileEntry{})
-	closeErr := filesImage.Close()
+	image, decodeErr := crit.New(imageFile, nil, "", false, false).Decode(entryType)
+	closeErr := imageFile.Close()
 	if decodeErr != nil {
-		return nil, fmt.Errorf("failed to decode %s: %w", filesImageFilename, decodeErr)
+		return nil, fmt.Errorf("failed to decode %s: %w", filename, decodeErr)
 	}
 	if closeErr != nil {
-		return nil, fmt.Errorf("failed to close %s: %w", filesImageFilename, closeErr)
+		return nil, fmt.Errorf("failed to close %s: %w", filename, closeErr)
 	}
 	return image, nil
 }

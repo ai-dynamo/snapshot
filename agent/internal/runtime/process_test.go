@@ -4,11 +4,133 @@
 package runtime
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+func TestResolveHostPIDsAfterManifestMapping(t *testing.T) {
+	root := t.TempDir()
+	localProc, hostProc := filepath.Join(root, "local"), filepath.Join(root, "host")
+	namespace := filepath.Join(root, "workload-namespace")
+	otherNamespace := filepath.Join(root, "other-namespace")
+	for _, path := range []string{namespace, otherNamespace} {
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// CRIU restores a workload namespace below the placeholder namespace.
+	// The host view includes one more PID level than nsrestore's proc view.
+	writeProcess(t, localProc, "74", "0", "74 1", namespace)
+	writeProcess(t, localProc, "80", "74", "80 750", namespace)
+	writeProcess(t, hostProc, "901", "0", "901 74 1", namespace)
+	writeProcess(t, hostProc, "902", "901", "902 80 750", namespace)
+	writeProcess(t, hostProc, "903", "0", "903 80 750", otherNamespace)
+	processes, err := ReadProcessTable(localProc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := ResolveManifestPIDsToObservedPIDs(processes, 74, []int{750, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory, err := os.Open(hostProc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	if err := os.Rename(hostProc, hostProc+"-moved"); err != nil {
+		t.Fatal(err)
+	}
+	retained := "/proc/self/fd/" + strconv.Itoa(int(directory.Fd()))
+	got, err := ResolveHostPIDs(retained, localProc, observed)
+	if err != nil || len(got) != 2 || got[0] != 902 || got[1] != 901 {
+		t.Fatalf("host PIDs = %v, %v, want [902 901]", got, err)
+	}
+	for _, pids := range [][]int{{999}, {80, 80}, {0}} {
+		if _, err := ResolveHostPIDs(retained, localProc, pids); err == nil {
+			t.Fatalf("accepted invalid targets %v", pids)
+		}
+	}
+	writeProcess(t, retained, "904", "0", "904 80 750", namespace)
+	if _, err := ResolveHostPIDs(retained, localProc, observed); err == nil {
+		t.Fatal("accepted ambiguous host PID")
+	}
+	for _, pid := range []string{"902", "904"} {
+		if err := os.RemoveAll(filepath.Join(retained, pid)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ResolveHostPIDs(retained, localProc, observed); err == nil {
+		t.Fatal("selected a process from another PID namespace")
+	}
+}
+
+func writeProcess(t *testing.T, procRoot, pid, parent, pids, ns string) {
+	t.Helper()
+	path := filepath.Join(procRoot, pid)
+	if err := os.MkdirAll(filepath.Join(path, "ns"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(ns, filepath.Join(path, "ns/pid")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "status"), []byte("PPid:\t"+parent+"\nNSpid:\t"+pids+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProcessHandleSurvivesStopAndDetectsExit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, "sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	}()
+	files, err := OpenProcessHandles([]int{child.Process.Pid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files[0].Close()
+	if err := unix.PidfdSendSignal(int(files[0].Fd()), unix.SIGSTOP, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	var status unix.WaitStatus
+	if _, err := unix.Wait4(child.Process.Pid, &status, unix.WUNTRACED, nil); err != nil || !status.Stopped() {
+		t.Fatalf("child did not stop: %v, %v", status, err)
+	}
+	hostPIDs, err := ResolveHostPIDs("/proc", "/proc", []int{child.Process.Pid})
+	if err != nil || len(hostPIDs) != 1 || hostPIDs[0] != child.Process.Pid {
+		t.Fatalf("resolve stopped child: %v, %v", hostPIDs, err)
+	}
+	if err := CheckProcessHandles(files); err != nil {
+		t.Fatalf("stopped child reported as exited: %v", err)
+	}
+	if err := unix.PidfdSendSignal(int(files[0].Fd()), unix.SIGKILL, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	_ = child.Wait()
+	if err := CheckProcessHandles(files); err == nil {
+		t.Fatal("accepted an exited and reaped target")
+	}
+	if err := files[0].Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckProcessHandles(files); err == nil {
+		t.Fatal("accepted a closed target descriptor")
+	}
+}
 
 func TestReadProcessFilesystemIDs(t *testing.T) {
 	procRoot := t.TempDir()

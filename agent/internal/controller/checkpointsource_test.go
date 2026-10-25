@@ -7,7 +7,6 @@ import (
 	"context"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -187,7 +187,7 @@ func TestMarkCheckpointReadyPublishesWhatTheCaptureRecorded(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 	path := committedArtifact(t, w, string(content.UID))
 
-	require.NoError(t, w.markCheckpointReady(context.Background(), content, path))
+	require.NoError(t, w.markCheckpointReady(context.Background(), content, path, "", nil))
 
 	assertPublishedTheRecordedSource(t, getContent(t, w, content.Name))
 }
@@ -198,7 +198,7 @@ func TestMarkCheckpointReadyGoesReadyWhenTheManifestCannotBeRead(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 
-	require.NoError(t, w.markCheckpointReady(context.Background(), content, t.TempDir()))
+	require.NoError(t, w.markCheckpointReady(context.Background(), content, t.TempDir(), "", nil))
 
 	got := getContent(t, w, content.Name)
 	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
@@ -210,16 +210,13 @@ func TestFreshCapturePublishesTheSourceItRecorded(t *testing.T) {
 	pod := makeSourcePod()
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
-	w.checkpointFn = func(_ context.Context, params CheckpointParams) error {
+	w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		committedArtifact(t, w, params.ContentUID)
-		return nil
+		return nil, nil
 	}
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
-	require.Eventually(t, func() bool {
-		return getContent(t, w, content.Name).Status.Source != nil
-	}, time.Second, 5*time.Millisecond)
 	assertPublishedTheRecordedSource(t, getContent(t, w, content.Name))
 }
 
@@ -237,7 +234,7 @@ func TestArtifactRecoveryPublishesTheSourceItRecorded(t *testing.T) {
 	w := makeNodeController(t, fc, content, pod)
 	committedArtifact(t, w, string(content.UID))
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	assert.False(t, fc.wasCalled())
 	assertPublishedTheRecordedSource(t, getContent(t, w, content.Name))
@@ -251,7 +248,7 @@ func TestDeferredCommittedCapturePublishesTheSourceItRecorded(t *testing.T) {
 	w := makeNodeController(t, fc, content)
 	committedArtifact(t, w, string(content.UID))
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	assert.False(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)

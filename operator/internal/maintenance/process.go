@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ai-dynamo/snapshot/api/storage/coordination"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	"github.com/go-logr/logr"
@@ -17,6 +18,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+// storeKey returns the coordination.Key this content's maintenance work must
+// serialize under. Legacy content without a store still gets a stable key.
+func storeKey(content *snapshotv1alpha1.PodSnapshotContent) coordination.Key {
+	storeID := ""
+	if content.Spec.Storage != nil {
+		storeID = content.Spec.Storage.StoreID
+	}
+	return coordination.Key{StoreID: storeID, ArtifactUID: string(content.UID)}
+}
 
 // processDeleteContent is idempotent: a content that's already gone, already
 // missing the finalizer, or recreated under the same name with a different
@@ -40,10 +51,12 @@ func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error
 		return nil
 	}
 
-	backend, err := q.backend()
+	backend, err := q.backendForContent(content)
 	if err != nil {
 		return err
 	}
+	unlock := q.locker.Lock(storeKey(content))
+	defer unlock()
 	if err := backend.Delete(ctx, string(content.UID)); err != nil {
 		if errors.Is(err, backends.ErrUnsafeArtifact) {
 			q.recorder.Eventf(content, corev1.EventTypeWarning, ArtifactCleanupBlockedReason,
@@ -78,6 +91,7 @@ func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
 	if enumerationErr != nil {
 		return enumerationErr
 	}
+
 	var sweepErrors []error
 	processed := 0
 	for uid := range candidates {
@@ -88,7 +102,10 @@ func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
 			break
 		}
 		processed++
-		if err := backend.Delete(ctx, uid); err != nil {
+		unlock := q.locker.Lock(coordination.Key{ArtifactUID: uid})
+		err := backend.Delete(ctx, uid)
+		unlock()
+		if err != nil {
 			sweepErrors = append(sweepErrors, err)
 			logger.Error(err, "Unable to reclaim orphan PodSnapshotContent artifact root", "content_uid", uid)
 			continue

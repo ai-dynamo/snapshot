@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A cap at or above the agent memory limit is lowered to fit, never rejected,
+# so no configuration that installs today stops installing. See SNEP-394.
+suite: PageBroker staging headroom
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: defaults leave the staging volume below the agent memory limit
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: 56Gi
+      - equal:
+          path: spec.template.spec.containers[?(@.name=="agent")].resources.limits.memory
+          value: 64Gi
+
+  - it: keeps the volume memory-backed and always bounded
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.medium
+          value: Memory
+      - exists:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+
+  - it: bounds the volume even when pageBroker.staging is explicitly null
+    set:
+      pageBroker.staging: null
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: 56Gi
+
+  # PageBroker writes this volume on staged restore, charged to its own limit,
+  # so the smaller of the two has to hold.
+  - it: follows the PageBroker memory limit when it is the smaller one
+    set:
+      pageBroker.resources.limits.memory: 8Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "7516192768" # 8Gi less an eighth
+
+  # What the CPU e2e cluster sets, with staging untouched.
+  - it: lowers the cap when the agent memory limit is smaller than the default
+    set:
+      daemonset.resources.limits.memory: 2Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "1879048192" # 2Gi less an eighth
+
+  - it: lowers a cap equal to the agent memory limit
+    set:
+      pageBroker.staging.sizeLimit: 64Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "60129542144" # 56Gi
+
+  - it: lowers a cap above the agent memory limit
+    set:
+      pageBroker.staging.sizeLimit: 128Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "60129542144" # 56Gi
+
+  - it: compares across mixed units rather than string-matching suffixes
+    set:
+      pageBroker.staging.sizeLimit: 65536Mi
+      daemonset.resources.limits.memory: 64Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "60129542144" # 56Gi, not the 65536Mi asked for
+
+  - it: leaves a cap that already fits alone
+    set:
+      pageBroker.staging.sizeLimit: 200Gi
+      daemonset.resources.limits.memory: 224Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: 200Gi
+
+  - it: honours a quantity it cannot parse
+    set:
+      pageBroker.staging.sizeLimit: "64e9"
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
+          value: "64e9"

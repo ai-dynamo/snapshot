@@ -107,21 +107,75 @@ func DiscoverVisibleGPUs(ctx context.Context, hostProcPath string, pid int, time
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	output, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "--query-gpu=gpu_uuid,name,driver_version", "--format=csv,noheader")
+	if err != nil {
+		return compat.GPUInfo{}, err
+	}
+	return parseNvidiaSmiGPUs(string(output)), nil
+}
+
+// DiscoverMIGSlices lists the MIG slices a container can see, by running
+// nvidia-smi -L inside its mount and PID namespaces. No DiscoverGPUs path can
+// stand in for it: DRA drops a slice's MIG- UUID, and --query-gpu reports the
+// card a slice is carved from as though it were whole.
+func DiscoverMIGSlices(ctx context.Context, hostProcPath string, pid int) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
+	defer cancel()
+
+	output, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "-L")
+	if err != nil {
+		return nil, err
+	}
+	return parseNvidiaSmiMIGSlices(string(output)), nil
+}
+
+func nsenterNvidiaSMI(ctx context.Context, hostProcPath string, pid int, args ...string) ([]byte, error) {
 	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
 	pidPath := fmt.Sprintf("%s/%d/ns/pid", strings.TrimRight(hostProcPath, "/"), pid)
 	cmd := exec.CommandContext(
 		ctx,
 		"nsenter",
-		fmt.Sprintf("--mount=%s", mountPath),
-		fmt.Sprintf("--pid=%s", pidPath),
-		"--",
-		"nvidia-smi", "--query-gpu=gpu_uuid,name,driver_version", "--format=csv,noheader",
+		append([]string{
+			fmt.Sprintf("--mount=%s", mountPath),
+			fmt.Sprintf("--pid=%s", pidPath),
+			"--",
+			"nvidia-smi",
+		}, args...)...,
 	)
 	output, err := cmd.Output()
 	if err != nil {
-		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
+		return nil, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
 	}
-	return parseNvidiaSmiGPUs(string(output)), nil
+	return output, nil
+}
+
+// parseNvidiaSmiMIGSlices reads the line nvidia-smi -L nests under a card for
+// each of its slices, "  MIG 1g.10gb Device 0: (UUID: MIG-...)", as
+// "1g.10gb MIG-...". A line it cannot take apart is still a slice, so it is
+// reported as printed rather than dropped.
+func parseNvidiaSmiMIGSlices(output string) []string {
+	var slices []string
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "MIG" {
+			continue
+		}
+		slice := strings.Join(fields, " ")
+		if uuid := listedUUID(fields); uuid != "" && len(fields) > 1 {
+			slice = fields[1] + " " + uuid
+		}
+		slices = append(slices, slice)
+	}
+	return slices
+}
+
+func listedUUID(fields []string) string {
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "(UUID:" {
+			return strings.TrimSuffix(fields[i+1], ")")
+		}
+	}
+	return ""
 }
 
 // parseNvidiaSmiGPUs reads the unquoted CSV nvidia-smi writes. Splitting on
@@ -171,7 +225,7 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 	if err != nil {
 		return nil, err
 	}
-	return gpuUUIDsOf(env), nil
+	return GPUUUIDs(env), nil
 }
 
 // DiscoverGPUs resolves the same GPUs as DiscoverGPUUUIDs, in the same
@@ -241,7 +295,7 @@ func discoverGPUs(
 				err,
 			)
 		}
-		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, gpuUUIDsOf(visible))
+		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, GPUUUIDs(visible))
 		if err != nil {
 			return compat.GPUInfo{}, err
 		}
@@ -275,7 +329,7 @@ func discoverGPUs(
 	if err != nil {
 		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 	}
-	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDsOf(visible))
+	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", GPUUUIDs(visible))
 	return visible, nil
 }
 
@@ -301,7 +355,8 @@ func describeGPUs(uuids []string, visible compat.GPUInfo) compat.GPUInfo {
 	return env
 }
 
-func gpuUUIDsOf(env compat.GPUInfo) []string {
+// GPUUUIDs returns device UUIDs in discovery order.
+func GPUUUIDs(env compat.GPUInfo) []string {
 	var uuids []string
 	for _, device := range env.Devices {
 		if device.UUID != "" {
@@ -355,11 +410,12 @@ func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, er
 	return append([]string(nil), visibleUUIDs...), nil
 }
 
-// FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
+// FilterProcesses returns the candidate PIDs with a CUDA driver restore thread.
+// Driver initialization can create that thread without a cuInterpose core runtime.
 // Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
 // --get-state, because --get-state incorrectly matches coordinator processes like
 // cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
-// don't hold CUDA contexts themselves.
+// do not have their own CUDA driver restore thread.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {
@@ -474,9 +530,10 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 	return timings, nil
 }
 
-// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-// helperBinaryPath must be the absolute path to cuda-checkpoint-helper: DefaultHelperBinaryPath
-// on the agent, or filepath.Join(bundleDir, HelperBinaryName) inside the placeholder namespace.
+// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs. It
+// runs inside nsrestore and shares its process group so cancellation reaches the CUDA
+// helper. helperBinaryPath identifies the binary in that namespace, including through
+// an inherited descriptor opened before CRIU restores the workload filesystem.
 func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 

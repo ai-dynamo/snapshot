@@ -5,7 +5,7 @@
 # api/ and agent/ modules used by the operator.
 # Tracks the toolchain pinned in go.work, the three go.mod files, hack/tools.mk,
 # agent/Dockerfile, and the workflows. Move them together, never this one alone.
-FROM golang:1.27-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS builder
+FROM golang:1.27-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS builder
 WORKDIR /workspace
 COPY go.work go.work.sum ./
 COPY api/ api/

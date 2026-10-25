@@ -20,6 +20,8 @@ func bindArtifactCleanupFlags(flags *flag.FlagSet) *operatortypes.ArtifactCleanu
 		"Maximum complete metadata-list attempts per scan")
 	flags.IntVar(&cfg.Workers, "artifact-cleanup-workers", operatortypes.DefaultArtifactWorkers,
 		"Concurrent maintenance workers processing delete-content and sweep work items")
+	flags.DurationVar(&cfg.TaskTimeout, "artifact-cleanup-task-timeout", operatortypes.DefaultArtifactTaskTimeout,
+		"Maximum time one maintenance work item may run before it is abandoned and retried")
 	flags.StringVar(&cfg.BackendType, "artifact-cleanup-backend-type", operatortypes.DefaultArtifactBackendType,
 		"Configured storage backend maintenance routes work items to, matching storage.type")
 	return cfg

@@ -2,15 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Fetches the corresponding source for protobuf, the only third-party component
-# the PageBroker image adds on top of its distroless base. Run in the build
-# stage, on the same libprotobuf-dev install that provided the libprotobuf.a
-# linked into the daemon, so the shipped source is the source of the linked
-# object rather than whatever the archive currently serves.
+# Fetch corresponding source for an installed image dependency. The default
+# remains protobuf, whose development package provides the linked library.
 
 set -eu
 
 OUT=${1:-/legal/source/protobuf}
+PACKAGE=${2:-libprotobuf-dev}
 
 # apt-get source needs deb-src, which Ubuntu's deb822 sources omit by default.
 for f in /etc/apt/sources.list.d/*.sources; do
@@ -26,13 +24,17 @@ apt-get update -qq
 # Pin to the source version of the installed development package. Without the
 # version, apt fetches the archive's current source, which may differ from the
 # code we linked.
-version=$(dpkg-query -W -f='${source:Version}' libprotobuf-dev)
-[ -n "$version" ] || { echo "ERROR: libprotobuf-dev is not installed" >&2; exit 1; }
+if ! version=$(dpkg-query -W -f='${source:Version}' "$PACKAGE") ||
+   ! source=$(dpkg-query -W -f='${source:Package}' "$PACKAGE") ||
+   [ -z "$version" ] || [ -z "$source" ]; then
+    echo "ERROR: $PACKAGE is not installed" >&2
+    exit 1
+fi
 
 mkdir -p "$OUT"
-(cd "$OUT" && apt-get source --only-source --download-only "protobuf=$version")
+(cd "$OUT" && apt-get source --only-source --download-only "$source=$version")
 
 printf '%s\n' "$version" > "$OUT/VERSION"
-cp /usr/share/doc/libprotobuf-dev/copyright "$OUT/copyright"
+cp "/usr/share/doc/$PACKAGE/copyright" "$OUT/copyright"
 
-echo "Fetched protobuf source $version"
+echo "Fetched $source source $version"

@@ -6,9 +6,12 @@ package maintenance
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/api/storage/coordination"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
@@ -35,13 +38,24 @@ type Queue struct {
 	registry          BackendRegistry
 	configuredBackend string
 
+	locker *coordination.Locker
+
 	queue workqueue.TypedRateLimitingInterface[WorkItemKey]
+	// Sweeps use one coalesced work-queue key, so this cursor is advanced by
+	// only one worker at a time. It lets a bounded scan reach blocked attempts.
+	nonTargetCursor types.UID
+	// A metadata scan may span work items; keep its consistent-list continuation
+	// until all pages have been read before considering any deletion.
+	nonTargetScan *nonTargetJobScan
+	// A sweep key is processed by one worker at a time. Avoid repeating the
+	// same permanent-retention warning on every scan.
+	nonTargetRetentionWarned map[types.UID]struct{}
 }
 
 // NewQueue constructs a Queue; register it with the manager (mgr.Add) to run
 // it. It fails if the configured backend has no registered implementation,
 // so an unsupported --artifact-cleanup-backend-type cannot reach readiness.
-func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) (*Queue, error) {
+func NewQueue(ctx context.Context, kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) (*Queue, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -55,12 +69,15 @@ func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record
 		recorder:          recorder,
 		config:            cfg,
 		configuredBackend: configuredBackend,
+		locker:            coordination.NewLocker(),
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[WorkItemKey](),
 			workqueue.TypedRateLimitingQueueConfig[WorkItemKey]{Name: "podsnapshotcontent-maintenance"},
 		),
 	}
-	q.registry.Init(cfg)
+	if err := q.registry.Init(ctx, cfg); err != nil {
+		return nil, err
+	}
 	if _, err := q.backend(); err != nil {
 		return nil, err
 	}
@@ -76,15 +93,27 @@ func (q *Queue) backend() (Backend, error) {
 	return backend, nil
 }
 
+// backendForContent prevents a missing artifact on another PVC from counting as completed cleanup.
+func (q *Queue) backendForContent(content *snapshotv1alpha1.PodSnapshotContent) (Backend, error) {
+	if content.Spec.Storage != nil {
+		if err := coordination.RequireStoreMatch(content.Spec.Storage.StoreID, q.config.StoreID); err != nil {
+			return nil, fmt.Errorf("maintenance for content %s: %w", content.Name, err)
+		}
+	}
+	return q.backend()
+}
+
 // EnqueueDeleteContent schedules cleanup for one content. Repeated calls for
 // the same key coalesce while it is queued or being processed.
 func (q *Queue) EnqueueDeleteContent(name string, uid types.UID) {
 	q.queue.Add(newDeleteContentKey(name, uid))
 }
 
-// EnqueueSweep schedules an orphan sweep; repeated calls coalesce.
+// EnqueueSweep schedules the independent content and failed-attempt sweeps.
+// Each gets its own work-item deadline, and repeated calls coalesce.
 func (q *Queue) EnqueueSweep() {
 	q.queue.Add(newSweepKey())
+	q.queue.Add(newNonTargetSweepKey())
 }
 
 // Start implements manager.Runnable: an immediate sweep, then one per
@@ -136,10 +165,10 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 		return true
 	}
 
-	if err := q.process(ctx, key, logger); err != nil {
+	if err := q.processWithDeadline(ctx, key, logger); err != nil {
 		switch {
 		case ctx.Err() != nil:
-		case key.Mode == ModeSweep:
+		case key.Mode == ModeSweep || key.Mode == ModeNonTargetSweep:
 			logger.Error(err, "Maintenance sweep failed; retrying at the next scan interval")
 		case q.queue.NumRequeues(key) < maxKeyRetries:
 			logger.Error(err, "Maintenance work item failed; requeuing with backoff",
@@ -156,12 +185,34 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 	return true
 }
 
+// processWithDeadline turns a panic or an overrun into an ordinary failure of
+// this one work item, so it is retried instead of stopping the operator or
+// holding a worker indefinitely.
+func (q *Queue) processWithDeadline(ctx context.Context, key WorkItemKey, logger logr.Logger) (err error) {
+	taskCtx, cancel := context.WithTimeout(ctx, q.config.TaskTimeout)
+	defer cancel()
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("maintenance work item panicked: %v", r)
+			logger.Error(err, "Recovered from a panic in a maintenance work item",
+				"mode", key.Mode, "name", key.Name, "stack", string(debug.Stack()))
+		}
+	}()
+	return q.process(taskCtx, key, logger)
+}
+
 func (q *Queue) process(ctx context.Context, key WorkItemKey, logger logr.Logger) error {
 	switch key.Mode {
 	case ModeDeleteContent:
 		return q.processDeleteContent(ctx, key)
 	case ModeSweep:
 		return q.processSweep(ctx, logger)
+	case ModeNonTargetSweep:
+		backend, err := q.backend()
+		if err != nil {
+			return err
+		}
+		return q.processNonTargetArtifactSweep(ctx, backend, logger)
 	default:
 		return fmt.Errorf("unknown maintenance mode %q", key.Mode)
 	}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/procfs"
+	"golang.org/x/sys/unix"
 )
 
 // HostProcPath is the mount point for the host's /proc in DaemonSet pods.
@@ -270,6 +271,105 @@ func ResolveManifestPIDsToObservedPIDs(processes []ProcessDetails, restoredPID i
 	}
 
 	return restorePIDs, nil
+}
+
+// OpenProcessHandles opens pidfds in the caller's PID namespace.
+// The caller must keep them open through host PID resolution and request submission.
+func OpenProcessHandles(pids []int) ([]*os.File, error) {
+	files := make([]*os.File, 0, len(pids))
+	for _, pid := range pids {
+		fd, err := unix.PidfdOpen(pid, 0)
+		if err != nil {
+			for _, file := range files {
+				file.Close()
+			}
+			return nil, fmt.Errorf("open pidfd for process %d: %w", pid, err)
+		}
+		files = append(files, os.NewFile(uintptr(fd), "pidfd"))
+	}
+	return files, nil
+}
+
+// CheckProcessHandles rejects targets that exited while their host PIDs were resolved.
+func CheckProcessHandles(files []*os.File) error {
+	for _, file := range files {
+		if file == nil || int(file.Fd()) < 0 {
+			return fmt.Errorf("invalid target pidfd")
+		}
+		target := []unix.PollFd{{Fd: int32(file.Fd()), Events: unix.POLLIN}}
+		var err error
+		for {
+			_, err = unix.Poll(target, 0)
+			if err != unix.EINTR {
+				break
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("poll target pidfd: %w", err)
+		}
+		if target[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0 {
+			return fmt.Errorf("target process exited during host PID resolution")
+		}
+		if target[0].Revents != 0 {
+			return fmt.Errorf("invalid target pidfd")
+		}
+	}
+	return nil
+}
+
+// ResolveHostPIDs maps PIDs observed through procRoot to the host proc view.
+// Match the process's own namespace because CRIU can restore it below nsrestore.
+func ResolveHostPIDs(hostProcRoot, procRoot string, pids []int) ([]int, error) {
+	hostProcesses, err := ReadProcessTable(hostProcRoot)
+	if err != nil {
+		return nil, err
+	}
+	hostPIDs := make([]int, len(pids))
+	seen := make(map[int]bool, len(pids))
+	for i, pid := range pids {
+		if seen[pid] {
+			return nil, fmt.Errorf("duplicate target PID %d", pid)
+		}
+		seen[pid] = true
+		hostPIDs[i], err = resolveHostPID(hostProcRoot, procRoot, pid, hostProcesses)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return hostPIDs, nil
+}
+
+func resolveHostPID(hostProcRoot, procRoot string, pid int, hostProcesses []ProcessDetails) (int, error) {
+	target, err := ReadProcessDetails(procRoot, pid)
+	if err != nil {
+		return 0, err
+	}
+	namespace, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(pid), "ns/pid"))
+	if err != nil {
+		return 0, fmt.Errorf("stat PID namespace for process %d: %w", pid, err)
+	}
+	hostPID := 0
+	for _, process := range hostProcesses {
+		if process.InnermostPID != target.InnermostPID {
+			continue
+		}
+		current, err := ReadProcessDetails(hostProcRoot, process.ObservedPID)
+		if err != nil || current.InnermostPID != target.InnermostPID {
+			continue
+		}
+		candidate, err := os.Stat(filepath.Join(hostProcRoot, strconv.Itoa(process.ObservedPID), "ns/pid"))
+		if err != nil || !os.SameFile(namespace, candidate) {
+			continue
+		}
+		if hostPID != 0 {
+			return 0, fmt.Errorf("ambiguous host PID for process %d", pid)
+		}
+		hostPID = process.ObservedPID
+	}
+	if hostPID == 0 {
+		return 0, fmt.Errorf("process %d not found in host proc", pid)
+	}
+	return hostPID, nil
 }
 
 // ProcessTreePIDs walks the process tree rooted at rootPID and returns all PIDs.

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Delete e2e vCluster
+description: Delete the per-run vCluster and its host namespace. Best-effort.
+
+inputs:
+  host_kubeconfig:
+    description: Host cluster kubeconfig, captured before the vCluster kubeconfig was exported.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cleanup e2e vCluster
+      shell: bash
+      env:
+        KUBECONFIG: ${{ inputs.host_kubeconfig }}
+      run: |
+        set +e
+        helm uninstall vcluster-hpm -n "${HOST_NAMESPACE}"
+        if command -v vcluster >/dev/null 2>&1; then
+          vcluster delete "${VCLUSTER_NAME}" --namespace "${HOST_NAMESPACE}"
+        fi
+        kubectl delete namespace "${HOST_NAMESPACE}" --ignore-not-found --wait=false
