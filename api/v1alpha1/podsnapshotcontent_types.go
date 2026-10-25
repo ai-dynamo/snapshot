@@ -37,12 +37,6 @@ type PodSnapshotContentSpec struct {
 	// Like the rest of spec it cannot be added, removed or changed after creation.
 	// +optional
 	Storage *CheckpointStorageBinding `json:"storage,omitempty"`
-
-	// CheckpointRetryLimit is copied from the PodSnapshot that requested this
-	// capture. Unset means the agent's cluster-wide default applies.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
 }
 
 // PodSnapshotReference is a cross-namespace reference to a PodSnapshot.

@@ -397,7 +397,6 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 				PodRef:   snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: snap.Spec.Source.PodRef.Containers},
 				NodeName: pod.Spec.NodeName,
 			},
-			CheckpointRetryLimit: snap.Spec.CheckpointRetryLimit,
 		},
 	}
 }
