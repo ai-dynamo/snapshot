@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Build these images from the same checkout with the production Dockerfile.
-ARG BUILD_IMAGE
-ARG RUNTIME_IMAGE
+ARG BUILD_IMAGE=local/pagebroker:integration-dependencies
+ARG RUNTIME_IMAGE=local/pagebroker:integration
 FROM ${BUILD_IMAGE} AS tests
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv openssl \
