@@ -628,15 +628,16 @@ func TestValidateRestoreManifest(t *testing.T) {
 	}
 }
 
-func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
+func TestRestoreInNamespaceMultiGPUPreflight(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		cuInterposePIDs []int // nil means native CUDA, empty means frontend only
-		wantStopsAt     string
+		legacyArtifact  bool
 	}{
-		{name: "native multi-GPU missing", wantStopsAt: "multi-GPU CUDA checkpoint is missing"},
-		{name: "frontend-only multi-GPU missing", cuInterposePIDs: []int{}, wantStopsAt: "multi-GPU CUDA checkpoint is missing"},
-		{name: "coordinator multi-GPU missing", cuInterposePIDs: []int{43}, wantStopsAt: "invalid target pod IP"},
+		{name: "native"},
+		{name: "frontend only", cuInterposePIDs: []int{}},
+		{name: "coordinator", cuInterposePIDs: []int{43}},
+		{name: "artifact captured by an older agent", legacyArtifact: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			checkpointDir := t.TempDir()
@@ -651,18 +652,23 @@ func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 				manifest.CuInterpose = testCuInterposeIdentity()
 				manifest.CuInterpose.PIDs = tc.cuInterposePIDs
 			}
-			// Stopping at IP validation exercises jobfile selection in the real restore
-			// preflight without reaching namespace or CUDA operations.
+			// Stopping at IP validation exercises the real restore preflight without
+			// reaching namespace or CUDA operations.
 			manifest.CRIUDump.CRIU.TcpEstablished = true
 			t.Setenv(criu.InetRemapEnvVar, "")
 			if err := types.WriteManifest(checkpointDir, manifest); err != nil {
 				t.Fatal(err)
 			}
+			if tc.legacyArtifact {
+				if err := os.WriteFile(filepath.Join(checkpointDir, "cuda-checkpoint-job"), []byte("job-state"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			_, err := RestoreInNamespace(context.Background(), RestoreOptions{
 				CheckpointPath: checkpointDir, TargetPodIP: "invalid",
 			}, testr.New(t))
-			if err == nil || !strings.Contains(err.Error(), tc.wantStopsAt) {
-				t.Fatalf("RestoreInNamespace() = %v, want preflight to stop at %q", err, tc.wantStopsAt)
+			if err == nil || !strings.Contains(err.Error(), "invalid target pod IP") {
+				t.Fatalf("RestoreInNamespace() = %v, want preflight to reach target IP validation", err)
 			}
 		})
 	}
