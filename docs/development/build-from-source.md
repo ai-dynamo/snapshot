@@ -82,3 +82,8 @@ Python test harness, GPU, or cluster.
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
+
+PageBroker integration tests have a separate
+[automated workflow](../../hack/pagebroker-integration/README.md). They exercise
+real transfers and the daemon protocol without adding service dependencies to
+component unit tests.
