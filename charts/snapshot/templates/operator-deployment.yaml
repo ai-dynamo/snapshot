@@ -19,10 +19,14 @@ spec:
       labels:
         {{- include "snapshot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: operator
-      {{- if .Values.openshift.enabled }}
       annotations:
+        # Rolls the operator when the S3/storage settings it reads at
+        # startup change, so an upgrade doesn't leave it running on stale
+        # config and silently skip rewriting PageBroker's ConfigMap.
+        checksum/config: {{ include "snapshot.operatorConfigChecksum" . }}
+        {{- if .Values.openshift.enabled }}
         openshift.io/required-scc: anyuid
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.operatorServiceAccountName" . }}
       {{- with .Values.image.operator.imagePullSecrets }}
