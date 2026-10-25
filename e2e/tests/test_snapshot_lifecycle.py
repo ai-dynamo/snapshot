@@ -452,6 +452,44 @@ def test_restored_workload_logs_and_exit_reach_kubernetes(
 
 @pytest.mark.cpu
 @pytest.mark.snapshot_success
+def test_pod_deletion_stops_the_restored_workload_gracefully(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # Deleting the Pod sends SIGTERM to the container's PID 1, the restore
+    # proxy, which forwards it to the restored workload. A workload that
+    # handles it exits with its own code within the grace period; SIGKILL at
+    # the end of the grace period would end the container with 137 instead.
+    if not snap.restore_proxy():
+        pytest.skip("only the restore proxy forwards signals to the restored workload")
+    grace_seconds = 30
+    try:
+        _, source_node, _ = create_valid_checkpoint(config, run, gpu=False, handle_sigterm=True)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        restore = snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node)
+        restore["spec"]["terminationGracePeriodSeconds"] = grace_seconds
+        k8s.create_pod(restore)
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+
+        started = time.monotonic()
+        exit_code = snap.delete_pod_and_wait_for_exit(
+            config.namespace, run.restore_pod, timeout=grace_seconds + 30
+        )
+        print(f"restored workload exited with {exit_code} after {time.monotonic() - started:.1f}s")
+        assert exit_code == snap.SIGTERM_EXIT
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
 def test_restored_workload_keeps_its_own_mount_at_the_securityfs_path(
     config: k8s.E2EConfig,
     run: snap.TestRun,
@@ -887,8 +925,11 @@ def create_valid_checkpoint(
     *,
     gpu: bool,
     memory_limit: str | None = None,
+    handle_sigterm: bool = False,
 ) -> tuple[object, str, int]:
-    source, source_node = create_ready_source(config, run, gpu=gpu, memory_limit=memory_limit)
+    source, source_node = create_ready_source(
+        config, run, gpu=gpu, memory_limit=memory_limit, handle_sigterm=handle_sigterm
+    )
     checkpoint_observations = snap.wait_for_state_observations(
         config.namespace,
         run.source_pod,
@@ -911,6 +952,7 @@ def create_ready_source(
     gpu: bool,
     annotations: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    handle_sigterm: bool = False,
 ) -> tuple[object, str]:
     k8s.create_pod(
         snap.source_pod(
@@ -919,6 +961,7 @@ def create_ready_source(
             gpu=gpu,
             annotations=annotations,
             memory_limit=memory_limit,
+            handle_sigterm=handle_sigterm,
         )
     )
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)
