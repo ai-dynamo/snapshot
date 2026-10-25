@@ -280,6 +280,44 @@ class Child {
   pid_t pid_;
 };
 
+pid_t
+StartRclone(const std::vector<std::string>& command, const std::vector<std::string>& environment,
+            int input, int output, int diagnostics, Cancellation cancellation)
+{
+  std::vector<char*> argv{const_cast<char*>(kExecutable)};
+  for (const auto& argument : command)
+    argv.push_back(const_cast<char*>(argument.c_str()));
+  argv.push_back(nullptr);
+  std::vector<char*> envp;
+  for (const auto& variable : environment)
+    envp.push_back(const_cast<char*>(variable.c_str()));
+  envp.push_back(nullptr);
+  const auto parent = getpid();
+  // Build all state in the parent. The child does no allocation, logging,
+  // locking, filesystem traversal or C++ cleanup between fork and execve.
+  sigset_t empty_mask;
+  sigemptyset(&empty_mask);
+  struct sigaction default_action {};
+  default_action.sa_handler = SIG_DFL;
+  sigemptyset(&default_action.sa_mask);
+  cancellation.ThrowIfCancelled();
+  const auto pid = fork();
+  if (pid < 0)
+    throw S3Error();
+  if (pid == 0) {
+    if (dup2(input, STDIN_FILENO) < 0 || dup2(output, STDOUT_FILENO) < 0 || dup2(diagnostics, STDERR_FILENO) < 0 ||
+        syscall(SYS_close_range, 3U, UINT_MAX, 0U) < 0 || sigprocmask(SIG_SETMASK, &empty_mask, nullptr) < 0 ||
+        sigaction(SIGTERM, &default_action, nullptr) < 0 || sigaction(SIGINT, &default_action, nullptr) < 0 ||
+        sigaction(SIGPIPE, &default_action, nullptr) < 0 || prctl(PR_SET_PDEATHSIG, SIGKILL) < 0)
+      _exit(127);
+    if (getppid() != parent)
+      _exit(127);
+    execve(kExecutable, argv.data(), envp.data());
+    _exit(127);
+  }
+  return pid;
+}
+
 // Limit work per poll so a noisy child cannot starve cancellation checks. Logs
 // are kept only in a bounded tail and never forwarded directly to callers.
 bool
@@ -304,6 +342,40 @@ Drain(int descriptor, std::string& bytes, std::size_t limit, bool diagnostics)
       bytes.erase(0, bytes.size() - limit);
   }
   return false;
+}
+
+std::string
+WaitForRclone(Child& child, int output, int diagnostics, std::size_t output_limit, Cancellation cancellation)
+{
+  std::string output_bytes, diagnostic_bytes;
+  bool output_done = false, diagnostics_done = false, reaped = false;
+  int status = 0;
+  auto kill_at = Clock::time_point::max();
+  while (!reaped || !output_done || !diagnostics_done) {
+    if (cancellation.IsCancelled() && kill_at == Clock::time_point::max()) {
+      child.Signal(SIGTERM);
+      kill_at = Clock::now() + kTerminationGrace;
+    }
+    if (Clock::now() >= kill_at)
+      child.Signal(SIGKILL);
+    if (!output_done)
+      output_done = Drain(output, output_bytes, output_limit, false);
+    if (!diagnostics_done)
+      diagnostics_done = Drain(diagnostics, diagnostic_bytes, kDiagnosticsLimit, true);
+    if (!reaped)
+      reaped = child.Poll(status);
+    if (!reaped || !output_done || !diagnostics_done) {
+      pollfd descriptors[] = {{output_done ? -1 : output, POLLIN, 0},
+                              {diagnostics_done ? -1 : diagnostics, POLLIN, 0}};
+      if (poll(descriptors, 2, kPollMilliseconds) < 0 && errno != EINTR)
+        throw std::system_error(errno, std::generic_category(), "poll rclone output");
+    }
+  }
+  const auto exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+  cancellation.ThrowIfCancelled();
+  if (exit_code != 0)
+    throw S3Error(HttpStatus(diagnostic_bytes));
+  return output_bytes;
 }
 
 } // namespace
@@ -455,72 +527,14 @@ std::string
 S3Client::Execute(Operation& operation, std::vector<std::string> command, int input, std::size_t output_limit)
 {
   command.insert(command.end(), arguments_.begin(), arguments_.end());
-  std::vector<char*> argv{const_cast<char*>(kExecutable)};
-  for (const auto& argument : command)
-    argv.push_back(const_cast<char*>(argument.c_str()));
-  argv.push_back(nullptr);
-  std::vector<char*> envp;
-  for (const auto& variable : environment_)
-    envp.push_back(const_cast<char*>(variable.c_str()));
-  envp.push_back(nullptr);
   auto stdin_fd = HighDescriptor(input);
   Pipe output, diagnostics;
-  const auto parent = getpid();
-  const int in = stdin_fd.get(), out = output.write_end.get(), err = diagnostics.write_end.get();
-  // Build all state in the parent. The child does no allocation, logging,
-  // locking, filesystem traversal or C++ cleanup between fork and execve.
-  sigset_t empty_mask;
-  sigemptyset(&empty_mask);
-  struct sigaction default_action {};
-  default_action.sa_handler = SIG_DFL;
-  sigemptyset(&default_action.sa_mask);
-  operation.cancellation.ThrowIfCancelled();
-  const auto pid = fork();
-  if (pid < 0)
-    throw S3Error();
-  if (pid == 0) {
-    if (dup2(in, STDIN_FILENO) < 0 || dup2(out, STDOUT_FILENO) < 0 || dup2(err, STDERR_FILENO) < 0 ||
-        syscall(SYS_close_range, 3U, UINT_MAX, 0U) < 0 || sigprocmask(SIG_SETMASK, &empty_mask, nullptr) < 0 ||
-        sigaction(SIGTERM, &default_action, nullptr) < 0 || sigaction(SIGINT, &default_action, nullptr) < 0 ||
-        sigaction(SIGPIPE, &default_action, nullptr) < 0 || prctl(PR_SET_PDEATHSIG, SIGKILL) < 0)
-      _exit(127);
-    if (getppid() != parent)
-      _exit(127);
-    execve(kExecutable, argv.data(), envp.data());
-    _exit(127);
-  }
-  Child child(pid);
+  Child child(StartRclone(command, environment_, stdin_fd.get(), output.write_end.get(),
+                          diagnostics.write_end.get(), operation.cancellation));
   output.write_end = FileDescriptor(-1);
   diagnostics.write_end = FileDescriptor(-1);
-  std::string output_bytes, diagnostic_bytes;
-  bool output_done = false, diagnostics_done = false, reaped = false;
-  int status = 0;
-  auto kill_at = Clock::time_point::max();
-  while (!reaped || !output_done || !diagnostics_done) {
-    if (operation.cancellation.IsCancelled() && kill_at == Clock::time_point::max()) {
-      child.Signal(SIGTERM);
-      kill_at = Clock::now() + kTerminationGrace;
-    }
-    if (Clock::now() >= kill_at)
-      child.Signal(SIGKILL);
-    if (!output_done)
-      output_done = Drain(output.read_end.get(), output_bytes, output_limit, false);
-    if (!diagnostics_done)
-      diagnostics_done = Drain(diagnostics.read_end.get(), diagnostic_bytes, kDiagnosticsLimit, true);
-    if (!reaped)
-      reaped = child.Poll(status);
-    if (!reaped || !output_done || !diagnostics_done) {
-      pollfd descriptors[] = {{output_done ? -1 : output.read_end.get(), POLLIN, 0},
-                              {diagnostics_done ? -1 : diagnostics.read_end.get(), POLLIN, 0}};
-      if (poll(descriptors, 2, kPollMilliseconds) < 0 && errno != EINTR)
-        throw std::system_error(errno, std::generic_category(), "poll rclone output");
-    }
-  }
-  const auto exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-  operation.cancellation.ThrowIfCancelled();
-  if (exit_code != 0)
-    throw S3Error(HttpStatus(diagnostic_bytes));
-  return output_bytes;
+  return WaitForRclone(child, output.read_end.get(), diagnostics.read_end.get(), output_limit,
+                       operation.cancellation);
 }
 
 void
