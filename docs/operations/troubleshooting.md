@@ -229,16 +229,18 @@ ended from outside:
 - `...; the restore was cancelled`: the restore was withdrawn or the agent
   shut down before nsrestore finished.
 
-An agent image older than the one that introduced the inner steps reports
-every nsrestore failure under this step.
+During an upgrade, a node whose agent pod has not rolled yet still reports
+every nsrestore failure under this step. `kubectl rollout status
+daemonset/snapshot-agent -n <snapshot-ns>` shows whether the rollout is
+complete.
 
-### reading checkpoint manifest inside the placeholder
+### checking the staged checkpoint
 
-nsrestore reads `manifest.json` again from the checkpoint as mounted inside the
+nsrestore re-reads the manifest from the checkpoint as staged inside the
 placeholder and checks that the PageBroker execution handed to it matches what
 the checkpoint needs.
 
-Likely causes: the staged checkpoint differs from the one the agent validated,
+Likely causes: the staged checkpoint is not the one the agent validated,
 usually a storage mount that changed under it; an agent and nsrestore from
 different builds.
 
@@ -247,9 +249,8 @@ reports, and check that the agent and nsrestore come from the same image.
 
 ### preparing CRIU restore
 
-nsrestore rewrites the checkpointed network addresses for the restore pod's IP,
-checks the LSM labels recorded at checkpoint against the profile requested for
-the placeholder, and builds CRIU's restore options from the manifest.
+nsrestore checks the LSM labels recorded at checkpoint against the
+placeholder's profile and builds CRIU's restore options from the manifest.
 
 Likely causes: the restore pod has an AppArmor or SELinux profile that does not
 match the labels the checkpoint recorded; the manifest records a mount or
@@ -273,14 +274,15 @@ that its root filesystem is writable.
 
 ### preparing GPU restore
 
-For a GPU checkpoint, nsrestore prepares the CUDA checkpoint job file, the GPU
-device mounts the checkpoint recorded, and opens the CUDA helper and the
-cuinterpose coordinator from the agent bundle before CRIU replaces the mount
+For a GPU checkpoint, nsrestore prepares the CUDA job file and the GPU device
+mounts, and opens the CUDA tools it will need after CRIU replaces the mount
 namespace.
 
-Likely causes: a job file that lists a different GPU count than the restore
-pod has; GPU device paths the placeholder cannot see; a bundle mount that went
-away because the placeholder restarted.
+Likely causes: a multi-GPU checkpoint with no CUDA job file, which the message
+names; take the checkpoint again with the source launched under
+`cuda-checkpoint --launch-job`. Otherwise GPU device paths the placeholder
+cannot see, or a bundle mount that went away because the placeholder
+restarted.
 
 ```bash
 kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
@@ -288,9 +290,12 @@ kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
 
 ### restoring with CRIU
 
-nsrestore clears the restore sentinels, mounts securityfs where CRIU needs it
-to detect AppArmor, and runs the CRIU restore. The cause is the last error CRIU
-logged; the agent log holds the key lines of `restore.log`.
+nsrestore prepares the placeholder's mounts and sentinels for CRIU, runs the
+CRIU restore, and reads the restored process table. For a CRIU failure the
+cause is the last error CRIU logged and the agent log holds the key lines of
+`restore.log`. The other causes name the operation that failed, such as
+`failed to unmount /dev/shm before restore`, and `restore.log` has nothing on
+them.
 
 Likely causes: a file, socket or mount the process had open at checkpoint is
 not present in the placeholder; a listening port already taken; a kernel or
@@ -303,16 +308,16 @@ errors in the agent log. Check the restore pod against the
 
 ### restoring CUDA state
 
-After CRIU has recreated the process tree, nsrestore maps the checkpointed CUDA
-PIDs onto the restored ones, restores GPU device mounts, and restores GPU
-memory through the driver's checkpoint tool or through PageBroker for
-CustomStorage, then releases the cuinterpose coordinator when the shim is in
-use.
+After CRIU, nsrestore maps the checkpointed CUDA PIDs onto the restored ones,
+restores GPU device mounts and GPU memory, through the driver's checkpoint tool
+or through PageBroker for CustomStorage, and for a multi-GPU workload runs the
+cuinterpose restore that rebuilds shared GPU memory.
 
 Likely causes: the restored process tree does not contain the PIDs the
 checkpoint recorded; the restore pod's GPUs do not match the checkpoint's device
 map; the driver refused the restore; PageBroker could not serve the GPU
-memory.
+memory; the cuinterpose restore failed, multi-GPU workloads only, with the
+coordinator's output in the message after `cuinterpose coordinator:`.
 
 The agent log carries the CUDA restore output and, for CustomStorage, the
 PageBroker result. Check the restore pod's GPU allocation against the
