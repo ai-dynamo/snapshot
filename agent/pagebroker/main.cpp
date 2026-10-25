@@ -15,17 +15,14 @@
 
 namespace {
 // ResolveStoreID reads and parses storage_config_path, then computes this
-// installation's store ID. Only type: pvc is supported; other types resolve
-// to an unconfigured store (empty), same as omitting --storage-config,
-// since no artifact-addressed backend exists for them yet.
+// installation's store ID. Every failure is reported as std::invalid_argument
+// so main exits with INVALID_ARGUMENTS instead of serving against no store.
 std::string
 ResolveStoreID(const std::string& storage_config_path)
 {
   std::ifstream file(storage_config_path);
-  if (!file.is_open()) {
-    std::cerr << "open storage config " << storage_config_path << " failed\n";
-    return "";
-  }
+  if (!file.is_open())
+    throw std::invalid_argument("open storage config " + storage_config_path + " failed");
   const std::string yaml((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
   snapshot::pagebroker::StorageConfig config;
@@ -33,19 +30,15 @@ ResolveStoreID(const std::string& storage_config_path)
     config = snapshot::pagebroker::ParseStorageConfig(yaml);
   }
   catch (const std::exception& error) {
-    std::cerr << "parse storage config " << storage_config_path << ": " << error.what() << '\n';
-    return "";
+    throw std::invalid_argument("parse storage config " + storage_config_path + ": " + error.what());
   }
-  if (config.type != "pvc") {
-    std::cerr << "storage config type " << config.type << " has no artifact-addressed backend yet\n";
-    return "";
-  }
+  if (config.type != "pvc")
+    throw std::invalid_argument("storage config type " + config.type + " has no artifact-addressed backend");
   try {
     return snapshot::pagebroker::ComputeStoreID(config.pvc_namespace, config.pvc_claim_name, config.pvc_base_path);
   }
   catch (const std::exception& error) {
-    std::cerr << "compute store ID from " << storage_config_path << ": " << error.what() << '\n';
-    return "";
+    throw std::invalid_argument("compute store ID from " + storage_config_path + ": " + error.what());
   }
 }
 }  // namespace

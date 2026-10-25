@@ -132,18 +132,26 @@ store configuration (`--storage-config /etc/snapshot/storage.yaml`) and derives
 the store identity from it at startup. Checkpoints bound to that store are addressed by
 identity rather than by path: the agent names the store, the content UID and
 the container, and PageBroker publishes the image at
-`artifacts/<contentUID>/containers/<name>/`, the same layout as before, with a
-`publication.json` next to `manifest.yaml` recording the store ID, the
-artifact handle and the deterministic commit ID. Commit returns that handle
-as the publication descriptor; restores and metadata reads name the
-descriptor, and PageBroker refuses a descriptor from another store
-(`STORE_MISMATCH`), a publication that is missing (`ARTIFACT_NOT_FOUND`) or
-whose evidence does not match (`ARTIFACT_CORRUPT`). A transaction that
-outlives PageBroker's fixed 2h5m lifetime fails Commit with
-`TRANSACTION_EXPIRED`. PageBroker begins expiry cleanup, but active GPU work
-or a filesystem cleanup error can defer removal until a later sweep. Legacy
-path-addressed requests are unchanged, and content without a store binding
-keeps using them.
+`artifacts/<contentUID>/containers/<name>/`, the same layout as before. A PVC
+publication has no index file: the directory is the publication and its
+relative path is the handle Commit returns as the publication descriptor. A
+retried Commit on the same transaction returns the same descriptor without
+publishing again, and the fixed path holds exactly one publication per content
+and container, so a Prepare or Commit that finds one already there fails with
+`TRANSACTION_CONFLICT` and leaves it untouched. Restores and metadata reads
+name the descriptor, and PageBroker refuses a descriptor from another store
+(`STORE_MISMATCH`), a handle outside that layout or a publication without its
+`manifest.yaml` (`ARTIFACT_CORRUPT`), and a publication that is missing
+(`ARTIFACT_NOT_FOUND`). A store it cannot reach or read reports
+`STORAGE_UNAVAILABLE` or `ACCESS_DENIED` instead, never a missing publication,
+and an artifact request naming an I/O engine other than the store's own is
+refused (`INVALID_REQUEST`). A sweep every two minutes
+aborts any transaction older than PageBroker's fixed 2h5m lifetime and removes
+its staging; it skips a transaction whose GPU operation is still running and
+retries on a later sweep when cleanup fails. The lifetime is a PageBroker
+constant, not configuration, so every participating component agrees on it
+without a value to drift out of sync on. Legacy path-addressed requests are
+unchanged, and content without a store binding keeps using them.
 
 Because the staging volume is RAM, size the agent pod for it:
 

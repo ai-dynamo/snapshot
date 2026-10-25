@@ -16,14 +16,17 @@ namespace snapshot::pagebroker {
 // Throws std::invalid_argument on inputs Go's validation would also reject.
 std::string ComputeStoreID(const std::string& ns, const std::string& claim_name, const std::string& base_path);
 
-// ComputeCommitID matches api/storage/identity.go's CommitID() exactly: the
-// v1 preimage is four length-prefixed fields ("snapshot.commit/v1", storeID,
-// artifactUID, containerName). storeID must already be a valid store-v1-<hex>
-// value (e.g. from ComputeStoreID); this does not recompute it.
-std::string ComputeCommitID(const std::string& store_id, const std::string& artifact_uid, const std::string& container_name);
+// ValidateArtifactIdentity matches api/storage/identity.go's
+// ValidateArtifactIdentity exactly: store_id is store-v1- plus 64 lowercase
+// hex characters, artifact_uid is an opaque Kubernetes UID (nonempty, at most
+// 256 bytes, valid UTF-8, no whitespace, control characters or path
+// separators) and container_name is a DNS1123 label. Throws
+// std::invalid_argument on the first violation.
+void ValidateArtifactIdentity(
+    const std::string& store_id, const std::string& artifact_uid, const std::string& container_name);
 
 // Sha256Hex is exposed for tests that want to check the preimage encoding
-// directly rather than only the final store/commit ID.
+// directly rather than only the final store ID.
 std::string Sha256Hex(const std::string& data);
 
 }  // namespace snapshot::pagebroker

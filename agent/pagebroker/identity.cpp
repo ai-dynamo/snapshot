@@ -203,10 +203,88 @@ IsDNS1123Subdomain(const std::string& value)
   return true;
 }
 
-bool
-IsControl(unsigned char c)
+// DecodeUtf8 mirrors Go's utf8.ValidString and rune iteration: overlong forms,
+// surrogates and code points above U+10FFFF are rejected with message.
+std::vector<char32_t>
+DecodeUtf8(const std::string& value, const char* message)
 {
-  return c < 0x20 || c == 0x7f;
+  std::vector<char32_t> runes;
+  size_t i = 0;
+  while (i < value.size()) {
+    const unsigned char lead = static_cast<unsigned char>(value[i]);
+    if (lead < 0x80) {
+      runes.push_back(lead);
+      ++i;
+      continue;
+    }
+    size_t length = 0;
+    char32_t rune = 0;
+    unsigned char low = 0x80;
+    unsigned char high = 0xBF;
+    if (lead >= 0xC2 && lead <= 0xDF) {
+      length = 2;
+      rune = lead & 0x1F;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+      length = 3;
+      rune = lead & 0x0F;
+      if (lead == 0xE0)
+        low = 0xA0;
+      if (lead == 0xED)
+        high = 0x9F;
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+      length = 4;
+      rune = lead & 0x07;
+      if (lead == 0xF0)
+        low = 0x90;
+      if (lead == 0xF4)
+        high = 0x8F;
+    } else {
+      throw std::invalid_argument(message);
+    }
+    if (i + length > value.size())
+      throw std::invalid_argument(message);
+    for (size_t k = 1; k < length; ++k) {
+      const unsigned char c = static_cast<unsigned char>(value[i + k]);
+      if (c < (k == 1 ? low : 0x80) || c > (k == 1 ? high : 0xBF))
+        throw std::invalid_argument(message);
+      rune = (rune << 6) | (c & 0x3F);
+    }
+    runes.push_back(rune);
+    i += length;
+  }
+  return runes;
+}
+
+// IsSpace matches Go's unicode.IsSpace.
+bool
+IsSpace(char32_t rune)
+{
+  switch (rune) {
+    case U'\t':
+    case U'\n':
+    case U'\v':
+    case U'\f':
+    case U'\r':
+    case U' ':
+    case 0x85:
+    case 0xA0:
+    case 0x1680:
+    case 0x2028:
+    case 0x2029:
+    case 0x202F:
+    case 0x205F:
+    case 0x3000:
+      return true;
+    default:
+      return rune >= 0x2000 && rune <= 0x200A;
+  }
+}
+
+// IsControl matches Go's unicode.IsControl: C0, DEL and C1.
+bool
+IsControl(char32_t rune)
+{
+  return rune < 0x20 || (rune >= 0x7F && rune <= 0x9F);
 }
 
 // NormalizeBasePath mirrors Go's PVC.NormalizedBasePath: absolute, bounded,
@@ -216,18 +294,19 @@ IsControl(unsigned char c)
 std::string
 NormalizeBasePath(const std::string& base_path)
 {
+  constexpr char kMessage[] =
+      "PVC base path must be an absolute path within the claim, at most 4096 bytes, "
+      "without control characters or backslashes";
   if (base_path.empty() || base_path.size() > 4096 || base_path.front() != '/')
-    throw std::invalid_argument(
-        "PVC base path must be an absolute path within the claim, at most 4096 bytes, "
-        "without control characters or backslashes");
+    throw std::invalid_argument(kMessage);
   if (base_path.find('\\') != std::string::npos)
     throw std::invalid_argument("PVC base path must not contain backslashes");
-  for (unsigned char c : base_path) {
-    if (IsControl(c))
+  const std::vector<char32_t> runes = DecodeUtf8(base_path, kMessage);
+  for (char32_t rune : runes) {
+    if (IsControl(rune))
       throw std::invalid_argument("PVC base path must not contain control characters");
   }
-  if (base_path.front() == ' ' || base_path.front() == '\t' || base_path.back() == ' ' || base_path.back() == '\t' ||
-      base_path.back() == '\n' || base_path.back() == '\r')
+  if (IsSpace(runes.front()) || IsSpace(runes.back()))
     throw std::invalid_argument("PVC base path must not have leading or trailing whitespace");
 
   std::vector<std::string> components;
@@ -275,8 +354,9 @@ ComputeStoreID(const std::string& ns, const std::string& claim_name, const std::
   return "store-v1-" + HashFields({"snapshot.store/v1", "pvc", ns, claim_name, normalized});
 }
 
-std::string
-ComputeCommitID(const std::string& store_id, const std::string& artifact_uid, const std::string& container_name)
+void
+ValidateArtifactIdentity(
+    const std::string& store_id, const std::string& artifact_uid, const std::string& container_name)
 {
   // Mirrors the Go side's storeIDPattern: exactly "store-v1-" + 64 lowercase
   // hex characters.
@@ -290,20 +370,17 @@ ComputeCommitID(const std::string& store_id, const std::string& artifact_uid, co
     if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
       throw std::invalid_argument("store ID must be store-v1- followed by 64 lowercase hexadecimal characters");
   }
+  constexpr char kUIDMessage[] =
+      "artifact UID must be nonempty, at most 256 bytes, without whitespace, control characters or path "
+      "separators";
   if (artifact_uid.empty() || artifact_uid.size() > 256)
-    throw std::invalid_argument(
-        "artifact UID must be nonempty, at most 256 bytes, without whitespace, control characters or path "
-        "separators");
-  for (unsigned char c : artifact_uid) {
-    if (c == '/' || c == '\\' || IsControl(c) || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' ||
-        c == '\f')
-      throw std::invalid_argument(
-          "artifact UID must be nonempty, at most 256 bytes, without whitespace, control characters or path "
-          "separators");
+    throw std::invalid_argument(kUIDMessage);
+  for (char32_t rune : DecodeUtf8(artifact_uid, kUIDMessage)) {
+    if (rune == U'/' || rune == U'\\' || IsSpace(rune) || IsControl(rune))
+      throw std::invalid_argument(kUIDMessage);
   }
   if (!IsDNS1123Label(container_name))
     throw std::invalid_argument("container name must be a valid DNS1123 label");
-  return "commit-v1-" + HashFields({"snapshot.commit/v1", store_id, artifact_uid, container_name});
 }
 
 }  // namespace snapshot::pagebroker

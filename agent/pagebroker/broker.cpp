@@ -123,6 +123,17 @@ DirectorySize(const Path& path)
   return bytes;
 }
 
+// An artifact request may leave the engine unset to take the store's own, or
+// name one explicitly; the PVC store copies through POSIX only, so any other
+// engine cannot serve the bound store.
+void
+RequireArtifactEngine(const IOEngine& engine)
+{
+  if (engine.kind_case() == IOEngine::KIND_NOT_SET || engine.has_posix_copy())
+    return;
+  throw ArtifactError(Failure::INVALID_REQUEST, "the requested I/O engine does not support the bound store");
+}
+
 void
 RejectSymlinks(const Path& directory)
 {
@@ -572,6 +583,7 @@ Broker::Restore(const Request& request)
   if (operation.has_artifact()) {
     if (operation.has_source())
       throw std::invalid_argument("artifact cannot be combined with legacy source");
+    RequireArtifactEngine(operation.io_engine());
     const auto& store = RequireArtifactStore();
     const auto plan = store.ResolveRestorePlan(operation.artifact());
     return StageArtifactRestore(request, plan);
@@ -696,6 +708,7 @@ Broker::PrepareCheckpoint(const Request& request)
   if (operation.has_target()) {
     if (operation.has_destination())
       throw std::invalid_argument("target cannot be combined with legacy destination");
+    RequireArtifactEngine(operation.io_engine());
     return StageArtifactCheckpoint(request, operation.target());
   }
   const auto& destination = ValidateStagedCheckpoint(operation);
@@ -773,7 +786,10 @@ Broker::Commit(const Request& request)
     return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction is aborting");
   }
   if (transaction->state() == Transaction::State::COMMITTED) {
-    return CommitSucceeded(request);
+    auto response = CommitSucceeded(request);
+    if (transaction->published_artifact)
+      *response.mutable_commit_complete()->mutable_published_artifact() = *transaction->published_artifact;
+    return response;
   }
   if (const auto& operation = transaction->gpu_operation) {
     if (operation->state != GpuState::Finished || operation->result.has_failure()) {
@@ -844,6 +860,7 @@ Broker::PublishArtifactCheckpoint(
   PublishedArtifact published;
   try {
     artifact_store_->PublishCheckpoint(staging_directory, descriptor.target(), &published);
+    transaction.published_artifact = published;
     transaction.clear_descriptor();
     transaction.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;
@@ -904,7 +921,8 @@ Broker::PrepareDirectCheckpoint(const Request& request)
   std::lock_guard lock(transaction->mutex());
   if (transaction->state() != Transaction::State::NEW) {
     const auto* prepared = std::get_if<CheckpointTransactionDescriptor>(&transaction->descriptor());
-    const bool same_destination = prepared && prepared->engine_type() == storage_engine.type() &&
+    const bool same_destination = prepared && !prepared->is_artifact_addressed() &&
+        prepared->engine_type() == storage_engine.type() &&
         storage_engine.DestinationDirectory(prepared->destination_storage()) == destination;
     if (transaction->state() != Transaction::State::STAGED || !same_destination ||
         prepared->staging_directory() != checkpoint_directory) {
