@@ -110,6 +110,57 @@ class ColdStartTiming:
 
 
 @dataclass
+class CheckpointAgentLog:
+    """Capture breakdown from the agent's ``Checkpoint timing summary``.
+
+    ``phases`` are the additive pieces of ``duration``. ``cuda_*`` splits
+    ``phases["cuda_checkpoint"]`` into lock, device-to-host copy, and job-file
+    refresh when the helper path measured them. PageBroker CustomStorage leaves
+    those fields unset. ``criu_memdump`` and ``criu_memwrite`` are CRIU's own
+    timers from ``stats-dump``. They overlap ``phases["criu_dump"]`` and are
+    not added to it: memdump is time spent reading the frozen process,
+    memwrite is time spent writing pages. CRIU can count the last write
+    interval twice, so use the pair to see which side dominates rather than
+    as a partition.
+    """
+
+    log_line_found: bool = False
+    log_source_pod: str | None = None
+    parse_warnings: list[str] = field(default_factory=list)
+
+    duration: float | None = None
+    started_to_complete: float | None = None
+    phases: dict[str, float] = field(default_factory=dict)
+
+    cuda_lock: float | None = None
+    cuda_copy: float | None = None
+    cuda_job_file: float | None = None
+
+    criu_freezing: float | None = None
+    criu_frozen: float | None = None
+    criu_memdump: float | None = None
+    criu_memwrite: float | None = None
+    criu_pages_written: int | None = None
+    criu_pages_written_bytes: int | None = None
+    criu_pages_scanned: int | None = None
+    criu_image_bytes: int | None = None
+    overlay_diff_bytes: int | None = None
+
+    @property
+    def memwrite_gigabytes_per_second(self) -> float | None:
+        """Page payload divided by CRIU's memwrite timer.
+
+        This uses ``pages_written``, not the apparent size of the image
+        directory. The directory also holds metadata and pages that
+        ``pages_written`` does not count, so dividing it by the dump wall
+        overstates the write rate.
+        """
+        if not self.criu_pages_written_bytes or not self.criu_memwrite:
+            return None
+        return self.criu_pages_written_bytes / self.criu_memwrite / 1e9
+
+
+@dataclass
 class CheckpointTiming:
     """Checkpoint timing boundaries.
 
@@ -236,6 +287,7 @@ class RunResult:
     git_sha: str | None = None
     cold_start: ColdStartTiming | None = None
     checkpoint: CheckpointTiming | None = None
+    checkpoint_agent_log: CheckpointAgentLog | None = None
     restore: RestoreTiming | None = None
     agent_log_phases: AgentLogPhases | None = None
     warnings: list[str] = field(default_factory=list)

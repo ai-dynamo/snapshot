@@ -316,13 +316,18 @@ def restore_proxy() -> bool:
 def workload_scheduling(*, cpu_only: bool | None = None) -> dict[str, Any]:
     if cpu_only is None:
         cpu_only = k8s.cpu_only_mode()
+    hostname = os.environ.get("SNAPSHOT_E2E_NODE_HOSTNAME", "").strip()
     if cpu_only:
-        return {}
+        if not hostname:
+            return {}
+        return {"nodeSelector": {"kubernetes.io/hostname": hostname}}
     # Keep all workload pods on GPU nodes so the shared RWO checkpoint PVC binds in
     # a zone where both source and restore pods can schedule.
     node_selector = {
         "nvidia.com/gpu.present": "true",
     }
+    if hostname:
+        node_selector["kubernetes.io/hostname"] = hostname
     if os.environ.get("SNAPSHOT_E2E_AVOID_MIG") == "true":
         # Opt-in for clusters that serve both MIG-capable and non-MIG GPU pools,
         # where preflight also pins the non-MIG pool. Clusters that do not expose
