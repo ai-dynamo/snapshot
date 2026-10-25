@@ -75,17 +75,17 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	)
 	m, err := types.ReadManifest(opts.CheckpointPath)
 	if err != nil {
-		return nil, failStep(StepReadManifestInPlaceholder, fmt.Errorf("failed to read manifest: %w", err))
+		return nil, failStep(StepCheckStagedCheckpoint, fmt.Errorf("failed to read manifest: %w", err))
 	}
 	if m.CUDA.CustomStorage && opts.CustomStorageExecution == nil {
-		return nil, failStep(StepReadManifestInPlaceholder, errors.New("CustomStorage checkpoint requires PageBroker execution"))
+		return nil, failStep(StepCheckStagedCheckpoint, errors.New("CustomStorage checkpoint requires PageBroker execution"))
 	}
 	if !m.CUDA.CustomStorage && opts.CustomStorageExecution != nil {
-		return nil, failStep(StepReadManifestInPlaceholder, errors.New("checkpoint does not use CustomStorage but PageBroker execution was supplied"))
+		return nil, failStep(StepCheckStagedCheckpoint, errors.New("checkpoint does not use CustomStorage but PageBroker execution was supplied"))
 	}
 	if opts.CustomStorageExecution != nil {
 		if opts.CustomStorageExecution.SocketDirectory == nil || opts.CustomStorageExecution.Socket == nil || opts.HostProc == nil || opts.CustomStorageExecution.GPUContext == nil || opts.CustomStorageExecution.TransactionID == "" {
-			return nil, failStep(StepReadManifestInPlaceholder, errors.New("invalid PageBroker CustomStorage execution context"))
+			return nil, failStep(StepCheckStagedCheckpoint, errors.New("invalid PageBroker CustomStorage execution context"))
 		}
 	}
 	log.V(1).Info("Loaded checkpoint manifest",
