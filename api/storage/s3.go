@@ -50,7 +50,9 @@ func (s S3) StoreID() (string, error) {
 // NormalizedEndpoint validates the endpoint as an absolute http(s) URL and
 // lowercases its scheme and host, so differently-cased but equivalent
 // endpoints resolve to the same store identity. The path, query and fragment
-// are rejected: the endpoint identifies a service, not a location in it.
+// are rejected: the endpoint identifies a service, not a location in it. A
+// scheme's default port is dropped so an explicit ":443"/":80" hashes the
+// same as its implicit form.
 func (s S3) NormalizedEndpoint() (string, error) {
 	if !utf8.ValidString(s.Endpoint) || len(s.Endpoint) > 2048 {
 		return "", fmt.Errorf("S3 endpoint must be a valid UTF-8 string of at most 2048 bytes")
@@ -59,11 +61,24 @@ func (s S3) NormalizedEndpoint() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("S3 endpoint: %w", err)
 	}
-	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+	scheme := strings.ToLower(parsed.Scheme)
+	hostname := strings.ToLower(parsed.Hostname())
+	if (scheme != "http" && scheme != "https") || hostname == "" ||
 		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
 		return "", fmt.Errorf("S3 endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo")
 	}
-	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host), nil
+	if strings.Contains(hostname, ":") {
+		hostname = "[" + hostname + "]"
+	}
+	port := parsed.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	host := hostname
+	if port != "" {
+		host = hostname + ":" + port
+	}
+	return scheme + "://" + host, nil
 }
 
 // NormalizedPrefix cleans redundant separators and dot components inside a

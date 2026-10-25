@@ -24,6 +24,7 @@ func TestS3StoreIDRejectsInvalidIdentity(t *testing.T) {
 		{"endpoint with path", func(s *storage.S3) { s.Endpoint = "https://s3.example.com/prefix" }},
 		{"endpoint with query", func(s *storage.S3) { s.Endpoint = "https://s3.example.com?x=1" }},
 		{"endpoint with userinfo", func(s *storage.S3) { s.Endpoint = "https://user@s3.example.com" }},
+		{"endpoint with no hostname", func(s *storage.S3) { s.Endpoint = "http://:9000" }},
 		{"malformed endpoint", func(s *storage.S3) { s.Endpoint = "://bad" }},
 		{"empty region", func(s *storage.S3) { s.Region = "" }},
 		{"non-ascii region", func(s *storage.S3) { s.Region = "us-éast-1" }},
@@ -66,6 +67,49 @@ func TestS3StoreIDIsStableAndCaseInsensitiveOnEndpoint(t *testing.T) {
 	id3, err := lower.StoreID()
 	if err != nil || id3 != id1 {
 		t.Fatalf("StoreID() is not stable across calls: %q, %q, %v", id1, id3, err)
+	}
+}
+
+func TestS3StoreIDIgnoresExplicitDefaultPort(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		implicitEndpoint string
+		explicitEndpoint string
+	}{
+		{"https default port", "https://s3.example.com", "https://s3.example.com:443"},
+		{"http default port", "http://s3.example.com", "http://s3.example.com:80"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			implicit := validS3()
+			implicit.Endpoint = tc.implicitEndpoint
+			explicit := validS3()
+			explicit.Endpoint = tc.explicitEndpoint
+			implicitID, err := implicit.StoreID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			explicitID, err := explicit.StoreID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if implicitID != explicitID {
+				t.Fatalf("expected the explicit default port to be ignored: %q != %q", implicitID, explicitID)
+			}
+		})
+	}
+	// A non-default port must still change the store ID.
+	s3 := validS3()
+	s3.Endpoint = "https://s3.example.com:8443"
+	id, err := s3.StoreID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := validS3().StoreID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == base {
+		t.Fatal("expected a non-default port to change the store ID")
 	}
 }
 
