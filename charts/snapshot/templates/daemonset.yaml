@@ -33,6 +33,9 @@ spec:
         {{- end }}
       annotations:
         kubectl.kubernetes.io/default-container: agent
+        # Rolls PageBroker when the operator-consumed S3/storage settings
+        # change, so an upgrade doesn't leave it running on stale config.
+        checksum/config: {{ include "snapshot.operatorConfigChecksum" . }}
         {{- if .Values.openshift.enabled }}
         # Pin this DS to the built-in "privileged" SCC even if a higher-priority
         # custom SCC is added later. See openshift/enhancements custom-scc-preemption-prevention.
