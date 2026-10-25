@@ -230,7 +230,7 @@ def main(argv=None):
         print("RUNNING native filesystem qualification", flush=True)
         results["filesystem"] = LocalRun(root / "filesystem", local_spec("filesystem"), harness, broker).execute()
     if args.backend in ("both", "s3"):
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "hack/pagebroker-integration"))
         from s3_integration import create_session, local_environment, local_service
         environment = local_environment()
         with local_service(SimpleNamespace(tls=True), environment, service_factory=lambda app: app):

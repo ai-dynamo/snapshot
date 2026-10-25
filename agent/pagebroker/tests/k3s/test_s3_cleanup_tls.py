@@ -28,10 +28,10 @@ import test_stress_process as processes
 AVAILABLE = importlib.util.find_spec("moto") is not None and importlib.util.find_spec("boto3") is not None
 
 
-@unittest.skipUnless(AVAILABLE, "install ../requirements.txt for the local TLS emulator")
+@unittest.skipUnless(AVAILABLE, "install hack/pagebroker-integration/requirements.txt for the local TLS emulator")
 class TLSCleanupTest(unittest.TestCase):
     def setUp(self):
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "hack/pagebroker-integration"))
         from s3_integration import local_environment, local_service
         self.environment = local_environment()
         self.service = local_service(SimpleNamespace(tls=True), self.environment, service_factory=lambda app: app)
