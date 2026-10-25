@@ -190,6 +190,15 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 
 {{/* Where PageBroker reads the Model Streamer tuning file (pageBroker.modelStreamer). */}}
 {{- define "snapshot.modelStreamerMountDir" -}}/etc/snapshot-model-streamer{{- end -}}
+
+{{/* Rolls the operator and PageBroker when the values behind storage.yaml and
+     pagebroker-s3.yaml change, so an upgrade doesn't leave either running on
+     stale config. Hashes the raw values rather than including configmap.yaml,
+     which would re-run its required()/fail() checks from this context and
+     misattribute their errors to the including template. */}}
+{{- define "snapshot.operatorConfigChecksum" -}}
+{{- toYaml (dict "storage" .Values.storage "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.modelStreamer) | sha256sum -}}
+{{- end -}}
 {{- define "snapshot.modelStreamerConfigPath" -}}{{ include "snapshot.modelStreamerMountDir" . }}/model-streamer.json{{- end -}}
 
 {{/* PageBroker's S3 limits object: the configured limits, with the staging
