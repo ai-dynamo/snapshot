@@ -162,6 +162,33 @@ InputBytes(const std::string& bytes)
   return file;
 }
 
+void
+ValidateUploadRoot(const std::filesystem::path& root, Cancellation cancellation)
+{
+  std::filesystem::path component;
+  for (const auto& part : root) {
+    cancellation.ThrowIfCancelled();
+    component /= part;
+    if (!std::filesystem::is_directory(std::filesystem::symlink_status(component)))
+      throw std::invalid_argument("S3 source must be a directory without symlinks");
+  }
+}
+
+void
+ValidateUploadFile(const std::filesystem::path& root, const S3UploadFile& file, Cancellation cancellation)
+{
+  auto component = root;
+  for (const auto& part : file.relative_path) {
+    cancellation.ThrowIfCancelled();
+    component /= part;
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(component)))
+      throw std::invalid_argument("S3 upload source contains a symlink");
+  }
+  if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(component)) ||
+      std::filesystem::file_size(component) != file.size_bytes)
+    throw std::invalid_argument("S3 upload source is missing, not regular, or has the wrong size");
+}
+
 std::string
 Remote(const S3ObjectLocation& object)
 {
@@ -505,13 +532,7 @@ S3Client::UploadFiles(const std::filesystem::path& source_root, const S3ObjectLo
     throw std::invalid_argument("invalid S3 source directory");
   Operation operation(*this, cancellation);
   const auto root = std::filesystem::absolute(source_root);
-  std::filesystem::path component;
-  for (const auto& part : root) {
-    cancellation.ThrowIfCancelled();
-    component /= part;
-    if (!std::filesystem::is_directory(std::filesystem::symlink_status(component)))
-      throw std::invalid_argument("S3 source must be a directory without symlinks");
-  }
+  ValidateUploadRoot(root, cancellation);
   std::string list;
   for (const auto& file : files) {
     cancellation.ThrowIfCancelled();
@@ -519,16 +540,7 @@ S3Client::UploadFiles(const std::filesystem::path& source_root, const S3ObjectLo
     S3ObjectLocation{destination_prefix.bucket, destination_prefix.key + "/" + relative}.Validate();
     if (relative.size() + 1 > kUploadListLimit - list.size())
       throw std::invalid_argument("S3 upload file list exceeds size limit");
-    component = root;
-    for (const auto& part : file.relative_path) {
-      cancellation.ThrowIfCancelled();
-      component /= part;
-      if (std::filesystem::is_symlink(std::filesystem::symlink_status(component)))
-        throw std::invalid_argument("S3 upload source contains a symlink");
-    }
-    if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(component)) ||
-        std::filesystem::file_size(component) != file.size_bytes)
-      throw std::invalid_argument("S3 upload source is missing, not regular, or has the wrong size");
+    ValidateUploadFile(root, file, cancellation);
     limits_.ValidateFileSize(file.size_bytes);
     list += relative + "\n";
   }
