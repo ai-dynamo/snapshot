@@ -98,7 +98,45 @@ ADD --checksum=sha256:5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf
 FROM scratch AS model-streamer-sdk
 COPY --from=model-streamer-install /opt/model-streamer-sdk/ /
 
+# Download an unmodified upstream executable. The Go stage collects notices
+# from the matching release's module graph; it does not rebuild or patch rclone.
+FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS rclone-amd64
+ARG RCLONE_SHA256=349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702
+
+FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS rclone-arm64
+ARG RCLONE_SHA256=7e1e8d69654941b7b7df84ee74c5f7fb09cce7d5496947fb7bf16b55ff427d10
+
+FROM rclone-${TARGETARCH} AS rclone-install
+ARG TARGETARCH
+ARG PAGEBROKER_RCLONE_VERSION=1.75.2
+ADD --checksum=sha256:${RCLONE_SHA256} https://downloads.rclone.org/v${PAGEBROKER_RCLONE_VERSION}/rclone-v${PAGEBROKER_RCLONE_VERSION}-linux-${TARGETARCH}.zip /tmp/rclone.zip
+ADD --checksum=sha256:68afd7f68c84bd978966feae2116339aa7bf454b39c573910c462e87c3774d5a https://codeload.github.com/rclone/rclone/tar.gz/refs/tags/v${PAGEBROKER_RCLONE_VERSION} /tmp/rclone.tar.gz
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && unzip -q /tmp/rclone.zip -d /tmp \
+    && mkdir -p /rclone/bin /rclone/legal /src/rclone \
+    && cp /tmp/rclone-v${PAGEBROKER_RCLONE_VERSION}-linux-${TARGETARCH}/rclone /rclone/bin/ \
+    && tar -xzf /tmp/rclone.tar.gz --strip-components=1 -C /src/rclone \
+    && cp /tmp/rclone.tar.gz /rclone/legal/source.tar.gz \
+    && cp /src/rclone/COPYING /rclone/legal/LICENSE \
+    && cp /usr/local/go/LICENSE /rclone/legal/Go-LICENSE \
+    && /rclone/bin/rclone version > /rclone/legal/VERSION \
+    && go version -m /rclone/bin/rclone > /rclone/legal/BUILD-INFO \
+    && sha256sum /tmp/rclone.zip /tmp/rclone.tar.gz > /rclone/legal/SHA256SUMS
+WORKDIR /src/rclone
+RUN go mod download all \
+    && find /go/pkg/mod -type f \( -iname 'license*' -o -iname 'notice*' -o -iname 'copying*' \) \
+       ! -path '/go/pkg/mod/cache/*' | sort > /tmp/notices \
+    && while IFS= read -r notice; do \
+         printf '\nCOMPONENT NOTICE: %s\n' "${notice#/go/pkg/mod/}" && cat "$notice" || exit 1; \
+       done < /tmp/notices > /rclone/legal/THIRD-PARTY-NOTICES.txt
+
+# Native developers can export the same executable and attribution.
+FROM scratch AS rclone-artifacts
+COPY --from=rclone-install /rclone/ /
+
 FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build-dependencies
+COPY --from=rclone-install /rclone/bin/rclone /usr/local/bin/rclone
 
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
 COPY --from=model-streamer-install /opt/model-streamer-sdk/include/ /usr/local/include/
@@ -111,9 +149,12 @@ COPY compliance/ compliance/
 # later layer cannot fetch the source of the version installed here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    ca-certificates \
     libaio-dev \
     libgtest-dev \
     libprotobuf-dev \
+    libssl-dev \
+    nlohmann-json3-dev=3.11.3-1 \
     pkg-config \
     protobuf-compiler \
     && sh compliance/collect-sources.sh /legal/source/protobuf libprotobuf-dev \
@@ -183,6 +224,11 @@ COPY --from=nixl /nixl-runtime/lib/ /usr/local/lib/
 COPY --from=sources /legal /legal
 ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
+COPY --from=build /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/local/lib/libcrypto.so.3
+COPY --from=build /usr/share/doc/libssl-dev/copyright /legal/openssl/copyright
+COPY --from=rclone-install /rclone/bin/rclone /usr/local/bin/rclone
+COPY --from=rclone-install /rclone/legal/ /legal/rclone/
+COPY --from=build /usr/share/doc/nlohmann-json3-dev/copyright /legal/nlohmann-json/copyright
 COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/ /legal/model-streamer/
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamers3.so /usr/local/lib/libstreamers3.so
