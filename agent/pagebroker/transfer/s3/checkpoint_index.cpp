@@ -83,13 +83,6 @@ HasValidIndexEntries(const Json& value)
 
 }  // namespace
 
-void
-ValidateCheckpointID(std::string_view id)
-{
-  if (id.size() != kCheckpointHandleLength || id.find_first_not_of(kCheckpointHandleHexDigits) != std::string_view::npos)
-    throw std::invalid_argument("checkpoint ID must be 64 lowercase hexadecimal characters");
-}
-
 std::uint64_t
 ValidateCheckpointInventory(const CheckpointInventory& inventory)
 {

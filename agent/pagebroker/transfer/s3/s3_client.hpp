@@ -23,25 +23,21 @@ inline constexpr char kAwsCaBundleEnv[] = "AWS_CA_BUNDLE";
 inline constexpr std::uint64_t kDefaultS3PartSize = 64ULL * 1024 * 1024;
 
 // Connection settings shared by rclone clients and native restore configuration.
-// Empty endpoint uses AWS S3; an empty region uses the startup environment or client default.
+// The daemon supplies its configured endpoint and region.
 struct S3Connection {
   std::string region;
   std::string endpoint;
   bool use_virtual_addressing = true;
   std::string ca_file;
-  // Omit all three to read the startup environment. Never log these values.
+  // Resolved startup credentials. Never log these values.
   std::string access_key_id;
   std::string secret_access_key;
   std::string session_token;
 
-  // Checks text, endpoint scheme and credential completeness without network I/O.
+  // Checks text, endpoint scheme, absolute CA path and credential completeness without network I/O.
   void Validate() const;
   bool operator==(const S3Connection&) const = default;
 };
-
-// Capture explicit or environment credentials once at startup. Missing or incomplete
-// credentials fail; profiles and provider discovery must be resolved externally.
-S3Connection ResolveS3Credentials(S3Connection connection);
 
 // Identifies one object using a bucket and its literal key, rather than a URL.
 struct S3ObjectLocation {

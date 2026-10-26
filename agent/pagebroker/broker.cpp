@@ -272,14 +272,14 @@ class GpuCompletion {
 }  // namespace
 
 Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine,
-    std::optional<S3Config> config, std::chrono::seconds lifetime)
+    std::optional<S3Config> config, std::chrono::seconds lifetime, model_streamer::settings::Options model_streamer)
     : lifetime_(config ? config->transaction_lifetime : lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
   const auto staging_base = staging_root_;
   if (config) {
     resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions);
     staging_root_ /= kS3StagingDirectory;
-    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config)));
+    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config), std::move(model_streamer)));
   } else {
     io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
   }
@@ -550,10 +550,8 @@ Response
 Broker::Metadata(const Request& request)
 {
   const auto& operation = request.get_artifact_metadata();
-  if (operation.has_target())
-    throw std::invalid_argument("artifact metadata lookup by identity is not implemented");
-  const auto& artifact = operation.artifact();
   const auto& engine = ArtifactEngine();
+  const auto artifact = operation.has_target() ? engine.ResolveArtifactTarget(operation.target()) : operation.artifact();
   engine.ValidateArtifact(artifact);
   return StageRestore(request, {}, engine, &artifact);
 }
