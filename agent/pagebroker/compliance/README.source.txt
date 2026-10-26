@@ -22,16 +22,14 @@ The uploader and metadata client execute the unmodified rclone release:
 
   https://github.com/rclone/rclone/releases/tag/v1.75.2
 
-The Dockerfile downloads the official Linux amd64 executable and pins its release
-archive by SHA-256. It does not compile or modify rclone. The matching source
+The Dockerfile downloads the official Linux executable for amd64 or arm64 and
+pins its release archive by SHA-256. It does not compile or modify rclone. The matching source
 archive and module downloads are used only to collect attribution. /legal/rclone
 contains the source archive, MIT license, Go license, module dependency notices,
 executable build information and release/source archive checksums.
 The PageBroker executable does not link the AWS C++ SDK. Model Streamer's
 prebuilt S3 plugin still contains its own AWS implementation.
-OpenSSL libcrypto remains available for downstream checkpoint hashing;
-its attribution is in /legal/openssl/copyright. The JSON parser's attribution
-is in /legal/nlohmann-json/copyright.
+The JSON parser's attribution is in /legal/nlohmann-json/copyright.
 
 The base image
 contains third-party components of its own -- glibc, libstdc++ and libgcc,

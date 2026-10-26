@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # S3 client
 
 `S3Client` runs [rclone v1.75.2](https://github.com/rclone/rclone/releases/tag/v1.75.2).
-The PageBroker Dockerfile downloads the official prebuilt Linux amd64 executable
-and verifies its release archive against a pinned SHA-256 checksum. It does not
+The PageBroker Dockerfile downloads the official prebuilt Linux executable for
+amd64 or arm64 and verifies its release archive against a pinned SHA-256 checksum. It does not
 compile or modify rclone. Matching sources and modules are downloaded only for
 attribution. License information, dependency notices, archive checksums and binary
 build information are packaged under `/legal/rclone`. PageBroker no longer builds
@@ -36,17 +36,16 @@ Command failures throw `S3Error`, carrying only the HTTP status extracted from
 the pinned CLI format (zero when unavailable). Cancellation and deadlines throw
 the shared `CancellationError` directly.
 
-`ResolveS3Credentials` in `s3_client.cpp` captures credentials once at startup.
-`S3Client` requires that resolved snapshot and never discovers credentials.
-Supply explicit `S3Connection` values or set `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY` and optional `AWS_SESSION_TOKEN` before startup. Missing
-or partial credentials fail instead of mixing sources. PageBroker does not read
-AWS credentials files or profiles, or discover instance roles, SSO, or external
-credential processes. Deployments must supply the resulting credentials.
-Region and CA settings can still come from `AWS_REGION`/`AWS_DEFAULT_REGION`
-and `AWS_CA_BUNDLE`. Credentials are passed to each rclone child through its
-environment and shared with Model Streamer. Restart PageBroker to adopt changed
-credentials; there is no automatic refresh.
+The daemon reads the `[default]` profile from `AWS_SHARED_CREDENTIALS_FILE` once
+at startup. The file must contain `aws_access_key_id` and `aws_secret_access_key`;
+`aws_session_token` is optional. Files are bounded to 64 KiB, and Kubernetes
+Secret symlinks are supported. Missing, malformed or incomplete files fail
+startup; environment access keys and named profiles cannot override or supplement
+them. The daemon shares that snapshot with rclone and Model Streamer.
+`S3Client` accepts only resolved connection settings and never discovers credentials.
+Region and endpoint come from the storage JSON. The optional `AWS_CA_BUNDLE`
+fallback must be absolute. Restart PageBroker to adopt changed credentials;
+there is no automatic refresh. Credential values never appear in arguments or logs.
 
 `active_files` bounds concurrent CLI processes, including metadata operations.
 A payload batch occupies one slot and transfers one file at a time. Independent

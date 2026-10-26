@@ -153,7 +153,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libaio-dev \
     libgtest-dev \
     libprotobuf-dev \
-    libssl-dev \
     nlohmann-json3-dev=3.11.3-1 \
     pkg-config \
     protobuf-compiler \
@@ -192,7 +191,6 @@ RUN arch="$(uname -m)" \
     && mv /usr/local/lib /usr/local/lib-build \
     && mkdir -p /runtime-lib \
     && cp -a "/usr/lib/${arch}-linux-gnu"/libaio.so.* /runtime-lib/ \
-    && cp -a "/usr/lib/${arch}-linux-gnu/libcrypto.so.3" /runtime-lib/ \
     && for library in /nixl-runtime-check/libnixl*.so /nixl-runtime-check/plugins/libplugin_POSIX.so; do \
          LD_LIBRARY_PATH=/nixl-runtime-check:/runtime-lib ldd "$library" > /tmp/dependencies \
          && ! grep -q 'not found' /tmp/dependencies || { cat /tmp/dependencies; exit 1; }; \
@@ -225,7 +223,6 @@ COPY --from=nixl /nixl-runtime/lib/ /usr/local/lib/
 COPY --from=sources /legal /legal
 ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
-COPY --from=build /usr/share/doc/libssl-dev/copyright /legal/openssl/copyright
 COPY --from=rclone-install /rclone/bin/rclone /usr/local/bin/rclone
 COPY --from=rclone-install /rclone/legal/ /legal/rclone/
 COPY --from=build /usr/share/doc/nlohmann-json3-dev/copyright /legal/nlohmann-json/copyright
