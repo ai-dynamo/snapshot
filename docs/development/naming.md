@@ -63,7 +63,7 @@ out of the reference.
 | snapshot | The saved state of a pod: the artifact a checkpoint writes to the snapshot store | `checkpoint` as a noun, `checkpoint artifact`, `dump`, `backup` |
 | checkpoint | Verb: take a snapshot of a pod. Also the `snapshotctl checkpoint` command | `snapshot` as a verb, `capture`, `dump` |
 | restore | Verb: start a new pod from a snapshot | `rehydrate`, `revive` |
-| capture | The mechanism inside a checkpoint. Use it in architecture pages and code, and in the existing `Captured` condition and capture Deployment. Elsewhere write checkpoint | `capture` for the act of checkpointing or for the snapshot |
+| capture | The mechanism inside a checkpoint. Internal only: code, comments, and detailed architecture pages. Every name and text a user sees says checkpoint, even where an existing name says capture | `capture` in a condition, reason, label, field, event, or message; `capture` for the act of checkpointing or for the snapshot |
 | snapshot store | The backend that holds snapshots. Today it is a PVC | `checkpoint store`, `checkpoint storage`, `shared volume` |
 | snapshot volume | The shared `ReadWriteMany` PVC that is the snapshot store today | `checkpoint volume` |
 | source Pod | The pod being checkpointed. Guides may call the serving instance a replica | `original pod`, `origin pod` |
@@ -86,7 +86,7 @@ These patterns are for user-facing names. An internal name follows its package.
 | --- | --- | --- |
 | Kind | PascalCase noun | `PodSnapshot`, `SnapshotJob` |
 | Spec or status field | lowerCamelCase. A reference to an object ends in `Ref`, a name in `Name`, a UID in `UID`, a timestamp in `At`, a duration in whole seconds in `Seconds`. A list is plural | `podRef`, `boundSnapshotContentName`, `sourceJobUID`, `startedAt`, `activeDeadlineSeconds`, `targetContainers` |
-| Condition type | PascalCase adjective or past participle | `Ready`, `Running`, `Captured`, `Completed`, `Failed` |
+| Condition type | PascalCase adjective or past participle | `Ready`, `Running`, `Completed`, `Failed` |
 | Condition or event reason | PascalCase, subject then outcome, no spaces | `DeadlineExceeded`, `PodSnapshotDeleted`, `CheckpointFailed` |
 | Annotation or label that Snapshot defines | `nvidia.com/` plus kebab-case. The restore interface starts with `restore-`; the rest usually start with `snapshot-` | `nvidia.com/restore-from`, `nvidia.com/snapshot-multi-gpu`, `nvidia.com/snapshot-skip-compat-check` |
 | Finalizer | `nvidia.com/` plus the object it protects and the action, in kebab-case | `nvidia.com/podsnapshotcontent-cleanup` |
