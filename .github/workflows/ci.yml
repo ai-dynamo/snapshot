@@ -64,6 +64,9 @@ jobs:
             **/go.sum
             go.work.sum
       - run: make test
+      - name: Test operator E2E build
+        working-directory: operator
+        run: go test -tags snapshot_e2e ./...
       - run: make test-integration
 
   build:
@@ -117,6 +120,7 @@ jobs:
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_inference.py \
+            e2e/tests/test_k8s.py \
             e2e/tests/test_pod_status_writers.py \
             e2e/tests/test_prune_ghcr.py \
             e2e/tests/test_required_tests.py \

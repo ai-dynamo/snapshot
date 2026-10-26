@@ -22,6 +22,10 @@ image:
 replicaCount: 1
 
 operator:
+  # Empty in normal deployments. CPU conformance tests may set this to an
+  # annotation key to request a deterministic capture failure for a test pod.
+  testFailCaptureSourceAnnotation: ""
+
   # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/storage.md.
   bindNewContents: false
   resources:
