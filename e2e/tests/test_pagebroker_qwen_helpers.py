@@ -140,6 +140,15 @@ def cluster(monkeypatch, identity):
     def deleted(namespace, name, **kwargs):
         state.trace.append("source-gone" if name == identity.source_pod else f"restore-{state.restores}-gone")
 
+    state.pvcs = []
+    state.pvs = []
+
+    def ensure_pvc(pvc):
+        state.pvcs.append(pvc)
+        state.trace.append("ensure-cache-pvc")
+
+    monkeypatch.setattr(qwen.snap, "ensure_pvc", ensure_pvc)
+    monkeypatch.setattr(qwen.snap, "ensure_pv", lambda pv: state.pvs.append(pv))
     monkeypatch.setattr(k8s, "create_pod", create)
     monkeypatch.setattr(k8s, "read_pod", read)
     monkeypatch.setattr(k8s, "delete_pod", remove)
@@ -163,13 +172,28 @@ def cluster(monkeypatch, identity):
 
 @pytest.mark.parametrize("case", qwen.CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("proxy", [False, True])
-def test_one_checkpoint_two_fresh_restores_and_four_inferences(case, cluster, identity, tmp_path, monkeypatch, proxy):
+@pytest.mark.parametrize("shared_cache", [False, True])
+def test_one_checkpoint_two_fresh_restores_and_four_inferences(case, cluster, identity, tmp_path, monkeypatch, proxy, shared_cache):
     monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "true" if proxy else "false")
+    if shared_cache:
+        monkeypatch.setenv("SNAPSHOT_E2E_MODEL_CACHE_SERVER", "cache.example.test")
+        monkeypatch.setenv("SNAPSHOT_E2E_MODEL_CACHE_PATH", "/models")
+        monkeypatch.setenv("SNAPSHOT_E2E_MODEL_CACHE_PVC", "review-model-cache")
     cluster.record.result_dir = tmp_path
     qwen.exercise(CONFIG, identity, case, cluster.record)
-    assert cluster.trace == ["create-app", "create-source", "checkpoint", "delete-source", "source-gone",
+    assert cluster.trace == ["ensure-cache-pvc", "create-app", "create-source", "checkpoint", "delete-source", "source-gone",
                              "create-restore-1", "delete-restore-1", "restore-1-gone",
                              "create-restore-2", "delete-restore-2", "restore-2-gone"]
+    assert len(cluster.pvcs) == 1
+    assert cluster.pvcs[0]["metadata"]["name"] == ("review-model-cache" if shared_cache else "model-cache")
+    assert len(cluster.pvs) == int(shared_cache)
+    source = cluster.manifests[0]
+    downloaders = [c for c in source["spec"].get("initContainers", []) if c["name"] == "model-cache"]
+    if shared_cache:
+        assert not downloaders
+    else:
+        assert len(downloaders) == 1
+        assert downloaders[0]["args"][1] == case.model
     assert cluster.queries == 4
     for pod in cluster.manifests:
         main = fw.main_container(pod)

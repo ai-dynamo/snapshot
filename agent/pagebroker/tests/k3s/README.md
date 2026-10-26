@@ -766,9 +766,11 @@ insufficient. They do not modify Helm values or restart the installed release.
 Allow enough GPU memory, node RAM, PageBroker tmpfs and checkpoint-PVC capacity for
 Qwen3-8B. The vLLM GPU-memory fractions default to 0.30 for 0.6B and 0.80 for 8B;
 `SNAPSHOT_E2E_QWEN_GPU_MEMORY_UTILIZATION` can override both. Model loading can
-download weights, or use the existing `SNAPSHOT_E2E_MODEL_CACHE_SERVER` / `_PATH`
-NFS cache settings; an offline cache must contain both models. The existing
-`SNAPSHOT_E2E_FRAMEWORK_IMAGE` override also applies. No new workload image build
+download the selected model into the default model-cache PVC, which the harness
+creates if missing and retains for reuse, or use the existing
+`SNAPSHOT_E2E_MODEL_CACHE_SERVER` / `_PATH` NFS cache settings. An offline cache
+must contain both models. The existing `SNAPSHOT_E2E_FRAMEWORK_IMAGE` override
+also applies. No new workload image build
 is required when using the guide image.
 
 After deployment, run from the repository root (set the workload-image variable

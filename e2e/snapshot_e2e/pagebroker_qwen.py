@@ -59,6 +59,9 @@ def prepare_pod(pod: dict, case: QwenCase, run: TestRun, utilization: float) -> 
         options = json.loads(main["args"][0])
         options["model"] = case.model
         main["args"] = [json.dumps(options)]
+        for container in pod["spec"].get("initContainers", []):
+            if container["name"] == fw.GUIDE_CACHE_INIT_CONTAINER:
+                container["args"][1] = case.model
     fw.set_env(main, "VLLM_GPU_MEMORY_UTILIZATION", str(utilization))
     for volume in pod["spec"]["volumes"]:
         if volume.get("configMap", {}).get("name") == "vllm-app":
@@ -143,6 +146,10 @@ def exercise(config: k8s.E2EConfig, run: TestRun, case: QwenCase,
             pv, pvc = fw.shared_model_cache_volume(config=config, cache=cache)
             snap.ensure_pv(pv)
             snap.ensure_pvc(pvc)
+        else:
+            pvc = fw.model_cache_pvc(config=config, spec=spec)
+            if pvc is not None:
+                snap.ensure_pvc(pvc)
         app = fw.app_configmap(config=config, spec=spec)
         app["metadata"]["name"] = app_name(run)
         app["metadata"]["labels"] = run.labels
