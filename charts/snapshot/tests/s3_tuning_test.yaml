@@ -15,6 +15,7 @@ set:
   storage.s3.region: us-east-1
   storage.s3.bucket: snapshot-bucket
   storage.s3.credentialsSecretRef: s3-creds
+  operator.bindNewContents: true
 tests:
   - it: renders only the staging cap as a limit when nothing else is set
     template: templates/configmap.yaml
@@ -275,6 +276,7 @@ tests:
       storage.s3.addressing: path
       storage.s3.caBundleConfigMapRef: s3-ca
       pageBroker.modelStreamer.s3Reader.concurrency: 2
+      operator.bindNewContents: false
     asserts:
       - notExists:
           path: data["pagebroker-s3.yaml"]
