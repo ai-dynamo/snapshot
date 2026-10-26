@@ -6,6 +6,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -266,11 +267,12 @@ type restoreFakeRuntime struct {
 	imageIDError           error
 	imageIDHit             bool
 	env                    []string
+	apparmorProfile        string
 }
 
 func (r *restoreFakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	r.resolvedID = id
-	return 123, &specs.Spec{Process: &specs.Process{Env: r.env}}, nil
+	return 123, &specs.Spec{Process: &specs.Process{Env: r.env, ApparmorProfile: r.apparmorProfile}}, nil
 }
 
 func (r *restoreFakeRuntime) ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error) {
@@ -431,6 +433,57 @@ func TestInspectRestoreComparesRuntimeImageID(t *testing.T) {
 	}
 }
 
+func TestLSMProfileFromSpec(t *testing.T) {
+	for name, tc := range map[string]struct {
+		spec *specs.Spec
+		want string
+	}{
+		"AppArmor": {spec: &specs.Spec{Process: &specs.Process{ApparmorProfile: "cri-containerd.apparmor.d"}},
+			want: "apparmor:cri-containerd.apparmor.d"},
+		"SELinux": {spec: &specs.Spec{Process: &specs.Process{SelinuxLabel: "system_u:system_r:container_t:s0:c1,c2"}},
+			want: "selinux:system_u:system_r:container_t:s0:c1,c2"},
+		"unconfined AppArmor": {spec: &specs.Spec{Process: &specs.Process{ApparmorProfile: "unconfined"}},
+			want: criu.LSMProfileNone},
+		"no label":   {spec: &specs.Spec{Process: &specs.Process{}}, want: criu.LSMProfileNone},
+		"no process": {spec: &specs.Spec{}, want: criu.LSMProfileNone},
+		"no spec":    {want: criu.LSMProfileNone},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := lsmProfileFromSpec(tc.spec); got != tc.want {
+				t.Fatalf("lsmProfileFromSpec = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInspectRestoreTakesThePlaceholdersLSMProfile(t *testing.T) {
+	manifest := types.NewCheckpointManifest(
+		"content-uid-123",
+		"main",
+		types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.OverlayManifest{},
+		types.HostManifest{},
+	)
+	rt := &restoreFakeRuntime{apparmorProfile: "cri-containerd.apparmor.d"}
+
+	snap, _, err := inspectRestore(context.Background(), rt, testr.New(t), RestoreRequest{
+		ContentUID:               "content-uid-123",
+		ContainerID:              "placeholder-id",
+		PodName:                  "restore-pod",
+		PodNamespace:             "default",
+		ArtifactContainerName:    "main",
+		DestinationContainerName: "main",
+	}, manifest)
+
+	if err != nil {
+		t.Fatalf("inspectRestore: %v", err)
+	}
+	if snap.LSMProfile != "apparmor:cri-containerd.apparmor.d" {
+		t.Fatalf("LSMProfile = %q", snap.LSMProfile)
+	}
+}
+
 func TestInspectRestoreRequiresTheRestoreProxy(t *testing.T) {
 	manifest := types.NewCheckpointManifest(
 		"content-uid-123",
@@ -441,11 +494,13 @@ func TestInspectRestoreRequiresTheRestoreProxy(t *testing.T) {
 		types.HostManifest{},
 	)
 	for name, tc := range map[string]struct {
-		cmdline string
-		readErr error
-		wantErr string
+		cmdline      string
+		readErr      error
+		withoutProxy bool
+		wantErr      string
 	}{
 		"the proxy":            {cmdline: "/snapshot-control/snapshot-restore-proxy"},
+		"a node without it":    {cmdline: "sleep infinity", withoutProxy: true},
 		"the image's command":  {cmdline: "sleep infinity", wantErr: "NRI plugin did not set up this container"},
 		"the proxy with args":  {cmdline: "/snapshot-control/snapshot-restore-proxy --x", wantErr: "NRI plugin"},
 		"PID 1 cannot be read": {readErr: errors.New("no such process"), wantErr: "no such process"},
@@ -466,8 +521,15 @@ func TestInspectRestoreRequiresTheRestoreProxy(t *testing.T) {
 				PodNamespace:             "default",
 				ArtifactContainerName:    "main",
 				DestinationContainerName: "main",
+				WithoutProxy:             tc.withoutProxy,
 			}, manifest)
 
+			if tc.withoutProxy {
+				if err != nil || readPID != 0 {
+					t.Fatalf("inspectRestore: %v, read PID %d; want no error and no PID 1 check", err, readPID)
+				}
+				return
+			}
 			if readPID != 123 {
 				t.Fatalf("read PID %d, want the container's PID 1, 123", readPID)
 			}
@@ -868,6 +930,47 @@ func (m *cleanupMounter) MountArtifact(context.Context, nsmount.MountPoint, stri
 	return nil, errors.New("unexpected artifact mount")
 }
 
+// failingUnmountMount always fails Unmount, so a test can verify the caller
+// keeps retrying it (via the deferred cleanup) instead of dropping it after
+// one failed attempt.
+type failingUnmountMount struct {
+	count  *int
+	events chan<- string
+	name   string
+}
+
+func (m failingUnmountMount) Unmount(context.Context) error {
+	*m.count++
+	m.events <- "unmount " + m.name
+	return fmt.Errorf("unmount %s failed", m.name)
+}
+
+func (m failingUnmountMount) NsFd() *os.File { return nil }
+
+func (m failingUnmountMount) Release() error { return nil }
+
+// failingStagingMounter mounts the bundle normally but returns a staging
+// mount whose Unmount always fails.
+type failingStagingMounter struct {
+	bundle, staging int
+	events          chan<- string
+}
+
+func (m *failingStagingMounter) MountBundle(context.Context, int) (nsmount.MountPoint, error) {
+	m.bundle++
+	return cleanupMount{&m.bundle, m.events, "bundle"}, nil
+}
+func (m *failingStagingMounter) MountCuInterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return nil, errors.New("unexpected cuinterpose mount")
+}
+func (m *failingStagingMounter) MountPageBroker(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	m.staging++
+	return failingUnmountMount{&m.staging, m.events, "staging"}, nil
+}
+func (m *failingStagingMounter) MountArtifact(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return nil, errors.New("unexpected artifact mount")
+}
+
 func TestRestoreSkipsAbortAfterFailedConnection(t *testing.T) {
 	base := t.TempDir()
 	artifact, err := nsmount.ResolveArtifactPath(base, "content", "main")
@@ -899,7 +1002,7 @@ func TestRestoreSkipsAbortAfterFailedConnection(t *testing.T) {
 		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
 		PageBrokerControlSocketPath: socketPath, SkipCompatCheck: true,
 	}, mounts)
-	if err == nil || !strings.Contains(err.Error(), "prepare PageBroker restore") {
+	if err == nil || !strings.Contains(err.Error(), "while preparing PageBroker restore") || StepOf(err) != StepPrepareRestore {
 		t.Fatalf("restore error = %v, want a prepare failure", err)
 	}
 	if strings.Contains(err.Error(), "abort PageBroker restore") {
@@ -970,13 +1073,311 @@ func TestRestoreReturnsBothRestoreAndAbortErrorsOnCleanupFailure(t *testing.T) {
 		PageBrokerControlSocketPath: listener.Addr().String(),
 		PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
 	}, mounts)
-	if err == nil || !strings.Contains(err.Error(), "nsrestore failed") {
+	if err == nil || !strings.Contains(err.Error(), "while running nsrestore") {
 		t.Fatalf("restore error = %v, want the nsrestore failure", err)
 	}
 	if !strings.Contains(err.Error(), "abort PageBroker restore") {
 		t.Fatalf("restore error = %v, want the Abort failure joined in too", err)
 	}
 	waitPageBrokerTest(t, server)
+}
+
+func TestStepErrorNamesTheStepAndKeepsTheCause(t *testing.T) {
+	cause := errors.New("boom")
+	err := failStep(StepMountBundle, cause)
+	if err.Error() != "while mounting agent bundle into placeholder: boom" {
+		t.Fatalf("StepError = %q", err.Error())
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("StepError does not unwrap to its cause: %v", err)
+	}
+	if got := StepOf(err); got != StepMountBundle {
+		t.Fatalf("StepOf = %q, want %q", got, StepMountBundle)
+	}
+	joined := errors.Join(failStep(StepRunNSRestore, cause), failStep(StepCommitRestore, cause))
+	if got := StepOf(joined); got != StepRunNSRestore {
+		t.Fatalf("StepOf(joined) = %q, want the first step", got)
+	}
+	cleanup := NewRestoreCleanupError(errors.Join(failStep(StepCommitRestore, cause)))
+	if got := StepOf(cleanup); got != StepCommitRestore {
+		t.Fatalf("StepOf(cleanup) = %q, want %q", got, StepCommitRestore)
+	}
+	if got := StepOf(cause); got != "" {
+		t.Fatalf("StepOf(plain) = %q, want empty", got)
+	}
+	if failStep(StepMountBundle, nil) != nil {
+		t.Fatal("failStep(nil) must stay nil")
+	}
+}
+
+func TestRestoreStepsNameTheFailingPhase(t *testing.T) {
+	writeManifest := func(t *testing.T, base, contentUID string) {
+		t.Helper()
+		directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		manifest := &types.CheckpointManifest{Artifact: types.ArtifactManifest{ContentUID: contentUID, ContainerName: "main"}}
+		if err := types.WriteManifest(directory, manifest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unreachableSocket := func(t *testing.T) string {
+		t.Helper()
+		regularFile := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(regularFile, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(regularFile, "pagebroker.sock")
+	}
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, base string) string
+		want  Step
+	}{
+		{
+			name:  "artifact missing",
+			setup: func(t *testing.T, base string) string { return unreachableSocket(t) },
+			want:  StepResolveArtifact,
+		},
+		{
+			name: "manifest for another artifact",
+			setup: func(t *testing.T, base string) string {
+				writeManifest(t, base, "someone-else")
+				return unreachableSocket(t)
+			},
+			want: StepValidateManifest,
+		},
+		{
+			name: "PageBroker unreachable",
+			setup: func(t *testing.T, base string) string {
+				writeManifest(t, base, "content")
+				return unreachableSocket(t)
+			},
+			want: StepPrepareRestore,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			socketPath := tt.setup(t, base)
+			ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+			defer cancel()
+			var events []string
+			_, err := Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+				PageBrokerControlSocketPath: socketPath, SkipCompatCheck: true,
+			}, &restoreSourceMounter{events: &events})
+			if got := StepOf(err); got != tt.want {
+				t.Fatalf("StepOf(%v) = %q, want %q", err, got, tt.want)
+			}
+			if !strings.HasPrefix(err.Error(), "while "+string(tt.want)+": ") {
+				t.Fatalf("restore error = %q, want it to open with the step", err.Error())
+			}
+		})
+	}
+}
+
+func TestRestoreKeepsTheStepNSRestoreNamed(t *testing.T) {
+	tests := []struct {
+		name  string
+		nsErr error
+		want  Step
+	}{
+		{name: "inner step is kept", nsErr: failStep(StepApplyRootfsDiff, errors.New("rootfs diff failed: tar: boom")), want: StepApplyRootfsDiff},
+		{name: "unnamed failure gets the launch step", nsErr: errors.New("nsrestore was killed (signal: killed)"), want: StepRunNSRestore},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+				types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+			if err := types.WriteManifest(directory, manifest); err != nil {
+				t.Fatal(err)
+			}
+			originalExec := execNSRestoreFunc
+			t.Cleanup(func() { execNSRestoreFunc = originalExec })
+			execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+				return nil, tt.nsErr
+			}
+
+			listener := listenPageBroker(t)
+			server := make(chan error, 1)
+			go func() {
+				for _, step := range []string{"stage", "abort"} {
+					connection, err := listener.Accept()
+					if err != nil {
+						server <- err
+						return
+					}
+					request, err := readPageBrokerTestRequest(connection)
+					if err != nil {
+						connection.Close()
+						server <- err
+						return
+					}
+					response := &pagebroker.Response{}
+					switch step {
+					case "stage":
+						response.Result = &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}}
+					case "abort":
+						if request.GetAbort() == nil {
+							err = errors.New("expected Abort after the failed restore")
+						}
+						response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+					}
+					if err == nil {
+						err = replyPageBrokerTest(connection, request, response)
+					}
+					connection.Close()
+					if err != nil {
+						server <- err
+						return
+					}
+				}
+				server <- nil
+			}()
+
+			ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+			defer cancel()
+			_, err = Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+				BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+				PageBrokerControlSocketPath: listener.Addr().String(),
+				PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
+			}, &cleanupMounter{events: make(chan string, 8)})
+			if got := StepOf(err); got != tt.want {
+				t.Fatalf("StepOf(%v) = %q, want %q", err, got, tt.want)
+			}
+			if !strings.HasPrefix(err.Error(), "while "+string(tt.want)+": ") {
+				t.Fatalf("restore error = %q, want it to open with the step", err.Error())
+			}
+			if tt.want != StepRunNSRestore && strings.Contains(err.Error(), string(StepRunNSRestore)) {
+				t.Fatalf("restore error = %q, want no second step prefix", err.Error())
+			}
+			waitPageBrokerTest(t, server)
+		})
+	}
+}
+
+func TestFailStepUnlessNamed(t *testing.T) {
+	cause := errors.New("boom")
+	if got := StepOf(failStepUnlessNamed(StepRunNSRestore, cause)); got != StepRunNSRestore {
+		t.Fatalf("StepOf(unnamed) = %q", got)
+	}
+	named := failStep(StepRestoreCRIU, cause)
+	if got := failStepUnlessNamed(StepRunNSRestore, named); got != named {
+		t.Fatalf("failStepUnlessNamed(named) = %v, want the error unchanged", got)
+	}
+	if failStepUnlessNamed(StepRunNSRestore, nil) != nil {
+		t.Fatal("failStepUnlessNamed(nil) must stay nil")
+	}
+}
+
+func TestRestoreCommitFailureIsACleanupError(t *testing.T) {
+	base := t.TempDir()
+	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	originalExec := execNSRestoreFunc
+	t.Cleanup(func() { execNSRestoreFunc = originalExec })
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+		return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
+	}
+	originalValidate := validateRestoredProcessFunc
+	t.Cleanup(func() { validateRestoredProcessFunc = originalValidate })
+	validateRestoredProcessFunc = func(string, int, logr.Logger) error { return nil }
+
+	listener := listenPageBroker(t)
+	server := make(chan error, 1)
+	go func() {
+		for _, step := range []string{"stage", "commit", "abort"} {
+			connection, err := listener.Accept()
+			if err != nil {
+				server <- err
+				return
+			}
+			request, err := readPageBrokerTestRequest(connection)
+			if err != nil {
+				connection.Close()
+				server <- err
+				return
+			}
+			response := &pagebroker.Response{}
+			switch step {
+			case "stage":
+				if request.GetStagedRestore() == nil {
+					err = errors.New("expected StagedRestore")
+				}
+				response.Result = &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}}
+			case "commit":
+				if request.GetCommit() == nil {
+					err = errors.New("expected Commit")
+				}
+				response.Result = &pagebroker.Response_Failure{Failure: &pagebroker.Failure{
+					Code: pagebroker.Failure_STORAGE_ERROR.Enum(), Message: proto.String("storage unavailable"),
+				}}
+			case "abort":
+				if request.GetAbort() == nil {
+					err = errors.New("expected Abort after the failed Commit")
+				}
+				response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+			}
+			if err == nil {
+				err = replyPageBrokerTest(connection, request, response)
+			}
+			connection.Close()
+			if err != nil {
+				server <- err
+				return
+			}
+		}
+		server <- nil
+	}()
+
+	mounts := &cleanupMounter{events: make(chan string, 8)}
+	ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+	defer cancel()
+	restored, err := Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		PageBrokerControlSocketPath: listener.Addr().String(),
+		PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
+	}, mounts)
+	waitPageBrokerTest(t, server)
+
+	var cleanupErr *RestoreCleanupError
+	if !errors.As(err, &cleanupErr) {
+		t.Fatalf("restore error = %v, want a *RestoreCleanupError carrying the commit failure", err)
+	}
+	if got := StepOf(err); got != StepCommitRestore {
+		t.Fatalf("StepOf = %q, want %q", got, StepCommitRestore)
+	}
+	want := "while committing PageBroker restore: PageBroker STORAGE_ERROR: storage unavailable"
+	if count := strings.Count(err.Error(), want); count != 1 {
+		t.Fatalf("restore error = %v, want %q exactly once, got %d", err, want, count)
+	}
+	if restored.RestoredPID != 4242 {
+		t.Fatalf("restore result = %+v, want the restored PID preserved", restored)
+	}
 }
 
 func TestRestoreSuccessfulCPURestoreUnmountsBeforeCommitAndSkipsAbort(t *testing.T) {
@@ -1080,6 +1481,199 @@ func TestRestoreSuccessfulCPURestoreUnmountsBeforeCommitAndSkipsAbort(t *testing
 	}
 }
 
+// TestRestoreFailedSourceUnmountSkipsCommitAndKeepsRetrying covers the branch
+// CodeRabbit flagged: a failed source unmount must stay in activeMounts for
+// the deferred cleanup to retry, and must not reach Commit or Abort.
+func TestRestoreFailedSourceUnmountSkipsCommitAndKeepsRetrying(t *testing.T) {
+	base := t.TempDir()
+	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan string, 8)
+	originalExec := execNSRestoreFunc
+	t.Cleanup(func() { execNSRestoreFunc = originalExec })
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+		return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
+	}
+	originalValidate := validateRestoredProcessFunc
+	t.Cleanup(func() { validateRestoredProcessFunc = originalValidate })
+	validateRestoredProcessFunc = func(string, int, logr.Logger) error { return nil }
+
+	listener := listenPageBroker(t)
+	server := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			server <- err
+			return
+		}
+		request, err := readPageBrokerTestRequest(connection)
+		if err == nil && request.GetStagedRestore() == nil {
+			err = errors.New("expected StagedRestore")
+		}
+		response := &pagebroker.Response{
+			Result: &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}},
+		}
+		if err == nil {
+			err = replyPageBrokerTest(connection, request, response)
+		}
+		connection.Close()
+		// No further request (Commit or Abort) should ever arrive: the failed
+		// unmount must leave the transaction alone for expiry to reclaim.
+		server <- err
+	}()
+
+	mounts := &failingStagingMounter{events: events}
+	ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+	defer cancel()
+	restored, err := Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		PageBrokerControlSocketPath: listener.Addr().String(),
+		PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
+	}, mounts)
+
+	var cleanupErr *RestoreCleanupError
+	if !errors.As(err, &cleanupErr) {
+		t.Fatalf("restore error = %v, want a *RestoreCleanupError wrapping the failed unmount", err)
+	}
+	if !strings.Contains(err.Error(), "unmount staging failed") {
+		t.Fatalf("restore error = %v, want it to carry the unmount failure", err)
+	}
+	if restored.RestoredPID != 4242 {
+		t.Fatalf("restore result = %+v, want the successful restore's PID preserved despite the cleanup error", restored)
+	}
+
+	waitPageBrokerTest(t, server)
+	close(events)
+	var observed []string
+	for event := range events {
+		observed = append(observed, event)
+	}
+	// The explicit unmount attempt fails, then the deferred cleanup retries
+	// it (in reverse mount order) before unmounting the bundle.
+	want := []string{"unmount staging", "unmount staging", "unmount bundle"}
+	if !reflect.DeepEqual(observed, want) {
+		t.Fatalf("event order = %v, want %v (failed unmount retried by cleanup, Commit never sent)", observed, want)
+	}
+}
+
+// TestRestoreCommitFailureAfterSuccessfulUnmountReturnsCleanupError covers
+// the branch CodeRabbit flagged: a Commit failure after a successful source
+// unmount must still surface as a *RestoreCleanupError, not be dropped.
+func TestRestoreCommitFailureAfterSuccessfulUnmountReturnsCleanupError(t *testing.T) {
+	base := t.TempDir()
+	directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan string, 8)
+	originalExec := execNSRestoreFunc
+	t.Cleanup(func() { execNSRestoreFunc = originalExec })
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+		return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
+	}
+	originalValidate := validateRestoredProcessFunc
+	t.Cleanup(func() { validateRestoredProcessFunc = originalValidate })
+	validateRestoredProcessFunc = func(string, int, logr.Logger) error { return nil }
+
+	listener := listenPageBroker(t)
+	server := make(chan error, 1)
+	go func() {
+		for _, step := range []string{"stage", "commit", "abort"} {
+			connection, err := listener.Accept()
+			if err != nil {
+				server <- err
+				return
+			}
+			request, err := readPageBrokerTestRequest(connection)
+			if err != nil {
+				connection.Close()
+				server <- err
+				return
+			}
+			response := &pagebroker.Response{}
+			switch step {
+			case "stage":
+				if request.GetStagedRestore() == nil {
+					err = errors.New("expected StagedRestore")
+				}
+				response.Result = &pagebroker.Response_StagedRestoreDirectory{StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: &directory}}
+			case "commit":
+				if request.GetCommit() == nil {
+					err = errors.New("expected Commit")
+				}
+				events <- "commit request received"
+				code := pagebroker.Failure_STORAGE_ERROR
+				response.Result = &pagebroker.Response_Failure{Failure: &pagebroker.Failure{Code: &code, Message: proto.String("commit failed")}}
+			case "abort":
+				if request.GetAbort() == nil {
+					err = errors.New("expected Abort")
+				}
+				response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+			}
+			if err == nil {
+				err = replyPageBrokerTest(connection, request, response)
+			}
+			connection.Close()
+			if err != nil {
+				server <- err
+				return
+			}
+		}
+		server <- nil
+	}()
+
+	mounts := &cleanupMounter{events: events}
+	ctx, cancel := context.WithTimeout(context.Background(), pageBrokerTestTimeout)
+	defer cancel()
+	restored, err := Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		PageBrokerControlSocketPath: listener.Addr().String(),
+		PageBrokerRestoreMode:       "staged", SkipCompatCheck: true,
+	}, mounts)
+
+	var cleanupErr *RestoreCleanupError
+	if !errors.As(err, &cleanupErr) {
+		t.Fatalf("restore error = %v, want a *RestoreCleanupError wrapping the Commit failure", err)
+	}
+	if !strings.Contains(err.Error(), "committing PageBroker restore") {
+		t.Fatalf("restore error = %v, want it to carry the Commit failure", err)
+	}
+	if restored.RestoredPID != 4242 {
+		t.Fatalf("restore result = %+v, want the successful restore's PID preserved despite the cleanup error", restored)
+	}
+
+	waitPageBrokerTest(t, server)
+	close(events)
+	var observed []string
+	for event := range events {
+		observed = append(observed, event)
+	}
+	want := []string{"unmount staging", "commit request received", "unmount bundle"}
+	if !reflect.DeepEqual(observed, want) {
+		t.Fatalf("event order = %v, want %v (source unmounted, Commit attempted and failed)", observed, want)
+	}
+}
+
 func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 	const gpuUUID = "GPU-11111111-1111-1111-1111-111111111111"
 	for _, mode := range []string{"cpu", "invalid-context", "custom-storage"} {
@@ -1173,7 +1767,7 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 			if mode == "invalid-context" && !strings.Contains(err.Error(), "GPU context requires captured PIDs") {
 				t.Fatalf("expected GPU context failure before staging: %v", err)
 			}
-			if mode == "custom-storage" && !strings.Contains(err.Error(), "nsrestore failed") {
+			if mode == "custom-storage" && !strings.Contains(err.Error(), "while running nsrestore") {
 				t.Fatalf("expected failure after staging mount: %v", err)
 			}
 			if mounts.mounted != 2*wantCleanup || mounts.bundle != wantCleanup || mounts.staging != wantCleanup {
@@ -1459,16 +2053,174 @@ func TestCustomStorageFilesReachChild(t *testing.T) {
 	}
 }
 
-func TestNSRestoreFailure(t *testing.T) {
-	runErr := errors.New("exit status 1")
+// Only an AppArmor profile or "none" needs securityfs, and only where it is
+// missing.
+func TestMountSecurityFSForCRIUMountsOnlyWhenNeeded(t *testing.T) {
+	visible := t.TempDir()
+	if err := os.Mkdir(filepath.Join(visible, "apparmor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		path, profile string
+	}{
+		"no profile":               {path: t.TempDir(), profile: ""},
+		"SELinux":                  {path: t.TempDir(), profile: "selinux:system_u:system_r:container_t:s0"},
+		"none, AppArmor visible":   {path: visible, profile: criu.LSMProfileNone},
+		"AppArmor already visible": {path: visible, profile: "apparmor:cri-containerd.apparmor.d"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			unmount, err := mountSecurityFSForCRIU(tc.path, tc.profile, testr.New(t))
+			if err != nil {
+				t.Fatalf("mountSecurityFSForCRIU: %v", err)
+			}
+			if err := unmount(); err != nil {
+				t.Fatalf("unmount: %v", err)
+			}
+		})
+	}
+}
 
-	err := nsrestoreFailure([]byte(`{"restoredPID":0,"error":"CRIU restore failed: mnt-v2: Can't stat mountpoint /cache/vllm"}`+"\n"), runErr)
-	if err == nil || err.Error() != "CRIU restore failed: mnt-v2: Can't stat mountpoint /cache/vllm" {
-		t.Fatalf("nsrestoreFailure(reported) = %v", err)
+// within bounds the securityfs unmount: a call that blocks gives an error in
+// time, and a call that returns passes its result through.
+func TestWithin(t *testing.T) {
+	unmountErr := errors.New("unmount failed")
+	if err := within(time.Second, func() error { return unmountErr }); !errors.Is(err, unmountErr) {
+		t.Fatalf("within(returns) = %v, want %v", err, unmountErr)
 	}
 
-	err = nsrestoreFailure([]byte("panic: boom"), runErr)
-	if !errors.Is(err, runErr) || !strings.Contains(err.Error(), "stdout: panic: boom") {
-		t.Fatalf("nsrestoreFailure(unstructured) = %v", err)
+	block := make(chan struct{})
+	defer close(block)
+	err := within(10*time.Millisecond, func() error { <-block; return nil })
+	if err == nil || !strings.Contains(err.Error(), "no answer in 10ms") {
+		t.Fatalf("within(blocks) = %v, want a timeout", err)
+	}
+}
+
+func TestRestoreBoundFetchesMetadataAndStagesPublishedArtifact(t *testing.T) {
+	publishedArtifact := &pagebroker.PublishedArtifact{
+		StoreId:        "store-v1-" + strings.Repeat("a", 64),
+		ArtifactHandle: "artifacts/content/containers/main",
+	}
+	manifestDir := t.TempDir()
+	manifest := &types.CheckpointManifest{Artifact: types.ArtifactManifest{ContentUID: "content", ContainerName: "main"}}
+	if err := types.WriteManifest(manifestDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "broker.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var events []string
+	bundleDone := make(chan struct{})
+	mounts := &restoreSourceMounter{events: &events, bundleDone: bundleDone}
+
+	server := make(chan error, 1)
+	go func() {
+		var metadataTx, mainTx string
+		// 0: GetArtifactMetadata. 1: its Abort (fires before the main
+		// transaction starts). 2: StagedRestore. 3: Abort of the main transaction.
+		for i := 0; i < 4; i++ {
+			connection, err := listener.Accept()
+			if err != nil {
+				server <- err
+				return
+			}
+			err = func() error {
+				defer connection.Close()
+				if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					return err
+				}
+				var size uint32
+				if err := binary.Read(connection, binary.BigEndian, &size); err != nil {
+					return err
+				}
+				data := make([]byte, size)
+				if _, err := io.ReadFull(connection, data); err != nil {
+					return err
+				}
+				request := new(pagebroker.Request)
+				if err := proto.Unmarshal(data, request); err != nil {
+					return err
+				}
+				response := &pagebroker.Response{RequestId: request.RequestId, TransactionId: request.TransactionId}
+				switch i {
+				case 0:
+					metadataTx = request.GetTransactionId()
+					metadataReq := request.GetGetArtifactMetadata()
+					if metadataReq == nil || !proto.Equal(metadataReq.GetArtifact(), publishedArtifact) {
+						return fmt.Errorf("expected GetArtifactMetadata for the published artifact, got %v", request.GetCommand())
+					}
+					response.Result = &pagebroker.Response_GetArtifactMetadataComplete{
+						GetArtifactMetadataComplete: &pagebroker.GetArtifactMetadataComplete{
+							ManifestDirectory: manifestDir, Artifact: metadataReq.GetArtifact(),
+						},
+					}
+				case 1:
+					if request.GetAbort() == nil || request.GetTransactionId() != metadataTx {
+						return fmt.Errorf("expected abort of the metadata transaction %q, got %v", metadataTx, request)
+					}
+					response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+				case 2:
+					mainTx = request.GetTransactionId()
+					if mainTx == metadataTx {
+						return errors.New("main transaction reused the metadata transaction ID")
+					}
+					staged := request.GetStagedRestore()
+					if staged == nil || !proto.Equal(staged.GetArtifact(), publishedArtifact) {
+						return fmt.Errorf("expected StagedRestore with the published artifact, got %v", request.GetCommand())
+					}
+					if staged.GetSource() != nil {
+						return fmt.Errorf("bound restore must not set a legacy source: %v", staged.GetSource())
+					}
+					response.Result = &pagebroker.Response_StagedRestoreDirectory{
+						StagedRestoreDirectory: &pagebroker.StagedRestoreDirectory{ImageDirectory: proto.String("/pagebroker/staging/restore/test")},
+					}
+				case 3:
+					if request.GetAbort() == nil || request.GetTransactionId() != mainTx {
+						return fmt.Errorf("expected abort of the main transaction %q, got %v", mainTx, request)
+					}
+					response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+				}
+				data, err = proto.Marshal(response)
+				if err != nil {
+					return err
+				}
+				if err := binary.Write(connection, binary.BigEndian, uint32(len(data))); err != nil {
+					return err
+				}
+				_, err = connection.Write(data)
+				return err
+			}()
+			if err != nil {
+				server <- err
+				return
+			}
+		}
+		server <- nil
+	}()
+
+	_, err = Restore(ctx, &restoreFakeRuntime{}, testr.New(t), RestoreRequest{
+		ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+		SkipCompatCheck: true, PageBrokerControlSocketPath: listener.Addr().String(),
+		PublishedArtifact: publishedArtifact,
+	}, mounts)
+	// The fixture has no namespace FD, so nsrestore cannot launch.
+	if err == nil {
+		t.Fatal("restore unexpectedly succeeded")
+	}
+	select {
+	case err := <-server:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("restore did not complete its PageBroker exchange")
+	}
+	if mounts.staged != "/pagebroker/staging/restore/test" || mounts.artifact != "" {
+		t.Fatalf("bound restore must mount via MountPageBroker, not MountArtifact: %+v", mounts)
 	}
 }

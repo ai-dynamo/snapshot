@@ -193,6 +193,39 @@ func TestSnapshotJobReconcileInvalidSpecIsTerminal(t *testing.T) {
 	assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, completed.Reason)
 }
 
+func TestSnapshotJobReconcileInvalidNonTargetContainersCreatesNoJob(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		containers []string
+	}{
+		{"duplicate", []string{"saver", "saver"}},
+		{"capture target", []string{"worker"}},
+		{"missing", []string{"missing"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := snapshotJobReconcilerScheme()
+			sj := minimalSnapshotJob()
+			sj.Spec.PodTemplate.Spec.Containers = append(sj.Spec.PodTemplate.Spec.Containers, corev1.Container{Name: "saver"})
+			sj.Spec.NonTargetArtifacts = &snapshotv1alpha1.NonTargetArtifactPolicy{Containers: tc.containers}
+			r := makeSnapshotJobReconciler(s, sj)
+
+			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+			require.NoError(t, err)
+
+			jobs := &batchv1.JobList{}
+			require.NoError(t, r.List(context.Background(), jobs))
+			assert.Empty(t, jobs.Items, "invalid artifact writers must not create a source Job")
+
+			updated := &snapshotv1alpha1.SnapshotJob{}
+			require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+			condition := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+			require.NotNil(t, condition)
+			assert.Equal(t, metav1.ConditionTrue, condition.Status)
+			assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, condition.Reason)
+		})
+	}
+}
+
 func TestSnapshotJobReconcilePropagatesJobGetError(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()

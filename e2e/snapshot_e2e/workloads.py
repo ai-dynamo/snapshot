@@ -25,6 +25,8 @@ RESTORE_DONE = f"{CONTROL_DIR}/restore-complete"
 # The agent's NRI plugin makes the restore proxy PID 1 in restore containers,
 # in place of the container's command.
 RESTORE_PROXY = f"{CONTROL_DIR}/snapshot-restore-proxy"
+# The command restore containers need on nodes without the restore proxy.
+INERT_COMMAND = ["sleep", "infinity"]
 # The process the CUDA workload runs as, from CUDA_SOURCE.
 CUDA_HOLD = "/tmp/cuda_hold"
 STATE_DIR = "/tmp/e2e-state"
@@ -259,6 +261,8 @@ def base_pod_spec(
     # agent's own pod, not the workload pod — see checkpoint_agent_pod() /
     # checkpoint_artifact_path() in lifecycle.py), a real caller's pod no
     # longer needs to carry this volume at all.
+    if gpu and config.cpu_only:
+        raise ValueError("GPU workloads cannot run in CPU-only E2E mode")
     container: dict[str, Any] = {
         "name": CONTAINER,
         "image": run.image,
@@ -287,7 +291,7 @@ def base_pod_spec(
         # Kubernetes default 30s graceful termination window between tests.
         "terminationGracePeriodSeconds": 1,
         "containers": [container],
-        **workload_scheduling(),
+        **workload_scheduling(cpu_only=config.cpu_only),
         "volumes": volumes,
     }
     if gpu:
@@ -299,7 +303,21 @@ def base_pod_spec(
     return spec
 
 
-def workload_scheduling() -> dict[str, Any]:
+def restore_proxy() -> bool:
+    """Whether the agents restore through the restore proxy.
+
+    SNAPSHOT_E2E_RESTORE_PROXY=false is for nodes without NRI v0.10 or newer,
+    where the agent restores without it. For auto, see
+    lifecycle.restore_proxy_on.
+    """
+    return os.environ.get("SNAPSHOT_E2E_RESTORE_PROXY", "true") != "false"
+
+
+def workload_scheduling(*, cpu_only: bool | None = None) -> dict[str, Any]:
+    if cpu_only is None:
+        cpu_only = k8s.cpu_only_mode()
+    if cpu_only:
+        return {}
     # Keep all workload pods on GPU nodes so the shared RWO checkpoint PVC binds in
     # a zone where both source and restore pods can schedule.
     node_selector = {
@@ -436,8 +454,8 @@ def snapshotjob_exit_pod_template(
 
 
 # The agent's NRI plugin replaces the restore container's command with the
-# restore proxy. Agents from before the proxy restore into the running
-# container instead, which upgrade tests still do, so the command idles.
+# restore proxy. Agents from before the proxy, in upgrade tests, and nodes
+# without it restore into the running container instead, so the command idles.
 RESTORE_COMMAND = "exec sleep infinity\n"
 
 

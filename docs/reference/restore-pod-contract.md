@@ -152,7 +152,8 @@ for the restore, then follows the restored process: it forwards signals to it,
 and exits with its exit code, so the container ends when the restored workload
 does. If the proxy is not PID 1, the agent fails the restore. Keep the source's
 command in restore Pods; it never runs. Other containers in the Pod, such as
-sidecars, are left alone.
+sidecars, are left alone. Nodes whose runtime cannot run the proxy restore
+without it; see [Nodes without the restore proxy](#nodes-without-the-restore-proxy).
 
 The plugin decides which containers get the proxy when each container is
 created. Without `restore-container-map`, it reads the PodSnapshot that
@@ -184,3 +185,27 @@ The proxy reserves two exit codes:
 
 Every other exit code is the restored workload's own, or 128 plus the number of
 the signal that ended it.
+
+## Nodes without the restore proxy
+
+On a node whose container runtime has no NRI, or NRI older than v0.10
+(containerd older than 2.2, or NRI disabled), the agent restores without the
+proxy. Its log says so when it starts. The container's own command stays PID 1,
+and the agent restores the workload beside it. On such nodes:
+
+- Give every destination container an inert, long-running command, such as
+  `["sleep", "infinity"]`. The source's command would start the workload from
+  scratch next to the restored one. An inert command also works on nodes with
+  the proxy, which replaces it.
+- Add a liveness probe that checks the workload itself, such as its API.
+
+Without the proxy:
+
+- The container does not end when the restored workload exits, and the
+  workload's exit code is lost. The Pod can stay Running and Ready with no
+  workload; the liveness probe is what notices.
+- Signals reach the inert command, not the workload. When the Pod is deleted,
+  the workload gets no `SIGTERM`; it is killed at the end of the grace period.
+- After a failed restore, the agent kills the container. If it starts again, it
+  runs the inert command and is not restored. Delete the Pod to restore again.
+- The proxy's exit codes, 112 and 113, do not apply.

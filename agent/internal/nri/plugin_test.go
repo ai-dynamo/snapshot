@@ -219,18 +219,29 @@ func TestInstallProxyReplacesAnEarlierCopy(t *testing.T) {
 	assert.Len(t, entries, 1, "no temporary file may be left behind")
 }
 
-// Restores need NRI, so the agent stops when the runtime has none.
-func TestRunFailsWithoutNRI(t *testing.T) {
+// Without NRI, Start fails at once, and the agent restores without the proxy.
+func TestStartFailsWithoutNRI(t *testing.T) {
 	p, _ := testPlugin(t, &fakeResolver{})
 	p.socketPath = filepath.Join(t.TempDir(), "nri.sock") // nothing listens here
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	err := p.Run(ctx)
+	err := p.Start(ctx)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "could not register with the container runtime")
 	assert.NoError(t, ctx.Err(), "fails at once, without waiting")
+}
+
+func TestWithin(t *testing.T) {
+	failed := errors.New("failed")
+	assert.ErrorIs(t, within(time.Second, func() error { return failed }), failed)
+
+	block := make(chan struct{})
+	defer close(block)
+	err := within(10*time.Millisecond, func() error { <-block; return nil })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no answer in 10ms")
 }
 
 func TestDropsArgs(t *testing.T) {
@@ -257,7 +268,7 @@ func TestConfigure(t *testing.T) {
 		assert.Zero(t, events, "zero keeps the events the plugin implements")
 	})
 
-	// Registration fails, and the agent stops, as without NRI.
+	// Registration fails, as without NRI, and restores run without the proxy.
 	t.Run("a runtime that drops args is refused", func(t *testing.T) {
 		p, _ := testPlugin(t, &fakeResolver{})
 		p.runtimeNRIVersion = func() string { return "v0.8.0" }

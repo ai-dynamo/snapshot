@@ -6,17 +6,20 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/controller"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 // version is overridable at build time via -ldflags "-X main.version=<tag>".
@@ -27,9 +30,43 @@ func main() {
 
 	storageConfigPath := flag.String("snapshot-storage-config", "", "Path to resolved storage configuration shared with PageBroker")
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
+	artifactCleanupS3CredentialsPath, artifactCleanupS3CABundlePath := bindArtifactCleanupS3Flags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
+	bindNewContents := flag.Bool("bind-new-contents", false,
+		"Bind new content to the configured store after all agents support artifact addressing")
+	pageBrokerS3ConfigNamespace := flag.String("pagebroker-s3-config-namespace", "",
+		"Namespace of the ConfigMap PageBroker reads its S3 configuration from; defaults to POD_NAMESPACE")
+	pageBrokerS3ConfigName := flag.String("pagebroker-s3-config-name", DefaultPageBrokerS3ConfigName,
+		"Name of the ConfigMap PageBroker reads its S3 configuration from")
+	releaseName := flag.String("release-name", "",
+		"Helm release name, used to label the PageBroker S3 configuration ConfigMap this binary writes outside Helm's own apply step")
 	flag.Parse()
-	storeID := mustStoreID(*storageConfigPath)
+	storageCfg, storeID := mustStorageConfig(*storageConfigPath)
+	captureStoreID, err := newContentStoreID(storeID, *bindNewContents)
+	if err != nil {
+		ctrl.Log.Error(err, "invalid content binding configuration")
+		os.Exit(1)
+	}
+	if *pageBrokerS3ConfigNamespace == "" {
+		*pageBrokerS3ConfigNamespace = os.Getenv("POD_NAMESPACE")
+	}
+	if storageCfg.S3 != nil {
+		if *pageBrokerS3ConfigNamespace == "" {
+			ctrl.Log.Error(fmt.Errorf("missing namespace"),
+				"pagebroker-s3-config-namespace is required with an S3 storage configuration "+
+					"when POD_NAMESPACE is not set")
+			os.Exit(1)
+		}
+		artifactCleanupConfig.S3 = &operatortypes.S3Config{
+			Bucket:          storageCfg.S3.Bucket,
+			Prefix:          storageCfg.S3.Prefix,
+			Region:          storageCfg.S3.Region,
+			Endpoint:        storageCfg.S3.Endpoint,
+			CredentialsPath: *artifactCleanupS3CredentialsPath,
+			CABundlePath:    *artifactCleanupS3CABundlePath,
+		}
+	}
+	artifactCleanupConfig.StoreID = storeID
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
 		os.Exit(1)
@@ -41,7 +78,7 @@ func main() {
 
 	ctrl.Log.Info("starting snapshot operator", "version", version)
 	if storeID != "" {
-		ctrl.Log.Info("configured PVC store", "storeID", storeID)
+		ctrl.Log.Info("configured storage store", "storeID", storeID)
 	}
 
 	scheme := runtime.NewScheme()
@@ -75,10 +112,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	if storageCfg.S3 != nil {
+		// A direct (non-cached) client: this runs once at startup, before the
+		// manager's cache is started, and writes rather than watches.
+		directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: scheme})
+		if err != nil {
+			ctrl.Log.Error(err, "unable to construct client for PageBroker S3 configuration")
+			os.Exit(1)
+		}
+		labels := map[string]string{"app.kubernetes.io/part-of": "snapshot", "app.kubernetes.io/managed-by": "snapshot-operator"}
+		if *releaseName != "" {
+			labels["app.kubernetes.io/instance"] = *releaseName
+		}
+		if err := ensurePageBrokerS3Config(context.Background(), directClient,
+			*pageBrokerS3ConfigNamespace, *pageBrokerS3ConfigName, labels, *storageCfg.S3, storeID); err != nil {
+			ctrl.Log.Error(err, "unable to write PageBroker S3 configuration")
+			os.Exit(1)
+		}
+	}
+
 	podSnapshotReconciler := &controller.PodSnapshotReconciler{
 		Client:             mgr.GetClient(),
 		NonCacheReadClient: mgr.GetAPIReader(),
 		Recorder:           mgr.GetEventRecorderFor("podsnapshot-controller"),
+		StoreID:            captureStoreID,
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")

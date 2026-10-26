@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
@@ -542,6 +543,29 @@ func TestReconcileRestorePodRunsMappedDestinationsConcurrently(t *testing.T) {
 	assert.Contains(t, payload, `"reason":"RestoreSucceeded"`)
 }
 
+func TestExecuteRestorePassesTheNodesProxyMode(t *testing.T) {
+	for name, withoutProxy := range map[string]bool{"with the proxy": false, "without the proxy": true} {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			w := makeTestController(t, pod)
+			if withoutProxy {
+				w.RestoreWithoutProxy()
+			}
+			var got executor.RestoreRequest
+			w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
+				got = req
+				return executor.RestoreResult{}, nil
+			}
+			plan := &restorePlan{artifact: &restoreArtifact{}}
+
+			_, err := w.newRestoreOperation(pod, plan, "main", "container-id", time.Now()).executeRestore(context.Background())
+
+			require.NoError(t, err)
+			assert.Equal(t, withoutProxy, got.WithoutProxy)
+		})
+	}
+}
+
 func TestReconcileRestorePodReportsPartialSuccess(t *testing.T) {
 	pod := multiRestorePod()
 	snapshot, content := readySnapshotObjects()
@@ -643,6 +667,18 @@ func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t
 	assert.Contains(t, payload, `"reason":"RestoreInProgress"`)
 	assert.Contains(t, payload, "1 succeeded")
 	assert.Contains(t, payload, "1 pending")
+}
+
+func TestLogWithStepAddsTheStepKeyOnlyWhenNamed(t *testing.T) {
+	var lines []string
+	log := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+
+	logWithStep(log, &executor.StepError{Step: executor.StepRunNSRestore, Err: errors.New("boom")}).Error(nil, "named")
+	logWithStep(log, errors.New("boom")).Error(nil, "plain")
+
+	require.Len(t, lines, 2)
+	assert.Contains(t, lines[0], `"step"="running nsrestore"`)
+	assert.NotContains(t, lines[1], `"step"`)
 }
 
 func TestRestoreTallyVerdictCoversEveryOutcome(t *testing.T) {
@@ -870,13 +906,28 @@ func TestPreflightRestorePendingStates(t *testing.T) {
 		assert.Nil(t, artifact)
 		assert.Equal(t, "ContentPending", pendingRestoreReason(t, err))
 	})
-	t.Run("artifact visibility", func(t *testing.T) {
-		snapshot, content := readySnapshotObjects()
-		w := makeTestController(t, pod, snapshot, content)
-		artifact, err := w.preflightRestore(context.Background(), pod)
-		assert.Nil(t, artifact)
-		assert.Equal(t, "ArtifactPending", pendingRestoreReason(t, err))
-	})
+}
+
+func TestReconcileRestorePodFailsWhenReadyArtifactIsMissing(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+	restoreCalls := 0
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
+		restoreCalls++
+		return executor.RestoreResult{}, nil
+	}
+
+	requeue := w.reconcileRestorePod(context.Background(), pod)
+
+	assert.False(t, requeue)
+	assert.Zero(t, restoreCalls)
+	payload := string(lastPodStatusApply(t, w).GetPatch())
+	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
+	assert.Contains(t, payload, "for Ready PodSnapshotContent "+content.Name+" is missing")
+	event := eventForReason(w.clientset.(*fake.Clientset), podcontract.RestoreReasonFailed)
+	require.NotNil(t, event)
+	assert.Equal(t, corev1.EventTypeWarning, event.Type)
 }
 
 func TestPreflightRestoreFailsWhenInProgressSnapshotDisappears(t *testing.T) {
@@ -1561,6 +1612,7 @@ func TestProcessCaptureQueueItemRequeuesOnError(t *testing.T) {
 	w.client = ctrlfake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(content, pod).
 		WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).Build()
+	require.NoError(t, w.contentIndexer.Add(mustUnstructured(t, content)))
 
 	w.captureQueue.Add(content.Name)
 	got, _ := w.captureQueue.Get()

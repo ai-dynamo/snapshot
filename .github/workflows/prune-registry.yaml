@@ -43,7 +43,7 @@ concurrency:
 jobs:
   prune:
     name: Prune untagged GHCR versions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       # Read the source of the prune script.
       contents: read

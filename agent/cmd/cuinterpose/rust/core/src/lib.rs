@@ -19,7 +19,8 @@ use cudarc::driver::sys::CUresult::{
 };
 use cudarc::driver::sys::{
     CUcontext, CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationHandleType,
-    CUmemAllocationProp, CUmemGenericAllocationHandle, CUmulticastObjectProp, CUresult,
+    CUmemAllocationProp, CUmemGenericAllocationHandle, CUmulticastObjectProp, CUpointer_attribute,
+    CUresult,
 };
 use cuinterpose_abi::*;
 use error::Error;
@@ -67,6 +68,7 @@ exports! {
     cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize);
     cuMemFree_v2(address: CUdeviceptr);
     cuMemGetAddressRange_v2(base: *mut CUdeviceptr, size: *mut usize, address: CUdeviceptr);
+    cuPointerGetAttribute(data: *mut c_void, attribute: CUpointer_attribute, address: CUdeviceptr);
     cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr);
     cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32);
     cuIpcOpenMemHandle_v2(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32);

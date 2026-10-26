@@ -5,8 +5,8 @@
 #
 # The cluster is k3d, so the Kubernetes node is a Docker container and CRIU
 # dumps a workload nested inside it. That works: see the proof run linked from
-# issue 241. Images are built in this job and imported into the cluster, because
-# a pull request has no published images to pull.
+# issue 241. Images are built in this job and pushed to its disposable local
+# registry, from which the cluster pulls them.
 #
 # Pull requests reach this through e2e-pr.yaml on their copy-pr-bot mirror
 # branch, which runs the GPU suite in e2e.yaml only once this job has passed.
@@ -28,6 +28,10 @@ on:
         default: ""
   workflow_dispatch:
     inputs:
+      qualify_restore_failure:
+        description: "Corrupt a checkpoint and require restore success; this probe must fail"
+        type: boolean
+        default: false
       cache_scope_suffix:
         description: >-
           Appended to every layer-cache tag. Any unused value points the build
@@ -41,8 +45,10 @@ on:
         default: "3"
 
 concurrency:
-  group: snapshot-e2e-cpu-${{ github.ref }}
-  cancel-in-progress: true
+  # e2e-pr.yaml cancels a superseded mirror run as a whole, so this never
+  # cancels anything itself: a manual qualification keeps its evidence.
+  group: snapshot-e2e-cpu-${{ github.run_id }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -63,7 +69,11 @@ env:
   IMAGE_TAG: cpu-e2e
   # CPU tests run at once. Set to 1 to run the whole suite serially.
   CPU_E2E_WORKERS: ${{ inputs.workers || '3' }}
+  # k3s 1.34 runs the restore proxy. Set, not detected, so a node that fails
+  # to set it up fails the tests.
+  SNAPSHOT_E2E_RESTORE_PROXY: "true"
   SNAPSHOT_E2E_MODE: direct
+  SNAPSHOT_E2E_CPU_ONLY: "true"
   SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
   SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
   SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
@@ -86,7 +96,7 @@ env:
 jobs:
   cpu-e2e:
     name: CPU checkpoint/restore
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       # setup.py and kubectl both read KUBECONFIG; in direct mode the target
@@ -285,6 +295,8 @@ jobs:
           image.operator.pullPolicy=IfNotPresent
           image.agent.pullPolicy=IfNotPresent
           image.pageBroker.pullPolicy=IfNotPresent"
+          # For the install without the restore proxy, below.
+          printf 'SNAPSHOT_E2E_HELM_SET<<EOF\n%s\nEOF\n' "${SNAPSHOT_E2E_HELM_SET}" >>"${GITHUB_ENV}"
           uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-install \
             --skip-host-preflight
@@ -301,14 +313,19 @@ jobs:
         run: uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
       - name: Run CPU checkpoint/restore tests
+        id: cpu_tests
         timeout-minutes: 25
         env:
+          # Dispatch-only negative control; normal PR runs disable it.
+          SNAPSHOT_E2E_RESTORE_FAILURE_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.qualify_restore_failure && 'true' || 'false' }}
           # The cases this job exists to prove. pytest exits 0 when a test is
           # deselected or skips, so without naming them a marker change could
           # leave the check green while it tested no round trip at all.
           SNAPSHOT_E2E_REQUIRED_TESTS: >-
             test_one_cpu_snapshot_restores_into_two_containers,
-            test_snapshotjob_cpu_captures_and_restore_recovers_state
+            test_snapshotjob_cpu_captures_and_restore_recovers_state,
+            test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot,
+            test_snapshotjob_deadline_removed_pod_retains_non_target_artifacts
         run: |
           set -euo pipefail
           start=$(date +%s)
@@ -317,12 +334,49 @@ jobs:
           trap 'hack/ci-phase.sh "Run CPU tests" "${start}"' EXIT
           rc=0
           uv run --locked --project e2e pytest e2e/tests -m "cpu and not serial" \
-            -n "${CPU_E2E_WORKERS}" -vv || rc=$?
+            -n "${CPU_E2E_WORKERS}" -vv \
+            --junitxml="${RUNNER_TEMP}/cpu-e2e-junit.xml" || rc=$?
           # Then the tests that must be alone on the node, one at a time. They
           # run even when the first pass fails, so a red run still reports them.
           SNAPSHOT_E2E_REQUIRED_TESTS= uv run --locked --project e2e pytest e2e/tests \
-            -m "cpu and serial" -vv -s || rc=$?
+            -m "cpu and serial" -vv -s \
+            --junitxml="${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" || rc=$?
           exit "${rc}"
+
+      - name: Verify restore-failure negative control
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.qualify_restore_failure && steps.cpu_tests.outcome != 'skipped' }}
+        env:
+          CPU_PYTEST_OUTCOME: ${{ steps.cpu_tests.outcome }}
+        run: |
+          uv run --locked --project e2e python -m snapshot_e2e.restore_failure_qualification \
+            "${RUNNER_TEMP}/cpu-e2e-junit.xml" \
+            "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" \
+            --pytest-outcome "${CPU_PYTEST_OUTCOME}"
+
+      # On nodes whose runtime is too old for the restore proxy, the agent
+      # restores without it. Check that path on k3s 1.32, whose containerd 2.1
+      # has NRI v0.8, with the images built above and two tests: a restore,
+      # and a failed one. Only after a pass, as it replaces the cluster that
+      # the diagnostics below would read.
+      - name: Run CPU tests without the restore proxy
+        if: ${{ steps.cpu_tests.outcome == 'success' }}
+        timeout-minutes: 25
+        env:
+          SNAPSHOT_E2E_K3S_IMAGE: docker.io/rancher/k3s:v1.32.13-k3s1
+          SNAPSHOT_E2E_RESTORE_PROXY: "false"
+          SNAPSHOT_E2E_REQUIRED_TESTS: >-
+            test_one_cpu_snapshot_restores_into_two_containers,
+            test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot
+        run: |
+          set -euo pipefail
+          hack/k3d-cpu-e2e.sh cluster-down-keep-registry
+          hack/k3d-cpu-e2e.sh cluster-up
+          for phase in snapshot-install snapshot-ready; do
+            uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+              --phase "${phase}" --skip-host-preflight
+          done
+          uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv \
+            -k "test_one_cpu_snapshot_restores_into_two_containers or test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot"
 
       # Last, and unconditional: the phases worth comparing are exactly the
       # ones a failing run also pays for.
@@ -349,6 +403,12 @@ jobs:
           set +e
           out="${RUNNER_TEMP}/diagnostics"
           mkdir -p "${out}"
+          if [ -f "${RUNNER_TEMP}/cpu-e2e-junit.xml" ]; then
+            cp "${RUNNER_TEMP}/cpu-e2e-junit.xml" "${out}/cpu-e2e-junit.xml"
+          fi
+          if [ -f "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" ]; then
+            cp "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" "${out}/cpu-e2e-serial-junit.xml"
+          fi
           kubectl get pods -A -o wide >"${out}/pods.txt"
           kubectl describe pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" >"${out}/pods-describe.txt"
           kubectl get events -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \

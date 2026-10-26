@@ -19,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <numeric>
 #include <set>
 #include <system_error>
 #include <thread>
@@ -154,6 +155,15 @@ ValidateParticipants(std::span<const uint32_t> captured_pids, std::span<const Pa
                  captured.erase(participant.captured_pid) && targets.insert(participant.target_pid).second,
              "invalid or duplicate GPU target");
   }
+}
+
+std::vector<size_t>
+RestoreSetupOrder(std::span<const size_t> extent_counts)
+{
+  std::vector<size_t> order(extent_counts.size());
+  std::iota(order.begin(), order.end(), size_t{0});
+  std::stable_partition(order.begin(), order.end(), [&](size_t index) { return extent_counts[index] > 0; });
+  return order;
 }
 
 struct Artifact::ArtifactState {
@@ -576,7 +586,7 @@ public:
   std::vector<ParticipantResult> Restore()
   {
     try {
-      for (auto& operation : operations_) {
+      for (auto* operation : RestoreSetupSequence()) {
         Begin(*operation);
         operation->PrepareRestore(artifact_.pairs, artifact_.mapping);
         // Transfer i runs while preparation i+1 sets up its CUDA mappings.
@@ -604,6 +614,23 @@ public:
   }
 
 private:
+  // Reorder setup only; preserve operations_ and its existing completion,
+  // unlock and cleanup traversals.
+  std::vector<Operation*> RestoreSetupSequence()
+  {
+    std::vector<size_t> extent_counts;
+    extent_counts.reserve(artifact_.participants.size());
+    for (const auto& participant : artifact_.participants) {
+      extent_counts.push_back(participant.manifest.size());
+    }
+    std::vector<Operation*> sequence;
+    sequence.reserve(operations_.size());
+    for (const auto index : RestoreSetupOrder(extent_counts)) {
+      sequence.push_back(operations_[index].get());
+    }
+    return sequence;
+  }
+
   void Begin(Operation& operation)
   {
     cancellation_.ThrowIfCancelled();

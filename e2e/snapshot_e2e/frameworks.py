@@ -11,8 +11,9 @@ model it serves.
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -22,9 +23,6 @@ FRAMEWORKS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "guide
 CONTAINER = "main"
 API_PORT = 8000
 
-# One small chat-style prompt is enough to prove the restored engine serves;
-# the guide APIs cap generation length themselves.
-PROMPT = "Reply with one short sentence confirming this restored worker can serve."
 REQUEST_TIMEOUT_SECONDS = 120
 
 # Phase budgets: source covers image pull, model load, and warm-up generation
@@ -37,9 +35,10 @@ REQUEST_TIMEOUT_SECONDS = 120
 # it counts double. The inner `timeout` around pytest in e2e-frameworks.yaml
 # is the binding limit: it must exceed SOURCE_READY_TIMEOUT_SECONDS +
 # CHECKPOINT_TIMEOUT_SECONDS + POD_DELETE_TIMEOUT_SECONDS +
-# 2 * restore_timeout_seconds + REQUEST_TIMEOUT_SECONDS, or pytest is
+# 2 * restore_timeout_seconds + 3 * REQUEST_TIMEOUT_SECONDS + 60s for source
+# prompt rendering, or pytest is
 # interrupted before the failure dump runs -- e.g. sglang's 600s override
-# makes that 900+300+180+2*600+120 = 2700s (45 min), the largest of the three.
+# makes that 900+300+180+2*600+3*120+60 = 3000s (50 min), the largest of the three.
 SOURCE_READY_TIMEOUT_SECONDS = 900
 CHECKPOINT_TIMEOUT_SECONDS = 300
 RESTORE_TIMEOUT_SECONDS = 300
@@ -57,11 +56,18 @@ class FrameworkSpec:
     # traceback. The restored process keeps the dead source container's stdout,
     # so this file is the only place such a failure is visible.
     restore_error_file: str
-    # Guide PVC manifest for a persistent model cache, if the guide uses one.
+    # The guides' model cache PVC manifest, relative to manifest_dir.
     model_cache_manifest: str | None = None
     # Overrides RESTORE_TIMEOUT_SECONDS for this framework's restore-condition
     # and restore-outcome waits.
     restore_timeout_seconds: int = RESTORE_TIMEOUT_SECONDS
+    source_ready_timeout_seconds: int = SOURCE_READY_TIMEOUT_SECONDS
+    checkpoint_timeout_seconds: int = CHECKPOINT_TIMEOUT_SECONDS
+    recipe: str | None = None
+
+    @property
+    def case_name(self) -> str:
+        return f"{self.name}-{self.recipe}" if self.recipe else self.name
 
     @property
     def manifest_dir(self) -> Path:
@@ -69,11 +75,12 @@ class FrameworkSpec:
 
     @property
     def deployment_manifest(self) -> Path:
-        return self.manifest_dir / "deployment.yaml"
+        return self.manifest_dir / "capture" / f"{self.recipe or 'qwen3-0.6b'}.yaml"
 
     @property
     def restore_deployment_manifest(self) -> Path:
-        return self.manifest_dir / "restore-deployment.yaml"
+        filename = "8-gpu.yaml" if self.recipe else "1-gpu.yaml"
+        return self.manifest_dir / "restore" / filename
 
     @property
     def app_py(self) -> Path:
@@ -81,8 +88,8 @@ class FrameworkSpec:
 
     @property
     def app_configmap_name(self) -> str:
-        # Matches the configMap.name this framework's own deployment.yaml
-        # references; see manifests/frameworks/<name>/deployment.yaml.
+        # Matches the configMap.name this framework's capture manifest
+        # references, including the multi-GPU variants.
         return f"{self.name}-app"
 
     @property
@@ -92,19 +99,24 @@ class FrameworkSpec:
         return self.manifest_dir / self.model_cache_manifest
 
 
+# The model cache PVC every recipe mounts, relative to the framework's manifest
+# directory.
+MODEL_CACHE_PVC_MANIFEST = "../model-cache-pvc.yaml"
+
 FRAMEWORKS: dict[str, FrameworkSpec] = {
     "vllm": FrameworkSpec(
         name="vllm",
         model="Qwen/Qwen3-0.6B",
         restore_ready_file="/snapshot-control/vllm-restore-ready",
         restore_error_file="/snapshot-control/vllm-restore-error",
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
     ),
     "sglang": FrameworkSpec(
         name="sglang",
         model="Qwen/Qwen3-0.6B",
         restore_ready_file="/snapshot-control/sglang-restore-ready",
         restore_error_file="/snapshot-control/sglang-restore-error",
-        model_cache_manifest="model-cache-pvc.yaml",
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
         # engine.resume_memory_occupation() has come within seconds of the
         # default 300s budget in CI; give it more room than the other
         # frameworks need.
@@ -115,8 +127,42 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         model="Qwen/Qwen3-0.6B",
         restore_ready_file="/snapshot-control/trtllm-restore-ready",
         restore_error_file="/snapshot-control/trtllm-restore-error",
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
     ),
 }
+
+
+def guide_model(args: list[str]) -> tuple[str, str | None, int]:
+    """Model, revision, and tensor-parallel size from a guide program's engine kwargs."""
+    kwargs = json.loads(args[-1])
+    return (
+        kwargs.get("model", kwargs.get("model_path")),
+        kwargs.get("revision"),
+        kwargs.get("tensor_parallel_size", kwargs.get("tp_size", 1)),
+    )
+
+
+def framework_spec(name: str) -> FrameworkSpec:
+    spec = FRAMEWORKS[name]
+    recipe = os.environ.get("SNAPSHOT_E2E_RECIPE", "")
+    if not recipe:
+        return spec
+    if recipe not in {"glm-5.3", "deepseek-v4.1-flash"}:
+        raise ValueError(f"unknown SNAPSHOT_E2E_RECIPE: {recipe}")
+    spec = replace(spec, recipe=recipe)
+    if not spec.deployment_manifest.is_file():
+        raise ValueError(f"{name} has no {recipe} recipe")
+    with spec.deployment_manifest.open(encoding="utf-8") as handle:
+        deployment = yaml.safe_load(handle)
+    main = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == CONTAINER)
+    return replace(
+        spec,
+        model=guide_model(main["args"])[0],
+        model_cache_manifest=MODEL_CACHE_PVC_MANIFEST,
+        source_ready_timeout_seconds=3600,
+        checkpoint_timeout_seconds=1800,
+        restore_timeout_seconds=1800,
+    )
 
 
 @dataclass(frozen=True)
@@ -126,8 +172,8 @@ class SharedModelCache:
     CI clusters commonly block or throttle model downloads from the pods, and
     even where they work, pulling weights on every run is wasted minutes. With
     a shared cache the framework pods mount the export at MODEL_CACHE_MOUNT,
-    point HF_HOME at it, and run offline; the guide's own per-deployment cache
-    (SGLang's download init container and PVC) is replaced, not duplicated.
+    point HF_HOME at it, and run offline; the guide's own model cache (its
+    download init container and PVC) is replaced, not duplicated.
     """
 
     server: str
@@ -148,7 +194,9 @@ class SharedModelCache:
         return cls(
             server=server,
             path=path,
-            pvc_name=os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_PVC", "model-cache"),
+            # Not the guides' own `model-cache` claim: a claim left behind by a
+            # run that downloaded through the guide must not shadow this one.
+            pvc_name=os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_PVC", "shared-model-cache"),
         )
 
 
@@ -180,7 +228,7 @@ def framework_image(spec: FrameworkSpec) -> str:
 
     SNAPSHOT_E2E_FRAMEWORK_IMAGE wins so a different image can be tested.
     Otherwise the image is read straight from the guide's own
-    deployment.yaml -- one place to change it.
+    capture manifest -- one place to change it.
     """
     override = os.environ.get("SNAPSHOT_E2E_FRAMEWORK_IMAGE")
     if override:

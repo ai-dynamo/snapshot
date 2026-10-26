@@ -159,6 +159,12 @@ spec:
             # proxy PID 1 in restore containers.
             - name: nri
               mountPath: /var/run/nri
+            # The node's securityfs, read-only. CRIU looks here to find the
+            # node's LSM: with it, a checkpoint records each process's
+            # AppArmor label, which a restore into a labeled container needs.
+            - name: securityfs
+              mountPath: /sys/kernel/security
+              readOnly: true
             # Per-container storage: agent reads overlay upperdirs from here
             # to capture the rootfs diff at checkpoint time.
             - name: runtime-storage
@@ -180,11 +186,6 @@ spec:
               mountPath: /root/.docker
               readOnly: true
             {{- end }}
-          {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.credentialsSecretRef }}
-          envFrom:
-            - secretRef:
-                name: {{ .Values.storage.s3.credentialsSecretRef }}
-          {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
         - name: pagebroker
@@ -196,11 +197,20 @@ spec:
             runAsUser: 0
             runAsGroup: 0
           env:
+            {{- if eq .Values.storage.type "s3" }}
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: {{ printf "%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
+            {{- end }}
             {{- include "snapshot.nvidiaEnvironment" . | nindent 12 }}
           args:
             - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
             - {{ $pageBrokerStagingPath | quote }}
+            {{- if eq .Values.storage.type "s3" }}
+            # Unused positional arg in S3 mode; still required by the CLI.
+            - /var/snapshot/pagebroker-unused-storage-root
+            {{- else }}
             - {{ .Values.storage.pvc.basePath | quote }}
+            {{- end }}
             - --max-concurrent-requests
             - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
             - --custom-storage-buffer-count
@@ -209,18 +219,39 @@ spec:
             - {{ .Values.pageBroker.transferChunkBytes | int64 | quote }}
             - --custom-storage-max-pinned-bytes
             - {{ .Values.pageBroker.maxPinnedBytes | int64 | quote }}
+            {{- if and .Values.pageBroker.artifactAddressing (eq .Values.storage.type "pvc") }}
+            # Enable only with a broker implementing the PVC artifact backend.
+            - --storage-config
+            - /etc/snapshot/storage.yaml
+            {{- else if eq .Values.storage.type "s3" }}
+            # Resolved by the operator, not rendered by this chart: the JSON
+            # file's storeId requires the Go identity computation the chart
+            # cannot reproduce. See operator/cmd/manager/pagebroker_storage_config.go.
+            - --storage-config
+            - /etc/snapshot-s3/pagebroker-s3-config.json
+            {{- end }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
-            # Expose the same PVC identity to the external artifact-contract
-            # build. The current filesystem-only broker keeps its existing args.
             - name: storage-config
               mountPath: /etc/snapshot
               readOnly: true
             - name: pagebroker
               mountPath: /pagebroker
+            {{- if eq .Values.storage.type "pvc" }}
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
+            {{- end }}
+            {{- if eq .Values.storage.type "s3" }}
+            - name: pagebroker-s3-config
+              mountPath: /etc/snapshot-s3
+              readOnly: true
+            {{- end }}
+            {{- if eq .Values.storage.type "s3" }}
+            - name: s3-credentials
+              mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
+              readOnly: true
+            {{- end }}
       volumes:
         # Configuration ConfigMap
         - name: config
@@ -238,11 +269,7 @@ spec:
         - name: pagebroker
           emptyDir:
             medium: Memory
-            # Falls back even when pageBroker.staging is explicitly null (e.g.
-            # helm upgrade --reuse-values from a release predating this key):
-            # an absent sizeLimit is an unbounded memory-backed volume, not a
-            # safe default.
-            sizeLimit: {{ (.Values.pageBroker.staging | default dict).sizeLimit | default "64Gi" | quote }}
+            sizeLimit: {{ include "snapshot.stagingSizeLimit" . | quote }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles
@@ -259,6 +286,23 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
         {{- end }}
+        {{- if eq .Values.storage.type "s3" }}
+        # Written by the operator (ensurePageBrokerS3Config), not this chart:
+        # its storeId field needs the Go identity computation. Fails closed if
+        # the operator has not written it yet, surfacing the rollout ordering
+        # rather than silently starting PageBroker without a storage config.
+        - name: pagebroker-s3-config
+          configMap:
+            name: {{ include "snapshot.pageBrokerS3ConfigName" . | quote }}
+        {{- end }}
+        {{- if eq .Values.storage.type "s3" }}
+        - name: s3-credentials
+          secret:
+            secretName: {{ .Values.storage.s3.credentialsSecretRef }}
+            items:
+              - key: {{ .Values.storage.s3.credentialsSecretKey }}
+                path: {{ .Values.storage.s3.credentialsSecretKey }}
+        {{- end }}
         # Runtime socket directory (read-write for checkpoint operations).
         # Same path inside and on the host so the agent dials runtime.socketPath
         # verbatim.
@@ -274,11 +318,17 @@ spec:
         # NRI socket directory. A directory, not the socket itself: a
         # socket-typed hostPath would keep the Pod from starting at all, and
         # hide the reason. On a node without NRI the agent starts, cannot
-        # register its NRI plugin, and exits with an error saying so.
+        # register its NRI plugin, and restores without the restore proxy.
         - name: nri
           hostPath:
             path: /var/run/nri
             type: DirectoryOrCreate
+        # Securityfs. sysfs always has the directory; where securityfs is not
+        # mounted it is empty, and CRIU records no labels.
+        - name: securityfs
+          hostPath:
+            path: /sys/kernel/security
+            type: Directory
         # Per-container storage (overlay upperdirs for rootfs-diff capture).
         - name: runtime-storage
           hostPath:

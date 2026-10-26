@@ -109,9 +109,36 @@ func IsSnapshotJobTerminal(j *SnapshotJob) bool {
 	return IsSnapshotJobCompleted(j) || IsSnapshotJobFailed(j)
 }
 
-// +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
+// NonTargetArtifactOnFailurePolicy controls only attempt-owned non-target bytes.
+// +kubebuilder:validation:Enum=Retain;Cleanup
+type NonTargetArtifactOnFailurePolicy string
+
+const (
+	NonTargetArtifactRetain  NonTargetArtifactOnFailurePolicy = "Retain"
+	NonTargetArtifactCleanup NonTargetArtifactOnFailurePolicy = "Cleanup"
+)
+
+// NonTargetArtifactPolicy opts regular non-target containers into attempt-owned
+// storage. Cleanup is permitted only for a positively failed attempt after
+// writer termination is proven; omitted onFailure retains the bytes.
+type NonTargetArtifactPolicy struct {
+	// Containers names the regular non-target containers publishing extra bytes.
+	// +kubebuilder:validation:MinItems=1
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Containers []string `json:"containers"`
+
+	// OnFailure governs only these containers' UID-owned artifact directory.
+	// +optional
+	OnFailure NonTargetArtifactOnFailurePolicy `json:"onFailure,omitempty"`
+}
 
 // SnapshotJobSpec defines the desired state of SnapshotJob.
+// +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
+// +kubebuilder:validation:XValidation:rule="!has(self.nonTargetArtifacts) || !has(self.podTemplate.metadata) || !has(self.podTemplate.metadata.annotations) || !('nvidia.com/snapshot-non-target-artifact-containers' in self.podTemplate.metadata.annotations)",message="nonTargetArtifacts and the legacy container annotation cannot both be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.nonTargetArtifacts) || self.nonTargetArtifacts.containers.all(c, !(c in self.podSnapshotTemplate.targetContainers))",message="nonTargetArtifacts.containers must not name capture targets"
 type SnapshotJobSpec struct {
 	// PodTemplate defines the workload to run and capture. The controller injects
 	// the snapshot contract (control volume, readiness probe, seccomp, sidecar
@@ -128,6 +155,13 @@ type SnapshotJobSpec struct {
 	// +kubebuilder:default=3600
 	// +kubebuilder:validation:Minimum=1
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+
+	// NonTargetArtifacts declares regular non-target writers and their opt-in
+	// failed-attempt cleanup policy. Omission retains their bytes and does not
+	// change capture-artifact or source-object deletion. The controller derives
+	// the source Pod annotation from this typed declaration.
+	// +optional
+	NonTargetArtifacts *NonTargetArtifactPolicy `json:"nonTargetArtifacts,omitempty"`
 
 	// PodSnapshotTemplate defines the properties of the PodSnapshot produced by
 	// this job. The controller fills in spec.source from the pod it creates.
@@ -164,6 +198,14 @@ type PodSnapshotTemplate struct {
 	// +kubebuilder:validation:items:MaxLength=63
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainers []string `json:"targetContainers,omitempty"`
+
+	// CheckpointRetryLimit is copied to the generated PodSnapshot: how many
+	// times a failed capture may be retried in place, over and above the first
+	// attempt. Unset defers to the agent's cluster-wide default, which is
+	// distinct from an explicit 0 asking for no retry.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
 }
 
 // PodSnapshotTemplateMetadata is the caller-owned metadata propagated to a

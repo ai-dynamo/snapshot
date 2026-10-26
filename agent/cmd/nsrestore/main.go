@@ -38,6 +38,7 @@ func main() {
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	gpuMountAliases := flag.String("gpu-mount-aliases", "{}", "Checkpoint path to destination GPU path JSON")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
+	lsmProfile := flag.String("lsm-profile", "", "CRIU lsm_profile for the restored processes")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
 	flag.Parse()
@@ -54,6 +55,7 @@ func main() {
 		CheckpointPath: *checkpointPath,
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,
+		LSMProfile:     *lsmProfile,
 		TargetPodIP:    *targetPodIP,
 		BundleDir:      *bundleDir,
 	}
@@ -78,7 +80,7 @@ func main() {
 	result, err := executor.RestoreInNamespace(ctx, opts, log)
 	if err != nil {
 		// The host agent reads the cause from stdout; stderr only reaches its logs.
-		_ = json.NewEncoder(os.Stdout).Encode(executor.RestoreInNamespaceResult{Error: err.Error()})
+		_ = json.NewEncoder(os.Stdout).Encode(executor.RestoreInNamespaceResult{Error: err.Error(), Step: string(executor.StepOf(err))})
 		fatal(log, err, "restore failed")
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {

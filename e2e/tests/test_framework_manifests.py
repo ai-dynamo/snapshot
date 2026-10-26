@@ -10,15 +10,18 @@ pull request, without a cluster:
 
 - the source and restore pods carry the restore-pod contract pieces the agent
   relies on (control volume at /snapshot-control with subPath main,
-  SNAPSHOT_CONTROL_DIR, io_uring seccomp profile, /dev/net/tun, nvidia
+  the apps' default control directory, io_uring seccomp profile, nvidia
   RuntimeClass, one GPU);
 - the restore pod keeps the source's command, which the restore proxy
-  replaces, and restores this run's PodSnapshot;
+  replaces, or idles on nodes without the proxy, and restores this run's
+  PodSnapshot;
 - the model the guide deploys is the one the tests expect;
 - the image tag is content-addressed and deterministic.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 import pytest
 
@@ -34,8 +37,9 @@ CONFIG = k8s.E2EConfig(
     kubeconfig=None,
 )
 IMAGE = "framework-under-test:local"
+AGENT_IMAGE = "snapshot-agent:test"
 CACHE = frameworks.SharedModelCache(
-    server="nfs.example.internal", path="/exports/models", pvc_name="model-cache"
+    server="nfs.example.internal", path="/exports/models", pvc_name="shared-model-cache"
 )
 
 
@@ -43,7 +47,7 @@ CACHE = frameworks.SharedModelCache(
 def _workload_image(monkeypatch: pytest.MonkeyPatch) -> None:
     # TestRun.new resolves the generic workload image eagerly; these checks
     # never schedule anything, so any value satisfies it.
-    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", "snapshot-workload:test")
+    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", AGENT_IMAGE)
 
 
 @pytest.fixture(params=sorted(frameworks.FRAMEWORKS))
@@ -61,8 +65,29 @@ def pods(spec: frameworks.FrameworkSpec) -> tuple[dict, dict, workloads.TestRun]
 
 
 @pytest.mark.workload
+def test_framework_pods_use_explicit_cpu_only_scheduling(
+    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_CPU_ONLY", "false")
+    config = replace(CONFIG, cpu_only=True)
+    run = workloads.TestRun.new("cpu-manifest")
+    source = fw.source_pod(config=config, run=run, spec=spec, image=IMAGE)
+    restore = fw.restore_pod(
+        config=config, run=run, spec=spec, source_node="only-node", image=IMAGE
+    )
+    for pod in (source, restore):
+        # Preserve GPU requirements from the guide itself; CPU-only mode only
+        # suppresses extra scheduling constraints from the e2e helper.
+        assert pod["spec"]["nodeSelector"] == {"nvidia.com/gpu.present": "true"}
+        assert pod["spec"]["tolerations"] == []
+
+
+@pytest.mark.workload
 def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
+    guide_pvc = fw.model_cache_pvc(config=CONFIG, spec=spec)
+    cache_claims = {guide_pvc["metadata"]["name"]} if guide_pvc else set()
+    assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
         assert pod_spec["runtimeClassName"] == "nvidia"
@@ -75,16 +100,20 @@ def test_guide_pods_satisfy_restore_pod_contract(spec: frameworks.FrameworkSpec)
         main = fw.main_container(pod)
         assert main["image"] == IMAGE
         assert main["resources"]["limits"]["nvidia.com/gpu"] == "1"
-        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
+        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") in (None, workloads.CONTROL_DIR)
         assert {
             "name": "snapshot-control",
             "mountPath": workloads.CONTROL_DIR,
             "subPath": workloads.CONTAINER,
         } in main["volumeMounts"]
-        assert any(mount["mountPath"] == "/dev/net/tun" for mount in main["volumeMounts"])
+        assert all(mount["mountPath"] != "/dev/net/tun" for mount in main["volumeMounts"])
         volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+        assert {
+            volume["persistentVolumeClaim"]["claimName"] for volume in volumes.values()
+            if "persistentVolumeClaim" in volume
+        } <= cache_claims
         assert volumes["snapshot-control"] == {"name": "snapshot-control", "emptyDir": {}}
-        assert volumes["tun"]["hostPath"] == {"path": "/dev/net/tun", "type": "CharDevice"}
+        assert not any(v.get("hostPath", {}).get("path") == "/dev/net/tun" for v in volumes.values())
         for container in pod_spec.get("initContainers", []):
             assert container["image"] == IMAGE
 
@@ -142,14 +171,16 @@ def test_app_configmap_matches_the_guide_program(
 
 
 @pytest.mark.workload
-def test_restore_pod_restores_this_run(spec: frameworks.FrameworkSpec) -> None:
+def test_restore_pod_restores_this_run(
+    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SNAPSHOT_E2E_RESTORE_PROXY", raising=False)
     source, restore, run = pods(spec)
     main = fw.main_container(restore)
     source_main = fw.main_container(source)
-    # The restore container keeps the source's command, which Snapshot
-    # replaces with the restore proxy.
+    # The restore container keeps the engine's command, which Snapshot
+    # replaces with the restore proxy. Model arguments come from the checkpoint.
     assert main["command"] == source_main["command"]
-    assert main.get("args") == source_main.get("args")
     assert fw.env_value(main, "SNAPSHOT_RESTORE_STANDBY") is None
     assert restore["metadata"]["annotations"] == {fw.RESTORE_FROM_ANNOTATION: run.snapshot_name}
     node_terms = restore["spec"]["affinity"]["nodeAffinity"][
@@ -159,14 +190,55 @@ def test_restore_pod_restores_this_run(spec: frameworks.FrameworkSpec) -> None:
 
 
 @pytest.mark.workload
+def test_restore_pod_idles_without_the_proxy(
+    spec: frameworks.FrameworkSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "false")
+    _, restore, _ = pods(spec)
+    main = fw.main_container(restore)
+    # The source's command would load a second model beside the restored one.
+    assert main["command"] == workloads.INERT_COMMAND
+    assert "args" not in main
+
+
+@pytest.mark.workload
+@pytest.mark.parametrize(
+    ("agent_log", "proxy"),
+    [
+        ("... Registered with the container runtime ...", True),
+        ("... Restoring without the restore proxy ...", False),
+    ],
+)
+def test_restore_pod_follows_the_agent_in_auto_mode(
+    monkeypatch: pytest.MonkeyPatch, agent_log: str, proxy: bool
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "auto")
+    monkeypatch.setattr(fw.lifecycle, "checkpoint_agent_pod", lambda config, node: "agent-0")
+    monkeypatch.setattr(fw.lifecycle.k8s, "pod_logs", lambda *args, **kwargs: agent_log)
+    _, restore, _ = pods(frameworks.FRAMEWORKS["vllm"])
+    idles = fw.main_container(restore)["command"] == workloads.INERT_COMMAND
+    assert idles is not proxy
+
+
+@pytest.mark.workload
+def test_auto_mode_fails_when_the_agent_says_neither(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "auto")
+    monkeypatch.setattr(fw.lifecycle, "checkpoint_agent_pod", lambda config, node: "agent-0")
+    monkeypatch.setattr(fw.lifecycle.k8s, "pod_logs", lambda *args, **kwargs: "starting")
+    with pytest.raises(AssertionError, match="logged neither"):
+        pods(frameworks.FRAMEWORKS["vllm"])
+
+
+@pytest.mark.workload
 def test_guide_deploys_the_expected_model(spec: frameworks.FrameworkSpec) -> None:
     source, restore, _ = pods(spec)
+    assert frameworks.guide_model(fw.main_container(source)["args"])[0] == spec.model
+    for container in source["spec"].get("initContainers", []):
+        if container["name"] == fw.GUIDE_CACHE_INIT_CONTAINER:
+            assert container["args"][1] == spec.model
     for pod in (source, restore):
         for container in pod["spec"].get("initContainers", []) + pod["spec"]["containers"]:
-            model = fw.env_value(container, "SNAPSHOT_MODEL")
-            if model is not None:
-                assert model == spec.model, f"{container['name']} deploys {model}"
-    assert fw.env_value(fw.main_container(source), "SNAPSHOT_MODEL") == spec.model
+            assert fw.env_value(container, "SNAPSHOT_MODEL") is None
 
 
 @pytest.mark.workload
@@ -205,6 +277,7 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
     restore = fw.restore_pod(
         config=CONFIG, run=run, spec=spec, source_node="n0", image=IMAGE, model_cache=CACHE
     )
+    assert fw.env_value(fw.main_container(restore), "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
     for pod in (source, restore):
         pod_spec = pod["spec"]
         # No download init container: the export is mounted read-mostly and the
@@ -216,7 +289,7 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         assert volumes[frameworks.MODEL_CACHE_VOLUME]["persistentVolumeClaim"] == {
             "claimName": CACHE.pvc_name
         }
-        # The guide's own claim (SGLang's sglang-model-cache) must not linger.
+        # The guide's own model-cache claim must not linger.
         assert sum(1 for v in pod_spec["volumes"] if v["name"] == frameworks.MODEL_CACHE_VOLUME) == 1
         main = fw.main_container(pod)
         assert {
@@ -228,8 +301,8 @@ def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSp
         # Exactly one HF_HOME even when the guide already set one (SGLang).
         assert sum(1 for e in main["env"] if e["name"] == "HF_HOME") == 1
         # Contract pieces are untouched by the cache rewrite.
-        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
-        assert any(m["mountPath"] == "/dev/net/tun" for m in main["volumeMounts"])
+        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") in (None, workloads.CONTROL_DIR)
+        assert all(m["mountPath"] != "/dev/net/tun" for m in main["volumeMounts"])
 
 
 @pytest.mark.workload
@@ -246,3 +319,40 @@ def test_control_file_names_match_the_guide_program(spec: frameworks.FrameworkSp
     for path in sentinels:
         name = path.rsplit("/", 1)[-1]
         assert f'"{name}"' in program, f"{spec.name}/app.py does not write {name!r}"
+
+
+@pytest.mark.workload
+@pytest.mark.parametrize("engine,recipe", [
+    ("vllm", "glm-5.3"),
+    ("sglang", "glm-5.3"),
+    ("tensorrt-llm", "glm-5.3"),
+    ("vllm", "deepseek-v4.1-flash"),
+    ("sglang", "deepseek-v4.1-flash"),
+])
+def test_multi_gpu_recipe_preserves_capture_restore_contract(
+    monkeypatch: pytest.MonkeyPatch, engine: str, recipe: str,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_RECIPE", recipe)
+    spec = frameworks.framework_spec(engine)
+    run = workloads.TestRun.new("recipe")
+    source = fw.source_pod(config=CONFIG, run=run, spec=spec, image=IMAGE, model_cache=CACHE)
+    restore = fw.restore_pod(
+        config=CONFIG, run=run, spec=spec, source_node="n0", image=IMAGE, model_cache=CACHE,
+    )
+    assert source["metadata"]["annotations"][fw.MULTI_GPU_ANNOTATION] == "enabled"
+    installer = next(c for c in source["spec"]["initContainers"] if c["name"] == "snapshot-cuda-install")
+    assert installer["image"] == AGENT_IMAGE
+    model, revision, parallelism = frameworks.guide_model(fw.main_container(source)["args"])
+    assert (model, parallelism) == (spec.model, 8)
+    assert revision
+    for pod in (source, restore):
+        main = fw.main_container(pod)
+        assert main["image"] == IMAGE
+        assert main["resources"]["limits"]["nvidia.com/gpu"] == "8"
+    restore_main = fw.main_container(restore)
+    assert fw.env_value(restore_main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
+    # The restore profile keeps the workload command the source runs under the
+    # launcher. Snapshot replaces it with the restore proxy.
+    restore_command = restore_main["command"]
+    assert fw.main_container(source)["command"][-len(restore_command):] == restore_command
+    assert restore["metadata"]["annotations"][fw.RESTORE_FROM_ANNOTATION] == run.snapshot_name

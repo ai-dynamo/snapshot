@@ -58,6 +58,46 @@ tests:
           path: spec.template.metadata.annotations["openshift.io/required-scc"]
           value: privileged
 
+  - it: keeps default daemon arguments compatible with the filesystem broker
+    template: templates/daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].args
+          value:
+            - /pagebroker/control/pagebroker.sock
+            - /pagebroker/staging
+            - /checkpoints
+            - --max-concurrent-requests
+            - "16"
+            - --custom-storage-buffer-count
+            - "32"
+            - --custom-storage-chunk-bytes
+            - "134217728"
+            - --custom-storage-max-pinned-bytes
+            - "0"
+
+  - it: passes store identity when the artifact backend is explicitly enabled
+    template: templates/daemonset.yaml
+    set:
+      pageBroker.artifactAddressing: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].args
+          value:
+            - /pagebroker/control/pagebroker.sock
+            - /pagebroker/staging
+            - /checkpoints
+            - --max-concurrent-requests
+            - "16"
+            - --custom-storage-buffer-count
+            - "32"
+            - --custom-storage-chunk-bytes
+            - "134217728"
+            - --custom-storage-max-pinned-bytes
+            - "0"
+            - --storage-config
+            - /etc/snapshot/storage.yaml
+
   - it: mounts the checkpoint PVC in both containers at the same path
     template: templates/daemonset.yaml
     asserts:
@@ -78,7 +118,7 @@ tests:
             persistentVolumeClaim:
               claimName: snapshot-pvc
 
-  - it: shares one memory-backed volume between the agent and the sidecar, capped at the agent memory limit by default
+  - it: shares one memory-backed volume between the agent and the sidecar, capped below the agent memory limit by default
     template: templates/daemonset.yaml
     asserts:
       - contains:
@@ -97,15 +137,16 @@ tests:
             name: pagebroker
             emptyDir:
               medium: Memory
-              sizeLimit: "64Gi"
+              sizeLimit: "56Gi"
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 64Gi
 
-  - it: honours a pageBroker.staging.sizeLimit override
+  - it: honours a pageBroker.staging.sizeLimit override that keeps the headroom
     template: templates/daemonset.yaml
     set:
       pageBroker.staging.sizeLimit: 128Gi
+      daemonset.resources.limits.memory: 160Gi
     asserts:
       - contains:
           path: spec.template.spec.volumes
@@ -115,7 +156,7 @@ tests:
               medium: Memory
               sizeLimit: "128Gi"
 
-  - it: falls back to the 64Gi default when reused values carry no pageBroker.staging map
+  - it: falls back to the chart default when reused values carry no pageBroker.staging map
     template: templates/daemonset.yaml
     set:
       pageBroker.staging: null
@@ -126,7 +167,7 @@ tests:
             name: pagebroker
             emptyDir:
               medium: Memory
-              sizeLimit: "64Gi"
+              sizeLimit: "56Gi"
 
   - it: reserves resources for the GPU engine and staging
     template: templates/daemonset.yaml
@@ -320,3 +361,110 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "maxConcurrentRequests"
+
+  - it: points PageBroker at its own S3 configuration and drops the PVC mount
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          content: --storage-config
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          content: /etc/snapshot-s3/pagebroker-s3-config.json
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: pagebroker-s3-config
+            mountPath: /etc/snapshot-s3
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: checkpoints
+            mountPath: /checkpoints
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: pagebroker-s3-config
+            configMap:
+              name: RELEASE-NAME-snapshot-pagebroker-storage-config
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: checkpoints
+            persistentVolumeClaim:
+              claimName: snapshot-pvc
+
+  - it: passes --storage-config exactly once when binding new S3 content requires artifactAddressing
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      pageBroker.artifactAddressing: true
+    asserts:
+      # Not a corner case: configmap.yaml requires artifactAddressing=true
+      # whenever bindNewContents is set, so this is the combination binding
+      # new S3 content actually uses.
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].args
+          value:
+            - /pagebroker/control/pagebroker.sock
+            - /pagebroker/staging
+            - /var/snapshot/pagebroker-unused-storage-root
+            - --max-concurrent-requests
+            - "16"
+            - --custom-storage-buffer-count
+            - "32"
+            - --custom-storage-chunk-bytes
+            - "134217728"
+            - --custom-storage-max-pinned-bytes
+            - "0"
+            - --storage-config
+            - /etc/snapshot-s3/pagebroker-s3-config.json
+
+  - it: mounts the shared S3 credentials file into the PageBroker container only
+    template: templates/daemonset.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: snapshot-s3-credentials
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].env
+          content:
+            name: AWS_SHARED_CREDENTIALS_FILE
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "agent")].volumeMounts
+          content:
+            name: s3-credentials
+          any: true
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].env
+          content:
+            name: AWS_SHARED_CREDENTIALS_FILE
+            value: /etc/snapshot-s3-credentials/credentials
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "pagebroker")].volumeMounts
+          content:
+            name: s3-credentials
+            mountPath: /etc/snapshot-s3-credentials
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+            secret:
+              secretName: snapshot-s3-credentials
+              items:
+                - key: credentials
+                  path: credentials

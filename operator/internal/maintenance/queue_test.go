@@ -37,7 +37,7 @@ func TestEnqueueSweepCoalescesDuplicates(t *testing.T) {
 	q.EnqueueSweep()
 	q.EnqueueSweep()
 
-	assert.Equal(t, 1, q.queue.Len())
+	assert.Equal(t, 2, q.queue.Len(), "each sweep mode has its own coalesced deadline")
 }
 
 func TestStartRunsImmediateSweepAndShutsDownCleanly(t *testing.T) {
@@ -287,7 +287,8 @@ func TestSweepRecoversDeleteContentAfterRetryExhaustion(t *testing.T) {
 			}}
 			q.EnqueueSweep()
 			require.True(t, q.processNextItem(ctx, logr.Discard()))
-			require.Equal(t, 1, q.queue.Len(), "sweep must rediscover the dropped deletion")
+			require.Equal(t, 2, q.queue.Len(), "content sweep rediscovers deletion beside the independent non-target sweep")
+			require.True(t, q.processNextItem(ctx, logr.Discard()))
 			require.True(t, q.processNextItem(ctx, logr.Discard()))
 			require.Zero(t, q.queue.Len())
 			require.Zero(t, q.queue.NumRequeues(key), "success must reset the retry count")
@@ -307,10 +308,12 @@ func TestFailedSweepWaitsForNextTrigger(t *testing.T) {
 
 	q.EnqueueSweep()
 	require.True(t, q.processNextItem(context.Background(), logr.Discard()))
+	require.True(t, q.processNextItem(context.Background(), logr.Discard()))
 
 	assert.Equal(t, q.config.ListAttempts, reader.calls)
 	assert.Zero(t, q.queue.Len())
 	assert.Zero(t, q.queue.NumRequeues(newSweepKey()))
+	assert.Zero(t, q.queue.NumRequeues(newNonTargetSweepKey()))
 }
 
 type stubBackend struct {

@@ -6,19 +6,19 @@ roadmap.
 ## Current limitations
 
 - Linux nodes on x86_64 or arm64.
-- Single-node workloads are supported; multi-node is on the roadmap.
+- Workloads, including multi-GPU workloads, must run on a single node. Multi-node is on the roadmap.
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 - The checkpointed workload must not have tools that intercept `libcuda.so`
   calls (e.g. Datadog GPU monitoring) — CUDA calls may fail or hang after
   restore, with undefined results. Disable such interception for workloads
   that will be snapshotted.
-- Every node needs a container runtime with NRI v0.10 or newer, enabled:
-  containerd 2.2 or newer. The node agent uses NRI to make its restore proxy
-  PID 1 in restore containers. On a node without NRI, or with an older runtime,
-  which drops that change silently, the agent exits with an error saying so and
-  keeps restarting, so that node can neither checkpoint nor restore. Keep the
-  agent off such nodes with `daemonset.nodeSelector`.
+- The restore proxy needs a container runtime with NRI v0.10 or newer, enabled:
+  containerd 2.2 or newer. The node agent uses NRI to make the proxy PID 1 in
+  restore containers. On a node without NRI, or with an older runtime, the
+  agent restores without the proxy: restore Pods need an inert command there,
+  and the container does not follow the restored workload. See
+  [Nodes without the restore proxy](reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
 - A Pod gets one restore. If a restored container starts again, for example
   under `restartPolicy: Always` after the restored process exits, it ends in
   `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in
