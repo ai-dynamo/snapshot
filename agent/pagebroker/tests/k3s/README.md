@@ -174,7 +174,7 @@ uv venv /tmp/snapshot-stress-tests
 uv pip install --python /tmp/snapshot-stress-tests/bin/python --require-hashes \
   -r agent/pagebroker/tests/k3s/stress-requirements.txt
 uv pip install --python /tmp/snapshot-stress-tests/bin/python \
-  -r agent/pagebroker/tests/requirements.txt
+  -r hack/pagebroker-integration/requirements.txt
 /tmp/snapshot-stress-tests/bin/python -B -m unittest discover \
   -s agent/pagebroker/tests/k3s -p 'test_s3_cleanup*.py' -v
 ```

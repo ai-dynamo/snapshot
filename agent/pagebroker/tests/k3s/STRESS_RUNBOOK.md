@@ -76,7 +76,7 @@ uses live AWS. It supplies fake credentials only to the loopback TLS emulator.
 ```bash
 uv venv "$REVIEW_DIR/venv"
 uv pip install --python "$REVIEW_DIR/venv/bin/python" \
-  -r agent/pagebroker/tests/requirements.txt PyYAML==6.0.2
+  -r hack/pagebroker-integration/requirements.txt PyYAML==6.0.2
 "$REVIEW_DIR/venv/bin/python" -B agent/pagebroker/tests/k3s/stress_local.py \
   --client-image "$STRESS_IMAGE" --pagebroker-image "$PAGEBROKER_IMAGE" \
   --harness-revision "$HARNESS_SHA" --broker-revision "$BROKER_SHA" \
