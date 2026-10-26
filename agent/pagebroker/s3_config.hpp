@@ -29,8 +29,10 @@ struct S3TransferOptions {
 void ValidateModelStreamerEnvironment(const S3TransferOptions& options);
 
 // Resolved startup settings for one store. Credentials are supplied externally
-// through standard AWS providers and snapshotted once by the daemon.
+// through AWS_SHARED_CREDENTIALS_FILE and snapshotted once by the daemon.
 struct S3Config {
+  // Validates the supported bucket and canonical configured prefix.
+  void ValidateLocation() const;
   S3TransferOptions transfer;
   // Logical store identity and the bucket/key prefix used for its checkpoints.
   std::string store_id;
@@ -48,4 +50,7 @@ S3Config ParseS3Config(std::string_view text);
 // Reads at most the configuration size limit plus one byte, then parses it so
 // oversized files are rejected without loading their full contents.
 S3Config ReadS3Config(const std::filesystem::path& path);
+// Loads only the mounted file's default profile and resolves the optional CA fallback.
+// Missing or invalid credentials fail before native startup settings are applied.
+S3Connection LoadS3Credentials(S3Connection connection);
 }  // namespace snapshot::pagebroker

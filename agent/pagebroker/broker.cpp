@@ -550,10 +550,8 @@ Response
 Broker::Metadata(const Request& request)
 {
   const auto& operation = request.get_artifact_metadata();
-  if (operation.has_target())
-    throw std::invalid_argument("artifact metadata lookup by identity is not implemented");
-  const auto& artifact = operation.artifact();
   const auto& engine = ArtifactEngine();
+  const auto artifact = operation.has_target() ? engine.ResolveArtifactTarget(operation.target()) : operation.artifact();
   engine.ValidateArtifact(artifact);
   return StageRestore(request, {}, engine, &artifact);
 }

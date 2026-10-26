@@ -14,10 +14,8 @@ namespace snapshot::pagebroker {
 inline constexpr char kCheckpointFormat[] = "snapshot.s3-checkpoint/v1";
 // Metadata object name within a checkpoint storage prefix.
 inline constexpr char kCheckpointIndexName[] = "index.json";
-// Required metadata entry and the alphabet used to encode artifact handles.
+// Required metadata entry.
 inline constexpr char kCheckpointManifestName[] = "manifest.yaml";
-inline constexpr char kCheckpointHandleHexDigits[] = "0123456789abcdef";
-inline constexpr std::size_t kCheckpointHandleLength = 64;
 // Bounds the JSON metadata fetched from S3 before it can become a restore inventory.
 inline constexpr std::size_t kMaxIndexBytes = 4 * 1024 * 1024;
 // Limits the required manifest and the total entries/bytes described by an index.
@@ -28,8 +26,6 @@ inline constexpr std::uint64_t kMaxCheckpointBytes = 1ULL << 40;
 // Carries protocol failure codes for corrupt, unsupported or conflicting artifacts.
 using CheckpointError = TransferError;
 
-// Requires the fixed lowercase hexadecimal handle used in artifact object keys.
-void ValidateCheckpointID(std::string_view id);
 // Validates ordered, unique relative paths, permissions, manifest and size limits,
 // then returns total file bytes.
 std::uint64_t ValidateCheckpointInventory(const CheckpointInventory& inventory);

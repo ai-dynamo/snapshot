@@ -165,12 +165,12 @@ TEST_F(ModelStreamerConfigTest, InvalidEnvironmentFailsBeforeAnySettingsAreAppli
 
 TEST_F(ModelStreamerConfigTest, DaemonRejectsRelativeCaBeforeApplyingSettings)
 {
-  for (const char* name : {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"})
-    SaveAndClear(name);
-  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
-  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
+  SaveAndClear("AWS_SHARED_CREDENTIALS_FILE");
   setenv("AWS_CA_BUNDLE", "relative/ca.pem", 1);
   test::TemporaryDirectory root;
+  const auto credentials = root.path() / "credentials";
+  std::ofstream(credentials) << "[default]\naws_access_key_id=fake-key\naws_secret_access_key=fake-secret\n";
+  setenv("AWS_SHARED_CREDENTIALS_FILE", credentials.c_str(), 1);
   DaemonOptions options;
   options.enable_gpu = false;
   // If CA validation regresses, the long socket path still prevents a server loop.

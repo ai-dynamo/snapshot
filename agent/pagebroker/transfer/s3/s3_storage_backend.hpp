@@ -28,8 +28,8 @@ class S3StorageBackend {
 
   // Immutable snapshot of the startup settings supplied by the engine.
   const S3Config& config() const;
-  // Derives a stable handle from the target's store, artifact UID and container
-  // identity, rejecting targets for another configured store without network I/O.
+  // Builds the content/container directory handle, rejecting unsafe identities
+  // and targets for another configured store without network I/O.
   PublishedArtifact ResolveTarget(const ArtifactTarget& target) const;
   // Checks descriptor identity and handle syntax against this store.
   void ValidateArtifactDescriptor(const PublishedArtifact& storage) const;
