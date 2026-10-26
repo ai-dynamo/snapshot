@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <set>
+#include <sstream>
 
 #include "transfer/checkpoint_inventory.hpp"
 #include "transfer/s3/checkpoint_index.hpp"
@@ -36,6 +37,62 @@ constexpr char kUploadActiveFilesKey[] = "uploadActiveFiles";
 constexpr char kRequestSecondsKey[] = "requestSeconds";
 constexpr char kUploadRequestRetriesKey[] = "uploadRequestRetries";
 constexpr char kUploadConnectSecondsKey[] = "uploadConnectSeconds";
+constexpr char kCredentialsFileEnv[] = "AWS_SHARED_CREDENTIALS_FILE";
+constexpr char kDefaultProfile[] = "default";
+constexpr char kAccessKey[] = "aws_access_key_id";
+constexpr char kSecretKey[] = "aws_secret_access_key";
+constexpr char kSessionToken[] = "aws_session_token";
+constexpr std::size_t kMaxCredentialsBytes = 64 * 1024;
+
+std::string_view
+Trim(std::string_view text)
+{
+  const auto first = text.find_first_not_of(" \t\r");
+  return first == text.npos ? std::string_view{} : text.substr(first, text.find_last_not_of(" \t\r") - first + 1);
+}
+
+S3Connection
+ParseCredentials(std::string_view text, S3Connection connection)
+{
+  if (text.size() > kMaxCredentialsBytes || text.find('\0') != text.npos)
+    throw std::invalid_argument("invalid S3 credentials file");
+  connection.access_key_id.clear();
+  connection.secret_access_key.clear();
+  connection.session_token.clear();
+  std::istringstream input{std::string(text)};
+  std::string line;
+  std::string profile;
+  std::set<std::string> seen;
+  while (std::getline(input, line)) {
+    auto value = Trim(line);
+    if (value.empty() || value.front() == '#' || value.front() == ';')
+      continue;
+    if (value.front() == '[' && value.back() == ']') {
+      profile = Trim(value.substr(1, value.size() - 2));
+      if (profile.empty())
+        throw std::invalid_argument("invalid S3 credentials profile");
+      continue;
+    }
+    const auto equals = value.find('=');
+    if (profile.empty() || equals == value.npos || Trim(value.substr(0, equals)).empty())
+      throw std::invalid_argument("invalid S3 credentials file");
+    if (profile != kDefaultProfile)
+      continue;
+    const auto key = Trim(value.substr(0, equals));
+    std::string* destination = key == kAccessKey ? &connection.access_key_id :
+        key == kSecretKey ? &connection.secret_access_key : key == kSessionToken ? &connection.session_token : nullptr;
+    if (!destination)
+      continue;
+    if (!seen.insert(std::string(key)).second)
+      throw std::invalid_argument("duplicate S3 credential key");
+    *destination = Trim(value.substr(equals + 1));
+  }
+  if (connection.access_key_id.empty() || connection.secret_access_key.empty())
+    throw std::invalid_argument("S3 credentials file requires a default access key and secret key");
+  connection.Validate();
+  return connection;
+}
+
 constexpr char kPathAddressing[] = "path";
 constexpr char kVirtualAddressing[] = "virtual";
 
@@ -229,6 +286,24 @@ ParseS3Config(std::string_view text)
   ValidateStorageLocation(config.bucket, config.prefix);
   ParseTransferLimits(value, config);
   return config;
+}
+
+S3Connection
+LoadS3Credentials(S3Connection connection)
+{
+  connection.Validate();
+  if (connection.ca_file.empty())
+    connection.ca_file = Environment(kAwsCaBundleEnv);
+  connection.Validate();
+  const auto path = Environment(kCredentialsFileEnv);
+  if (path.empty())
+    throw std::invalid_argument("AWS_SHARED_CREDENTIALS_FILE is required for S3");
+  try {
+    return ParseCredentials(utils::config::ReadBoundedConfigFile(path, kMaxCredentialsBytes), std::move(connection));
+  }
+  catch (const std::ios_base::failure&) {
+    throw std::invalid_argument("cannot read S3 credentials file");
+  }
 }
 
 S3Config
