@@ -159,6 +159,14 @@ tests:
       - failedTemplate:
           errorPattern: "set storage.s3.allowHttp=true"
 
+  - it: rejects a plain-http endpoint with an uppercase scheme unless allowHttp is set
+    template: templates/configmap.yaml
+    set:
+      storage.s3.endpoint: HTTP://s3.example.com
+    asserts:
+      - failedTemplate:
+          errorPattern: "set storage.s3.allowHttp=true"
+
   - it: writes allowHttp for a plain-http endpoint when set
     template: templates/configmap.yaml
     set:
