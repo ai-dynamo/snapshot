@@ -192,15 +192,17 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 
 ### Storage
 
-| Value                      | Default        | Description                                                                                               |
-|----------------------------|----------------|-----------------------------------------------------------------------------------------------------------|
-| `pageBroker.restoreMode`   | `direct`       | PageBroker restore source: `staged` copies CPU images into staging, `direct` reads the original artifact. |
-| `storage.type`             | `pvc`          | Only `pvc` is implemented today.                                                                          |
-| `storage.pvc.create`       | `true`         | Create the PVC; set `false` to use an existing one.                                                       |
-| `storage.pvc.name`         | `snapshot-pvc` | Shared PVC name.                                                                                          |
-| `storage.pvc.size`         | `1Ti`          | Requested size.                                                                                           |
-| `storage.pvc.storageClass` | `""`           | Storage class; empty uses the cluster default. Must support `ReadWriteMany`.                              |
-| `storage.pvc.basePath`     | `/checkpoints` | Fixed agent mount path; cannot be changed.                                                                |
+| Value                           | Default        | Description                                                                                                                                                                                               |
+|---------------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `pageBroker.restoreMode`        | `direct`       | PageBroker restore source: `staged` copies CPU images into staging, `direct` reads the original artifact.                                                                                                 |
+| `storage.type`                  | `pvc`          | Checkpoint store backend: `pvc` or `s3`.                                                                                                                                                                  |
+| `storage.pvc.create`            | `true`         | Create the PVC; set `false` to use an existing one.                                                                                                                                                       |
+| `storage.pvc.name`              | `snapshot-pvc` | Shared PVC name.                                                                                                                                                                                          |
+| `storage.pvc.size`              | `1Ti`          | Requested size.                                                                                                                                                                                           |
+| `storage.pvc.storageClass`      | `""`           | Storage class; empty uses the cluster default. Must support `ReadWriteMany`.                                                                                                                              |
+| `storage.pvc.basePath`          | `/checkpoints` | Fixed agent mount path; cannot be changed.                                                                                                                                                                |
+| `pageBroker.artifactAddressing` | `false`        | Pass store configuration to a compatible PageBroker artifact backend. Deploy this before enabling `operator.bindNewContents`.                                                                             |
+| `operator.bindNewContents`      | `false`        | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../operations/storage.md#enable-artifact-addressing). |
 
 ### PageBroker GPU engine
 

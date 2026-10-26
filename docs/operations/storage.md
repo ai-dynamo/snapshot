@@ -67,10 +67,11 @@ installation:
    activation; it does not roll the agents again. New contents now record the
    configured store and require publication descriptors.
 
-Both settings default to `false`, so the chart adds no artifact-backend arguments
-until explicitly enabled. Agent and PageBroker images must still match. A fresh installation with compatible images may enable
-both settings together, provided no captures are submitted until all agents are
-ready. Existing unbound contents remain readable through the legacy path.
+Both settings default to `false`, so the chart adds no artifact-backend
+arguments until explicitly enabled. Agent and PageBroker images must still
+match. A fresh installation with compatible images may enable both settings
+together, provided no captures are submitted until all agents are ready.
+Existing unbound contents remain readable through the legacy path.
 
 Once bound content exists, keep a compatible broker with artifact addressing
 enabled for its reads and restores. Turning off `operator.bindNewContents` stops
