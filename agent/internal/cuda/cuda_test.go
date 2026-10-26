@@ -425,6 +425,20 @@ func TestBuildDeviceMap(t *testing.T) {
 			want:   "",
 		},
 		{
+			// A TP4 restore onto GPUs 2-5 of a node, checkpointed on GPUs 0-3:
+			// every process keeps its position, so GPUs 2 and 3 move too.
+			name:   "overlapping GPUs pair by position",
+			source: []string{"GPU-0", "GPU-1", "GPU-2", "GPU-3"},
+			target: []string{"GPU-2", "GPU-3", "GPU-4", "GPU-5"},
+			want:   "GPU-0=GPU-2,GPU-1=GPU-3,GPU-2=GPU-4,GPU-3=GPU-5",
+		},
+		{
+			name:   "a GPU at the same position stays",
+			source: []string{"GPU-aaa", "GPU-bbb"},
+			target: []string{"GPU-aaa", "GPU-ccc"},
+			want:   "GPU-aaa=GPU-aaa,GPU-bbb=GPU-ccc",
+		},
+		{
 			name:    "mismatched lengths",
 			source:  []string{"GPU-aaa", "GPU-bbb"},
 			target:  []string{"GPU-ccc"},
