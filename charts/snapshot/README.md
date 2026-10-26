@@ -225,8 +225,10 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `rbac.create` | Create agent and operator RBAC | `true` |
 | `openshift.enabled` | Create required-SCC pod annotations and, when `rbac.create=true`, OpenShift SCC-use RBAC | `false` |
 
-Reserved `s3` and `oci` values remain chart-owned placeholders for future
-snapshot backends, but only `pvc` is implemented today.
+`storage.type` supports `pvc` and `s3`. `oci` remains a chart-owned placeholder
+for a future backend and is not implemented today. See
+[Storage](../../docs/operations/storage.md#other-backends) for the S3 settings
+PageBroker reads.
 
 Filesystem checkpoint and restore use POSIX.
 
