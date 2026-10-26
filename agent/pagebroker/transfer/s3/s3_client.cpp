@@ -34,6 +34,8 @@ namespace snapshot::pagebroker {
 namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::uint64_t kMiB = 1024 * 1024;
+// S3's fixed service limit; larger files require a larger configured part size.
+constexpr std::uint64_t kMaxMultipartParts = 10'000;
 constexpr char kSizeField[] = "Size";
 constexpr char kDirectoryField[] = "IsDir";
 constexpr char kMessageField[] = "msg";
@@ -221,6 +223,8 @@ constexpr char kExecutable[] = PAGEBROKER_RCLONE_PATH;
 constexpr std::size_t kDiagnosticsLimit = 64 * 1024;
 constexpr auto kTerminationGrace = std::chrono::seconds(2);
 constexpr int kPollMilliseconds = 20;
+// The child could not complete setup or execute rclone.
+constexpr int kChildStartupFailureExitCode = 127;
 
 FileDescriptor
 HighDescriptor(int descriptor)
@@ -309,11 +313,11 @@ StartRclone(const std::vector<std::string>& command, const std::vector<std::stri
         syscall(SYS_close_range, 3U, UINT_MAX, 0U) < 0 || sigprocmask(SIG_SETMASK, &empty_mask, nullptr) < 0 ||
         sigaction(SIGTERM, &default_action, nullptr) < 0 || sigaction(SIGINT, &default_action, nullptr) < 0 ||
         sigaction(SIGPIPE, &default_action, nullptr) < 0 || prctl(PR_SET_PDEATHSIG, SIGKILL) < 0)
-      _exit(127);
+      _exit(kChildStartupFailureExitCode);
     if (getppid() != parent)
-      _exit(127);
+      _exit(kChildStartupFailureExitCode);
     execve(kExecutable, argv.data(), envp.data());
-    _exit(127);
+    _exit(kChildStartupFailureExitCode);
   }
   return pid;
 }
@@ -371,8 +375,8 @@ WaitForRclone(Child& child, int output, int diagnostics, std::size_t output_limi
         throw std::system_error(errno, std::generic_category(), "poll rclone output");
     }
   }
-  const auto exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
   cancellation.ThrowIfCancelled();
+  const auto exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
   if (exit_code != 0)
     throw S3Error(HttpStatus(diagnostic_bytes));
   return output_bytes;
@@ -457,8 +461,8 @@ S3Limits::ValidateFileSize(std::uint64_t size) const
 {
   Validate();
   if (size > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) ||
-      size / part_size + (size % part_size != 0) > 10'000)
-    throw std::invalid_argument("S3 file exceeds the configured 10000-part limit");
+      size / part_size + (size % part_size != 0) > kMaxMultipartParts)
+    throw std::invalid_argument("S3 file exceeds the supported size for the configured part size");
 }
 
 // A permit bounds admitted operations through preparation, execution and cleanup.

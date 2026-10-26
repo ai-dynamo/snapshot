@@ -20,6 +20,7 @@ namespace snapshot::pagebroker {
 inline constexpr char kHttpsEndpointPrefix[] = "https://";
 inline constexpr char kHttpEndpointPrefix[] = "http://";
 inline constexpr char kAwsCaBundleEnv[] = "AWS_CA_BUNDLE";
+inline constexpr std::uint64_t kDefaultS3PartSize = 64ULL * 1024 * 1024;
 
 // Connection settings shared by rclone clients and native restore configuration.
 // Empty endpoint uses AWS S3; an empty region uses the startup environment or client default.
@@ -60,7 +61,8 @@ struct S3UploadFile {
 // Bounds resources shared by concurrent calls to one S3Client and the duration
 // and retries of its requests. rclone owns multipart scheduling and buffering.
 struct S3Limits {
-  std::uint64_t part_size = 16 * 1024 * 1024;
+  // S3 allows 10,000 parts per object: the default supports files up to 625 GiB.
+  std::uint64_t part_size = kDefaultS3PartSize;
   // Active buffer budget split equally between concurrent rclone processes.
   // Each share must fit one part plus rclone's allocation padding.
   // Idle buffer caches, process overhead, metadata, and file lists are additional.

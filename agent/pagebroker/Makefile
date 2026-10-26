@@ -124,12 +124,12 @@ s3-lifetime-test:
 	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$$LD_LIBRARY_PATH" python3 tests/model_streamer_submission_lifetime.py
 
 # Test fork/exec with a compiled child, never a shell script or real credentials.
-build/rclone-test-child: transfer/s3/tests/rclone_test_child.cpp | build
+build/rclone-child-helper: transfer/s3/tests/rclone_child_helper.cpp | build
 	$(CXX) $(CXXFLAGS) $< -o $@
 
 # Wrappers observe admission waits and expire a notified waiter deterministically.
-rclone-process-test: build/rclone-test-child
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -DPAGEBROKER_RCLONE_PATH='"$(abspath build/rclone-test-child)"' \
+rclone-process-test: build/rclone-child-helper
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -DPAGEBROKER_RCLONE_PATH='"$(abspath build/rclone-child-helper)"' \
 		transfer/s3/s3_client.cpp file_descriptor.cpp \
 		transfer/s3/tests/rclone_process_test.cpp $(GTEST_FLAGS) \
 		-Wl,--wrap=pthread_cond_clockwait,--wrap=_ZNSt6chrono3_V212steady_clock3nowEv -o build/rclone-process-test

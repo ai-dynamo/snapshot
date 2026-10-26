@@ -213,6 +213,15 @@ TEST(S3ClientTest, ValidatesMultipartBoundariesWithoutAllocation)
   EXPECT_THROW(limits.ValidateFileSize(std::numeric_limits<std::uint64_t>::max()), std::invalid_argument);
 }
 
+TEST(S3ClientTest, DefaultPartSizeSupports625GiBFiles)
+{
+  const S3Limits limits;
+  EXPECT_EQ(limits.part_size, 64ULL * 1024 * 1024);
+  constexpr std::uint64_t max_file_size = 625ULL * 1024 * 1024 * 1024;
+  EXPECT_NO_THROW(limits.ValidateFileSize(max_file_size));
+  EXPECT_THROW(limits.ValidateFileSize(max_file_size + 1), std::invalid_argument);
+}
+
 TEST(S3ClientTest, RejectsIncompleteCredentialsAndMalformedSettings)
 {
   auto connection = OfflineConnection();

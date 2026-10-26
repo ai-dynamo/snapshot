@@ -53,7 +53,10 @@ A payload batch occupies one slot and transfers one file at a time. Independent
 batches can run concurrently. Each process receives `buffer_budget / active_files`
 through rclone's `--max-buffer-memory`, with up to four parts uploaded concurrently
 and no additional transfer buffer. `part_size` sets both the multipart
-threshold and chunk size. Each process's budget must fit one part rounded up to
+threshold and chunk size. It defaults to 64 MiB, supporting files up to 625 GiB
+within S3's fixed 10,000-part limit. Larger files require a larger configured
+part size; oversized files are rejected before upload.
+Each process's budget must fit one part rounded up to
 the next whole MiB, including an extra MiB for an already aligned part. This lets
 rclone finish reading a part before uploading it. The budget limits active
 buffers; idle buffer caches, Go/TLS overhead, metadata, and file lists use
