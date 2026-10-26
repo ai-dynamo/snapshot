@@ -191,7 +191,7 @@ def synthetic(kube, args, mode, run_id, directory, result):
             kube.create(resource)
         if mode == "s3":
             kube.call("-n", namespace, "create", "secret", "generic", values.credentials_secret,
-                      f"--from-env-file={os.environ['PAGEBROKER_SMOKE_AWS_CREDENTIALS_FILE']}", sensitive=True)
+                      f"--from-file=credentials={os.environ['PAGEBROKER_SMOKE_AWS_CREDENTIALS_FILE']}", sensitive=True)
         kube.create(job)
         result.update(wait_job(kube, namespace, directory, args.startup_seconds, args.job_seconds))
     except Exception as error:

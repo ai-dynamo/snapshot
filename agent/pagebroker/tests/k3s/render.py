@@ -79,11 +79,10 @@ def render(args):
         storage = storage_config(args)
         config["data"]["storage.json"] = json.dumps(storage, indent=2)
         broker["args"].extend(["--storage-config", "/config/storage.json"])
-        broker["env"] = [
-            {"name": name, "valueFrom": {"secretKeyRef": {
-                "name": args.credentials_secret, "key": name, "optional": name == "AWS_SESSION_TOKEN"}}}
-            for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
-        ]
+        pod["volumes"].append({"name": "credentials", "secret": {
+            "secretName": args.credentials_secret, "items": [{"key": "credentials", "path": "credentials"}]}})
+        broker["volumeMounts"].append({"name": "credentials", "mountPath": "/credentials", "readOnly": True})
+        broker["env"] = [{"name": "AWS_SHARED_CREDENTIALS_FILE", "value": "/credentials/credentials"}]
         client["env"].append({"name": "PAGEBROKER_SMOKE_STORE_ID", "value": storage["storeId"]})
     if args.node:
         for spec in (pod, exporter["spec"]):

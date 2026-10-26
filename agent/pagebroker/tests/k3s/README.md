@@ -145,8 +145,8 @@ filesystem, S3, Qwen3-0.6B and Qwen3-8B. Run it from the repository root using t
 pinned e2e Python environment. There is no additional runner image to build.
 
 The runner requires `kubectl`, one existing kubeconfig file, an explicit context,
-and an external environment file containing `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY` as `KEY=value` lines.
+and an external shared credentials file containing `[default]`,
+`aws_access_key_id` and `aws_secret_access_key` assignments.
 Temporary credentials must include `AWS_SESSION_TOKEN` and remain valid through
 the S3 case. The AWS file is read by `kubectl` when creating the temporary Secret;
 it is not copied into the result directory. Select the same images imported into
@@ -293,13 +293,13 @@ kubectl create -f "$SMOKE_MANIFESTS/resources.yaml"
 
 **For S3 only**, create the credentials Secret before creating the Job. Set
 `SMOKE_AWS_CREDENTIALS_FILE` to a dedicated file outside the repository containing
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as `KEY=value` lines. Temporary credentials must include
-`AWS_SESSION_TOKEN` and remain valid for the run. Do not put credentials into the
+`[default]`, `aws_access_key_id` and `aws_secret_access_key` assignments. Temporary credentials must include
+`aws_session_token` and remain valid for the run. Do not put credentials into the
 rendered ConfigMap. The launcher and Go client do not receive this Secret.
 
 ```bash
 kubectl -n "$SMOKE_NAMESPACE" create secret generic pagebroker-smoke-aws \
-  --from-env-file="$SMOKE_AWS_CREDENTIALS_FILE"
+  --from-file=credentials="$SMOKE_AWS_CREDENTIALS_FILE"
 ```
 
 The credentials need upload, read, metadata and multipart access under the run's
