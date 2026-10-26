@@ -47,7 +47,8 @@ caller-supplied store ID nor an additional PVC namespace setting is required.
 The operator validates this resolved identity at startup and uses it to check
 artifact cleanup against each content's recorded store. New captures use the
 legacy filesystem flow by default. Artifact addressing requires a compatible
-PageBroker image and the separate activation steps below. S3 remains unsupported.
+PageBroker image and the separate activation steps below; see
+[Other backends](#other-backends) for `storage.type: s3`.
 
 ### Enable artifact addressing
 
@@ -256,8 +257,8 @@ survive an uninstall.
 
 ## Other backends
 
-`storage.type` currently supports `pvc`. Object-storage backends (`s3`, `oci`) are
-reserved in the chart for future use and are not supported today.
+`storage.type` supports `pvc` and `s3`. `oci` is reserved in the chart for
+future use and is not supported today.
 
 ### S3 settings PageBroker reads
 
