@@ -117,14 +117,30 @@ hack/k3d-cpu-e2e.sh registry-up
 if [[ "${SKIP_BUILD}" != "true" ]]; then
   require_push_capable_builder
   log "building images"
-  for component in operator agent pagebroker; do
+  components=(operator agent pagebroker)
+  build_pids=()
+  for component in "${components[@]}"; do
     build_args="--push"
     if [[ "${component}" == "operator" ]]; then
       build_args+=" --build-arg GO_BUILD_TAGS=snapshot_e2e"
     fi
-    make "docker-build-${component}" REGISTRY="${IMAGE_REGISTRY}" TAGS="${IMAGE_TAG}" \
-      DOCKER_BUILD_ARGS="${build_args}"
+    (
+      set -o pipefail
+      make "docker-build-${component}" REGISTRY="${IMAGE_REGISTRY}" TAGS="${IMAGE_TAG}" \
+        DOCKER_BUILD_ARGS="${build_args}" 2>&1 | sed -u "s/^/[${component}] /"
+    ) &
+    build_pids+=("$!")
   done
+  failed_builds=()
+  for index in "${!components[@]}"; do
+    if ! wait "${build_pids[index]}"; then
+      failed_builds+=("${components[index]}")
+    fi
+  done
+  if ((${#failed_builds[@]})); then
+    echo "image build failed: ${failed_builds[*]}" >&2
+    exit 1
+  fi
 else
   # Skipping the builds means relying on what a previous run pushed, and the
   # registry only survives that run if it kept the cluster. Say so here rather
