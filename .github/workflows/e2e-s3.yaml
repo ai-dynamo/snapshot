@@ -36,7 +36,12 @@ env:
   K3D_VERSION: v5.8.3
   KUBECTL_VERSION: v1.34.12
   SNAPSHOT_E2E_STORAGE: s3
-  SNAPSHOT_E2E_REQUIRED_TESTS: test_checkpoint_is_published_to_s3_and_restores_from_it
+  SNAPSHOT_E2E_REQUIRED_TESTS: >-
+    test_checkpoint_is_published_to_s3_and_restores_from_it,
+    test_deleting_a_snapshot_removes_its_objects_from_the_store,
+    test_capture_fails_without_the_bucket_and_publishes_nothing,
+    test_model_streamer_settings_reach_pagebroker_and_restore_still_works,
+    test_unknown_model_streamer_key_stops_pagebroker_from_starting
   SNAPSHOT_E2E_KEEP_CLUSTER: "true"
   SNAPSHOT_E2E_RESTORE_PROXY: "true"
   SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e

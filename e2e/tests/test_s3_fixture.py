@@ -71,3 +71,13 @@ def test_settings_follow_the_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     settings = s3.S3Settings.from_env()
     assert settings.bucket == "other"
     assert settings.cluster_endpoint == "http://s3.test:9000"
+
+
+def test_artifact_prefix_covers_every_container_of_one_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_PREFIX", "snapshots")
+    settings = s3.S3Settings.from_env()
+    prefix = s3.artifact_prefix(settings, "uid-1")
+    assert prefix == "snapshots/artifacts/uid-1/"
+    assert s3.artifact_root(settings, "uid-1", "main").startswith(prefix)
