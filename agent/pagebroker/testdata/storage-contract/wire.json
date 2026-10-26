@@ -131,6 +131,18 @@
       "type": "Response",
       "text": "request_id: \"request-1\" transaction_id: \"tx-1\" failure { code: TRANSACTION_EXPIRED message: \"bounded storage failure\" }",
       "wire_hex": "0a09726571756573742d31120474782d313a1b081b1217626f756e6465642073746f72616765206661696c757265"
+    },
+    {
+      "name": "nixl-engine-selector",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" staged_restore { source { filesystem { directory: \"/checkpoints/source\" } } io_engine { nixl {} } }",
+      "wire_hex": "0a09726571756573742d31120474782d311a1d0a170a150a132f636865636b706f696e74732f736f7572636512021200"
+    },
+    {
+      "name": "model-streamer-engine-selector",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" staged_restore { source { filesystem { directory: \"/checkpoints/source\" } } io_engine { model_streamer {} } }",
+      "wire_hex": "0a09726571756573742d31120474782d311a1d0a170a150a132f636865636b706f696e74732f736f7572636512021a00"
     }
   ]
 }

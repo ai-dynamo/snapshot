@@ -106,8 +106,12 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
   require_push_capable_builder
   log "building images"
   for component in operator agent pagebroker; do
+    build_args="--push"
+    if [[ "${component}" == "operator" ]]; then
+      build_args+=" --build-arg GO_BUILD_TAGS=snapshot_e2e"
+    fi
     make "docker-build-${component}" REGISTRY="${IMAGE_REGISTRY}" TAGS="${IMAGE_TAG}" \
-      DOCKER_BUILD_ARGS="--push"
+      DOCKER_BUILD_ARGS="${build_args}"
   done
 else
   # Skipping the builds means relying on what a previous run pushed, and the
@@ -143,6 +147,8 @@ image.pageBroker.repository=${IMAGE_REGISTRY}/pagebroker
 image.operator.pullPolicy=IfNotPresent
 image.agent.pullPolicy=IfNotPresent
 image.pageBroker.pullPolicy=IfNotPresent"
+export SNAPSHOT_E2E_HELM_SET="${SNAPSHOT_E2E_HELM_SET}
+operator.testFailCaptureSourceAnnotation=snapshot-e2e.nvidia.com/fail-capture"
 uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
   --phase snapshot-install --skip-host-preflight
 uv run --locked --project e2e python -m snapshot_e2e.infra.setup \

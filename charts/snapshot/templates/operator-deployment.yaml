@@ -99,6 +99,11 @@ spec:
             - {{ printf "--release-name=%s" .Release.Name | quote }}
             - {{ printf "--artifact-cleanup-s3-credentials-path=%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
             {{- end }}
+          {{- if .Values.operator.testFailCaptureSourceAnnotation }}
+          env:
+            - name: SNAPSHOT_E2E_TEST_FAIL_CAPTURE_SOURCE_ANNOTATION
+              value: {{ .Values.operator.testFailCaptureSourceAnnotation | quote }}
+          {{- end }}
           volumeMounts:
             {{- if eq .Values.storage.type "pvc" }}
             - name: checkpoints

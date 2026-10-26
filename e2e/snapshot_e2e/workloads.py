@@ -29,6 +29,8 @@ RESTORE_PROXY = f"{CONTROL_DIR}/snapshot-restore-proxy"
 INERT_COMMAND = ["sleep", "infinity"]
 # The process the CUDA workload runs as, from CUDA_SOURCE.
 CUDA_HOLD = "/tmp/cuda_hold"
+RESTORE_INITIAL_TOKEN = f"{CONTROL_DIR}/initial-restore-token"
+HELPER_SYNC_DIR = "/e2e-helper-sync"
 STATE_DIR = "/tmp/e2e-state"
 FILE_TOKEN = f"{STATE_DIR}/file-token"
 OBSERVATIONS = f"{STATE_DIR}/observations.log"
@@ -404,18 +406,47 @@ def snapshotjob_helper_pod_template(
     config: k8s.E2EConfig,
     run: TestRun,
     helper_command: str,
+    wait_for_helper_before_capture: bool = False,
+    wait_for_capture_release: bool = False,
 ) -> dict[str, Any]:
     # Two containers: the CRIU target plus a helper doing independent work
     # (the design's GMS-saver pattern). The dump kills only the target; the
     # SnapshotJob must wait for the helper before completing, and a helper
     # failure must fail the run even though the capture succeeded.
     template = snapshotjob_pod_template(config=config, run=run, gpu=False)
+    if wait_for_helper_before_capture or wait_for_capture_release:
+        waits = []
+        if wait_for_helper_before_capture:
+            waits.append(f"while [ ! -f {HELPER_SYNC_DIR}/helper-finished ]; do sleep 0.1; done")
+            # The fail-capture hook is triggered by container readiness, so
+            # retain this gate until the helper has completed.
+            template["spec"]["containers"][0]["readinessProbe"] = {
+                "exec": {"command": ["cat", f"{HELPER_SYNC_DIR}/helper-finished"]},
+                "periodSeconds": 1,
+            }
+        if wait_for_capture_release:
+            waits.append(f"while [ ! -f {HELPER_SYNC_DIR}/capture-release ]; do sleep 0.1; done")
+        template["spec"]["containers"][0]["command"] = [
+            "/bin/bash",
+            "-lc",
+            f"""set -euo pipefail
+mkdir -p {STATE_DIR}
+{chr(10).join(waits)}
+{CPU_SOURCE}
+""",
+        ]
+    template["spec"]["volumes"].append({"name": "e2e-helper-sync", "emptyDir": {}})
+    for container in template["spec"]["containers"]:
+        container.setdefault("volumeMounts", []).append(
+            {"name": "e2e-helper-sync", "mountPath": HELPER_SYNC_DIR}
+        )
     template["spec"]["containers"].append(
         {
             "name": "helper",
             "image": run.image,
             "imagePullPolicy": "IfNotPresent",
             "command": ["/bin/bash", "-lc", helper_command],
+            "volumeMounts": [{"name": "e2e-helper-sync", "mountPath": HELPER_SYNC_DIR}],
         }
     )
     return template
