@@ -28,7 +28,7 @@ const (
 	// placeholder namespace.
 	CheckpointDst = "/tmp/checkpoint"
 	// PageBrokerRestoreSrc is the agent-side PageBroker restore staging root.
-	PageBrokerRestoreSrc = "/pagebroker/staging/restore"
+	PageBrokerRestoreSrc = "/pagebroker/staging/s3/restore"
 	// PageBrokerDst is the mount destination for PageBroker staging inside the placeholder namespace.
 	PageBrokerDst = "/tmp/pagebroker"
 )

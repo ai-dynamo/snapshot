@@ -67,7 +67,7 @@ struct mount_attr {
 #define SNAPSHOT_CUDA_DESTINATION "/tmp/snapshot-cuda"
 #define CHECKPOINT_ROOT "/checkpoints"
 #define CHECKPOINT_DESTINATION "/tmp/checkpoint"
-#define PAGEBROKER_RESTORE_ROOT "/pagebroker/staging/restore"
+#define PAGEBROKER_RESTORE_ROOT "/pagebroker/staging/s3/restore"
 #define PAGEBROKER_DESTINATION "/tmp/pagebroker"
 
 static int
