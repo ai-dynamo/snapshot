@@ -324,3 +324,18 @@ def test_the_images_and_not_the_cache_are_swept_for_pull_requests(prune, monkeyp
     swept = _default_sweep(prune, monkeypatch)
     assert swept["snapshot/agent:pr"] == 7
     assert swept["snapshot/cache:pr"] is None
+
+
+@pytest.mark.parametrize("flag", ["--keep-days", "--cache-keep-days", "--pr-keep-days"])
+def test_a_negative_age_is_rejected_before_anything_is_swept(prune, monkeypatch, flag):
+    """A negative age would put the cutoff in the future and expire everything."""
+    def fail(*_args, **_kwargs):
+        raise AssertionError("swept despite an invalid age")
+
+    monkeypatch.setattr(prune.sys, "argv", ["prune-ghcr.py", flag, "-1"])
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setattr(prune, "prune_package", fail)
+
+    with pytest.raises(SystemExit) as exc:
+        prune.main()
+    assert exc.value.code == 2

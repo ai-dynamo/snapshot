@@ -40,7 +40,7 @@ there, runs the environment check, then runs the snapshot lifecycle tests.
 The workflow resolves the latest published Snapshot operator/agent image tag and
 passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
-### Pull Requests
+### Pull requests
 
 Pull requests are tested by `e2e-pr.yaml` on their copy-pr-bot mirror branch
 (`pull-request/<number>`), because the GPU runners accept push events but not
