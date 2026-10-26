@@ -17,8 +17,8 @@ This is stage 1 of the [usage guides](README.md). Complete
 > This example is validated on vLLM 0.31.0 (the pinned
 > `vllm/vllm-openai:v0.31.0-ubuntu2404` image).
 
-For customers using 0.27.1, see
-[Earlier vLLM versions](#earlier-vllm-versions-0271). The numbered steps use
+For customers using 0.27.x, see
+[Earlier vLLM versions](#earlier-vllm-versions-027x). The numbered steps use
 `spawn` for the single-GPU path. For other configurations, see
 [Alternative launch methods](#alternative-launch-methods).
 
@@ -206,13 +206,25 @@ CUDA job wrapping.
 
 Use the [driver version recommended for native CUDA job wrapping](../reference/compatibility.md#minimum-versions-by-feature).
 
-## Earlier vLLM versions (0.27.1)
+## Earlier vLLM versions (0.27.x)
 
-For vLLM 0.27.1, use the matching
-[`app.py`](https://github.com/ai-dynamo/snapshot/blob/ec327cc34c9de2a55b0f541c3a3039504f72429b/docs/guides/vllm/app.py),
-[source manifest](https://github.com/ai-dynamo/snapshot/blob/ec327cc34c9de2a55b0f541c3a3039504f72429b/docs/guides/vllm/deployment.yaml),
-and [restore manifest](https://github.com/ai-dynamo/snapshot/blob/ec327cc34c9de2a55b0f541c3a3039504f72429b/docs/guides/vllm/restore-deployment.yaml)
-from that revision. They pin the previously validated
-`v0.27.1-ubuntu2404` image. Create the `vllm-app` ConfigMap from that application
-and deploy those manifests; do not substitute the current `app.py` or
-recipes. Source and restore must use the same image as the checkpoint.
+For customers remaining on vLLM 0.27.x, use the same single-GPU steps above
+with a matching runtime image. The example below pins the previously
+validated `v0.27.1-ubuntu2404` image. Before creating the
+ConfigMap in step 1, replace `await engine.release_kv_cache_memory()` with
+`await engine.sleep()` in your local `vllm/app.py` and set both the source
+and restore manifests to that image:
+
+```bash
+export VLLM_IMAGE=vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+
+for manifest in vllm/capture/qwen3-0.6b.yaml vllm/restore/1-gpu.yaml; do
+  kubectl set image --local --filename "$manifest" \
+    "*=$VLLM_IMAGE" --output yaml > "$manifest.tmp" &&
+    mv "$manifest.tmp" "$manifest"
+done
+```
+
+Continue with step 1, then checkpoint and restore as usual. Source and
+restore must use the same image; do not restore a 0.27.x checkpoint into
+the default 0.31.0 image.
