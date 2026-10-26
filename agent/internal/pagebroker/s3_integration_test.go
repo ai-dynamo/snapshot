@@ -138,11 +138,11 @@ func TestS3CheckpointDaemon(t *testing.T) {
 			t.Fatal(err)
 		}
 		write(t, directory, payload)
-		published, err := client.CommitCheckpoint(ctx, scenario+"-capture")
+		published, err := client.CommitCheckpoint(ctx, scenario+"-capture", testTarget(id).GetStoreId())
 		if err != nil {
 			t.Fatal(err)
 		}
-		retained, err := client.CommitCheckpoint(ctx, scenario+"-capture")
+		retained, err := client.CommitCheckpoint(ctx, scenario+"-capture", testTarget(id).GetStoreId())
 		if err != nil || !proto.Equal(published, retained) || !proto.Equal(published, testArtifact(id)) {
 			t.Fatalf("publication descriptor was not stable: %v %v %v", published, retained, err)
 		}

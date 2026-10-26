@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ROOT := ../..
+AGENT_PLATFORM ?= linux/amd64
 REGISTRY ?= local
 VERSION ?= integration
 BUILD_IMAGE := $(REGISTRY)/pagebroker:$(VERSION)-dependencies
@@ -19,7 +20,7 @@ test: images $(VENV)/.installed
 images:
 	$(MAKE) -C $(ROOT) docker-build-pagebroker REGISTRY="$(REGISTRY)" VERSION="$(VERSION)" DOCKER_BUILD_ARGS="$(DOCKER_BUILD_ARGS) --load"
 	$(MAKE) -C $(ROOT) docker-build-pagebroker REGISTRY="$(REGISTRY)" VERSION="$(VERSION)-dependencies" DOCKER_BUILD_ARGS="$(DOCKER_BUILD_ARGS) --target build-dependencies --load"
-	cd $(ROOT) && docker buildx build --load -f hack/pagebroker-integration/Dockerfile \
+	cd $(ROOT) && docker buildx build --load --platform "$(AGENT_PLATFORM)" -f hack/pagebroker-integration/Dockerfile \
 		--build-arg BUILD_IMAGE="$(BUILD_IMAGE)" --build-arg RUNTIME_IMAGE="$(RUNTIME_IMAGE)" -t "$(TEST_IMAGE)" .
 
 $(VENV)/.installed: requirements.txt
