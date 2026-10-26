@@ -7,7 +7,7 @@ INTEGRATION_VENV := build/integration-venv
 
 .PHONY: integration-build integration-test integration-fixtures integration-lifetime
 integration-build: generate | build
-	$(CXX) $(CPPFLAGS) -std=c++20 -Wall -Werror $(ENGINE_SOURCES) $(INTEGRATION_DIR)/native/model_streamer_s3_test.cpp $(INTEGRATION_DIR)/native/s3_round_trip_test.cpp v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(GTEST_FLAGS) $(MODEL_STREAMER_FLAGS) $(CRYPTO_FLAGS) -o build/model-streamer-s3-test
+	$(CXX) $(CPPFLAGS) -std=c++20 -Wall -Werror $(ENGINE_SOURCES) $(INTEGRATION_DIR)/native/model_streamer_s3_test.cpp $(INTEGRATION_DIR)/native/s3_round_trip_test.cpp v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(GTEST_FLAGS) $(MODEL_STREAMER_FLAGS) -o build/model-streamer-s3-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp $(INTEGRATION_DIR)/native/daemon_transport_test.cpp v1/pagebroker.pb.cc -Wl,--wrap=_ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_19CheckpointInventoryERKNSt10filesystem7__cxx114pathENS0_12CancellationE -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o build/daemon-transport-test
 
 $(INTEGRATION_VENV)/.installed: $(INTEGRATION_DIR)/requirements.txt | build
