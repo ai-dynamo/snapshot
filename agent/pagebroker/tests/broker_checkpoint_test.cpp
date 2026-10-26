@@ -372,6 +372,40 @@ TEST_F(BrokerTransferTest, CheckpointRetryRejectsModeChangeWithoutChangingCaptur
   }
 }
 
+TEST_F(BrokerTransferTest, DirectCheckpointRetryRejectsUnavailableEngineWithoutChangingCapture)
+{
+  Broker broker(staging_, storage_);
+  auto request = Checkpoint(true);
+  const auto prepared = broker.HandleRequest(request);
+  ASSERT_TRUE(prepared.has_direct_checkpoint_directory()) << prepared.DebugString();
+  const auto transaction = Find(broker, "checkpoint");
+  ASSERT_NE(transaction, nullptr);
+  const auto deadline = transaction->cancellation().Deadline();
+  const auto output = CheckpointOutput(true);
+  std::ofstream(output / "payload") << "capture";
+
+  auto changed = Checkpoint(true);
+  changed.mutable_prepare_direct_checkpoint()->mutable_io_engine()->mutable_model_streamer();
+  ASSERT_NE(changed.request_id(), request.request_id());
+  EXPECT_EQ(broker.HandleRequest(changed).failure().code(), Failure::INVALID_REQUEST);
+  EXPECT_EQ(Find(broker, "checkpoint"), transaction);
+  EXPECT_EQ(transaction->state(), Transaction::State::STAGED);
+  EXPECT_EQ(transaction->cancellation().Deadline(), deadline);
+  std::string payload;
+  std::ifstream(output / "payload") >> payload;
+  EXPECT_EQ(payload, "capture");
+
+  // The original engine remains usable after the rejected change.
+  const auto retry = broker.HandleRequest(request);
+  ASSERT_TRUE(retry.has_direct_checkpoint_directory()) << retry.DebugString();
+  EXPECT_EQ(retry.direct_checkpoint_directory().image_directory(), output.string());
+  EXPECT_EQ(transaction->cancellation().Deadline(), deadline);
+  auto abort = RequestFor("checkpoint");
+  abort.mutable_abort();
+  ASSERT_TRUE(broker.HandleRequest(abort).has_abort_complete());
+  EXPECT_FALSE(fs::exists(output));
+}
+
 TEST_F(BrokerTransferTest, DirectCheckpointRetriesPreserveDeadlineAndCapture)
 {
   for (const bool expire : {false, true}) {

@@ -28,8 +28,11 @@ This file lists third-party open-source software redistributed in this
 container image, together with the license text for each component.
 
 SCOPE: this covers what this image adds on top of its base image. This image
-includes protobuf, linked statically into /usr/local/bin/pagebroker. Additional components are listed
-below when included. Base-image components are attributed by that image.
+includes protobuf, linked statically into /usr/local/bin/pagebroker, and Model
+Streamer. Model Streamer metadata and sources, including its bundled libaio
+and liburing sources and license texts, are under /legal/model-streamer/.
+S3 plugin notices are in /legal/model-streamer-s3/.
+Base-image components are attributed by that image.
 
 CORRESPONDING SOURCE: upstream source for the component listed below ships
 inside this image under /legal/source/. See /legal/source/README.txt.
