@@ -68,8 +68,9 @@ out of the reference.
 | checkpoint volume | The shared `ReadWriteMany` PVC that is the checkpoint store today | |
 | source Pod | The pod being checkpointed. Guides may call the serving instance a replica | `original pod`, `origin pod` |
 | restore Pod | The new pod that a restore starts | |
-| target container | The container being checkpointed (`targetContainers`) | `captured container`, `main container` |
+| target container | The container you checkpoint from (`targetContainers`). It is a checkpoint-side term; a restore runs in a destination container | `captured container`, `main container` |
 | non-target container | Any other container in the source Pod | `helper`, `sidecar`, `writer`, `saver`, except as an example of what one does |
+| destination container | The container in a restore Pod that you restore into. `nvidia.com/restore-container-map` maps the target container to one or more destination containers | `target container` or `restore target` for this side |
 | node agent | The per-node DaemonSet (`snapshot-agent`) that drives CRIU and `cuda-checkpoint`. After the first use, "agent" is enough | `agent` for an AI assistant |
 | PageBroker | The broker sidecar of the node agent | `pagebroker` or `page broker` in prose |
 | baseline | The minimum versions every installation needs, in the baseline row of Compatibility | `general floor`, `default requirements` |
