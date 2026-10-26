@@ -76,8 +76,6 @@ container. Success means the application is safe to capture. If the probe is
 omitted, the agent waits for the selected container to be ready. `restoreRelease`
 adds an application notification after process and GPU restoration.
 
-Changes to startup, readiness, and liveness probe handling belong in a separate issue.
-
 ### Limitations, Risks, and Mitigations
 
 Snapshot currently captures one container per PodSnapshot. The API allows
