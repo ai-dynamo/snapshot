@@ -286,7 +286,7 @@ to be briefly unavailable on that node during the upgrade.
 | `storage.s3.allowHttp` | `allowHttp` in the JSON. The chart refuses a plain-http endpoint unless it is set | `false` |
 | `storage.s3.caBundleConfigMapRef`, `storage.s3.caBundleConfigMapKey` | The bundle mounted at `/etc/snapshot-s3-ca/<key>`, named by `caFile` in the JSON and by `AWS_CA_BUNDLE` in the environment. The operator's maintenance client gets the same bundle | system trust |
 | `pageBroker.s3.limits` | The `limits` object in the JSON, with `stagingBytes` filled in from the staging cap when omitted; other keys pass through as given | see below |
-| `pageBroker.modelStreamer` | A second JSON file, mounted at `/etc/snapshot-model-streamer/model-streamer.json` and passed with `--model-streamer-config` | no file |
+| `pageBroker.transferEngine.modelStreamer` | A second JSON file, mounted at `/etc/snapshot-model-streamer/model-streamer.json` and passed with `--model-streamer-config` | no file |
 
 `pageBroker.s3.limits` accepts PageBroker's own keys, with its bounds:
 
@@ -310,7 +310,7 @@ know, an `activeTransactions` at or above `maxConcurrentRequests`, and an
 `addressing` other than `path` or
 `virtual`; PageBroker enforces the remaining bounds at startup.
 
-`pageBroker.modelStreamer` is written as given. Its keys are PageBroker's Model
+`pageBroker.transferEngine.modelStreamer` is written as given. Its keys are PageBroker's Model
 Streamer input contract: `readChunkBytes`, `processGroupSize`, an `s3Reader`
 object (`concurrency`, `targetGbps`, `maxConnections`, `maxInflightMiB`,
 `maxRetries`, `retryWindowSeconds`, `lowSpeedTimeoutMs`, `lowSpeedBytesPerSecond`)

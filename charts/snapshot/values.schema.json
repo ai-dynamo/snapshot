@@ -53,8 +53,13 @@
             }
           }
         },
-        "modelStreamer": {
-          "type": "object"
+        "transferEngine": {
+          "type": "object",
+          "properties": {
+            "modelStreamer": {
+              "type": "object"
+            }
+          }
         }
       }
     }
