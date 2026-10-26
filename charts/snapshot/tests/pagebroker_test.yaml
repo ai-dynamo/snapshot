@@ -46,6 +46,20 @@ tests:
           path: spec.template.metadata.annotations["example.com/team"]
           value: platform
 
+  - it: does not let podAnnotations override the rollout checksum
+    template: templates/daemonset.yaml
+    set:
+      daemonset.podAnnotations:
+        checksum/config: hijacked
+        example.com/team: platform
+    asserts:
+      - notEqual:
+          path: spec.template.metadata.annotations["checksum/config"]
+          value: hijacked
+      - equal:
+          path: spec.template.metadata.annotations["example.com/team"]
+          value: platform
+
   - it: keeps the default container alongside the OpenShift SCC pin
     template: templates/daemonset.yaml
     set:
