@@ -14,6 +14,7 @@ from kubernetes import client
 from kubernetes import watch
 from kubernetes.client import ApiException
 from kubernetes.stream import stream
+from urllib3.exceptions import ReadTimeoutError
 
 from snapshot_e2e.infra.preflight import load_config
 
@@ -288,13 +289,19 @@ def watch_pod(
     namespace: str, name: str, resource_version: str, timeout: int
 ) -> Iterator[dict[str, Any]]:
     """Yield the Pod's watch events after resource_version, for timeout seconds."""
-    yield from watch.Watch().stream(
-        client.CoreV1Api().list_namespaced_pod,
-        namespace=namespace,
-        field_selector=f"metadata.name={name}",
-        resource_version=resource_version,
-        timeout_seconds=timeout,
-    )
+    # timeout_seconds only asks the server to end the watch. The client read
+    # timeout also ends it if the connection stalls, so the wait stays bounded.
+    try:
+        yield from watch.Watch().stream(
+            client.CoreV1Api().list_namespaced_pod,
+            namespace=namespace,
+            field_selector=f"metadata.name={name}",
+            resource_version=resource_version,
+            timeout_seconds=timeout,
+            _request_timeout=timeout + 10,
+        )
+    except ReadTimeoutError:
+        return
 
 
 def pod_logs(

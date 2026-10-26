@@ -135,6 +135,7 @@ def test_cpu_source_exits_with_its_code_on_sigterm_when_asked(tmp_path: Path) ->
         deadline = time.monotonic() + 10
         while not (control_dir / "ready-for-snapshot").exists() and time.monotonic() < deadline:
             time.sleep(0.05)
+        assert (control_dir / "ready-for-snapshot").exists(), "source never became ready"
         proc.send_signal(signal.SIGTERM)
         # bash runs the trap once the loop's sleep returns.
         proc.communicate(timeout=15)
