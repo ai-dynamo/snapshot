@@ -244,7 +244,7 @@ spec:
             - --storage-config
             - /etc/snapshot-s3/pagebroker-s3-config.json
             {{- end }}
-            {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.modelStreamer }}
+            {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.transferEngine.modelStreamer }}
             - --model-streamer-config
             - {{ include "snapshot.modelStreamerConfigPath" . }}
             {{- end }}
@@ -275,7 +275,7 @@ spec:
               mountPath: {{ include "snapshot.s3CABundleMountDir" . }}
               readOnly: true
             {{- end }}
-            {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.modelStreamer }}
+            {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.transferEngine.modelStreamer }}
             - name: model-streamer-config
               mountPath: {{ include "snapshot.modelStreamerMountDir" . }}
               readOnly: true
@@ -339,7 +339,7 @@ spec:
               - key: {{ .Values.storage.s3.caBundleConfigMapKey }}
                 path: {{ .Values.storage.s3.caBundleConfigMapKey }}
         {{- end }}
-        {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.modelStreamer }}
+        {{- if and (eq .Values.storage.type "s3") .Values.pageBroker.transferEngine.modelStreamer }}
         - name: model-streamer-config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config

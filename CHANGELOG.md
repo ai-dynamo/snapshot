@@ -48,7 +48,7 @@ commit-level history for each release is on its
   checkpoint that outruns it.
 - `storage.type: s3` stores checkpoints in an S3-compatible bucket instead of
   the shared PVC. `storage.s3.*` configures the endpoint, bucket, and
-  credentials; `pageBroker.s3.limits` and `pageBroker.modelStreamer` tune
+  credentials; `pageBroker.s3.limits` and `pageBroker.transferEngine.modelStreamer` tune
   PageBroker's S3 transfer and restore behavior. See
   [Storage](docs/operations/storage.md#other-backends).
 

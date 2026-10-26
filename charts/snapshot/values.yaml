@@ -185,10 +185,11 @@ pageBroker:
   # volume cannot hold instead of filling it. Used with storage.type=s3 only.
   s3:
     limits: {}
-  # Model Streamer reader tuning for S3 restores, written as given to the JSON
-  # file PageBroker reads with --model-streamer-config. Empty passes no file.
-  # Used with storage.type=s3 only.
-  modelStreamer: {}
+  transferEngine:
+    # Model Streamer reader tuning for S3 restores, written as given to the JSON
+    # file PageBroker reads with --model-streamer-config. Empty passes no file.
+    # Used with storage.type=s3 only.
+    modelStreamer: {}
   # Requires 32 GiB of free allocatable memory, plus the agent request.
   # Override for each node profile. Budget 4 GiB per GPU plus process and staging
   # overhead. A lower request does not reduce the pinned ring allocation.
