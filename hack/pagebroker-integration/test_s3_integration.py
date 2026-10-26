@@ -118,7 +118,7 @@ class FaultServiceTest(unittest.TestCase):
 
         service = s3_integration.FaultService(backend)
         statuses = []
-        prefix = "/bucket/roundtrip/engine-partial/" + "a" * 64 + "/data/"
+        prefix = "/bucket/roundtrip/engine-partial/" + "artifacts/a/containers/main" + "/data/"
         for method, name in (("PUT", "data"), ("PUT", "last"), ("HEAD", "data")):
             service({"PATH_INFO": prefix + name,
                      "QUERY_STRING": "", "REQUEST_METHOD": method},
