@@ -57,6 +57,49 @@ func NewFailureError(code Failure_Code, message string) *FailureError {
 	return &FailureError{code: failureCode(code), message: message}
 }
 
+// TransactionGone reports whether the broker never had the transaction or it
+// expired.
+func TransactionGone(err error) bool {
+	var failure *FailureError
+	if !errors.As(err, &failure) {
+		return false
+	}
+	switch failure.Code() {
+	case Failure_TRANSACTION_NOT_FOUND, Failure_TRANSACTION_EXPIRED:
+		return true
+	default:
+		return false
+	}
+}
+
+// ignoreAlreadyReleased treats a transaction the broker is not holding as the
+// success Abort asked for, which is what makes Abort idempotent.
+func ignoreAlreadyReleased(err error) error {
+	if TransactionGone(err) {
+		return nil
+	}
+	return err
+}
+
+// CommitWorthRetrying reports whether a failed commit leaves the staged pages
+// worth holding: the failure may clear, or its outcome is unknown. Every other
+// failure is settled, so holding its pages only costs node memory.
+func CommitWorthRetrying(err error) bool {
+	if isRetryableTransportError(err) {
+		return true
+	}
+	var failure *FailureError
+	if !errors.As(err, &failure) {
+		return false
+	}
+	switch failure.Code() {
+	case Failure_STORAGE_ERROR, Failure_UNAVAILABLE, Failure_STORAGE_UNAVAILABLE, Failure_OUTCOME_UNKNOWN:
+		return true
+	default:
+		return false
+	}
+}
+
 func isStorageFailure(code Failure_Code) bool {
 	switch code {
 	case Failure_STORE_MISMATCH, Failure_ACCESS_DENIED, Failure_STORAGE_UNAVAILABLE,
