@@ -127,6 +127,31 @@ rejects non-CPU mode and invalid boolean values before capture. Do not use it
 against customer or shared checkpoint data. It does not add a second runner
 or change the normal restored-state assertions.
 
+### S3 Mode (k3d)
+
+`e2e-s3.yaml` runs the CPU cluster against an S3-compatible store instead of the
+checkpoint volume. It is started by hand and does not run on pull requests.
+
+The store runs outside the cluster, as a service container on the runner. Tests
+reach it at `SNAPSHOT_E2E_S3_ENDPOINT` (default `http://localhost:9000`); the
+chart reaches it at `SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT` (default
+`http://host.k3d.internal:9000`). Access key and secret default to `minioadmin`,
+the bucket to `snapshot-e2e` and the key prefix to `snapshots`; each has a
+`SNAPSHOT_E2E_S3_*` variable.
+
+`hack/cpu-e2e.sh` switches to S3 with `SNAPSHOT_E2E_STORAGE=s3`. Before the
+install it creates the bucket and the credentials Secret
+(`python -m snapshot_e2e.s3 prepare`) and appends the chart values for the store
+(`python -m snapshot_e2e.s3 helm-set`) to `SNAPSHOT_E2E_HELM_SET`. It then runs
+`pytest -m s3`. Tests marked `s3` carry no `cpu` marker, so the pull request job
+never selects them.
+
+```bash
+docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+  -e MINIO_VOLUMES=/tmp/minio-data <s3-compatible-image>
+SNAPSHOT_E2E_STORAGE=s3 make cpu-e2e
+```
+
 ### Local Direct Mode
 
 Use direct mode when `KUBECONFIG` already points at the cluster where Snapshot

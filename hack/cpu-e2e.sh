@@ -37,9 +37,21 @@ export KUBECONFIG="${SNAPSHOT_E2E_KUBECONFIG}"
 
 SKIP_BUILD="${SNAPSHOT_E2E_SKIP_BUILD:-false}"
 KEEP_CLUSTER="${SNAPSHOT_E2E_KEEP_CLUSTER:-false}"
+STORAGE="${SNAPSHOT_E2E_STORAGE:-pvc}"
+case "${STORAGE}" in
+  pvc | s3) ;;
+  *)
+    echo "SNAPSHOT_E2E_STORAGE must be pvc or s3, got ${STORAGE}" >&2
+    exit 1
+    ;;
+esac
 PYTEST_ARGS=("$@")
 if ((${#PYTEST_ARGS[@]} == 0)); then
-  PYTEST_ARGS=(-m cpu -vv)
+  if [[ "${STORAGE}" == "s3" ]]; then
+    PYTEST_ARGS=(-m s3 -vv)
+  else
+    PYTEST_ARGS=(-m cpu -vv)
+  fi
 fi
 
 log() {
@@ -143,6 +155,12 @@ image.pageBroker.repository=${IMAGE_REGISTRY}/pagebroker
 image.operator.pullPolicy=IfNotPresent
 image.agent.pullPolicy=IfNotPresent
 image.pageBroker.pullPolicy=IfNotPresent"
+if [[ "${STORAGE}" == "s3" ]]; then
+  uv run --locked --project e2e python -m snapshot_e2e.s3 prepare
+  s3_values="$(uv run --locked --project e2e python -m snapshot_e2e.s3 helm-set)"
+  export SNAPSHOT_E2E_HELM_SET="${SNAPSHOT_E2E_HELM_SET}
+${s3_values}"
+fi
 uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
   --phase snapshot-install --skip-host-preflight
 uv run --locked --project e2e python -m snapshot_e2e.infra.setup \

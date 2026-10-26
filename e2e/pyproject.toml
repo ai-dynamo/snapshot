@@ -7,6 +7,7 @@ version = "0.0.0"
 description = "Snapshot end-to-end infrastructure helpers"
 requires-python = ">=3.12"
 dependencies = [
+  "boto3>=1.35,<2",
   "kubernetes>=32.0.1,<37.0.0",
   "packaging>=24.2,<26",
   "pytest>=8.4.0,<9",
@@ -24,6 +25,7 @@ markers = [
   "serial: must not run beside other tests; the CPU job runs these after the rest",
   "workload: cluster-free checks of the workload scripts themselves",
   "framework: checkpoint/restore of an inference framework guide workload",
+  "s3: checkpoint/restore against an S3-compatible store; needs the S3 fixture",
   "upgrade: state created on an older Snapshot version and validated after upgrading",
 ]
 testpaths = ["tests"]
