@@ -315,6 +315,12 @@ Streamer input contract: `readChunkBytes`, `processGroupSize`, an `s3Reader`
 object (`concurrency`, `targetGbps`, `maxConnections`, `maxInflightMiB`,
 `maxRetries`, `retryWindowSeconds`, `lowSpeedTimeoutMs`, `lowSpeedBytesPerSecond`)
 and a `logging` object (`level`, `toStderr`). Every key is optional.
+The chart does not validate these keys. PageBroker rejects a key it does not know and
+refuses to start, so a misspelled key shows up as a failing PageBroker pod, not as a
+rendering error.
+
+`pageBroker.transferEngine` groups the settings of PageBroker's transfer engines.
+Today it holds only `modelStreamer`, the engine that reads S3 restores.
 
 ### PageBroker restore source
 
