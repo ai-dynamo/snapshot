@@ -103,6 +103,60 @@ Checkpoint size (`model.checkpoint_artifact_bytes`) is measured with `du -sb`
 on the capture node — neither `PodSnapshot` nor `PodSnapshotContent` status
 exposes a size field.
 
+### Capture breakdown
+
+The published tables in [benchmarks.md](benchmarks.md) cover restore only.
+Each run also records capture. `checkpoint.checkpoint_seconds` is the
+Kubernetes `PodSnapshot` Ready time, at one-second resolution. The precise
+split is `checkpoint_agent_log`, parsed from the capture-node agent's
+`Checkpoint timing summary`:
+
+- `duration` — agent wall time for the whole capture
+- `phases.cuda_checkpoint` — CUDA lock + device-to-host copy + job file
+- `cuda_lock`, `cuda_copy`, `cuda_job_file` — that CUDA total, split. Absent
+  when PageBroker CustomStorage captured the GPU: that path records
+  `phases.cuda_checkpoint` and does not measure lock, copy, and job file
+- `phases.criu_dump` — CRIU dump RPC wall time, including the page write
+- `criu_freezing`, `criu_memdump`, `criu_memwrite` — CRIU's own timers.
+  Memdump is reading the frozen process. Memwrite is writing pages. They
+  overlap the CRIU wall and are not added to it; CRIU can count the last
+  write interval twice, so use them to see which side dominates
+- `criu_pages_written_bytes` and `criu_image_bytes` — page payload versus
+  the whole CRIU image. `memwrite_gigabytes_per_second` divides the page
+  payload by CRIU's memwrite timer. The image directory also holds other
+  bytes, so it is not turned into a rate
+- `phases.overlay_capture` and `overlay_diff_bytes` — writable-layer tar
+
+`report` prints this as **Where the capture time goes** and **How the CRIU
+image was written** when a result has `checkpoint_agent_log`. An agent built
+before this split still produces phase totals; the result then warns that
+the criu memwrite split is absent.
+
+Before the run deletes the artifact, it also lists every file under that
+content directory and reads `dump.log`. `checkpoint_image.categories` sums
+those files by kind (`pages`, `core`, `mm`, and so on). Each total has an
+apparent size (`st_size`, holes included) and an allocated size
+(`st_blocks * 512`). `pages_sparse_bytes` is that difference for page images:
+bytes the filesystem did not allocate. `pagemap_holes` is a different number.
+It counts pages CRIU skipped because a parent image already holds them, the
+same count as `pages_skipped_parent`, and it is zero without
+`--prev-images-dir`. A large non-`pages` category is the rest of the image.
+The finish-path offsets (`first_dumping_core_seconds`, the thread-core span,
+`unfreezing_seconds`, `writing_stats_seconds`, `dumping_finished_seconds`)
+are CRIU's own log clock. Pagemap and per-thread lines are summarized in the
+inventory command so `Dumping finished` is not dropped.
+
+A single-model baseline on the same hardware you care about:
+
+```bash
+uv run --project benchmarks python -m snapshot_benchmarks run \
+  --snapshot-namespace <namespace-snapshot-is-installed-in> \
+  --model-label "Qwen3 0.6B" \
+  --image <registry>/vllm-snapshot:<tag>
+uv run --project benchmarks python -m snapshot_benchmarks report \
+  --results-dir benchmarks/results/<date>-<git-sha>-<invocation-id>
+```
+
 ## Interpreting results
 
 The published numbers were measured on a single B200 (driver 595) with a VAST

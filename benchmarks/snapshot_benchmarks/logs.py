@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Parses the node agent's "Restore timing summary" log line.
+"""Parses the node agent's restore and checkpoint timing summary log lines.
 
 The agent logs with zap's console encoder (agent/internal/logging/logging.go):
 a plain-text preamble (RFC3339Nano timestamp, level, logger, caller, message)
@@ -26,9 +26,12 @@ import json
 import re
 from typing import Any
 
-from snapshot_benchmarks.schema import AgentLogPhases
+from snapshot_e2e.benchmark import parse_agent_timing_summary
+
+from snapshot_benchmarks.schema import AgentLogPhases, CheckpointAgentLog
 
 RESTORE_SUMMARY_MARKER = "Restore timing summary"
+CHECKPOINT_SUMMARY_MARKER = "Checkpoint timing summary"
 
 _GO_DURATION_TERM = re.compile(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)")
 _GO_DURATION_UNIT_SECONDS = {
@@ -78,9 +81,20 @@ def find_restore_summary_json(
     entirely -- concurrent benchmark runs, or another tenant's workload on a
     shared cluster -- so a bare marker-text match would risk silently
     attributing someone else's phase timings to this run."""
+    return _find_summary_json(
+        log_text,
+        marker=RESTORE_SUMMARY_MARKER,
+        matches={"pod": pod, "snapshot": snapshot},
+    )
+
+
+def _find_summary_json(
+    log_text: str, *, marker: str, matches: dict[str, str]
+) -> dict[str, Any] | None:
+    """Returns the last log line whose trailing JSON object matches every key."""
     summary_payload = None
     for line in log_text.splitlines():
-        if RESTORE_SUMMARY_MARKER not in line:
+        if marker not in line:
             continue
         brace_index = line.find("{")
         if brace_index == -1:
@@ -89,7 +103,9 @@ def find_restore_summary_json(
             candidate = json.loads(line[brace_index:])
         except json.JSONDecodeError:
             continue
-        if candidate.get("pod") == pod and candidate.get("snapshot") == snapshot:
+        if isinstance(candidate, dict) and all(
+            str(candidate.get(key)) == expected for key, expected in matches.items()
+        ):
             summary_payload = candidate
     return summary_payload
 
@@ -142,3 +158,80 @@ def parse_agent_log_phases(
         phases.parse_warnings.append('"restore" object had no "phases" map')
 
     return phases
+
+
+def parse_checkpoint_agent_log(
+    log_text: str, *, log_source_pod: str | None, content: str
+) -> CheckpointAgentLog:
+    """Parses the capture-node agent's checkpoint summary for `content`.
+
+    Best-effort: a missing line or an older agent that only logged phase
+    totals becomes warnings on the returned object, never an exception.
+    """
+    parsed = CheckpointAgentLog(log_source_pod=log_source_pod)
+    try:
+        summary = parse_agent_timing_summary(
+            log_text,
+            message=CHECKPOINT_SUMMARY_MARKER,
+            field="checkpoint",
+            matches={"content": content},
+        )
+    except ValueError as exc:
+        parsed.parse_warnings.append(str(exc))
+        return parsed
+
+    parsed.log_line_found = True
+    parsed.duration = summary.duration_seconds
+    parsed.started_to_complete = summary.started_to_complete_seconds
+    parsed.phases = dict(summary.phases_seconds)
+    nested = summary.nested_seconds
+    parsed.cuda_lock = nested.get("cuda.lock")
+    parsed.cuda_copy = nested.get("cuda.copy")
+    parsed.cuda_job_file = nested.get("cuda.job_file")
+    parsed.criu_freezing = nested.get("criu.freezing")
+    parsed.criu_frozen = nested.get("criu.frozen")
+    parsed.criu_memdump = nested.get("criu.memdump")
+    parsed.criu_memwrite = nested.get("criu.memwrite")
+
+    # The e2e parser keeps Go durations. Page and byte counters are integers
+    # on the same payload, so they are read from that object afterwards.
+    payload = _find_summary_json(
+        log_text,
+        marker=CHECKPOINT_SUMMARY_MARKER,
+        matches={"content": content},
+    )
+    checkpoint = payload.get("checkpoint") if isinstance(payload, dict) else None
+    if isinstance(checkpoint, dict):
+        criu = checkpoint.get("criu")
+        if isinstance(criu, dict):
+            parsed.criu_pages_written = _int(criu.get("pages_written"))
+            parsed.criu_pages_written_bytes = _int(criu.get("pages_written_bytes"))
+            parsed.criu_pages_scanned = _int(criu.get("pages_scanned"))
+            parsed.criu_image_bytes = _int(criu.get("image_bytes"))
+            stats_error = criu.get("stats_error")
+            if isinstance(stats_error, str) and stats_error:
+                parsed.parse_warnings.append(f"criu stats unavailable: {stats_error}")
+        overlay = checkpoint.get("overlay")
+        if isinstance(overlay, dict):
+            parsed.overlay_diff_bytes = _int(overlay.get("diff_bytes"))
+
+    if parsed.criu_memwrite is None and not any(
+        warning.startswith("criu stats unavailable:") for warning in parsed.parse_warnings
+    ):
+        parsed.parse_warnings.append(
+            "checkpoint summary has no criu memwrite split; "
+            "the agent build predates capture sub-phase instrumentation"
+        )
+    return parsed
+
+
+def _int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None

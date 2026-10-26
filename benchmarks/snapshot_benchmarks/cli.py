@@ -42,6 +42,13 @@ def _parse_toleration(value: str) -> dict[str, str]:
     return {"key": key, "operator": "Equal", "value": val, "effect": effect}
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--namespace",
@@ -132,7 +139,20 @@ def _setup(args: argparse.Namespace) -> tuple[BenchmarkConfig, Any]:
     return cfg, ENGINES[args.engine]
 
 
+def _reject_keep_with_repeats(args: argparse.Namespace) -> int | None:
+    """A kept pod still holds its GPU, so the next repeat cannot schedule."""
+    if getattr(args, "keep", False) and getattr(args, "repeats", 1) > 1:
+        print(
+            "error: --keep cannot be combined with --repeats greater than 1",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    if rejected := _reject_keep_with_repeats(args):
+        return rejected
     cfg, engine = _setup(args)
     models = {m.label: m for m in _load_models(Path(args.models))}
     if args.model_label not in models:
@@ -141,10 +161,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     model = models[args.model_label]
 
-    result = _run_one(cfg, engine, model, args)
-    out_dir = results.invocation_dir(Path(args.output_dir), git_sha=result.git_sha)
-    path = results.write_result(result, out_dir)
-    print(f"wrote {path}")
+    out_dir: Path | None = None
+    for repeat in range(1, args.repeats + 1):
+        print(f"=== {model.label} (repeat {repeat}/{args.repeats}) ===")
+        result = _run_one(cfg, engine, model, args)
+        if out_dir is None:
+            out_dir = results.invocation_dir(Path(args.output_dir), git_sha=result.git_sha)
+        path = results.write_result(result, out_dir)
+        print(f"wrote {path}")
     return 0
 
 
@@ -165,36 +189,45 @@ def _run_one(
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:
+    if rejected := _reject_keep_with_repeats(args):
+        return rejected
     cfg, engine = _setup(args)
     models = _load_models(Path(args.models))
 
     out_dir: Path | None = None
     failures: list[str] = []
+    abort = False
     for model in models:
-        print(f"=== {model.label} ===")
-        try:
-            result = _run_one(cfg, engine, model, args)
-        except CleanupError as exc:
-            # Cleanup itself failed -- a pod, PodSnapshot, or
-            # PodSnapshotContent from this model may still be on the cluster.
-            # Unlike an ordinary per-model failure, it is never safe to
-            # continue the sweep from here: the next model could schedule
-            # onto a GPU still held by the leaked resource, or trip over
-            # stale checkpoint state. Always stop, regardless of --fail-fast.
-            print(f"error: {model.label} cleanup failed: {exc}", file=sys.stderr)
-            failures.append(model.label)
-            print("aborting sweep: cluster state may be contaminated, inspect and clean up manually", file=sys.stderr)
+        for repeat in range(1, args.repeats + 1):
+            run_label = f"{model.label} repeat {repeat}/{args.repeats}"
+            print(f"=== {run_label} ===")
+            try:
+                result = _run_one(cfg, engine, model, args)
+            except CleanupError as exc:
+                # Cleanup itself failed -- a pod, PodSnapshot, or
+                # PodSnapshotContent from this run may still be on the cluster.
+                # It is never safe to continue from here because the next run
+                # could schedule onto a GPU still held by the leaked resource.
+                print(f"error: {run_label} cleanup failed: {exc}", file=sys.stderr)
+                failures.append(run_label)
+                print(
+                    "aborting sweep: cluster state may be contaminated, inspect and clean up manually",
+                    file=sys.stderr,
+                )
+                abort = True
+                break
+            except Exception as exc:  # noqa: BLE001 - recorded per-run, sweep continues
+                print(f"error: {run_label} failed: {exc}", file=sys.stderr)
+                failures.append(run_label)
+                if args.fail_fast:
+                    raise
+                continue
+            if out_dir is None:
+                out_dir = results.invocation_dir(Path(args.output_dir), git_sha=result.git_sha)
+            path = results.write_result(result, out_dir)
+            print(f"wrote {path}")
+        if abort:
             break
-        except Exception as exc:  # noqa: BLE001 - recorded per-model, sweep continues
-            print(f"error: {model.label} failed: {exc}", file=sys.stderr)
-            failures.append(model.label)
-            if args.fail_fast:
-                raise
-            continue
-        if out_dir is None:
-            out_dir = results.invocation_dir(Path(args.output_dir), git_sha=result.git_sha)
-        path = results.write_result(result, out_dir)
-        print(f"wrote {path}")
 
     if failures:
         print(f"sweep finished with {len(failures)} failure(s): {failures}", file=sys.stderr)
@@ -236,6 +269,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--models", default=str(Path(__file__).resolve().parents[1] / "models.yaml"))
     run_parser.add_argument("--mode", choices=["cold_start", "both"], default="both")
+    run_parser.add_argument(
+        "--repeats",
+        type=_positive_int,
+        default=1,
+        help="Run the selected model this many times, writing every result to one invocation directory.",
+    )
     run_parser.add_argument("--output-dir", default=str(results.DEFAULT_RESULTS_ROOT))
     run_parser.add_argument("--keep", action="store_true", help="Skip cleanup, leave pods/snapshot running for debugging.")
     run_parser.add_argument(
@@ -266,6 +305,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep_parser.add_argument("--models", default=str(Path(__file__).resolve().parents[1] / "models.yaml"))
     sweep_parser.add_argument("--mode", choices=["cold_start", "both"], default="both")
+    sweep_parser.add_argument(
+        "--repeats",
+        type=_positive_int,
+        default=1,
+        help="Run each model this many times, writing every result to one invocation directory.",
+    )
     sweep_parser.add_argument("--output-dir", default=str(results.DEFAULT_RESULTS_ROOT))
     sweep_parser.add_argument("--keep", action="store_true")
     sweep_parser.add_argument("--fail-fast", action="store_true")
