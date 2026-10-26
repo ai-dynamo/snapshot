@@ -12,6 +12,11 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
+
 // S3 identifies a logical store inside an S3-compatible bucket. Prefix is a
 // relative key prefix inside the bucket, not an absolute filesystem path.
 // Credentials, part sizes and transfer limits are not identity inputs: they
@@ -63,7 +68,7 @@ func (s S3) NormalizedEndpoint() (string, error) {
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	hostname := strings.ToLower(parsed.Hostname())
-	if (scheme != "http" && scheme != "https") || hostname == "" ||
+	if (scheme != schemeHTTP && scheme != schemeHTTPS) || hostname == "" ||
 		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
 		return "", fmt.Errorf("S3 endpoint must be an absolute http(s) URL with no path, query, fragment or userinfo")
 	}
@@ -71,7 +76,7 @@ func (s S3) NormalizedEndpoint() (string, error) {
 		hostname = "[" + hostname + "]"
 	}
 	port := parsed.Port()
-	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+	if (scheme == schemeHTTP && port == "80") || (scheme == schemeHTTPS && port == "443") {
 		port = ""
 	}
 	host := hostname
