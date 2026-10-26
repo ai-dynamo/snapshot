@@ -226,7 +226,7 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- if not (has $addressing (list "" "path" "virtual")) -}}
 {{- fail (printf "storage.s3.addressing must be \"path\" or \"virtual\", got %q" $addressing) -}}
 {{- end -}}
-{{- if and (not $s3.allowHttp) (hasPrefix "http://" ($s3.endpoint | default "")) -}}
+{{- if and (not $s3.allowHttp) (hasPrefix "http://" ($s3.endpoint | default "" | lower)) -}}
 {{- fail "storage.s3.endpoint is plain http; set storage.s3.allowHttp=true to accept it" -}}
 {{- end -}}
 {{- $allowed := list "transactionSeconds" "stagingBytes" "activeTransactions" "uploadPartBytes" "uploadBufferBytes" "uploadTargetGbps" "uploadActiveFiles" "requestSeconds" "uploadRequestRetries" "uploadConnectSeconds" -}}
