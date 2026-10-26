@@ -52,6 +52,17 @@ Channel('/control',sys.argv[1]).write('stop.json',reason='host-request')
 """
 
 
+def shared_credentials_file(values):
+    fields = {"AWS_ACCESS_KEY_ID": "aws_access_key_id", "AWS_SECRET_ACCESS_KEY": "aws_secret_access_key",
+              "AWS_SESSION_TOKEN": "aws_session_token"}
+    if any(any(c in value for c in "\r\n\0") for value in values.values()):
+        raise ValueError("invalid broker credential value")
+    text = "[default]\n" + "".join(f"{field}={values[key]}\n" for key, field in fields.items() if values.get(key))
+    if len(text.encode()) > 64 * 1024:
+        raise ValueError("broker credentials exceed file size limit")
+    return text
+
+
 def roles(mode):
     return ["pagebroker", "client", "supervisor"] + (["s3-helper"] if mode == "s3" else [])
 
@@ -360,6 +371,7 @@ class Controller:
                     secret = {"apiVersion": "v1", "kind": "Secret", "metadata": metadata(self.record, entry["namespace"], SECRET),
                               "type": "Opaque", "immutable": True, "data": {name: base64.b64encode(value.encode()).decode()
                                                            for name, value in credential_values.items()}}
+                    secret["data"]["credentials"] = base64.b64encode(shared_credentials_file(credential_values).encode()).decode()
                     self.ensure(entry, secret, sensitive=True)
                     frozen_credentials(spec, credential_values, self.clock.time())
                 if self.clock.time() >= spec.startup_deadline:

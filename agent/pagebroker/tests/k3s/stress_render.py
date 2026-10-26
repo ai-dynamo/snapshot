@@ -109,7 +109,13 @@ def render_stress(spec, namespace, campaign, owner, client_image, broker_image, 
                 raise ValueError("CA input must be a bounded public PEM certificate bundle")
             config["data"]["ca.pem"] = ca_pem
             environment.append({"name": "AWS_CA_BUNDLE", "value": "/config/ca.pem"})
-        broker["env"], helper["env"] = deepcopy(environment), deepcopy(environment)
+        helper["env"] = environment
+        pod["volumes"].append({"name": "credentials", "secret": {
+            "secretName": SECRET, "items": [{"key": "credentials", "path": "credentials"}]}})
+        broker["volumeMounts"].append({"name": "credentials", "mountPath": "/credentials", "readOnly": True})
+        broker["env"] = [{"name": "AWS_SHARED_CREDENTIALS_FILE", "value": "/credentials/credentials"}]
+        if ca_pem is not None:
+            broker["env"].append({"name": "AWS_CA_BUNDLE", "value": "/config/ca.pem"})
         storage = {"storeId": spec.store_id, "bucket": spec.s3.bucket, "prefix": spec.s3.prefix,
                    "region": spec.s3.region, "endpoint": spec.s3.endpoint, "addressing": spec.s3.addressing,
                    "limits": {"transactionSeconds": 600, "stagingBytes": 1024**3, "activeTransactions": 4,

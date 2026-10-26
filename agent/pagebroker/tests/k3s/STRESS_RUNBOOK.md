@@ -241,3 +241,8 @@ ownership-checked operator decision after evidence review; the collector removes
 only temporary exporters and Secrets. Log tails are bounded diagnostic evidence.
 Passing these runs establishes the observed functionality and any declared
 resource bounds for this duration; it is never proof that no leaks exist.
+
+PageBroker receives a mounted `[default]` shared credentials file. The launcher
+adds that file to the run Secret; only PageBroker mounts it. The S3 cleanup
+helper continues using explicit environment credentials from the same Secret.
+Both use the admitted startup snapshot for the run.

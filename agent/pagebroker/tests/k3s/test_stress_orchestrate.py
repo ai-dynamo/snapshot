@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -242,10 +243,17 @@ class EnduranceControllerTest(unittest.TestCase):
         self.assertEqual(entry["spec"]["s3"]["credential_provider"], "static-environment")
         self.assertIsNone(entry["spec"]["s3"]["credential_expiry"])
         secret = self.kube.get("Secret", SECRET, entry["namespace"])
-        self.assertEqual(set(secret["data"]), set(values))
+        self.assertEqual(set(secret["data"]), set(values) | {"credentials"})
+        self.assertEqual(base64.b64decode(secret["data"]["credentials"]).decode(),
+                         "[default]\naws_access_key_id=fake-static-access\naws_secret_access_key=fake-static-secret\n")
         for container in entry["job"]["spec"]["template"]["spec"]["containers"]:
             environment = {item["name"]: item for item in container.get("env", [])}
-            if container["name"] in ("pagebroker", "s3-helper"):
+            if container["name"] == "pagebroker":
+                self.assertEqual(environment, {"AWS_SHARED_CREDENTIALS_FILE": {
+                    "name": "AWS_SHARED_CREDENTIALS_FILE", "value": "/credentials/credentials"}})
+                mounts = {mount["name"]: mount for mount in container["volumeMounts"]}
+                self.assertTrue(mounts["credentials"]["readOnly"])
+            elif container["name"] == "s3-helper":
                 self.assertEqual({name for name, item in environment.items() if "valueFrom" in item}, set(values))
                 for name in ("AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_CREDENTIAL_EXPIRATION"):
                     self.assertEqual(environment[name], {"name": name})
@@ -674,7 +682,7 @@ class EndurancePackagingTest(unittest.TestCase):
                     self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])
                     self.assertEqual(set(container["resources"]), {"requests", "limits"})
                     secrets = [e for e in container.get("env", []) if "valueFrom" in e]
-                    self.assertEqual(bool(secrets), mode == "s3" and container["name"] in ("pagebroker", "s3-helper"))
+                    self.assertEqual(bool(secrets), mode == "s3" and container["name"] == "s3-helper")
                 exporter = entry["exporter"]["spec"]
                 self.assertEqual(exporter["activeDeadlineSeconds"], 600)
                 self.assertTrue(all(mount["readOnly"] for mount in exporter["containers"][0]["volumeMounts"]))
