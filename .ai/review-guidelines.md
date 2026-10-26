@@ -52,6 +52,14 @@ Do not invent objections, demand justification for obvious code, or repeat quest
 - Permanent comments describe current behavior or a non-obvious constraint. Flag stale change narratives such as "the old behavior" or "now does Y instead of Z" when they require change history to understand. Keep useful reasons for design decisions. PR descriptions explain the problem, resulting behavior, relevant tradeoffs, and actual validation.
 - Base naming and style suggestions on surrounding conventions, not personal preference. Identify a concrete clarity or consistency problem.
 
+## Check documentation placement and names
+
+- Check each documentation change against docs/development/writing-docs.md. Flag a fact that is on the wrong page, stated twice, or padding the change beyond what the reader needs, and name the page it belongs on or the lines to cut. Flag controller internals, change history, rejected alternatives, and runbooks in reference pages. SNEPs follow their template instead.
+- Check each new or changed name (field, Helm value, annotation, label, environment variable, event reason, flag, or term) against docs/development/naming.md and its neighbors. Flag a second name for an existing concept, a user-facing name that names the mechanism instead of the capability, and an internal name that reaches the docs or a message that a user reads.
+- Check that every table that lists the thing was updated, that a new page is linked from the index of its section, and that a user-visible change has a CHANGELOG entry.
+- Check that a change to docs/reference/architecture/README.md shows the change in about a line (a table row, diagram edge, or numbered step), and that mechanics (queues, retries, failure reasons, timeouts, formats, code paths) are in a detailed page that the overview links to.
+- Check that a feature needing a newer driver, CUDA, GPU Operator, kernel, or runtime than the README baseline has a row in docs/reference/compatibility.md, and that the requirement is not stated only in an error message or a comment.
+
 ## Suggest practical splits for large PRs
 
 - For a large PR, check whether the changes contain logically independent pieces with separate purposes. Raise a PR-level comment suggesting a split when each resulting PR can build, pass relevant checks, and be understood independently, with a clear merge order for dependencies.

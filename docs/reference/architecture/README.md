@@ -41,7 +41,7 @@ flowchart LR
       agent["Node agent<br/>CRIU · cuda-checkpoint · NRI"]
       pb["PageBroker<br/>+ GPU engine"]
     end
-    wl["Workload container<br/>(source or restore target)"]
+    wl["Workload container<br/>(source or destination)"]
   end
   store[("Checkpoint store<br/>RWX PVC")]
 
