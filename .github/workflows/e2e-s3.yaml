@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Checkpoint/restore e2e against an S3-compatible store, without a GPU.
+#
+# Same cluster and installer as e2e-cpu.yaml, with the chart pointed at a
+# store that runs outside the cluster as a service container. The store image
+# comes through the ECR pull-through cache for quay.io, so this needs the
+# ECR_REGISTRY repository variable and a runner that can pull from it.
+#
+# Manual only: it does not run on pull requests.
+
+name: E2E S3 (k3d)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: snapshot-e2e-s3-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  UV_LINK_MODE: copy
+  K3D_VERSION: v5.8.3
+  KUBECTL_VERSION: v1.34.12
+  SNAPSHOT_E2E_STORAGE: s3
+  SNAPSHOT_E2E_REQUIRED_TESTS: test_checkpoint_is_published_to_s3_and_restores_from_it
+  SNAPSHOT_E2E_KEEP_CLUSTER: "true"
+  SNAPSHOT_E2E_RESTORE_PROXY: "true"
+  SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+  SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+  SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
+  SNAPSHOT_E2E_PVC_SIZE: 2Gi
+  SNAPSHOT_E2E_HELM_TIMEOUT: 6m
+  SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
+  SNAPSHOT_E2E_K3D_CLUSTER: snapshot-s3-e2e
+  SNAPSHOT_E2E_S3_ENDPOINT: http://localhost:9000
+  SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT: http://host.k3d.internal:9000
+  SNAPSHOT_E2E_S3_ACCESS_KEY: minioadmin
+  SNAPSHOT_E2E_S3_SECRET_KEY: minioadmin
+
+jobs:
+  s3-e2e:
+    name: S3 checkpoint/restore
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      SNAPSHOT_E2E_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-s3-e2e
+      KUBECONFIG: ${{ github.workspace }}/.kubeconfig-s3-e2e
+    services:
+      minio:
+        image: ${{ vars.ECR_REGISTRY }}/quay/minio/minio:latest
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_VOLUMES: /tmp/minio-data
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install k3d
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/k3d \
+            "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d version
+
+      - name: Install kubectl
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Install Python tooling
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Wait for the S3 store
+        run: |
+          for ((attempt = 0; attempt < 30; attempt++)); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the S3 store was not ready"
+          exit 1
+
+      - name: Run S3 checkpoint/restore tests
+        timeout-minutes: 100
+        run: hack/cpu-e2e.sh -m s3 -vv --junitxml="${RUNNER_TEMP}/s3-e2e-junit.xml"
+
+      - name: Collect diagnostics
+        if: ${{ failure() }}
+        run: |
+          set +e
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          if [ -f "${RUNNER_TEMP}/s3-e2e-junit.xml" ]; then
+            cp "${RUNNER_TEMP}/s3-e2e-junit.xml" "${out}/s3-e2e-junit.xml"
+          fi
+          kubectl get pods -A -o wide >"${out}/pods.txt"
+          kubectl describe pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" >"${out}/pods-describe.txt"
+          kubectl get events -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            --sort-by=.lastTimestamp >"${out}/events.txt"
+          kubectl get podsnapshots,podsnapshotcontents -A -o yaml >"${out}/snapshots.yaml"
+          kubectl get configmap -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" -o yaml \
+            >"${out}/configmaps.yaml"
+          kubectl logs -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            -l app.kubernetes.io/component=snapshot-agent \
+            --all-containers --tail=-1 --prefix >"${out}/agent.log"
+          kubectl logs -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            -l app.kubernetes.io/component=operator \
+            --all-containers --tail=-1 --prefix >"${out}/operator.log"
+          echo "DIAGNOSTICS_DIR=${out}" >>"${GITHUB_ENV}"
+
+      - name: Upload diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-s3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DIAGNOSTICS_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Delete k3d cluster
+        if: ${{ always() }}
+        run: hack/k3d-cpu-e2e.sh cluster-down
