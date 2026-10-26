@@ -61,7 +61,10 @@ func (f *fakeBroker) Commit(_ context.Context, tx string) error {
 	}
 	return os.RemoveAll(path)
 }
-func (f *fakeBroker) CommitCheckpoint(ctx context.Context, tx string) (*pb.PublishedArtifact, error) {
+func (f *fakeBroker) CommitCheckpoint(ctx context.Context, tx, storeID string) (*pb.PublishedArtifact, error) {
+	if storeID != "test-store" {
+		f.t.Fatal("wrong commit store")
+	}
 	return f.artifact, f.Commit(ctx, tx)
 }
 func (f *fakeBroker) StagedRestore(ctx context.Context, tx, source string) (string, error) {
