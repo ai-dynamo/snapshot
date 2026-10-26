@@ -1748,6 +1748,10 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(tools, "nvidia-smi"), []byte("#!/bin/sh\necho '"+gpuUUID+", Test GPU, 590.00'\n"), 0700); err != nil {
 					t.Fatal(err)
 				}
+				// The placeholder's own listing puts the selected GPU in bus order.
+				if err := os.WriteFile(filepath.Join(tools, "nsenter"), []byte("#!/bin/sh\necho 'GPU 0: Test GPU (UUID: "+gpuUUID+")'\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
 				t.Setenv("PATH", tools)
 			}
 			if err := types.WriteManifest(directory, manifest); err != nil {
