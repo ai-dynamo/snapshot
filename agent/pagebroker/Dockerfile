@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG DOCKER_PROXY
+ARG TARGETARCH
 ARG PAGEBROKER_BUILD_IMAGE=ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
 # When bumping the base, update the source URL in compliance/README.source.txt
 # to the matching version.
@@ -56,18 +57,26 @@ RUN git -C /tmp/nvtx rev-parse HEAD > /NVTX_COMMIT
 
 # Download the release SDK inside the PageBroker build so every image builder
 # uses the same checksummed headers and library without preparing local inputs.
-FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS model-streamer-install
+FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS model-streamer-amd64
+ARG MODEL_STREAMER_ARCH=x86_64
+
+FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS model-streamer-arm64
+ARG MODEL_STREAMER_ARCH=aarch64
+
+# Docker and the SDK use different architecture names.
+FROM model-streamer-${TARGETARCH} AS model-streamer-install
+ARG TARGETARCH
 ARG MODEL_STREAMER_VERSION=0.17.0
 ARG MODEL_STREAMER_REF=dd9e5d34f966cc2667c9f0505262050b4bedc35a
 WORKDIR /opt/model-streamer-sdk
-COPY model-streamer-sdk.sha256 /tmp/model-streamer-sdk.sha256
-ADD https://github.com/dsx-ai-factory/model-streamer/releases/download/${MODEL_STREAMER_VERSION}/runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-x86_64.tar.gz ./sdk.tar.gz
+COPY model-streamer-sdk.${TARGETARCH}.sha256 /tmp/model-streamer-sdk.sha256
+ADD https://github.com/dsx-ai-factory/model-streamer/releases/download/${MODEL_STREAMER_VERSION}/runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}.tar.gz ./sdk.tar.gz
 RUN sha256sum -c /tmp/model-streamer-sdk.sha256 \
     && tar -xzf sdk.tar.gz --strip-components=1 \
-      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-x86_64/include \
-      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-x86_64/lib/libstreamer.so \
-      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-x86_64/lib/libstreamers3.so \
-      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-x86_64/LICENSE \
+      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}/include \
+      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}/lib/libstreamer.so \
+      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}/lib/libstreamers3.so \
+      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}/LICENSE \
     && rm sdk.tar.gz \
     && mkdir -p legal \
     && mv LICENSE legal/LICENSE \
