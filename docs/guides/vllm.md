@@ -18,14 +18,6 @@ then restore it and verify inference. No shared-memory annotation is needed
 for this path. Other launch methods are covered under
 [Alternative launch methods](#alternative-launch-methods).
 
-## Prerequisites
-
-Complete the [Snapshot installation](../operations/install.md) before
-deploying vLLM. The cluster must provide an available NVIDIA GPU, the
-`nvidia` RuntimeClass, and the `profiles/block-iouring.json` seccomp profile
-referenced by the manifests. Checkpoint storage must also be configured as
-described in the installation guide.
-
 ## 1. Download the example files
 
 Download [`app.py`](vllm/app.py), [`deployment.yaml`](vllm/deployment.yaml),
@@ -178,8 +170,10 @@ checkpointing must handle that state across the worker process tree.
 
 ### Single-node workloads with cuInterpose
 
-Snapshot provides cuInterpose for single-node workloads with **one or
-multiple GPUs**. On a `SnapshotJob`, enable it in the Pod template:
+cuInterpose supports single-node workloads with **one or multiple GPUs**.
+If you are still using Snapshot 0.1.0, [install](../operations/install.md#install-from-a-release)
+or [upgrade](../operations/install.md#upgrade-an-existing-release) to Snapshot
+0.2 or later before enabling it. On a `SnapshotJob`, enable it in the Pod template:
 
 ```yaml
 spec:
@@ -210,6 +204,10 @@ groups its CUDA processes into a job so checkpointing can coordinate their
 state. This is an alternative to changing worker startup to `spawn`, not
 an additional prerequisite. SnapshotJob does **not** automatically add native
 CUDA job wrapping.
+
+NVIDIA [recommends native job wrapping only with driver 610 or newer](https://github.com/NVIDIA/cuda-checkpoint#610-features).
+Do not treat an earlier single-GPU result on driver 595.58.03 as general
+support for native job wrapping on older drivers.
 
 ## Earlier vLLM versions (0.27.1)
 
