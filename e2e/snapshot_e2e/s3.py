@@ -85,6 +85,11 @@ def artifact_root(settings: S3Settings, content_uid: str, container: str) -> str
     return "/".join(part for part in parts if part)
 
 
+def artifact_prefix(settings: S3Settings, content_uid: str) -> str:
+    parts = [settings.prefix, "artifacts", content_uid]
+    return "/".join(part for part in parts if part) + "/"
+
+
 def index_key(settings: S3Settings, content_uid: str, container: str) -> str:
     return f"{artifact_root(settings, content_uid, container)}/index.json"
 
@@ -111,6 +116,13 @@ def list_keys(settings: S3Settings, prefix: str) -> list[str]:
 def read_json(settings: S3Settings, key: str) -> dict[str, Any]:
     body = s3_client(settings).get_object(Bucket=settings.bucket, Key=key)["Body"]
     return json.loads(body.read())
+
+
+def drop_bucket(settings: S3Settings) -> None:
+    s3 = s3_client(settings)
+    for key in list_keys(settings, ""):
+        s3.delete_object(Bucket=settings.bucket, Key=key)
+    s3.delete_bucket(Bucket=settings.bucket)
 
 
 def ensure_bucket(settings: S3Settings) -> None:
