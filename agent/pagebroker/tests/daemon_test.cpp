@@ -1102,6 +1102,27 @@ TEST_F(BrokerTest, RejectsInvalidS3DescriptorsBeforeAllocatingRestoreOrMetadataT
   }
 }
 
+TEST_F(BrokerTest, MetadataLookupValidatesTargetBeforeAllocatingTransaction)
+{
+  broker_.emplace(root_ / "tmpfs", root_ / "storage", nullptr, TestS3Config());
+  struct Case { const char* uid; const char* store; Failure::Code code; };
+  for (const auto& invalid : {Case{"content-1", "other-store", Failure::STORE_MISMATCH},
+                             Case{"..", "test-store", Failure::INVALID_REQUEST},
+                             Case{"", "test-store", Failure::INVALID_REQUEST}}) {
+    auto request = RequestFor("lookup-invalid");
+    auto* target = request.mutable_get_artifact_metadata()->mutable_target();
+    target->set_store_id(invalid.store);
+    target->mutable_artifact()->set_artifact_uid(invalid.uid);
+    target->mutable_artifact()->set_container_name("main");
+    const auto result = broker().HandleRequest(request);
+    ASSERT_TRUE(result.has_failure());
+    EXPECT_EQ(result.failure().code(), invalid.code);
+    EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "restore" / request.transaction_id()));
+    request.mutable_commit();
+    EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+  }
+}
+
 TEST_F(BrokerTest, RejectsUnsupportedArtifactSelectorsWithOrWithoutEngine)
 {
   auto request = RequestFor("empty-target");
