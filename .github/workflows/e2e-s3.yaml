@@ -4,21 +4,28 @@
 # Checkpoint/restore e2e against an S3-compatible store, without a GPU.
 #
 # Same cluster and installer as e2e-cpu.yaml, with the chart pointed at a
-# store that runs outside the cluster as a service container. The store image
-# comes through the ECR pull-through cache for quay.io, so this needs the
-# ECR_REGISTRY repository variable and a runner that can pull from it, which is
-# why it runs on the self-hosted runner. That runner needs a Docker daemon.
+# store that runs outside the cluster as a service container.
 #
-# Manual only: it does not run on pull requests.
+# Runs when a pull request touches the S3 e2e files, and on demand. It does not
+# run on other pull requests.
 
 name: E2E S3 (k3d)
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/e2e-s3.yaml
+      - e2e/snapshot_e2e/s3.py
+      - e2e/tests/test_s3_*.py
+      - e2e/pyproject.toml
+      - e2e/uv.lock
+      - hack/cpu-e2e.sh
+      - hack/k3d-cpu-e2e.sh
   workflow_dispatch:
 
 concurrency:
-  group: snapshot-e2e-s3-${{ github.run_id }}
-  cancel-in-progress: false
+  group: snapshot-e2e-s3-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -47,20 +54,19 @@ env:
 jobs:
   s3-e2e:
     name: S3 checkpoint/restore
-    runs-on: prod-deploy-tester-v1
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       SNAPSHOT_E2E_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-s3-e2e
       KUBECONFIG: ${{ github.workspace }}/.kubeconfig-s3-e2e
     services:
       minio:
-        image: ${{ vars.ECR_REGISTRY }}/quay/minio/minio:latest
+        image: docker.io/bitnamilegacy/minio:2025.7.23-debian-12-r5@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
         ports:
           - 9000:9000
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
-          MINIO_VOLUMES: /tmp/minio-data
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
