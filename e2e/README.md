@@ -130,7 +130,8 @@ or change the normal restored-state assertions.
 ### S3 Mode (k3d)
 
 `e2e-s3.yaml` runs the CPU cluster against an S3-compatible store instead of the
-checkpoint volume. It is started by hand and does not run on pull requests.
+checkpoint volume. It runs on pull requests that touch the S3 e2e files, and on
+demand once the workflow is on the default branch; other pull requests skip it.
 
 The store runs outside the cluster, as a service container on the runner. Tests
 reach it at `SNAPSHOT_E2E_S3_ENDPOINT` (default `http://localhost:9000`); the
@@ -148,7 +149,7 @@ never selects them.
 
 ```bash
 docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  -e MINIO_VOLUMES=/tmp/minio-data <s3-compatible-image>
+  docker.io/bitnamilegacy/minio:2025.7.23-debian-12-r5
 SNAPSHOT_E2E_STORAGE=s3 make cpu-e2e
 ```
 
