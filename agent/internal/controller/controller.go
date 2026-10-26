@@ -421,6 +421,14 @@ func (w *NodeController) RestoreContainerStarted(pod ktypes.NamespacedName, uid 
 	w.restoreQueue.Add(pod)
 }
 
+// RestoreContainerStopped forgets a reported destination container that has
+// stopped, unless a later container already replaced the report. A restore
+// into it would fail the Pod's restore instead of waiting for the container
+// kubelet starts next.
+func (w *NodeController) RestoreContainerStopped(uid ktypes.UID, container, containerID string) {
+	w.startedRestoreContainers.CompareAndDelete(restoreContainerKey(uid, container), containerID)
+}
+
 func restoreContainerKey(uid ktypes.UID, container string) string {
 	return string(uid) + "/" + container
 }

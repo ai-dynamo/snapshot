@@ -75,6 +75,9 @@ type Restorer interface {
 	// RestoreContainerStarted reports a destination container that is now
 	// running, so its restore starts without waiting for the Pod status.
 	RestoreContainerStarted(pod ktypes.NamespacedName, uid ktypes.UID, container, containerID string)
+	// RestoreContainerStopped withdraws that report once the container stops,
+	// so a restore waits for its replacement instead.
+	RestoreContainerStopped(uid ktypes.UID, container, containerID string)
 }
 
 // destination is a restore destination container the plugin shaped, by the
@@ -103,6 +106,9 @@ type Plugin struct {
 	// created maps the ID of each destination container the plugin shaped to
 	// its destination, until the container starts or is removed.
 	created sync.Map
+	// started holds the same for each destination container reported as
+	// running, until it stops or is removed.
+	started sync.Map
 }
 
 // NewPlugin returns a plugin that resolves destinations through restorer. If
@@ -260,15 +266,28 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 // runtime by its Pod name, which the runtime knows by the host Pod's.
 func (p *Plugin) PostStartContainer(_ context.Context, _ *api.PodSandbox, ctr *api.Container) error {
 	if d, ok := p.created.LoadAndDelete(ctr.GetId()); ok {
+		p.started.Store(ctr.GetId(), d)
 		d := d.(destination)
 		p.restorer.RestoreContainerStarted(d.pod, d.uid, d.container, ctr.GetId())
 	}
 	return nil
 }
 
-// RemoveContainer forgets a destination container that never started.
+// StopContainer withdraws a started destination container's report. The
+// runtime sends it when kubelet stops the container and when the container
+// exits on its own.
+func (p *Plugin) StopContainer(_ context.Context, _ *api.PodSandbox, ctr *api.Container) ([]*api.ContainerUpdate, error) {
+	if d, ok := p.started.LoadAndDelete(ctr.GetId()); ok {
+		d := d.(destination)
+		p.restorer.RestoreContainerStopped(d.uid, d.container, ctr.GetId())
+	}
+	return nil, nil
+}
+
+// RemoveContainer forgets a destination container.
 func (p *Plugin) RemoveContainer(_ context.Context, _ *api.PodSandbox, ctr *api.Container) error {
 	p.created.Delete(ctr.GetId())
+	p.started.Delete(ctr.GetId())
 	return nil
 }
 

@@ -1158,6 +1158,27 @@ func TestResolveRestoreContainerIDUsesContainerStartedUnderNRI(t *testing.T) {
 
 		assert.Empty(t, containerID)
 	})
+
+	t.Run("stopped before the pass", func(t *testing.T) {
+		w := makeTestController(t, pod)
+		w.RestoreContainerStarted(podKey, pod.UID, "main", "nri-container")
+		w.RestoreContainerStopped(pod.UID, "main", "nri-container")
+
+		containerID, _ := w.resolveRestoreContainerID(canceledContext(), pod, "main", podKey.String())
+
+		assert.Empty(t, containerID, "the pass waits for a replacement")
+	})
+
+	t.Run("replaced before the stop arrives", func(t *testing.T) {
+		w := makeTestController(t, pod)
+		w.RestoreContainerStarted(podKey, pod.UID, "main", "nri-container")
+		w.RestoreContainerStarted(podKey, pod.UID, "main", "nri-replacement")
+		w.RestoreContainerStopped(pod.UID, "main", "nri-container")
+
+		containerID, _ := w.resolveRestoreContainerID(canceledContext(), pod, "main", podKey.String())
+
+		assert.Equal(t, "nri-replacement", containerID)
+	})
 }
 
 // canceledContext makes resolveRestoreContainerID check once and return.

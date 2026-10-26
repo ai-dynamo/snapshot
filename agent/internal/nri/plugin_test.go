@@ -34,6 +34,7 @@ type fakeRestorer struct {
 	calls        int
 	pod          *corev1.Pod
 	started      []started
+	stopped      []started
 }
 
 func (r *fakeRestorer) RestoreDestinations(_ context.Context, pod *corev1.Pod) ([]string, error) {
@@ -44,6 +45,10 @@ func (r *fakeRestorer) RestoreDestinations(_ context.Context, pod *corev1.Pod) (
 
 func (r *fakeRestorer) RestoreContainerStarted(pod ktypes.NamespacedName, uid ktypes.UID, container, containerID string) {
 	r.started = append(r.started, started{pod, uid, container, containerID})
+}
+
+func (r *fakeRestorer) RestoreContainerStopped(uid ktypes.UID, container, containerID string) {
+	r.stopped = append(r.stopped, started{uid: uid, container: container, containerID: containerID})
 }
 
 // testPlugin installs into a temporary directory instead of kubelet's.
@@ -264,6 +269,34 @@ func TestPostStartContainerReportsDestinations(t *testing.T) {
 		require.NoError(t, p.PostStartContainer(context.Background(), vclusterSandbox, main))
 
 		assert.Empty(t, restorer.started)
+	})
+
+	t.Run("stopped after it started", func(t *testing.T) {
+		restorer := &fakeRestorer{destinations: []string{"main"}}
+		p, _ := testPlugin(t, restorer)
+		_, _, err := p.CreateContainer(context.Background(), vclusterSandbox, main)
+		require.NoError(t, err)
+		require.NoError(t, p.PostStartContainer(context.Background(), vclusterSandbox, main))
+
+		_, err = p.StopContainer(context.Background(), vclusterSandbox, main)
+		require.NoError(t, err)
+		_, err = p.StopContainer(context.Background(), vclusterSandbox, main)
+		require.NoError(t, err)
+
+		assert.Equal(t, []started{{uid: "pod-uid", container: "main", containerID: "ctr-main"}},
+			restorer.stopped, "withdrawn once, by the tenant identity")
+	})
+
+	t.Run("stopped before it started", func(t *testing.T) {
+		restorer := &fakeRestorer{destinations: []string{"main"}}
+		p, _ := testPlugin(t, restorer)
+		_, _, err := p.CreateContainer(context.Background(), vclusterSandbox, main)
+		require.NoError(t, err)
+
+		_, err = p.StopContainer(context.Background(), vclusterSandbox, main)
+		require.NoError(t, err)
+
+		assert.Empty(t, restorer.stopped, "nothing was reported")
 	})
 }
 
