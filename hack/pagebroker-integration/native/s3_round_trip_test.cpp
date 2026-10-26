@@ -573,7 +573,7 @@ TEST_F(S3RoundTripTest, CoexistsWithReaderAndMultipleUploaderLifetimes)
       provider.access_key_id.clear();
       provider.secret_access_key.clear();
       auto config = Config("provider");
-      config.transfer.connection = ResolveS3Credentials(provider);
+      config.transfer.connection = LoadS3Credentials(provider);
       S3StorageBackend second(config);
       const auto source = SingleFileTree("provider-source");
       auto reading = std::async(std::launch::async, [&] { reader.Stage(reader_fixture, temporary_.path() / "during"); });
@@ -592,18 +592,19 @@ TEST_F(S3RoundTripTest, CoexistsWithReaderAndMultipleUploaderLifetimes)
   }
 }
 
-TEST_F(S3RoundTripTest, UploadsAndRestoresUsingStartupEnvironmentCredentials)
+TEST_F(S3RoundTripTest, UploadsAndRestoresUsingStartupFileCredentials)
 {
   auto config = Config("provider-chain");
   auto& connection = config.transfer.connection;
   connection.access_key_id.clear();
   connection.secret_access_key.clear();
   connection.session_token.clear();
-  connection = ResolveS3Credentials(connection);
+  connection = LoadS3Credentials(connection);
   S3StorageBackend storage(config);
   const auto source = SingleFileTree("provider-chain-source");
   const auto inventory = PublishTree(storage, source);
-  ModelStreamerRestore reader({connection.region, connection.endpoint}, std::chrono::seconds(30));
+  ModelStreamerRestore reader({connection.region, connection.endpoint, connection.access_key_id,
+                               connection.secret_access_key, connection.session_token}, std::chrono::seconds(30));
   const auto restored = temporary_.path() / "provider-chain-restored";
   reader.Stage(inventory, restored);
   EXPECT_TRUE(test::FilesEqual(source / "data", restored / "data"));
