@@ -19,8 +19,10 @@ class CheckpointFixtureTest(unittest.TestCase):
         self.service.prefix = "snapshots"
 
     def request(self, agent, checkpoint, name, method="PUT"):
+        handle = f"artifacts/{checkpoint}/containers/container"
+        self.service.labels[handle] = checkpoint
         environment = {
-            "PATH_INFO": f"/bucket/snapshots/{checkpoint}/{name}",
+            "PATH_INFO": f"/bucket/snapshots/artifacts/{checkpoint}/containers/container/{name}",
             "QUERY_STRING": "",
             "REQUEST_METHOD": method,
             "HTTP_USER_AGENT": agent,
@@ -43,13 +45,13 @@ class CheckpointFixtureTest(unittest.TestCase):
                 self.service.control("assert-no-reupload", checkpoint, lambda status, headers: None)
 
     def test_injects_lost_responses_for_sdk_and_crt_clients(self):
-        for agent in ("aws-sdk-cpp/1.11.584", "CRTS3NativeClient/0.1.x"):
+        for agent in ("rclone/v1.75.2", "aws-sdk-cpp/1.11.584", "CRTS3NativeClient/0.1.x"):
             for checkpoint, name in (("lost-payload", "data/file"), ("lost-index", "index.json")):
                 with self.subTest(agent=agent, checkpoint=checkpoint):
                     statuses, body = self.request(agent, checkpoint, name)
                     self.assertEqual(statuses, ["503 Service Unavailable"])
                     self.assertIn(b"ServiceUnavailable", body)
-                    self.assertEqual(self.forwarded[-1], ("PUT", f"/bucket/snapshots/{checkpoint}/{name}"))
+                    self.assertEqual(self.forwarded[-1], ("PUT", f"/bucket/snapshots/artifacts/{checkpoint}/containers/container/{name}"))
 
     def test_unconfirmed_crt_publication_blocks_reads_until_confirmation(self):
         self.assertEqual(self.request("CRTS3NativeClient/0.1.x", "unconfirmed-index", "index.json")[0],
