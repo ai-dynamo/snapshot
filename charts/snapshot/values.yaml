@@ -175,8 +175,8 @@ pageBroker:
   # S3 transfer and transaction limits, written as given into PageBroker's S3
   # configuration as its "limits" object. The keys and bounds are PageBroker's:
   # transactionSeconds, stagingBytes, activeTransactions, uploadPartBytes,
-  # uploadBufferBytes, uploadTargetGbps, uploadActiveFiles, requestSeconds,
-  # uploadRequestRetries, uploadConnectSeconds. stagingBytes defaults to the
+  # uploadBufferBytes, uploadActiveFiles, requestSeconds, uploadRequestRetries,
+  # uploadConnectSeconds. stagingBytes defaults to the
   # staging volume cap (staging.sizeLimit), so PageBroker refuses a restore the
   # volume cannot hold instead of filling it. Used with storage.type=s3 only.
   s3:

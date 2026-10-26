@@ -229,7 +229,7 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- if and (not $s3.allowHttp) (hasPrefix "http://" ($s3.endpoint | default "" | lower)) -}}
 {{- fail "storage.s3.endpoint is plain http; set storage.s3.allowHttp=true to accept it" -}}
 {{- end -}}
-{{- $allowed := list "transactionSeconds" "stagingBytes" "activeTransactions" "uploadPartBytes" "uploadBufferBytes" "uploadTargetGbps" "uploadActiveFiles" "requestSeconds" "uploadRequestRetries" "uploadConnectSeconds" -}}
+{{- $allowed := list "transactionSeconds" "stagingBytes" "activeTransactions" "uploadPartBytes" "uploadBufferBytes" "uploadActiveFiles" "requestSeconds" "uploadRequestRetries" "uploadConnectSeconds" -}}
 {{- $limits := ((.Values.pageBroker.s3 | default dict).limits | default dict) -}}
 {{- range $key, $_ := $limits -}}
 {{- if not (has $key $allowed) -}}
