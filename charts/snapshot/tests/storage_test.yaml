@@ -177,11 +177,24 @@ tests:
       - failedTemplate:
           errorPattern: only pvc and s3 are currently implemented
 
+  - it: rejects an S3 install that does not bind new content
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
+    asserts:
+      - failedTemplate:
+          errorMessage: "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path capture mode"
+
   - it: rejects S3 activation without required fields
     template: templates/configmap.yaml
     set:
       storage.type: s3
       storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
     asserts:
       - failedTemplate:
           errorMessage: storage.s3.endpoint is required
@@ -195,6 +208,7 @@ tests:
       storage.s3.bucket: snapshot-bucket
       storage.s3.prefix: containers
       storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
     asserts:
       - matchRegex:
           path: data["storage.yaml"]
@@ -233,6 +247,7 @@ tests:
       storage.s3.region: us-east-1
       storage.s3.bucket: snapshot-bucket
       storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
@@ -263,6 +278,7 @@ tests:
       storage.s3.region: us-east-1
       storage.s3.bucket: snapshot-bucket
       storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
@@ -303,6 +319,7 @@ tests:
       storage.s3.bucket: snapshot-bucket
       storage.s3.credentialsSecretRef: s3-creds
       storage.s3.credentialsSecretKey: aws-credentials
+      operator.bindNewContents: true
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
