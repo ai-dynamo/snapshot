@@ -50,7 +50,10 @@ def test_both_pods_use_the_requested_model_and_private_app(case, identity, monke
                               case, identity, case.gpu_memory_utilization)
     for pod in (source, restore):
         main = fw.main_container(pod)
-        assert fw.env_value(main, "SNAPSHOT_MODEL") == case.model
+        if "nvidia.com/restore-from" not in pod["metadata"]["annotations"]:
+            assert json.loads(main["args"][0])["model"] == case.model
+        else:
+            assert "args" not in main
         assert fw.env_value(main, "VLLM_GPU_MEMORY_UTILIZATION") == str(case.gpu_memory_utilization)
         assert main["resources"]["limits"]["nvidia.com/gpu"] == "1"
         assert "@sha256:" in main["image"]
@@ -59,8 +62,8 @@ def test_both_pods_use_the_requested_model_and_private_app(case, identity, monke
     expected_command = fw.main_container(source)["command"] if proxy else fw.INERT_COMMAND
     assert fw.main_container(restore)["command"] == expected_command
     assert restore["metadata"]["annotations"]["nvidia.com/restore-from"] == identity.snapshot_name
-    assert fw.env_value(fw.main_container(fw.source_pod(config=CONFIG, run=identity, spec=spec)),
-                        "SNAPSHOT_MODEL") == "Qwen/Qwen3-0.6B"
+    original = fw.main_container(fw.source_pod(config=CONFIG, run=identity, spec=spec))
+    assert json.loads(original["args"][0])["model"] == "Qwen/Qwen3-0.6B"
 
 
 @pytest.mark.parametrize("old,new", [("type: pvc", "type: s3"), ("restoreMode: staged", "restoreMode: direct"),
@@ -168,7 +171,10 @@ def test_one_checkpoint_two_fresh_restores_and_four_inferences(case, cluster, id
                              "create-restore-1", "delete-restore-1", "restore-1-gone",
                              "create-restore-2", "delete-restore-2", "restore-2-gone"]
     assert cluster.queries == 4
-    assert all(fw.env_value(fw.main_container(p), "SNAPSHOT_MODEL") == case.model for p in cluster.manifests)
+    for pod in cluster.manifests:
+        main = fw.main_container(pod)
+        if "nvidia.com/restore-from" not in pod["metadata"]["annotations"]:
+            assert json.loads(main["args"][0])["model"] == case.model
     report = json.loads(cluster.record.finalize("passed").read_text())
     assert report["outcome"] == "passed"
     assert report["environment"]["completedRestores"] == 2

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
+import json
 import math
 import os
 
@@ -53,7 +54,11 @@ def app_name(run: TestRun) -> str:
 
 def prepare_pod(pod: dict, case: QwenCase, run: TestRun, utilization: float) -> dict:
     main = fw.main_container(pod)
-    fw.set_env(main, "SNAPSHOT_MODEL", case.model)
+    # Only the source runs the application; the restore proxy supplies its process.
+    if fw.RESTORE_FROM_ANNOTATION not in pod["metadata"].get("annotations", {}):
+        options = json.loads(main["args"][0])
+        options["model"] = case.model
+        main["args"] = [json.dumps(options)]
     fw.set_env(main, "VLLM_GPU_MEMORY_UTILIZATION", str(utilization))
     for volume in pod["spec"]["volumes"]:
         if volume.get("configMap", {}).get("name") == "vllm-app":
@@ -193,7 +198,7 @@ def exercise(config: k8s.E2EConfig, run: TestRun, case: QwenCase,
             identity = running_containers(restored, ("main",), no_restarts=True)
             assert identity["containers"]["main"][2] == source_image, "restore used a different workload image"
             assert text.strip(), "restored process produced an empty readiness result"
-            for prompt in (frameworks.PROMPT, "Reply with one short word: ready"):
+            for prompt in ("Reply with one short sentence confirming this restored worker can serve.", "Reply with one short word: ready"):
                 answer = inference.request_generate(config.namespace, run.restore_pod, prompt)
                 assert isinstance(answer, str) and answer.strip(), "restored inference returned empty text"
                 print(f"[{case.name} restore {number}] /generate: {answer!r}")
