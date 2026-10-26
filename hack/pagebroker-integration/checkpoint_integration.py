@@ -202,7 +202,7 @@ def run(args):
                 "--max-concurrent-requests", "16", "--storage-config", str(config_path),
             ]
             missing = subprocess.run(missing_command, capture_output=True, text=True, timeout=15)
-            assert missing.returncode == 1 and "PageBroker startup failed" in missing.stderr, missing.stderr
+            assert missing.returncode == 2 and "external S3 credentials are missing" in missing.stderr, missing.stderr
             invalid_path = root / "invalid-streamer.json"
             invalid_path.write_text('{"s3Reader":{"concurrency":0}}')
             invalid = subprocess.run(missing_command + ["--model-streamer-config", str(invalid_path)],
