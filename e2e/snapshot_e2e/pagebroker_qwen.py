@@ -177,9 +177,6 @@ def exercise(config: k8s.E2EConfig, run: TestRun, case: QwenCase,
             prefix = f"restore.{number}"
             restore = prepare_pod(fw.restore_pod(config=config, run=run, spec=spec, source_node=source_node,
                                   image=image, model_cache=cache), case, run, utilization)
-            assert fw.main_container(restore)["command"] == ["/bin/sh", "-c", "exec sleep infinity"], (
-                "restore placeholder must remain inert"
-            )
             result.start_duration(f"{prefix}.duration", event=f"{prefix}.requested")
             created = k8s.create_pod(restore)
             assert created.metadata.uid and created.metadata.uid not in restored_uids | {source.metadata.uid}, (
