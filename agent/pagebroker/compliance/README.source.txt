@@ -15,7 +15,13 @@ Source for PageBroker and the third-party components distributed in this image:
                generated protobuf files are excluded. Run `make generate` to
                generate protobuf files from the supplied .proto file.
 
-NVIDIA publishes source for the distroless base image at:
+This image also ships the pinned Model Streamer core and S3 native libraries,
+with their SDK license and release metadata in /legal/model-streamer/.
+The S3 plugin license is also in /legal/model-streamer-s3/.
+The base image
+contains third-party components of its own -- glibc, libstdc++ and libgcc,
+which this binary links dynamically. Source for the base image's own contents
+is published by NVIDIA and is not duplicated here:
 
   https://developer.download.nvidia.com/distroless-oss/cc/v4.0.8/
 
@@ -26,4 +32,18 @@ NVIDIA-authored code uses the Apache-2.0 license and is published at:
 
   https://github.com/ai-dynamo/snapshot
 
-Component license texts are in /legal/THIRD-PARTY.txt.
+Per-component license texts are in /legal/THIRD-PARTY.txt.
+
+Model Streamer uses the native SDK release published at:
+
+  https://github.com/dsx-ai-factory/model-streamer/releases/tag/0.17.0
+
+Its release and pinned upstream build definition are also linked in
+/legal/model-streamer/UPSTREAM.txt. Its release version, SDK checksum, source
+revision and source archive are installed alongside that file.
+
+Model Streamer selects and statically links its libaio and liburing dependencies
+when building libstreamer.so. Snapshot consumes that prebuilt SDK; it does not
+build or independently select those dependency versions. The source directory
+also contains their matching source archives and license texts for attribution.
+The upstream build definition records their versions and checksums.
