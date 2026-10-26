@@ -42,11 +42,13 @@ data:
       prefix: {{ .Values.storage.s3.prefix | default "" | quote }}
     {{- end }}
   config.yaml: |
-    # Pinned to pvc regardless of storage.type above: the agent itself has no
-    # S3 awareness yet. PageBroker and the operator own S3 I/O.
+    # Pinned to pvc/checkpoints regardless of storage.type or storage.pvc.basePath
+    # above: the agent itself has no S3 awareness yet, and this value can no
+    # longer vary meaningfully since it's pinned either way. PageBroker and the
+    # operator own S3 I/O.
     storage:
       type: "pvc"
-      basePath: {{ .Values.storage.pvc.basePath | quote }}
+      basePath: "/checkpoints"
 
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
