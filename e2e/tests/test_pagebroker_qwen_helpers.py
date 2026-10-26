@@ -31,6 +31,7 @@ pageBroker:
 
 @pytest.fixture
 def identity(monkeypatch):
+    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "true")
     monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", "local/agent:fixture")
     for name in ("SNAPSHOT_E2E_FRAMEWORK_IMAGE", "SNAPSHOT_E2E_MODEL_CACHE_SERVER",
                  "SNAPSHOT_E2E_MODEL_CACHE_PATH", "SNAPSHOT_E2E_QWEN_GPU_MEMORY_UTILIZATION"):
@@ -39,7 +40,9 @@ def identity(monkeypatch):
 
 
 @pytest.mark.parametrize("case", qwen.CASES, ids=lambda case: case.name)
-def test_both_pods_use_the_requested_model_and_private_app(case, identity):
+@pytest.mark.parametrize("proxy", [False, True])
+def test_both_pods_use_the_requested_model_and_private_app(case, identity, monkeypatch, proxy):
+    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "true" if proxy else "false")
     spec = replace(frameworks.FRAMEWORKS["vllm"], model=case.model)
     source = qwen.prepare_pod(fw.source_pod(config=CONFIG, run=identity, spec=spec),
                              case, identity, case.gpu_memory_utilization)
@@ -53,7 +56,8 @@ def test_both_pods_use_the_requested_model_and_private_app(case, identity):
         assert "@sha256:" in main["image"]
         assert pod["spec"]["restartPolicy"] == "Never"
         assert any(v.get("configMap", {}).get("name") == qwen.app_name(identity) for v in pod["spec"]["volumes"])
-    assert fw.main_container(restore)["command"] == ["/bin/sh", "-c", "exec sleep infinity"]
+    expected_command = fw.main_container(source)["command"] if proxy else fw.INERT_COMMAND
+    assert fw.main_container(restore)["command"] == expected_command
     assert restore["metadata"]["annotations"]["nvidia.com/restore-from"] == identity.snapshot_name
     assert fw.env_value(fw.main_container(fw.source_pod(config=CONFIG, run=identity, spec=spec)),
                         "SNAPSHOT_MODEL") == "Qwen/Qwen3-0.6B"
@@ -155,7 +159,9 @@ def cluster(monkeypatch, identity):
 
 
 @pytest.mark.parametrize("case", qwen.CASES, ids=lambda case: case.name)
-def test_one_checkpoint_two_fresh_restores_and_four_inferences(case, cluster, identity, tmp_path):
+@pytest.mark.parametrize("proxy", [False, True])
+def test_one_checkpoint_two_fresh_restores_and_four_inferences(case, cluster, identity, tmp_path, monkeypatch, proxy):
+    monkeypatch.setenv("SNAPSHOT_E2E_RESTORE_PROXY", "true" if proxy else "false")
     cluster.record.result_dir = tmp_path
     qwen.exercise(CONFIG, identity, case, cluster.record)
     assert cluster.trace == ["create-app", "create-source", "checkpoint", "delete-source", "source-gone",
