@@ -216,10 +216,7 @@ func (r *smokeRunner) runEngine(ctx context.Context, engine string, storage stri
 					return err
 				}
 				if r.config.Mode == "s3" {
-					publication.Artifact, err = r.client.CommitCheckpoint(ctx, tx)
-					if err == nil && publication.Artifact.GetStoreId() != r.config.StoreID {
-						err = errors.New("publication returned a different store ID")
-					}
+					publication.Artifact, err = r.client.CommitCheckpoint(ctx, tx, r.config.StoreID)
 				} else {
 					err = r.client.Commit(ctx, tx)
 				}
