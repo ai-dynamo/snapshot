@@ -8,10 +8,8 @@ package pagebroker
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -33,12 +31,7 @@ func testTarget(id string) *ArtifactTarget {
 }
 
 func testArtifact(id string) *PublishedArtifact {
-	input := ""
-	for _, part := range []string{"test-store", id, "container"} {
-		input += fmt.Sprintf("%d:%s", len(part), part)
-	}
-	digest := sha256.Sum256([]byte(input))
-	return &PublishedArtifact{StoreId: "test-store", ArtifactHandle: hex.EncodeToString(digest[:])}
+	return &PublishedArtifact{StoreId: "test-store", ArtifactHandle: "artifacts/" + id + "/containers/container"}
 }
 
 func (c artifactTestClient) prepareArtifact(ctx context.Context, tx, id string) (string, error) {
@@ -153,6 +146,16 @@ func TestS3CheckpointDaemon(t *testing.T) {
 	}
 	verify := func(t *testing.T, transaction, id, payload string) {
 		t.Helper()
+		artifact, lookupDirectory, err := client.LookupArtifactMetadata(ctx, transaction+"-lookup", testTarget(id))
+		if err != nil || !proto.Equal(artifact, testArtifact(id)) {
+			t.Fatalf("lookup descriptor: %v %v", artifact, err)
+		}
+		if _, err := os.Stat(filepath.Join(lookupDirectory, "manifest.yaml")); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Abort(ctx, transaction+"-lookup"); err != nil {
+			t.Fatal(err)
+		}
 		directory, err := client.metadata(ctx, transaction+"-metadata", id)
 		if err != nil {
 			t.Fatal(err)
@@ -179,6 +182,25 @@ func TestS3CheckpointDaemon(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Run("lookup is read only and preserves failure classification", func(t *testing.T) {
+		id := target(t, "lookup-missing")
+		_, _, err := client.LookupArtifactMetadata(ctx, "lookup-missing", testTarget(id))
+		expectCode(t, err, Failure_ARTIFACT_NOT_FOUND)
+		if err := client.Abort(ctx, "lookup-missing"); err != nil {
+			t.Fatal(err)
+		}
+		foreign := testTarget(id)
+		foreign.StoreId = "other-store"
+		_, _, err = client.LookupArtifactMetadata(ctx, "lookup-foreign", foreign)
+		expectCode(t, err, Failure_STORE_MISMATCH)
+		denied := target(t, "denied-access")
+		_, _, err = client.LookupArtifactMetadata(ctx, "lookup-denied", testTarget(denied))
+		expectCode(t, err, Failure_ACCESS_DENIED)
+		if err := client.Abort(ctx, "lookup-denied"); err != nil {
+			t.Fatal(err)
+		}
+		control(t, "assert-unpublished", id)
+	})
 	t.Run("roundtrip and preflight", func(t *testing.T) {
 		payload := strings.Repeat("binary\x00payload\xff", 600000)
 		id := publish(t, "roundtrip", payload)
@@ -594,6 +616,16 @@ func TestS3CheckpointDaemon(t *testing.T) {
 		}
 		control(t, "restart", id)
 		expectCode(t, other.Commit(ctx, "restart"), Failure_TRANSACTION_NOT_FOUND)
+		artifact, lookupDirectory, err := other.LookupArtifactMetadata(ctx, "restart-lookup", testTarget(id))
+		if err != nil || !proto.Equal(artifact, testArtifact(id)) {
+			t.Fatalf("lookup after restart: %v %v", artifact, err)
+		}
+		if _, err := os.Stat(filepath.Join(lookupDirectory, "manifest.yaml")); err != nil {
+			t.Fatal(err)
+		}
+		if err := other.Abort(ctx, "restart-lookup"); err != nil {
+			t.Fatal(err)
+		}
 		_, err = other.prepareArtifact(ctx, "restart-recapture", id)
 		expectCode(t, err, Failure_TRANSACTION_CONFLICT)
 		verify(t, "restart", id, "durable bytes")

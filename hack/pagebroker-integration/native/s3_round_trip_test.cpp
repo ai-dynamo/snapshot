@@ -132,7 +132,7 @@ class S3RoundTripTest : public ::testing::Test {
   {
     PublishedArtifact artifact;
     artifact.set_store_id("test-store");
-    artifact.set_artifact_handle(std::string(64, id));
+    artifact.set_artifact_handle("artifacts/" + std::string(1, id) + "/containers/main");
     return artifact;
   }
 

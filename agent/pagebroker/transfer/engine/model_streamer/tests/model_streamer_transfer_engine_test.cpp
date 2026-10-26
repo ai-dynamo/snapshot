@@ -467,7 +467,7 @@ TEST_F(ModelStreamerTransferEngineTest, RejectsInvalidUtf8FilenameAsInvalidReque
   ModelStreamerTransferEngine engine(config);
   PublishedArtifact artifact;
   artifact.set_store_id(config.store_id);
-  artifact.set_artifact_handle(std::string(64, 'a'));
+  artifact.set_artifact_handle("artifacts/content-1/containers/main");
   engine.ValidateArtifact(artifact);
   std::ofstream(root_.path() / "manifest.yaml") << "version: 1\n";
   const auto invalid = root_.path() / "invalid-\xff";

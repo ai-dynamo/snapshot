@@ -5,6 +5,11 @@
 
 #include <gtest/gtest.h>
 #include <fstream>
+#include <cstdlib>
+#include <optional>
+#include <vector>
+
+#include "daemon.hpp"
 
 #include "tests/temporary_directory.hpp"
 #include <nlohmann/json.hpp>
@@ -13,6 +18,115 @@ namespace snapshot::pagebroker {
 namespace {
 using Json = nlohmann::json;
 const char* kConfig = R"({"storeId":"test-store","endpoint":"https://s3.example.test","region":"us-east-1","bucket":"checkpoint-bucket","prefix":"snapshots"})";
+
+class S3CredentialsTest : public ::testing::Test {
+ protected:
+  void SetUp() override
+  {
+    for (const auto* name : {"AWS_SHARED_CREDENTIALS_FILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                            "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_CA_BUNDLE", "RUNAI_STREAMER_LOG_LEVEL"}) {
+      const auto* value = std::getenv(name);
+      saved_.push_back({name, value ? std::optional<std::string>(value) : std::nullopt});
+      unsetenv(name);
+    }
+    setenv("AWS_SHARED_CREDENTIALS_FILE", file_.c_str(), 1);
+  }
+  void TearDown() override
+  {
+    for (const auto& [name, value] : saved_) {
+      if (value) setenv(name.c_str(), value->c_str(), 1);
+      else unsetenv(name.c_str());
+    }
+  }
+  void Write(const std::string& text) { std::ofstream(file_, std::ios::binary) << text; }
+  S3Connection Load() { return LoadS3Credentials(ParseS3Config(kConfig).transfer.connection); }
+  test::TemporaryDirectory root_;
+  std::filesystem::path file_ = root_.path() / "credentials";
+  std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
+};
+
+TEST_F(S3CredentialsTest, ReadsDefaultProfileWithoutMixingCredentialSources)
+{
+  Write("# comment\r\n[other]\r\naws_access_key_id=other\r\n; comment\r\n[default]\r\n"
+        " aws_access_key_id = file-key \r\naws_secret_access_key = fake-secret=with=padding\r\n"
+        "aws_session_token = fake-token==\r\n");
+  setenv("AWS_ACCESS_KEY_ID", "environment-key", 1);
+  setenv("AWS_SECRET_ACCESS_KEY", "environment-secret", 1);
+  setenv("AWS_SESSION_TOKEN", "environment-token", 1);
+  setenv("AWS_PROFILE", "other", 1);
+  const auto connection = Load();
+  EXPECT_EQ(connection.access_key_id, "file-key");
+  EXPECT_EQ(connection.secret_access_key, "fake-secret=with=padding");
+  EXPECT_EQ(connection.session_token, "fake-token==");
+  EXPECT_EQ(connection.region, "us-east-1");
+  Write("[default]\naws_access_key_id=replacement\naws_secret_access_key=fake-secret\n");
+  EXPECT_EQ(connection.access_key_id, "file-key"); // The running client retains its snapshot.
+  EXPECT_EQ(Load().access_key_id, "replacement");
+  EXPECT_TRUE(Load().session_token.empty());
+}
+
+TEST_F(S3CredentialsTest, ReadsSecretProjectionSymlink)
+{
+  Write("[default]\naws_access_key_id=fake-key\naws_secret_access_key=fake-secret\n");
+  const auto link = root_.path() / "mounted-secret";
+  std::filesystem::create_symlink(file_, link);
+  setenv("AWS_SHARED_CREDENTIALS_FILE", link.c_str(), 1);
+  EXPECT_EQ(Load().access_key_id, "fake-key");
+}
+
+TEST_F(S3CredentialsTest, RejectsMissingMalformedAndOversizedCredentialsWithoutFallback)
+{
+  setenv("AWS_ACCESS_KEY_ID", "environment-key", 1);
+  setenv("AWS_SECRET_ACCESS_KEY", "environment-secret", 1);
+  EXPECT_THROW(Load(), std::invalid_argument); // Missing file.
+  for (const std::string& text : {std::string(), std::string("[other]\naws_access_key_id=fake\naws_secret_access_key=fake\n"),
+       std::string("[default]\naws_access_key_id=fake\n"), std::string("[default]\nprivate-secret-value\n"),
+       std::string("[default]\naws_access_key_id=a\naws_access_key_id=b\naws_secret_access_key=fake\n"),
+       std::string("[default]\naws_access_key_id=fake\naws_secret_access_key=\n"), std::string(65537, 'x'),
+       std::string(1, '\0')}) {
+    Write(text);
+    try { (void)Load(); FAIL() << "invalid credentials accepted"; }
+    catch (const std::invalid_argument& error) { EXPECT_EQ(std::string(error.what()).find("private-secret-value"), std::string::npos); }
+  }
+  setenv("AWS_SHARED_CREDENTIALS_FILE", root_.path().c_str(), 1);
+  EXPECT_THROW(Load(), std::invalid_argument);
+  unsetenv("AWS_SHARED_CREDENTIALS_FILE");
+  EXPECT_THROW(Load(), std::invalid_argument);
+}
+
+TEST_F(S3CredentialsTest, PreservesCaValidationAndBoundedRead)
+{
+  std::string text = "[default]\naws_access_key_id=fake-key\naws_secret_access_key=fake-secret\n#";
+  text.resize(65536, 'x');
+  Write(text);
+  EXPECT_NO_THROW(Load());
+  setenv("AWS_CA_BUNDLE", "relative/ca.pem", 1);
+  EXPECT_THROW(Load(), std::invalid_argument);
+  setenv("AWS_CA_BUNDLE", "/mounted/ca.pem", 1);
+  EXPECT_EQ(Load().ca_file, "/mounted/ca.pem");
+  auto explicit_ca = ParseS3Config(kConfig).transfer.connection;
+  explicit_ca.ca_file = "/configured/ca.pem";
+  EXPECT_EQ(LoadS3Credentials(explicit_ca).ca_file, "/configured/ca.pem");
+}
+
+TEST_F(S3CredentialsTest, DaemonRejectsCredentialsBeforeApplyingNativeSettings)
+{
+  Write("[default]\naws_access_key_id=private-secret-value\n");
+  const auto config = root_.path() / "storage.json";
+  const auto streamer = root_.path() / "streamer.json";
+  std::ofstream(config) << kConfig;
+  std::ofstream(streamer) << R"({"logging":{"level":"ERROR"}})";
+  DaemonOptions options;
+  options.socket_path = root_.path() / std::string(120, 's');
+  options.enable_gpu = false;
+  options.staging_directory = root_.path() / "staging";
+  options.storage_config = config;
+  options.model_streamer_config = streamer;
+  EXPECT_EQ(RunDaemon(options), ExitCode::INVALID_ARGUMENTS);
+  EXPECT_FALSE(std::filesystem::exists(options.socket_path));
+  EXPECT_FALSE(std::filesystem::exists(options.staging_directory));
+  EXPECT_EQ(std::getenv("RUNAI_STREAMER_LOG_LEVEL"), nullptr);
+}
 
 TEST(S3ConfigTest, ReadsBoundedFiles)
 {
