@@ -285,7 +285,8 @@ class BrokerGpuTest {
     } else {
       broker_.ReapExpiredTransactions(std::chrono::steady_clock::now() + kExpiryAdvance);
     }
-    EXPECT_TRUE(cancellation->IsCancelled());
+    // Transaction cancellation stops GPU work without cancelling the request scope.
+    EXPECT_FALSE(cancellation->IsCancelled());
     EXPECT_EQ(work.wait_for(std::chrono::seconds{0}), std::future_status::timeout);
     EXPECT_TRUE(fs::exists(restore.staging / "image"));
     EXPECT_TRUE(fs::exists(restore.source / gpu::kDataDirectory));
