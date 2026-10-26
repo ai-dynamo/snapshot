@@ -271,6 +271,15 @@ and the connection and transfer settings below from the chart's
 settings against. PageBroker reads all of it once at startup, so changing any of
 these values needs a PageBroker restart.
 
+The environment and the JSON roll on different schedules: the DaemonSet
+rewrites the environment the moment `helm upgrade` applies it, while the JSON
+only updates once the new operator pod has started and rewritten PageBroker's
+ConfigMap. Changing `storage.s3.addressing` or the CA bundle can land a
+PageBroker pod with the new environment against the still-old JSON; PageBroker
+refuses to start until they agree. This is bounded and self-healing — the pod's
+mounted ConfigMap catches up and a later restart succeeds — but expect PageBroker
+to be briefly unavailable on that node during the upgrade.
+
 | Value | PageBroker input | Default |
 |-------|------------------|---------|
 | `storage.s3.addressing` | `addressing` in the JSON, and `RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING` (`0` for `path`, `1` for `virtual`) in the environment | PageBroker's `virtual` |
