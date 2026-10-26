@@ -158,7 +158,7 @@ sequenceDiagram
     Agent->>Agent: Snapshot compatibility checks
     Agent->>PB: Abort (release metadata directory)
     Agent->>PB: StagedRestore(handle)
-    PB->>S3: Download all objects, verify digests
+    PB->>S3: Download all objects, check sizes
     PB-->>Agent: Staged bundle path
     Agent->>Agent: Mount staging, CRIU/CUDA restore, unmount
     Agent->>PB: Commit (release staging)
@@ -205,7 +205,7 @@ container it was published for, and every reader refuses it on a mismatch; see
 [Publication and artifact format](#publication-and-artifact-format).
 
 **Restore:** agent → GetArtifactMetadata → Snapshot compatibility gates → StagedRestore
-downloads/verifies the full bundle → CRIU/CUDA restore → unmount → Commit cleanup.
+downloads and structurally validates the full bundle → CRIU/CUDA restore → unmount → Commit cleanup.
 Once fully staged, restore needs no further S3 reads. The later executor
 compatibility gate still runs before process restore.
 
@@ -445,7 +445,7 @@ message GetArtifactMetadataRequest {
 
 // Success result; errors use the existing Failure message.
 message GetArtifactMetadataComplete {
-  string manifest_directory = 1; // Shared local directory with verified manifest.yaml.
+  string manifest_directory = 1; // Shared local directory with manifest.yaml.
 }
 ```
 
@@ -464,11 +464,11 @@ GetArtifactMetadata(
 ```
 
 PageBroker verifies the store binding, committed publication, supported format,
-metadata access and integrity, then returns a temporary local directory containing
-`manifest.yaml` for the exact requested publication. A mismatch returns `Failure`;
+metadata access and indexed object sizes, then returns a temporary local directory
+containing `manifest.yaml` for the exact requested publication. A mismatch returns `Failure`;
 PageBroker never substitutes another publication. Snapshot decides how to use this
-metadata; restore compatibility checks are one caller flow. Full payload verification
-belongs to `StagedRestore`.
+metadata; restore compatibility checks are one caller flow. `StagedRestore` checks
+structure and sizes without application-level payload integrity verification.
 
 The directory remains valid until the transaction is closed with `Abort` or expires.
 The caller releases it after reading, on every exit path. Cleanup removes temporary
@@ -624,9 +624,12 @@ Store the existing per-container bundle under
 `<store-prefix>/artifacts/<artifactUID>/containers/<name>/`; the store prefix includes
 the configured prefix and installation/store identifiers. Upload immutable payloads,
 then publish the index last. The index carries its own layout version, binds
-store/artifact/container, and lists file/directory paths, permissions, sizes and
-file SHA-256 digests.
-Reject unsafe paths, unsupported formats, missing files and checksum mismatches.
+store/artifact/container, and lists file/directory paths, permissions and sizes.
+Reject unsafe paths, unsupported formats, missing files and size mismatches.
+Payload digests and integrity verification are deferred to a separate design.
+The initial implementation cannot detect same-size payload replacement or corruption;
+SDK transport checks and TLS do not establish equality to the captured bytes.
+Store identity hashes remain part of the storage binding.
 
 The index lives at a fixed key, `containers/<name>/index.json`, so there is exactly
 one publication per content and container. `Commit` is idempotent for that key: if
@@ -739,7 +742,7 @@ backend integration with a disposable S3-compatible service, and GPU end-to-end 
   immediate cancellation on leadership loss, and every maintenance mode using the
   same `(storeID, artifactUID)` lock, including candidates resolved by a sweep.
 - **Storage/RPC:** disposable S3-compatible service; upload/index publication,
-  format/path/digest rejection, fixed transaction expiry across retries, rejection
+  format/path/size rejection, fixed transaction expiry across retries, rejection
   immediately before a late index publication, bounded messages, maintenance
   pagination, Abort and inspection expiry.
 - **Failure:** invalid credentials before capture, outage during transfer, lost
