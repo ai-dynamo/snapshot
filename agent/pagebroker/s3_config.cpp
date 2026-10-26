@@ -245,6 +245,12 @@ ParseTransferLimits(const Json& value, S3Config& config)
 }  // namespace
 
 void
+S3Config::ValidateLocation() const
+{
+  ValidateStorageLocation(bucket, prefix);
+}
+
+void
 S3TransferOptions::Validate() const
 {
   connection.Validate();
@@ -283,7 +289,7 @@ ParseS3Config(std::string_view text)
   config.transfer.connection = ParseConnection(value);
   config.bucket = ReadField<std::string>(value, kBucketKey);
   config.prefix = value.contains(kPrefixKey) ? ReadField<std::string>(value, kPrefixKey) : std::string();
-  ValidateStorageLocation(config.bucket, config.prefix);
+  config.ValidateLocation();
   ParseTransferLimits(value, config);
   return config;
 }

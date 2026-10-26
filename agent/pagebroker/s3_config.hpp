@@ -31,6 +31,8 @@ void ValidateModelStreamerEnvironment(const S3TransferOptions& options);
 // Resolved startup settings for one store. Credentials are supplied externally
 // through AWS_SHARED_CREDENTIALS_FILE and snapshotted once by the daemon.
 struct S3Config {
+  // Validates the supported bucket and canonical configured prefix.
+  void ValidateLocation() const;
   S3TransferOptions transfer;
   // Logical store identity and the bucket/key prefix used for its checkpoints.
   std::string store_id;
