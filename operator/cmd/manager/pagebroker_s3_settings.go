@@ -29,7 +29,6 @@ type pageBrokerS3Limits struct {
 	ActiveTransactions   *uint64 `json:"activeTransactions,omitempty"`
 	UploadPartBytes      *uint64 `json:"uploadPartBytes,omitempty"`
 	UploadBufferBytes    *uint64 `json:"uploadBufferBytes,omitempty"`
-	UploadTargetGbps     *uint64 `json:"uploadTargetGbps,omitempty"`
 	UploadActiveFiles    *uint64 `json:"uploadActiveFiles,omitempty"`
 	RequestSeconds       *uint64 `json:"requestSeconds,omitempty"`
 	UploadRequestRetries *uint64 `json:"uploadRequestRetries,omitempty"`

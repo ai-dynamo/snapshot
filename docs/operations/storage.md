@@ -287,7 +287,6 @@ these values needs a PageBroker restart.
 | `activeTransactions` | 8 | 1 to 1024, below `pageBroker.maxConcurrentRequests` |
 | `uploadPartBytes` | 16 MiB | 8 MiB to 1 GiB |
 | `uploadBufferBytes` | 1 GiB | 1 to 16 GiB, at least twice `uploadPartBytes` |
-| `uploadTargetGbps` | 10 | 1 to 1000 |
 | `uploadActiveFiles` | 2 | 1 to 64 |
 | `requestSeconds` | 60 | 1 to 60 |
 | `uploadRequestRetries` | 3 | 0 to 10 |
