@@ -55,12 +55,13 @@ class ManifestTest(unittest.TestCase):
         self.assertIn("--storage-config", broker["args"])
         self.assertEqual(dict((item["name"], item["value"]) for item in client["env"])["PAGEBROKER_SMOKE_STORE_ID"], storage["storeId"])
         self.assertNotIn("credentials", [item["name"] for item in client["volumeMounts"]])
-        environment = {item["name"]: item["valueFrom"]["secretKeyRef"] for item in broker["env"]}
-        self.assertEqual(set(environment), {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"})
-        for name, ref in environment.items():
-            self.assertEqual(ref["name"], "test-credentials")
-            self.assertEqual(ref["key"], name)
-            self.assertEqual(ref["optional"], name == "AWS_SESSION_TOKEN")
+        environment = {item["name"]: item["value"] for item in broker["env"]}
+        self.assertEqual(environment, {"AWS_SHARED_CREDENTIALS_FILE": "/credentials/credentials"})
+        volume = next(item for item in pod["volumes"] if item["name"] == "credentials")
+        self.assertEqual(volume["secret"], {"secretName": "test-credentials", "items": [{"key": "credentials", "path": "credentials"}]})
+        mount = next(item for item in broker["volumeMounts"] if item["name"] == "credentials")
+        self.assertTrue(mount["readOnly"])
+        self.assertEqual(mount["mountPath"], "/credentials")
         self.assertNotIn("uploadTargetGbps", storage["limits"])
         self.assertFalse(any(item["kind"] == "Secret" for item in resources))
 
