@@ -361,7 +361,16 @@ func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, 
 			listed, err := visible()
 			return listed.GPUs, err
 		}
-		return resolveSelectedGPUs(ctx, *value)
+		selected, err := resolveSelectedGPUs(ctx, *value)
+		if err != nil {
+			return selected, err
+		}
+		// The variable may name its GPUs in any order; the container lists them in bus order.
+		listed, err := visible()
+		if err != nil {
+			return compat.GPUInfo{}, fmt.Errorf("list selected GPUs in bus order: %w", err)
+		}
+		return describeGPUs(GPUUUIDs(selected), listed.GPUs)
 	}
 	return discoverGPUs(ctx, clientset, podName, podNamespace, containerName, visible, log)
 }
@@ -410,7 +419,7 @@ func discoverGPUs(
 			"resolved DRA GPU UUIDs in container ordinal order",
 			"uuids", orderedUUIDs,
 		)
-		return describeGPUs(orderedUUIDs, listed.GPUs), nil
+		return describeGPUs(orderedUUIDs, listed.GPUs)
 	}
 
 	gpuUUIDs, err = GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
@@ -418,14 +427,13 @@ func discoverGPUs(
 		return compat.GPUInfo{}, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
 	}
 	if len(gpuUUIDs) > 0 {
-		// This path has its GPUs already and needs nvidia-smi only to describe
-		// them, so a failure here costs the description, not the checkpoint.
+		// kubelet lists the GPUs in allocation order; only the container's
+		// listing gives their bus order.
 		listed, err := visible()
 		if err != nil {
-			log.V(1).Info("Failed to describe PodResources GPUs; recording their UUIDs alone", "error", err)
-			return describeGPUs(gpuUUIDs, compat.GPUInfo{}), nil
+			return compat.GPUInfo{}, fmt.Errorf("list PodResources GPUs in bus order: %w", err)
 		}
-		return describeGPUs(gpuUUIDs, listed.GPUs), nil
+		return describeGPUs(gpuUUIDs, listed.GPUs)
 	}
 
 	log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi")
@@ -437,26 +445,36 @@ func discoverGPUs(
 	return listed.GPUs, nil
 }
 
-// describeGPUs keeps the allocated order and fills each UUID in from what
-// nvidia-smi reported about it. A UUID nvidia-smi did not report keeps its
-// place undescribed rather than dropping out of the set.
-func describeGPUs(uuids []string, visible compat.GPUInfo) compat.GPUInfo {
-	described := make(map[string]compat.GPUDevice, len(visible.Devices))
-	for _, device := range visible.Devices {
-		described[device.UUID] = device
+// describeGPUs puts the allocated GPUs in the order the container lists them,
+// PCI bus order, and describes each from that listing. Bus order is the one
+// order a checkpoint and its restore always agree on, whatever order kubelet or
+// NVIDIA_VISIBLE_DEVICES names the GPUs in, so BuildDeviceMap can pair them by
+// position. A GPU the listing does not report has no bus position to take, so
+// it fails discovery: any other order could pair it with another rank's GPU.
+func describeGPUs(uuids []string, listed compat.GPUInfo) (compat.GPUInfo, error) {
+	allocated := make(map[string]bool, len(uuids))
+	for _, uuid := range uuids {
+		allocated[uuid] = true
 	}
 	env := compat.GPUInfo{
-		DriverVersion: visible.DriverVersion,
-		Devices:       make([]compat.GPUDevice, 0, len(uuids)),
+		DriverVersion: listed.DriverVersion,
+		Devices:       make([]compat.GPUDevice, 0, len(allocated)),
 	}
-	for _, uuid := range uuids {
-		device, ok := described[uuid]
-		if !ok {
-			device = compat.GPUDevice{UUID: uuid}
+	for _, device := range listed.Devices {
+		if allocated[device.UUID] {
+			env.Devices = append(env.Devices, device)
+			delete(allocated, device.UUID)
 		}
-		env.Devices = append(env.Devices, device)
 	}
-	return env
+	if len(allocated) > 0 {
+		missing := make([]string, 0, len(allocated))
+		for uuid := range allocated {
+			missing = append(missing, uuid)
+		}
+		sort.Strings(missing)
+		return compat.GPUInfo{}, fmt.Errorf("container does not list allocated GPUs %v", missing)
+	}
+	return env, nil
 }
 
 // GPUUUIDs returns device UUIDs in discovery order.
@@ -543,11 +561,11 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 }
 
 // BuildDeviceMap creates a cuda-checkpoint-helper --device-map value from source and target GPU UUID lists.
-// When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
-// unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
-// Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
-// If all mappings are identity mappings, it returns an empty string so same-GPU restores use the
-// default CUDA restore path instead of forcing the GPU migration path.
+// The i-th source GPU maps to the i-th target GPU, so each process keeps its position among the pod's
+// GPUs. DiscoverGPUs lists every pod's GPUs in PCI bus order, so that position is the GPU's bus position,
+// and GPU Memory Service places each GPU's restored weights by bus position.
+// A restore onto the same set of GPUs returns an empty string instead, so it uses the default CUDA
+// restore path rather than the GPU migration path even when kubelet lists the set in another order.
 func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string, error) {
 	if len(sourceUUIDs) != len(targetUUIDs) {
 		return "", fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
@@ -561,46 +579,20 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 	for _, t := range targetUUIDs {
 		targetSet[t] = true
 	}
-
-	// First pass: identity-map any source UUID that exists in the target set
-	mapping := make(map[string]string, len(sourceUUIDs))
-	usedTargets := make(map[string]bool, len(targetUUIDs))
+	sameGPUs := true
 	for _, src := range sourceUUIDs {
-		if targetSet[src] {
-			mapping[src] = src
-			usedTargets[src] = true
-		}
-	}
-
-	// Second pass: pair remaining source UUIDs with remaining target UUIDs positionally
-	var remainingTargets []string
-	for _, t := range targetUUIDs {
-		if !usedTargets[t] {
-			remainingTargets = append(remainingTargets, t)
-		}
-	}
-	idx := 0
-	for _, src := range sourceUUIDs {
-		if _, ok := mapping[src]; !ok {
-			mapping[src] = remainingTargets[idx]
-			idx++
-		}
-	}
-
-	allIdentity := true
-	for _, src := range sourceUUIDs {
-		if mapping[src] != src {
-			allIdentity = false
+		if !targetSet[src] {
+			sameGPUs = false
 			break
 		}
 	}
-	if allIdentity {
+	if sameGPUs {
 		return "", nil
 	}
 
 	pairs := make([]string, len(sourceUUIDs))
 	for i, src := range sourceUUIDs {
-		pairs[i] = src + "=" + mapping[src]
+		pairs[i] = src + "=" + targetUUIDs[i]
 	}
 	return strings.Join(pairs, ","), nil
 }
