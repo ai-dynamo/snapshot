@@ -29,6 +29,12 @@ The target builds the production image and its matching dependency image, then:
   Daemons read a mounted shared credentials file; changing it takes effect on restart.
 
 Fixtures use fake credentials and clean up their services and containers.
+Unexpected HTTP fixture exceptions fail the run after request handlers drain,
+including errors during resource probes. Deliberately injected HTTP failures
+remain part of the failure tests. The Python fixture verifies uploaded sizes and
+contents after each native memory probe exits. The probes allow 60 seconds for
+uploads and idle I/O because Moto assembles large objects during multipart
+completion; the runner retains a 120-second watchdog for each native probe.
 No cloud account, GPU, or Kubernetes cluster is needed. The separate
 `pagebroker-integration` CI job runs this command.
 
