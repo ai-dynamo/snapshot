@@ -772,9 +772,9 @@ RunDaemon(const DaemonOptions& options)
     }
     if (!options.model_streamer_config.empty())
       model_streamer = model_streamer::settings::ReadConfig(options.model_streamer_config);
-    model_streamer = model_streamer::settings::ResolveOptions(std::move(model_streamer), config ? &*config : nullptr);
     if (config)
-      config->transfer.connection = ResolveS3Credentials(std::move(config->transfer.connection));
+      config->transfer.connection = LoadS3Credentials(std::move(config->transfer.connection));
+    model_streamer = model_streamer::settings::ResolveOptions(std::move(model_streamer), config ? &*config : nullptr);
   }
   catch (const std::invalid_argument& error) {
     // Configuration errors report schema-owned field names, never values.
