@@ -524,7 +524,7 @@ class GpuEngine::Batch {
 public:
   Batch(GpuEngineState& engine, Artifact::ArtifactState& artifact,
         const std::vector<Participant>& participants, Cancellation& cancellation, Direction direction)
-      : artifact_(artifact), cancellation_(&cancellation), results_(participants.size())
+      : artifact_(artifact), cancellation_(Cancellation::ChildOf(cancellation)), results_(participants.size())
   {
     Require(engine.available, "CustomStorage is unavailable");
     Validate(artifact.direction == direction, "GPU operation does not match artifact direction");
