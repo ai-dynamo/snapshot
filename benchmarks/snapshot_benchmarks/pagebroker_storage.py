@@ -112,6 +112,20 @@ def validate_credentials(source: str, expiry: str | None, required_until: dt.dat
     return values
 
 
+def write_broker_credentials(path: Path, credentials: dict[str, str]) -> None:
+    """Write the daemon's startup file inside the runner's private temporary directory."""
+    fields = dict(zip(AWS_KEYS, ("aws_access_key_id", "aws_secret_access_key", "aws_session_token")))
+    if not all(credentials.get(key) for key in AWS_KEYS[:2]):
+        raise ValueError("broker credentials require an access key and secret key")
+    if any(any(c in value for c in "\r\n\0") for value in credentials.values()):
+        raise ValueError("invalid broker credential value")
+    text = "[default]\n" + "".join(f"{field}={credentials[key]}\n" for key, field in fields.items() if credentials.get(key))
+    if len(text.encode()) > 64 * 1024:
+        raise ValueError("broker credentials exceed file size limit")
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
+        output.write(text)
+
+
 def child_environment(credentials: dict[str, str] | None = None) -> dict[str, str]:
     # Remove provider/endpoint overrides as well as credentials from non-SDK helpers.
     env = {k: v for k, v in os.environ.items() if not k.startswith("AWS_") and k != "BOTO_CONFIG"}

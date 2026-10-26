@@ -26,7 +26,7 @@ import uuid
 
 from snapshot_benchmarks import results
 from snapshot_benchmarks.pagebroker_storage import (
-    child_environment, read_json, render_s3_config, validate_credentials, write_json,
+    child_environment, read_json, render_s3_config, validate_credentials, write_broker_credentials, write_json,
 )
 
 KIND = "snapshot.pagebroker-benchmark/v1"
@@ -440,7 +440,13 @@ class Campaign:
         if self.credentials:
             validate_credentials(args.credentials_source, args.credentials_expire_at,
                                  dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=budget(args)), self.credentials)
-        self.broker = launch_broker(args, self.paths, child_environment(self.credentials))
+        broker_environment = child_environment()
+        if self.credentials:
+            # socket_dir is private, outside result collection, and removed after shutdown.
+            credentials_path = self.paths["socket_dir"] / "credentials"
+            write_broker_credentials(credentials_path, self.credentials)
+            broker_environment["AWS_SHARED_CREDENTIALS_FILE"] = str(credentials_path)
+        self.broker = launch_broker(args, self.paths, broker_environment)
         self.watch(self.broker)
         proc = Path("/proc") / str(self.broker.pid)
         self.identity = dict(pid=self.broker.pid, start_ticks=proc_start_ticks((proc / "stat").read_text()),

@@ -291,3 +291,8 @@ uv run --locked --project benchmarks --group test pytest benchmarks/tests -q
 go test ./agent/cmd/pagebroker-bench ./agent/internal/pagebroker
 make -C agent pagebroker-bench
 ```
+
+The PageBroker benchmark supplies the daemon with a private mode-0600 shared
+credentials file via `AWS_SHARED_CREDENTIALS_FILE`. It lives outside collected
+results and is removed after shutdown. The SDK cleanup worker retains its own
+explicit credential environment.

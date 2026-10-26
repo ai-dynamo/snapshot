@@ -388,6 +388,26 @@ def test_credentials(monkeypatch):
     assert s.child_environment(KEYS)["AWS_SECRET_ACCESS_KEY"] == KEYS["AWS_SECRET_ACCESS_KEY"]
 
 
+def test_broker_credentials_file_is_private_and_preserves_session_token(tmp_path):
+    import configparser
+    import stat
+    path = tmp_path / "credentials"
+    credentials = dict(KEYS, AWS_SESSION_TOKEN="fake-token==")
+    s.write_broker_credentials(path, credentials)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    parsed = configparser.ConfigParser()
+    parsed.read(path)
+    assert dict(parsed["default"]) == {"aws_access_key_id": KEYS["AWS_ACCESS_KEY_ID"],
+                                      "aws_secret_access_key": KEYS["AWS_SECRET_ACCESS_KEY"],
+                                      "aws_session_token": "fake-token=="}
+    with pytest.raises(FileExistsError):
+        s.write_broker_credentials(path, credentials)
+    for bad in ({}, dict(KEYS, AWS_SESSION_TOKEN="bad\nvalue")):
+        with pytest.raises(ValueError):
+            s.write_broker_credentials(tmp_path / "invalid", bad)
+        assert not (tmp_path / "invalid").exists()
+
+
 def test_render_config_and_no_secrets(tmp_path):
     template = tmp_path / "template.json"
     original = dict(CONFIG, prefix="tests", storeId="original")
