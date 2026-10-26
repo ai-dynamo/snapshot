@@ -97,7 +97,7 @@ class FaultService:
             if operation == "put" and (scenario in ("denied", "concurrent-failure")
                                        or (scenario == "bounded" and key.endswith("/data/bad"))):
                 return self.error(start_response, "AccessDenied", "403 Forbidden")
-            if scenario == "engine-partial" and operation == "put" and key.endswith("/" + "a" * 64 + "/data/last"):
+            if scenario == "engine-partial" and operation == "put" and key.endswith("/" + "artifacts/a/containers/main" + "/data/last"):
                 return self.error(start_response, "AccessDenied", "403 Forbidden")
             if scenario in ("part-failure", "abort-failure", "verify-failure") and operation == "part" and query["partNumber"] != ["1"]:
                 with self.changed:
@@ -174,7 +174,7 @@ class FaultService:
             if scenario in ("lost-put", "lost-metadata-put") and operation == "put":
                 return self.error(start_response)
             if (scenario == "corrupt" and operation == "get" and success and body
-                    and key.endswith("/" + "a" * 64 + "/data/data")):
+                    and key.endswith("/" + "artifacts/a/containers/main" + "/data/data")):
                 body = bytes([body[0] ^ 1]) + body[1:]
             start_response(response["status"], response["headers"])
             return [body]
@@ -192,7 +192,7 @@ class FaultService:
             assert self.counts["destination-exists", "head"] == 4, self.counts
             assert self.counts["destination-exists", "get"] == 0, self.counts
         if self.counts["engine-partial", "put"]:
-            prefix = "roundtrip/engine-partial/" + "a" * 64 + "/"
+            prefix = "roundtrip/engine-partial/" + "artifacts/a/containers/main" + "/"
             assert client.head_object(Bucket=bucket, Key=prefix + "data/data")["ContentLength"] > 0
             keys = client.list_objects_v2(Bucket=bucket, Prefix=prefix)
             # A batch may finish other payloads after one file fails, but never publishes its index.
@@ -242,7 +242,7 @@ class FaultService:
         if self.counts["verify-failure", "create"]:
             assert self.counts["verify-failure", "list_parts"] == 0, self.counts
         if self.counts["tree", "put"]:
-            metadata = client.head_object(Bucket=bucket, Key="roundtrip/tree/" + "a" * 64 + "/data/empty")
+            metadata = client.head_object(Bucket=bucket, Key="roundtrip/tree/" + "artifacts/a/containers/main" + "/data/empty")
             assert metadata["ContentLength"] == 0
 
 
@@ -375,6 +375,9 @@ def run(args, environment, faults=None):
             metadata = client.head_object(Bucket=bucket, Key=key)
             if metadata["ContentLength"] != path.stat().st_size:
                 raise RuntimeError("S3 fixture size mismatch")
+        credentials = Path(directory) / "credentials"
+        credentials.write_text("[default]\naws_access_key_id=local-test-access-key\naws_secret_access_key=local-test-secret-key\n")
+        environment["AWS_SHARED_CREDENTIALS_FILE"] = str(credentials)
         environment["PAGEBROKER_S3_TEST_FIXTURE"] = str(fixture)
         container_name = None
         if args.image:
@@ -382,6 +385,7 @@ def run(args, environment, faults=None):
             command = ["docker", "run", "--rm", "--network=host", "--user", f"{os.getuid()}:{os.getgid()}"]
             command += ["--name", container_name]
             command += ["--mount", f"type=bind,source={fixture},target={fixture},readonly"]
+            command += ["--mount", f"type=bind,source={credentials},target={credentials},readonly"]
             if environment.get("AWS_CA_BUNDLE"):
                 ca = Path(environment["AWS_CA_BUNDLE"]).resolve()
                 environment["AWS_CA_BUNDLE"] = str(ca)
