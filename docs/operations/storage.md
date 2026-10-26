@@ -276,7 +276,7 @@ these values needs a PageBroker restart.
 | `storage.s3.addressing` | `addressing` in the JSON, and `RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING` (`0` for `path`, `1` for `virtual`) in the environment | PageBroker's `virtual` |
 | `storage.s3.allowHttp` | `allowHttp` in the JSON. The chart refuses a plain-http endpoint unless it is set | `false` |
 | `storage.s3.caBundleConfigMapRef`, `storage.s3.caBundleConfigMapKey` | The bundle mounted at `/etc/snapshot-s3-ca/<key>`, named by `caFile` in the JSON and by `AWS_CA_BUNDLE` in the environment. The operator's maintenance client gets the same bundle | system trust |
-| `pageBroker.s3.limits` | The `limits` object in the JSON, passed through as given | see below |
+| `pageBroker.s3.limits` | The `limits` object in the JSON, with `stagingBytes` filled in from the staging cap when omitted; other keys pass through as given | see below |
 | `pageBroker.modelStreamer` | A second JSON file, mounted at `/etc/snapshot-model-streamer/model-streamer.json` and passed with `--model-streamer-config` | no file |
 
 `pageBroker.s3.limits` accepts PageBroker's own keys, with its bounds:
@@ -293,10 +293,12 @@ these values needs a PageBroker restart.
 | `uploadRequestRetries` | 3 | 0 to 10 |
 | `uploadConnectSeconds` | the smaller of 5 and `requestSeconds` | 1 to `requestSeconds` |
 
-The chart fills `stagingBytes` from the staging volume cap unless it is set, so
-PageBroker refuses a staged restore the volume cannot hold instead of filling
-it. The chart rejects a key PageBroker does not know, an `activeTransactions` at
-or above `maxConcurrentRequests`, and an `addressing` other than `path` or
+When `stagingBytes` is omitted, the chart fills it from the staging volume cap,
+so PageBroker refuses a staged restore the volume cannot hold instead of
+filling it; an explicit `stagingBytes` is not checked against the volume and
+can exceed what it actually holds. The chart rejects a key PageBroker does not
+know, an `activeTransactions` at or above `maxConcurrentRequests`, and an
+`addressing` other than `path` or
 `virtual`; PageBroker enforces the remaining bounds at startup.
 
 `pageBroker.modelStreamer` is written as given. Its keys are PageBroker's Model
