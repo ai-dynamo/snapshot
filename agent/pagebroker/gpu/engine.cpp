@@ -362,7 +362,8 @@ struct GpuEngine::GpuEngineState {
       });
     }
     // The pinned-memory limit is configuration, not a GPU fault, so it still
-    // stops PageBroker. It counts only the GPUs that were kept.
+    // stops PageBroker. The check above counts every GPU; this one adds CUDA's
+    // allocation rounding for the GPUs that were kept, before any ring is pinned.
     size_t total_bytes = 0;
     for (const auto& [id, device] : devices) {
       (void)id;
