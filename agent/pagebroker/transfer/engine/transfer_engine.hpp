@@ -85,5 +85,11 @@ class TransferEngine {
   virtual void PublishCheckpoint(const Path& source, const StorageBackend& destination, CheckpointInventory inventory,
       CheckpointPublication* publication = nullptr, Cancellation cancellation = {},
       TransferMode mode = TransferMode::Staged) const;
+
+  // Resolves a logical target into a publication descriptor, if artifacts are supported.
+  virtual PublishedArtifact ResolveArtifactTarget(const ArtifactTarget& target) const;
+
+  // Validates a publication descriptor, or rejects unsupported artifacts.
+  virtual void ValidateArtifact(const PublishedArtifact& artifact) const;
 };
 }  // namespace snapshot::pagebroker

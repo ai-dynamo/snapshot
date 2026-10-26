@@ -16,6 +16,7 @@
 
 #include "gpu/storage_manifest.hpp"
 #include "gpu/checkpoint.hpp"
+#include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
 #include "transfer/engine/posix/posix_copy_engine.hpp"
 #include "transfer/filesystem/filesystem_storage.hpp"
 #include "transfer/checkpoint_inventory.hpp"
@@ -23,6 +24,10 @@
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
+
+constexpr char kS3StagingDirectory[] = "s3";
+constexpr char kRestoreStagingDirectory[] = "restore";
+constexpr char kCheckpointStagingDirectory[] = "checkpoint";
 
 constexpr auto kGpuAbortTimeout = std::chrono::seconds{30};
 constexpr auto kTerminalTransactionRetention = std::chrono::hours(1);
@@ -70,18 +75,9 @@ AbortSucceeded(const Request& request)
 const StorageBackend&
 ValidateStagedRestore(const StagedRestoreRequest& request)
 {
-  switch (request.selector_case()) {
-    case StagedRestoreRequest::kSource:
-      if (request.source().kind_case() == StorageBackend::KIND_NOT_SET)
-        throw std::invalid_argument("restore source is required");
-      return request.source();
-    case StagedRestoreRequest::kArtifact:
-      // No backend serves store-bound artifacts yet.
-      throw std::invalid_argument("artifact-addressed restore is not implemented");
-    case StagedRestoreRequest::SELECTOR_NOT_SET:
-    default:
-      throw std::invalid_argument("restore source is required");
-  }
+  if (!request.has_source() || request.source().kind_case() == StorageBackend::KIND_NOT_SET)
+    throw std::invalid_argument("restore source is required");
+  return request.source();
 }
 
 void
@@ -94,18 +90,9 @@ ValidateArtifactMetadata(const GetArtifactMetadataRequest& request)
 const StorageBackend&
 ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
 {
-  switch (request.selector_case()) {
-    case PrepareStagedCheckpointRequest::kDestination:
-      if (request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
-        throw std::invalid_argument("checkpoint destination is required");
-      return request.destination();
-    case PrepareStagedCheckpointRequest::kTarget:
-      // No backend serves store-bound artifacts yet.
-      throw std::invalid_argument("artifact-addressed checkpoint is not implemented");
-    case PrepareStagedCheckpointRequest::SELECTOR_NOT_SET:
-    default:
-      throw std::invalid_argument("checkpoint destination is required");
-  }
+  if (!request.has_destination() || request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
+    throw std::invalid_argument("checkpoint destination is required");
+  return request.destination();
 }
 
 bool
@@ -284,14 +271,31 @@ class GpuCompletion {
 
 }  // namespace
 
-Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine, std::chrono::seconds lifetime)
-    : lifetime_(lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
+Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine,
+    std::optional<S3Config> config, std::chrono::seconds lifetime)
+    : lifetime_(config ? config->transaction_lifetime : lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
-  io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
-  filesystem_storage::RemoveStaging(staging_root_ / "restore");
-  filesystem_storage::RemoveStaging(staging_root_ / "checkpoint");
-  fs::create_directories(staging_root_ / "restore");
-  fs::create_directories(staging_root_ / "checkpoint");
+  const auto staging_base = staging_root_;
+  if (config) {
+    resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions);
+    staging_root_ /= kS3StagingDirectory;
+    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config)));
+  } else {
+    io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
+  }
+  // A new daemon starts with no transactions; discard staging from the previous
+  // instance for both storage modes without changing published artifacts.
+  for (const auto& root : {staging_base, staging_base / kS3StagingDirectory}) {
+    // Do not follow a stale S3 namespace link while cleaning its children.
+    if (fs::is_symlink(fs::symlink_status(root))) {
+      filesystem_storage::RemoveStaging(root);
+      continue;
+    }
+    filesystem_storage::RemoveStaging(root / kRestoreStagingDirectory);
+    filesystem_storage::RemoveStaging(root / kCheckpointStagingDirectory);
+  }
+  fs::create_directories(staging_root_ / kRestoreStagingDirectory);
+  fs::create_directories(staging_root_ / kCheckpointStagingDirectory);
 }
 
 Broker::~Broker()
@@ -505,6 +509,10 @@ Broker::HandleRequest(const Request& request)
       case Request::kStagedRestore:
         response = Restore(request);
         break;
+      case Request::kGetArtifactMetadata:
+        ValidateArtifactMetadata(request.get_artifact_metadata());
+        response = Metadata(request);
+        break;
       case Request::kPrepareStagedCheckpoint:
         response = PrepareCheckpoint(request);
         break;
@@ -513,10 +521,6 @@ Broker::HandleRequest(const Request& request)
         break;
       case Request::kAbort:
         response = Abort(request);
-        break;
-      case Request::kGetArtifactMetadata:
-        ValidateArtifactMetadata(request.get_artifact_metadata());
-        response = Fail(request, Failure::INVALID_REQUEST, "artifact metadata retrieval is not implemented");
         break;
       default:
         response = Fail(request, Failure::INVALID_REQUEST, "unsupported operation");
@@ -534,7 +538,25 @@ Broker::HandleRequest(const Request& request)
   return response;
 }
 
+const TransferEngine&
+Broker::ArtifactEngine(const IOEngine* selection) const
+{
+  if (selection && !selection->has_model_streamer())
+    throw std::invalid_argument("S3 artifacts require the Model Streamer engine");
+  return Engine(IoEngine::MODEL_STREAMER);
+}
 
+Response
+Broker::Metadata(const Request& request)
+{
+  const auto& operation = request.get_artifact_metadata();
+  if (operation.has_target())
+    throw std::invalid_argument("artifact metadata lookup by identity is not implemented");
+  const auto& artifact = operation.artifact();
+  const auto& engine = ArtifactEngine();
+  engine.ValidateArtifact(artifact);
+  return StageRestore(request, {}, engine, &artifact);
+}
 
 Response
 Broker::DirectRestore(const Request& request)
@@ -548,6 +570,11 @@ Response
 Broker::Restore(const Request& request)
 {
   const auto& operation = request.staged_restore();
+  if (operation.has_artifact()) {
+    const auto& engine = ArtifactEngine(operation.has_io_engine() ? &operation.io_engine() : nullptr);
+    engine.ValidateArtifact(operation.artifact());
+    return StageRestore(request, {}, engine, &operation.artifact());
+  }
   const auto& source = ValidateStagedRestore(operation);
   const auto& engine = Engine(operation.io_engine());
   return StageRestore(request, source, engine);
@@ -557,7 +584,7 @@ Response
 Broker::StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine,
       const PublishedArtifact* artifact)
 {
-  const Path restore_root = staging_root_ / "restore";
+  const Path restore_root = staging_root_ / kRestoreStagingDirectory;
   const bool direct = request.has_direct_restore();
   const auto mode = direct ? TransferMode::Direct : TransferMode::Staged;
   const Path staging_directory = direct ? Path{} : TransactionDirectory(restore_root, request.transaction_id());
@@ -622,9 +649,11 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
   auto response = Reply(request);
   if (direct)
     response.mutable_direct_restore_ready();
-  else if (request.has_get_artifact_metadata())
-    response.mutable_get_artifact_metadata_complete()->set_manifest_directory(access.image_directory.string());
-  else
+  else if (request.has_get_artifact_metadata()) {
+    auto* complete = response.mutable_get_artifact_metadata_complete();
+    complete->set_manifest_directory(access.image_directory.string());
+    *complete->mutable_artifact() = *artifact;
+  } else
     response.mutable_staged_restore_directory()->set_image_directory(access.image_directory.string());
   return response;
 }
@@ -633,6 +662,11 @@ Response
 Broker::PrepareCheckpoint(const Request& request)
 {
   const auto& operation = request.prepare_staged_checkpoint();
+  if (operation.has_target()) {
+    const auto& engine = ArtifactEngine(operation.has_io_engine() ? &operation.io_engine() : nullptr);
+    const auto artifact = engine.ResolveArtifactTarget(operation.target());
+    return StageCheckpoint(request, {}, engine, &artifact);
+  }
   const auto& destination = ValidateStagedCheckpoint(operation);
   const auto& engine = Engine(operation.io_engine());
   return StageCheckpoint(request, destination, engine);
@@ -644,7 +678,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
 {
   const bool direct = request.has_prepare_direct_checkpoint();
   const auto mode = direct ? TransferMode::Direct : TransferMode::Staged;
-  const Path staging_directory = TransactionDirectory(staging_root_ / "checkpoint", request.transaction_id());
+  const Path staging_directory = TransactionDirectory(staging_root_ / kCheckpointStagingDirectory, request.transaction_id());
   Path output = staging_directory;
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());

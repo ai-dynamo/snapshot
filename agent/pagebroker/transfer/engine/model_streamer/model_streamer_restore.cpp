@@ -15,7 +15,6 @@
 #include <filesystem>
 #include <future>
 #include <limits>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -44,7 +43,6 @@ constexpr auto kCancellationPollInterval = std::chrono::milliseconds(25);
 // Bound outstanding submissions while reusing the native session across restores.
 // Failed submissions retain their mappings until the session drains.
 constexpr std::size_t kActiveSubmissionLimit = 8;
-constexpr char kS3UriPrefix[] = "s3://";
 
 bool
 IsRecoverableRangeStatus(int status)
@@ -88,43 +86,6 @@ ApplyPermissions(const Path& path, fs::perms permissions, Cancellation cancellat
   cancellation.ThrowIfCancelled();
   if (permissions != fs::perms::unknown)
     fs::permissions(path, permissions, fs::perm_options::replace);
-}
-
-void
-ValidateRestoreInventory(const CheckpointInventory& inventory, Cancellation cancellation)
-{
-  cancellation.ThrowIfCancelled();
-  std::set<Path> directories;
-  std::set<Path> entries;
-  for (const auto& directory : inventory.directories) {
-    if (!IsSafeRelativePath(directory.relative_path))
-      throw std::invalid_argument("restore inventory contains an unsafe directory path");
-    const Path parent = directory.relative_path.parent_path();
-    // create_directory() needs each parent to exist before its children.
-    if (!parent.empty() && !directories.contains(parent))
-      throw std::invalid_argument("restore inventory directories must be ordered parent-first");
-    if (!entries.insert(directory.relative_path).second)
-      throw std::invalid_argument("restore inventory contains a duplicate path");
-    directories.insert(directory.relative_path);
-    cancellation.ThrowIfCancelled();
-  }
-  for (const auto& file : inventory.files) {
-    // Source locators are remote object addresses; never interpret them as local paths.
-    const auto& locator = file.source_locator;
-    constexpr auto prefix_size = sizeof(kS3UriPrefix) - 1;
-    const auto slash = locator.find('/', prefix_size);
-    if (!locator.starts_with(kS3UriPrefix) || locator.find('\0') != std::string::npos ||
-        slash == std::string::npos || slash == prefix_size || slash + 1 == locator.size())
-      throw std::invalid_argument("Model Streamer requires an S3 object source");
-    if (!IsSafeRelativePath(file.relative_path))
-      throw std::invalid_argument("restore inventory contains an unsafe file path");
-    const Path parent = file.relative_path.parent_path();
-    if (!parent.empty() && !directories.contains(parent))
-      throw std::invalid_argument("restore inventory file parent is missing");
-    if (!entries.insert(file.relative_path).second)
-      throw std::invalid_argument("restore inventory contains a duplicate path");
-    cancellation.ThrowIfCancelled();
-  }
 }
 
 size_t
@@ -708,7 +669,7 @@ ModelStreamerRestore::RestoreFiles(const CheckpointInventory& inventory, const P
 void
 ModelStreamerRestore::Stage(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
-  ValidateRestoreInventory(inventory, cancellation);
+  cancellation.ThrowIfCancelled();
   CreateDirectoryTree(inventory, destination, cancellation);
   std::call_once(start_once_, [this] { worker_ = std::thread([this] { Run(); }); });
   RestoreFiles(inventory, destination, cancellation);
