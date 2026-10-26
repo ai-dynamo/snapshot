@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+**
+!agent/
+!agent/pagebroker/
+!agent/pagebroker/**
+!hack/
+!hack/pagebroker-integration/
+!hack/pagebroker-integration/**
+agent/pagebroker/build/
+agent/pagebroker/pagebroker
+agent/pagebroker/v1/pagebroker.pb.*
+hack/pagebroker-integration/.venv/
+**/__pycache__/

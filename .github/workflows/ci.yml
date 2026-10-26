@@ -200,3 +200,15 @@ jobs:
           # inline call would drop the cache flags and still build.
           cache_flags="$(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
           make docker-build-pagebroker REGISTRY=local VERSION=ci DOCKER_BUILD_ARGS="${cache_flags} --load"
+
+  pagebroker-integration:
+    name: PageBroker integration tests
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - run: make pagebroker-integration-test REGISTRY=local VERSION=ci
