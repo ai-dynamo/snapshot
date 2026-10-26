@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-members = ["abi", "core", "protocol", "coordinator", "launcher"]
+members = ["abi", "core", "protocol", "coordinator", "launcher", "gpu-tests"]
 resolver = "3"
 
 [workspace.package]

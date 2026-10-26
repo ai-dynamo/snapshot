@@ -10,6 +10,7 @@ include $(REPO_HACK_DIR)/tools.mk
 
 PROTOC_GEN_GO := $(TOOLS_BIN_DIR)/protoc-gen-go
 CUDA_ROOT ?= /usr/local/cuda
+GOARCH ?= amd64
 
 # Native artifacts have their own build and CI gate so Go-only work needs no Docker.
 build: go-build
@@ -21,8 +22,8 @@ cuinterpose-test:
 	$(MAKE) -C cmd/cuinterpose test
 
 go-build:
-	GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent
-	GOOS=linux GOARCH=amd64 go build -o bin/nsrestore ./cmd/nsrestore
+	GOOS=linux GOARCH=$(GOARCH) go build -o bin/agent ./cmd/agent
+	GOOS=linux GOARCH=$(GOARCH) go build -o bin/nsrestore ./cmd/nsrestore
 
 # Conventional driver-managed checkpointing and state queries stay in this CLI.
 cuda-checkpoint-helper:

@@ -6,7 +6,9 @@
 The e2e run must test the commit it checked out, so the tag is derived from
 HEAD (v0.0.0-g<sha8>) and merely verified to be published for the operator,
 agent, and pagebroker packages. If push-artifacts has not published HEAD yet,
-the run fails instead of silently testing something else.
+the run fails instead of silently testing something else. A scheduled run can
+start while push-artifacts is still building the commit it just checked out
+(a build takes 12-15 minutes), so --wait-seconds polls for the tags first.
 
 Pull requests are the exception: push-artifacts publishes only main and
 release branches, so a PR head usually has no images. With --fallback-main the
@@ -34,12 +36,14 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 
 
 GITHUB_API_VERSION = "2022-11-28"
 PAGE_SIZE = 100
+POLL_INTERVAL_SECONDS = 30
 ORG = "ai-dynamo"
 REPOSITORY = f"{ORG}/snapshot"
 PACKAGES = ("snapshot/operator", "snapshot/agent", "snapshot/pagebroker")
@@ -143,6 +147,18 @@ def newest_plain_tag(headers: dict[str, str]) -> str | None:
         if tag in common:
             return tag
     return None
+
+
+def wait_for_published(tag: str, headers: dict[str, str], wait_seconds: int) -> bool:
+    deadline = time.monotonic() + wait_seconds
+    while not published_for_all(tag, headers):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        print(f"Tag {tag} is not published yet; retrying ({int(remaining)}s left)", file=sys.stderr)
+        time.sleep(min(POLL_INTERVAL_SECONDS, remaining))
+        _VERSIONS_CACHE.clear()
+    return True
 
 
 def write_github_env(tag: str) -> None:
@@ -299,6 +315,16 @@ def main() -> int:
         help="upgrade from the newest patch release of each of the last N minor versions",
     )
     parser.add_argument(
+        "--wait-seconds",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "poll up to N seconds for the head commit's tag to be published "
+            "before failing; not used with --fallback-main, which has nothing to wait for"
+        ),
+    )
+    parser.add_argument(
         "--to",
         help=(
             "version under test, dropped from the upgrade-from list; defaults to "
@@ -319,11 +345,15 @@ def main() -> int:
         return resolve_upgrade_from(args, headers)
     if args.to:
         parser.error("--to only applies with --from or --from-minor-versions")
+    if args.wait_seconds < 0:
+        parser.error("--wait-seconds must not be negative")
+    if args.wait_seconds and args.fallback_main:
+        parser.error("--wait-seconds does not apply with --fallback-main")
 
     sha = head_sha()
     tag = dev_tag(sha)
 
-    if published_for_all(tag, headers):
+    if wait_for_published(tag, headers, args.wait_seconds):
         write_github_env(tag)
         print(f"Resolved Snapshot image tag: {tag} (commit {sha})")
         return 0

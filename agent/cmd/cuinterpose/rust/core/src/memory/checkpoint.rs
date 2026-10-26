@@ -89,6 +89,7 @@ impl ProcessState {
             let record = Record::Allocation {
                 allocation: allocation.reference,
                 shared: allocation.shared,
+                peer_access_granted: allocation.peer_access_granted,
                 size: allocation.size as u64,
                 allocation_type: allocation.properties.type_ as u32,
                 handle_types: allocation.properties.requestedHandleTypes.0,
@@ -138,7 +139,7 @@ impl ProcessState {
 
     /// Check the complete local plan before changing any state. The coordinator
     /// selects holders from the frozen group. Each participant verifies that the
-    /// plan names exactly its shared allocations with their original identities.
+    /// plan names exactly its host-carrier allocations with their original identities.
     fn select_checkpoint_owners(
         &mut self,
         owners: &[cuinterpose_protocol::AllocationOwner],
@@ -150,7 +151,7 @@ impl ProcessState {
                 .get(&owner.allocation.id)
                 .and_then(Memblock::unicast)
                 .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-            if !allocation.shared
+            if !allocation.uses_host_carrier()
                 || allocation.reference != owner.allocation
                 || owner.owner_pid == 0
                 || selected
@@ -165,7 +166,7 @@ impl ProcessState {
                 .memblocks
                 .values()
                 .filter_map(Memblock::unicast)
-                .filter(|a| a.shared)
+                .filter(|a| a.uses_host_carrier())
                 .count()
         {
             return Err(CUDA_ERROR_INVALID_VALUE.into());
@@ -190,7 +191,7 @@ impl ProcessState {
                     .values()
                     .filter_map(Memblock::unicast)
                     .filter(|a| {
-                        a.shared
+                        a.uses_host_carrier()
                             && self.checkpoint_owners.get(&a.reference.id)
                                 == Some(&self.namespace_pid)
                     })
@@ -231,7 +232,7 @@ impl ProcessState {
                     .memblocks
                     .values_mut()
                     .filter_map(Memblock::unicast_mut)
-                    .filter(|a| a.shared)
+                    .filter(|a| a.uses_host_carrier())
                 {
                     // These context-independent VMM operations run directly to avoid
                     // creating and destroying a primary context for every allocation in
@@ -257,7 +258,7 @@ impl ProcessState {
                     .values()
                     .filter_map(Memblock::unicast)
                     .filter(|a| {
-                        a.shared
+                        a.uses_host_carrier()
                             && self.checkpoint_owners.get(&a.reference.id)
                                 == Some(&self.namespace_pid)
                     })
@@ -287,7 +288,7 @@ impl ProcessState {
                     .values_mut()
                     .filter_map(Memblock::unicast_mut)
                     .filter(|a| {
-                        a.shared
+                        a.uses_host_carrier()
                             && self.checkpoint_owners.get(&a.reference.id)
                                 != Some(&self.namespace_pid)
                     })
@@ -320,7 +321,9 @@ impl ProcessState {
         {
             let owned_here =
                 self.checkpoint_owners.get(&allocation.reference.id) == Some(&self.namespace_pid);
-            if allocation.shared && owned_here == (participants == Participants::Owners) {
+            if allocation.uses_host_carrier()
+                && owned_here == (participants == Participants::Owners)
+            {
                 restore_allocation(allocation, &self.mappings, participants)?;
             }
         }
@@ -458,6 +461,8 @@ mod tests {
                     ..unsafe { std::mem::zeroed() }
                 },
                 shared,
+                peer_access_granted: false,
+                home_device: Some(0),
                 context: 0,
             })
             .unwrap();

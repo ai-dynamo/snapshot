@@ -33,21 +33,19 @@ pub fn cuMemCreate(
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *prop };
-    let supported = properties.requestedHandleTypes
-        == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
-    if !supported && properties.requestedHandleTypes.0 != 0 {
-        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
-    }
-    if supported {
-        vmm::validate_properties(&properties)?;
-    }
+    let tracked = vmm::tracked(&properties)?;
     let mut state = active()?;
-    let reference = if supported {
+    let reference = if tracked {
         Some(state.new_reference()?)
     } else {
         None
     };
-    let context = if supported { driver::context()? } else { 0 };
+    let context = if tracked { driver::context()? } else { 0 };
+    let home_device = if tracked {
+        vmm::home_device(&properties, context)?
+    } else {
+        None
+    };
     let mut driver = 0;
     let create = crate::driver::symbols::cuMemCreate()?;
     crate::driver::result(unsafe { create(&mut driver, size, &properties, flags) })?;
@@ -60,6 +58,8 @@ pub fn cuMemCreate(
             size,
             properties,
             shared: false,
+            peer_access_granted: false,
+            home_device,
             context,
         })),
         None => driver,
@@ -89,6 +89,12 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let mut state = active()?;
+    // Converted malloc and its IPC imports must keep cudaMalloc semantics, where CUDA
+    // refuses to retain the allocation. Otherwise libraries such as NCCL export them
+    // through cuMem paths that native cudaMalloc never reaches.
+    if state.malloc_region(address as u64).is_some() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
     let mapping = state
         .mappings
         .range(..=address as u64)
@@ -196,7 +202,7 @@ pub fn cuMemSetAccess(
         .collect();
     unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
     for (start, access) in updates {
-        state.mappings.get_mut(&start).unwrap().access = access;
+        state.set_mapping_access(start, access);
     }
     Ok(())
 }
@@ -435,12 +441,35 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
         size: extent,
         properties,
         shared: false,
+        peer_access_granted: false,
+        home_device: Some(device),
         context,
     }));
     let opens = 0;
     let address = state.map_malloc(handle, size, extent, opens, context, device)?;
     unsafe { out.write(address) };
     Ok(())
+}
+
+pub fn cuPointerGetAttribute(
+    data: *mut c_void,
+    attribute: CUpointer_attribute,
+    address: CUdeviceptr,
+) -> Result<()> {
+    let state = runtime::active()?;
+    // Like cudaMalloc, converted malloc supports cudaIpcGetMemHandle and its IPC imports
+    // do not, while the driver reports neither for VMM memory. CUDA writes a 32-bit flag.
+    if attribute == CUpointer_attribute::CU_POINTER_ATTRIBUTE_IS_LEGACY_CUDA_IPC_CAPABLE
+        && !data.is_null()
+        && let Some(region) = state.malloc_region(address)
+    {
+        unsafe { data.cast::<u32>().write(u32::from(!region.is_import())) };
+        return Ok(());
+    }
+    runtime::call_unlocked(state, || unsafe {
+        driver::cuPointerGetAttribute(data, attribute, address)
+    })
+    .map(|_| ())
 }
 
 pub fn cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr) -> Result<()> {

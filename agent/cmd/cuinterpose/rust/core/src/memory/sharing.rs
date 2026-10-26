@@ -358,6 +358,9 @@ pub(crate) fn import_reference(
         size,
         properties,
         shared: true,
+        peer_access_granted: false,
+        // Imported backing already uses the host carrier.
+        home_device: None,
         context,
     }));
     Ok((state, handle))

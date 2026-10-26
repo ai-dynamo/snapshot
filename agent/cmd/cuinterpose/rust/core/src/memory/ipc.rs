@@ -100,7 +100,7 @@ impl ProcessState {
                 }
             }
             unsafe { driver::cuMemSetAccess(address, extent, access.as_ptr(), access.len()) }?;
-            self.mappings.get_mut(&address).unwrap().access = access;
+            self.set_mapping_access(address, access);
             self.malloc_regions.insert(
                 address,
                 MallocRegion {
@@ -129,6 +129,15 @@ impl ProcessState {
             runtime::must_complete(self.release_virtual_handle(handle));
         }
         result
+    }
+
+    /// The converted malloc or IPC import whose VA reservation contains `address`.
+    pub(crate) fn malloc_region(&self, address: CUdeviceptr) -> Option<&MallocRegion> {
+        self.malloc_regions
+            .range(..=address)
+            .next_back()
+            .filter(|(start, region)| address - **start < region.extent as u64)
+            .map(|(_, region)| region)
     }
 
     pub(crate) fn unmap_malloc(&mut self, address: CUdeviceptr) -> Result<()> {
@@ -217,7 +226,7 @@ pub fn cuCtxEnablePeerAccess(peer: CUcontext, flags: u32) -> Result<()> {
         }
     }
     for update in updates {
-        state.mappings.get_mut(&update.address).unwrap().access = update.access;
+        state.set_mapping_access(update.address, update.access);
     }
     state
         .malloc_peers
@@ -300,8 +309,13 @@ pub(crate) fn decode(handle: CUipcMemHandle) -> Result<(AllocationReference, usi
 }
 
 impl MallocRegion {
+    /// cuIpcGetMemHandle accepts only mallocs, not IPC imports.
+    pub(crate) fn is_import(&self) -> bool {
+        self.opens != 0
+    }
+
     pub(crate) fn export_handle(&self, reference: AllocationReference) -> Result<CUipcMemHandle> {
-        if self.opens != 0 {
+        if self.is_import() {
             return Err(CUresult::CUDA_ERROR_INVALID_VALUE.into());
         }
         let handle = VirtualIpcMemHandle {

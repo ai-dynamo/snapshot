@@ -63,6 +63,12 @@ other two jobs. Running all three before pushing means CI holds no surprises.
 only downloaded for that platform. On other hosts, run `make linux-build` and
 `make linux-test`, which execute in a container, and let CI run the full gate.
 
+**Document the change where readers look for it.** Each kind of fact has one
+page, and a change usually adds a few table rows and a few sentences. See
+[Writing documentation](docs/development/writing-docs.md) for where
+a change goes and [Naming conventions](docs/development/naming.md) for names and
+terms.
+
 **Write conventional commit messages.** Subjects follow
 [Conventional Commits](https://www.conventionalcommits.org/): a type — one of
 `feat`, `fix`, `docs`, `ci`, `build`, `refactor`, `perf`, `test`, `chore` — an
@@ -86,18 +92,18 @@ not touch the operator or the agent. See the
 [usage guides](docs/guides/README.md) for the shape of the flow.
 
 To add one, follow an existing framework end to end —
-[vLLM](docs/guides/vllm.md) is the smallest — and provide the same four pieces
+[vLLM](docs/guides/vllm.md) is the smallest — and provide the same three pieces
 under `docs/guides/<framework>/`:
 
 | File | What it does |
 | --- | --- |
-| `Dockerfile.<framework>` | Starts from the framework's runtime image and adds the entrypoint program |
 | `app.py` | Cooperates with the checkpoint/restore lifecycle: loads the model, then signals readiness |
-| `deployment.yaml` | Deploys the replica that gets checkpointed |
-| `restore-deployment.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
+| `capture/<model>.yaml` | Deploys the replica that gets checkpointed |
+| `restore/1-gpu.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
 
 Plus `docs/guides/<framework>.md` walking through it, and an entry in the
-[guides index](docs/guides/README.md).
+[guides index](docs/guides/README.md) with a row in its recipe table for each
+model you add.
 
 The contract your entrypoint has to honor — the control volume, the startup
 gate, the `SNAPSHOT_CONTROL_DIR` environment variable, and the seccomp profile
@@ -110,6 +116,19 @@ Extending the API surface instead — a new field, or a new custom resource — 
 a larger change that affects stored checkpoints. Open an issue and agree the
 approach before writing code, and expect the CRD compatibility question to be
 the bulk of the review.
+
+### Documenting a feature-specific version floor
+
+Snapshot states one general minimum dependency floor — GPU Operator and CUDA
+driver version — in the README's
+[Prerequisites](README.md#prerequisites). If your feature only works on a
+newer driver, GPU Operator, or other dependency version than that floor, add a
+row for it to the table in
+[Compatibility](docs/reference/compatibility.md) in the same pull request.
+Don't leave the floor implicit in an error message or a code comment — someone
+deciding whether to adopt the feature needs to find it in the docs, not in the
+failure path. If you're drafting an SNEP, record it under that proposal's
+`Dependencies` section too.
 
 ## AI-assisted contributions
 

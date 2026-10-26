@@ -82,7 +82,7 @@ tests:
           value: 50m
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
-          value: 128Mi
+          value: 256Mi
 
   - it: omits the manager seccomp profile for the OpenShift anyuid SCC
     set:

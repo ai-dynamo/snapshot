@@ -14,9 +14,17 @@ pub struct AllocationSummary {
     pub reference: AllocationReference,
     pub size: u64,
     pub shared: bool,
+    /// Any holder granted another GPU access.
+    pub peer_access_granted: bool,
     pub owner_pid: NamespacePid,
     pub holders: BTreeSet<NamespacePid>,
     location: MemoryLocation,
+}
+
+impl AllocationSummary {
+    pub fn uses_host_carrier(&self) -> bool {
+        self.shared || self.peer_access_granted
+    }
 }
 struct Multicast {
     reference: AllocationReference,
@@ -47,6 +55,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                 Record::Allocation {
                     allocation,
                     shared,
+                    peer_access_granted,
                     size,
                     allocation_type,
                     handle_types,
@@ -71,12 +80,22 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         *size > 0,
                         "participant {namespace_pid}: invalid allocation extent for {allocation:?}"
                     );
+                    // Creators may be nonexportable. CUDA reports no handle types on imports.
+                    let known_handle_types = *handle_types == 0
+                        || *handle_types
+                            == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+                                .0;
                     if allocation.creator_pid == *namespace_pid {
-                        ensure!(*handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
-                            "participant {namespace_pid}: invalid allocation creator {allocation:?}: handle_types={handle_types}");
+                        // Only exportable backing can be shared.
+                        ensure!(
+                            known_handle_types && (*handle_types != 0 || !*shared),
+                            "participant {namespace_pid}: invalid allocation creator {allocation:?}: handle_types={handle_types}"
+                        );
                     } else {
-                        ensure!(*shared && (*handle_types == 0 || *handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0),
-                            "participant {namespace_pid}: invalid imported allocation {allocation:?}");
+                        ensure!(
+                            *shared && known_handle_types,
+                            "participant {namespace_pid}: invalid imported allocation {allocation:?}"
+                        );
                     }
                     let known =
                         allocations
@@ -85,6 +104,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                                 reference: *allocation,
                                 size: *size,
                                 shared: *shared,
+                                peer_access_granted: false,
                                 owner_pid: *namespace_pid,
                                 holders: BTreeSet::new(),
                                 location: *location,
@@ -100,6 +120,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                                 || known.location.id == location.id),
                         "participant {namespace_pid}: inconsistent allocation metadata for {allocation:?}"
                     );
+                    // Each holder grants peer access through its own mappings.
+                    known.peer_access_granted |= *peer_access_granted;
                     ensure!(
                         known.holders.insert(*namespace_pid),
                         "participant {namespace_pid}: duplicate allocation record for {allocation:?}"
@@ -346,6 +368,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_records::*;
     use cuinterpose_protocol::{BindingVersion, MemberRange, MulticastProperties};
 
     #[test]
@@ -401,6 +424,7 @@ mod tests {
                 allocation,
                 size: 4096,
                 shared: true,
+                peer_access_granted: false,
                 allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32,
                 handle_types: CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
                 location: MemoryLocation {
@@ -422,5 +446,214 @@ mod tests {
                 assert_eq!(summary[0].reference, allocation);
             }
         }
+    }
+
+    #[test]
+    fn creators_may_be_nonexportable() {
+        let allocation = AllocationReference {
+            creator_pid: 1,
+            id: [1; 16],
+        };
+        let record = |handle_types, shared| Record::Allocation {
+            allocation,
+            size: 4096,
+            shared,
+            peer_access_granted: true,
+            allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32,
+            handle_types,
+            location: MemoryLocation {
+                location_type: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE as u32,
+                id: 0,
+            },
+            virtual_allocation_handle_count: 1,
+        };
+        for handle_types in [
+            0,
+            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
+        ] {
+            let summary =
+                validate(&BTreeMap::from([(1, vec![record(handle_types, false)])])).unwrap();
+            assert!(summary[0].uses_host_carrier());
+        }
+        for (handle_types, shared) in [
+            (0, true),
+            (
+                CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0,
+                false,
+            ),
+        ] {
+            assert!(validate(&BTreeMap::from([(1, vec![record(handle_types, shared)])])).is_err());
+        }
+    }
+
+    /// Validation error for the records of participants 1 and 2, if any.
+    struct Rejection(Option<String>);
+
+    impl Rejection {
+        #[track_caller]
+        fn names(self, check: &str) {
+            let named = self.0.as_ref().is_some_and(|error| error.contains(check));
+            assert!(named, "{:?} lacks {check:?}", self.0);
+        }
+    }
+
+    fn rejection(first: &[Record], second: &[Record]) -> Rejection {
+        let manifest = Manifest::from([(1, first.to_vec()), (2, second.to_vec())]);
+        Rejection(validate(&manifest).err().map(|error| format!("{error:#}")))
+    }
+
+    // Participant 1 holds `record` after any valid records it references.
+    fn alone(record: Record) -> Rejection {
+        rejection(&[record], &[])
+    }
+
+    fn after_allocation(record: Record) -> Rejection {
+        rejection(&[allocation(), record], &[])
+    }
+
+    fn after_multicast(record: Record) -> Rejection {
+        rejection(&[multicast(), record], &[])
+    }
+
+    fn after_both(record: Record) -> Rejection {
+        rejection(&[allocation(), multicast(), record], &[])
+    }
+
+    // Participant 2 holds `record` after participant 1 creates and shares `A`.
+    fn imported(record: Record) -> Rejection {
+        rejection(&[shared()], &[record])
+    }
+
+    #[test]
+    fn validate_rejection_names_failed_allocation_check() {
+        alone(with!(allocation(), Allocation.location.location_type = 0))
+            .names("participant 1: unsupported allocation properties");
+        alone(with!(allocation(), Allocation.allocation_type = 0))
+            .names("participant 1: unsupported allocation properties");
+        alone(with!(allocation(), Allocation.allocation.creator_pid = 3))
+            .names("participant 1: missing creator participant");
+        alone(with!(allocation(), Allocation.size = 0))
+            .names("participant 1: invalid allocation extent");
+        alone(with!(shared(), Allocation.handle_types = 8))
+            .names("participant 1: invalid allocation creator");
+        rejection(&[allocation()], &[allocation()])
+            .names("participant 2: invalid imported allocation");
+        imported(with!(shared(), Allocation.handle_types = 8))
+            .names("participant 2: invalid imported allocation");
+        rejection(&[allocation()], &[shared()])
+            .names("participant 2: inconsistent allocation metadata");
+        rejection(
+            &[allocation()],
+            &[with!(allocation(), Allocation.allocation = A2)],
+        )
+        .names("participant 2: inconsistent allocation metadata");
+        imported(with!(shared(), Allocation.size = 8192))
+            .names("participant 2: inconsistent allocation metadata");
+        imported(with!(shared(), Allocation.location = numa(0)))
+            .names("participant 2: inconsistent allocation metadata");
+        rejection(
+            &[with!(shared(), Allocation.location = numa(1))],
+            &[with!(shared(), Allocation.location = numa(0))],
+        )
+        .names("participant 2: inconsistent allocation metadata");
+        after_allocation(allocation()).names("participant 1: duplicate allocation record");
+        imported(with!(
+            shared(),
+            Allocation.virtual_allocation_handle_count = 0
+        ))
+        .names("participant 2: missing allocation anchor");
+    }
+
+    #[test]
+    fn validate_rejection_names_failed_mapping_check() {
+        alone(mapping()).names("participant 1: missing creator for");
+        after_allocation(with!(mapping(), Mapping.allocation = A2))
+            .names("participant 1: inconsistent allocation creator");
+        rejection(&[shared()], &[mapping()])
+            .names("participant 2: inconsistent allocation creator");
+        after_allocation(with!(mapping(), Mapping.address = 0))
+            .names("participant 1: invalid mapping or mapping out of bounds");
+        after_allocation(with!(mapping(), Mapping.size = 0))
+            .names("participant 1: invalid mapping or mapping out of bounds");
+        // Ends one byte past `A`.
+        after_allocation(with!(mapping(), Mapping.offset = 1))
+            .names("participant 1: invalid mapping or mapping out of bounds");
+        after_allocation(with!(mapping(), Mapping.offset = u64::MAX))
+            .names("participant 1: invalid mapping or mapping out of bounds");
+    }
+
+    #[test]
+    fn validate_rejection_names_failed_multicast_check() {
+        alone(with!(multicast(), Multicast.properties.flags = 1))
+            .names("participant 1: invalid multicast properties");
+        alone(with!(multicast(), Multicast.properties.size = 0))
+            .names("participant 1: invalid multicast properties");
+        alone(with!(multicast(), Multicast.properties.devices = 0))
+            .names("participant 1: invalid multicast properties");
+        alone(with!(multicast(), Multicast.properties.handle_types = 0))
+            .names("participant 1: invalid multicast properties");
+        rejection(
+            &[multicast()],
+            &[with!(multicast(), Multicast.properties.size = 8192)],
+        )
+        .names("participant 2: inconsistent multicast properties");
+        rejection(&[device(), device()], &[]).names("participant 1: duplicate multicast device 0");
+        alone(device()).names("missing multicast object");
+        rejection(&[], &[multicast()]).names("must have exactly one creator; found 0");
+        after_multicast(multicast()).names("must have exactly one creator; found 2");
+        alone(multicast()).names("incomplete multicast device group");
+        after_multicast(device()).names("incomplete multicast binding group");
+    }
+
+    #[test]
+    fn validate_rejection_names_failed_multicast_binding_check() {
+        let null_address = BindingSource::Address {
+            address: 0,
+            tracked_member: None,
+        };
+        alone(binding()).names("missing multicast object");
+        after_multicast(with!(binding(), MulticastBinding.allocation = M2))
+            .names("participant 1: inconsistent multicast creator");
+        after_multicast(with!(binding(), MulticastBinding.source = null_address))
+            .names("participant 1: invalid multicast member of");
+        after_multicast(binding())
+            .names("participant 1: invalid multicast member AllocationReference");
+        after_both(with!(binding(), MulticastBinding.source = member(A2, 0)))
+            .names("participant 1: inconsistent allocation creator");
+        // Ends one byte past `A`.
+        after_both(with!(binding(), MulticastBinding.source = member(A, 1)))
+            .names("participant 1: multicast binding out of member bounds");
+        after_both(with!(
+            binding(),
+            MulticastBinding.source = member(A, u64::MAX)
+        ))
+        .names("participant 1: multicast binding out of member bounds");
+        rejection(
+            &[allocation(), multicast(), device(), binding()],
+            &[multicast(), binding()],
+        )
+        .names("participant 2: multicast binding device 0 is not attached in this participant");
+        alone(multicast_mapping()).names("missing multicast object");
+        after_multicast(with!(multicast_mapping(), MulticastMapping.allocation = M2))
+            .names("participant 1: inconsistent multicast creator");
+    }
+
+    #[test]
+    fn validate_accepts_different_device_ordinals_for_one_allocation_across_processes() {
+        let other = MemoryLocation { id: 1, ..DEVICE };
+        let importer = with!(shared(), Allocation.location = other);
+        validate(&Manifest::from([(1, vec![shared()]), (2, vec![importer])])).unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_multicast_binding_and_mapping_beyond_requested_object_size() {
+        let creator = vec![
+            allocation(),
+            multicast(),
+            device(),
+            with!(binding(), MulticastBinding.offset = 4096),
+            with!(multicast_mapping(), MulticastMapping.size = 8192),
+        ];
+        validate(&Manifest::from([(1, creator)])).unwrap();
     }
 }

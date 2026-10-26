@@ -4,7 +4,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -127,8 +126,15 @@ type RestoreRequest struct {
 	PageBrokerControlSocketPath string
 	PageBrokerRestoreMode       string
 
+	// PublishedArtifact, when set, switches restore to the artifact-addressed
+	// RPCs; read from the content's recorded status, never reconstructed here.
+	PublishedArtifact *pagebroker.PublishedArtifact
+
 	// Decided by the caller, so both gates reach the same answer.
 	SkipCompatCheck bool
+	// WithoutProxy restores into a container whose PID 1 is its own command,
+	// on a node without the restore proxy. Otherwise PID 1 must be the proxy.
+	WithoutProxy bool
 }
 
 // RestoreResult identifies the processes a successful restore leaves behind.
@@ -140,6 +146,29 @@ type RestoreResult struct {
 	// RestoredPID is the restored process, relative to the container's PID
 	// namespace.
 	RestoredPID int
+}
+
+// fetchArtifactMetadata retrieves and parses the manifest, then releases the
+// metadata transaction on every exit. Parses before the deferred Abort runs,
+// since Abort invalidates the staging directory.
+func fetchArtifactMetadata(ctx context.Context, broker pagebroker.Client, artifact *pagebroker.PublishedArtifact) (manifest *types.CheckpointManifest, retErr error) {
+	transactionID := uuid.NewString()
+	defer func() {
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pageBrokerAbortTimeout)
+		defer cancel()
+		if err := broker.Abort(abortCtx, transactionID); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker metadata transaction %q: %w", transactionID, err))
+		}
+	}()
+	dir, err := broker.GetArtifactMetadata(ctx, transactionID, artifact)
+	if err != nil {
+		return nil, fmt.Errorf("get PageBroker artifact metadata: %w", err)
+	}
+	manifest, err = types.ReadManifest(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read PageBroker artifact manifest: %w", err)
+	}
+	return manifest, nil
 }
 
 // Restore performs external restore for the given request.
@@ -184,7 +213,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 				if retErr != nil {
 					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker restore: %w", err))
 				} else {
-					retErr = NewRestoreCleanupError(errors.Join(cleanupErr, fmt.Errorf("release PageBroker restore: %w", err)))
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("release PageBroker restore: %w", err))
 				}
 			}
 		}
@@ -214,46 +243,57 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"destination_container", req.DestinationContainerName,
 	)
 
-	artifactPath, err := nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
-	if err != nil {
-		return RestoreResult{}, fmt.Errorf("resolve checkpoint artifact: %w", err)
-	}
-	manifest, err := types.ReadManifest(artifactPath)
-	if err != nil {
-		return RestoreResult{}, fmt.Errorf("read checkpoint manifest: %w", err)
+	bound := req.PublishedArtifact != nil
+	var artifactPath string
+	var manifest *types.CheckpointManifest
+	var err error
+	if bound {
+		manifest, err = fetchArtifactMetadata(ctx, broker, req.PublishedArtifact)
+		if err != nil {
+			return RestoreResult{}, failStep(StepResolveArtifact, err)
+		}
+	} else {
+		artifactPath, err = nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
+		if err != nil {
+			return RestoreResult{}, failStep(StepResolveArtifact, err)
+		}
+		manifest, err = types.ReadManifest(artifactPath)
+		if err != nil {
+			return RestoreResult{}, failStep(StepReadManifest, err)
+		}
 	}
 	if err := validateRestoreManifest(req, manifest); err != nil {
-		return RestoreResult{}, err
+		return RestoreResult{}, failStep(StepValidateManifest, err)
 	}
 	if manifest.CuInterpose != nil {
 		// These libraries belong to the checkpointed process. The agent supplies their
 		// files, but an upgraded bundle may differ from the bytes loaded at capture.
 		if err := cuda.VerifyCuInterposeLibraryIdentity(nsmount.CuInterposeBundlePath, manifest.CuInterpose); err != nil {
-			return RestoreResult{}, err
+			return RestoreResult{}, failStep(StepVerifyCuInterpose, err)
 		}
 	}
 
 	usePageBrokerGPU = manifest.CUDA.CustomStorage
 	if err := validateCustomStorageRestore(req, manifest); err != nil {
-		return RestoreResult{}, err
+		return RestoreResult{}, failStep(StepValidateManifest, err)
 	}
 
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
-		return RestoreResult{}, err
+		return RestoreResult{}, failStep(StepInspectPlaceholder, err)
 	}
 
 	var gpuContext *pagebroker.GpuContext
 	if usePageBrokerGPU {
 		gpuContext, err = pagebroker.NewGPUContext(manifest.CUDA.PIDs, snap.TargetGPUUUIDs, snap.CUDADeviceMap)
 		if err != nil {
-			return RestoreResult{}, err
+			return RestoreResult{}, failStep(StepBuildGPUContext, err)
 		}
 	}
 
 	bundleMount, err := mounts.MountBundle(ctx, snap.PlaceholderPID)
 	if err != nil {
-		return RestoreResult{}, fmt.Errorf("mount agent bundle into placeholder: %w", err)
+		return RestoreResult{}, failStep(StepMountBundle, err)
 	}
 	activeMounts = append(activeMounts, restoreMount{
 		action: "unmount agent bundle from placeholder",
@@ -263,7 +303,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if manifest.CuInterpose != nil {
 		shimMount, err := mounts.MountCuInterpose(ctx, bundleMount)
 		if err != nil {
-			return RestoreResult{}, fmt.Errorf("mount cuinterpose into placeholder: %w", err)
+			return RestoreResult{}, failStep(StepMountCuInterpose, err)
 		}
 		activeMounts = append(activeMounts, restoreMount{
 			action:        "unmount cuinterpose from placeholder",
@@ -275,28 +315,21 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
 	transactionID = uuid.NewString()
 	stageStart := time.Now()
-	direct := req.PageBrokerRestoreMode != "staged"
+	// Bound restore has no direct mode at the protocol level.
+	direct := !bound && req.PageBrokerRestoreMode != "staged"
 	var staged string
 	preparationAttempted = true
-	if usePageBrokerGPU && direct {
-		gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
-	} else if usePageBrokerGPU {
-		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
-	} else if direct {
-		err = broker.DirectRestore(ctx, transactionID, artifactPath)
-	} else {
-		staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
-	}
+	staged, gpu, err = prepareRestoreSource(ctx, broker, transactionID, bound, usePageBrokerGPU, direct, req.PublishedArtifact, artifactPath, gpuContext)
 	pageBrokerStageDuration = time.Since(stageStart)
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
-		return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
+		return RestoreResult{}, failStep(StepPrepareRestore, err)
 	}
 	mountStart := time.Now()
 	sourceMount, containerCheckpointPath, err := mountRestoreSource(ctx, mounts, bundleMount, direct, artifactPath, staged)
 	pageBrokerMountDuration = time.Since(mountStart)
 	if err != nil {
-		return RestoreResult{}, fmt.Errorf("mount PageBroker restore source: %w", err)
+		return RestoreResult{}, failStep(StepMountRestoreSource, err)
 	}
 	activeMounts = append(activeMounts, restoreMount{
 		action: "unmount PageBroker restore source from placeholder",
@@ -315,7 +348,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 				return rt.TerminateContainer(stopCtx, req.ContainerID)
 			}
 		}
-		return RestoreResult{}, fmt.Errorf("nsrestore failed: %w", err)
+		return RestoreResult{}, failStepUnlessNamed(StepRunNSRestore, err)
 	}
 	gpuRestoreComplete = usePageBrokerGPU
 	restoreSource := activeMounts[len(activeMounts)-1]
@@ -326,6 +359,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	commitStart := time.Now()
 	if err := broker.Commit(ctx, transactionID); err != nil {
 		log.Error(err, "failed to commit PageBroker restore")
+		cleanupErr = errors.Join(cleanupErr, failStep(StepCommitRestore, err))
 	} else {
 		committed = true
 	}
@@ -335,7 +369,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
 	if err := validateRestoredProcessFunc(snap.TargetRoot, result.RestoredPID, log); err != nil {
-		return RestoreResult{}, err
+		return RestoreResult{}, failStep(StepValidateRestored, err)
 	}
 
 	// Restored processes still need these paths for lazy core loading and
@@ -384,6 +418,41 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	return RestoreResult{PlaceholderHostPID: snap.PlaceholderPID, RestoredPID: result.RestoredPID}, nil
 }
 
+// prepareRestoreSource starts the PageBroker transaction that stages (or, for legacy
+// direct restores, opens in place) the checkpoint this restore reads from. Bound
+// restore always stages, since artifact-addressed restore has no direct mode at the
+// protocol level; legacy restore keeps its existing direct/staged choice.
+func prepareRestoreSource(ctx context.Context, broker pagebroker.Client, transactionID string, bound, usePageBrokerGPU, direct bool, publishedArtifact *pagebroker.PublishedArtifact, artifactPath string, gpuContext *pagebroker.GpuContext) (staged string, gpu *pagebroker.CustomStorageExecution, err error) {
+	if bound {
+		if usePageBrokerGPU {
+			// Bound GPU restore.
+			staged, gpu, err = broker.PrepareGPUStagedArtifactRestore(ctx, transactionID, publishedArtifact, nil, gpuContext)
+			return staged, gpu, err
+		}
+		// Bound CPU restore.
+		staged, err = broker.StagedArtifactRestore(ctx, transactionID, publishedArtifact, nil)
+		return staged, nil, err
+	}
+	if usePageBrokerGPU {
+		if direct {
+			// Legacy GPU restore, direct from the filesystem artifact.
+			gpu, err = broker.PrepareGPUDirectRestore(ctx, transactionID, artifactPath, gpuContext)
+			return "", gpu, err
+		}
+		// Legacy GPU restore, staged through PageBroker.
+		staged, gpu, err = broker.PrepareGPUStagedRestore(ctx, transactionID, artifactPath, gpuContext)
+		return staged, gpu, err
+	}
+	if direct {
+		// Legacy CPU restore, direct from the filesystem artifact.
+		err = broker.DirectRestore(ctx, transactionID, artifactPath)
+		return "", nil, err
+	}
+	// Legacy CPU restore, staged through PageBroker.
+	staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
+	return staged, nil, err
+}
+
 // mountRestoreSource mounts the direct artifact or the PageBroker-staged copy into
 // the placeholder and reports which path nsrestore should read the checkpoint from.
 func mountRestoreSource(ctx context.Context, mounts RestoreMounter, bundleMount nsmount.MountPoint, direct bool, artifactPath, staged string) (nsmount.MountPoint, string, error) {
@@ -411,7 +480,7 @@ func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger
 	if err := snapshotruntime.ValidateProcessState(procRoot, restoredPID); err != nil {
 		restoreLogPath := filepath.Join(targetRoot, "var", "criu-work", criu.RestoreLogFilename)
 		logging.LogProcessDiagnostics(procRoot, restoredPID, restoreLogPath, log)
-		return fmt.Errorf("restored process failed post-restore validation: %w", err)
+		return err
 	}
 	return nil
 }
@@ -439,6 +508,49 @@ func validateCustomStorageRestore(req RestoreRequest, manifest *types.Checkpoint
 	return nil
 }
 
+// lsmProfileFromSpec returns the security label the runtime gave the
+// placeholder container, in CRIU's lsm_profile form, so the restored
+// processes take the container's label, as runc does on its restores. A
+// container without a label gets CRIU's "none".
+func lsmProfileFromSpec(spec *specs.Spec) string {
+	if spec == nil || spec.Process == nil {
+		return criu.LSMProfileNone
+	}
+	if p := spec.Process.ApparmorProfile; p != "" && p != "unconfined" {
+		return "apparmor:" + p
+	}
+	if spec.Process.SelinuxLabel != "" {
+		return "selinux:" + spec.Process.SelinuxLabel
+	}
+	return criu.LSMProfileNone
+}
+
+// readInitCmdline returns the command line of the container's PID 1, given
+// its host PID. Tests replace it.
+var readInitCmdline = func(pid int) (string, error) {
+	details, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+	if err != nil {
+		return "", err
+	}
+	return details.Cmdline, nil
+}
+
+// checkRestoreProxy refuses a container whose PID 1 is not the restore proxy.
+// The agent's NRI plugin makes the proxy PID 1 when the container is created.
+// Without the proxy, nothing in the container waits for the restore, and the
+// container does not end when the restored workload does.
+func checkRestoreProxy(pid int) error {
+	cmdline, err := readInitCmdline(pid)
+	if err != nil {
+		return fmt.Errorf("read the command of the container's PID 1: %w", err)
+	}
+	if cmdline != podcontract.RestoreProxyPath {
+		return fmt.Errorf("the container's PID 1 is %q, not %s: the agent's NRI plugin did not set up this container; check that NRI is enabled in the container runtime",
+			cmdline, podcontract.RestoreProxyPath)
+	}
+	return nil
+}
+
 func inspectRestore(
 	ctx context.Context,
 	rt snapshotruntime.Runtime,
@@ -460,6 +572,11 @@ func inspectRestore(
 		return nil, 0, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
 	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
+	if !req.WithoutProxy {
+		if err := checkRestoreProxy(placeholderPID); err != nil {
+			return nil, 0, err
+		}
+	}
 
 	// Read only for the image-digest check, which treats a blank value as
 	// unknown, so neither a skipped gate nor a runtime that cannot answer is
@@ -485,6 +602,7 @@ func inspectRestore(
 	}
 
 	targetRoot := fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID)
+	lsmProfile := lsmProfileFromSpec(ociSpec)
 
 	var (
 		targetGPUs       compat.GPUInfo
@@ -494,6 +612,9 @@ func inspectRestore(
 	if !manifest.CUDA.IsEmpty() {
 		if len(manifest.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
+		}
+		if err := refuseMIGRestore(ctx, log, placeholderPID, req.SkipCompatCheck); err != nil {
+			return nil, 0, err
 		}
 		discoverStart := time.Now()
 		var env []string
@@ -534,6 +655,7 @@ func inspectRestore(
 		PlaceholderPID:  placeholderPID,
 		TargetRoot:      targetRoot,
 		CgroupRoot:      cgroupRoot,
+		LSMProfile:      lsmProfile,
 		CUDADeviceMap:   cudaDeviceMap,
 		GPUMountAliases: gpuMountAliases,
 	}, discoverDuration + deviceMapDuration, nil
@@ -583,6 +705,9 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
 	}
+	if snap.LSMProfile != "" {
+		args = append(args, "--lsm-profile", snap.LSMProfile)
+	}
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
@@ -606,33 +731,12 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
-
+	output := newNSRestoreOutput(os.Stderr)
+	output.Attach(cmd)
 	if err := cmd.Run(); err != nil {
-		return nil, nsrestoreFailure(stdout.Bytes(), err)
+		return nil, output.failure(err, ctx.Err())
 	}
-
-	var result RestoreInNamespaceResult
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, stdout.String())
-	}
-	if result.RestoredPID <= 0 {
-		return nil, fmt.Errorf("nsrestore returned invalid PID %d", result.RestoredPID)
-	}
-
-	return &result, nil
-}
-
-// nsrestoreFailure prefers the cause nsrestore reports on stdout over the bare
-// exit status, so restore status and events name what actually failed.
-func nsrestoreFailure(stdout []byte, runErr error) error {
-	var result RestoreInNamespaceResult
-	if err := json.Unmarshal(stdout, &result); err == nil && result.Error != "" {
-		return errors.New(result.Error)
-	}
-	return fmt.Errorf("%w\nstdout: %s", runErr, stdout)
+	return output.result()
 }
 
 const firstExtraFileDescriptor = 3

@@ -43,6 +43,11 @@ pub struct BackendAbi {
         *mut usize,
         cuda::CUdeviceptr,
     ) -> cuda::CUresult,
+    pub cuPointerGetAttribute: unsafe extern "C" fn(
+        *mut c_void,
+        cuda::CUpointer_attribute,
+        cuda::CUdeviceptr,
+    ) -> cuda::CUresult,
     pub cuIpcGetMemHandle:
         unsafe extern "C" fn(*mut cuda::CUipcMemHandle, cuda::CUdeviceptr) -> cuda::CUresult,
     pub cuIpcOpenMemHandle:
