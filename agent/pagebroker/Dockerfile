@@ -148,7 +148,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf-dev \
     libssl-dev \
     nlohmann-json3-dev=3.11.3-1 \
-    openssl \
     pkg-config \
     protobuf-compiler \
     && sh compliance/collect-sources.sh /legal/source/protobuf libprotobuf-dev \

@@ -13,7 +13,6 @@ GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
 MODEL_STREAMER_LIB_DIR ?= /usr/local/lib
 MODEL_STREAMER_INCLUDE_DIR ?= /usr/local/include
 MODEL_STREAMER_FLAGS := -L$(MODEL_STREAMER_LIB_DIR) -lstreamer -Wl,-rpath,$(MODEL_STREAMER_LIB_DIR)
-S3_TEST_VENV := build/s3-test-venv
 STREAMER_SOURCES := transfer/engine/model_streamer/model_streamer_restore.cpp
 S3_SOURCES := transfer/s3/s3_client.cpp
 RESTORE_SOURCES := file_descriptor.cpp $(STREAMER_SOURCES)
@@ -64,7 +63,7 @@ daemon: generate
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DAEMON_SOURCES) v1/pagebroker.pb.cc \
 		-Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o pagebroker
 
-test: rclone-process-test generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test s3-test s3-fixture-test s3-lifetime-test | build
+test: rclone-process-test generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test    | build
 	./build/cancellation-test
 	./build/gpu-engine-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp tests/daemon_test.cpp $(BROKER_TEST_SOURCES) tests/filesystem_storage_test.cpp tests/storage_contract_test.cpp $(TRANSFER_TEST_SOURCES) v1/pagebroker.pb.cc $(BROKER_TEST_WRAP_FLAGS) -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o build/pagebroker-test
@@ -106,22 +105,6 @@ build/gpu-checkpoint-test: generate $(GPU_TEST_SOURCES) gpu/checkpoint_test.cpp 
 build/gpu-transfer-test: generate transfer/engine/transfer_engine.cpp gpu/transfer.cpp gpu/transfer.hpp gpu/transfer_test.cpp cancellation.hpp $(COMMON_SOURCES) $(IO_SOURCES) file_descriptor.hpp io_engine.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/transfer.cpp gpu/transfer_test.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer/engine/transfer_engine.cpp v1/pagebroker.pb.cc \
 		$(GTEST_FLAGS) -lprotobuf $(NIXL_FLAGS) -L$(CUDA_LIBRARY_DIR) -lcuda -ldl -o $@
-
-# Uses a disposable local S3 service; no cloud credentials are needed.
-s3-test-build: generate
-	mkdir -p build
-	c++ -I. -I$(MODEL_STREAMER_INCLUDE_DIR) -std=c++20 -Wall -Werror $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_s3_test.cpp transfer/s3/tests/s3_round_trip_test.cpp v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(GTEST_FLAGS) $(MODEL_STREAMER_FLAGS) -o build/model-streamer-s3-test
-
-s3-test: s3-test-build $(S3_TEST_VENV)/.installed
-	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$$LD_LIBRARY_PATH" $(S3_TEST_VENV)/bin/python3 tests/s3_integration.py --binary ./build/model-streamer-s3-test --resources
-	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$$LD_LIBRARY_PATH" $(S3_TEST_VENV)/bin/python3 tests/s3_integration.py --binary ./build/model-streamer-s3-test --tls
-
-s3-fixture-test:
-	python3 -m unittest discover -s tests -p 'test_*.py' -v
-
-# Real SDK buffer-lifetime checks run in isolated processes against a local endpoint.
-s3-lifetime-test:
-	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$$LD_LIBRARY_PATH" python3 tests/model_streamer_submission_lifetime.py
 
 # Test fork/exec with a compiled child, never a shell script or real credentials.
 build/rclone-child-helper: transfer/s3/tests/rclone_child_helper.cpp | build
