@@ -27,7 +27,7 @@ AGENT_PLATFORM ?= linux/amd64
 AGENT_BASE_PACKAGES = agent/compliance/base-packages$(if $(filter linux/arm64,$(AGENT_PLATFORM)),.arm64).tsv
 
 .PHONY: tidy generate test test-integration build lint verify-generate verify-crds verify-toc update-toc verify-troubleshooting-steps check fmt add-license-headers \
-        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker docker-build-pagebroker-smoke docker-build-pagebroker-stress \
         capture-base-packages verify-base-packages docker-export-agent-bundle \
         linux-build linux-test pagebroker-check-generated cpu-e2e
 
@@ -215,3 +215,13 @@ pagebroker-integration-test:
 
 pagebroker-checkpoint-test:
 	$(MAKE) -C hack/pagebroker-integration checkpoint-test REGISTRY="$(REGISTRY)" VERSION="$(VERSION)"
+
+docker-build-pagebroker-smoke:
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" \
+	  -f agent/pagebroker/tests/k3s/Dockerfile --target runtime \
+	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker-smoke:$(t)) .
+
+docker-build-pagebroker-stress:
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" \
+	  -f agent/pagebroker/tests/k3s/Dockerfile --target stress \
+	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker-stress:$(t)) .

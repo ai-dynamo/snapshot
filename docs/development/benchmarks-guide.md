@@ -132,3 +132,167 @@ Open a GitHub issue on the repository and attach:
 - `kubectl get nodes -o wide`
 - The node agent's pod logs for the run window
   (`kubectl logs -n <snapshot-namespace> <snapshot-agent-pod>`)
+
+## Direct PageBroker transfer endurance
+
+`pagebroker` publishes checkpoint files, verifies two restores per cycle, and
+deletes its publication. The same broker runs throughout workload and two idle
+hours. Choose one case per invocation:
+
+| Backend | Transfer engine |
+| --- | --- |
+| `filesystem` | `posix-copy` |
+| `s3` | `model-streamer` |
+
+This tests file integrity and broker resources. Existing `run`/`sweep` commands
+exercise live-model Snapshot operations; transferring a captured Qwen directory
+with `--fixture-dir` does not establish that its model process can resume.
+
+Use Linux amd64, Python 3.12+, and permission to read the child broker's
+`/proc/PID/{status,smaps_rollup,stat,fd}`. Build with the pinned Go toolchain:
+
+```bash
+uv sync --locked --project benchmarks
+make -C agent pagebroker-bench
+make -C agent/pagebroker daemon CUDA_ROOT=/opt/cuda
+```
+
+The native build needs the NIXL, Model Streamer, protobuf,
+OpenSSL, NVTX and CUDA dependencies from the Dockerfile's `build-dependencies`
+stage, plus the pinned prebuilt rclone executable for S3. Install matching runtime libraries, configure `LD_LIBRARY_PATH` and
+`NIXL_PLUGIN_DIR` as needed; copying the executable alone is insufficient. A GPU
+or installed Snapshot stack is unnecessary: CUDA initialization is disabled.
+
+Use separate absolute work, storage and output roots. Work must be local;
+tmpfs is optional and must have room for staging. Publications use the storage
+mount under test; successful cycles delete only their unique owned children.
+
+```bash
+uv run --locked --project benchmarks python -m snapshot_benchmarks pagebroker \
+  --backend filesystem --transfer-engine posix-copy \
+  --broker-bin /opt/snapshot/pagebroker --client-bin /opt/snapshot/pagebroker-bench \
+  --work-dir /dev/shm/pagebroker-bench --storage-root /mnt/checkpoints/pagebroker-bench \
+  --output-dir /mnt/benchmark-results --duration 30m
+```
+
+Use `30m`, `4h`, `3d` or `7d`; 7,200 idle seconds follow **final transfer and
+cleanup**. Starts are at least 60s apart without catch-up bursts; three verified
+measured cycles are required. Crossing cycles retain their original timeout and
+count as drain. Defaults: `--cycle-timeout 600s`, `--cleanup-timeout 120s`,
+`--sample-interval 10s`. Transactions close between cycles and before idle.
+
+Generated fixtures have `(128 << 20) + 37` payload bytes plus a manifest, small
+binary/empty files, nested/empty directories and varied modes. `--payload-bytes`
+changes the large file; `--fixture-dir` instead preserves and copies a captured
+source. Verification checks paths/types/modes/sizes/SHA-256. Native limits:
+10,000 entries, 512-byte paths, readable/traversable ordinary modes, no links or
+special files, 1 TiB total, and a regular root `manifest.yaml` up to 1 MiB.
+Captured files use `corpus/` plus an outer manifest copy so reserved `gpu/` files
+also use CPU staging. Counts include the wrapper and extra manifest; fixture
+preparation is timed separately.
+
+### Native S3
+
+Use the existing nonsecret daemon configuration, for example:
+
+```json
+{"storeId":"template","endpoint":"https://s3.us-east-1.amazonaws.com",
+ "region":"us-east-1","bucket":"YOUR-TEST-BUCKET","prefix":"pagebroker-benchmarks",
+ "addressing":"virtual"}
+```
+
+The runner derives a unique store/data prefix. The SDK uses the same endpoint,
+region, addressing and optional absolute `caFile`; TLS is verified. HTTP needs
+explicit `allowHttp` and a loopback endpoint. The SDK performs probes/deletion;
+PageBroker publishes via native upload and restores through Model Streamer.
+
+Set the existing test key pair in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`:
+
+```bash
+uv run --locked --project benchmarks python -m snapshot_benchmarks pagebroker \
+  --backend s3 --transfer-engine model-streamer \
+  --broker-bin /opt/snapshot/pagebroker --client-bin /opt/snapshot/pagebroker-bench \
+  --work-dir /dev/shm/pagebroker-bench --output-dir /mnt/benchmark-results \
+  --s3-config /etc/pagebroker-bench/s3.json \
+  --credentials-source static-environment --duration 3d
+```
+
+Static mode rejects session tokens/expiry. Temporary mode requires a session
+in `AWS_SESSION_TOKEN`, `--credentials-source temporary-environment`, and RFC3339
+`--credentials-expire-at` covering the runtime budget below plus 15 minutes.
+Credentials resolve once; there is no refresh. Use static test credentials for
+multi-day runs. Profiles/instance fallback are disabled; credential values never
+enter requests, configuration, results or the Go helper environment.
+
+The identity needs bucket versioning status, object/version/multipart listing,
+read/write, and exact object/version deletion permissions in the namespace.
+Cleanup verifies emptiness, including versions/delete markers in Enabled or
+Suspended buckets. Partial deletion, incomplete uploads or uncertain transactions
+fail the run and retain the artifact location for investigation. The small owner
+marker remains outside data. Inspect failed results before manually deleting
+only that run's data; there is no automatic recovery command.
+
+### Long execution and results
+
+Use a service manager to survive SSH disconnect. Adapt paths/user and run the
+prepared venv's absolute Python executable directly:
+
+```bash
+sudo systemd-run --unit=pagebroker-bench-filesystem \
+  --property=Type=exec --property=User=YOUR-USER --property=UMask=0077 \
+  --property=Restart=no --property=KillMode=control-group \
+  --property=SendSIGKILL=yes --property=TimeoutStopSec=120 --property=RuntimeMaxSec=11700 \
+  --working-directory=/opt/snapshot \
+  /opt/snapshot/benchmarks/.venv/bin/python -m snapshot_benchmarks pagebroker \
+  --backend filesystem --transfer-engine posix-copy \
+  --broker-bin /opt/snapshot/pagebroker --client-bin /opt/snapshot/pagebroker-bench \
+  --work-dir /dev/shm/pagebroker-bench --storage-root /mnt/checkpoints/pagebroker-bench \
+  --output-dir /mnt/benchmark-results --duration 30m
+sudo systemctl status pagebroker-bench-filesystem
+sudo journalctl -u pagebroker-bench-filesystem
+sudo systemctl stop pagebroker-bench-filesystem
+```
+
+Pass loader/plugin settings through the service environment. For S3, use an
+existing protected file outside the repository, e.g.
+`--property=EnvironmentFile=/run/pagebroker-bench/aws.env`. Keep credential values
+out of command arguments and committed files. User services need existing
+lingering. Set the runtime cap to at least this budget, plus startup allowance:
+`1800 + active + cycle-timeout + cleanup-timeout + cooldown + 30 + 120` seconds.
+Defaults give 11,670s for 30m. Children stay in the cgroup; runner death stops
+them. Reboot/replacement cannot resume a campaign; forced termination may retain
+artifacts. Foreground execution depends on the shell/session; there is no
+independent heartbeat supervisor.
+
+Results use `OUTPUT/pagebroker/DATE-nogit-ID/`. `run.json.config` records all 20
+effective CLI settings (seconds, resolved paths, generated payload or null,
+credential mode/declared expiry), alongside owned paths, identities/hashes and
+admitted corpus manifest/hash/wrapped bytes. `cycles.jsonl` journals starts and
+outcomes/cleanup; `resources.jsonl` samples RSS/HWM, PSS/private bytes, threads,
+FDs and staging counts/bytes. `summary.json` records status, timing/counts and
+samples/peaks. Optional `fixture.json` is the source manifest; `broker.log` and
+failure-only `helper.log` are bounded, incomplete diagnostic tails.
+
+Broker exit/replacement, missing metrics, sampling gaps over three intervals,
+leftovers, failed verification and forced shutdown fail the campaign. Idle sends
+no protocol requests. Output/memory remain bounded; missing terminal summary
+means incomplete evidence. SIGINT/SIGTERM requests bounded shutdown and exit 130.
+A successful result proves recorded transfer/continuity checks; resource values
+retain `resource_assessment: not_assessed`. RSS alone does not prove a leak;
+caches/allocator retention can matter. Heaptrack remains future work.
+
+For labeled short qualification, append `--qualification --duration 120s
+--cycle-interval 1s --sample-interval 1s --payload-bytes 1048613 --cooldown 30s`.
+Fake clocks test scheduling; record actual native durations separately. Run
+qualification, then 30m plus full two-hour idle before longer campaigns. Fast checks:
+
+```bash
+uv run --locked --project benchmarks --group test pytest benchmarks/tests -q
+go test ./agent/cmd/pagebroker-bench ./agent/internal/pagebroker
+make -C agent pagebroker-bench
+```
+
+The PageBroker benchmark supplies the daemon with a private mode-0600 shared
+credentials file via `AWS_SHARED_CREDENTIALS_FILE`. It lives outside collected
+results and is removed after shutdown. The SDK cleanup worker retains its own
+explicit credential environment.
