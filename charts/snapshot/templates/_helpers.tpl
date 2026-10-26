@@ -188,7 +188,7 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- printf "%s/%s" (include "snapshot.s3CABundleMountDir" .) (required "storage.s3.caBundleConfigMapKey is required with storage.s3.caBundleConfigMapRef" .Values.storage.s3.caBundleConfigMapKey) -}}
 {{- end -}}
 
-{{/* Where PageBroker reads the Model Streamer tuning file (pageBroker.modelStreamer). */}}
+{{/* Where PageBroker reads the Model Streamer tuning file (pageBroker.transferEngine.modelStreamer). */}}
 {{- define "snapshot.modelStreamerMountDir" -}}/etc/snapshot-model-streamer{{- end -}}
 
 {{/* Rolls the operator and PageBroker when the values behind storage.yaml and
@@ -200,7 +200,7 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
      default stagingBytes is derived from it together with both containers'
      memory limits, so a change to either limit must also roll both. */}}
 {{- define "snapshot.operatorConfigChecksum" -}}
-{{- toYaml (dict "storage" .Values.storage "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.modelStreamer "stagingSizeLimit" (include "snapshot.stagingSizeLimit" .)) | sha256sum -}}
+{{- toYaml (dict "storage" .Values.storage "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.transferEngine.modelStreamer "stagingSizeLimit" (include "snapshot.stagingSizeLimit" .)) | sha256sum -}}
 {{- end -}}
 {{- define "snapshot.modelStreamerConfigPath" -}}{{ include "snapshot.modelStreamerMountDir" . }}/model-streamer.json{{- end -}}
 

@@ -245,8 +245,8 @@ tests:
 
   - it: renders and mounts the Model Streamer file and passes its flag only when tuning is set
     set:
-      pageBroker.modelStreamer.s3Reader.concurrency: 2
-      pageBroker.modelStreamer.logging.toStderr: true
+      pageBroker.transferEngine.modelStreamer.s3Reader.concurrency: 2
+      pageBroker.transferEngine.modelStreamer.logging.toStderr: true
     asserts:
       - equal:
           path: data["model-streamer.json"]
@@ -283,7 +283,7 @@ tests:
       storage.type: pvc
       storage.s3.addressing: path
       storage.s3.caBundleConfigMapRef: s3-ca
-      pageBroker.modelStreamer.s3Reader.concurrency: 2
+      pageBroker.transferEngine.modelStreamer.s3Reader.concurrency: 2
       operator.bindNewContents: false
     asserts:
       - notExists:
