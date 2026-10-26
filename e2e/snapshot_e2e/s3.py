@@ -44,9 +44,7 @@ class S3Settings:
         env = os.environ.get
         return cls(
             endpoint=env("SNAPSHOT_E2E_S3_ENDPOINT", "http://localhost:9000"),
-            cluster_endpoint=env(
-                "SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT", "http://host.k3d.internal:9000"
-            ),
+            cluster_endpoint=env("SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT", ""),
             access_key=env("SNAPSHOT_E2E_S3_ACCESS_KEY", "minioadmin"),
             secret_key=env("SNAPSHOT_E2E_S3_SECRET_KEY", "minioadmin"),
             bucket=env("SNAPSHOT_E2E_S3_BUCKET", "snapshot-e2e"),
@@ -67,6 +65,10 @@ def credentials_file(settings: S3Settings) -> str:
 
 
 def helm_set(settings: S3Settings) -> list[str]:
+    if not settings.cluster_endpoint:
+        raise ValueError(
+            "SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT is required: the address the cluster uses to reach the store"
+        )
     return [
         "storage.type=s3",
         f"storage.s3.endpoint={settings.cluster_endpoint}",

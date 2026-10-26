@@ -160,6 +160,9 @@ image.operator.pullPolicy=IfNotPresent
 image.agent.pullPolicy=IfNotPresent
 image.pageBroker.pullPolicy=IfNotPresent"
 if [[ "${STORAGE}" == "s3" ]]; then
+  s3_gateway="$(docker network inspect "k3d-${SNAPSHOT_E2E_K3D_CLUSTER}" \
+    --format '{{(index .IPAM.Config 0).Gateway}}')"
+  export SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT="${SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT:-http://${s3_gateway}:9000}"
   uv run --locked --project e2e python -m snapshot_e2e.s3 prepare
   s3_values="$(uv run --locked --project e2e python -m snapshot_e2e.s3 helm-set)"
   export SNAPSHOT_E2E_HELM_SET="${SNAPSHOT_E2E_HELM_SET}
