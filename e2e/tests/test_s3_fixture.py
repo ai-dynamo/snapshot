@@ -17,6 +17,7 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> s3.S3Settings:
     for name in list(os.environ):
         if name.startswith("SNAPSHOT_E2E_S3_"):
             monkeypatch.delenv(name)
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT", "http://172.18.0.1:9000")
     return s3.S3Settings.from_env()
 
 
@@ -63,6 +64,14 @@ def test_index_key_is_under_the_configured_prefix_only(
 ) -> None:
     monkeypatch.setenv("SNAPSHOT_E2E_S3_PREFIX", prefix)
     assert s3.index_key(s3.S3Settings.from_env(), "uid-1", "main") == expected
+
+
+def test_helm_values_need_the_cluster_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT", raising=False)
+    with pytest.raises(ValueError, match="SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT"):
+        s3.helm_set(s3.S3Settings.from_env())
 
 
 def test_settings_follow_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:

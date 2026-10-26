@@ -135,8 +135,8 @@ demand once the workflow is on the default branch; other pull requests skip it.
 
 The store runs outside the cluster, as a service container on the runner. Tests
 reach it at `SNAPSHOT_E2E_S3_ENDPOINT` (default `http://localhost:9000`); the
-chart reaches it at `SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT` (default
-`http://host.k3d.internal:9000`). Access key and secret default to `minioadmin`,
+chart reaches it at `SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT`, which `hack/cpu-e2e.sh`
+sets to the gateway address of the k3d cluster's Docker network. Access key and secret default to `minioadmin`,
 the bucket to `snapshot-e2e` and the key prefix to `snapshots`; each has a
 `SNAPSHOT_E2E_S3_*` variable.
 
