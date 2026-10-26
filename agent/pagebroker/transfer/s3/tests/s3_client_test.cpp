@@ -71,83 +71,13 @@ class CredentialEnvironment {
   std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
 };
 
-TEST(S3ClientTest, CapturesEnvironmentCredentialsIncludingSessionToken)
-{
-  CredentialEnvironment environment;
-  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
-  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
-  setenv("AWS_SESSION_TOKEN", "fake-token", 1);
-  const auto snapshot = ResolveS3Credentials({});
-  EXPECT_EQ(snapshot.access_key_id, "fake-key");
-  EXPECT_EQ(snapshot.secret_access_key, "fake-secret");
-  EXPECT_EQ(snapshot.session_token, "fake-token");
-  setenv("AWS_ACCESS_KEY_ID", "replacement", 1);
-  EXPECT_EQ(ResolveS3Credentials(snapshot).access_key_id, "fake-key");
-  EXPECT_EQ(ResolveS3Credentials(OfflineConnection()).access_key_id, "local-test-access-key");
-}
-
-TEST(S3ClientTest, DoesNotDiscoverCredentialsFromFilesOrProfiles)
-{
-  CredentialEnvironment environment;
-  test::TemporaryDirectory directory;
-  const auto path = directory.path() / "credentials";
-  std::ofstream(path) << "[default]\naws_access_key_id=file-key\naws_secret_access_key=file-secret\n";
-  setenv("AWS_SHARED_CREDENTIALS_FILE", path.c_str(), 1);
-  setenv("AWS_PROFILE", "default", 1);
-  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
-  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
-  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
-  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
-  const auto snapshot = ResolveS3Credentials({});
-  EXPECT_EQ(snapshot.access_key_id, "fake-key");
-  EXPECT_EQ(snapshot.secret_access_key, "fake-secret");
-  EXPECT_TRUE(snapshot.session_token.empty());
-}
-
-TEST(S3ClientTest, RejectsPartialCredentialsWithoutMixingSources)
-{
-  CredentialEnvironment environment;
-  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
-  setenv("AWS_SESSION_TOKEN", "fake-token", 1);
-  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
-  setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
-  EXPECT_THROW(ResolveS3Credentials({}), std::invalid_argument);
-  setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
-  auto explicit_connection = OfflineConnection();
-  explicit_connection.secret_access_key.clear();
-  EXPECT_THROW(ResolveS3Credentials(explicit_connection), std::invalid_argument);
-  const auto snapshot = ResolveS3Credentials(OfflineConnection());
-  EXPECT_EQ(snapshot.access_key_id, "local-test-access-key");
-  EXPECT_EQ(snapshot.secret_access_key, "local-test-secret-key");
-  EXPECT_TRUE(snapshot.session_token.empty());
-}
-
-TEST(S3ClientTest, PreservesRegionAndCaStartupSettings)
-{
-  CredentialEnvironment environment;
-  auto connection = OfflineConnection();
-  connection.region.clear();
-  setenv("AWS_DEFAULT_REGION", "default-region", 1);
-  setenv("AWS_CA_BUNDLE", "/fake-ca.pem", 1);
-  auto snapshot = ResolveS3Credentials(connection);
-  EXPECT_EQ(snapshot.region, "default-region");
-  EXPECT_EQ(snapshot.ca_file, "/fake-ca.pem");
-  setenv("AWS_REGION", "preferred-region", 1);
-  EXPECT_EQ(ResolveS3Credentials(connection).region, "preferred-region");
-  connection.region = "explicit-region";
-  connection.ca_file = "/explicit-ca.pem";
-  snapshot = ResolveS3Credentials(connection);
-  EXPECT_EQ(snapshot.region, "explicit-region");
-  EXPECT_EQ(snapshot.ca_file, "/explicit-ca.pem");
-}
-
 TEST(S3ClientTest, RequiresResolvedCredentialsEvenWhenEnvironmentIsAvailable)
 {
   CredentialEnvironment environment;
   setenv("AWS_ACCESS_KEY_ID", "fake-key", 1);
   setenv("AWS_SECRET_ACCESS_KEY", "fake-secret", 1);
   EXPECT_THROW(S3Client({}, SmallLimits()), std::invalid_argument);
-  const auto connection = ResolveS3Credentials({});
+  const auto connection = OfflineConnection();
   unsetenv("AWS_ACCESS_KEY_ID");
   unsetenv("AWS_SECRET_ACCESS_KEY");
   EXPECT_NO_THROW(S3Client(connection, SmallLimits()));

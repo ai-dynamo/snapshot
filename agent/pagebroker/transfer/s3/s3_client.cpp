@@ -16,7 +16,6 @@
 #include <cerrno>
 #include <charconv>
 #include <climits>
-#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -206,19 +205,6 @@ ReadArguments(const char* command, const S3ObjectLocation& object)
   return arguments;
 }
 
-constexpr char kAccessKeyEnv[] = "AWS_ACCESS_KEY_ID";
-constexpr char kSecretKeyEnv[] = "AWS_SECRET_ACCESS_KEY";
-constexpr char kTokenEnv[] = "AWS_SESSION_TOKEN";
-constexpr char kRegionEnv[] = "AWS_REGION";
-constexpr char kDefaultRegionEnv[] = "AWS_DEFAULT_REGION";
-
-std::string
-Environment(const char* name)
-{
-  const auto* value = std::getenv(name);
-  return value ? value : "";
-}
-
 constexpr char kExecutable[] = PAGEBROKER_RCLONE_PATH;
 constexpr std::size_t kDiagnosticsLimit = 64 * 1024;
 constexpr auto kTerminationGrace = std::chrono::seconds(2);
@@ -384,28 +370,6 @@ WaitForRclone(Child& child, int output, int diagnostics, std::size_t output_limi
 
 } // namespace
 
-S3Connection
-ResolveS3Credentials(S3Connection connection)
-{
-  connection.Validate();
-  if (connection.access_key_id.empty()) {
-    connection.access_key_id = Environment(kAccessKeyEnv);
-    connection.secret_access_key = Environment(kSecretKeyEnv);
-    connection.session_token = Environment(kTokenEnv);
-  }
-  if (connection.access_key_id.empty() || connection.secret_access_key.empty())
-    throw std::invalid_argument("external S3 credentials are missing");
-  if (connection.region.empty()) {
-    connection.region = Environment(kRegionEnv);
-    if (connection.region.empty())
-      connection.region = Environment(kDefaultRegionEnv);
-  }
-  if (connection.ca_file.empty())
-    connection.ca_file = Environment(kAwsCaBundleEnv);
-  connection.Validate();
-  return connection;
-}
-
 void
 S3Connection::Validate() const
 {
@@ -413,6 +377,8 @@ S3Connection::Validate() const
     if (value->find('\0') != std::string::npos || value->find_first_of("\n\r") != std::string::npos)
       throw std::invalid_argument("S3 settings cannot contain NUL or line breaks");
   }
+  if (!ca_file.empty() && !std::filesystem::path(ca_file).is_absolute())
+    throw std::invalid_argument("S3 CA path must be absolute");
   if (access_key_id.empty() != secret_access_key.empty() || (!session_token.empty() && access_key_id.empty()))
     throw std::invalid_argument("S3 explicit credentials require an access key and secret key");
   if (!endpoint.empty() && !endpoint.starts_with(kHttpsEndpointPrefix) && !endpoint.starts_with(kHttpEndpointPrefix))

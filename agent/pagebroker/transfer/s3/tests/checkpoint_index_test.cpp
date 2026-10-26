@@ -109,15 +109,6 @@ TEST(CheckpointIndexTest, RejectsFileAsParent)
   EXPECT_THROW(ParseCheckpointIndex(value.dump()), CheckpointError);
 }
 
-TEST(CheckpointIndexTest, ValidatesIDsAndAggregateSize)
-{
-  EXPECT_NO_THROW(ValidateCheckpointID(std::string(64, 'a')));
-  for (const auto& id : {std::string(), std::string(63, 'a'), std::string(64, 'A'), std::string(64, 'g'), std::string("../capture")})
-    EXPECT_THROW(ValidateCheckpointID(id), std::invalid_argument);
-  auto inventory = Inventory();
-  inventory.files.back().size_bytes = kMaxCheckpointBytes;
-  EXPECT_THROW(ValidateCheckpointInventory(inventory), std::invalid_argument);
-}
 
 TEST(CheckpointIndexTest, RejectsUnknownFormats)
 {

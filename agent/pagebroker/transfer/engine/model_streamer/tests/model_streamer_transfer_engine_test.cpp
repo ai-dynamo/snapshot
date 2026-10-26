@@ -406,6 +406,15 @@ TEST_F(ModelStreamerTransferEngineTest, S3RecoveryPreservesConnectionAndTimeout)
   EXPECT_EQ(fs::file_size(root_.path() / "recovered/data"), 9);
 }
 
+TEST_F(ModelStreamerTransferEngineTest, RejectsUnappliedProcessSettingsBeforeNativeStartup)
+{
+  ScopedEnvironment concurrency("RUNAI_STREAMER_OBJ_CONCURRENCY", "2");
+  model_streamer::settings::Options tuning;
+  tuning.s3_concurrency = 3;
+  EXPECT_THROW(ModelStreamerTransferEngine(Config(), tuning), std::invalid_argument);
+  EXPECT_EQ(starts, 0);
+}
+
 TEST_F(ModelStreamerTransferEngineTest, AcceptsMatchingAddressingSettings)
 {
   for (const auto* value : {static_cast<const char*>(nullptr), "1", "0"}) {
@@ -458,7 +467,7 @@ TEST_F(ModelStreamerTransferEngineTest, RejectsInvalidUtf8FilenameAsInvalidReque
   ModelStreamerTransferEngine engine(config);
   PublishedArtifact artifact;
   artifact.set_store_id(config.store_id);
-  artifact.set_artifact_handle(std::string(64, 'a'));
+  artifact.set_artifact_handle("artifacts/content-1/containers/main");
   engine.ValidateArtifact(artifact);
   std::ofstream(root_.path() / "manifest.yaml") << "version: 1\n";
   const auto invalid = root_.path() / "invalid-\xff";
