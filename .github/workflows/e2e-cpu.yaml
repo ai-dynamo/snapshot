@@ -45,10 +45,9 @@ on:
         default: "3"
 
 concurrency:
-  # e2e-pr.yaml cancels a superseded mirror run as a whole, so this never
-  # cancels anything itself: a manual qualification keeps its evidence.
-  group: snapshot-e2e-cpu-${{ github.run_id }}
-  cancel-in-progress: false
+  # PR runs cancel superseded runs; manual qualification retains its evidence.
+  group: snapshot-e2e-cpu-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
