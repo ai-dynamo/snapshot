@@ -114,9 +114,8 @@ func (c Client) PrepareGPUStagedArtifactRestore(ctx context.Context, transaction
 	return directory, execution, nil
 }
 
-// GetArtifactMetadata returns a private shared directory with verified
-// manifest.yaml, not a verified payload. The caller must Abort on every exit,
-// including a lost reply, using a bounded cleanup context if ctx was cancelled.
+// GetArtifactMetadata returns a private shared directory with manifest.yaml only.
+// Always Abort, even after a lost reply; use a bounded cleanup context if cancelled.
 func (c Client) GetArtifactMetadata(ctx context.Context, transactionID string, artifact *PublishedArtifact) (string, error) {
 	if err := validatePublishedArtifact(artifact); err != nil {
 		return "", err

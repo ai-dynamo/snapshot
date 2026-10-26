@@ -44,9 +44,6 @@ using namespace snapshot::pagebroker;
 
 namespace {
 
-// Set only in the child, before RunDaemon starts its handler threads.
-int restore_started_fd = -1;
-
 S3Config TestS3Config()
 {
   S3Config config;
