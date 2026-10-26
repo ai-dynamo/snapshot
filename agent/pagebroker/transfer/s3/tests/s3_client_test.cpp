@@ -141,6 +141,23 @@ TEST(S3ClientTest, PreservesRegionAndCaStartupSettings)
   EXPECT_EQ(snapshot.ca_file, "/explicit-ca.pem");
 }
 
+TEST(S3ClientTest, RejectsRelativeCaFromExplicitAndEnvironmentSettings)
+{
+  CredentialEnvironment environment;
+  auto connection = OfflineConnection();
+  EXPECT_TRUE(ResolveS3Credentials(connection).ca_file.empty());
+  setenv("AWS_CA_BUNDLE", "relative/ca.pem", 1);
+  EXPECT_THROW(ResolveS3Credentials(connection), std::invalid_argument);
+  connection.ca_file = "/explicit-ca.pem";
+  EXPECT_EQ(ResolveS3Credentials(connection).ca_file, "/explicit-ca.pem");
+  connection.ca_file = "relative/ca.pem";
+  setenv("AWS_CA_BUNDLE", "/environment-ca.pem", 1);
+  EXPECT_THROW(connection.Validate(), std::invalid_argument);
+  EXPECT_THROW(ResolveS3Credentials(connection), std::invalid_argument);
+  connection.ca_file.clear();
+  EXPECT_EQ(ResolveS3Credentials(connection).ca_file, "/environment-ca.pem");
+}
+
 TEST(S3ClientTest, RequiresResolvedCredentialsEvenWhenEnvironmentIsAvailable)
 {
   CredentialEnvironment environment;

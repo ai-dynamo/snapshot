@@ -82,25 +82,3 @@ Python test harness, GPU, or cluster.
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
-
-### PageBroker S3 checkpoint tests
-
-For daemon-level checkpoint protocol checks, use Docker, Go and Python 3 with
-venv support to run:
-
-```bash
-make docker-build-pagebroker REGISTRY=local VERSION=s3-test DOCKER_BUILD_ARGS="--load"
-make pagebroker-checkpoint-test REGISTRY=local VERSION=s3-test
-```
-
-The test target prepares the Python environment, builds the Go test client and
-runs the HTTP and TLS fixtures. The `pagebroker-image` CI job runs this target
-after loading the packaged daemon image. The repository-root `make test` runs
-Go unit tests and does not run these fixtures.
-
-The fixture runs native daemons against disposable Moto storage using fake
-credentials. It exercises the real Go client, checkpoint publication, full
-and metadata-only restore, lost responses, retries without payload rewrites,
-active Abort, staging ownership, expiry, restart and startup credential
-resolution. It validates protocol behavior and credential selection; deployment
-integration and production IAM policies require separate validation.

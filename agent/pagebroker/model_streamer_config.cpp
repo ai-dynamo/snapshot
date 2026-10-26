@@ -4,17 +4,16 @@
 #include "model_streamer_config.hpp"
 
 #include <algorithm>
-#include <charconv>
 #include <cstdlib>
-#include <fstream>
 #include <limits>
 #include <set>
 #include <stdexcept>
 #include <vector>
 
+#include "utils/config.hpp"
 #include "utils/json.hpp"
 
-namespace snapshot::pagebroker {
+namespace snapshot::pagebroker::model_streamer::settings {
 namespace {
 using Json = nlohmann::json;
 constexpr char kReadChunkBytesKey[] = "readChunkBytes";
@@ -65,7 +64,7 @@ struct NumericSetting {
   const char* group;
   const char* field;
   const char* environment;
-  std::optional<std::uint64_t> ModelStreamerOptions::*member;
+  std::optional<std::uint64_t> Options::*member;
   std::uint64_t minimum;
   std::uint64_t maximum;
 };
@@ -73,16 +72,16 @@ struct NumericSetting {
 // One mapping drives parsing, validation and native translation, keeping the
 // JSON contract and environment fallback rules identical.
 constexpr NumericSetting kNumbers[] = {
-    {"", kReadChunkBytesKey, kReadChunkBytesEnv, &ModelStreamerOptions::read_chunk_bytes, 2 * kMiB, 1024 * kMiB},
-    {"", kProcessGroupSizeKey, kProcessGroupSizeEnv, &ModelStreamerOptions::process_group_size, 1, kMaxCount},
-    {kS3ReaderKey, kConcurrencyKey, kS3ConcurrencyEnv, &ModelStreamerOptions::s3_concurrency, 1, 1024},
-    {kS3ReaderKey, kTargetGbpsKey, kS3TargetGbpsEnv, &ModelStreamerOptions::s3_target_gbps, 1, kMaxCount},
-    {kS3ReaderKey, kMaxConnectionsKey, kS3MaxConnectionsEnv, &ModelStreamerOptions::s3_max_connections, 1, kMaxCount},
-    {kS3ReaderKey, kMaxInflightMiBKey, kS3MaxInflightMiBEnv, &ModelStreamerOptions::s3_max_inflight_mib, 1, 1024 * 1024},
-    {kS3ReaderKey, kMaxRetriesKey, kS3MaxRetriesEnv, &ModelStreamerOptions::s3_max_retries, 0, 10},
-    {kS3ReaderKey, kRetryWindowSecondsKey, kS3RetryWindowSecondsEnv, &ModelStreamerOptions::s3_retry_window_seconds, 0, 86400},
-    {kS3ReaderKey, kLowSpeedTimeoutMsKey, kS3LowSpeedTimeoutMsEnv, &ModelStreamerOptions::s3_low_speed_timeout_ms, 1, 86400000},
-    {kS3ReaderKey, kLowSpeedBytesPerSecondKey, kS3LowSpeedBytesPerSecondEnv, &ModelStreamerOptions::s3_low_speed_bytes_per_second, 1, kMaxCount},
+    {"", kReadChunkBytesKey, kReadChunkBytesEnv, &Options::read_chunk_bytes, 2 * kMiB, 1024 * kMiB},
+    {"", kProcessGroupSizeKey, kProcessGroupSizeEnv, &Options::process_group_size, 1, kMaxCount},
+    {kS3ReaderKey, kConcurrencyKey, kS3ConcurrencyEnv, &Options::s3_concurrency, 1, 1024},
+    {kS3ReaderKey, kTargetGbpsKey, kS3TargetGbpsEnv, &Options::s3_target_gbps, 1, kMaxCount},
+    {kS3ReaderKey, kMaxConnectionsKey, kS3MaxConnectionsEnv, &Options::s3_max_connections, 1, kMaxCount},
+    {kS3ReaderKey, kMaxInflightMiBKey, kS3MaxInflightMiBEnv, &Options::s3_max_inflight_mib, 1, 1024 * 1024},
+    {kS3ReaderKey, kMaxRetriesKey, kS3MaxRetriesEnv, &Options::s3_max_retries, 0, 10},
+    {kS3ReaderKey, kRetryWindowSecondsKey, kS3RetryWindowSecondsEnv, &Options::s3_retry_window_seconds, 0, 86400},
+    {kS3ReaderKey, kLowSpeedTimeoutMsKey, kS3LowSpeedTimeoutMsEnv, &Options::s3_low_speed_timeout_ms, 1, 86400000},
+    {kS3ReaderKey, kLowSpeedBytesPerSecondKey, kS3LowSpeedBytesPerSecondEnv, &Options::s3_low_speed_bytes_per_second, 1, kMaxCount},
 };
 
 std::string
@@ -101,13 +100,12 @@ Invalid(const std::string& field)
 std::uint64_t
 Number(std::string_view value, const std::string& field)
 {
-  if (value.empty())
+  try {
+    return utils::config::ParseUnsigned(value);
+  }
+  catch (const std::invalid_argument&) {
     Invalid(field);
-  std::uint64_t result = 0;
-  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), result);
-  if (error != std::errc{} || end != value.data() + value.size())
-    Invalid(field);
-  return result;
+  }
 }
 
 void
@@ -123,14 +121,6 @@ ValidateFields(const Json& value, const std::string& group, std::set<std::string
     if (!allowed.contains(key))
       Invalid(group.empty() ? "unknown field" : group + ".unknown field");
   }
-}
-
-std::string
-String(const Json& value, const char* field)
-{
-  if (!value.is_string())
-    Invalid(field);
-  return value.get<std::string>();
 }
 
 void
@@ -152,7 +142,7 @@ IsWithinBounds(const std::optional<std::uint64_t>& value, const NumericSetting& 
 }  // namespace
 
 void
-ModelStreamerOptions::Validate() const
+Options::Validate() const
 {
   for (const auto& setting : kNumbers) {
     const auto& value = this->*setting.member;
@@ -165,7 +155,7 @@ ModelStreamerOptions::Validate() const
 }
 
 std::map<std::string, std::string>
-ModelStreamerOptions::NativeEnvironment() const
+Options::NativeEnvironment() const
 {
   Validate();
   std::map<std::string, std::string> result;
@@ -181,7 +171,7 @@ ModelStreamerOptions::NativeEnvironment() const
 }
 
 void
-ModelStreamerOptions::ValidateEnvironment() const
+Options::ValidateEnvironment() const
 {
   for (const auto& [name, expected] : NativeEnvironment()) {
     const auto* actual = std::getenv(name.c_str());
@@ -190,8 +180,8 @@ ModelStreamerOptions::ValidateEnvironment() const
   }
 }
 
-ModelStreamerOptions
-ParseModelStreamerConfig(std::string_view text)
+Options
+ParseConfig(std::string_view text)
 {
   Json value;
   try {
@@ -206,7 +196,7 @@ ParseModelStreamerConfig(std::string_view text)
   if (value.contains(kLoggingKey))
     ValidateFields(value.at(kLoggingKey), kLoggingKey, {kLevelKey, kToStderrKey});
 
-  ModelStreamerOptions options;
+  Options options;
   for (const auto& setting : kNumbers) {
     const Json* group = &value;
     if (*setting.group) {
@@ -225,34 +215,40 @@ ParseModelStreamerConfig(std::string_view text)
   }
   if (value.contains(kLoggingKey)) {
     const auto& logging = value.at(kLoggingKey);
-    if (logging.contains(kLevelKey))
-      options.log_level = String(logging.at(kLevelKey), "logging.level");
+    if (logging.contains(kLevelKey)) {
+      try {
+        options.log_level = utils::config::ReadField<std::string>(logging, kLevelKey);
+      }
+      catch (const std::invalid_argument&) {
+        Invalid("logging.level");
+      }
+    }
     if (logging.contains(kToStderrKey)) {
-      if (!logging.at(kToStderrKey).is_boolean())
+      try {
+        options.log_to_stderr = utils::config::ReadField<bool>(logging, kToStderrKey);
+      }
+      catch (const std::invalid_argument&) {
         Invalid("logging.toStderr");
-      options.log_to_stderr = logging.at(kToStderrKey).get<bool>();
+      }
     }
   }
   options.Validate();
   return options;
 }
 
-ModelStreamerOptions
-ReadModelStreamerConfig(const std::filesystem::path& path)
+Options
+ReadConfig(const std::filesystem::path& path)
 {
-  std::ifstream input(path, std::ios::binary);
-  if (!input)
+  try {
+    return ParseConfig(utils::config::ReadBoundedConfigFile(path, kMaxConfigBytes));
+  }
+  catch (const std::ios_base::failure&) {
     Invalid("unreadable file");
-  std::string text(kMaxConfigBytes + 1, '\0');
-  input.read(text.data(), text.size());
-  if (input.bad())
-    Invalid("unreadable file");
-  text.resize(input.gcount());
-  return ParseModelStreamerConfig(text);
+  }
 }
 
-ModelStreamerOptions
-ResolveModelStreamerOptions(ModelStreamerOptions options, const S3Config* storage)
+Options
+ResolveOptions(Options options, const S3Config* storage)
 {
   for (const auto& setting : kNumbers) {
     if (!(options.*setting.member)) {
@@ -289,7 +285,7 @@ ResolveModelStreamerOptions(ModelStreamerOptions options, const S3Config* storag
 }
 
 void
-ConfigureModelStreamerEnvironment(const ModelStreamerOptions& options, const S3Config* storage)
+ConfigureEnvironment(const Options& options, const S3Config* storage)
 {
   auto environment = options.NativeEnvironment();
   if (storage) {
@@ -304,4 +300,4 @@ ConfigureModelStreamerEnvironment(const ModelStreamerOptions& options, const S3C
       throw std::runtime_error("configure Model Streamer startup environment: " + name);
   }
 }
-}  // namespace snapshot::pagebroker
+}  // namespace snapshot::pagebroker::model_streamer::settings

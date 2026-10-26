@@ -413,6 +413,8 @@ S3Connection::Validate() const
     if (value->find('\0') != std::string::npos || value->find_first_of("\n\r") != std::string::npos)
       throw std::invalid_argument("S3 settings cannot contain NUL or line breaks");
   }
+  if (!ca_file.empty() && !std::filesystem::path(ca_file).is_absolute())
+    throw std::invalid_argument("S3 CA path must be absolute");
   if (access_key_id.empty() != secret_access_key.empty() || (!session_token.empty() && access_key_id.empty()))
     throw std::invalid_argument("S3 explicit credentials require an access key and secret key");
   if (!endpoint.empty() && !endpoint.starts_with(kHttpsEndpointPrefix) && !endpoint.starts_with(kHttpEndpointPrefix))

@@ -12,10 +12,10 @@
 
 #include "s3_config.hpp"
 
-namespace snapshot::pagebroker {
+namespace snapshot::pagebroker::model_streamer::settings {
 // Optional values distinguish omission (inherit the startup environment or
 // defaults) from an explicit zero. Native tuning is fixed for the process.
-struct ModelStreamerOptions {
+struct Options {
   std::optional<std::uint64_t> read_chunk_bytes;
   std::optional<std::uint64_t> process_group_size;
   std::optional<std::uint64_t> s3_concurrency;
@@ -36,12 +36,12 @@ struct ModelStreamerOptions {
   void ValidateEnvironment() const;
 };
 
-ModelStreamerOptions ParseModelStreamerConfig(std::string_view text);
-ModelStreamerOptions ReadModelStreamerConfig(const std::filesystem::path& path);
+Options ParseConfig(std::string_view text);
+Options ReadConfig(const std::filesystem::path& path);
 // Pure with respect to the environment: resolve JSON > native environment >
 // legacy S3 daemon defaults, then validate the complete result before mutation.
-ModelStreamerOptions ResolveModelStreamerOptions(ModelStreamerOptions options, const S3Config* storage = nullptr);
+Options ResolveOptions(Options options, const S3Config* storage = nullptr);
 // Startup only, before constructing Broker or any native workers. Shared S3
 // connection settings remain authoritative in the existing storage config.
-void ConfigureModelStreamerEnvironment(const ModelStreamerOptions& options, const S3Config* storage = nullptr);
-}  // namespace snapshot::pagebroker
+void ConfigureEnvironment(const Options& options, const S3Config* storage = nullptr);
+}  // namespace snapshot::pagebroker::model_streamer::settings

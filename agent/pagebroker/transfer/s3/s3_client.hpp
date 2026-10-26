@@ -34,7 +34,7 @@ struct S3Connection {
   std::string secret_access_key;
   std::string session_token;
 
-  // Checks text, endpoint scheme and credential completeness without network I/O.
+  // Checks text, endpoint scheme, absolute CA path and credential completeness without network I/O.
   void Validate() const;
   bool operator==(const S3Connection&) const = default;
 };

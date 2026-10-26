@@ -272,7 +272,7 @@ class GpuCompletion {
 }  // namespace
 
 Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine,
-    std::optional<S3Config> config, std::chrono::seconds lifetime, ModelStreamerOptions model_streamer)
+    std::optional<S3Config> config, std::chrono::seconds lifetime, model_streamer::settings::Options model_streamer)
     : lifetime_(config ? config->transaction_lifetime : lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
   const auto staging_base = staging_root_;

@@ -8,13 +8,13 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
-#include <string_view>
-#include <fstream>
 #include <set>
 
 #include "transfer/checkpoint_inventory.hpp"
 #include "transfer/s3/checkpoint_index.hpp"
+#include "utils/config.hpp"
 #include "utils/json.hpp"
+#include <string_view>
 
 namespace snapshot::pagebroker {
 namespace {
@@ -67,9 +67,9 @@ T
 ReadField(const Json& value, const char* key)
 {
   try {
-    return value.at(key).get<T>();
+    return utils::config::ReadField<T>(value, key);
   }
-  catch (const Json::exception&) {
+  catch (const std::invalid_argument&) {
     throw std::invalid_argument(std::string("missing or invalid S3 field: ") + key);
   }
 }
@@ -94,7 +94,7 @@ HasValidConnectionSettings(const S3Connection& connection, const Json& value)
   const bool allow_http = value.contains(kAllowHttpKey) && ReadField<bool>(value, kAllowHttpKey);
   if (!allow_http && !connection.endpoint.starts_with(kHttpsEndpointPrefix))
     return false;
-  return connection.ca_file.empty() || std::filesystem::path(connection.ca_file).is_absolute();
+  return true;
 }
 
 S3Connection
@@ -111,7 +111,7 @@ ParseConnection(const Json& value)
   connection.ca_file = value.contains(kCaFileKey) ? ReadField<std::string>(value, kCaFileKey) : std::string();
 
   if (!HasValidConnectionSettings(connection, value))
-    throw std::invalid_argument("invalid S3 endpoint, region, or CA path");
+    throw std::invalid_argument("invalid S3 endpoint or region");
   connection.Validate();
   return connection;
 }
@@ -234,14 +234,11 @@ ParseS3Config(std::string_view text)
 S3Config
 ReadS3Config(const std::filesystem::path& path)
 {
-  std::ifstream input(path, std::ios::binary);
-  if (!input)
+  try {
+    return ParseS3Config(utils::config::ReadBoundedConfigFile(path, kMaxConfigBytes));
+  }
+  catch (const std::ios_base::failure&) {
     throw std::invalid_argument("cannot read S3 configuration");
-  std::string text(kMaxConfigBytes + 1, '\0');
-  input.read(text.data(), text.size());
-  if (input.bad())
-    throw std::invalid_argument("cannot read S3 configuration");
-  text.resize(input.gcount());
-  return ParseS3Config(text);
+  }
 }
 }  // namespace snapshot::pagebroker

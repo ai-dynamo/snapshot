@@ -19,7 +19,7 @@ namespace snapshot::pagebroker {
 class ModelStreamerTransferEngine final : public TransferEngine {
  public:
   // Binds artifact operations to the configured S3 store.
-  explicit ModelStreamerTransferEngine(S3Config config, ModelStreamerOptions model_streamer = {});
+  explicit ModelStreamerTransferEngine(S3Config config, model_streamer::settings::Options model_streamer = {});
 
   // Identifies the Model Streamer transfer implementation.
   IoEngine type() const override;
@@ -64,7 +64,7 @@ class ModelStreamerTransferEngine final : public TransferEngine {
   // Reuses a healthy coordinator or replaces a failed native session.
   std::shared_ptr<ModelStreamerRestore> AcquireRestore() const;
   S3StorageBackend store_;
-  const ModelStreamerOptions model_streamer_;
+  const model_streamer::settings::Options model_streamer_;
   mutable std::mutex restore_mutex_;
   mutable std::shared_ptr<ModelStreamerRestore> restore_;
 };

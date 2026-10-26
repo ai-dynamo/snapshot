@@ -22,7 +22,6 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
-#include <charconv>
 #include <optional>
 #include <set>
 #include <limits>
@@ -42,6 +41,7 @@
 
 #include "broker.hpp"
 #include "file_descriptor.hpp"
+#include "utils/config.hpp"
 
 namespace fs = std::filesystem;
 using snapshot::pagebroker::Broker;
@@ -695,12 +695,15 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
 size_t
 ParseSize(std::string_view option, std::string_view input, bool allow_zero)
 {
-  size_t value = 0;
-  const auto [end, error] = std::from_chars(input.data(), input.data() + input.size(), value);
-  if (error != std::errc{} || end != input.data() + input.size() || (!allow_zero && value == 0)) {
+  try {
+    const auto value = snapshot::pagebroker::utils::config::ParseUnsigned(input);
+    if (!allow_zero && value == 0)
+      throw std::invalid_argument("expected positive integer");
+    return value;
+  }
+  catch (const std::invalid_argument&) {
     throw std::invalid_argument("invalid value for " + std::string(option) + ": " + std::string(input));
   }
-  return value;
 }
 
 }  // namespace
@@ -760,7 +763,7 @@ RunDaemon(const DaemonOptions& options)
   // worker threads. Cached native settings cannot be changed per operation.
   using namespace snapshot::pagebroker;
   std::optional<S3Config> config;
-  ModelStreamerOptions model_streamer;
+  model_streamer::settings::Options model_streamer;
   try {
     if (!options.storage_config.empty()) {
       config = ReadS3Config(options.storage_config);
@@ -768,19 +771,17 @@ RunDaemon(const DaemonOptions& options)
         throw std::invalid_argument("S3 transaction admission must leave a connection available for Abort");
     }
     if (!options.model_streamer_config.empty())
-      model_streamer = ReadModelStreamerConfig(options.model_streamer_config);
-    model_streamer = ResolveModelStreamerOptions(std::move(model_streamer), config ? &*config : nullptr);
+      model_streamer = model_streamer::settings::ReadConfig(options.model_streamer_config);
+    model_streamer = model_streamer::settings::ResolveOptions(std::move(model_streamer), config ? &*config : nullptr);
+    if (config)
+      config->transfer.connection = ResolveS3Credentials(std::move(config->transfer.connection));
   }
   catch (const std::invalid_argument& error) {
     // Configuration errors report schema-owned field names, never values.
     std::cerr << error.what() << '\n';
     return ExitCode::INVALID_ARGUMENTS;
   }
-  if (config)
-    config->transfer.connection = ResolveS3Credentials(std::move(config->transfer.connection));
-  // Resolve SDK providers before disabling native IMDS lookup: the daemon may
-  // itself obtain its shared credentials from an instance role.
-  ConfigureModelStreamerEnvironment(model_streamer, config ? &*config : nullptr);
+  model_streamer::settings::ConfigureEnvironment(model_streamer, config ? &*config : nullptr);
 
   if (!RaiseFileDescriptorLimit())
     return ExitCode::FAILURE;

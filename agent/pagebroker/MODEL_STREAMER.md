@@ -106,7 +106,7 @@ an inflight request. Broker transaction deadlines still apply.
 
 PageBroker applies process settings before constructing native workers and
 validates them when replacing a failed restore coordinator. Direct C++
-callers should resolve/apply `ModelStreamerOptions` once before constructing
+callers should resolve/apply `model_streamer::settings::Options` once before constructing
 engines; conflicting process options are rejected. Engines cannot independently
 choose different process-wide profiles. Native session admission, destination
 mapping lifetime and cancellation/draining rules remain in force.

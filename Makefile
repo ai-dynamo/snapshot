@@ -29,7 +29,7 @@ AGENT_BASE_PACKAGES = agent/compliance/base-packages$(if $(filter linux/arm64,$(
 .PHONY: tidy generate test test-integration build lint verify-generate verify-crds verify-toc update-toc verify-troubleshooting-steps check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
         capture-base-packages verify-base-packages docker-export-agent-bundle \
-        linux-build linux-test pagebroker-check-generated pagebroker-checkpoint-test cpu-e2e
+        linux-build linux-test pagebroker-check-generated cpu-e2e
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
@@ -52,10 +52,6 @@ test:
 # Only the operator has envtest-backed admission tests today.
 test-integration:
 	$(MAKE) -C operator test-integration
-
-# Uses the packaged daemon image built by docker-build-pagebroker.
-pagebroker-checkpoint-test:
-	$(MAKE) -C agent/pagebroker checkpoint-test CHECKPOINT_TEST_IMAGE="$(REGISTRY)/pagebroker:$(VERSION)"
 
 build:
 	$(MAKE) -C agent build

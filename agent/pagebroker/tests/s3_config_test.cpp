@@ -4,6 +4,9 @@
 #include "s3_config.hpp"
 
 #include <gtest/gtest.h>
+#include <fstream>
+
+#include "tests/temporary_directory.hpp"
 #include <nlohmann/json.hpp>
 
 namespace snapshot::pagebroker {
@@ -11,12 +14,29 @@ namespace {
 using Json = nlohmann::json;
 const char* kConfig = R"({"storeId":"test-store","endpoint":"https://s3.example.test","region":"us-east-1","bucket":"checkpoint-bucket","prefix":"snapshots"})";
 
+TEST(S3ConfigTest, ReadsBoundedFiles)
+{
+  test::TemporaryDirectory root;
+  const auto path = root.path() / "s3.json";
+  EXPECT_THROW(ReadS3Config(path), std::invalid_argument);
+  std::ofstream(path) << kConfig;
+  EXPECT_EQ(ReadS3Config(path).bucket, "checkpoint-bucket");
+  std::string text = kConfig;
+  text.resize(65536, ' ');
+  std::ofstream(path) << text;
+  EXPECT_EQ(ReadS3Config(path).bucket, "checkpoint-bucket");
+  std::ofstream(path) << text << ' ';
+  EXPECT_THROW(ReadS3Config(path), std::invalid_argument);
+  EXPECT_THROW(ReadS3Config(root.path()), std::invalid_argument);
+}
+
 TEST(S3ConfigTest, HasFiniteDefaultsAndNoCredentialValues)
 {
   const auto config = ParseS3Config(kConfig);
   EXPECT_EQ(config.prefix, "snapshots");
   EXPECT_EQ(config.transaction_lifetime, std::chrono::hours(2));
   EXPECT_EQ(config.transfer.restore_timeout, std::chrono::minutes(20));
+  EXPECT_EQ(config.transfer.upload_limits.part_size, 64ULL * 1024 * 1024);
   EXPECT_EQ(config.transfer.upload_limits.buffer_budget, 1024ULL * 1024 * 1024);
   EXPECT_TRUE(config.transfer.connection.access_key_id.empty());
 }
@@ -110,14 +130,14 @@ TEST(S3ConfigTest, BoundsAggregateRcloneBuffersAndRejectsObsoleteSettings)
 {
   auto value = Json::parse(kConfig);
   value["limits"] = {{"uploadPartBytes", 8 * 1024 * 1024},
-                     {"uploadBufferBytes", 24 * 1024 * 1024}, {"uploadActiveFiles", 3}};
+                     {"uploadBufferBytes", 27 * 1024 * 1024}, {"uploadActiveFiles", 3}};
   const auto config = ParseS3Config(value.dump());
-  EXPECT_EQ(config.transfer.upload_limits.buffer_budget, 24U * 1024 * 1024);
+  EXPECT_EQ(config.transfer.upload_limits.buffer_budget, 27U * 1024 * 1024);
   EXPECT_EQ(config.transfer.upload_limits.active_files, 3U);
-  value["limits"]["uploadBufferBytes"] = 24 * 1024 * 1024 - 1;
+  value["limits"]["uploadBufferBytes"] = 27 * 1024 * 1024 - 1;
   EXPECT_THROW(ParseS3Config(value.dump()), std::invalid_argument);
   value["limits"] = {{"uploadPartBytes", 8 * 1024 * 1024},
-                     {"uploadBufferBytes", 8 * 1024 * 1024}, {"uploadActiveFiles", 1}};
+                     {"uploadBufferBytes", 9 * 1024 * 1024}, {"uploadActiveFiles", 1}};
   EXPECT_NO_THROW(ParseS3Config(value.dump()));
   for (const auto* field : {"uploadTargetGbps", "uploadWorkers"}) {
     value["limits"] = {{field, 4}};
