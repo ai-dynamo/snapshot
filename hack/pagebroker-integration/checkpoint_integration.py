@@ -5,7 +5,6 @@
 """Exercise the real Go checkpoint client against two packaged native daemons."""
 
 import argparse
-import configparser
 from collections import Counter, defaultdict
 import contextlib
 import json
@@ -98,7 +97,10 @@ class CheckpointService:
             return self.control(action, uid, start_response)
         if f"/{self.prefix}/" not in path:
             return self.app(environment, start_response)
-        checkpoint_id = path.split(f"/{self.prefix}/", 1)[1].split("/", 1)[0]
+        parts = path.split(f"/{self.prefix}/", 1)[1].split("/")
+        if len(parts) < 5 or parts[0] != "artifacts" or parts[2] != "containers":
+            return self.app(environment, start_response)
+        checkpoint_id = "/".join(parts[:4])
         uid = self.labels.get(checkpoint_id, checkpoint_id)
         method = environment["REQUEST_METHOD"]
         query = parse_qs(environment.get("QUERY_STRING", ""), keep_blank_values=True)
@@ -202,10 +204,10 @@ def run(args):
                 "--max-concurrent-requests", "16", "--storage-config", str(config_path),
             ]
             missing = subprocess.run(missing_command, capture_output=True, text=True, timeout=15)
-            assert missing.returncode == 2 and "external S3 credentials are missing" in missing.stderr, missing.stderr
+            assert missing.returncode == 2 and "S3 credentials file requires" in missing.stderr, missing.stderr
             invalid_path = root / "invalid-streamer.json"
             invalid_path.write_text('{"s3Reader":{"concurrency":0}}')
-            invalid = subprocess.run(missing_command + ["--model-streamer-config", str(invalid_path)],
+            invalid = subprocess.run([arg.replace("AWS_SHARED_CREDENTIALS_FILE=/dev/null", f"AWS_SHARED_CREDENTIALS_FILE={credentials}") for arg in missing_command] + ["--model-streamer-config", str(invalid_path)],
                                      capture_output=True, text=True, timeout=15)
             assert invalid.returncode == 2 and "s3Reader.concurrency" in invalid.stderr, invalid.stderr
             invalid_storage = root / "invalid-storage.json"
@@ -230,8 +232,7 @@ def run(args):
                     name = "pagebroker-checkpoint-" + uuid.uuid4().hex
                     command = ["docker", "run", "--rm", "--detach", "--network=host", "--name", name,
                                "--user", f"{os.getuid()}:{os.getgid()}", "--mount", f"type=bind,source={root},target={root}"]
-                    command += ["--env", "AWS_ACCESS_KEY_ID=local-test-access-key",
-                                "--env", "AWS_SECRET_ACCESS_KEY=local-test-secret-key"]
+                    command += ["--env", f"AWS_SHARED_CREDENTIALS_FILE={credentials}"]
                     if args.tls:
                         ca = environment["AWS_CA_BUNDLE"]
                         command += ["--mount", f"type=bind,source={ca},target={ca},readonly"]
@@ -260,17 +261,8 @@ def run(args):
                         raise RuntimeError("native daemons did not create sockets")
                     time.sleep(0.05)
                 def restart():
-                    # Deployment code resolves credentials and supplies a fresh startup environment.
-                    provider = configparser.ConfigParser()
-                    provider.read(credentials)
-                    updated = provider["default"]
-                    command = [
-                        "AWS_ACCESS_KEY_ID=" + updated["aws_access_key_id"] if arg.startswith("AWS_ACCESS_KEY_ID=") else
-                        "AWS_SECRET_ACCESS_KEY=" + updated["aws_secret_access_key"] if arg.startswith("AWS_SECRET_ACCESS_KEY=") else arg
-                        for arg in commands[1]
-                    ]
-                    subprocess.run(["docker", "stop", "--time", "10", containers[1]], check=True, stdout=subprocess.DEVNULL)
-                    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+                    subprocess.run(["docker", "stop", containers[1]], check=True, stdout=subprocess.DEVNULL)
+                    subprocess.run(commands[1], check=True, stdout=subprocess.DEVNULL)
                 service.restart = restart
                 environment.update(PAGEBROKER_CHECKPOINT_SHORT_SOCKET=str(root / "2.sock"), PAGEBROKER_CHECKPOINT_SOCKET=str(root / "0.sock"),
                                    PAGEBROKER_CHECKPOINT_SECOND_SOCKET=str(root / "1.sock"),
