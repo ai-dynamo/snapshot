@@ -25,6 +25,10 @@ go-build:
 	GOOS=linux GOARCH=$(GOARCH) go build -o bin/agent ./cmd/agent
 	GOOS=linux GOARCH=$(GOARCH) go build -o bin/nsrestore ./cmd/nsrestore
 
+.PHONY: pagebroker-bench
+pagebroker-bench:
+	GOOS=linux GOARCH=amd64 go build -o bin/pagebroker-bench ./cmd/pagebroker-bench
+
 # Conventional driver-managed checkpointing and state queries stay in this CLI.
 cuda-checkpoint-helper:
 	$(MAKE) -C cmd/cuda-checkpoint-helper helper CUDA_ROOT=$(CUDA_ROOT)

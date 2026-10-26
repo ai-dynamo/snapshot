@@ -50,6 +50,51 @@ func TestFailureCodeMapsUnknownValuesToUnspecified(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesProbe(t *testing.T) {
+	for _, valid := range []bool{true, false} {
+		t.Run(fmt.Sprint(valid), func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "broker.sock")
+			listener, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			done := make(chan error, 1)
+			go func() {
+				conn, err := listener.Accept()
+				if err != nil {
+					done <- err
+					return
+				}
+				defer conn.Close()
+				r, err := readRequest(conn)
+				if err != nil {
+					done <- err
+					return
+				}
+				if r.GetCapabilities() == nil || r.GetTransactionId() != "" {
+					done <- errors.New("invalid probe request")
+					return
+				}
+				if valid {
+					done <- writeReply(conn, r, &Response_Capabilities{Capabilities: &Capabilities{}})
+				} else {
+					done <- writeReply(conn, r, &Response_CommitComplete{CommitComplete: &CommitComplete{}})
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, err = (Client{ControlSocketPath: socket}).Capabilities(ctx)
+			if (err == nil) != valid {
+				t.Fatalf("valid=%v: %v", valid, err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestRequestStopsWhenContextIsCanceled(t *testing.T) {
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {

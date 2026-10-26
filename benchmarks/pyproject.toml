@@ -10,7 +10,11 @@ dependencies = [
   "snapshot-e2e",
   "kubernetes>=32.0.1,<33.0.0",
   "PyYAML>=6.0.2,<7",
+  "boto3==1.40.18",
 ]
+
+[dependency-groups]
+test = ["pytest>=8.4.0,<9"]
 
 [tool.uv.sources]
 snapshot-e2e = { path = "../e2e" }
