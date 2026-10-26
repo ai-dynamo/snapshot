@@ -6,7 +6,8 @@
 # Same cluster and installer as e2e-cpu.yaml, with the chart pointed at a
 # store that runs outside the cluster as a service container. The store image
 # comes through the ECR pull-through cache for quay.io, so this needs the
-# ECR_REGISTRY repository variable and a runner that can pull from it.
+# ECR_REGISTRY repository variable and a runner that can pull from it, which is
+# why it runs on the self-hosted runner. That runner needs a Docker daemon.
 #
 # Manual only: it does not run on pull requests.
 
@@ -46,7 +47,7 @@ env:
 jobs:
   s3-e2e:
     name: S3 checkpoint/restore
-    runs-on: ubuntu-24.04
+    runs-on: prod-deploy-tester-v1
     timeout-minutes: 120
     env:
       SNAPSHOT_E2E_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-s3-e2e
