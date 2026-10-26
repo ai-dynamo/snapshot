@@ -196,7 +196,7 @@ type brokerClient interface {
 	PrepareCheckpoint(context.Context, string, string) (string, error)
 	StagedRestore(context.Context, string, string) (string, error)
 	PrepareArtifactCheckpoint(context.Context, string, *pb.ArtifactTarget, *pb.IOEngine) (string, error)
-	CommitCheckpoint(context.Context, string) (*pb.PublishedArtifact, error)
+	CommitCheckpoint(context.Context, string, string) (*pb.PublishedArtifact, error)
 	StagedArtifactRestore(context.Context, string, *pb.PublishedArtifact, *pb.IOEngine) (string, error)
 	Commit(context.Context, string) error
 	Abort(context.Context, string) error
@@ -325,7 +325,7 @@ func (s *cycleState) commitPublication(ctx context.Context) error {
 	if s.r.Backend == filesystemBackend {
 		return s.client.Commit(ctx, s.open)
 	}
-	artifact, err := s.client.CommitCheckpoint(ctx, s.open)
+	artifact, err := s.client.CommitCheckpoint(ctx, s.open, s.r.StoreID)
 	if err != nil {
 		return err
 	}
