@@ -25,7 +25,8 @@ The target builds the production image and its matching dependency image, then:
   endpoints, including injected failures, cancellation, and memory limits.
 - Repeats the S3 checks against the production runtime and trust store.
 - Builds the Go integration client and tests the packaged daemon's checkpoint
-  lifecycle over HTTP and HTTPS, including publication recovery and restart.
+  lifecycle over HTTP and HTTPS, including read-only lookup by target, publication recovery and restart.
+  Daemons read a mounted shared credentials file; changing it takes effect on restart.
 
 Fixtures use fake credentials and clean up their services and containers.
 No cloud account, GPU, or Kubernetes cluster is needed. The separate
