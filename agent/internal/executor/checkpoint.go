@@ -33,6 +33,25 @@ import (
 
 const pageBrokerAbortTimeout = 30 * time.Second
 
+// cleanupFailure marks a failure from releasing a transaction, as opposed to the
+// capture failure it is reported alongside. The two travel joined, so without a
+// mark a classifier can only tell them apart by the order they were joined in.
+type cleanupFailure struct{ cause error }
+
+func (e *cleanupFailure) Error() string { return e.cause.Error() }
+
+func (e *cleanupFailure) Unwrap() error { return e.cause }
+
+// CleanupFailure marks err as having come from cleanup rather than the capture.
+func CleanupFailure(err error) error { return &cleanupFailure{cause: err} }
+
+// IsCleanupFailure reports whether err came from releasing a transaction rather
+// than from the capture itself.
+func IsCleanupFailure(err error) bool {
+	var cleanup *cleanupFailure
+	return errors.As(err, &cleanup)
+}
+
 // checkpointNeedsSourceKillError reports a failure after CUDA or CRIU may have left the source unsafe.
 type checkpointNeedsSourceKillError struct{ cause error }
 
@@ -129,7 +148,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		if preparationAttempted && !committed {
 			if gpu != nil {
 				if err := gpu.Abort(ctx); err != nil {
-					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint: %w", err))
+					retErr = errors.Join(retErr, CleanupFailure(fmt.Errorf("abort PageBroker checkpoint: %w", err)))
 				}
 			} else {
 				retErr = abortCheckpointTransaction(broker, transactionID, retErr)
@@ -527,7 +546,7 @@ func abortPageBrokerTransaction(broker pagebroker.Client, transactionID string) 
 
 func abortCheckpointTransaction(broker pagebroker.Client, transactionID string, cause error) error {
 	if err := abortPageBrokerTransaction(broker, transactionID); err != nil {
-		cause = errors.Join(cause, fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err))
+		cause = errors.Join(cause, CleanupFailure(fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err)))
 	}
 	return cause
 }

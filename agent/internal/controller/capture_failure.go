@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 )
 
@@ -62,22 +63,23 @@ func classifyCaptureFailure(err error) captureFailure {
 	}
 }
 
-// captureCause strips the cleanup failures the executor joins onto a capture
-// error, so a code from a failed Abort is not read as why the capture failed —
-// an abort reporting TRANSACTION_NOT_FOUND would otherwise look like the staged
-// data had been lost.
-//
-// The executor joins cause first, and errors.Join drops nils, so the first
-// branch is the real cause even when the cleanup is the only thing that failed.
+// captureCause strips the cleanup failures the executor reports alongside a
+// capture error, so a code from a failed Abort is not read as why the capture
+// failed — an abort reporting TRANSACTION_NOT_FOUND would otherwise look like
+// the staged data had been lost.
 func captureCause(err error) error {
 	for current := err; current != nil; current = errors.Unwrap(current) {
 		joined, ok := current.(interface{ Unwrap() []error })
 		if !ok {
 			continue
 		}
-		if parts := joined.Unwrap(); len(parts) > 0 {
-			return captureCause(parts[0])
+		for _, part := range joined.Unwrap() {
+			if !executor.IsCleanupFailure(part) {
+				return captureCause(part)
+			}
 		}
+		// Nothing but cleanup failed, so the cleanup is the cause.
+		return err
 	}
 	return err
 }

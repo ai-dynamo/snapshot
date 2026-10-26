@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 )
 
@@ -59,8 +60,8 @@ func TestClassifyCaptureFailureSeesThroughWrapping(t *testing.T) {
 // would be recorded as staged data lost.
 func TestClassifyCaptureFailureIgnoresTheCleanupError(t *testing.T) {
 	dump := errors.New("criu dump: frozen task is unreachable")
-	abort := fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
-		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, ""))
+	abort := executor.CleanupFailure(fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
+		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, "")))
 
 	// How executorCheckpoint presents it: the join, wrapped once more.
 	joined := fmt.Errorf("checkpoint: %w", errors.Join(dump, abort))
@@ -70,11 +71,34 @@ func TestClassifyCaptureFailureIgnoresTheCleanupError(t *testing.T) {
 	}
 }
 
+// The cleanup is identified by its mark, not by where it sits in the join, so
+// joining the other way round classifies the same.
+func TestClassifyCaptureFailureDoesNotDependOnJoinOrder(t *testing.T) {
+	dump := errors.New("criu dump: frozen task is unreachable")
+	abort := executor.CleanupFailure(fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
+		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, "")))
+
+	for _, tc := range []struct {
+		name   string
+		joined error
+	}{
+		{"cause first", errors.Join(dump, abort)},
+		{"cleanup first", errors.Join(abort, dump)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyCaptureFailure(fmt.Errorf("checkpoint: %w", tc.joined))
+			if got.reason != reasonCheckpointFailed {
+				t.Errorf("classifyCaptureFailure() = %+v, want %q from the dump", got, reasonCheckpointFailed)
+			}
+		})
+	}
+}
+
 // The same join, with a code on both sides: the dump's is the one that counts.
 func TestClassifyCaptureFailurePrefersTheDumpsCode(t *testing.T) {
 	dump := pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR, "storage I/O failed")
-	abort := fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
-		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, ""))
+	abort := executor.CleanupFailure(fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
+		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, "")))
 
 	got := classifyCaptureFailure(fmt.Errorf("checkpoint: %w", errors.Join(dump, abort)))
 	if got.reason != reasonCheckpointFailed || !got.retryable {
@@ -85,8 +109,8 @@ func TestClassifyCaptureFailurePrefersTheDumpsCode(t *testing.T) {
 // When the capture itself succeeded and only cleanup failed, errors.Join has
 // dropped the nil, so the first branch is the cleanup — and that is the cause.
 func TestClassifyCaptureFailureUsesCleanupWhenItIsTheOnlyFailure(t *testing.T) {
-	abort := fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
-		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, ""))
+	abort := executor.CleanupFailure(fmt.Errorf("abort PageBroker checkpoint %q: %w", "tx-1",
+		pagebroker.NewFailureError(pagebroker.Failure_TRANSACTION_NOT_FOUND, "")))
 
 	got := classifyCaptureFailure(fmt.Errorf("checkpoint: %w", errors.Join(nil, abort)))
 	if got.reason != reasonStagedDataLost {
