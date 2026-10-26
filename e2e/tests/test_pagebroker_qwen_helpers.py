@@ -210,8 +210,12 @@ def test_required_qwen_cases_cannot_pass_as_skipped(pytester, monkeypatch):
     assert result.ret == pytest.ExitCode.TESTS_FAILED
 
 
-def test_selected_context_is_passed_to_kubernetes(monkeypatch):
+@pytest.mark.parametrize("cpu_only", [False, True])
+def test_selected_context_is_passed_to_kubernetes(monkeypatch, cpu_only):
     calls = []
+    checks = []
+    monkeypatch.setenv("SNAPSHOT_E2E_CPU_ONLY", "true" if cpu_only else "false")
+    monkeypatch.setattr(k8s, "require_single_cpu_node", lambda: checks.append(calls[-1]))
     monkeypatch.setattr(k8s, "load_config", lambda *args: calls.append(args))
     monkeypatch.setenv("SNAPSHOT_E2E_MODE", "direct")
     monkeypatch.setenv("KUBECONFIG", "/external/config")
@@ -220,6 +224,7 @@ def test_selected_context_is_passed_to_kubernetes(monkeypatch):
     monkeypatch.delenv("SNAPSHOT_E2E_KUBE_CONTEXT")
     k8s.configure(k8s.E2EConfig.from_env())
     assert calls == [("/external/config", "selected-cluster"), ("/external/config", None)]
+    assert checks == (calls if cpu_only else [])
 
 
 def test_fixture_records_ownership_before_creating_workloads(tmp_path, monkeypatch, identity):
