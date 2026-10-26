@@ -275,8 +275,10 @@ func (p *Plugin) PostStartContainer(_ context.Context, _ *api.PodSandbox, ctr *a
 
 // StopContainer withdraws a started destination container's report. The
 // runtime sends it when kubelet stops the container and when the container
-// exits on its own.
+// exits on its own, which can be before PostStartContainer: forgetting the
+// container then keeps that from reporting it.
 func (p *Plugin) StopContainer(_ context.Context, _ *api.PodSandbox, ctr *api.Container) ([]*api.ContainerUpdate, error) {
+	p.created.Delete(ctr.GetId())
 	if d, ok := p.started.LoadAndDelete(ctr.GetId()); ok {
 		d := d.(destination)
 		p.restorer.RestoreContainerStopped(d.uid, d.container, ctr.GetId())

@@ -295,8 +295,10 @@ func TestPostStartContainerReportsDestinations(t *testing.T) {
 
 		_, err = p.StopContainer(context.Background(), vclusterSandbox, main)
 		require.NoError(t, err)
+		require.NoError(t, p.PostStartContainer(context.Background(), vclusterSandbox, main))
 
 		assert.Empty(t, restorer.stopped, "nothing was reported")
+		assert.Empty(t, restorer.started, "a late post-start does not report the stopped container")
 	})
 }
 
