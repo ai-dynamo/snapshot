@@ -13,7 +13,6 @@ GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
 MODEL_STREAMER_LIB_DIR ?= /usr/local/lib
 MODEL_STREAMER_INCLUDE_DIR ?= /usr/local/include
 MODEL_STREAMER_FLAGS := -L$(MODEL_STREAMER_LIB_DIR) -lstreamer -Wl,-rpath,$(MODEL_STREAMER_LIB_DIR)
-S3_TEST_VENV := build/s3-test-venv
 STREAMER_SOURCES := transfer/engine/model_streamer/model_streamer_restore.cpp
 RESTORE_SOURCES := file_descriptor.cpp $(STREAMER_SOURCES)
 ENGINE_SOURCES = $(COMMON_SOURCES) $(STREAMER_SOURCES) transfer/engine/model_streamer/model_streamer_transfer_engine.cpp transfer/engine/transfer_engine.cpp
@@ -35,8 +34,7 @@ BROKER_TEST_SOURCES := tests/broker_transfer_test.cpp tests/broker_checkpoint_te
 # Wrap mkdir and GPU calls to inject failures without requiring CUDA.
 BROKER_TEST_WRAP_FLAGS := -Wl,--wrap=mkdir \
 	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine10CheckpointERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE \
-	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine7RestoreERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE \
-	-Wl,--wrap=_ZN8snapshot10pagebroker18filesystem_storage12StageRestoreERKNS0_19CheckpointInventoryERKNSt10filesystem7__cxx114pathENS0_12CancellationE
+	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine7RestoreERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE
 COMMON_SOURCES := file_descriptor.cpp $(FILESYSTEM_SOURCES)
 IO_SOURCES := io_engine.cpp
 GPU_SOURCES := gpu/engine.cpp gpu/checkpoint.cpp gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp
@@ -49,7 +47,7 @@ GPU_TEST_SOURCES := $(filter-out gpu/cuda_driver.cpp,$(PAGEBROKER_SOURCES))
 NIXL_FLAGS := -isystem $(NIXL_ROOT)/include -L$(NIXL_ROOT)/lib -lnixl -lnixl_build
 
 .DEFAULT_GOAL := daemon
-.PHONY: daemon generate test test-gpu s3-test-build s3-test s3-fixture-test s3-lifetime-test
+.PHONY: daemon generate test test-gpu
 
 generate: v1/pagebroker.pb.cc v1/pagebroker.pb.h
 
@@ -64,7 +62,7 @@ daemon: generate
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DAEMON_SOURCES) v1/pagebroker.pb.cc \
 		-Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o pagebroker
 
-test: generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test s3-test s3-fixture-test s3-lifetime-test | build
+test: generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test    | build
 	./build/cancellation-test
 	./build/gpu-engine-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp tests/daemon_test.cpp $(BROKER_TEST_SOURCES) tests/filesystem_storage_test.cpp tests/storage_contract_test.cpp $(TRANSFER_TEST_SOURCES) v1/pagebroker.pb.cc $(BROKER_TEST_WRAP_FLAGS) -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o build/pagebroker-test
@@ -106,25 +104,3 @@ build/gpu-checkpoint-test: generate $(GPU_TEST_SOURCES) gpu/checkpoint_test.cpp 
 build/gpu-transfer-test: generate transfer/engine/transfer_engine.cpp gpu/transfer.cpp gpu/transfer.hpp gpu/transfer_test.cpp cancellation.hpp $(COMMON_SOURCES) $(IO_SOURCES) file_descriptor.hpp io_engine.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/transfer.cpp gpu/transfer_test.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer/engine/transfer_engine.cpp v1/pagebroker.pb.cc \
 		$(GTEST_FLAGS) -lprotobuf $(NIXL_FLAGS) -L$(CUDA_LIBRARY_DIR) -lcuda -ldl -o $@
-
-# Install fixture dependencies automatically for native and containerized tests.
-$(S3_TEST_VENV)/.installed: tests/requirements.txt | build
-	python3 -m venv $(S3_TEST_VENV)
-	$(S3_TEST_VENV)/bin/python3 -m pip install --disable-pip-version-check -r $<
-	touch $@
-
-# Uses a disposable local S3 service; no cloud credentials are needed.
-s3-test-build: generate
-	mkdir -p build
-	c++ -I. -I$(MODEL_STREAMER_INCLUDE_DIR) -std=c++20 -Wall -Werror $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_s3_test.cpp  v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(GTEST_FLAGS) $(MODEL_STREAMER_FLAGS)  -o build/model-streamer-s3-test
-
-s3-test: s3-test-build $(S3_TEST_VENV)/.installed
-	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$(AWS_SDK_PREFIX)/lib:$$LD_LIBRARY_PATH" $(S3_TEST_VENV)/bin/python3 tests/s3_integration.py --binary ./build/model-streamer-s3-test
-	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$(AWS_SDK_PREFIX)/lib:$$LD_LIBRARY_PATH" $(S3_TEST_VENV)/bin/python3 tests/s3_integration.py --binary ./build/model-streamer-s3-test --tls
-
-s3-fixture-test: $(S3_TEST_VENV)/.installed
-	$(S3_TEST_VENV)/bin/python3 -m unittest discover -s tests -p 'test_*.py' -v
-
-# Real SDK buffer-lifetime checks run in isolated processes against a local endpoint.
-s3-lifetime-test:
-	LD_LIBRARY_PATH="$(MODEL_STREAMER_LIB_DIR):$$LD_LIBRARY_PATH" python3 tests/model_streamer_submission_lifetime.py

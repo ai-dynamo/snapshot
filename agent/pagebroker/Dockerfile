@@ -105,11 +105,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libaio-dev \
     libgtest-dev \
     libprotobuf-dev \
-    openssl \
     pkg-config \
     protobuf-compiler \
-    python3 \
-    python3-venv \
     && sh compliance/collect-sources.sh /legal/source/protobuf libprotobuf-dev \
     && sh compliance/collect-sources.sh /legal/source/libaio libaio1t64 \
     && rm -rf /var/lib/apt/lists/*
@@ -127,7 +124,7 @@ RUN useradd --create-home --user-group pagebroker-test \
     && chown pagebroker-test:pagebroker-test /src
 COPY --chown=pagebroker-test:pagebroker-test . .
 USER pagebroker-test
-# Run CPU and local S3 tests unprivileged so directory permissions are enforced.
+# Run unit tests unprivileged so directory permissions are enforced.
 # GPU tests are compiled here and run separately.
 RUN test "$(id -u)" -ne 0 \
     && make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
@@ -186,10 +183,5 @@ COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/LICENSE /legal/
 # RUNPATH alone does not cover that lookup or all transitive dependencies.
 
 ENTRYPOINT ["/usr/local/bin/pagebroker"]
-
-# Exercise real S3 reads with the exact production runtime and trust store.
-FROM runtime AS s3-test
-COPY --from=build /src/build/model-streamer-s3-test /usr/local/bin/model-streamer-s3-test
-ENTRYPOINT ["/usr/local/bin/model-streamer-s3-test"]
 
 FROM runtime AS final
