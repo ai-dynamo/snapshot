@@ -379,9 +379,10 @@ Qwen3-8B, without pytest parallelization. Each case:
 5. Rejects a cold-starting placeholder, changed workload image, workload restart,
    or replacement/restart of the agent or PageBroker during the case.
 
-The restored containers use the guide's inert `sleep infinity` command. Model
-selection is set on both source and restore templates; the captured process reads
-it when initially loading the model. Each case gets its own app ConfigMap, cleaned
+Restore containers follow the framework helper's proxy selection: the restore
+proxy replaces the application command, or the container idles when the proxy is
+disabled. The source receives the model through the guide's JSON application
+arguments. Each case gets its own app ConfigMap, cleaned
 up after the pods and snapshot, so it does not replace another vLLM workload's
 ConfigMap. The generic framework tests and guides retain their existing defaults.
 
