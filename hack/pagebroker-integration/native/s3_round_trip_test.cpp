@@ -31,6 +31,11 @@
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
+// Moto assembles the entire object during multipart completion. Large memory
+// probes need more time than the small failure tests, especially on busy CI
+// hosts. The Python runner independently bounds each probe to 120 seconds.
+constexpr auto kMemoryProbeTimeout = std::chrono::seconds(60);
+
 Cancellation
 Deadline(std::chrono::milliseconds duration = std::chrono::seconds(30))
 {
@@ -1004,10 +1009,11 @@ TEST_F(S3RoundTripTest, UploadMemoryProbe)
   for (std::uint64_t offset = 0; offset < size; offset += chunk.size())
     file.write(chunk.data(), std::min<std::uint64_t>(chunk.size(), size - offset));
   file.close();
+  limits_.request_timeout = kMemoryProbeTimeout;
   ProcessMemory memory;
   const auto begin = std::chrono::steady_clock::now();
   S3Client client(connection_, limits_);
-  const auto uploaded = Upload(client, source, Destination("memory", requested), Deadline());
+  const auto uploaded = Upload(client, source, Destination("memory", requested), Deadline(kMemoryProbeTimeout));
   EXPECT_EQ(uploaded, size);
   const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
   std::cout << "S3 upload resource check: " << size << " bytes, " << seconds << " s, "
@@ -1032,12 +1038,13 @@ TEST_F(S3RoundTripTest, ConcurrentUploadMemoryProbe)
   file.close();
   limits_.active_files = 2;
   limits_.buffer_budget = 18 * 1024 * 1024;
+  limits_.request_timeout = kMemoryProbeTimeout;
   ProcessMemory memory;
   S3Client client(connection_, limits_);
   auto first = std::async(std::launch::async,
-                          [&] { return Upload(client, path, Destination("memory", "first"), Deadline()); });
+                          [&] { return Upload(client, path, Destination("memory", "first"), Deadline(kMemoryProbeTimeout)); });
   auto second = std::async(std::launch::async,
-                           [&] { return Upload(client, path, Destination("memory", "second"), Deadline()); });
+                           [&] { return Upload(client, path, Destination("memory", "second"), Deadline(kMemoryProbeTimeout)); });
   EXPECT_EQ(first.get(), 256ULL * 1024 * 1024);
   EXPECT_EQ(second.get(), 256ULL * 1024 * 1024);
   // Allow runtime overhead for the parent and both children, but not whole-file

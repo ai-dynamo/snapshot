@@ -261,6 +261,40 @@ def local_environment():
     return environment
 
 
+class CheckedService:
+    """Propagate unexpected HTTP worker failures to the test runner."""
+
+    def __init__(self, app):
+        self.app = app
+        self.lock = threading.Lock()
+        self.errors = []
+
+    def __call__(self, environment, start_response):
+        started = time.monotonic()
+        try:
+            iterable = self.app(environment, start_response)
+            try:
+                yield from iterable
+            finally:
+                if hasattr(iterable, "close"):
+                    iterable.close()
+        except Exception as error:
+            query = parse_qs(environment.get("QUERY_STRING", ""))
+            # Only test object identifiers belong in diagnostics, never headers
+            # or the complete query string (which could contain credentials).
+            request = dict(method=environment["REQUEST_METHOD"], path=environment["PATH_INFO"],
+                           upload_id=query.get("uploadId"), part=query.get("partNumber"),
+                           seconds=round(time.monotonic() - started, 3), error=type(error).__name__)
+            with self.lock:
+                self.errors.append(request)
+            raise
+
+    def verify(self):
+        with self.lock:
+            if self.errors:
+                raise AssertionError(f"Unexpected fixture exceptions: {self.errors}")
+
+
 @contextlib.contextmanager
 def local_service(args, environment, service_factory=FaultService):
     from moto.server import DomainDispatcherApplication, create_backend_app
@@ -281,8 +315,12 @@ def local_service(args, environment, service_factory=FaultService):
             environment["AWS_CA_BUNDLE"] = str(certificate)
             tls = (str(certificate), str(key))
         faults = service_factory(DomainDispatcherApplication(create_backend_app))
-        server = make_server("127.0.0.1", 0, faults,
+        checked = CheckedService(faults)
+        server = make_server("127.0.0.1", 0, checked,
                              threaded=True, ssl_context=tls)
+        # server_close must join request handlers before inspecting their errors.
+        # This also covers late failures after cancellation or a resource probe.
+        server.daemon_threads = False
         worker = threading.Thread(target=server.serve_forever)
         worker.start()
         try:
@@ -293,6 +331,9 @@ def local_service(args, environment, service_factory=FaultService):
             server.shutdown()
             worker.join()
             server.server_close()
+        # Preserve an existing test failure; otherwise worker exceptions must
+        # fail the run even when every native process returned successfully.
+        checked.verify()
 
 
 def make_fixture(root):
@@ -341,6 +382,22 @@ def create_session(environment):
         aws_secret_access_key=environment["AWS_SECRET_ACCESS_KEY"],
         region_name=environment["AWS_DEFAULT_REGION"],
     )
+
+
+def verify_resource_upload(client, bucket, key, size):
+    # Resource probes write 'm' bytes. Read them independently after the native
+    # process exits, so verification cannot affect its upload memory sample.
+    response = client.get_object(Bucket=bucket, Key=key)
+    with contextlib.closing(response["Body"]) as body:
+        if response["ContentLength"] != size:
+            raise AssertionError(f"Resource upload size mismatch: {key}")
+        received = 0
+        while chunk := body.read(64 * 1024):
+            received += len(chunk)
+            if received > size or chunk != b"m" * len(chunk):
+                raise AssertionError(f"Resource upload contents mismatch: {key}")
+        if received != size:
+            raise AssertionError(f"Resource upload truncated: {key}")
 
 
 def run(args, environment, faults=None):
@@ -410,6 +467,11 @@ def run(args, environment, faults=None):
                 if args.image:
                     resource_command[-1:-1] = ["--env", "GTEST_FILTER", "--env", "PAGEBROKER_S3_TEST_MEMORY_MIB"]
                 run_native(resource_command, probe, container_name, 120)
+                if test == "UploadMemoryProbe":
+                    verify_resource_upload(client, bucket, f"roundtrip/memory/{size}", size * 1024 * 1024)
+                elif test == "ConcurrentUploadMemoryProbe":
+                    for name in ("first", "second"):
+                        verify_resource_upload(client, bucket, f"roundtrip/memory/{name}", size * 1024 * 1024)
         if args.tls:
             # A separate process is necessary: the pinned native library
             # caches its AWS configuration for the process lifetime.
