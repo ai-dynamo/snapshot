@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG DOCKER_PROXY
+ARG TARGETARCH
 ARG PAGEBROKER_BUILD_IMAGE=ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
 # When bumping the base, update the source URL in compliance/README.source.txt
 # to the matching version.
@@ -54,7 +55,54 @@ RUN find /tmp/nixl/subprojects -type f \( -iname 'license*' -o -iname 'copying*'
       done < /tmp/nixl-notices > /nixl-runtime/THIRD-PARTY-NOTICES.txt
 RUN git -C /tmp/nvtx rev-parse HEAD > /NVTX_COMMIT
 
-FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build
+# Download the release SDK inside the PageBroker build so every image builder
+# uses the same checksummed headers and library without preparing local inputs.
+FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS model-streamer-amd64
+ARG MODEL_STREAMER_ARCH=x86_64
+
+FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS model-streamer-arm64
+ARG MODEL_STREAMER_ARCH=aarch64
+
+# Docker and the SDK use different architecture names.
+FROM model-streamer-${TARGETARCH} AS model-streamer-install
+ARG TARGETARCH
+ARG MODEL_STREAMER_VERSION=0.17.0
+ARG MODEL_STREAMER_REF=dd9e5d34f966cc2667c9f0505262050b4bedc35a
+WORKDIR /opt/model-streamer-sdk
+COPY model-streamer-sdk.${TARGETARCH}.sha256 /tmp/model-streamer-sdk.sha256
+ADD https://github.com/dsx-ai-factory/model-streamer/releases/download/${MODEL_STREAMER_VERSION}/runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}.tar.gz ./sdk.tar.gz
+RUN sha256sum -c /tmp/model-streamer-sdk.sha256 \
+    && tar -xzf sdk.tar.gz --strip-components=1 \
+      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}/include \
+      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}/lib/libstreamer.so \
+      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}/lib/libstreamers3.so \
+      runai-model-streamer-cpp-sdk-${MODEL_STREAMER_VERSION}-linux-${MODEL_STREAMER_ARCH}/LICENSE \
+    && rm sdk.tar.gz \
+    && mkdir -p legal \
+    && mv LICENSE legal/LICENSE \
+    && cp /tmp/model-streamer-sdk.sha256 legal/SDK.sha256 \
+    && printf '%s\n' "${MODEL_STREAMER_VERSION}" > legal/VERSION \
+    && printf '%s\n' "${MODEL_STREAMER_REF}" > legal/REVISION \
+    && printf 'Release: https://github.com/dsx-ai-factory/model-streamer/releases/tag/%s\nBuild: https://github.com/dsx-ai-factory/model-streamer/blob/%s/.devcontainer/Dockerfile\n' \
+      "${MODEL_STREAMER_VERSION}" "${MODEL_STREAMER_REF}" > legal/UPSTREAM.txt
+
+# Preserve corresponding sources for the core library and its statically linked
+# I/O dependencies. These archives are attribution inputs, not build inputs.
+# Dependency versions and checksums follow Model Streamer's pinned build (see
+# legal/UPSTREAM.txt); changing these archives does not change the prebuilt SDK.
+ADD --checksum=sha256:c344e2ee677a3c3e4cb65fc7ab1e04918d85c2f7268e9d4465a895cea2082499 https://codeload.github.com/dsx-ai-factory/model-streamer/tar.gz/${MODEL_STREAMER_REF} /opt/model-streamer-sdk/legal/source/model-streamer.tar.gz
+ADD --checksum=sha256:2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz /opt/model-streamer-sdk/legal/source/libaio.tar.gz
+ADD --checksum=sha256:5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf61de0c https://github.com/axboe/liburing/archive/refs/tags/liburing-2.14.tar.gz /opt/model-streamer-sdk/legal/source/liburing.tar.gz
+
+# Native builds can export the same SDK without building the daemon image.
+FROM scratch AS model-streamer-sdk
+COPY --from=model-streamer-install /opt/model-streamer-sdk/ /
+
+FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build-dependencies
+
+COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
+COPY --from=model-streamer-install /opt/model-streamer-sdk/include/ /usr/local/include/
+COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamers3.so /usr/local/lib/libstreamers3.so
 
 WORKDIR /src
 COPY compliance/ compliance/
@@ -79,11 +127,21 @@ COPY --from=nixl /nixl-runtime/lib/ /nixl-runtime-check/
 ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 
-COPY . .
-# Run CPU tests and compile GPU tests. GPU tests run separately.
-RUN make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
+FROM build-dependencies AS build
+WORKDIR /src
+RUN useradd --create-home --user-group pagebroker-test \
+    && chown pagebroker-test:pagebroker-test /src
+COPY --chown=pagebroker-test:pagebroker-test . .
+USER pagebroker-test
+# Run unit tests unprivileged so directory permissions are enforced.
+# GPU tests are compiled here and run separately.
+RUN test "$(id -u)" -ne 0 \
+    && make test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
     && make build/gpu-checkpoint-test build/gpu-transfer-test CUDA_ROOT=/opt/cuda CUDA_LIBRARY_DIR=/opt/cuda/lib64/stubs \
     && make daemon CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
+
+# Packaging below needs root to collect libraries and corresponding sources.
+USER root
 
 # The CLI remains usable without a driver. CUDA is loaded only for capability
 # detection, and no build-time driver stub is shipped in the runtime image.
@@ -117,7 +175,7 @@ COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/protobuf /legal/THIRD-PARTY.txt \
     /legal/source/libaio /legal/source/nixl /legal/source/nvtx
 
-FROM ${PAGEBROKER_BASE_IMAGE}
+FROM ${PAGEBROKER_BASE_IMAGE} AS runtime
 
 COPY --from=build /src/pagebroker /usr/local/bin/pagebroker
 COPY --from=build /runtime-lib/ /usr/local/lib/
@@ -125,5 +183,14 @@ COPY --from=nixl /nixl-runtime/lib/ /usr/local/lib/
 COPY --from=sources /legal /legal
 ENV LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
+COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/ /legal/model-streamer/
+COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
+COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamers3.so /usr/local/lib/libstreamers3.so
+COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/LICENSE /legal/model-streamer-s3/LICENSE
+
+# libstreamers3.so is loaded with dlopen inside libstreamer.so; the executable's
+# RUNPATH alone does not cover that lookup or all transitive dependencies.
 
 ENTRYPOINT ["/usr/local/bin/pagebroker"]
+
+FROM runtime AS final

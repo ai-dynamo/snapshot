@@ -4,8 +4,6 @@
 #include "broker.hpp"
 
 #include <sys/statvfs.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -14,10 +12,13 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 
-#include "posix_copy_engine.hpp"
 #include "gpu/storage_manifest.hpp"
 #include "gpu/checkpoint.hpp"
+#include "transfer/engine/posix/posix_copy_engine.hpp"
+#include "transfer/filesystem/filesystem_storage.hpp"
+#include "transfer/checkpoint_inventory.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -26,7 +27,9 @@ namespace {
 constexpr auto kGpuAbortTimeout = std::chrono::seconds{30};
 constexpr auto kTerminalTransactionRetention = std::chrono::hours(1);
 constexpr size_t kMaxRetainedTerminalTransactions = 1024;
-constexpr auto kLiveTransactionLifetime = std::chrono::hours(2) + std::chrono::minutes(5);
+// Account for a checkpoint at admission before its size is known; publication
+// grows this reservation to the inspected size.
+constexpr uintmax_t kCheckpointAdmissionBytes = 1;
 
 Response
 Reply(const Request& request)
@@ -47,10 +50,12 @@ Fail(const Request& request, Failure::Code code, const std::string& message)
 }
 
 Response
-CommitSucceeded(const Request& request)
+CommitSucceeded(const Request& request, const CheckpointPublication* publication = nullptr)
 {
   auto response = Reply(request);
-  response.mutable_commit_complete();
+  auto* complete = response.mutable_commit_complete();
+  if (publication && publication->published)
+    *complete->mutable_published_artifact() = publication->artifact;
   return response;
 }
 
@@ -60,13 +65,6 @@ AbortSucceeded(const Request& request)
   auto response = Reply(request);
   response.mutable_abort_complete();
   return response;
-}
-
-bool
-IsSafePathComponent(const std::string& value)
-{
-  return !value.empty() && value != "." && value != ".." && value.find('/') == std::string::npos &&
-         value.find('\\') == std::string::npos && value.find('\0') == std::string::npos;
 }
 
 const StorageBackend&
@@ -110,24 +108,6 @@ ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
   }
 }
 
-FileDescriptor
-OpenDirectory(const Path& path)
-{
-  FileDescriptor directory(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-  if (directory.get() < 0)
-    throw std::system_error(errno, std::generic_category(), "open artifact directory");
-  return directory;
-}
-
-void
-RejectSymlinks(const Path& directory)
-{
-  for (const auto& entry : fs::recursive_directory_iterator(directory)) {
-    if (entry.is_symlink())
-      throw std::runtime_error("checkpoint contains symlink");
-  }
-}
-
 bool
 HasAvailableSpace(const Path& filesystem, uintmax_t required_bytes)
 {
@@ -147,19 +127,34 @@ using GpuRequest = Transaction::GpuRequest;
 using GpuOperation = Transaction::GpuOperation;
 using GpuState = GpuOperation::State;
 
-Path
-CheckpointOutputDirectory(const Path& destination, const std::string& transaction_id)
-{
-  return Path(destination.string() + ".pagebroker-tx-" + transaction_id);
-}
+enum class AbortWait { NoWait, WaitForGpu };
 
-void
-BeginAbort(Transaction& transaction)
+// Caller owns lock on transaction.mutex(). False with no error means GPU work
+// is still running; false with an error means staging cleanup needs a retry.
+bool
+TryAbortTransactionLocked(Transaction& transaction, std::unique_lock<std::mutex>& lock,
+    AbortWait wait, std::error_code& cleanup_error)
 {
+  cleanup_error.clear();
   transaction.set_state(Transaction::State::ABORTING);
-  if (transaction.gpu_operation) {
-    transaction.gpu_operation->cancellation->Cancel();
+  transaction.CancelWork();
+  if (const auto operation = transaction.gpu_operation) {
+    if (wait == AbortWait::NoWait) {
+      // The accept loop must not wait for GPU I/O. A later sweep finishes cleanup.
+      if (operation->state == GpuState::Running)
+        return false;
+    } else if (!operation->completed.wait_for(lock, kGpuAbortTimeout,
+                   [&] { return operation->state != GpuState::Running; })) {
+      return false;
+    }
+    operation->artifact.reset();
   }
+  transaction.CleanupTransfer(cleanup_error);
+  if (cleanup_error)
+    return false;
+  transaction.TryClearDescriptor();
+  transaction.set_state(Transaction::State::ABORTED);
+  return true;
 }
 
 std::string
@@ -237,7 +232,7 @@ CreateGpuArtifact(const Transaction& transaction, const GpuRequest& request)
   if (!checkpoint) {
     throw std::invalid_argument("GPU checkpoint requires a checkpoint transaction");
   }
-  auto directory = OpenDirectory(checkpoint->staging_directory());
+  auto directory = filesystem_storage::OpenDirectory(checkpoint->staging_directory());
   return std::make_unique<gpu::Artifact>(directory.get(), request.direction,
       request.captured_pids, request.visible_devices, request.device_map);
 }
@@ -289,19 +284,19 @@ class GpuCompletion {
 
 }  // namespace
 
-Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine)
-    : staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
+Broker::Broker(Path staging_root, Path storage_root, gpu::GpuEnginePtr gpu_engine, std::chrono::seconds lifetime)
+    : lifetime_(lifetime), staging_root_(fs::weakly_canonical(std::move(staging_root))), gpu_engine_(std::move(gpu_engine))
 {
   io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
-  fs::remove_all(staging_root_ / "restore");
-  fs::remove_all(staging_root_ / "checkpoint");
+  filesystem_storage::RemoveStaging(staging_root_ / "restore");
+  filesystem_storage::RemoveStaging(staging_root_ / "checkpoint");
   fs::create_directories(staging_root_ / "restore");
   fs::create_directories(staging_root_ / "checkpoint");
 }
 
 Broker::~Broker()
 {
-  CancelGpuWork();
+  Shutdown();
 }
 
 std::vector<std::pair<std::string, Broker::TransactionHandle>>
@@ -312,32 +307,12 @@ Broker::TransactionSnapshot()
 }
 
 void
-Broker::CancelGpuWork()
+Broker::Shutdown()
 {
-  for (const auto& [id, transaction] : TransactionSnapshot()) {
-    std::lock_guard lock(transaction->mutex());
-    if (transaction->gpu_operation) {
-      transaction->gpu_operation->cancellation->Cancel();
-    }
-  }
-}
-
-std::error_code
-Broker::CleanupTransactionDirectory(const std::string& id, Transaction& transaction)
-{
-  std::error_code error;
-  if (const auto* checkpoint = std::get_if<CheckpointTransactionDescriptor>(&transaction.descriptor())) {
-    fs::remove_all(checkpoint->staging_directory(), error);
-    if (error) {
-      return error;
-    }
-  }
-  fs::remove_all(TransactionDirectory(staging_root_ / "restore", id), error);
-  if (error) {
-    return error;
-  }
-  fs::remove_all(TransactionDirectory(staging_root_ / "checkpoint", id), error);
-  return error;
+  std::lock_guard lock(transactions_mutex_);
+  stopping_ = true;
+  for (const auto& [id, transaction] : transactions_)
+    transaction->CancelWork();
 }
 
 void
@@ -350,36 +325,37 @@ void
 Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
 {
   for (const auto& [id, transaction] : TransactionSnapshot()) {
-    std::lock_guard transaction_lock(transaction->mutex());
-    if (!transaction->expired(now, kLiveTransactionLifetime)) {
+    std::unique_lock transaction_lock(transaction->mutex(), std::try_to_lock);
+    if (!transaction_lock.owns_lock())
+      continue;
+    if (transaction->state() == Transaction::State::COMMITTED || transaction->state() == Transaction::State::ABORTED) {
+      // Retry missed retention and failed cleanup even without new requests.
+      std::error_code error;
+      transaction->CleanupTransfer(error);
+      if (!error)
+        RetainTerminalTransactionLocked(id, transaction);
       continue;
     }
-    if (const auto& operation = transaction->gpu_operation) {
-      BeginAbort(*transaction);
-      // Expiry retries cleanup on a later sweep instead of waiting for I/O.
-      if (operation->state == GpuState::Running) {
-        continue;
-      }
-      operation->artifact.reset();
-    }
-    if (CleanupTransactionDirectory(id, *transaction)) {
-      continue;
-    }
-    transaction->clear_descriptor();
-    transaction->set_state(Transaction::State::ABORTED);
 
-    std::lock_guard transactions_lock(transactions_mutex_);
-    const auto current = transactions_.find(id);
-    if (current != transactions_.end() && current->second == transaction) {
-      transactions_.erase(current);
+    if (!transaction->expired(now)) {
+      continue;
     }
+    transaction->ExpireTransfer(now);
+    std::error_code cleanup_error;
+    if (!TryAbortTransactionLocked(*transaction, transaction_lock, AbortWait::NoWait, cleanup_error)) {
+      continue;
+    }
+    EraseTransaction(id, transaction);
   }
+  ReapTerminalTransactions(now);
 }
 
 Broker::TransactionHandle
 Broker::CreateOrGetTransaction(const std::string& transaction_id)
 {
   std::lock_guard lock(transactions_mutex_);
+  if (stopping_)
+    throw TransferError(Failure::UNAVAILABLE, "PageBroker is shutting down");
   auto [iterator, inserted] = transactions_.try_emplace(transaction_id, std::make_shared<Transaction>());
   return iterator->second;
 }
@@ -393,22 +369,37 @@ Broker::FindTransaction(const std::string& transaction_id)
 }
 
 void
+Broker::EraseTransaction(const std::string& id, const TransactionHandle& transaction)
+{
+  std::lock_guard lock(transactions_mutex_);
+  const auto current = transactions_.find(id);
+  if (current != transactions_.end() && current->second == transaction)
+    transactions_.erase(current);
+}
+
+void
 Broker::RetainTerminalTransaction(const std::string& transaction_id)
 {
   auto transaction = FindTransaction(transaction_id);
   if (!transaction)
     return;
-  std::lock_guard transaction_lock(transaction->mutex());
-  if (!transaction->retain_terminal())
-    return;
-  std::lock_guard terminal_lock(terminal_transactions_mutex_);
-  terminal_transactions_.push_back({transaction_id, std::move(transaction), std::chrono::steady_clock::now()});
+  std::unique_lock transaction_lock(transaction->mutex(), std::try_to_lock);
+  if (transaction_lock.owns_lock())
+    RetainTerminalTransactionLocked(transaction_id, transaction);
 }
 
 void
-Broker::ReapTerminalTransactions()
+Broker::RetainTerminalTransactionLocked(const std::string& id, const TransactionHandle& transaction)
 {
-  const auto now = std::chrono::steady_clock::now();
+  if (!transaction->retain_terminal())
+    return;
+  std::lock_guard terminal_lock(terminal_transactions_mutex_);
+  terminal_transactions_.push_back({id, transaction, std::chrono::steady_clock::now()});
+}
+
+void
+Broker::ReapTerminalTransactions(std::chrono::steady_clock::time_point now)
+{
   std::vector<TerminalTransaction> expired;
   {
     std::lock_guard lock(terminal_transactions_mutex_);
@@ -420,12 +411,8 @@ Broker::ReapTerminalTransactions()
     }
   }
 
-  std::lock_guard lock(transactions_mutex_);
-  for (const auto& item : expired) {
-    const auto iterator = transactions_.find(item.id);
-    if (iterator != transactions_.end() && iterator->second == item.transaction)
-      transactions_.erase(iterator);
-  }
+  for (const auto& item : expired)
+    EraseTransaction(item.id, item.transaction);
 }
 
 bool
@@ -446,16 +433,32 @@ Broker::ReleaseStaging(uintmax_t bytes)
 }
 
 Response
+Broker::RejectBeforeOwnership(const Request& request, const TransactionHandle& transaction,
+    Failure::Code code, const std::string& message)
+{
+  // Existing holders must see ABORTED before the ID can be reused. Keep the
+  // registry entry if cleanup fails so the reaper can retry it.
+  transaction->set_state(Transaction::State::ABORTED);
+  std::error_code cleanup_error;
+  transaction->CleanupTransfer(cleanup_error);
+  if (cleanup_error)
+    return Fail(request, code, message + "; cleanup: " + cleanup_error.message());
+  EraseTransaction(request.transaction_id(), transaction);
+  return Fail(request, code, message);
+}
+
+Response
 Broker::AbortStaging(
     const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error)
 {
-  transaction.clear_descriptor();
+  // Pending cleanup retains the descriptor until RemoveStaging succeeds.
+  (void)transaction.TryClearDescriptor();
   transaction.set_state(Transaction::State::ABORTED);
   std::error_code cleanup_error;
-  fs::remove_all(staging_directory, cleanup_error);
+  transaction.RemoveStaging(staging_directory, cleanup_error);
   if (cleanup_error)
-    return Fail(request, Failure::STORAGE_ERROR, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
-  return Fail(request, Failure::STORAGE_ERROR, error.what());
+    return Fail(request, TransferFailureCode(error), std::string(error.what()) + "; cleanup: " + cleanup_error.message());
+  return Fail(request, TransferFailureCode(error), error.what());
 }
 
 const TransferEngine&
@@ -465,7 +468,7 @@ Broker::Engine(IoEngine engine_type) const
     if (candidate->type() == engine_type)
       return *candidate;
   }
-  throw std::runtime_error("configured I/O engine not found");
+  throw std::invalid_argument("configured I/O engine not found");
 }
 
 const TransferEngine&
@@ -473,6 +476,8 @@ Broker::Engine(const IOEngine& engine) const
 {
   if (engine.has_posix_copy())
     return Engine(IoEngine::POSIX_COPY);
+  if (engine.has_model_streamer())
+    return Engine(IoEngine::MODEL_STREAMER);
   throw std::invalid_argument("unsupported I/O engine");
 }
 
@@ -522,30 +527,21 @@ Broker::HandleRequest(const Request& request)
     response = Fail(request, Failure::INVALID_REQUEST, error.what());
   }
   catch (const std::exception& error) {
-    response = Fail(request, Failure::STORAGE_ERROR, error.what());
+    response = Fail(request, TransferFailureCode(error), error.what());
   }
   RetainTerminalTransaction(request.transaction_id());
-  ReapTerminalTransactions();
+  ReapTerminalTransactions(std::chrono::steady_clock::now());
   return response;
 }
+
+
 
 Response
 Broker::DirectRestore(const Request& request)
 {
   const auto& input = request.direct_restore();
   const auto& engine = Engine(input.io_engine());
-  // GPU restore reads its payload through this descriptor.
-  auto source = OpenDirectory(engine.SourceDirectory(input.source()));
-  auto transaction = CreateOrGetTransaction(request.transaction_id());
-  std::lock_guard lock(transaction->mutex());
-  if (transaction->state() != Transaction::State::NEW)
-    return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
-  transaction->set_state(Transaction::State::PREPARING);
-  transaction->set_descriptor(RestoreTransactionDescriptor({}, std::move(source)));
-  transaction->set_state(Transaction::State::STAGED);
-  auto response = Reply(request);
-  response.mutable_direct_restore_ready();
-  return response;
+  return StageRestore(request, input.source(), engine);
 }
 
 Response
@@ -558,38 +554,78 @@ Broker::Restore(const Request& request)
 }
 
 Response
-Broker::StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine)
+Broker::StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine,
+      const PublishedArtifact* artifact)
 {
   const Path restore_root = staging_root_ / "restore";
-  const Path staging_directory = TransactionDirectory(restore_root, request.transaction_id());
-  const uintmax_t bytes = engine.RestoreSize(source);
+  const bool direct = request.has_direct_restore();
+  const auto mode = direct ? TransferMode::Direct : TransferMode::Staged;
+  const Path staging_directory = direct ? Path{} : TransactionDirectory(restore_root, request.transaction_id());
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());
-  if (transaction->state() != Transaction::State::NEW || fs::exists(staging_directory))
+  if (transaction->state() != Transaction::State::NEW)
     return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
-  if (!ReserveStaging(bytes)) {
-    std::lock_guard transactions_lock(transactions_mutex_);
-    const auto current = transactions_.find(request.transaction_id());
-    if (current != transactions_.end() && current->second == transaction)
-      transactions_.erase(current);
-    return Fail(request, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
-  }
-  bool staging_reserved = true;
+  bool staging_reserved = false;
+  bool source_prepared = false;
+  uintmax_t bytes = 0;
+  bool owned = false;
+  RestoreAccess access;
   try {
+    if (fs::exists(staging_directory) || (artifact && fs::is_symlink(staging_directory)))
+      throw TransferError(Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
+    const bool metadata_only = request.has_get_artifact_metadata();
+    transaction->PrepareTransfer(direct ? nullptr : resources_, 0, nullptr, lifetime_);
     transaction->set_state(Transaction::State::PREPARING);
-    engine.StageRestore(source, staging_directory);
-    ReleaseStaging(bytes);
+    // Preparation can scan storage; it shares the transfer's deadline and cancellation.
+    auto prepared = engine.PrepareRestore(source, transaction->cancellation(), artifact, metadata_only, mode);
+    transaction->cancellation().ThrowIfCancelled();
+    source_prepared = true;
+    bytes = prepared.inventory.size_bytes();
+    // The configured budget remains reserved until staging cleanup. The separate
+    // filesystem reservation covers concurrent copies and ends after copying,
+    // when the staged files themselves consume the space reported by statvfs.
+    transaction->Reserve(bytes);
+    if (!direct && !ReserveStaging(bytes))
+      return RejectBeforeOwnership(request, transaction, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
+    staging_reserved = !direct;
+    if (!direct) {
+      transaction->cancellation().ThrowIfCancelled();
+      filesystem_storage::CreateDirectoryExclusive(staging_directory, fs::perms::all);
+      owned = true;
+      transaction->OwnDirectory(staging_directory);
+      transaction->cancellation().ThrowIfCancelled();
+    }
+    access = engine.StageRestore(std::move(prepared), staging_directory, transaction->cancellation());
+    // A final blocking copy may return after expiry or cancellation.
+    transaction->cancellation().ThrowIfCancelled();
+    if (staging_reserved)
+      ReleaseStaging(bytes);
     staging_reserved = false;
-    transaction->set_descriptor(RestoreTransactionDescriptor(staging_directory, OpenDirectory(engine.SourceDirectory(source))));
+    transaction->set_descriptor(RestoreTransactionDescriptor(access.staging_directory, std::move(access.source)));
     transaction->set_state(Transaction::State::STAGED);
   }
   catch (const std::exception& error) {
     if (staging_reserved)
       ReleaseStaging(bytes);
-    return AbortStaging(request, *transaction, staging_directory, error);
+    const auto* failure = dynamic_cast<const TransferError*>(&error);
+    if (!owned && failure && failure->code == Failure::INSUFFICIENT_STORAGE)
+      return RejectBeforeOwnership(request, transaction, failure->code, error.what());
+    const bool staging_conflict = transaction->state() == Transaction::State::NEW &&
+        failure && failure->code == Failure::TRANSACTION_CONFLICT;
+    if (staging_conflict || (!artifact && !source_prepared && dynamic_cast<const std::invalid_argument*>(&error))) {
+      const auto code = staging_conflict ? Failure::TRANSACTION_CONFLICT : Failure::INVALID_REQUEST;
+      // Rejected staging paths and invalid sources must allow a fresh retry.
+      return RejectBeforeOwnership(request, transaction, code, error.what());
+    }
+    return AbortStaging(request, *transaction, owned ? staging_directory : Path{}, error);
   }
   auto response = Reply(request);
-  response.mutable_staged_restore_directory()->set_image_directory(staging_directory.string());
+  if (direct)
+    response.mutable_direct_restore_ready();
+  else if (request.has_get_artifact_metadata())
+    response.mutable_get_artifact_metadata_complete()->set_manifest_directory(access.image_directory.string());
+  else
+    response.mutable_staged_restore_directory()->set_image_directory(access.image_directory.string());
   return response;
 }
 
@@ -603,26 +639,71 @@ Broker::PrepareCheckpoint(const Request& request)
 }
 
 Response
-Broker::StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine)
+Broker::StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine,
+      const PublishedArtifact* artifact)
 {
-  const Path checkpoint_root = staging_root_ / "checkpoint";
-  const Path staging_directory = TransactionDirectory(checkpoint_root, request.transaction_id());
-  engine.ValidateCheckpointDestination(destination);
+  const bool direct = request.has_prepare_direct_checkpoint();
+  const auto mode = direct ? TransferMode::Direct : TransferMode::Staged;
+  const Path staging_directory = TransactionDirectory(staging_root_ / "checkpoint", request.transaction_id());
+  Path output = staging_directory;
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());
-  if (transaction->state() != Transaction::State::NEW || fs::exists(staging_directory))
-    return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
-  try {
-    transaction->set_state(Transaction::State::PREPARING);
-    fs::create_directory(staging_directory);
-    transaction->set_descriptor(CheckpointTransactionDescriptor(staging_directory, destination, engine.type(), CheckpointOutput::Staged));
-    transaction->set_state(Transaction::State::STAGED);
-  }
-  catch (const std::exception& error) {
-    return AbortStaging(request, *transaction, staging_directory, error);
+  if (transaction->state() != Transaction::State::NEW) {
+    const auto* prepared = std::get_if<CheckpointTransactionDescriptor>(&transaction->descriptor());
+    if (!direct || transaction->state() != Transaction::State::STAGED || !prepared ||
+        prepared->mode() != mode || prepared->engine_type() != engine.type())
+      return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
+    // Retries use the original cancellation and never clean up an existing capture.
+    transaction->cancellation().ThrowIfCancelled();
+    output = engine.PrepareCheckpoint(destination, staging_directory, request.transaction_id(), mode,
+        artifact, transaction->cancellation());
+    transaction->cancellation().ThrowIfCancelled();
+    if (prepared->staging_directory() != output)
+      return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
+  } else {
+    bool owned = false;
+    try {
+      // Admission precedes backend I/O; cleanup ownership starts only after mkdir succeeds.
+      transaction->PrepareTransfer(direct ? nullptr : resources_, kCheckpointAdmissionBytes, artifact, lifetime_);
+      transaction->set_state(Transaction::State::PREPARING);
+      transaction->cancellation().ThrowIfCancelled();
+      output = engine.PrepareCheckpoint(destination, staging_directory, request.transaction_id(), mode,
+          artifact, transaction->cancellation());
+      transaction->cancellation().ThrowIfCancelled();
+      if (fs::exists(fs::symlink_status(output)))
+        throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
+      transaction->cancellation().ThrowIfCancelled();
+      fs::create_directories(output.parent_path());
+      transaction->cancellation().ThrowIfCancelled();
+      // Publication preserves this mode: staged captures use normal directory
+      // permissions filtered by umask, while direct captures remain private.
+      const auto permissions = direct ? fs::perms::owner_all : fs::perms::all;
+      filesystem_storage::CreateDirectoryExclusive(output, permissions);
+      owned = true;
+      transaction->OwnDirectory(output);
+      // mkdir may have completed after the deadline or a concurrent Abort.
+      transaction->cancellation().ThrowIfCancelled();
+      transaction->set_descriptor(CheckpointTransactionDescriptor(output, destination, engine.type(), mode));
+      transaction->set_state(Transaction::State::STAGED);
+    }
+    catch (const std::exception& error) {
+      const bool invalid = dynamic_cast<const std::invalid_argument*>(&error) != nullptr;
+      const auto* failure = dynamic_cast<const TransferError*>(&error);
+      if (!owned && failure && failure->code == Failure::INSUFFICIENT_STORAGE)
+        return RejectBeforeOwnership(request, transaction, failure->code, error.what());
+      if (!artifact && !owned && (invalid || (failure && failure->code == Failure::TRANSACTION_CONFLICT))) {
+        // Allow corrected filesystem-path requests without claiming another writer's output.
+        return RejectBeforeOwnership(request, transaction,
+            invalid ? Failure::INVALID_REQUEST : failure->code, error.what());
+      }
+      return AbortStaging(request, *transaction, owned ? output : Path{}, error);
+    }
   }
   auto response = Reply(request);
-  response.mutable_staged_checkpoint_directory()->set_image_directory(staging_directory.string());
+  if (direct)
+    response.mutable_direct_checkpoint_directory()->set_image_directory(output.string());
+  else
+    response.mutable_staged_checkpoint_directory()->set_image_directory(output.string());
   return response;
 }
 
@@ -637,7 +718,7 @@ Broker::Commit(const Request& request)
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::ABORTED) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   }
-  if (transaction->expired(now_(), kLiveTransactionLifetime)) {
+  if (transaction->expired(now_())) {
     return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
   }
   if (transaction->state() == Transaction::State::PREPARING) {
@@ -647,7 +728,9 @@ Broker::Commit(const Request& request)
     return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction is aborting");
   }
   if (transaction->state() == Transaction::State::COMMITTED) {
-    return CommitSucceeded(request);
+    std::error_code cleanup_error;
+    transaction->CleanupTransfer(cleanup_error);
+    return CommitSucceeded(request, transaction->publication());
   }
   if (const auto& operation = transaction->gpu_operation) {
     if (operation->state != GpuState::Finished || operation->result.has_failure()) {
@@ -670,9 +753,13 @@ Broker::Commit(const Request& request)
 Response
 Broker::CleanupRestore(const Request& request, Transaction& transaction, const RestoreTransactionDescriptor& descriptor)
 {
-  if (!descriptor.staging_directory().empty())
-    fs::remove_all(descriptor.staging_directory());
-  transaction.clear_descriptor();
+  if (!descriptor.staging_directory().empty()) {
+    // Restore succeeded; the reaper retries failed staging cleanup without failing Commit.
+    std::error_code cleanup_error;
+    transaction.RemoveStaging(descriptor.staging_directory(), cleanup_error);
+  }
+  // Any remaining reservation defers clearing until the reaper finishes cleanup.
+  (void)transaction.TryClearDescriptor();
   transaction.set_state(Transaction::State::COMMITTED);
   return CommitSucceeded(request);
 }
@@ -685,24 +772,25 @@ Broker::PublishCheckpoint(
   if (!fs::is_directory(staging_directory))
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "checkpoint staging directory not found");
   const auto& engine = Engine(descriptor.engine_type());
-  if (engine.CheckpointDestinationConflicts(descriptor.destination_storage()))
-    return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint destination conflicts");
-  RejectSymlinks(staging_directory);
   try {
-    if (descriptor.output() == CheckpointOutput::Direct) {
-      engine.PromoteCheckpoint(staging_directory, descriptor.destination_storage());
-    } else {
-      engine.PublishCheckpoint(staging_directory, descriptor.destination_storage());
+    auto* publication = transaction.publication();
+    CheckpointInventory inventory;
+    if (!publication || publication->pending_index.empty()) {
+      inventory = engine.InspectCheckpoint(staging_directory, publication ? &publication->artifact : nullptr, transaction.cancellation());
+      transaction.Reserve(inventory.size_bytes());
     }
-    transaction.clear_descriptor();
+    engine.PublishCheckpoint(staging_directory, descriptor.destination_storage(), std::move(inventory), publication,
+        transaction.cancellation(), descriptor.mode());
+    // Publication succeeded; retaining the descriptor for cleanup does not fail the commit.
+    (void)transaction.TryClearDescriptor();
     transaction.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;
-    fs::remove_all(staging_directory, cleanup_error);
+    transaction.RemoveStaging(staging_directory, cleanup_error);
   }
   catch (const std::exception& error) {
-    return Fail(request, Failure::STORAGE_ERROR, error.what());
+    return Fail(request, TransferFailureCode(error), error.what());
   }
-  return CommitSucceeded(request);
+  return CommitSucceeded(request, transaction.publication());
 }
 
 Response
@@ -712,28 +800,27 @@ Broker::Abort(const Request& request)
   if (!transaction) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   }
+  transaction->CancelWork(); // Interrupt transfer work before waiting for its lock.
   std::unique_lock lock(transaction->mutex());
-  if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::COMMITTED) {
+  if (transaction->state() == Transaction::State::COMMITTED) {
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   }
   if (transaction->state() == Transaction::State::ABORTED) {
+    std::error_code error;
+    transaction->CleanupTransfer(error);
+    if (error)
+      return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
     return AbortSucceeded(request);
   }
-  if (transaction->expired(now_(), kLiveTransactionLifetime)) {
+  if (transaction->expired(now_())) {
     return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
   }
-  if (const auto operation = transaction->gpu_operation) {
-    BeginAbort(*transaction);
-    if (!operation->completed.wait_for(lock, kGpuAbortTimeout, [&] { return operation->state != GpuState::Running; })) {
-      return Fail(request, Failure::INTERNAL_ERROR, "GPU cleanup is still running");
-    }
-    operation->artifact.reset();
+  std::error_code error;
+  if (!TryAbortTransactionLocked(*transaction, lock, AbortWait::WaitForGpu, error)) {
+    if (error)
+      return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
+    return Fail(request, Failure::INTERNAL_ERROR, "GPU cleanup is still running");
   }
-  if (const auto error = CleanupTransactionDirectory(request.transaction_id(), *transaction)) {
-    return Fail(request, Failure::STORAGE_ERROR, "remove transaction directory: " + error.message());
-  }
-  transaction->clear_descriptor();
-  transaction->set_state(Transaction::State::ABORTED);
   return AbortSucceeded(request);
 }
 
@@ -741,42 +828,8 @@ Response
 Broker::PrepareDirectCheckpoint(const Request& request)
 {
   const auto& input = request.prepare_direct_checkpoint();
-  const auto& storage_engine = Engine(input.io_engine());
-  storage_engine.ValidateCheckpointDestination(input.destination());
-  const auto destination = storage_engine.DestinationDirectory(input.destination());
-  const Path checkpoint_directory = CheckpointOutputDirectory(destination, request.transaction_id());
-  auto transaction = CreateOrGetTransaction(request.transaction_id());
-  std::lock_guard lock(transaction->mutex());
-  if (transaction->state() != Transaction::State::NEW) {
-    const auto* prepared = std::get_if<CheckpointTransactionDescriptor>(&transaction->descriptor());
-    const bool same_destination = prepared && prepared->engine_type() == storage_engine.type() &&
-        storage_engine.DestinationDirectory(prepared->destination_storage()) == destination;
-    if (transaction->state() != Transaction::State::STAGED || !same_destination ||
-        prepared->staging_directory() != checkpoint_directory) {
-      return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction is already prepared");
-    }
-  } else {
-    fs::create_directories(destination.parent_path());
-    if (mkdir(checkpoint_directory.c_str(), S_IRWXU)) {
-      if (errno == EEXIST) {
-        return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint output directory already exists");
-      }
-      throw std::system_error(errno, std::generic_category(), "create checkpoint directory");
-    }
-    // Only this successful mkdir gives the transaction ownership for cleanup.
-    try {
-      transaction->set_state(Transaction::State::PREPARING);
-      transaction->set_descriptor(CheckpointTransactionDescriptor(
-          checkpoint_directory, input.destination(), storage_engine.type(), CheckpointOutput::Direct));
-      // STAGED means the output directory is ready. Checkpoint data is written next.
-      transaction->set_state(Transaction::State::STAGED);
-    } catch (const std::exception& error) {
-      return AbortStaging(request, *transaction, checkpoint_directory, error);
-    }
-  }
-  auto response = Reply(request);
-  response.mutable_direct_checkpoint_directory()->set_image_directory(checkpoint_directory.string());
-  return response;
+  const auto& engine = Engine(input.io_engine());
+  return StageCheckpoint(request, input.destination(), engine);
 }
 
 Response
@@ -796,6 +849,9 @@ Broker::HandleGpuRequest(const Request& request, CancellationPtr cancellation,
       return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
     }
     std::unique_lock lock(transaction->mutex());
+    if (transaction->ExpireTransfer(now_())) {
+      return Fail(request, Failure::TRANSACTION_EXPIRED, "transaction expired");
+    }
     if (transaction->state() != Transaction::State::STAGED) {
       return Fail(request, Failure::TRANSACTION_CONFLICT, "storage transaction is not ready");
     }
@@ -816,14 +872,16 @@ Broker::HandleGpuRequest(const Request& request, CancellationPtr cancellation,
         response.set_request_id(request.request_id());
         return response;
       }
-      previous->cancellation = std::move(cancellation);
+      previous->cancellation = std::make_shared<Cancellation>(
+          Cancellation::Join(transaction->cancellation(), *cancellation));
       return ExecuteGpu(request, previous, std::move(lock));
     }
     auto operation = std::make_shared<GpuOperation>();
     operation->artifact = CreateGpuArtifact(*transaction, decoded);
     operation->request = std::move(decoded);
     operation->target_descriptors = std::move(target_descriptors);
-    operation->cancellation = std::move(cancellation);
+    operation->cancellation = std::make_shared<Cancellation>(
+        Cancellation::Join(transaction->cancellation(), *cancellation));
     transaction->gpu_operation = operation;
     return ExecuteGpu(request, operation, std::move(lock));
   } catch (const std::invalid_argument& error) {
@@ -856,6 +914,8 @@ Broker::ExecuteGpu(const Request& request, const Transaction::GpuOperationPtr& o
     // No CUDA work started. Keep the artifact available for this request's retry.
     completion.MarkRetryable();
     response = Fail(request, Failure::TRANSACTION_CONFLICT, error.what());
+  } catch (const CancellationError& error) {
+    response = Fail(request, TransferFailureCode(error), error.what());
   } catch (const std::exception& error) {
     response = Fail(request, Failure::INTERNAL_ERROR, error.what());
   }

@@ -48,7 +48,9 @@ type RestoreInNamespaceResult struct {
 	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
 	CUDARestoreDuration    time.Duration `json:"cudaRestoreDuration"`
 	// Error is set, with every other field empty, when nsrestore exits non-zero.
+	// Step names the part of the in-namespace restore it came from, when known.
 	Error string `json:"error,omitempty"`
+	Step  string `json:"step,omitempty"`
 }
 
 // CleanupError is the wire representation of a successful restore whose
@@ -73,17 +75,17 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	)
 	m, err := types.ReadManifest(opts.CheckpointPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest: %w", err)
+		return nil, failStep(StepCheckStagedCheckpoint, fmt.Errorf("failed to read manifest: %w", err))
 	}
 	if m.CUDA.CustomStorage && opts.CustomStorageExecution == nil {
-		return nil, fmt.Errorf("CustomStorage checkpoint requires PageBroker execution")
+		return nil, failStep(StepCheckStagedCheckpoint, errors.New("CustomStorage checkpoint requires PageBroker execution"))
 	}
 	if !m.CUDA.CustomStorage && opts.CustomStorageExecution != nil {
-		return nil, fmt.Errorf("checkpoint does not use CustomStorage but PageBroker execution was supplied")
+		return nil, failStep(StepCheckStagedCheckpoint, errors.New("checkpoint does not use CustomStorage but PageBroker execution was supplied"))
 	}
 	if opts.CustomStorageExecution != nil {
 		if opts.CustomStorageExecution.SocketDirectory == nil || opts.CustomStorageExecution.Socket == nil || opts.HostProc == nil || opts.CustomStorageExecution.GPUContext == nil || opts.CustomStorageExecution.TransactionID == "" {
-			return nil, fmt.Errorf("invalid PageBroker CustomStorage execution context")
+			return nil, failStep(StepCheckStagedCheckpoint, errors.New("invalid PageBroker CustomStorage execution context"))
 		}
 	}
 	log.V(1).Info("Loaded checkpoint manifest",
@@ -96,22 +98,22 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	if !m.CUDA.IsEmpty() && !m.CUDA.CustomStorage {
 		cudaJobFile, err = cuda.JobFileFromCheckpoint(opts.CheckpointPath)
 		if err != nil {
-			return nil, err
+			return nil, failStep(StepPrepareGPURestore, err)
 		}
 		if err := cuda.CheckJobFile(cudaJobFile, len(m.CUDA.SourceGPUUUIDs), m.CuInterpose.UsesCoordinator()); err != nil {
-			return nil, err
+			return nil, failStep(StepPrepareGPURestore, err)
 		}
 	}
 
 	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
-		return nil, err
+		return nil, failStep(StepPrepareCRIURestore, err)
 	}
 	if err := criu.CheckRecordedLSMLabels(opts.CheckpointPath, opts.LSMProfile); err != nil {
-		return nil, err
+		return nil, failStep(StepPrepareCRIURestore, err)
 	}
 	criuOpts, err := criu.BuildRestoreOpts(m, opts.CgroupRoot, opts.LSMProfile, log)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepPrepareCRIURestore, err)
 	}
 
 	executeTimings, restoredPID, cleanupErr, err := executeRestore(ctx, criuOpts, m, opts, cudaJobFile, log)
@@ -154,7 +156,7 @@ func executeRestore(
 
 	overlayStart := time.Now()
 	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", opts.BundleDir, log); err != nil {
-		return nil, 0, nil, fmt.Errorf("rootfs diff failed: %w", err)
+		return nil, 0, nil, failStep(StepApplyRootfsDiff, fmt.Errorf("rootfs diff failed: %w", err))
 	}
 	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
 		log.Error(err, "Failed to apply deleted files")
@@ -164,17 +166,17 @@ func executeRestore(
 	if cudaJobFile != "" {
 		liveJobFile, err := cuda.PrepareLiveJobFile(cudaJobFile)
 		if err != nil {
-			return nil, 0, nil, fmt.Errorf("prepare CUDA checkpoint job file: %w", err)
+			return nil, 0, nil, failStep(StepPrepareGPURestore, fmt.Errorf("prepare CUDA checkpoint job file: %w", err))
 		}
 		cudaRestoreJobFile = liveJobFile
 		if err := os.Setenv(cuda.JobFileEnv, cudaRestoreJobFile); err != nil {
-			return nil, 0, nil, fmt.Errorf("set CUDA checkpoint job file environment: %w", err)
+			return nil, 0, nil, failStep(StepPrepareGPURestore, fmt.Errorf("set CUDA checkpoint job file environment: %w", err))
 		}
 	}
 
 	gpuMounts, err := criu.PrepareGPUDeviceMounts(opts.GPUMountAliases, log)
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("prepare GPU device mounts: %w", err)
+		return nil, 0, nil, failStep(StepPrepareGPURestore, fmt.Errorf("prepare GPU device mounts: %w", err))
 	}
 	gpuMountsCommitted := false
 	defer func() {
@@ -185,11 +187,11 @@ func executeRestore(
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
 	if err := syscall.Unmount("/dev/shm", 0); err != nil {
-		return nil, 0, nil, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err)
+		return nil, 0, nil, failStep(StepRestoreCRIU, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err))
 	}
 
 	if err := snapshotruntime.RemountProcSys(true); err != nil {
-		return nil, 0, nil, fmt.Errorf("failed to remount /proc/sys read-write for restore: %w", err)
+		return nil, 0, nil, failStep(StepRestoreCRIU, fmt.Errorf("failed to remount /proc/sys read-write for restore: %w", err))
 	}
 	defer func() {
 		if err := snapshotruntime.RemountProcSys(false); err != nil {
@@ -210,7 +212,7 @@ func executeRestore(
 		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
 		f, err := os.Open(helperPath)
 		if err != nil {
-			return nil, 0, nil, fmt.Errorf("failed to open cuda-checkpoint-helper before CRIU restore: %w", err)
+			return nil, 0, nil, failStep(StepPrepareGPURestore, fmt.Errorf("failed to open cuda-checkpoint-helper before CRIU restore: %w", err))
 		}
 		defer f.Close()
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
@@ -218,7 +220,7 @@ func executeRestore(
 	if m.CuInterpose.UsesCoordinator() {
 		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
 		if err != nil {
-			return nil, 0, nil, fmt.Errorf("failed to open cuinterpose-coordinator before CRIU restore: %w", err)
+			return nil, 0, nil, failStep(StepPrepareGPURestore, fmt.Errorf("failed to open cuinterpose-coordinator before CRIU restore: %w", err))
 		}
 		defer coordinator.Close()
 		coordinatorFdPath = fmt.Sprintf("/proc/self/fd/%d", coordinator.Fd())
@@ -232,16 +234,16 @@ func executeRestore(
 	// gone; a missing mount is a hard error.
 	for _, name := range []string{podcontract.RestoreCompleteFile, podcontract.RestoreFailedFile} {
 		if err := snapshotruntime.RemoveControlSentinel(podcontract.SnapshotControlMountPath, name); err != nil {
-			return nil, 0, nil, fmt.Errorf("remove stale %s sentinel: %w", name, err)
+			return nil, 0, nil, failStep(StepRestoreCRIU, fmt.Errorf("remove stale %s sentinel: %w", name, err))
 		}
 	}
 
 	if err := criu.RemoveKdatCache("/"); err != nil {
-		return nil, 0, nil, fmt.Errorf("remove CRIU's kernel cache from the restore target: %w", err)
+		return nil, 0, nil, failStep(StepRestoreCRIU, fmt.Errorf("remove CRIU's kernel cache from the restore target: %w", err))
 	}
 	unmountSecurityFS, err := mountSecurityFSForCRIU(securityFSPath, opts.LSMProfile, log)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, failStep(StepRestoreCRIU, err)
 	}
 	defer func() {
 		if err := unmountSecurityFS(); err != nil {
@@ -250,7 +252,7 @@ func executeRestore(
 	}()
 	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, unmountSecurityFS, log)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, failStep(StepRestoreCRIU, err)
 	}
 	restoredPID = int(criuPID)
 	// Cleanup runs after CUDA unlock. A cleanup-only failure is returned
@@ -269,15 +271,15 @@ func executeRestore(
 	if cudaRestoreJobFile != "" {
 		uid, gid, err := snapshotruntime.ReadProcessFilesystemIDs("/proc", restoredPID)
 		if err != nil {
-			return nil, 0, nil, fmt.Errorf("read restored process credentials: %w", err)
+			return nil, 0, nil, failStep(StepRestoreCUDA, fmt.Errorf("read restored process credentials: %w", err))
 		}
 		if err := cuda.SetLiveJobFileOwner(cudaRestoreJobFile, uid, gid); err != nil {
-			return nil, 0, nil, fmt.Errorf("set CUDA checkpoint job file ownership: %w", err)
+			return nil, 0, nil, failStep(StepRestoreCUDA, fmt.Errorf("set CUDA checkpoint job file ownership: %w", err))
 		}
 	}
 	processes, err := snapshotruntime.ReadProcessTable("/proc")
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("failed to read restored process table: %w", err)
+		return nil, 0, nil, failStep(StepRestoreCRIU, fmt.Errorf("failed to read restored process table: %w", err))
 	}
 	log.V(1).Info("Restored process table snapshot",
 		"proc_root", "/proc",
@@ -301,7 +303,7 @@ func executeRestore(
 	if !m.CUDA.IsEmpty() {
 		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, restoredPID, m.CUDA.PIDs)
 		if err != nil {
-			return nil, 0, nil, fmt.Errorf("failed to resolve restored CUDA PIDs: %w", err)
+			return nil, 0, nil, failStep(StepRestoreCUDA, fmt.Errorf("failed to resolve restored CUDA PIDs: %w", err))
 		}
 		log.V(1).Info("Resolved manifest CUDA PIDs to current restore PIDs",
 			"manifest_cuda_pids", m.CUDA.PIDs,
@@ -311,7 +313,7 @@ func executeRestore(
 		cudaStart := time.Now()
 		for _, pid := range restorePIDs {
 			if err := gpuMounts.RestoreNativePaths(pid); err != nil {
-				return nil, 0, nil, fmt.Errorf("restore GPU device mounts: %w", err)
+				return nil, 0, nil, failStep(StepRestoreCUDA, fmt.Errorf("restore GPU device mounts: %w", err))
 			}
 		}
 		if m.CUDA.CustomStorage {
@@ -321,7 +323,7 @@ func executeRestore(
 		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
-			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
+			return nil, 0, nil, failStep(StepRestoreCUDA, fmt.Errorf("CUDA restore failed: %w", err))
 		}
 		if m.CuInterpose.UsesCoordinator() {
 			// CUDA is unlocked, but the application still waits for restore-complete. Socket
@@ -329,7 +331,7 @@ func executeRestore(
 			// calls above need PIDs visible to the restoring process.
 			err := cuda.RestoreCuInterpose(ctx, opts.CheckpointPath, m.CuInterpose.PIDs, coordinatorFdPath)
 			if err != nil {
-				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)
+				return nil, 0, nil, failStep(StepRestoreCUDA, fmt.Errorf("restore cuinterpose: %w", err))
 			}
 		}
 	}

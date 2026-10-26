@@ -73,6 +73,9 @@ type PodSnapshotReconciler struct {
 	NonCacheReadClient    client.Reader
 	Recorder              record.EventRecorder
 	TestFailureAnnotation string
+	// StoreID binds every new PodSnapshotContent to the configured store. Empty
+	// keeps producing legacy, path-addressed content.
+	StoreID string
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -396,6 +399,10 @@ func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, s
 
 // buildPodSnapshotContent constructs the desired cluster-scoped PodSnapshotContent for a PodSnapshot.
 func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.PodSnapshot, contentName string, pod *corev1.Pod) *snapshotv1alpha1.PodSnapshotContent {
+	var storage *snapshotv1alpha1.CheckpointStorageBinding
+	if sr.StoreID != "" {
+		storage = &snapshotv1alpha1.CheckpointStorageBinding{StoreID: sr.StoreID}
+	}
 	return &snapshotv1alpha1.PodSnapshotContent{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: snapshotv1alpha1.GroupVersion.String(),
@@ -418,6 +425,7 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 				PodRef:   snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: snap.Spec.Source.PodRef.Containers},
 				NodeName: pod.Spec.NodeName,
 			},
+			Storage: storage,
 		},
 	}
 }

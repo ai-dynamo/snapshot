@@ -3,11 +3,20 @@
 
 apiVersion: v1
 kind: ConfigMap
-{{- if ne .Values.storage.type "pvc" }}
-{{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc is currently implemented" .Values.storage.type) }}
+{{- if and (ne .Values.storage.type "pvc") (ne .Values.storage.type "s3") }}
+{{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc and s3 are currently implemented" .Values.storage.type) }}
 {{- end }}
-{{- if ne .Values.storage.pvc.basePath "/checkpoints" }}
+{{- if and (eq .Values.storage.type "pvc") (ne .Values.storage.pvc.basePath "/checkpoints") }}
 {{- fail "snapshot.storage.pvc.basePath is fixed at /checkpoints so the privileged mount helper can enforce its source allowlist" }}
+{{- end }}
+{{- if and .Values.operator.bindNewContents (eq .Values.storage.type "pvc") (not .Values.pageBroker.artifactAddressing) }}
+{{- fail "operator.bindNewContents requires pageBroker.artifactAddressing and a completed compatible agent rollout" }}
+{{- end }}
+{{- if and (eq .Values.storage.type "s3") (not .Values.storage.s3.credentialsSecretRef) }}
+{{- fail "storage.s3.credentialsSecretRef is required when storage.type=s3" }}
+{{- end }}
+{{- if and (eq .Values.storage.type "s3") (not .Values.operator.bindNewContents) }}
+{{- fail "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path capture mode" }}
 {{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
@@ -18,17 +27,31 @@ data:
   # Resolved backend settings for operator/PageBroker, not AgentConfig. Keeping
   # this separate lets another resolver supply them without changing agent APIs.
   storage.yaml: |
+    {{- if eq .Values.storage.type "pvc" }}
     pvc:
       namespace: {{ .Release.Namespace | quote }}
       claimName: {{ required "storage.pvc.name is required" .Values.storage.pvc.name | quote }}
       # The entire claim is used; this is not the container-local mount path.
       basePath: "/"
+    {{- else }}
+    # Raw connection fields only: the operator computes the store ID from
+    # these (api/storage.S3.StoreID) and writes it separately into the
+    # ConfigMap PageBroker actually reads. See
+    # operator/cmd/manager/pagebroker_storage_config.go.
+    s3:
+      endpoint: {{ required "storage.s3.endpoint is required" .Values.storage.s3.endpoint | quote }}
+      region: {{ required "storage.s3.region is required" .Values.storage.s3.region | quote }}
+      bucket: {{ required "storage.s3.bucket is required" .Values.storage.s3.bucket | quote }}
+      prefix: {{ .Values.storage.s3.prefix | default "" | quote }}
+    {{- end }}
   config.yaml: |
+    # Pinned to pvc/checkpoints regardless of storage.type or storage.pvc.basePath
+    # above: the agent itself has no S3 awareness yet, and this value can no
+    # longer vary meaningfully since it's pinned either way. PageBroker and the
+    # operator own S3 I/O.
     storage:
-      type: {{ .Values.storage.type | quote }}
-      {{- if eq .Values.storage.type "pvc" }}
-      basePath: {{ .Values.storage.pvc.basePath | quote }}
-      {{- end }}
+      type: "pvc"
+      basePath: "/checkpoints"
 
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
@@ -39,6 +62,7 @@ data:
 
     checkpoint:
       checkpointTimeoutSeconds: {{ .Values.config.checkpoint.checkpointTimeoutSeconds }}
+      retryLimit: {{ .Values.config.checkpoint.retryLimit | default 0 }}
 
     restore:
       restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}

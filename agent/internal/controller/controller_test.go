@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
@@ -666,6 +667,18 @@ func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t
 	assert.Contains(t, payload, `"reason":"RestoreInProgress"`)
 	assert.Contains(t, payload, "1 succeeded")
 	assert.Contains(t, payload, "1 pending")
+}
+
+func TestLogWithStepAddsTheStepKeyOnlyWhenNamed(t *testing.T) {
+	var lines []string
+	log := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+
+	logWithStep(log, &executor.StepError{Step: executor.StepRunNSRestore, Err: errors.New("boom")}).Error(nil, "named")
+	logWithStep(log, errors.New("boom")).Error(nil, "plain")
+
+	require.Len(t, lines, 2)
+	assert.Contains(t, lines[0], `"step"="running nsrestore"`)
+	assert.NotContains(t, lines[1], `"step"`)
 }
 
 func TestRestoreTallyVerdictCoversEveryOutcome(t *testing.T) {

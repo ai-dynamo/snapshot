@@ -213,7 +213,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 				if retErr != nil {
 					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker restore: %w", err))
 				} else {
-					retErr = NewRestoreCleanupError(errors.Join(cleanupErr, fmt.Errorf("release PageBroker restore: %w", err)))
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("release PageBroker restore: %w", err))
 				}
 			}
 		}
@@ -250,50 +250,50 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if bound {
 		manifest, err = fetchArtifactMetadata(ctx, broker, req.PublishedArtifact)
 		if err != nil {
-			return RestoreResult{}, err
+			return RestoreResult{}, failStep(StepResolveArtifact, err)
 		}
 	} else {
 		artifactPath, err = nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
 		if err != nil {
-			return RestoreResult{}, fmt.Errorf("resolve checkpoint artifact: %w", err)
+			return RestoreResult{}, failStep(StepResolveArtifact, err)
 		}
 		manifest, err = types.ReadManifest(artifactPath)
 		if err != nil {
-			return RestoreResult{}, fmt.Errorf("read checkpoint manifest: %w", err)
+			return RestoreResult{}, failStep(StepReadManifest, err)
 		}
 	}
 	if err := validateRestoreManifest(req, manifest); err != nil {
-		return RestoreResult{}, err
+		return RestoreResult{}, failStep(StepValidateManifest, err)
 	}
 	if manifest.CuInterpose != nil {
 		// These libraries belong to the checkpointed process. The agent supplies their
 		// files, but an upgraded bundle may differ from the bytes loaded at capture.
 		if err := cuda.VerifyCuInterposeLibraryIdentity(nsmount.CuInterposeBundlePath, manifest.CuInterpose); err != nil {
-			return RestoreResult{}, err
+			return RestoreResult{}, failStep(StepVerifyCuInterpose, err)
 		}
 	}
 
 	usePageBrokerGPU = manifest.CUDA.CustomStorage
 	if err := validateCustomStorageRestore(req, manifest); err != nil {
-		return RestoreResult{}, err
+		return RestoreResult{}, failStep(StepValidateManifest, err)
 	}
 
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
-		return RestoreResult{}, err
+		return RestoreResult{}, failStep(StepInspectPlaceholder, err)
 	}
 
 	var gpuContext *pagebroker.GpuContext
 	if usePageBrokerGPU {
 		gpuContext, err = pagebroker.NewGPUContext(manifest.CUDA.PIDs, snap.TargetGPUUUIDs, snap.CUDADeviceMap)
 		if err != nil {
-			return RestoreResult{}, err
+			return RestoreResult{}, failStep(StepBuildGPUContext, err)
 		}
 	}
 
 	bundleMount, err := mounts.MountBundle(ctx, snap.PlaceholderPID)
 	if err != nil {
-		return RestoreResult{}, fmt.Errorf("mount agent bundle into placeholder: %w", err)
+		return RestoreResult{}, failStep(StepMountBundle, err)
 	}
 	activeMounts = append(activeMounts, restoreMount{
 		action: "unmount agent bundle from placeholder",
@@ -303,7 +303,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if manifest.CuInterpose != nil {
 		shimMount, err := mounts.MountCuInterpose(ctx, bundleMount)
 		if err != nil {
-			return RestoreResult{}, fmt.Errorf("mount cuinterpose into placeholder: %w", err)
+			return RestoreResult{}, failStep(StepMountCuInterpose, err)
 		}
 		activeMounts = append(activeMounts, restoreMount{
 			action:        "unmount cuinterpose from placeholder",
@@ -323,13 +323,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	pageBrokerStageDuration = time.Since(stageStart)
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
-		return RestoreResult{}, fmt.Errorf("prepare PageBroker restore: %w", err)
+		return RestoreResult{}, failStep(StepPrepareRestore, err)
 	}
 	mountStart := time.Now()
 	sourceMount, containerCheckpointPath, err := mountRestoreSource(ctx, mounts, bundleMount, direct, artifactPath, staged)
 	pageBrokerMountDuration = time.Since(mountStart)
 	if err != nil {
-		return RestoreResult{}, fmt.Errorf("mount PageBroker restore source: %w", err)
+		return RestoreResult{}, failStep(StepMountRestoreSource, err)
 	}
 	activeMounts = append(activeMounts, restoreMount{
 		action: "unmount PageBroker restore source from placeholder",
@@ -348,27 +348,40 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 				return rt.TerminateContainer(stopCtx, req.ContainerID)
 			}
 		}
-		return RestoreResult{}, fmt.Errorf("nsrestore failed: %w", err)
+		return RestoreResult{}, failStepUnlessNamed(StepRunNSRestore, err)
 	}
 	gpuRestoreComplete = usePageBrokerGPU
-	restoreSource := activeMounts[len(activeMounts)-1]
-	if err := restoreSource.point.Unmount(ctx); err != nil {
-		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", restoreSource.action, err))
-	}
-	activeMounts = activeMounts[:len(activeMounts)-1]
-	commitStart := time.Now()
-	if err := broker.Commit(ctx, transactionID); err != nil {
-		log.Error(err, "failed to commit PageBroker restore")
+	lastMount := activeMounts[len(activeMounts)-1]
+	unmountFailed := false
+	if err := lastMount.point.Unmount(ctx); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", lastMount.action, err))
+		unmountFailed = true
 	} else {
-		committed = true
+		// Only drop it once unmounted: the deferred cleanup below retries
+		// whatever is still in activeMounts, so a failed unmount must stay
+		// tracked or it leaks until the restored container exits on its own.
+		activeMounts = activeMounts[:len(activeMounts)-1]
 	}
-	pageBrokerCommitDuration = time.Since(commitStart)
-
+	if unmountFailed {
+		// Staging may still be in use; don't Commit or Abort. Leave the
+		// transaction for expiry to reclaim.
+		log.Info("skipping PageBroker commit after a failed staging unmount; the transaction will expire", "transaction", transactionID)
+		transactionID = ""
+	} else {
+		commitStart := time.Now()
+		if err := broker.Commit(ctx, transactionID); err != nil {
+			log.Error(err, "failed to commit PageBroker restore")
+			cleanupErr = errors.Join(cleanupErr, failStep(StepCommitRestore, err))
+		} else {
+			committed = true
+		}
+		pageBrokerCommitDuration = time.Since(commitStart)
+	}
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
 	if err := validateRestoredProcessFunc(snap.TargetRoot, result.RestoredPID, log); err != nil {
-		return RestoreResult{}, err
+		return RestoreResult{}, failStep(StepValidateRestored, err)
 	}
 
 	// Restored processes still need these paths for lazy core loading and
@@ -479,7 +492,7 @@ func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger
 	if err := snapshotruntime.ValidateProcessState(procRoot, restoredPID); err != nil {
 		restoreLogPath := filepath.Join(targetRoot, "var", "criu-work", criu.RestoreLogFilename)
 		logging.LogProcessDiagnostics(procRoot, restoredPID, restoreLogPath, log)
-		return fmt.Errorf("restored process failed post-restore validation: %w", err)
+		return err
 	}
 	return nil
 }

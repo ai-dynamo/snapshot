@@ -59,6 +59,12 @@ tests:
   - it: mounts resolved backend configuration only in PageBroker on the node
     template: templates/daemonset.yaml
     asserts:
+      - notContains:
+          path: spec.template.spec.containers[1].args
+          content: --storage-config
+      - notContains:
+          path: spec.template.spec.containers[1].args
+          content: /etc/snapshot/storage.yaml
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
@@ -101,6 +107,9 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: --snapshot-storage-config=/etc/snapshot/storage.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-new-contents=true
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
@@ -117,6 +126,41 @@ tests:
                 - key: storage.yaml
                   path: storage.yaml
 
+  - it: prepares compatible brokers while keeping new content unbound
+    set:
+      pageBroker.artifactAddressing: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: --storage-config
+        template: templates/daemonset.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-new-contents=true
+        template: templates/operator-deployment.yaml
+
+  - it: activates binding separately after the compatible daemon rollout
+    set:
+      pageBroker.artifactAddressing: true
+      operator.bindNewContents: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: --storage-config
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-new-contents=true
+        template: templates/operator-deployment.yaml
+
+  - it: refuses binding without an artifact backend
+    template: templates/configmap.yaml
+    set:
+      operator.bindNewContents: true
+    asserts:
+      - failedTemplate:
+          errorMessage: operator.bindNewContents requires pageBroker.artifactAddressing and a completed compatible agent rollout
+
   - it: rejects a missing PVC name
     template: templates/configmap.yaml
     set:
@@ -125,10 +169,167 @@ tests:
       - failedTemplate:
           errorMessage: storage.pvc.name is required
 
-  - it: does not activate S3
+  - it: rejects an unsupported storage type
+    template: templates/configmap.yaml
+    set:
+      storage.type: oci
+    asserts:
+      - failedTemplate:
+          errorPattern: only pvc and s3 are currently implemented
+
+  - it: rejects an S3 install that does not bind new content
     template: templates/configmap.yaml
     set:
       storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
     asserts:
       - failedTemplate:
-          errorPattern: only pvc is currently implemented
+          errorMessage: "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path capture mode"
+
+  - it: rejects S3 activation without required fields
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
+    asserts:
+      - failedTemplate:
+          errorMessage: storage.s3.endpoint is required
+
+  - it: renders the S3 backend block when S3 is configured
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.prefix: containers
+      storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: |-
+            (?s)s3:\s*
+              endpoint: "https://s3.example.com"\s*
+              region: "us-east-1"\s*
+              bucket: "snapshot-bucket"\s*
+              prefix: "containers"
+      - notMatchRegex:
+          path: data["storage.yaml"]
+          pattern: "pvc:"
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'storage:\s+type: "pvc"\s+basePath: "/checkpoints"'
+
+  - it: allows binding new S3 content without pageBroker.artifactAddressing
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-new-contents=true
+
+  - it: tells the operator where to write PageBroker's S3 configuration and drops the PVC mount
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pagebroker-s3-config-namespace=storage-ns
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pagebroker-s3-config-name=snapshot-pagebroker-storage-config
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --release-name=snapshot
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: checkpoints
+            mountPath: /checkpoints
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: checkpoints
+            persistentVolumeClaim:
+              claimName: snapshot-pvc
+
+  - it: mounts the shared S3 credentials file into the operator
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
+      operator.bindNewContents: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --artifact-cleanup-s3-credentials-path=/etc/snapshot-s3-credentials/credentials
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: s3-credentials
+            mountPath: /etc/snapshot-s3-credentials
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+            secret:
+              secretName: s3-creds
+              items:
+                - key: credentials
+                  path: credentials
+
+  - it: rejects an S3 install missing the shared credentials secret
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+    asserts:
+      - failedTemplate:
+          errorMessage: storage.s3.credentialsSecretRef is required when storage.type=s3
+
+  - it: honours a custom shared credentials secret key
+    template: templates/operator-deployment.yaml
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+      storage.s3.credentialsSecretRef: s3-creds
+      storage.s3.credentialsSecretKey: aws-credentials
+      operator.bindNewContents: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --artifact-cleanup-s3-credentials-path=/etc/snapshot-s3-credentials/aws-credentials
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: s3-credentials
+            secret:
+              secretName: s3-creds
+              items:
+                - key: aws-credentials
+                  path: aws-credentials

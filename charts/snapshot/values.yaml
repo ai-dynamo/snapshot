@@ -26,6 +26,8 @@ operator:
   # annotation key to request a deterministic capture failure for a test pod.
   testFailCaptureSourceAnnotation: ""
 
+  # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/storage.md.
+  bindNewContents: false
   resources:
     limits:
       cpu: 500m
@@ -94,7 +96,7 @@ openshift:
 # the operator and PageBroker; backend details are not part of the agent API.
 storage:
   # Storage type stays snapshot-owned for future backend expansion.
-  # Only pvc is implemented today.
+  # pvc and s3 are implemented today.
   type: pvc
 
   # PVC configuration (when type=pvc)
@@ -112,9 +114,33 @@ storage:
     # use the claim root (/); the privileged helper enforces this local mount.
     basePath: /checkpoints
 
-  # Reserved for future snapshot-owned backends. Unsupported today.
+  # S3-compatible object storage (when type=s3). Requires a PageBroker image
+  # implementing the S3 backend. Endpoint, region, bucket and prefix are
+  # identity inputs: see api/storage.S3.StoreID.
   s3:
-    uri: ""
+    # S3-compatible endpoint, an absolute http(s) URL with no path, query or
+    # userinfo, e.g. "https://s3.example.com".
+    endpoint: ""
+    region: ""
+    bucket: ""
+    # Key prefix inside the bucket. Empty identifies the bucket root.
+    prefix: ""
+    # Secret holding a shared credentials file (the common S3-SDK INI format:
+    # a [default] profile with aws_access_key_id/aws_secret_access_key, the
+    # literal key names that format uses) at the key named
+    # by credentialsSecretKey. Mounted as a file into the PageBroker and
+    # operator containers, rather than injected as env vars: a
+    # mounted Secret's file is refreshed by kubelet when the Secret changes,
+    # without restarting the pod, so rotation does not require a restart as
+    # long as the reading code re-reads it. The operator's S3 maintenance
+    # backend already does this (operator/internal/maintenance/backends/s3.go
+    # re-reads the file every 5 minutes). PageBroker does not yet: it
+    # snapshots credentials once at startup, so this file reaching it is
+    # forward-compatible with that changing, not a rotation guarantee today.
+    # Required when type=s3.
+    credentialsSecretRef: ""
+    # Key inside credentialsSecretRef holding the credentials file.
+    credentialsSecretKey: credentials
 
   # Reserved for future snapshot-owned backends. Unsupported today.
   oci:
@@ -123,6 +149,8 @@ storage:
 # PageBroker sidecar: stages checkpoint images in memory and publishes them to
 # the checkpoint PVC it shares with the agent. See docs/operations/storage.md.
 pageBroker:
+  # Requires a PageBroker image implementing the PVC artifact backend. Roll this out before binding new contents.
+  artifactAddressing: false
   # Restore directly from the checkpoint directory, or opt into a staged copy.
   restoreMode: direct
   maxConcurrentRequests: 16
@@ -268,6 +296,10 @@ config:
   checkpoint:
     # Maximum seconds before the agent marks a checkpoint failed.
     checkpointTimeoutSeconds: 3600
+    # Times a failed capture may be retried in place, beyond the first attempt.
+    # A PodSnapshot can override it with spec.checkpointRetryLimit; 0 keeps
+    # retry opt-in, so upgrading changes no existing capture's behaviour.
+    retryLimit: 0
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed

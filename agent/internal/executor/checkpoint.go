@@ -33,6 +33,25 @@ import (
 
 const pageBrokerAbortTimeout = 30 * time.Second
 
+// cleanupFailure marks a failure from releasing a transaction, as opposed to the
+// capture failure it is reported alongside. The two travel joined, so without a
+// mark a classifier can only tell them apart by the order they were joined in.
+type cleanupFailure struct{ cause error }
+
+func (e *cleanupFailure) Error() string { return e.cause.Error() }
+
+func (e *cleanupFailure) Unwrap() error { return e.cause }
+
+// CleanupFailure marks err as having come from cleanup rather than the capture.
+func CleanupFailure(err error) error { return &cleanupFailure{cause: err} }
+
+// IsCleanupFailure reports whether err came from releasing a transaction rather
+// than from the capture itself.
+func IsCleanupFailure(err error) bool {
+	var cleanup *cleanupFailure
+	return errors.As(err, &cleanup)
+}
+
 // checkpointNeedsSourceKillError reports a failure after CUDA or CRIU may have left the source unsafe.
 type checkpointNeedsSourceKillError struct{ cause error }
 
@@ -96,7 +115,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	var finalDir string
 	if bound {
 		if err := coordination.ValidateBinding(req.StoreID, req.ContentUID, req.ContainerName); err != nil {
-			return nil, fmt.Errorf("validate storage binding: %w", err)
+			return nil, failStep(StepResolveCheckpointPath, fmt.Errorf("validate storage binding: %w", err))
 		}
 		target = &pagebroker.ArtifactTarget{
 			StoreId: req.StoreID,
@@ -109,12 +128,12 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		var err error
 		finalDir, err = nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
 		if err != nil {
-			return nil, fmt.Errorf("resolve checkpoint artifact path: %w", err)
+			return nil, failStep(StepResolveCheckpointPath, err)
 		}
 	}
 	state, gpuDeviceMapDuration, err := inspect(ctx, rt, log, req)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepInspectSource, err)
 	}
 	usePageBrokerGPU := cfg.CustomStorageAvailable && len(state.CUDAHostPIDs) > 0
 	transactionID := uuid.NewString()
@@ -129,7 +148,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		if preparationAttempted && !committed {
 			if gpu != nil {
 				if err := gpu.Abort(ctx); err != nil {
-					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint: %w", err))
+					retErr = errors.Join(retErr, CleanupFailure(fmt.Errorf("abort PageBroker checkpoint: %w", err)))
 				}
 			} else {
 				retErr = abortCheckpointTransaction(broker, transactionID, retErr)
@@ -140,7 +159,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if usePageBrokerGPU {
 		executionContext, err = pagebroker.NewGPUContext(state.CUDANSPIDs, cuda.GPUUUIDs(state.GPUs), "")
 		if err != nil {
-			return nil, err
+			return nil, failStep(StepBuildGPUContext, err)
 		}
 	}
 	preparationAttempted = true
@@ -148,27 +167,27 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	tmpDir, gpu, err = prepareCheckpointTarget(ctx, broker, transactionID, bound, target, finalDir, executionContext)
 	if err != nil {
 		preparationAttempted = !pagebroker.IsDialError(err)
-		return nil, fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+		return nil, failStep(StepPrepareCheckpoint, err)
 	}
 
 	state.CuInterpose, err = inspectCuInterpose(ctx, state, req.CuInterposeRequested)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepInspectCuInterpose, err)
 	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 && !usePageBrokerGPU {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir)
 		if err != nil {
-			return nil, err
+			return nil, failStep(StepStageCUDAJobFile, err)
 		}
 		if err := cuda.CheckJobFile(cudaJobFile, len(state.GPUs.Devices), state.CuInterpose.UsesCoordinator()); err != nil {
-			return nil, err
+			return nil, failStep(StepStageCUDAJobFile, err)
 		}
 	}
 
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, usePageBrokerGPU)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepConfigureCheckpoint, err)
 	}
 
 	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
@@ -179,7 +198,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	switchStart := time.Now()
 	artifact, err = commitCheckpointArtifact(ctx, broker, transactionID, bound, req.StoreID)
 	if err != nil {
-		return nil, fmt.Errorf("commit PageBroker checkpoint: %w", err)
+		return nil, failStep(StepCommitCheckpoint, err)
 	}
 	committed = true
 	switchDuration := time.Since(switchStart)
@@ -423,20 +442,20 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	// GPU capture must finish before CRIU and filesystem capture.
 	gpuDuration, err := captureGPU(ctx, data, state, checkpointDir, cudaJobFile, log, gpu)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepCheckpointGPU, err)
 	}
 	timings.CUDACheckpointDuration = gpuDuration
 
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 	if err != nil {
-		return nil, err
+		return nil, failStep(StepDumpCRIU, err)
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 
 	if state.UpperDir != "" {
 		overlayCaptureStart := time.Now()
 		if err := captureOverlay(state.UpperDir, data.Overlay, checkpointDir, log); err != nil {
-			return nil, err
+			return nil, failStep(StepCaptureOverlay, err)
 		}
 		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 	}
@@ -527,7 +546,7 @@ func abortPageBrokerTransaction(broker pagebroker.Client, transactionID string) 
 
 func abortCheckpointTransaction(broker pagebroker.Client, transactionID string, cause error) error {
 	if err := abortPageBrokerTransaction(broker, transactionID); err != nil {
-		cause = errors.Join(cause, fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err))
+		cause = errors.Join(cause, CleanupFailure(fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err)))
 	}
 	return cause
 }
