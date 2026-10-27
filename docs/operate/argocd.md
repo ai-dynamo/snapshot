@@ -19,9 +19,10 @@ separate Applications, and selective sync bypasses this ordering. See
 Install [Snapshot](../get-started/installation.md), configure the [checkpoint store](configure-storage.md),
 and meet the [vLLM guide prerequisites](../get-started/prerequisites.md).
 The examples use vLLM with Qwen3-0.6B, one NVIDIA GPU, and a model-cache PVC.
-The restore command stays inert on nodes without the restore proxy; an HTTP
-liveness probe checks the restored API. The startup probe waits for restore
-completion and API readiness before liveness checks begin. See the
+The restore command stays inert on nodes without the restore proxy. Readiness
+and liveness check `/health`, which calls the vLLM engine's health check. The
+startup probe waits for restore completion and API readiness before those
+checks begin. See the
 [Restore Pod contract](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy)
 for the differences in process exit and signal handling.
 

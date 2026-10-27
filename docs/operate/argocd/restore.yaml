@@ -56,17 +56,16 @@ spec:
             failureThreshold: 1800
           livenessProbe:
             httpGet:
-              path: /openapi.json
+              path: /health
               port: api
             periodSeconds: 10
             timeoutSeconds: 5
           readinessProbe:
-            exec:
-              command:
-                - cat
-                - /snapshot-control/vllm-restore-ready
+            httpGet:
+              path: /health
+              port: api
             periodSeconds: 1
-            failureThreshold: 1800
+            failureThreshold: 1
           volumeMounts:
             - name: model-cache
               mountPath: /hf-cache
