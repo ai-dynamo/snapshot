@@ -1,8 +1,9 @@
 # Storage
 
-Snapshot keeps every checkpoint in a single shared volume that all node agents
-mount. Each agent's PageBroker sidecar publishes checkpoint artifacts there and
-reads them back for restore; workload pods never mount checkpoint storage.
+Snapshot keeps every checkpoint in one store that all node agents reach: a
+shared volume by default, or an S3-compatible bucket with `storage.type: s3`.
+Each agent's PageBroker sidecar publishes checkpoint artifacts there and reads
+them back for restore; workload pods never mount checkpoint storage.
 
 The checkpoint store must prevent unauthorized modification of artifacts through
 filesystem permissions or the storage server's access controls. PageBroker requests
@@ -12,14 +13,16 @@ as SMB can report these modes from mount settings rather than per-directory perm
 
 ## The checkpoint volume
 
-Today the checkpoint store is a Kubernetes PersistentVolumeClaim (PVC). Because
+With `storage.type: pvc`, the default, the checkpoint store is a Kubernetes
+PersistentVolumeClaim (PVC). Because
 agents on multiple GPU nodes mount it concurrently, it must support
 `ReadWriteMany` (RWX). The chart provisions one PVC per cluster by default and
 mounts it at `/checkpoints` in every agent.
 
 ## Configuration
 
-The chart's `storage.pvc` values control the PVC:
+For `storage.type: pvc`, the chart's `storage.pvc` values control the PVC (for
+`s3`, see [Other backends](#other-backends)):
 
 | Value                      | Purpose                                             | Default        |
 |----------------------------|-----------------------------------------------------|----------------|
@@ -260,6 +263,10 @@ survive an uninstall.
 `storage.type` supports `pvc` and `s3`. `oci` is reserved in the chart for
 future use and is not supported today.
 
+`storage.type: s3` requires `operator.bindNewContents: true`, because S3 has no
+legacy local-path capture mode; the chart fails the render without it. See
+[Enable artifact addressing](#enable-artifact-addressing) for the rollout order.
+
 ### S3 settings PageBroker reads
 
 With `storage.type: s3` and a PageBroker image that implements the S3 backend,
@@ -293,7 +300,7 @@ to be briefly unavailable on that node during the upgrade.
 | Key | Default | Bounds |
 |-----|---------|--------|
 | `transactionSeconds` | 7200 | 1 to 7200 |
-| `stagingBytes` | the staging volume cap, `pageBroker.staging.sizeLimit` after headroom | 1 byte to 1 TiB |
+| `stagingBytes` | the staging volume cap, `pageBroker.staging.sizeLimit` as lowered in [How the cap is chosen](#how-the-cap-is-chosen) | 1 byte to 1 TiB |
 | `activeTransactions` | 8 | 1 to 1024, below `pageBroker.maxConcurrentRequests` |
 | `uploadPartBytes` | 16 MiB | 8 MiB to 1 GiB |
 | `uploadBufferBytes` | 1 GiB | 1 to 16 GiB, at least twice `uploadPartBytes` |

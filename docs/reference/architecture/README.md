@@ -216,9 +216,10 @@ hatch.
 
 ## Storage
 
-Every checkpoint lives in one store shared by all node agents. Today that store
-is a single `ReadWriteMany` PVC, mounted at `/checkpoints` in the agent and in
-PageBroker. Workload pods never mount it.
+Every checkpoint lives in one store shared by all node agents: by default a
+single `ReadWriteMany` PVC, mounted at `/checkpoints` in the agent and in
+PageBroker, or an S3-compatible bucket with `storage.type: s3`. Workload pods
+never mount the PVC.
 
 An artifact is addressed by the `PodSnapshotContent` UID and the captured
 container name, so a deleted-and-recreated content object can never adopt a

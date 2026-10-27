@@ -189,7 +189,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
 | `daemonset.runtimeClassName` | RuntimeClass for the agent pod. Set `""` to omit it when the NVIDIA runtime is containerd's default and no `nvidia` RuntimeClass exists | `nvidia` |
 | `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 256Mi limit |
-| `operator.bindNewContents` | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../../docs/operations/storage.md#enable-artifact-addressing) | `false` |
+| `operator.bindNewContents` | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../../docs/operations/storage.md#enable-artifact-addressing). Required for `storage.type: s3` | `false` |
 | `operator.nodeSelector` | Node selector for the operator pod | `{}` |
 | `operator.affinity` | Affinity rules for the operator pod | `{}` |
 | `operator.tolerations` | Tolerations for the operator pod | `[]` |
@@ -209,7 +209,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.s3.allowHttp` | Accept a plain-http endpoint | `false` |
 | `storage.s3.caBundleConfigMapRef` | ConfigMap holding the CA bundle for the endpoint's TLS certificate, mounted into PageBroker and the operator | `""` |
 | `storage.s3.caBundleConfigMapKey` | Key in that ConfigMap holding the bundle | `ca.crt` |
-| `pageBroker.staging.sizeLimit` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for checkpoint (except GPU CustomStorage capture) and staged restore. Leave headroom above it in the writing container's memory limit; the chart's 64Gi default and the agent's 64Gi default memory limit leave none | `64Gi` |
+| `pageBroker.staging.sizeLimit` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for checkpoint (except GPU CustomStorage capture) and staged restore. The chart lowers a value that leaves the writing container no headroom; see [How the cap is chosen](../../docs/operations/storage.md#how-the-cap-is-chosen) | `56Gi` |
 | `pageBroker.maxConcurrentRequests` | Concurrent control-socket requests the daemon serves | `16` |
 | `pageBroker.artifactAddressing` | Pass store configuration to a compatible PVC artifact backend. Deploy this before enabling `operator.bindNewContents` | `false` |
 | `pageBroker.s3.limits` | PageBroker's S3 transfer and transaction limits, passed through as its `limits` object; `stagingBytes` defaults to the staging cap | `{}` |
