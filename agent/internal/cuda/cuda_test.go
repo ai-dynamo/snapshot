@@ -1050,3 +1050,74 @@ func TestOrderDRAUUIDsByRuntimeRejectsMismatches(t *testing.T) {
 		})
 	}
 }
+
+// fakeRestoreHelper installs a helper that sleeps on restore and records every action.
+func fakeRestoreHelper(t *testing.T, sleep time.Duration) (helper, actions string) {
+	t.Helper()
+	actions = filepath.Join(t.TempDir(), "actions")
+	installFakeCUDAHelper(t, fmt.Sprintf(`action=""
+pid=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --action) action="$2"; shift 2 ;;
+    --pid) pid="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ "$action" = restore ] && sleep %.2f
+echo "$action $pid" >> %q
+`, sleep.Seconds(), actions))
+	return cudaCheckpointHelperBinary, actions
+}
+
+func TestRestoreAndUnlockProcessTreeConcurrency(t *testing.T) {
+	const sleep = 200 * time.Millisecond
+	pids := []int{11, 12, 13, 14}
+
+	for _, tc := range []struct {
+		name        string
+		concurrency string
+		maxDuration time.Duration
+		minDuration time.Duration
+	}{
+		{name: "serial by default", concurrency: "", minDuration: time.Duration(len(pids)) * sleep},
+		{name: "invalid value stays serial", concurrency: "nonsense", minDuration: time.Duration(len(pids)) * sleep},
+		{name: "concurrent when asked", concurrency: "4", maxDuration: 2 * sleep},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(RestoreConcurrencyEnv, tc.concurrency)
+			helper, actions := fakeRestoreHelper(t, sleep)
+
+			started := time.Now()
+			timings, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", helper, logr.Discard())
+			duration := time.Since(started)
+			if err != nil {
+				t.Fatalf("RestoreAndUnlockProcessTree() error = %v", err)
+			}
+			if timings.TotalDuration <= 0 {
+				t.Fatalf("TotalDuration = %s", timings.TotalDuration)
+			}
+			if tc.minDuration > 0 && duration < tc.minDuration {
+				t.Fatalf("restored %d ranks in %s, expected at least %s", len(pids), duration, tc.minDuration)
+			}
+			if tc.maxDuration > 0 && duration > tc.maxDuration {
+				t.Fatalf("restored %d ranks in %s, expected under %s", len(pids), duration, tc.maxDuration)
+			}
+
+			recorded, err := os.ReadFile(actions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var unlocked []string
+			for _, line := range strings.Split(strings.TrimSpace(string(recorded)), "\n") {
+				if after, ok := strings.CutPrefix(line, "unlock "); ok {
+					unlocked = append(unlocked, after)
+				}
+			}
+			want := []string{"11", "12", "13", "14"}
+			if !reflect.DeepEqual(unlocked, want) {
+				t.Fatalf("unlock order = %v, want %v", unlocked, want)
+			}
+		})
+	}
+}
