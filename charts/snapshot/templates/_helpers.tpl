@@ -87,10 +87,15 @@ Convert a Kubernetes quantity to bytes, or empty when it is not a form we parse.
 {{- else if hasSuffix "Mi" $q }}{{ mulf (trimSuffix "Mi" $q | float64) 1048576 | int64 }}
 {{- else if hasSuffix "Gi" $q }}{{ mulf (trimSuffix "Gi" $q | float64) 1073741824 | int64 }}
 {{- else if hasSuffix "Ti" $q }}{{ mulf (trimSuffix "Ti" $q | float64) 1099511627776 | int64 }}
+{{- else if hasSuffix "Pi" $q }}{{ mulf (trimSuffix "Pi" $q | float64) 1125899906842624 | int64 }}
+{{- else if hasSuffix "Ei" $q }}{{ mulf (trimSuffix "Ei" $q | float64) 1152921504606846976 | int64 }}
 {{- else if hasSuffix "k" $q }}{{ mulf (trimSuffix "k" $q | float64) 1000 | int64 }}
 {{- else if hasSuffix "M" $q }}{{ mulf (trimSuffix "M" $q | float64) 1000000 | int64 }}
 {{- else if hasSuffix "G" $q }}{{ mulf (trimSuffix "G" $q | float64) 1000000000 | int64 }}
 {{- else if hasSuffix "T" $q }}{{ mulf (trimSuffix "T" $q | float64) 1000000000000 | int64 }}
+{{- else if hasSuffix "P" $q }}{{ mulf (trimSuffix "P" $q | float64) 1000000000000000 | int64 }}
+{{- else if hasSuffix "E" $q }}{{ mulf (trimSuffix "E" $q | float64) 1000000000000000000 | int64 }}
+{{- else if regexMatch "^[0-9]+(\\.[0-9]+)?[eE]\\+?[0-9]+$" $q }}{{ $q | float64 | int64 }}
 {{- else if regexMatch "^[0-9]+$" $q }}{{ $q }}
 {{- end }}
 {{- end }}
@@ -213,7 +218,11 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- $_ := set $limits $key (int64 $value) -}}
 {{- end -}}
 {{- if not (hasKey $limits "stagingBytes") -}}
-{{- $_ := set $limits "stagingBytes" (int64 (include "snapshot.quantityBytes" (include "snapshot.stagingSizeLimit" .))) -}}
+{{- $staging := include "snapshot.quantityBytes" (include "snapshot.stagingSizeLimit" .) -}}
+{{- if not $staging -}}
+{{- fail (printf "pageBroker.staging.sizeLimit %q is not a byte quantity the chart can read" (include "snapshot.stagingSizeLimit" .)) -}}
+{{- end -}}
+{{- $_ := set $limits "stagingBytes" (int64 $staging) -}}
 {{- end -}}
 {{- toYaml $limits -}}
 {{- end -}}
