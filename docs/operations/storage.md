@@ -1,7 +1,7 @@
 # Storage
 
 Snapshot keeps every checkpoint in one store that all node agents reach: a
-shared volume by default, or an S3-compatible bucket with `storage.type: s3`.
+checkpoint volume by default, or an S3-compatible bucket with `storage.type: s3`.
 Each agent's PageBroker sidecar publishes checkpoint artifacts there and reads
 them back for restore; workload pods never mount checkpoint storage.
 
@@ -270,64 +270,23 @@ legacy local-path capture mode; the chart fails the render without it. See
 ### S3 settings PageBroker reads
 
 With `storage.type: s3` and a PageBroker image that implements the S3 backend,
-the chart gives PageBroker its S3 configuration in two parts. The operator
-writes the JSON file PageBroker reads at `--storage-config`: the store identity
-fields (`storeId`, `endpoint`, `region`, `bucket`, `prefix`) from `storage.yaml`,
-and the connection and transfer settings below from the chart's
-`pagebroker-s3.yaml`. The DaemonSet sets the environment PageBroker checks those
-settings against. PageBroker reads all of it once at startup, so changing any of
-these values needs a PageBroker restart.
+the chart passes PageBroker the settings below. PageBroker reads them once at
+startup, so changing one restarts PageBroker on each node, and it can fail to
+start briefly until the operator has rewritten its configuration. See
+[PageBroker does not start after an S3 settings change](troubleshooting.md#pagebroker-does-not-start-after-an-s3-settings-change).
 
-The environment and the JSON roll on different schedules: the DaemonSet
-rewrites the environment the moment `helm upgrade` applies it, while the JSON
-only updates once the new operator pod has started and rewritten PageBroker's
-ConfigMap. Changing `storage.s3.addressing` or the CA bundle can land a
-PageBroker pod with the new environment against the still-old JSON; PageBroker
-refuses to start until they agree. This is bounded and self-healing — the pod's
-mounted ConfigMap catches up and a later restart succeeds — but expect PageBroker
-to be briefly unavailable on that node during the upgrade.
+| Value | Effect | Default |
+|-------|--------|---------|
+| `storage.s3.addressing` | `path` or `virtual` bucket addressing | PageBroker's `virtual` |
+| `storage.s3.allowHttp` | Accepts a plain-http endpoint; the chart refuses one otherwise | `false` |
+| `storage.s3.caBundleConfigMapRef`, `storage.s3.caBundleConfigMapKey` | CA bundle for the endpoint, used by PageBroker and the operator | system trust |
+| `pageBroker.s3.limits` | Transfer and transaction limits; keys, defaults and bounds are in the [values reference](../reference/api.md#s3-transfer-limits) | see reference |
+| `pageBroker.transferEngine.modelStreamer` | Tuning for the engine that reads S3 restores, written as given; keys are in [Model Streamer configuration](../../agent/pagebroker/MODEL_STREAMER.md) | no file |
 
-| Value | PageBroker input | Default |
-|-------|------------------|---------|
-| `storage.s3.addressing` | `addressing` in the JSON, and `RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING` (`0` for `path`, `1` for `virtual`) in the environment | PageBroker's `virtual` |
-| `storage.s3.allowHttp` | `allowHttp` in the JSON. The chart refuses a plain-http endpoint unless it is set | `false` |
-| `storage.s3.caBundleConfigMapRef`, `storage.s3.caBundleConfigMapKey` | The bundle mounted at `/etc/snapshot-s3-ca/<key>`, named by `caFile` in the JSON and by `AWS_CA_BUNDLE` in the environment. The operator's maintenance client gets the same bundle | system trust |
-| `pageBroker.s3.limits` | The `limits` object in the JSON, with `stagingBytes` filled in from the staging cap when omitted; other keys pass through as given | see below |
-| `pageBroker.transferEngine.modelStreamer` | A second JSON file, mounted at `/etc/snapshot-model-streamer/model-streamer.json` and passed with `--model-streamer-config` | no file |
-
-`pageBroker.s3.limits` accepts PageBroker's own keys, with its bounds:
-
-| Key | Default | Bounds |
-|-----|---------|--------|
-| `transactionSeconds` | 7200 | 1 to 7200 |
-| `stagingBytes` | the staging volume cap, `pageBroker.staging.sizeLimit` as lowered in [How the cap is chosen](#how-the-cap-is-chosen) | 1 byte to 1 TiB |
-| `activeTransactions` | 8 | 1 to 1024, below `pageBroker.maxConcurrentRequests` |
-| `uploadPartBytes` | 16 MiB | 8 MiB to 1 GiB |
-| `uploadBufferBytes` | 1 GiB | 1 to 16 GiB, at least twice `uploadPartBytes` |
-| `uploadActiveFiles` | 2 | 1 to 64 |
-| `requestSeconds` | 60 | 1 to 60 |
-| `uploadRequestRetries` | 3 | 0 to 10 |
-| `uploadConnectSeconds` | the smaller of 5 and `requestSeconds` | 1 to `requestSeconds` |
-
-When `stagingBytes` is omitted, the chart fills it from the staging volume cap,
-so PageBroker refuses a staged restore the volume cannot hold instead of
-filling it; an explicit `stagingBytes` is not checked against the volume and
-can exceed what it actually holds. The chart rejects a key PageBroker does not
-know, an `activeTransactions` at or above `maxConcurrentRequests`, and an
-`addressing` other than `path` or
-`virtual`; PageBroker enforces the remaining bounds at startup.
-
-`pageBroker.transferEngine.modelStreamer` is written as given. Its keys are PageBroker's Model
-Streamer input contract: `readChunkBytes`, `processGroupSize`, an `s3Reader`
-object (`concurrency`, `targetGbps`, `maxConnections`, `maxInflightMiB`,
-`maxRetries`, `retryWindowSeconds`, `lowSpeedTimeoutMs`, `lowSpeedBytesPerSecond`)
-and a `logging` object (`level`, `toStderr`). Every key is optional.
-The chart does not validate these keys. PageBroker rejects a key it does not know and
-refuses to start, so a misspelled key shows up as a failing PageBroker pod, not as a
-rendering error.
-
-`pageBroker.transferEngine` groups the settings of PageBroker's transfer engines.
-Today it holds only `modelStreamer`, the engine that reads S3 restores.
+When `pageBroker.s3.limits.stagingBytes` is omitted, the chart fills it from the
+staging volume cap, so PageBroker refuses a staged restore the volume cannot
+hold instead of filling it. An explicit `stagingBytes` is not checked against
+the volume.
 
 ### PageBroker restore source
 

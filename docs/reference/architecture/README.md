@@ -43,7 +43,7 @@ flowchart LR
     end
     wl["Workload container<br/>(source or destination)"]
   end
-  store[("Checkpoint store<br/>RWX PVC")]
+  store[("Checkpoint store<br/>RWX PVC or S3")]
 
   caller -->|"PodSnapshot · SnapshotJob<br/>restore-from annotation"| op
   op -->|"PodSnapshotContent<br/>(work order, node-labelled)"| agent
@@ -229,8 +229,8 @@ changing how callers address a checkpoint — see
 [SNEP-237: S3-compatible object storage](../../proposals/237-s3-storage/README.md).
 
 PageBroker adds a memory-backed staging volume shared with the agent. By default
-CRIU dumps into staging and PageBroker publishes to the PVC on success, while
-restore reads the artifact directly (`pageBroker.restoreMode: direct`). Because
+CRIU dumps into staging and PageBroker publishes to the checkpoint store on
+success, while restore reads the artifact directly (`pageBroker.restoreMode: direct`). Because
 staging is RAM, its cap and the agent's memory limit have to be sized together —
 see [Storage](../../operations/storage.md).
 

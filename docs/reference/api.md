@@ -213,8 +213,27 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `storage.s3.caBundleConfigMapKey`         | `ca.crt`       | Key in that ConfigMap holding the bundle.                                                                                                                                                                 |
 | `pageBroker.artifactAddressing`           | `false`        | Pass store configuration to a compatible PageBroker artifact backend. Deploy this before enabling `operator.bindNewContents`.                                                                             |
 | `operator.bindNewContents`                | `false`        | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../operations/storage.md#enable-artifact-addressing). Required for `storage.type: s3`. |
-| `pageBroker.s3.limits`                    | `{}`           | PageBroker's S3 transfer and transaction limits; see [S3 settings PageBroker reads](../operations/storage.md#s3-settings-pagebroker-reads) for the keys and bounds.                                       |
-| `pageBroker.transferEngine.modelStreamer` | `{}`           | Model Streamer reader tuning for S3 restores; see [S3 settings PageBroker reads](../operations/storage.md#s3-settings-pagebroker-reads) for the keys.                                                     |
+| `pageBroker.s3.limits`                    | `{}`           | PageBroker's S3 transfer and transaction limits; see [S3 transfer limits](#s3-transfer-limits) for the keys and bounds.                                                                                |
+| `pageBroker.transferEngine.modelStreamer` | `{}`           | Tuning for the engine that reads S3 restores, written as given; keys are in [Model Streamer configuration](../../agent/pagebroker/MODEL_STREAMER.md).                                                |
+
+### S3 transfer limits
+
+`pageBroker.s3.limits` accepts PageBroker's own keys, with its bounds. The chart
+rejects a key PageBroker does not know, an `activeTransactions` at or above
+`pageBroker.maxConcurrentRequests`, and an `addressing` other than `path` or
+`virtual`; PageBroker enforces the remaining bounds at startup.
+
+| Key | Default | Bounds |
+|-----|---------|--------|
+| `transactionSeconds` | 7200 | 1 to 7200 |
+| `stagingBytes` | the staging volume cap, `pageBroker.staging.sizeLimit` as lowered in [How the cap is chosen](../operations/storage.md#how-the-cap-is-chosen) | 1 byte to 1 TiB |
+| `activeTransactions` | 8 | 1 to 1024, below `pageBroker.maxConcurrentRequests` |
+| `uploadPartBytes` | 16 MiB | 8 MiB to 1 GiB |
+| `uploadBufferBytes` | 1 GiB | 1 to 16 GiB, at least twice `uploadPartBytes` |
+| `uploadActiveFiles` | 2 | 1 to 64 |
+| `requestSeconds` | 60 | 1 to 60 |
+| `uploadRequestRetries` | 3 | 0 to 10 |
+| `uploadConnectSeconds` | the smaller of 5 and `requestSeconds` | 1 to `requestSeconds` |
 
 ### PageBroker GPU engine
 
