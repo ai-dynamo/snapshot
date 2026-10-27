@@ -5,12 +5,15 @@
 // for each attempt, a space of write-once keys, waits on keys, counters, and
 // barriers over distinct participants.
 //
-// The package knows nothing about Snapshot. Roles, namespaces, quotas, members,
-// retries, and failures all belong to the session package above it, which
-// reaches storage only through these interfaces, so a backend such as Redis can
-// replace the in-memory one without changing it. Package memory holds the
-// in-memory backend, and package kvtest the conformance suite every backend
-// must pass.
+// The package knows nothing about Snapshot. Roles, namespaces, the byte budget,
+// members, retries, and failures all belong to the session package above it,
+// which reaches storage only through these interfaces, so a backend such as
+// Redis can replace the in-memory one without changing it. That holds for
+// storage only. A session's own records (how it ended, its retry records, its
+// byte budget) and the epoch live in the coordinator's memory, so surviving a
+// coordinator restart would also take moving the session's ledger behind the
+// store, as the ledger notes. Package memory holds the in-memory backend, and
+// package kvtest the conformance suite every backend must pass.
 package kv
 
 import (

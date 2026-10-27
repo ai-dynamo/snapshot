@@ -85,15 +85,16 @@ const (
 	maxReasonLength = 1024
 )
 
+var reasonRE = regexp.MustCompile(reasonPattern)
+
 // validateReason reports ErrInvalid for a reason that is not a valid condition
-// reason. Failing a session is rare, so the pattern is compiled per call
-// rather than kept in a package variable.
+// reason.
 func validateReason(reason Reason) error {
 	if len(reason) > maxReasonLength {
 		return fmt.Errorf("a reason of %d bytes is over the %d-byte limit: %w", len(reason), maxReasonLength,
 			ErrInvalid)
 	}
-	if !regexp.MustCompile(reasonPattern).MatchString(string(reason)) {
+	if !reasonRE.MatchString(string(reason)) {
 		return fmt.Errorf("reason %q is not a condition reason: %w", reason, ErrInvalid)
 	}
 	return nil

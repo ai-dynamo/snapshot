@@ -96,8 +96,8 @@ func (l *ledger) forget(r Request) {
 // identityOf returns what a record keeps of an error: the *AbortError, or the
 // sentinel the error matches, and never the wrapped message, which names the
 // key. A replayed error therefore matches the same sentinel as the original. It
-// reports false for an error with no identity, such as a backend failure, which
-// is not worth replaying.
+// knows every sentinel errors.go declares, and reports false for an error with
+// no identity, such as a backend failure, which is not worth replaying.
 func identityOf(err error) (error, bool) {
 	if err == nil {
 		return nil, true
@@ -107,8 +107,9 @@ func identityOf(err error) (error, bool) {
 		return aborted, true
 	}
 	for _, sentinel := range []error{
-		ErrNotFound, ErrNotYet, ErrExists, ErrMismatch, ErrNotCounter, ErrBarrierCount,
-		ErrClosed, ErrNotMember, ErrForbidden, ErrTooLarge, ErrTooMany, ErrInvalid,
+		ErrNotFound, ErrExists, ErrMismatch, ErrNotCounter, ErrBarrierCount,
+		ErrNotYet, ErrAborted, ErrClosed, ErrUnknownSession, ErrNotMember, ErrForbidden, ErrTooLarge,
+		ErrTooMany, ErrInvalid,
 	} {
 		if errors.Is(err, sentinel) {
 			return sentinel, true
