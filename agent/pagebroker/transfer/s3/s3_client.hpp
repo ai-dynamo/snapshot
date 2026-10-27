@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "cancellation.hpp"
@@ -112,6 +113,10 @@ class S3Client {
                    const std::vector<S3UploadFile>& files, Cancellation cancellation);
   // Returns the object size, or nullopt for a missing object; other failures throw.
   std::optional<std::uint64_t> Head(const S3ObjectLocation& object, Cancellation cancellation);
+  // Sizes of the listed objects in one process, keyed by key. Missing objects are
+  // absent from the result; other failures throw. The key list is bounded to 16 MiB.
+  std::unordered_map<std::string, std::uint64_t> HeadMany(
+      const std::string& bucket, const std::vector<std::string>& keys, Cancellation cancellation);
   // Returns at most max_bytes after checking HEAD/GET sizes, or returns nullopt
   // for a missing object. Oversized or inconsistent responses throw S3ResponseError.
   std::optional<std::string> Get(const S3ObjectLocation& object, std::size_t max_bytes, Cancellation cancellation);

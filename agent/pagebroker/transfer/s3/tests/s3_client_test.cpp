@@ -219,6 +219,23 @@ TEST(S3ClientTest, RequiresCallerDeadline)
   EXPECT_THROW(client.Head({"bucket", "data"}, Cancellation{}), std::invalid_argument);
 }
 
+TEST(S3ClientTest, ChecksManyObjectsWithoutConnectingWhenTheRequestIsInvalid)
+{
+  S3Client client(OfflineConnection(), SmallLimits());
+  EXPECT_THROW(client.HeadMany("local-test-bucket", {"data"}, Cancellation{}), std::invalid_argument);
+  EXPECT_THROW(client.HeadMany("", {"data"}, Deadline()), std::invalid_argument);
+  EXPECT_THROW(client.HeadMany("local-test-bucket", {"data", "a//b"}, Deadline()), std::invalid_argument);
+  EXPECT_THROW(client.HeadMany("local-test-bucket", {"data", "../escape"}, Deadline()), std::invalid_argument);
+  const std::vector<std::string> oversized(17'000, std::string(1000, 'a'));
+  EXPECT_THROW(client.HeadMany("local-test-bucket", oversized, Deadline()), std::invalid_argument);
+}
+
+TEST(S3ClientTest, ChecksNoObjectsWithoutStartingAProcess)
+{
+  S3Client client(OfflineConnection(), SmallLimits());
+  EXPECT_TRUE(client.HeadMany("local-test-bucket", {}, Deadline()).empty());
+}
+
 TEST(S3ClientTest, RejectsInvalidOrCancelledMetadataWithoutConnecting)
 {
   S3Client client(OfflineConnection(), SmallLimits());
@@ -232,6 +249,7 @@ TEST(S3ClientTest, RejectsInvalidOrCancelledMetadataWithoutConnecting)
     const auto code = cancellation.DeadlineExceeded() ? "DeadlineExceeded" : "Cancelled";
     for (const auto& [operation, call] : std::initializer_list<std::pair<const char*, std::function<void()>>>{
              {"HeadObject", [&] { client.Head(object, cancellation); }},
+             {"HeadObject", [&] { client.HeadMany(object.bucket, {object.key}, cancellation); }},
              {"HeadObject", [&] { client.Get(object, 1024, cancellation); }},
              {"PutObject", [&] { client.Put(object, "{}", 1024, cancellation); }}}) {
       SCOPED_TRACE(operation);
