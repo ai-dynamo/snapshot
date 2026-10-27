@@ -34,6 +34,8 @@ This page lists every page in the Snapshot documentation, grouped by section.
 
 ## Operate
 
+- [Argo CD](operate/argocd.md) - Gate restore on SnapshotJob completion and retain snapshots.
+
 - [Configure Storage](operate/configure-storage.md) - The shared snapshot volume and how to configure it.
 - [Tune Storage](operate/tune-storage/README.md) - Storage option tuning and examples.
 - [Upgrade Snapshot and the CRDs](operate/upgrade.md) - Upgrade with `helm upgrade`; the operator updates the CRDs.

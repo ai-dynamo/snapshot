@@ -48,6 +48,8 @@ commit-level history for each release is on its
   `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` to control batch
   and shared admission bytes. The default remains 10 GB; restart PageBroker
   after changing it.
+- [Argo CD operations guide](docs/operate/argocd.md) with capture-completion
+  gating, restore manifests, and checkpoint retention.
 
 - `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
   and opt into cleanup after failure; omission or `Retain` preserves output.
