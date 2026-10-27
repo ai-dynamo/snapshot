@@ -14,11 +14,13 @@ build information are packaged under `/legal/rclone`. PageBroker no longer build
 or links the AWS C++ SDK.
 Model Streamer's prebuilt S3 plugin retains its own AWS implementation.
 
-The client exposes `UploadFiles`, `Head`, bounded `Get`, and create-only `Put`.
+The client exposes `UploadFiles`, `Head`, `HeadMany`, bounded `Get`, and create-only `Put`.
 `UploadFiles` runs one `copy` process for the listed payloads, preserving their
 relative paths beneath the destination prefix. It validates file types, sizes,
 keys and multipart limits before launch. The file list is bounded to 16 MiB;
-empty batches start no process. Metadata writes use `copyto`; reads use `lsjson`
+empty batches start no process. `HeadMany` checks a list of objects with one
+`lsjson` process, and restore uses it to verify every payload before staging.
+Metadata writes use `copyto`; reads use `lsjson`
 and `cat` with exact file lists and `--no-traverse`, without listing the bucket.
 A missing-object response is distinct from access denial. Object keys must be
 canonical relative paths, since rclone normalizes paths; unsupported spellings
