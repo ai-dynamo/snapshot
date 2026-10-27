@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/client-go/kubernetes"
@@ -32,6 +34,14 @@ const (
 	// DefaultHelperBinaryPath is the agent-side cuda-checkpoint-helper absolute path.
 	// In the placeholder namespace pass filepath.Join(bundleDir, HelperBinaryName) instead.
 	DefaultHelperBinaryPath = "/usr/local/bin/" + HelperBinaryName
+
+	// RestoreConcurrencyEnv bounds how many ranks RestoreAndUnlockProcessTree restores at
+	// once. Each rank is a separate target process whose checkpointed pages already sit in
+	// its own host memory after CRIU, so N ranks drive N distinct PCIe links and share only
+	// host memory bandwidth. The default is 1, which is the serial behaviour: NVIDIA
+	// documents no process-safety guarantee for concurrent cuCheckpointProcessRestore calls
+	// against different targets, so raising it is an opt-in.
+	RestoreConcurrencyEnv = "SNAPSHOT_CUDA_RESTORE_CONCURRENCY"
 
 	// nvidiaSMITimeout is what the agent bounds every nsenter nvidia-smi call
 	// by. The agent's own context carries no deadline, so a hung one would block
@@ -530,6 +540,23 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 	return timings, nil
 }
 
+// restoreConcurrency reads RestoreConcurrencyEnv from the environment nsrestore inherits
+// from the agent container. Anything missing, unparseable or below 1 keeps the serial
+// default rather than failing a restore over a tuning knob.
+func restoreConcurrency(log logr.Logger) int {
+	value := strings.TrimSpace(os.Getenv(RestoreConcurrencyEnv))
+	if value == "" {
+		return 1
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil || limit < 1 {
+		log.Info("ignoring invalid CUDA restore concurrency, restoring one rank at a time",
+			"env", RestoreConcurrencyEnv, "value", value)
+		return 1
+	}
+	return limit
+}
+
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs. It
 // runs inside nsrestore and shares its process group so cancellation reaches the CUDA
 // helper. helperBinaryPath identifies the binary in that namespace, including through
@@ -538,14 +565,42 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap,
 	var timings RestorePhaseTimings
 
 	start := time.Now()
+	limit := restoreConcurrency(log)
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(limit)
 	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, helperBinaryPath, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
-		}
+		group.Go(func() error {
+			began := time.Since(start)
+			if err := restoreProcess(groupCtx, pid, deviceMap, helperBinaryPath, log); err != nil {
+				return err
+			}
+			// Logged at Info, unlike the helper's own V(1) line: whether the ranks
+			// overlapped at all is the question this concurrency exists to answer,
+			// and a total alone cannot distinguish that from each rank being slower.
+			log.Info("CUDA rank restored",
+				"pid", pid,
+				"restore_concurrency", limit,
+				"started_after", began,
+				"duration", time.Since(start)-began,
+			)
+			return nil
+		})
+	}
+	// The first failure cancels groupCtx, which kills the sibling helpers. Nothing has
+	// been unlocked at this point, so the caller discards the workload either way.
+	if err := group.Wait(); err != nil {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 
+	restored := time.Since(start)
+
+	// Unlock stays serial and in captured order: it is the step that resumes execution,
+	// and the PageBroker CustomStorage path deliberately unlocks one process at a time.
+	// Its cost is timed separately because the phase summary folds both loops into
+	// cuda_restore, so a serial unlock could cap the restore win without showing why.
 	for _, pid := range cudaPIDs {
+		unlockStart := time.Now()
 		if err := unlock(ctx, pid, helperBinaryPath, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			state, stateErr := getState(ctx, pid, helperBinaryPath)
@@ -555,8 +610,16 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap,
 			}
 			return timings, err
 		}
+		log.Info("CUDA rank unlocked", "pid", pid, "duration", time.Since(unlockStart))
 	}
 	timings.TotalDuration = time.Since(start)
 
+	log.Info("CUDA process tree restored and unlocked",
+		"ranks", len(cudaPIDs),
+		"restore_concurrency", limit,
+		"restore_duration", restored,
+		"unlock_duration", timings.TotalDuration-restored,
+		"duration", timings.TotalDuration,
+	)
 	return timings, nil
 }
