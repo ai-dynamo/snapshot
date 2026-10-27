@@ -178,6 +178,7 @@ operations, indexed below.
 
 - [Installation](docs/operations/install.md) — Helm install and uninstall.
 - [Storage](docs/operations/storage.md) — the shared checkpoint volume and how to configure it.
+- [Argo CD](docs/operations/argocd.md) — gate restore on SnapshotJob completion and retain checkpoints.
 - [Troubleshooting](docs/operations/troubleshooting.md) — common failures and where to look.
 - [Security](docs/operations/security.md) — the privileged agent, seccomp, and Pod Security.
 

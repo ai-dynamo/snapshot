@@ -34,6 +34,9 @@ commit-level history for each release is on its
 
 ### Added
 
+- [Argo CD operations guide](docs/operations/argocd.md) with capture-completion
+  gating, restore manifests, and checkpoint retention.
+
 - `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
   and opt into cleanup after failure; omission or `Retain` preserves output.
   CRD change: deploy the matching CRD and operator together.
