@@ -18,9 +18,12 @@ separate Applications, and selective sync bypasses this ordering. See
 
 Install [Snapshot](install.md), configure the [checkpoint store](storage.md),
 and meet the [vLLM guide prerequisites](../guides/README.md#before-you-start).
-The examples use vLLM with Qwen3-0.6B, one NVIDIA GPU, a model-cache PVC, and the
-restore proxy described in the
-[Restore Pod contract](../reference/restore-pod-contract.md).
+The examples use vLLM with Qwen3-0.6B, one NVIDIA GPU, and a model-cache PVC.
+The restore command stays inert on nodes without the restore proxy; an HTTP
+liveness probe checks the restored API. The startup probe waits for restore
+completion and API readiness before liveness checks begin. See the
+[Restore Pod contract](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy)
+for the differences in process exit and signal handling.
 
 Use an existing [Argo CD installation](https://argo-cd.readthedocs.io/en/stable/operator-manual/installation/).
 An Argo administrator must configure the health check before the Application
