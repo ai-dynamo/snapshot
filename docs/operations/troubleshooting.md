@@ -144,8 +144,10 @@ its mounts, cgroup root, image and security profile, and maps the checkpoint's
 GPUs onto the GPUs visible in the placeholder. Mismatches that make the node
 unable to run the checkpoint are refused with reason `RestoreIncompatible`
 rather than failed here. That includes a placeholder with an AppArmor or SELinux
-profile when the checkpoint recorded no security labels (check `lsm-labels`):
-re-checkpoint with an agent that records them.
+profile when the checkpoint manifest does not confirm a security label for every
+process (check `lsm-labels`). Agents that predate this check write no such
+record, so their checkpoints are refused even when the dumped processes carry
+labels. Re-checkpoint with an agent that records them.
 
 Likely causes: the placeholder container exited or restarted before the agent
 reached it; the runtime did not answer; the placeholder has fewer GPUs
