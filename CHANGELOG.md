@@ -35,7 +35,8 @@ commit-level history for each release is on its
 ### Added
 
 - [Argo CD operations guide](docs/operations/argocd.md) with capture-completion
-  gating, restore manifests, and checkpoint retention.
+  gating, restore manifests, and checkpoint retention. The vLLM example adds
+  `/health` to check engine availability for readiness and liveness probes.
 
 - `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
   and opt into cleanup after failure; omission or `Retain` preserves output.

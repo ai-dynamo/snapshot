@@ -18,10 +18,14 @@ state loop with two contractual properties this file pins down:
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import os
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -229,3 +233,23 @@ def test_restore_manifests_use_canonical_control_mount_and_startup_gate(
         ]
         assert all("RESTORE_STANDBY" not in e["name"] for e in container["env"])
         assert all(not e["name"].startswith("DYN_") for e in container["env"])
+
+
+@pytest.mark.workload
+def test_vllm_health_rechecks_engine_after_failure() -> None:
+    script = Path(__file__).resolve().parents[2] / "docs/guides/vllm/app.py"
+    module = ast.parse(script.read_text())
+    serve_api = next(node for node in module.body if getattr(node, "name", None) == "serve_api")
+    health = next(node for node in serve_api.body if getattr(node, "name", None) == "health")
+    # Run the actual route without importing vLLM or starting a GPU worker.
+    health.decorator_list = []
+    engine = SimpleNamespace(check_health=AsyncMock())
+    namespace = {"engine": engine}
+    exec(compile(ast.Module(body=[health], type_ignores=[]), str(script), "exec"), namespace)
+
+    assert asyncio.run(namespace["health"]()) == {"status": "ok"}
+    engine.check_health.assert_awaited_once()
+    engine.check_health.side_effect = RuntimeError("engine stopped")
+    with pytest.raises(RuntimeError, match="engine stopped"):
+        asyncio.run(namespace["health"]())
+    assert engine.check_health.await_count == 2

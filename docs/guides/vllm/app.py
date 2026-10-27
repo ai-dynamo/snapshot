@@ -67,6 +67,11 @@ async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
         )
         return {"text": text}
 
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        await engine.check_health()
+        return {"status": "ok"}
+
     server = uvicorn.Server(
         uvicorn.Config(
             app,
