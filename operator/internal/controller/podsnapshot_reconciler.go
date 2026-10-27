@@ -47,11 +47,11 @@ const (
 	// List calls using this field are also scoped to the pod's namespace.
 	podSnapshotSourcePodNameField = "spec.source.podRef.name"
 
-	// podSnapshotReasonSourcePodGone is the pending-capture failure written when the source pod
-	// turned terminal (Failed or deleting) with no capture result. It is failed only after
-	// sourcePodTerminalGrace, because a checkpoint that terminates its source produces exactly this
-	// pod state shortly before the agent writes content Ready.
-	podSnapshotReasonSourcePodGone = "SourcePodGone"
+	// podSnapshotReasonCheckpointResultTimeout is the pending-capture failure written when the
+	// agent publishes no capture result within the checkpoint completion grace of the source
+	// pod becoming terminal. The dump terminating its source is expected, so the pod being gone
+	// is not the cause; the missing result is.
+	podSnapshotReasonCheckpointResultTimeout = "CheckpointResultTimeout"
 )
 
 // errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled to a node; the
@@ -76,6 +76,9 @@ type PodSnapshotReconciler struct {
 	// StoreID binds every new PodSnapshotContent to the configured store. Empty
 	// keeps producing legacy, path-addressed content.
 	StoreID string
+	// CheckpointCompletionGrace is how long a pending capture may stay unresolved, counted
+	// from when its source pod turned terminal. Zero uses DefaultCheckpointCompletionGrace.
+	CheckpointCompletionGrace time.Duration
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -159,7 +162,7 @@ func (sr *PodSnapshotReconciler) mirrorBoundContent(ctx context.Context, snap *s
 func (sr *PodSnapshotReconciler) resolvePendingBoundContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
 	pod, err := sr.getSourcePod(ctx, snap)
 	if err == nil {
-		if _, cause := pendingCaptureSourceFailure(snap, cachedContent, pod); cause == nil {
+		if _, cause := pendingCaptureSourceFailure(snap, cachedContent, pod); cause == nil && !sourcePodTerminal(pod) {
 			return sr.propagateStatus(ctx, snap, cachedContent)
 		}
 	} else if !apierrors.IsNotFound(err) {
@@ -169,9 +172,11 @@ func (sr *PodSnapshotReconciler) resolvePendingBoundContent(ctx context.Context,
 	return sr.confirmPendingCaptureTerminal(ctx, snap, cachedContent)
 }
 
-// confirmPendingCaptureTerminal bypasses the informer cache before writing sticky failure. The
-// pod is read before the content: the agent persists content Ready before releasing the source
-// process, so a pod observed terminal guarantees the content read cannot miss a raced Ready.
+// confirmPendingCaptureTerminal re-reads the source pod and content from the API server,
+// bypassing the informer cache, before writing a failure that is never revisited. A terminal
+// source pod is not by itself a capture failure: the dump kills the source process before the
+// agent commits the artifact and writes content Ready, so a terminal pod with pending content
+// is timed by awaitCheckpointResult instead.
 func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
 	pod, podErr := sr.readAuthoritativeSourcePod(ctx, snap)
 	if podErr != nil && !apierrors.IsNotFound(podErr) {
@@ -195,34 +200,57 @@ func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Conte
 			fmt.Errorf("source pod %q disappeared before capture success or failure was recorded", key.String()))
 	}
 
-	reason, cause := pendingCaptureSourceFailure(snap, content, pod)
-	if cause == nil {
-		return sr.propagateStatus(ctx, snap, content)
+	if reason, cause := pendingCaptureSourceFailure(snap, content, pod); cause != nil {
+		return sr.failPodSnapshot(ctx, snap, reason, cause)
 	}
-	if reason == podSnapshotReasonSourcePodGone {
-		// A checkpoint that terminates its source fails the pod before the agent
-		// writes content Ready; wait out the grace window instead of racing it.
-		if wait := sourcePodTerminalGraceRemaining(pod, time.Now()); wait > 0 {
-			return ctrl.Result{RequeueAfter: wait}, nil
-		}
+	if sourcePodTerminal(pod) {
+		return sr.awaitCheckpointResult(ctx, snap, content, pod)
 	}
-	return sr.failPodSnapshot(ctx, snap, reason, cause)
+	return sr.propagateStatus(ctx, snap, content)
 }
 
-// sourcePodTerminalGrace is how long a pending capture may stay unresolved
-// after its source pod turned terminal before the pod's state becomes the
-// capture failure — the backstop for an agent that never publishes a result.
-const sourcePodTerminalGrace = 5 * time.Minute
-
-// sourcePodTerminalGraceRemaining returns how much of the grace window is left
-// for a terminal source pod. An unknown transition time returns zero — failing
-// immediately — rather than requeueing on a clock that can never expire.
-func sourcePodTerminalGraceRemaining(pod *corev1.Pod, now time.Time) time.Duration {
+// awaitCheckpointResult is the timer for a pending capture whose source pod is terminal. The
+// timer starts when the pod became terminal and runs for the checkpoint completion grace; the
+// agent's Ready or Failed write ends it early by resolving the content, and expiry fails the
+// PodSnapshot with CheckpointResultTimeout. The start time is read from pod status on every
+// reconcile rather than held in memory, so the timer survives operator restarts.
+func (sr *PodSnapshotReconciler) awaitCheckpointResult(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (ctrl.Result, error) {
+	grace := sr.checkpointCompletionGrace()
+	key := client.ObjectKeyFromObject(pod).String()
 	terminalAt := podTerminalTime(pod)
 	if terminalAt.IsZero() {
-		return 0
+		// Requeueing on a clock with no start would never expire, so fail now.
+		return sr.failPodSnapshot(ctx, snap, podSnapshotReasonCheckpointResultTimeout,
+			fmt.Errorf("source pod %q is terminal but its status records no termination time, so the %v checkpoint completion grace cannot be timed; PodSnapshotContent %q has no capture result",
+				key, grace, content.Name))
 	}
-	return sourcePodTerminalGrace - now.Sub(terminalAt)
+	if remaining := time.Until(terminalAt.Add(grace)); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	return sr.failPodSnapshot(ctx, snap, podSnapshotReasonCheckpointResultTimeout,
+		fmt.Errorf("PodSnapshotContent %q reported no capture result within %v of source pod %q becoming terminal; raise --checkpoint-completion-grace if the checkpoint upload needs longer",
+			content.Name, grace, key))
+}
+
+// DefaultCheckpointCompletionGrace is how long a pending capture may stay unresolved
+// after its source pod turned terminal before the controller fails the
+// PodSnapshot with CheckpointResultTimeout — the backstop for an agent that
+// never publishes a result.
+// The window starts when the source pod becomes terminal, not when the
+// checkpoint starts, so it is distinct from the agent's overall checkpoint
+// timeout (config.checkpoint.checkpointTimeoutSeconds).
+// The window must cover the agent's upload of the largest checkpoint, so
+// deployments with large images or slow storage raise it with
+// --checkpoint-completion-grace.
+const DefaultCheckpointCompletionGrace = 5 * time.Minute
+
+// checkpointCompletionGrace returns the configured grace window, falling back to
+// DefaultCheckpointCompletionGrace when the reconciler was built without one.
+func (sr *PodSnapshotReconciler) checkpointCompletionGrace() time.Duration {
+	if sr.CheckpointCompletionGrace > 0 {
+		return sr.CheckpointCompletionGrace
+	}
+	return DefaultCheckpointCompletionGrace
 }
 
 // podTerminalTime returns the latest observable time at which the source pod
@@ -266,6 +294,16 @@ func (sr *PodSnapshotReconciler) readAuthoritativeSourcePod(ctx context.Context,
 	return pod, nil
 }
 
+// sourcePodTerminal reports whether the source pod has stopped running for good: Failed, or
+// being deleted. A successful dump ends here, so this starts awaitCheckpointResult's timer
+// rather than failing the capture.
+func sourcePodTerminal(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodFailed || pod.DeletionTimestamp != nil
+}
+
+// pendingCaptureSourceFailure reports a source pod state that fails a pending capture at once:
+// a same-named replacement pod, or a source that exited successfully without being captured.
+// A terminal source pod is not one of them; see sourcePodTerminal.
 func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (string, error) {
 	key := client.ObjectKeyFromObject(pod)
 	wantUID := snap.Spec.Source.PodRef.UID
@@ -277,16 +315,11 @@ func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *sn
 			fmt.Errorf("source pod %q UID %q does not match capture UID %q", key.String(), pod.UID, wantUID)
 	}
 
-	switch {
-	case pod.Status.Phase == corev1.PodSucceeded:
+	if pod.Status.Phase == corev1.PodSucceeded {
 		return snapshotv1alpha1.ReasonSourceCompletedWithoutCapture,
 			fmt.Errorf("source pod %q completed before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
-	case pod.Status.Phase == corev1.PodFailed || pod.DeletionTimestamp != nil:
-		return podSnapshotReasonSourcePodGone,
-			fmt.Errorf("source pod %q became unavailable before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
-	default:
-		return "", nil
 	}
+	return "", nil
 }
 
 // captureFromSourcePod is the no-content path: it resolves and validates the live source pod, then

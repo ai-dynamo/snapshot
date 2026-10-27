@@ -242,7 +242,7 @@ missed.
 
 Terminal states are sticky and specific. A `Failed` condition names its cause
 (`SourcePodNotFound`, `StalePodReference`, `ContentConflict`,
-`ContainerNotResolved`, a compatibility check name) and is never re-evaluated.
+`ContainerNotResolved`, `CheckpointResultTimeout`, a compatibility check name) and is never re-evaluated.
 `Ready` deliberately is not terminal on a `PodSnapshot`: it mirrors the content,
 and keeps mirroring it.
 

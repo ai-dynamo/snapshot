@@ -1020,6 +1020,7 @@ func TestCaptureFailureReason(t *testing.T) {
 		{"bind-stage: StalePodReference maps to PodSnapshotFailed", "StalePodReference", snapshotv1alpha1.ReasonPodSnapshotFailed},
 		{"source completion without result keeps its specific reason", snapshotv1alpha1.ReasonSourceCompletedWithoutCapture, snapshotv1alpha1.ReasonSourceCompletedWithoutCapture},
 		{"agent-mirrored reason maps to CaptureFailed", "CRIUDumpFailed", snapshotv1alpha1.ReasonCaptureFailed},
+		{"expired checkpoint completion grace maps to CaptureFailed", podSnapshotReasonCheckpointResultTimeout, snapshotv1alpha1.ReasonCaptureFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

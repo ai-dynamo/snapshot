@@ -28,6 +28,14 @@ operator:
 
   # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/storage.md.
   bindNewContents: false
+
+  # How long a capture waits for the agent's result once its source pod becomes
+  # terminal, before the PodSnapshot fails with CheckpointResultTimeout. The
+  # window starts when the source pod becomes terminal, not when the checkpoint
+  # starts, so it is separate from config.checkpoint.checkpointTimeoutSeconds,
+  # which bounds the whole checkpoint. Must cover the upload of the largest
+  # checkpoint to storage: about 10m for 140 GB at 220 MB/s.
+  checkpointCompletionGrace: 5m
   resources:
     limits:
       cpu: 500m

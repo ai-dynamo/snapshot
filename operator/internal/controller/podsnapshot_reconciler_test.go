@@ -421,7 +421,7 @@ func TestSnapshotReconciler_FailedSourcePodWaitsForCaptureResultWithinGrace(t *t
 	// out the grace window instead of racing the agent's Ready write.
 	res := reconcileSnapshot(t, r, snap.Name)
 	assert.Greater(t, res.RequeueAfter, time.Duration(0))
-	assert.LessOrEqual(t, res.RequeueAfter, sourcePodTerminalGrace)
+	assert.LessOrEqual(t, res.RequeueAfter, DefaultCheckpointCompletionGrace)
 
 	updated := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
@@ -449,7 +449,7 @@ func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *test
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name: "main",
 		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-			ExitCode: 137, FinishedAt: metav1.NewTime(time.Now().Add(-sourcePodTerminalGrace - time.Minute)),
+			ExitCode: 137, FinishedAt: metav1.NewTime(time.Now().Add(-DefaultCheckpointCompletionGrace - time.Minute)),
 		}},
 	}}
 	r := makeSnapshotReconciler(s, snap, content, pod)
@@ -461,10 +461,37 @@ func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *test
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
 	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, failed, "an agent that never publishes a result must not hold the capture pending forever")
-	assert.Equal(t, podSnapshotReasonSourcePodGone, failed.Reason)
+	// The checkpoint terminating its source is expected; the missing result is the cause.
+	assert.Equal(t, podSnapshotReasonCheckpointResultTimeout, failed.Reason)
+	assert.Contains(t, failed.Message, "--checkpoint-completion-grace")
 }
 
-func TestSnapshotReconciler_FailedSourcePodWithoutTerminalTimeFailsImmediately(t *testing.T) {
+func TestSnapshotReconciler_FailedSourcePodHonorsConfiguredGrace(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, content := pendingBoundSnapshotContent()
+	pod := scheduledPod()
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "main",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 137, FinishedAt: metav1.NewTime(time.Now().Add(-DefaultCheckpointCompletionGrace - time.Minute)),
+		}},
+	}}
+	r := makeSnapshotReconciler(s, snap, content, pod)
+	r.CheckpointCompletionGrace = 20 * time.Minute
+
+	// A large checkpoint can still be uploading past the default window; a longer
+	// configured grace keeps the capture pending for the remainder.
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Greater(t, res.RequeueAfter, 13*time.Minute)
+	assert.LessOrEqual(t, res.RequeueAfter, 14*time.Minute)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+}
+
+func TestSnapshotReconciler_FailedSourcePodWithoutTerminalTimeTimesOutImmediately(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap, content := pendingBoundSnapshotContent()
 	pod := scheduledPod()
@@ -478,7 +505,28 @@ func TestSnapshotReconciler_FailedSourcePodWithoutTerminalTimeFailsImmediately(t
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
 	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, failed)
-	assert.Equal(t, podSnapshotReasonSourcePodGone, failed.Reason)
+	assert.Equal(t, podSnapshotReasonCheckpointResultTimeout, failed.Reason)
+	assert.Contains(t, failed.Message, "no termination time")
+}
+
+func TestSnapshotReconciler_DeletingSourcePodTimesFromDeletionStamp(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, content := pendingBoundSnapshotContent()
+	pod := scheduledPod()
+	// Still Running with no terminated container, so the deletion stamp is the only start time.
+	deletedAt := metav1.NewTime(time.Now().Add(-DefaultCheckpointCompletionGrace - time.Minute))
+	pod.DeletionTimestamp = &deletedAt
+	pod.Finalizers = []string{"test.nvidia.com/hold"} // the fake client rejects a deleting object without one
+
+	r := makeSnapshotReconciler(s, snap, content, pod)
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Zero(t, res.RequeueAfter)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed, "a deleting source pod starts the timer like a Failed one")
+	assert.Equal(t, podSnapshotReasonCheckpointResultTimeout, failed.Reason)
 }
 
 func TestSnapshotReconciler_PendingContentWithMissingSourceFails(t *testing.T) {
