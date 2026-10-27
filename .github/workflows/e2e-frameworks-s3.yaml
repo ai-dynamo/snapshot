@@ -1,0 +1,301 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: E2E Framework Tests over S3
+
+# Checkpoint/restore of the vLLM guide workload with Snapshot installed against
+# an S3-compatible store instead of the checkpoint volume, on the same GPU
+# cluster and vCluster layout as e2e-frameworks.yaml. The store runs inside the
+# vCluster as a pod (snapshot_e2e.s3 deploy).
+#
+# Manual only. It installs published images, so dispatch push-artifacts.yaml on
+# the branch under test first and pass the resulting tag as snapshot_tag.
+
+on:
+  # TEMP: GPU runners admit only trusted mirror pushes, so run this before it is
+  # on main through the mirror of this PR. Remove with the default tag below
+  # before merging.
+  push:
+    branches: ['pull-request/727']
+  workflow_dispatch:
+    inputs:
+      snapshot_tag:
+        description: >-
+          Operator/agent/pagebroker image tag to install, from a push-artifacts.yaml
+          dispatch on the branch under test.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: snapshot-e2e-frameworks-s3
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: vllm over S3
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 120
+    env:
+      HOST_NAMESPACE: snapshot-e2e-fw-s3-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_NAME: snapshot-e2e-fw-s3-${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-fw-s3-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-fw-s3-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
+      SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+      # TEMP default for push-triggered runs, which have no inputs.
+      SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ inputs.snapshot_tag || 'v0.0.0-test-s3-vllm-framework-ge7bd1582' }}
+      SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
+      SNAPSHOT_E2E_PVC_SIZE: 64Gi
+      SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
+      SNAPSHOT_E2E_MODE: vcluster
+      SNAPSHOT_E2E_AVOID_MIG: "true"
+      SNAPSHOT_E2E_RESTORE_PROXY: auto
+      SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
+      SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
+      SNAPSHOT_E2E_HELM_TIMEOUT: 6m
+      SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
+      SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
+      SNAPSHOT_E2E_FRAMEWORK: vllm
+      SNAPSHOT_E2E_MODEL_CACHE_SERVER: ${{ vars.SNAPSHOT_E2E_MODEL_CACHE_SERVER || 'dynamoinfracimodelcache.file.core.windows.net' }}
+      SNAPSHOT_E2E_MODEL_CACHE_PATH: ${{ vars.SNAPSHOT_E2E_MODEL_CACHE_PATH || '/dynamoinfracimodelcache/models' }}
+      PYTHONUNBUFFERED: "1"
+      UV_LINK_MODE: copy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Capture host kubeconfig
+        id: host
+        run: |
+          echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install vCluster CLI
+        timeout-minutes: 3
+        uses: ./.github/actions/install-vcluster-cli
+
+      - name: Install Python tooling (ARM64)
+        if: ${{ runner.arch == 'ARM64' }}
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: "23003df007937dd607409c8ddf010baa82bad2673e60e254632ca5b04edcce13"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Install Python tooling (X64)
+        if: ${{ runner.arch == 'X64' }}
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Validate host GPU cluster
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase host-preflight
+
+      - name: Create vCluster target
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase vcluster
+
+      - name: Deploy the S3 store in the vCluster
+        timeout-minutes: 8
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.s3 deploy
+          SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT="$(uv run --locked --project e2e python -m snapshot_e2e.s3 endpoint)"
+          export SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT
+          values="$(uv run --locked --project e2e python -m snapshot_e2e.s3 helm-set)"
+          values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.level=INFO"
+          values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.toStderr=true"
+          {
+            echo "SNAPSHOT_E2E_STORAGE=s3"
+            echo "SNAPSHOT_E2E_HELM_SET<<SNAPSHOT_E2E_HELM_SET_END"
+            echo "${values}"
+            echo "SNAPSHOT_E2E_HELM_SET_END"
+          } >> "${GITHUB_ENV}"
+
+      - name: Install Snapshot in vCluster
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-install
+
+      - name: Wait for Snapshot components
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-ready
+
+      - name: Export vCluster kubeconfig
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = json.loads(Path(os.environ["SNAPSHOT_E2E_RESULT_FILE"]).read_text())
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"KUBECONFIG={result['target_kubeconfig']}\n")
+              env.write(f"SNAPSHOT_E2E_HOST_NAMESPACE={result.get('host_namespace', '')}\n")
+              env.write(f"SNAPSHOT_E2E_VCLUSTER_NAME={result.get('vcluster_name', '')}\n")
+              env.write(f"SNAPSHOT_E2E_TEST_NAMESPACE={result['test_namespace']}\n")
+              env.write(f"SNAPSHOT_E2E_TARGET_KUBECONFIG={result['target_kubeconfig']}\n")
+              env.write(f"SNAPSHOT_E2E_SNAPSHOT_RELEASE={result['snapshot_release']}\n")
+              env.write(f"SNAPSHOT_E2E_PVC_NAME={result['pvc_name']}\n")
+          PY
+
+      - name: Inspect vCluster target
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          kubectl get nodes -o wide
+          kubectl get pods -n "${TEST_NAMESPACE}" -o wide
+
+      - name: Run environment validation
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e pytest e2e/tests -m environment -vv
+
+      - name: Run vllm checkpoint/restore test over S3
+        timeout-minutes: 56
+        env:
+          SNAPSHOT_E2E_REQUIRED_TESTS: test_framework_checkpoint_restore_over_s3_serves_inference[vllm]
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          store_pod="$(kubectl get pods -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 -o name | head -1)"
+          kubectl exec -n "${TEST_NAMESPACE}" "${store_pod}" -- sh -c \
+            'mc alias set local http://localhost:19000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; exec mc admin trace --json local' \
+            > "${out}/s3-trace.jsonl" 2> "${out}/s3-trace.err" &
+          trace_pid=$!
+          (
+            while true; do
+              for pod in $(kubectl get pods -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=snapshot-agent -o name); do
+                kubectl exec -n "${TEST_NAMESPACE}" -c pagebroker "${pod}" -- \
+                  du -sb /staging /pagebroker/staging 2>&1 | sed "s|^|$(date -u +%T) ${pod} |"
+              done
+              sleep 10
+            done
+          ) > "${out}/staging-size.log" 2>&1 &
+          sampler_pid=$!
+          timeout --signal=INT --kill-after=150s 52m \
+            uv run --locked --project e2e pytest e2e/tests/test_frameworks_s3.py -vv -s
+          status=$?
+          kill "${trace_pid}" "${sampler_pid}" 2>/dev/null
+          exit "${status}"
+
+      - name: Collect diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 5
+        run: |
+          set +e
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          kubectl get pods -n "${TEST_NAMESPACE}" -o yaml > "${out}/pods.yaml"
+          kubectl describe pods -n "${TEST_NAMESPACE}" > "${out}/pods-describe.txt"
+          kubectl get events -n "${TEST_NAMESPACE}" --sort-by=.lastTimestamp > "${out}/events.txt"
+          kubectl get podsnapshots -n "${TEST_NAMESPACE}" -o yaml > "${out}/podsnapshots.yaml"
+          kubectl get podsnapshotcontents -o yaml > "${out}/podsnapshotcontents.yaml"
+          kubectl get configmap -n "${TEST_NAMESPACE}" -o yaml > "${out}/configmaps.yaml"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=snapshot-agent \
+            --all-containers --tail=-1 --prefix > "${out}/snapshot-agent.log"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=operator \
+            --all-containers --tail=-1 --prefix > "${out}/snapshot-operator.log"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 \
+            --all-containers --tail=-1 --prefix > "${out}/s3-store.log"
+          for pod in $(kubectl get pods -n "${TEST_NAMESPACE}" -l snapshot-e2e-test -o name); do
+            kubectl logs -n "${TEST_NAMESPACE}" "${pod}" --all-containers --tail=-1 \
+              > "${out}/${pod#pod/}.log"
+          done
+          store_pod="$(kubectl get pods -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 -o name | head -1)"
+          store_mc() {
+            kubectl exec -n "${TEST_NAMESPACE}" "${store_pod}" -- sh -c \
+              'mc alias set local http://localhost:19000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; mc "$@"' sh "$@"
+          }
+          store_mc --json ls --recursive local/snapshot-e2e > "${out}/s3-objects.jsonl" 2> "${out}/s3-objects.err"
+          n=0
+          for key in $(python3 -c 'import json,sys; [print(json.loads(l)["key"]) for l in open(sys.argv[1]) if l.strip().endswith("}") and json.loads(l).get("key","").endswith("/index.json")]' "${out}/s3-objects.jsonl"); do
+            n=$((n + 1))
+            echo "${key}" > "${out}/s3-index-${n}.key"
+            store_mc cat "local/snapshot-e2e/${key}" > "${out}/s3-index-${n}.json" 2>/dev/null
+          done
+          python3 - "${out}" > "${out}/s3-index-check.txt" 2>&1 <<'PY'
+          import glob
+          import json
+          import sys
+
+          out = sys.argv[1]
+          objects = {}
+          for line in open(f"{out}/s3-objects.jsonl"):
+              line = line.strip()
+              if line.startswith("{"):
+                  item = json.loads(line)
+                  if "key" in item:
+                      objects[item["key"]] = item.get("size")
+          print(f"objects in bucket: {len(objects)}, bytes: {sum(v or 0 for v in objects.values())}")
+          for key_file in sorted(glob.glob(f"{out}/s3-index-*.key")):
+              key = open(key_file).read().strip()
+              prefix = key.rsplit("/", 1)[0]
+              index = json.load(open(key_file.replace(".key", ".json")))
+              files = index["files"]
+              problems = []
+              for entry in files:
+                  object_key = f"{prefix}/data/{entry['path']}"
+                  size = objects.get(object_key)
+                  if size is None:
+                      problems.append(f"missing  {entry['path']} (index {entry['size']})")
+                  elif size != entry["size"]:
+                      problems.append(f"size     {entry['path']} (index {entry['size']}, object {size})")
+              print(f"{prefix}: {len(files)} files in the index, {len(problems)} problems")
+              for problem in problems[:40]:
+                  print("  " + problem)
+          PY
+          echo "DIAGNOSTICS_DIR=${out}" >> "$GITHUB_ENV"
+
+      - name: Upload diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-frameworks-s3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DIAGNOSTICS_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup e2e vCluster
+        if: ${{ always() }}
+        env:
+          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
+        run: |
+          set +e
+          helm uninstall vcluster-hpm -n "${HOST_NAMESPACE}"
+          if command -v vcluster >/dev/null 2>&1; then
+            vcluster delete "${VCLUSTER_NAME}" --namespace "${HOST_NAMESPACE}"
+          fi
+          kubectl delete namespace "${HOST_NAMESPACE}" --ignore-not-found --wait=false

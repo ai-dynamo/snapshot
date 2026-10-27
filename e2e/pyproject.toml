@@ -24,6 +24,7 @@ markers = [
   "serial: must not run beside other tests; the CPU job runs these after the rest",
   "workload: cluster-free checks of the workload scripts themselves",
   "framework: checkpoint/restore of an inference framework guide workload",
+  "s3_gpu: framework checkpoint/restore over S3 on a GPU cluster; needs an in-cluster S3 store",
   "upgrade: state created on an older Snapshot version and validated after upgrading",
 ]
 testpaths = ["tests"]

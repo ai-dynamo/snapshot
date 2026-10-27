@@ -127,6 +127,22 @@ rejects non-CPU mode and invalid boolean values before capture. Do not use it
 against customer or shared checkpoint data. It does not add a second runner
 or change the normal restored-state assertions.
 
+### Framework tests over S3 (GPU)
+
+`e2e-frameworks-s3.yaml` runs the vLLM guide workload on the GPU cluster with
+Snapshot installed against an S3-compatible store (`test_frameworks_s3.py`). It is
+started by hand and installs published images: dispatch `push-artifacts.yaml` on
+the branch first and pass its tag as `snapshot_tag`.
+
+The store runs in the vCluster as a pod. `python -m snapshot_e2e.s3 deploy` creates
+it with the credentials Secret and a default bucket, and `python -m snapshot_e2e.s3
+endpoint` prints the node address the chart is given. The store runs on the host
+network because the agent pod, which hosts PageBroker, does too and cannot resolve
+cluster service names. The test needs no S3 client
+of its own: it checks the descriptor in the PodSnapshotContent status and that
+nothing was written to the checkpoint volume. It carries the `s3_gpu` marker, so
+the existing framework workflow does not select it.
+
 ### Local Direct Mode
 
 Use direct mode when `KUBECONFIG` already points at the cluster where Snapshot
