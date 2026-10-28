@@ -363,6 +363,15 @@ Each recorded holder must have a local handle or mapping, and the creator proces
 New imports contact the creator, so it must retain a handle or mapping from which it can export the backing.
 Keeping only a virtual shareable FD is insufficient: the file records allocation identity but does not itself retain CUDA memory.
 
+The coordinator validates the records of a group of Pods as one topology, and a single Pod is a group of one.
+Each Pod names its processes by PID in its own namespace, so the coordinator puts the Pod's rank in the bits above the largest Linux PID.
+It resolves each [FABRIC import](#fabric-handles) to the process that exported the same handle, in any Pod, and takes the allocation size, location, and multicast properties from that creator.
+A multicast team can therefore have devices in several Pods.
+POSIX sharing cannot cross Pods, because a POSIX import names its creator by PID in the importer's own namespace.
+The creator always saves a FABRIC allocation, because its importers do not know its size.
+The coordinator refuses a FABRIC import whose creator is not in the group or no longer holds the allocation.
+Today every Pod's coordinator runs alone, as a group of one, so FABRIC sharing between the processes of one Pod checkpoints and restores, and a Pod that imports FABRIC memory from another Pod is refused at inspection, before anything changes.
+
 #### Multicast tracking
 
 A restored multicast mapping must still access the corresponding memory range on every device in its team.
@@ -721,6 +730,8 @@ CRIU also restores namespace PIDs, shim records, and host carriers.
 `LOAD_ALLOCATIONS` recreates backing in the selected holders, copies carrier contents into it, and restores their mappings, permissions, and export FDs.
 `RESTORE_UNICAST` reconnects the other holders to that same backing at their original addresses.
 For each reconstruction phase, the coordinator sends requests across the group and waits for every participant's reply before advancing.
+Creators of FABRIC memory return the new handles that replace their recorded ones in `LOAD_ALLOCATIONS` and `RESTORE_MULTICAST_CREATORS`.
+The coordinator keeps a table of old and new handles and sends it with every later phase, and the final comparison applies the table to the captured records.
 
 Multicast reconstruction requires four separate group barriers:
 
