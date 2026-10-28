@@ -99,7 +99,9 @@ jobs:
     name: datadog gpu monitoring off
     needs: check
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 5
+    # The job clock includes runner setup, which takes minutes on a busy
+    # GPU cluster -- as when e2e-pr.yaml runs the GPU suite alongside.
+    timeout-minutes: 15
     concurrency:
       group: snapshot-e2e-frameworks-datadog-gate
       cancel-in-progress: false
@@ -498,7 +500,9 @@ jobs:
     # the gate never ran (then nothing was disabled and nothing is held).
     if: ${{ always() && needs.datadog-gate.result == 'success' && needs.datadog-gate.outputs.mode == 'disable' }}
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 5
+    # The job clock includes runner setup, which takes minutes on a busy
+    # GPU cluster -- as when e2e-pr.yaml runs the GPU suite alongside.
+    timeout-minutes: 15
     concurrency:
       group: snapshot-e2e-frameworks-datadog-gate
       cancel-in-progress: false
