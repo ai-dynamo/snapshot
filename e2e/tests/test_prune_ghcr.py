@@ -39,12 +39,16 @@ def prune():
     return _load()
 
 
-def _version(vid: int, digest: str, *, tags: list[str], age_days: int) -> dict:
-    created = datetime.now(timezone.utc) - timedelta(days=age_days)
+def _version(vid: int, digest: str, *, tags: list[str], age_days: int,
+             updated_days: int | None = None) -> dict:
+    now = datetime.now(timezone.utc)
+    created = now - timedelta(days=age_days)
+    updated = created if updated_days is None else now - timedelta(days=updated_days)
     return {
         "id": vid,
         "name": digest,
         "created_at": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at": updated.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "metadata": {"container": {"tags": tags}},
     }
 
@@ -216,6 +220,13 @@ def test_an_expired_pull_request_image_is_deleted(prune, monkeypatch):
 def test_a_recent_pull_request_image_is_kept(prune, monkeypatch):
     """A week covers a rerun of the run that built it."""
     versions = [_version(1, "sha256:pr", tags=[PR_TAG], age_days=3)]
+    assert _pr_sweep(prune, monkeypatch, versions)[2] == []
+
+
+def test_a_pull_request_image_retagged_recently_is_kept(prune, monkeypatch):
+    """A rebuild that reproduces an old digest only adds a tag to its version."""
+    versions = [_version(1, "sha256:pr", tags=[PR_TAG, "v0.0.0-pull-request-42-g5e6f7a8b"],
+                         age_days=30, updated_days=1)]
     assert _pr_sweep(prune, monkeypatch, versions)[2] == []
 
 

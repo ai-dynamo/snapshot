@@ -126,8 +126,23 @@ def child_digests(repo_path: str, digest: str, reg_token: str) -> set[str]:
     return set()
 
 
+def _timestamp(version: dict, field: str) -> datetime:
+    return datetime.fromisoformat(version[field].replace("Z", "+00:00"))
+
+
 def _created(version: dict) -> datetime:
-    return datetime.fromisoformat(version["created_at"].replace("Z", "+00:00"))
+    return _timestamp(version, "created_at")
+
+
+def _published(version: dict) -> datetime:
+    """When a tag was last pushed to this version.
+
+    A version is one digest, so a rebuild that reproduces an earlier image only
+    adds a tag to the existing version and leaves created_at where it was.
+    """
+    if not version.get("updated_at"):
+        return _created(version)
+    return max(_created(version), _timestamp(version, "updated_at"))
 
 
 def _delete(org: str, package: str, token: str, version: dict, reason: str,
@@ -178,7 +193,7 @@ def prune_package(org: str, package: str, token: str, keep_days: int,
             continue
         is_expired = (pr_cutoff is not None
                       and all(PR_TAG.match(t) for t in tags)
-                      and _created(v) <= pr_cutoff)
+                      and _published(v) <= pr_cutoff)
         if not is_expired:
             reachable.add(digest)
         try:
