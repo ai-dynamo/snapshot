@@ -24,7 +24,10 @@ checkpoint was taken with. The agent reads them only from the content.
 ## The checkpoint readiness probe
 
 The probe replaces the Ready check at the agent's readiness gate in
-`reconcileCapture`.
+`reconcileCapture`. For a `SnapshotJob`, the operator then keeps the target
+container's own readiness probe instead of injecting the `ready-for-snapshot`
+one (`SourceJobOptions.CheckpointReadinessProbe`), so Ready can mean what the
+workload says.
 
 - **What a check is.** A file check passes when a regular file exists at the
   path, resolved inside the source container. An HTTP check passes when a GET to
