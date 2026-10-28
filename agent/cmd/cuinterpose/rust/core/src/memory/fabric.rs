@@ -1,0 +1,321 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+
+//! FABRIC handles stay real at runtime: an export returns the driver's handle and an
+//! import goes to the driver, so the shim never sits on the application's import path.
+//! The shim records every handle that a process exports or imports, so the handle joins
+//! an importer to its creator in another process or Pod. Restore re-exports each saved
+//! creator, and importers import the replacement that the coordinator passes on.
+
+use super::checkpoint::Phase;
+use super::multicast::MulticastObject;
+use super::vmm::Allocation;
+use super::{Memblock, ProcessState, VirtualAllocationHandle};
+use crate::driver;
+use crate::error::{Error, Result};
+use crate::runtime;
+use cudarc::driver::sys::CUresult::{CUDA_ERROR_NOT_READY, CUDA_ERROR_NOT_SUPPORTED};
+use cudarc::driver::sys::{
+    CUmemAllocationHandleType, CUmemAllocationProp, CUmemAllocationType, CUmemLocation,
+    CUmemLocationType, CUmulticastObjectProp,
+};
+use cuinterpose_protocol::{AllocationReference, FabricHandle, FabricUpdate, Record};
+use std::sync::MutexGuard;
+
+pub(crate) const FABRIC: CUmemAllocationHandleType =
+    CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC;
+
+/// The driver does not expose the kind of object that a fabric handle names. Current
+/// drivers store it at this offset: 1 for memory and 3 for a multicast object. The layout
+/// is private, so any other value refuses the import instead of guessing. A public query
+/// would remove this dependency.
+const KIND_OFFSET: usize = 44;
+const KIND_MEMORY: u8 = 1;
+const KIND_MULTICAST: u8 = 3;
+
+fn is_multicast(handle: &FabricHandle) -> Result<bool> {
+    match handle.0[KIND_OFFSET] {
+        KIND_MEMORY => Ok(false),
+        KIND_MULTICAST => Ok(true),
+        _ => Err(CUDA_ERROR_NOT_SUPPORTED.into()),
+    }
+}
+
+impl Memblock {
+    /// The fabric handle that this process exported or imported, if any.
+    pub(crate) fn fabric(&self) -> Option<FabricHandle> {
+        match self {
+            Self::Unicast(allocation) => allocation.fabric,
+            Self::Multicast(object) => object.fabric,
+        }
+    }
+}
+
+/// A fabric handle does not name its creator, so an import is recorded with creator
+/// namespace PID 0, which is never a process, and an ID derived from the handle.
+pub(crate) fn importer_reference(handle: &FabricHandle) -> AllocationReference {
+    AllocationReference {
+        id: handle.digest(),
+        creator_pid: 0,
+    }
+}
+
+/// Export a tracked memblock as its real fabric handle and mark it shared. CUDA returns
+/// the same handle for every export of one object, so later exports return the recorded
+/// one.
+pub(crate) fn export(memblock: &mut Memblock) -> Result<FabricHandle> {
+    if let Some(handle) = memblock.fabric() {
+        return Ok(handle);
+    }
+    let handle = driver::export_fabric(memblock.driver_handle()?)?;
+    match memblock {
+        Memblock::Unicast(allocation) => {
+            if allocation.context == 0 {
+                allocation.context = driver::context()?;
+            }
+            allocation.shared = true;
+            allocation.fabric = Some(handle);
+        }
+        Memblock::Multicast(object) => {
+            object.shared = true;
+            object.fabric = Some(handle);
+        }
+    }
+    Ok(handle)
+}
+
+/// Import a fabric handle. A handle that this process already exported or imported
+/// returns another virtual handle for its memblock. Any other handle is imported from the
+/// driver and recorded under `importer_reference`.
+pub(crate) fn import(
+    mut state: MutexGuard<'static, ProcessState>,
+    handle: FabricHandle,
+) -> Result<(MutexGuard<'static, ProcessState>, u64)> {
+    if let Some(virtual_handle) = state.import_known_fabric(handle)? {
+        return Ok((state, virtual_handle));
+    }
+    let multicast = is_multicast(&handle)?;
+    let context = driver::context()?;
+    // An importer cannot observe the creator's properties. It records the device it
+    // imports on, and the coordinator takes the rest from the creator's records.
+    let mut device = 0;
+    if !multicast {
+        unsafe { driver::cuCtxGetDevice(&mut device) }?;
+    }
+    // Imports can wait for the fabric manager, so the registry is released around them.
+    let (mut state, imported) = runtime::call_unlocked(state, || driver::import_fabric(&handle))?;
+    let imported = runtime::must_complete(VirtualAllocationHandle::from_driver(imported));
+    if let Some(virtual_handle) = state.import_known_fabric(handle)? {
+        // Another thread imported the same handle while this one waited.
+        unsafe { driver::cuMemRelease(imported) }?;
+        return Ok((state, virtual_handle));
+    }
+    let reference = importer_reference(&handle);
+    if multicast {
+        let properties = CUmulticastObjectProp {
+            numDevices: 0,
+            size: 0,
+            handleTypes: u64::from(FABRIC.0),
+            flags: 0,
+        };
+        let mut object = MulticastObject::imported(reference, properties, imported, context);
+        object.fabric = Some(handle);
+        object.refcounts.handle_entries = 1;
+        let virtual_handle =
+            runtime::must_complete(state.mint_virtual_allocation_handle(reference.id));
+        state
+            .memblocks
+            .insert(reference.id, Memblock::Multicast(object));
+        return Ok((state, virtual_handle));
+    }
+    let properties = CUmemAllocationProp {
+        type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
+        requestedHandleTypes: FABRIC,
+        location: CUmemLocation {
+            type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+            id: device,
+        },
+        ..unsafe { std::mem::zeroed() }
+    };
+    let virtual_handle = runtime::must_complete(state.adopt_unicast(Allocation {
+        reference,
+        refcounts: Default::default(),
+        driver: Some(imported),
+        size: 0,
+        properties,
+        shared: true,
+        peer_access_granted: false,
+        // Imported backing already uses the host carrier.
+        home_device: None,
+        context,
+        fabric: Some(handle),
+    }));
+    Ok((state, virtual_handle))
+}
+
+impl ProcessState {
+    /// Mint another virtual handle for the memblock that `handle` already names.
+    fn import_known_fabric(&mut self, handle: FabricHandle) -> Result<Option<u64>> {
+        if self.phase != Phase::Active {
+            return Err(CUDA_ERROR_NOT_READY.into());
+        }
+        let Some(id) = self
+            .memblocks
+            .iter()
+            .find(|(_, memblock)| memblock.fabric() == Some(handle))
+            .map(|(id, _)| *id)
+        else {
+            return Ok(None);
+        };
+        let virtual_handle = self.mint_virtual_allocation_handle(id)?;
+        self.memblocks
+            .get_mut(&id)
+            .unwrap()
+            .refcounts_mut()
+            .handle_entries += 1;
+        Ok(Some(virtual_handle))
+    }
+}
+
+/// Name the handle of every memblock that this process exported or imported, which is
+/// how the coordinator joins importers to creators.
+pub(crate) fn describe(state: &ProcessState, records: &mut Vec<Record>) {
+    for memblock in state.memblocks.values() {
+        let Some(handle) = memblock.fabric() else {
+            continue;
+        };
+        let allocation = memblock.reference();
+        records.push(if allocation.creator_pid == state.namespace_pid {
+            Record::FabricExport { allocation, handle }
+        } else {
+            Record::FabricImport { allocation, handle }
+        });
+    }
+}
+
+/// The handle that a restored creator exported in place of `old`.
+pub(crate) fn replacement(imports: &[FabricUpdate], old: FabricHandle) -> Result<FabricHandle> {
+    imports
+        .iter()
+        .find(|update| update.old == old)
+        .map(|update| update.new)
+        .ok_or(Error::MissingFabricReplacement(old))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handle(byte: u8) -> FabricHandle {
+        let mut bytes = [byte; 64];
+        bytes[KIND_OFFSET] = KIND_MEMORY;
+        FabricHandle(bytes)
+    }
+
+    fn allocation(reference: AllocationReference, fabric: Option<FabricHandle>) -> Allocation {
+        Allocation {
+            reference,
+            refcounts: Default::default(),
+            driver: None,
+            size: 4096,
+            properties: CUmemAllocationProp {
+                type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
+                requestedHandleTypes: FABRIC,
+                ..unsafe { std::mem::zeroed() }
+            },
+            shared: fabric.is_some(),
+            peer_access_granted: false,
+            home_device: Some(0),
+            context: 0,
+            fabric,
+        }
+    }
+
+    #[test]
+    fn handle_kind_selects_memory_or_multicast_and_refuses_other_values() {
+        let mut bytes = [0; 64];
+        for (kind, expected) in [(1, Some(false)), (3, Some(true)), (0, None), (2, None)] {
+            bytes[KIND_OFFSET] = kind;
+            match (is_multicast(&FabricHandle(bytes)), expected) {
+                (Ok(actual), Some(expected)) => assert_eq!(actual, expected, "{kind}"),
+                (Err(Error::Cuda(CUDA_ERROR_NOT_SUPPORTED)), None) => {}
+                (actual, _) => panic!("{kind}: {actual:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn records_name_exported_and_imported_handles() {
+        let mut state = ProcessState::new(41);
+        let created = state.new_reference().unwrap();
+        let unshared = state.new_reference().unwrap();
+        let imported = importer_reference(&handle(2));
+        for (reference, fabric) in [
+            (created, Some(handle(1))),
+            (unshared, None),
+            (imported, Some(handle(2))),
+        ] {
+            state.adopt_unicast(allocation(reference, fabric)).unwrap();
+        }
+        let mut records = Vec::new();
+        describe(&state, &mut records);
+        records.sort();
+        let mut expected = vec![
+            Record::FabricExport {
+                allocation: created,
+                handle: handle(1),
+            },
+            Record::FabricImport {
+                allocation: imported,
+                handle: handle(2),
+            },
+        ];
+        expected.sort();
+        assert_eq!(records, expected);
+    }
+
+    #[test]
+    fn export_returns_the_recorded_handle_without_the_driver() {
+        let mut state = ProcessState::new(41);
+        let reference = state.new_reference().unwrap();
+        state
+            .adopt_unicast(allocation(reference, Some(handle(1))))
+            .unwrap();
+        let memblock = state.memblocks.get_mut(&reference.id).unwrap();
+        assert_eq!(export(memblock).unwrap(), handle(1));
+    }
+
+    #[test]
+    fn known_handles_reuse_their_memblock_while_active() {
+        let mut state = ProcessState::new(41);
+        let reference = importer_reference(&handle(2));
+        state
+            .adopt_unicast(allocation(reference, Some(handle(2))))
+            .unwrap();
+        assert_eq!(state.import_known_fabric(handle(3)).unwrap(), None);
+        let again = state.import_known_fabric(handle(2)).unwrap().unwrap();
+        assert_eq!(
+            state.resolve_virtual_handle(again).unwrap(),
+            Some(reference.id)
+        );
+        assert_eq!(state.memblocks[&reference.id].refcounts().handle_entries, 2);
+        state.phase = Phase::Checkpointing;
+        assert!(matches!(
+            state.import_known_fabric(handle(2)),
+            Err(Error::Cuda(CUDA_ERROR_NOT_READY))
+        ));
+    }
+
+    #[test]
+    fn replacement_requires_an_update_for_the_old_handle() {
+        let update = FabricUpdate {
+            old: handle(1),
+            new: handle(2),
+        };
+        assert_eq!(replacement(&[update], handle(1)).unwrap(), handle(2));
+        assert!(matches!(
+            replacement(&[update], handle(2)),
+            Err(Error::MissingFabricReplacement(old)) if old == handle(2)
+        ));
+    }
+}

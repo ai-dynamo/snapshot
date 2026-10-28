@@ -27,6 +27,8 @@ pub enum Error {
     Startup(&'static str),
     #[error("cuinterpose runtime previously failed")]
     RuntimeFailed,
+    #[error("no replacement for imported fabric handle {0:?}")]
+    MissingFabricReplacement(cuinterpose_protocol::FabricHandle),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

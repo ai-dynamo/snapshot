@@ -5,6 +5,7 @@
 
 pub(crate) mod checkpoint;
 pub(crate) mod context;
+pub(crate) mod fabric;
 mod host_carrier;
 pub(crate) mod ipc;
 pub(crate) mod multicast;

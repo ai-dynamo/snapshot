@@ -16,8 +16,8 @@ use cudarc::driver::sys::CUresult::{
 };
 use cudarc::driver::sys::{CUmemAllocationHandleType, CUmulticastObjectProp};
 use cuinterpose_protocol::{
-    AllocationId, AllocationReference, BindingSource, BindingVersion, MemberRange, Operation,
-    Record,
+    AllocationId, AllocationReference, BindingSource, BindingVersion, FabricHandle, FabricUpdate,
+    MemberRange, Operation, Record,
 };
 use std::ffi::c_void;
 use std::os::fd::{AsFd, AsRawFd};
@@ -35,6 +35,31 @@ pub struct MulticastObject {
     pub bindings: Vec<Binding>,
     // Clones share this lock so bind/unbind calls retain their order.
     binding_lock: Arc<Mutex<()>>,
+    /// The fabric handle that the creator exported, or that an importer imported.
+    pub fabric: Option<FabricHandle>,
+}
+
+impl MulticastObject {
+    /// An object imported from its creator, without devices or bindings yet.
+    pub(crate) fn imported(
+        reference: AllocationReference,
+        properties: CUmulticastObjectProp,
+        driver: u64,
+        context: usize,
+    ) -> Self {
+        Self {
+            reference,
+            refcounts: Default::default(),
+            properties,
+            driver: Some(driver),
+            context,
+            shared: true,
+            devices: Vec::new(),
+            bindings: Vec::new(),
+            binding_lock: Arc::default(),
+            fabric: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -155,17 +180,9 @@ pub fn import(
     } else {
         state.memblocks.insert(
             id,
-            Memblock::Multicast(MulticastObject {
-                reference,
-                refcounts: Default::default(),
-                properties,
-                driver: Some(driver),
-                context,
-                shared: true,
-                devices: Vec::new(),
-                bindings: Vec::new(),
-                binding_lock: Arc::default(),
-            }),
+            Memblock::Multicast(MulticastObject::imported(
+                reference, properties, driver, context,
+            )),
         );
     }
     let virtual_multicast_handle = runtime::must_complete(state.mint_virtual_allocation_handle(id));
@@ -503,8 +520,14 @@ pub fn prepare(state: &mut ProcessState) -> Result<()> {
 
 /// Application threads remain paused throughout restore. Since the peer FD service uses
 /// only the export cache, reconstruction can hold the registry lock even during driver
-/// calls that wait for other processes.
-pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
+/// calls that wait for other processes. Creators return the fabric handles that they
+/// export in place of checkpointed ones, and importers import those from `imports`.
+pub fn restore(
+    state: &mut ProcessState,
+    operation: Operation,
+    imports: &[FabricUpdate],
+) -> Result<Vec<FabricUpdate>> {
+    let mut exports = Vec::new();
     let allocations: std::collections::BTreeMap<_, _> = state
         .memblocks
         .iter()
@@ -534,7 +557,11 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
                     let mut driver = 0;
                     unsafe { crate::driver::cuMulticastCreate(&mut driver, &object.properties) }?;
                     object.driver = Some(driver);
-                    if object.shared {
+                    if let Some(old) = object.fabric {
+                        let new = crate::driver::export_fabric(driver)?;
+                        exports.push(FabricUpdate { old, new });
+                        object.fabric = Some(new);
+                    } else if object.shared {
                         let fd = crate::driver::export_posix(driver)?;
                         runtime::export_cache()?.insert(
                             object.reference,
@@ -542,6 +569,11 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
                             sharing::ExportMetadata::Multicast(object.properties),
                         )?;
                     }
+                }
+                Operation::RestoreMulticastImporters if !creator && object.fabric.is_some() => {
+                    let new = super::fabric::replacement(imports, object.fabric.unwrap())?;
+                    object.driver = Some(crate::driver::import_fabric(&new)?);
+                    object.fabric = Some(new);
                 }
                 Operation::RestoreMulticastImporters if !creator => {
                     let (fd, metadata) =
@@ -621,7 +653,7 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
             Ok(())
         })?;
     }
-    Ok(())
+    Ok(exports)
 }
 /// The registry lock must be released around multicast creation because the CUDA call
 /// can wait for other processes.
@@ -664,6 +696,7 @@ impl ProcessState {
                 devices: Vec::new(),
                 bindings: Vec::new(),
                 binding_lock: Arc::default(),
+                fabric: None,
             }),
         );
         Ok(virtual_multicast_handle)

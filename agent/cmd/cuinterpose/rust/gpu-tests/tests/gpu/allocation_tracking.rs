@@ -129,8 +129,10 @@ fn rejected_create_or_export_leaves_output_and_records_unchanged() {
         let granule = cuda::granularity(&valid);
         let mut invalid_type = valid;
         invalid_type.type_ = CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_INVALID;
-        let mut fabric_create = valid;
-        fabric_create.requestedHandleTypes = fabric;
+        // The shim tracks one exportable handle type per allocation.
+        let mut two_handle_types = valid;
+        two_handle_types.requestedHandleTypes =
+            sys::CUmemAllocationHandleType_enum(POSIX_FD.0 | fabric.0);
         for (case, properties, size, expected) in [
             ("zero size", valid, 0, CUresult::CUDA_ERROR_INVALID_VALUE),
             (
@@ -140,8 +142,8 @@ fn rejected_create_or_export_leaves_output_and_records_unchanged() {
                 CUresult::CUDA_ERROR_NOT_SUPPORTED,
             ),
             (
-                "fabric create",
-                fabric_create,
+                "two handle types",
+                two_handle_types,
                 granule,
                 CUresult::CUDA_ERROR_NOT_SUPPORTED,
             ),
