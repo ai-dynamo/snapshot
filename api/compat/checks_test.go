@@ -101,6 +101,17 @@ func TestCPUFeaturesCheck(t *testing.T) {
 			target: features("avx2"),
 		},
 		{
+			name:   "an arm64 target is missing one",
+			source: features("asimd", "fp", "sve", "sve2"),
+			target: features("asimd", "fp", "sve"),
+			want:   []Mismatch{{Check: CheckCPUFeatures, Source: "sve2", Target: "missing"}},
+		},
+		{
+			name:   "an arm64 timer event stream never refuses",
+			source: features("asimd", "evtstrm", "fp"),
+			target: features("asimd", "fp"),
+		},
+		{
 			name:   "checkpoint taken before CPU features were recorded",
 			target: features("avx2"),
 		},
