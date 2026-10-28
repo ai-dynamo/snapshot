@@ -229,7 +229,7 @@ rejects a key PageBroker does not know, an `activeTransactions` at or above
 | `stagingBytes` | the staging volume cap, `pageBroker.staging.sizeLimit` as lowered in [How the cap is chosen](../operations/storage.md#how-the-cap-is-chosen), and at most 1 TiB | 1 byte to 1 TiB |
 | `activeTransactions` | 8 | 1 to 1024, below `pageBroker.maxConcurrentRequests` |
 | `uploadPartBytes` | 64 MiB | 8 MiB to 1 GiB |
-| `uploadBufferBytes` | 1 GiB | 1 to 16 GiB; each of the `uploadActiveFiles` files needs an equal share of at least `uploadPartBytes` rounded up to a whole MiB, plus 1 MiB |
+| `uploadBufferBytes` | 1 GiB | at most 16 GiB, and at least `uploadActiveFiles` × (`uploadPartBytes` rounded up to a whole MiB, plus 1 MiB) |
 | `uploadActiveFiles` | 2 | 1 to 64 |
 | `requestSeconds` | 60 | 1 to 60 |
 | `uploadRequestRetries` | 3 | 0 to 10 |

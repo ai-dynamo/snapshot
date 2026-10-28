@@ -275,6 +275,9 @@ than v0.2.0; see [Compatibility](../reference/compatibility.md). PageBroker read
 startup, so changing one restarts PageBroker on each node, and it can fail to
 start briefly until the operator has rewritten its configuration. See
 [PageBroker does not start after an S3 settings change](troubleshooting.md#pagebroker-does-not-start-after-an-s3-settings-change).
+After changing the endpoint, bucket, region or prefix, restart the agent
+DaemonSet once the operator pod is Ready, so PageBroker reads the operator's
+current configuration; PageBroker does not re-read it while running.
 
 | Value | Effect | Default |
 |-------|--------|---------|
