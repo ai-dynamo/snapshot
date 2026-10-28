@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: E2E Framework Tests over S3
+name: E2E Framework Tests, S3 and checkpoint volume
 
 # Checkpoint/restore of the inference framework guide workloads (vLLM, SGLang,
-# TensorRT-LLM) with Snapshot installed against an S3-compatible store instead
-# of the checkpoint volume, one vCluster per framework in parallel, on the same
-# GPU cluster and vCluster layout as e2e-frameworks.yaml. The store runs inside
-# each vCluster as a pod (snapshot_e2e.s3 deploy) on its own host ports, so two
-# jobs that land on one node do not collide.
+# TensorRT-LLM) twice: with Snapshot installed against an S3-compatible store,
+# and against the checkpoint volume, one vCluster per framework and store, on
+# the same GPU cluster and vCluster layout as e2e-frameworks.yaml. A final job
+# puts each framework's two results side by side. The S3 store runs inside its
+# vCluster as a pod (snapshot_e2e.s3 deploy) on its own host ports, so two jobs
+# that land on one node do not collide.
 #
 # Manual only. It installs published images, so dispatch push-artifacts.yaml on
 # the branch under test first and pass the resulting tag as snapshot_tag.
@@ -27,6 +28,12 @@ on:
         default: all
         type: choice
         options: [all, vllm, sglang, tensorrt-llm]
+      storage:
+        description: Checkpoint store to test (both, s3, pvc). "both" adds the comparison.
+        required: false
+        default: both
+        type: choice
+        options: [both, s3, pvc]
       datadog_gpu_monitoring:
         description: >-
           Datadog GPU monitoring on the host cluster during the run. "disable"
@@ -53,21 +60,33 @@ jobs:
     timeout-minutes: 2
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      cases: ${{ steps.matrix.outputs.cases }}
+      compare: ${{ steps.matrix.outputs.compare }}
     steps:
-      - name: Build the framework matrix
+      - name: Build the framework and storage matrix
         id: matrix
         env:
           SELECTED: ${{ inputs.framework || 'all' }}
+          STORAGE: ${{ inputs.storage || 'both' }}
         run: |
           set -euo pipefail
+          # Ordered so a framework's two stores start together.
           all='[
-            {"framework":"vllm","port":19000,"console_port":19001},
-            {"framework":"sglang","port":19010,"console_port":19011},
-            {"framework":"tensorrt-llm","port":19020,"console_port":19021}
+            {"framework":"vllm","storage":"pvc","port":0,"console_port":0},
+            {"framework":"vllm","storage":"s3","port":19000,"console_port":19001},
+            {"framework":"sglang","storage":"pvc","port":0,"console_port":0},
+            {"framework":"sglang","storage":"s3","port":19010,"console_port":19011},
+            {"framework":"tensorrt-llm","storage":"pvc","port":0,"console_port":0},
+            {"framework":"tensorrt-llm","storage":"s3","port":19020,"console_port":19021}
           ]'
-          matrix="$(jq -c --arg selected "${SELECTED}" \
-            '{include: [.[] | select($selected == "all" or .framework == $selected)]}' <<< "${all}")"
-          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+          selected="$(jq -c --arg framework "${SELECTED}" --arg storage "${STORAGE}" \
+            '[.[] | select(($framework == "all" or .framework == $framework)
+                           and ($storage == "both" or .storage == $storage))]' <<< "${all}")"
+          {
+            echo "matrix=$(jq -c '{include: .}' <<< "${selected}")"
+            echo "cases=$(jq -r '[.[].framework] | unique | join(" ")' <<< "${selected}")"
+            echo "compare=$([[ "${STORAGE}" == "both" ]] && echo true || echo false)"
+          } >> "${GITHUB_OUTPUT}"
 
   # Datadog's GPU monitoring is a suspected interferer for CRIU/CUDA checkpoint
   # and restore; see the same gate in e2e-frameworks.yaml, whose concurrency
@@ -102,22 +121,25 @@ jobs:
         run: python3 hack/datadog-gpu-monitoring.py disable --holder "${{ github.run_id }}-${{ github.run_attempt }}"
 
   e2e:
-    name: ${{ matrix.framework }} over S3
+    name: ${{ matrix.framework }} on ${{ matrix.storage }}
     needs: [select, datadog-gate]
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # Six GPU jobs would ask the cluster for more GPUs than the nightly
+      # framework run does; three at a time keeps pods from waiting for one.
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
     concurrency:
-      group: snapshot-e2e-frameworks-s3-${{ matrix.framework }}
+      group: snapshot-e2e-frameworks-s3-${{ matrix.storage }}-${{ matrix.framework }}
       cancel-in-progress: false
     env:
-      HOST_NAMESPACE: snapshot-e2e-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
-      VCLUSTER_NAME: snapshot-e2e-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      HOST_NAMESPACE: snapshot-e2e-${{ matrix.storage }}-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_NAME: snapshot-e2e-${{ matrix.storage }}-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
       TEST_NAMESPACE: snapshot-e2e
-      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
-      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-${{ matrix.storage }}-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-${{ matrix.storage }}-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
       SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
       SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
       SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
@@ -135,6 +157,8 @@ jobs:
       SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
       SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
       SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
+      SNAPSHOT_E2E_STORAGE: ${{ matrix.storage }}
+      SNAPSHOT_E2E_BENCHMARK_DIR: ${{ github.workspace }}/.e2e-benchmark-results
       SNAPSHOT_E2E_S3_PORT: ${{ matrix.port }}
       SNAPSHOT_E2E_S3_CONSOLE_PORT: ${{ matrix.console_port }}
       SNAPSHOT_E2E_DATADOG_GPU_MONITORING: ${{ needs.datadog-gate.outputs.mode }}
@@ -192,6 +216,7 @@ jobs:
             --phase vcluster
 
       - name: Deploy the S3 store in the vCluster
+        if: ${{ matrix.storage == 's3' }}
         timeout-minutes: 8
         env:
           KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
@@ -204,7 +229,6 @@ jobs:
           values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.level=INFO"
           values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.toStderr=true"
           {
-            echo "SNAPSHOT_E2E_STORAGE=s3"
             echo "SNAPSHOT_E2E_HELM_SET<<SNAPSHOT_E2E_HELM_SET_END"
             echo "${values}"
             echo "SNAPSHOT_E2E_HELM_SET_END"
@@ -258,24 +282,59 @@ jobs:
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
-      - name: Run ${{ matrix.framework }} checkpoint/restore test over S3
+      - name: Run ${{ matrix.framework }} checkpoint/restore test on ${{ matrix.storage }}
+        id: framework_test
         timeout-minutes: 56
         env:
-          SNAPSHOT_E2E_REQUIRED_TESTS: test_framework_checkpoint_restore_over_s3_serves_inference[${{ matrix.framework }}]
+          SNAPSHOT_E2E_REQUIRED_TESTS: test_framework_checkpoint_restore_serves_inference[${{ matrix.framework }}]
         run: |
           set -uo pipefail
           out="${RUNNER_TEMP}/diagnostics"
           mkdir -p "${out}"
-          store_pod="$(kubectl get pods -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 -o name | head -1)"
-          kubectl exec -n "${TEST_NAMESPACE}" "${store_pod}" -- sh -c \
-            'mc alias set local http://localhost:'"${SNAPSHOT_E2E_S3_PORT}"' "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; exec mc admin trace --json local' \
-            > "${out}/s3-trace.jsonl" 2> "${out}/s3-trace.err" &
-          trace_pid=$!
+          trace_pid=""
+          if [[ "${SNAPSHOT_E2E_STORAGE}" == "s3" ]]; then
+            store_pod="$(kubectl get pods -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 -o name | head -1)"
+            kubectl exec -n "${TEST_NAMESPACE}" "${store_pod}" -- sh -c \
+              'mc alias set local http://localhost:'"${SNAPSHOT_E2E_S3_PORT}"' "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; exec mc admin trace --json local' \
+              > "${out}/s3-trace.jsonl" 2> "${out}/s3-trace.err" &
+            trace_pid=$!
+          fi
           timeout --signal=INT --kill-after=150s 52m \
-            uv run --locked --project e2e pytest e2e/tests/test_frameworks_s3.py -vv -s
+            uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
           status=$?
-          kill "${trace_pid}" 2>/dev/null
+          if [[ "${status}" -eq 124 ]]; then
+            PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
+              --suite framework-checkpoint-restore \
+              --case "${{ matrix.framework }}" \
+              --test test_framework_checkpoint_restore_serves_inference \
+              --outcome timed_out \
+              --message "pytest exceeded the 52 minute timeout"
+          fi
+          [[ -n "${trace_pid}" ]] && kill "${trace_pid}" 2>/dev/null
           exit "${status}"
+
+      - name: Ensure benchmark result exists
+        if: ${{ always() }}
+        env:
+          TEST_STEP_OUTCOME: ${{ steps.framework_test.outcome }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
+            --suite framework-checkpoint-restore \
+            --case "${{ matrix.framework }}" \
+            --test test_framework_checkpoint_restore_serves_inference \
+            --outcome infrastructure_failed \
+            --message "pytest produced no benchmark result; step outcome=${TEST_STEP_OUTCOME}"
+
+      - name: Upload benchmark result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-framework-benchmark-${{ matrix.storage }}-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SNAPSHOT_E2E_BENCHMARK_DIR }}/*.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
 
       - name: Collect diagnostics
         if: ${{ always() }}
@@ -294,12 +353,21 @@ jobs:
             --all-containers --tail=-1 --prefix > "${out}/snapshot-agent.log"
           kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=operator \
             --all-containers --tail=-1 --prefix > "${out}/snapshot-operator.log"
-          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 \
-            --all-containers --tail=-1 --prefix > "${out}/s3-store.log"
           for pod in $(kubectl get pods -n "${TEST_NAMESPACE}" -l snapshot-e2e-test -o name); do
             kubectl logs -n "${TEST_NAMESPACE}" "${pod}" --all-containers --tail=-1 \
               > "${out}/${pod#pod/}.log"
           done
+          echo "DIAGNOSTICS_DIR=${out}" >> "$GITHUB_ENV"
+
+      - name: Collect S3 store diagnostics
+        if: ${{ always() && matrix.storage == 's3' }}
+        timeout-minutes: 5
+        run: |
+          set +e
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 \
+            --all-containers --tail=-1 --prefix > "${out}/s3-store.log"
           store_pod="$(kubectl get pods -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 -o name | head -1)"
           store_mc() {
             kubectl exec -n "${TEST_NAMESPACE}" "${store_pod}" -- sh -c \
@@ -343,13 +411,12 @@ jobs:
               for problem in problems[:40]:
                   print("  " + problem)
           PY
-          echo "DIAGNOSTICS_DIR=${out}" >> "$GITHUB_ENV"
 
       - name: Upload diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-frameworks-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: e2e-frameworks-diagnostics-${{ matrix.storage }}-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.DIAGNOSTICS_DIR }}
           if-no-files-found: ignore
           retention-days: 7
@@ -383,3 +450,56 @@ jobs:
 
       - name: Restore Datadog GPU monitoring
         run: python3 hack/datadog-gpu-monitoring.py restore --holder "${{ github.run_id }}-${{ github.run_attempt }}"
+
+  # Each framework's two results from this run side by side. The jobs ran on
+  # the same cluster in the same run, which the nightly history cannot give.
+  storage-comparison:
+    name: compare S3 and checkpoint volume
+    needs: [select, e2e]
+    if: ${{ !cancelled() && needs.select.outputs.compare == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download checkpoint volume results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: e2e-framework-benchmark-pvc-*-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/benchmark/pvc
+          merge-multiple: true
+
+      - name: Download S3 results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: e2e-framework-benchmark-s3-*-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/benchmark/s3
+          merge-multiple: true
+
+      - name: Compare
+        env:
+          CASES: ${{ needs.select.outputs.cases }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/benchmark/pvc" "${RUNNER_TEMP}/benchmark/s3"
+          case_args=()
+          for framework in ${CASES}; do
+            case_args+=(--case "${framework}")
+          done
+          PYTHONPATH=e2e python3 -m snapshot_e2e.storage_comparison \
+            --pvc-dir "${RUNNER_TEMP}/benchmark/pvc" \
+            --s3-dir "${RUNNER_TEMP}/benchmark/s3" \
+            --summary-file "${GITHUB_STEP_SUMMARY}" \
+            --json-file "${RUNNER_TEMP}/benchmark/storage-comparison.json" \
+            "${case_args[@]}"
+
+      - name: Upload comparison
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-storage-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/benchmark/storage-comparison.json
+          if-no-files-found: error
+          retention-days: 30

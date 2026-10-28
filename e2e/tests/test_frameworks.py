@@ -20,13 +20,19 @@ driven by the guide's own program and manifests (see framework_workloads):
    a restore that silently degraded to a cold start must not pass.
 
 Select frameworks with SNAPSHOT_E2E_FRAMEWORK=vllm[,sglang,...]; CI runs one
-per matrix job. Point SNAPSHOT_E2E_FRAMEWORK_IMAGE at a local build to test an
+per matrix job. With SNAPSHOT_E2E_STORAGE=s3, Snapshot is installed against an
+S3-compatible store (snapshot_e2e.s3) instead of the checkpoint volume: the
+checkpoint is checked in the PodSnapshotContent status, and nothing may be
+written to the volume. The benchmark result is the same, with the store
+recorded, so a PVC run and an S3 run of one framework can be compared. Point SNAPSHOT_E2E_FRAMEWORK_IMAGE at a local build to test an
 unpublished guide change.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import os
+import re
 
 import pytest
 
@@ -44,6 +50,11 @@ RESTORE_POD_TO_TRAFFIC_DURATION = "restore.pod_create_to_traffic.duration"
 RESTORE_AGENT_TO_TRAFFIC_DURATION = "restore.agent_complete_to_traffic.duration"
 RESTORE_AGENT_TO_TRAFFIC_DISPLAY_NAME = "Agent restore complete to traffic ready"
 GPU_PRODUCT_NODE_LABEL = "nvidia.com/gpu.product"
+S3_PHASE_TIMEOUT_SECONDS = 1800
+
+
+def over_s3() -> bool:
+    return os.environ.get("SNAPSHOT_E2E_STORAGE") == "s3"
 
 
 def _phase_display_name(phase: str) -> str:
@@ -89,7 +100,14 @@ def framework(request: pytest.FixtureRequest) -> frameworks.FrameworkSpec:
     name = request.param
     if name not in frameworks.selected_frameworks():
         pytest.skip(f"{name} not selected by SNAPSHOT_E2E_FRAMEWORK")
-    return frameworks.framework_spec(name)
+    spec = frameworks.framework_spec(name)
+    if over_s3():
+        spec = dataclasses.replace(
+            spec,
+            checkpoint_timeout_seconds=S3_PHASE_TIMEOUT_SECONDS,
+            restore_timeout_seconds=S3_PHASE_TIMEOUT_SECONDS,
+        )
+    return spec
 
 
 @pytest.mark.framework
@@ -106,9 +124,9 @@ def test_framework_checkpoint_restore_serves_inference(
         environment={
             "namespace": config.namespace,
             "model": framework.model,
-            "storageClass": os.environ.get(
-                "SNAPSHOT_E2E_STORAGE_CLASS", "cluster-default"
-            ),
+            "storageClass": "s3"
+            if over_s3()
+            else os.environ.get("SNAPSHOT_E2E_STORAGE_CLASS", "cluster-default"),
             "modelCacheMode": "unknown",
             "datadogGpuMonitoringMode": os.environ.get(
                 "SNAPSHOT_E2E_DATADOG_GPU_MONITORING", "unknown"
@@ -204,6 +222,13 @@ def test_framework_checkpoint_restore_serves_inference(
         result.finish_duration(CHECKPOINT_DURATION, event="checkpoint.ready")
         assert pod_snapshot["status"]["boundSnapshotContentName"] == content["metadata"]["name"]
         assert content["spec"]["source"]["nodeName"] == source_node
+        if over_s3():
+            assert re.fullmatch(r"store-v1-[0-9a-f]{64}", content["spec"]["storage"]["storeID"])
+            artifacts = content["status"]["storage"]["artifacts"]
+            assert [artifact["containerName"] for artifact in artifacts] == [frameworks.CONTAINER]
+            assert not snap.artifact_root_exists(
+                config, source_node, content["metadata"]["uid"]
+            ), "the checkpoint must not also be written to the checkpoint volume"
 
         k8s.delete_pod(config.namespace, run.source_pod)
         snap.wait_for_pod_deleted(
@@ -414,6 +439,12 @@ def _record_storage_environment(
     config: k8s.E2EConfig,
 ) -> None:
     """Records the bound checkpoint PVC and its provisioner best-effort."""
+    if over_s3():
+        result.update_environment(
+            storageClass="s3",
+            storage={"storageClass": "s3", "type": "s3", "provisioner": "s3-compatible"},
+        )
+        return
     try:
         pvc = k8s.read_pvc(config.namespace, config.pvc_name)
         storage_class_name = pvc.spec.storage_class_name
