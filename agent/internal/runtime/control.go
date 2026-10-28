@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -210,6 +211,32 @@ func controlSentinelExists(procRoot string, hostPID int, name string) (bool, err
 		return false, fmt.Errorf("control sentinel %s in %s is not a regular file", name, dir.Name())
 	}
 	return true, nil
+}
+
+// ControlSentinelModTime returns when a sentinel in the workload container's
+// snapshot-control volume was written. Sentinels are written by rename, so
+// this is when the whole file appeared. Only a regular file counts.
+func ControlSentinelModTime(hostPID int, name string) (time.Time, error) {
+	return controlSentinelModTime(HostProcPath, hostPID, name)
+}
+
+func controlSentinelModTime(procRoot string, hostPID int, name string) (time.Time, error) {
+	if name == "" || name != filepath.Base(name) || name == ".." {
+		return time.Time{}, fmt.Errorf("invalid control sentinel name %q", name)
+	}
+	dir, err := openContainerControlDir(procRoot, hostPID)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("control sentinel %q: %w", name, err)
+	}
+	defer dir.Close()
+	var st unix.Stat_t
+	if err := unix.Fstatat(int(dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return time.Time{}, fmt.Errorf("stat control sentinel %s in %s: %w", name, dir.Name(), err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return time.Time{}, fmt.Errorf("control sentinel %s in %s is not a regular file", name, dir.Name())
+	}
+	return time.Unix(st.Mtim.Unix()), nil
 }
 
 // RemoveControlSentinel removes a sentinel from the snapshot-control mount at

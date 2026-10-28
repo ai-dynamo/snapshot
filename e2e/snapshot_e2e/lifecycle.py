@@ -27,13 +27,17 @@ from snapshot_e2e.workloads import EXIT_REQUEST
 from snapshot_e2e.workloads import FILE_TOKEN
 from snapshot_e2e.workloads import HOOKS_PORT
 from snapshot_e2e.workloads import HOOKS_PORT_NAME
+from snapshot_e2e.workloads import HOOKS_RESUME_PATH
 from snapshot_e2e.workloads import HOOKS_STATUS_PATH
 from snapshot_e2e.workloads import OBSERVATIONS
+from snapshot_e2e.workloads import RELEASE_MARKER
 from snapshot_e2e.workloads import RESTORE_DONE
 from snapshot_e2e.workloads import RESTORE_PROXY
 from snapshot_e2e.workloads import SIGTERM_EXIT
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
+from snapshot_e2e.workloads import add_release_dir
+from snapshot_e2e.workloads import add_stale_release_marker
 from snapshot_e2e.workloads import multi_restore_pod
 from snapshot_e2e.workloads import restore_pod
 from snapshot_e2e.workloads import restore_proxy

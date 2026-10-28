@@ -33,6 +33,8 @@ const (
 	StepRestoreCUDA           Step = "restoring CUDA state"
 	StepCommitRestore         Step = "committing PageBroker restore"
 	StepValidateRestored      Step = "validating restored process"
+	StepCheckPostRestore      Step = "checking the post-restore action"
+	StepPostRestore           Step = "running the post-restore action"
 
 	StepResolveCheckpointPath Step = "resolving checkpoint artifact path"
 	StepInspectSource         Step = "inspecting source container"

@@ -378,6 +378,38 @@ The agent log carries the process diagnostics and the `restore.log` lines
 captured at the failure. The workload's own output is in the restore pod's
 container logs.
 
+### checking the post-restore action
+
+When the checkpoint's container has a `lifecycle.postRestore` action, the agent
+checks it before restoring anything, and checks a file action again once the
+restored files are in place, before it releases the restored process.
+
+Likely causes:
+- **The file already exists.** The message names the path and says whether it
+  was there before the restore or came back with the restored files. An
+  existing file would be taken for the notification, so the application would
+  never get one. Use a path that only Snapshot writes, such as one on an
+  emptyDir that the restore Pod mounts for this purpose.
+- **The path is refused.** A file must be on the container's own filesystem or
+  on an emptyDir volume, must not go through a symlink, and must not be one of
+  Snapshot's own files in the snapshot-control volume.
+- **The Pod uses the host network.** An HTTP action needs the Pod's own IP.
+
+### running the post-restore action
+
+After writing `restore-complete`, the agent notifies the restored application:
+it creates the file, or sends the HTTP POST, every `periodSeconds` until it
+succeeds or the restore deadline (`restoreTimeoutSeconds`) passes. The restore
+fails, and the restored container is stopped, when no attempt succeeded.
+
+Likely causes: the file's parent directory does not exist in the restore
+container; the application does not listen on the port at the restore Pod's IP,
+for example because it bound only to the source Pod's IP; the endpoint returns
+something other than `200` or `204`; a NetworkPolicy blocks the agent.
+
+The message carries the last attempt's error. The agent log shows every attempt
+at debug level.
+
 ## Checkpoint fails at a step
 
 ### resolving checkpoint artifact path

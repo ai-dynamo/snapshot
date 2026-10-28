@@ -45,6 +45,11 @@ HOOKS_PORT = 8000
 # The source names HOOKS_PORT, so a test can address it by name.
 HOOKS_PORT_NAME = "hooks"
 HOOKS_STATUS_PATH = "/checkpoint/status"
+HOOKS_RESUME_PATH = "/checkpoint/resume"
+# Post-restore tests: an emptyDir per container, so the marker is never
+# carried over from the source and fan-out copies don't share one.
+RELEASE_DIR = "/app-release"
+RELEASE_MARKER = f"{RELEASE_DIR}/released"
 SOURCE_TOKEN_ENV = "SNAPSHOT_E2E_SOURCE_TOKEN"
 RESTORE_TOKEN_ENV = "SNAPSHOT_E2E_RESTORE_TOKEN"
 
@@ -200,6 +205,37 @@ def restore_pod(
         },
         "spec": spec,
     }
+
+
+def add_release_dir(pod: dict[str, Any]) -> dict[str, Any]:
+    """Mount an emptyDir at RELEASE_DIR in every container, one subPath each."""
+    spec = pod["spec"]
+    spec["volumes"].append({"name": "app-release", "emptyDir": {}})
+    for container in spec["containers"]:
+        container.setdefault("volumeMounts", []).append(
+            {"name": "app-release", "mountPath": RELEASE_DIR, "subPath": container["name"]}
+        )
+    return pod
+
+
+def add_stale_release_marker(pod: dict[str, Any]) -> dict[str, Any]:
+    """Create every container's RELEASE_MARKER before it starts, as a file left
+    on a volume by an earlier restore would be."""
+    spec = pod["spec"]
+    touches = " && ".join(
+        f"mkdir -p /release/{c['name']} && touch /release/{c['name']}/released"
+        for c in spec["containers"]
+    )
+    spec["initContainers"] = [
+        {
+            "name": "stale-release-marker",
+            "image": spec["containers"][0]["image"],
+            "imagePullPolicy": "IfNotPresent",
+            "command": ["/bin/sh", "-c", touches],
+            "volumeMounts": [{"name": "app-release", "mountPath": "/release"}],
+        }
+    ]
+    return pod
 
 
 def multi_restore_pod(
@@ -439,6 +475,9 @@ while (my $conn = $server->accept) {{
   my $code = 404;
   if (($method // "") eq "GET" && ($path // "") eq "{HOOKS_STATUS_PATH}") {{
     $code = -e "{CHECKPOINT_READY}" ? 200 : 503;
+  }} elsif (($method // "") eq "POST" && ($path // "") eq "{HOOKS_RESUME_PATH}") {{
+    # The application's notification: leave the same marker a file action would.
+    if (open(my $marker, ">", "{RELEASE_MARKER}")) {{ close $marker; $code = 204; }} else {{ $code = 500; }}
   }}
   print $conn "HTTP/1.1 $code Hook\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n";
   close $conn;
