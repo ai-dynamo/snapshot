@@ -328,7 +328,8 @@ CHECKPOINT_HOLD_SECONDS = 15
 
 CHECKPOINT_READINESS_PROBES = {
     "file": {"file": {"path": snap.CHECKPOINT_READY}},
-    "http": {"httpGet": {"path": snap.HOOKS_STATUS_PATH, "port": snap.HOOKS_PORT}},
+    # By name, so the agent resolves it against the source container.
+    "http": {"httpGet": {"path": snap.HOOKS_STATUS_PATH, "port": snap.HOOKS_PORT_NAME}},
 }
 
 

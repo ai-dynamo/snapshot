@@ -26,6 +26,7 @@ from snapshot_e2e.workloads import CUDA_HOLD
 from snapshot_e2e.workloads import EXIT_REQUEST
 from snapshot_e2e.workloads import FILE_TOKEN
 from snapshot_e2e.workloads import HOOKS_PORT
+from snapshot_e2e.workloads import HOOKS_PORT_NAME
 from snapshot_e2e.workloads import HOOKS_STATUS_PATH
 from snapshot_e2e.workloads import OBSERVATIONS
 from snapshot_e2e.workloads import RESTORE_DONE
