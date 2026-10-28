@@ -41,6 +41,11 @@ func TestInstructionSetFeatures(t *testing.T) {
 			want:  []string{"rtm"},
 		},
 		{
+			name:  "arm64 hwcaps without the timer event stream",
+			flags: []string{"fp", "asimd", "evtstrm", "aes", "sve", "sve2"},
+			want:  []string{"aes", "asimd", "fp", "sve", "sve2"},
+		},
+		{
 			name:  "no instruction-set flag at all is unknown",
 			flags: []string{"hypervisor", "constant_tsc"},
 		},
