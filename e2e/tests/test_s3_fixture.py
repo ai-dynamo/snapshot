@@ -65,3 +65,22 @@ def test_settings_follow_the_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     settings = s3.S3Settings.from_env()
     assert settings.bucket == "other"
     assert settings.cluster_endpoint == "http://s3.test:9000"
+
+
+def test_store_ports_follow_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_PORT", "19010")
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_CONSOLE_PORT", "19011")
+    settings = s3.S3Settings.from_env()
+    container = s3.store_deployment(settings, "ns").spec.template.spec.containers[0]
+    env = {item.name: item.value for item in container.env}
+    assert env["MINIO_API_PORT_NUMBER"] == "19010"
+    assert env["MINIO_CONSOLE_PORT_NUMBER"] == "19011"
+    assert container.ports[0].container_port == 19010
+    assert container.readiness_probe.http_get.port == 19010
+    assert s3.host_endpoint("10.0.0.5", settings.port) == "http://10.0.0.5:19010"
+
+
+def test_store_ports_default_to_the_single_job_ports(
+    settings: s3.S3Settings,
+) -> None:
+    assert (settings.port, settings.console_port) == (19000, 19001)
