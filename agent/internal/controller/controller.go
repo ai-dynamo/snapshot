@@ -43,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
+	"github.com/ai-dynamo/snapshot/agent/internal/lifecyclehooks"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -78,6 +79,15 @@ type NodeController struct {
 	// captureQueue holds PodSnapshotContent names. Its per-key exclusion is the capture path's only
 	// lock, which is enough because exactly one agent runs per node.
 	captureQueue workqueue.TypedRateLimitingInterface[string]
+
+	// checkpointProbes holds a *checkpointProbeState per work order whose container has a
+	// checkpoint readiness probe, while the agent waits for it.
+	checkpointProbes sync.Map
+	probeFileFn      func(hostPID int, path string) (bool, error)
+	probeHTTPFn      func(ctx context.Context, podIP string, action *snapshotv1alpha1.LifecycleHTTPAction, timeout time.Duration) error
+	// nowFn and requeueCaptureFn default to time.Now and captureQueue.AddAfter when nil.
+	nowFn            func() time.Time
+	requeueCaptureFn func(name string, after time.Duration)
 
 	handledRestores sync.Map
 
@@ -246,6 +256,8 @@ func newDefaultController(
 		controlSentinelExistsFn:   snapshotruntime.ControlSentinelExists,
 		sendSignalFn:              snapshotruntime.SendSignalToPID,
 		compareFn:                 compat.Compare,
+		probeFileFn:               lifecyclehooks.FileExists,
+		probeHTTPFn:               lifecyclehooks.HTTPGet,
 	}
 	w.checkpointFn = w.executorCheckpoint
 	w.fetchManifestFn = func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
