@@ -73,7 +73,7 @@ func newProbeHarness(t *testing.T, probe snapshotv1alpha1.CheckpointReadinessPro
 		err := h.next()
 		return err == nil, nil
 	}
-	h.w.probeHTTPFn = func(_ context.Context, ip string, _ *snapshotv1alpha1.LifecycleHTTPAction, timeout time.Duration) error {
+	h.w.probeHTTPFn = func(_ context.Context, ip string, _ *snapshotv1alpha1.HTTPGetAction, timeout time.Duration) error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.httpIP, h.httpTO = ip, timeout
@@ -237,7 +237,7 @@ func TestCheckpointProbe_WaitsForARunningContainer(t *testing.T) {
 func TestCheckpointProbe_HTTPGoesToThePodIP(t *testing.T) {
 	probe := snapshotv1alpha1.CheckpointReadinessProbe{
 		CheckpointReadinessProbeHandler: snapshotv1alpha1.CheckpointReadinessProbeHandler{
-			HTTPGet: &snapshotv1alpha1.LifecycleHTTPAction{Path: "/checkpoint/status", Port: 8000},
+			HTTPGet: &snapshotv1alpha1.HTTPGetAction{Path: "/checkpoint/status", Port: 8000},
 		},
 		PeriodSeconds: 1, TimeoutSeconds: 3, SuccessThreshold: 1,
 	}
@@ -270,7 +270,7 @@ func TestCheckpointProbe_AnnouncesTheWaitOnce(t *testing.T) {
 func TestCheckpointProbe_RefusedTargetsFailTheWorkOrder(t *testing.T) {
 	httpProbe := snapshotv1alpha1.CheckpointReadinessProbe{
 		CheckpointReadinessProbeHandler: snapshotv1alpha1.CheckpointReadinessProbeHandler{
-			HTTPGet: &snapshotv1alpha1.LifecycleHTTPAction{Path: "/status", Port: 8000},
+			HTTPGet: &snapshotv1alpha1.HTTPGetAction{Path: "/status", Port: 8000},
 		},
 		PeriodSeconds: 1, TimeoutSeconds: 1, SuccessThreshold: 1,
 	}

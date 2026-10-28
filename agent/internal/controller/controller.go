@@ -84,7 +84,7 @@ type NodeController struct {
 	// checkpoint readiness probe, while the agent waits for it.
 	checkpointProbes sync.Map
 	probeFileFn      func(hostPID int, path string) (bool, error)
-	probeHTTPFn      func(ctx context.Context, podIP string, action *snapshotv1alpha1.LifecycleHTTPAction, timeout time.Duration) error
+	probeHTTPFn      func(ctx context.Context, podIP string, action *snapshotv1alpha1.HTTPGetAction, timeout time.Duration) error
 	// nowFn and requeueCaptureFn default to time.Now and captureQueue.AddAfter when nil.
 	nowFn            func() time.Time
 	requeueCaptureFn func(name string, after time.Duration)
