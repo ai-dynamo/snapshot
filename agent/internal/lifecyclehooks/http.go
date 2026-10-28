@@ -60,20 +60,20 @@ func HTTPTarget(pod *corev1.Pod) (string, error) {
 }
 
 // HTTPGet sends a GET for a probe. It succeeds on 200 only.
-func HTTPGet(ctx context.Context, podIP string, action *snapshotv1alpha1.LifecycleHTTPAction, timeout time.Duration) error {
-	return send(ctx, http.MethodGet, podIP, action, timeout, http.StatusOK)
+func HTTPGet(ctx context.Context, podIP string, action *snapshotv1alpha1.HTTPGetAction, timeout time.Duration) error {
+	return send(ctx, http.MethodGet, podIP, action.Path, action.Port, timeout, http.StatusOK)
 }
 
 // HTTPPost sends a POST with an empty body for a notification. It succeeds on
 // 200 or 204, which mean the application accepted it.
-func HTTPPost(ctx context.Context, podIP string, action *snapshotv1alpha1.LifecycleHTTPAction, timeout time.Duration) error {
-	return send(ctx, http.MethodPost, podIP, action, timeout, http.StatusOK, http.StatusNoContent)
+func HTTPPost(ctx context.Context, podIP string, action *snapshotv1alpha1.HTTPPostAction, timeout time.Duration) error {
+	return send(ctx, http.MethodPost, podIP, action.Path, action.Port, timeout, http.StatusOK, http.StatusNoContent)
 }
 
-func send(ctx context.Context, method, podIP string, action *snapshotv1alpha1.LifecycleHTTPAction,
+func send(ctx context.Context, method, podIP, path string, port int32,
 	timeout time.Duration, success ...int,
 ) error {
-	target, err := requestURL(podIP, action)
+	target, err := requestURL(podIP, path, port)
 	if err != nil {
 		return err
 	}
@@ -99,17 +99,16 @@ func send(ctx context.Context, method, podIP string, action *snapshotv1alpha1.Li
 
 // requestURL repeats the API's rules for the path and port, so a value that
 // reached the agent some other way still can't name another host.
-func requestURL(podIP string, action *snapshotv1alpha1.LifecycleHTTPAction) (string, error) {
+func requestURL(podIP, path string, port int32) (string, error) {
 	if net.ParseIP(podIP) == nil {
 		return "", fmt.Errorf("invalid Pod IP %q", podIP)
 	}
-	p := action.Path
-	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.ContainsAny(p, "?#") {
-		return "", fmt.Errorf("invalid HTTP path %q", p)
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsAny(path, "?#") {
+		return "", fmt.Errorf("invalid HTTP path %q", path)
 	}
-	if action.Port < 1 || action.Port > 65535 {
-		return "", fmt.Errorf("invalid port %d", action.Port)
+	if port < 1 || port > 65535 {
+		return "", fmt.Errorf("invalid port %d", port)
 	}
-	u := url.URL{Scheme: "http", Host: net.JoinHostPort(podIP, strconv.Itoa(int(action.Port))), Path: p}
+	u := url.URL{Scheme: "http", Host: net.JoinHostPort(podIP, strconv.Itoa(int(port))), Path: path}
 	return u.String(), nil
 }
