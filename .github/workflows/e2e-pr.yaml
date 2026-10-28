@@ -3,12 +3,13 @@
 
 # End-to-end tests for pull requests, run on their copy-pr-bot mirror branch
 # (pull-request/<number>, see .github/copy-pr-bot.yaml). The GPU runners admit
-# push events but not pull_request, so both suites run from the mirror push: the
-# CPU suite first, and the GPU suite only once it has passed for the same commit.
+# push events but not pull_request, so every suite runs from the mirror push: the
+# CPU suite first, and the GPU and framework suites only once it has passed for
+# the same commit.
 #
-# The GPU suite installs images built here from the mirrored commit, never
-# main's, so a pass means the pull request's own operator, agent, and
-# pagebroker were tested. hack/prune-ghcr.py expires those images.
+# The GPU and framework suites install images built here from the mirrored
+# commit, never main's, so a pass means the pull request's own operator, agent,
+# and pagebroker were tested. hack/prune-ghcr.py expires those images.
 
 name: PR E2E
 
@@ -75,6 +76,10 @@ jobs:
               - ".github/workflows/e2e-pr.yaml"
               - ".github/workflows/e2e-cpu.yaml"
               - ".github/workflows/e2e.yaml"
+              - ".github/workflows/e2e-frameworks.yaml"
+              # The framework workloads' programs and manifests.
+              - "docs/guides/**"
+              - "hack/datadog-gpu-monitoring.py"
 
   cpu:
     name: CPU
@@ -85,7 +90,7 @@ jobs:
       contents: read
       packages: read
 
-  # Built alongside the CPU suite rather than after it: the GPU suite waits for
+  # Built alongside the CPU suite rather than after it: the GPU suites wait for
   # both, so this costs no wall-clock time when CPU passes.
   images:
     name: Build ${{ matrix.image }} image
@@ -151,12 +156,24 @@ jobs:
       contents: read
       packages: read
 
+  frameworks:
+    name: Frameworks
+    needs: [cpu, images]
+    uses: ./.github/workflows/e2e-frameworks.yaml
+    with:
+      snapshot_tag: ${{ needs.images.outputs.tag }}
+    permissions:
+      # Its benchmark comparison reads the result artifacts of this run.
+      actions: read
+      contents: read
+      packages: read
+
   # The one check to require. always(), never !cancelled(): a skipped required
   # check counts as passing, so this job must run -- and fail -- when the run is
   # cancelled or a job it depends on did not succeed.
   pr-e2e:
     name: PR E2E
-    needs: [changes, cpu, images, gpu]
+    needs: [changes, cpu, images, gpu, frameworks]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -171,7 +188,7 @@ jobs:
           set -euo pipefail
           jq -e --arg e2e "${E2E}" '
             .changes.result == "success" and
-            ([.cpu, .images, .gpu] | if $e2e == "true"
+            ([.cpu, .images, .gpu, .frameworks] | if $e2e == "true"
                then all(.result == "success")
                else all(.result == "skipped") end)
           ' <<< "${RESULTS}"

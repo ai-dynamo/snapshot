@@ -51,8 +51,9 @@ On each mirror push the workflow first checks whether the pull request touches
 the images, chart, CRDs, harness, or these workflows, comparing against where it
 branched from `main`. If it does, the CPU suite runs while the operator, agent,
 and pagebroker images are built from the mirrored commit and pushed to GHCR as
-`v0.0.0-pull-request-<number>-g<sha8>`. The GPU suite in `e2e.yaml` runs only
-once both succeed, and installs those images rather than main's.
+`v0.0.0-pull-request-<number>-g<sha8>`. The GPU suite in `e2e.yaml` and the
+framework suites in `e2e-frameworks.yaml` run only once both succeed, and
+install those images rather than main's.
 
 The `PR E2E` check passes only when every suite the change needed passed, or
 when the change needed none of them. The scheduled registry prune deletes
@@ -547,15 +548,14 @@ The dashboard deployment summary links to the resulting Pages URL.
 
 #### Viewing a pull request's benchmark preview
 
-1. Get an `E2E Framework Tests` run against your PR. This does not happen
-   automatically: first dispatch `push-artifacts.yaml` (Actions tab,
-   `workflow_dispatch`) on your PR's source branch to build its own
-   operator/agent/pagebroker images, then dispatch
+1. Get an `E2E Framework Tests` run against your PR. The framework suites in
+   `PR E2E` do not publish a preview: dispatch
    `.github/workflows/e2e-frameworks.yaml` (`workflow_dispatch`, `ref`: your
    PR's `pull-request/<number>` mirror branch, created by `copy-pr-bot`) with
-   `snapshot_tag` set to the tag `push-artifacts.yaml` just built. Dispatching
-   against the `pull-request/<number>` branch (not your source branch) is what
-   keys the benchmark preview to your PR.
+   `snapshot_tag` set to the `v0.0.0-pull-request-<number>-g<sha8>` tag that
+   `PR E2E` built for the commit. Dispatching against the
+   `pull-request/<number>` branch (not your source branch) is what keys the
+   benchmark preview to your PR.
 2. Wait for it to finish, then open the **E2E Benchmark Dashboard** workflow
    run it triggers (`.github/workflows/e2e-benchmark-pages.yaml`, via
    `workflow_run`) -- filter the Actions tab to that workflow and your PR's
