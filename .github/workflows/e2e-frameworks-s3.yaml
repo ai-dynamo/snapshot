@@ -157,6 +157,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Prepare the diagnostics directory
+        run: |
+          mkdir -p "${RUNNER_TEMP}/diagnostics"
+          echo "DIAGNOSTICS_DIR=${RUNNER_TEMP}/diagnostics" >> "$GITHUB_ENV"
+
       - name: Capture host kubeconfig
         id: host
         run: |
@@ -363,7 +368,6 @@ jobs:
             kubectl logs -n "${TEST_NAMESPACE}" "${pod}" --all-containers --tail=-1 \
               > "${out}/${pod#pod/}.log"
           done
-          echo "DIAGNOSTICS_DIR=${out}" >> "$GITHUB_ENV"
 
       - name: Collect S3 store diagnostics
         if: ${{ always() }}

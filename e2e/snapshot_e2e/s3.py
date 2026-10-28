@@ -15,6 +15,7 @@ chart reaches it at ``cluster_endpoint``. Jobs that share a node need different
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import time
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from dataclasses import dataclass
 from kubernetes import client, config
 
 CREDENTIALS_KEY = "credentials"
+ROOT_USER_KEY = "MINIO_ROOT_USER"
+ROOT_PASSWORD_KEY = "MINIO_ROOT_PASSWORD"
 DEFAULT_NAMESPACE = "snapshot-e2e"
 STORE_NAME = "snapshot-s3"
 DEFAULT_STORE_PORT = 19000
@@ -102,7 +105,11 @@ def ensure_credentials_secret(settings: S3Settings, namespace: str) -> None:
             raise
     secret = client.V1Secret(
         metadata=client.V1ObjectMeta(name=settings.credentials_secret),
-        string_data={CREDENTIALS_KEY: credentials_file(settings)},
+        string_data={
+            CREDENTIALS_KEY: credentials_file(settings),
+            ROOT_USER_KEY: settings.access_key,
+            ROOT_PASSWORD_KEY: settings.secret_key,
+        },
     )
     try:
         api.create_namespaced_secret(namespace, secret)
@@ -113,7 +120,11 @@ def ensure_credentials_secret(settings: S3Settings, namespace: str) -> None:
 
 
 def host_endpoint(host_ip: str, port: int = DEFAULT_STORE_PORT) -> str:
-    return f"http://{host_ip}:{port}"
+    try:
+        host = f"[{host_ip}]" if ipaddress.ip_address(host_ip).version == 6 else host_ip
+    except ValueError:
+        host = host_ip
+    return f"http://{host}:{port}"
 
 
 def store_endpoint(namespace: str, port: int = DEFAULT_STORE_PORT) -> str:
@@ -129,16 +140,25 @@ def store_endpoint(namespace: str, port: int = DEFAULT_STORE_PORT) -> str:
 def store_deployment(settings: S3Settings, namespace: str) -> client.V1Deployment:
     labels = {"app.kubernetes.io/name": STORE_NAME}
     env = {
-        "MINIO_ROOT_USER": settings.access_key,
-        "MINIO_ROOT_PASSWORD": settings.secret_key,
         "MINIO_DEFAULT_BUCKETS": settings.bucket,
         "MINIO_API_PORT_NUMBER": str(settings.port),
         "MINIO_CONSOLE_PORT_NUMBER": str(settings.console_port),
     }
+    login = [
+        client.V1EnvVar(
+            name=key,
+            value_from=client.V1EnvVarSource(
+                secret_key_ref=client.V1SecretKeySelector(
+                    name=settings.credentials_secret, key=key
+                )
+            ),
+        )
+        for key in (ROOT_USER_KEY, ROOT_PASSWORD_KEY)
+    ]
     container = client.V1Container(
         name="store",
         image=STORE_IMAGE,
-        env=[client.V1EnvVar(name=name, value=value) for name, value in env.items()],
+        env=login + [client.V1EnvVar(name=name, value=value) for name, value in env.items()],
         ports=[client.V1ContainerPort(container_port=settings.port)],
         readiness_probe=client.V1Probe(
             http_get=client.V1HTTPGetAction(
@@ -203,6 +223,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "helm-set":
         print("\n".join(helm_set(settings)))
         return 0
+    if args.command == "deploy":
+        missing = [
+            name
+            for name in ("SNAPSHOT_E2E_S3_ACCESS_KEY", "SNAPSHOT_E2E_S3_SECRET_KEY")
+            if not os.environ.get(name)
+        ]
+        if missing:
+            parser.error(
+                f"deploy needs {', '.join(missing)}: the store listens on the node network "
+                "and must not use a default login"
+            )
     config.load_kube_config(os.environ.get("KUBECONFIG"))
     if args.command == "endpoint":
         print(store_endpoint(namespace, settings.port))
