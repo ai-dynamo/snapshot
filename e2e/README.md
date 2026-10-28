@@ -130,14 +130,11 @@ or change the normal restored-state assertions.
 ### Framework tests over S3 (GPU)
 
 `e2e-frameworks-s3.yaml` runs the vLLM, SGLang and TensorRT-LLM guide workloads on
-the GPU cluster twice, once with Snapshot installed against an S3-compatible store
-and once against the checkpoint volume, one vCluster per framework and store, three
-at a time. It is the same test as the framework workflow (`test_frameworks.py`)
-with `SNAPSHOT_E2E_STORAGE` set to the store, so both runs record the same
-benchmark result. A final job pairs each framework's two results and prints the
-timings side by side in the run summary (`snapshot_e2e.storage_comparison`). The
-`framework` and `storage` inputs select a subset; `storage: s3` or `pvc` skips the
-comparison. The workflow runs nightly on `main` and installs the published images
+the GPU cluster with Snapshot installed against an S3-compatible store instead of
+the checkpoint volume, one vCluster per framework in parallel. It is the same test as
+the framework workflow (`test_frameworks.py`) with `SNAPSHOT_E2E_STORAGE=s3`, so it
+records the same benchmark result, uploaded per framework. The `framework` input
+selects one. The workflow runs nightly on `main` and installs the published images
 of the commit it checked out. To test a branch, dispatch `push-artifacts.yaml` on it
 and pass the resulting tag as `snapshot_tag`.
 
