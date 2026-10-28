@@ -291,13 +291,14 @@ def pod_logs(
     container: str | None = None,
 ) -> str:
     try:
-        return client.CoreV1Api().read_namespaced_pod_log(
+        response = client.CoreV1Api().read_namespaced_pod_log(
             name=name,
             namespace=namespace,
             tail_lines=tail_lines,
             container=container,
-            _preload_content=True,
+            _preload_content=False,
         )
+        return response.data.decode("utf-8", errors="replace")
     except ApiException as exc:
         return f"<logs unavailable: {api_error_detail(exc)}>"
 

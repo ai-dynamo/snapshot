@@ -216,3 +216,36 @@ def test_wait_for_container_running_rejects_terminal_or_terminated(
 
     with pytest.raises(AssertionError):
         lifecycle.wait_for_container_running("namespace", "pod", timeout=1)
+
+
+def test_pod_logs_returns_the_log_text_not_its_bytes_repr(monkeypatch) -> None:
+    log = b"first line\n2026-10-28T10:00:00Z\tINFO\tCheckpoint timing summary\t{}\n"
+
+    def read_namespaced_pod_log(**kwargs):
+        if kwargs["_preload_content"]:
+            return repr(log)
+        return SimpleNamespace(data=log)
+
+    monkeypatch.setattr(
+        k8s.client,
+        "CoreV1Api",
+        lambda: SimpleNamespace(read_namespaced_pod_log=read_namespaced_pod_log),
+    )
+
+    text = k8s.pod_logs("ns", "agent", tail_lines=2000, container="agent")
+
+    assert text == log.decode()
+    assert text.splitlines()[1].endswith("Checkpoint timing summary\t{}")
+
+
+def test_pod_logs_reports_an_unreadable_log_instead_of_raising(monkeypatch) -> None:
+    def read_namespaced_pod_log(**kwargs):
+        raise k8s.ApiException(status=404, reason="not found")
+
+    monkeypatch.setattr(
+        k8s.client,
+        "CoreV1Api",
+        lambda: SimpleNamespace(read_namespaced_pod_log=read_namespaced_pod_log),
+    )
+
+    assert k8s.pod_logs("ns", "missing").startswith("<logs unavailable:")

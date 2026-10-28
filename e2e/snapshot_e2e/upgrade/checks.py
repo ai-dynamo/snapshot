@@ -410,15 +410,15 @@ def dump_diagnostics(ctx: UpgradeContext) -> None:
                 print(k8s.pod_logs(ctx.config.namespace, pod.metadata.name, tail_lines=80, container=status.name))
                 if status.restart_count:
                     try:
-                        print(
-                            core.read_namespaced_pod_log(
-                                pod.metadata.name,
-                                ctx.config.namespace,
-                                container=status.name,
-                                previous=True,
-                                tail_lines=80,
-                            )
+                        previous = core.read_namespaced_pod_log(
+                            pod.metadata.name,
+                            ctx.config.namespace,
+                            container=status.name,
+                            previous=True,
+                            tail_lines=80,
+                            _preload_content=False,
                         )
+                        print(previous.data.decode("utf-8", errors="replace"))
                     except ApiException as exc:
                         print(f"<previous logs unavailable: {k8s.api_error_detail(exc)}>")
     print("--- end debug ---\n")
