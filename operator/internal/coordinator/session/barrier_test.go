@@ -89,6 +89,24 @@ func TestBarrierTakesSeveralLibraryParticipantsFromOneMember(t *testing.T) {
 	require.NoError(t, await(t, released))
 }
 
+func TestALibraryParticipantIsScopedByItsMember(t *testing.T) {
+	f := newFixture(t, memberA, memberB)
+	ctx := context.Background()
+	first, second := Request{Caller: ncclOf(memberA)}, Request{Caller: ncclOf(memberB)}
+	require.NoError(t, f.session.CreateBarrier(ctx, first, ncclOther, 2))
+
+	require.NoError(t, f.session.PostBarrier(ctx, first, ncclOther, "rank-0"))
+	require.NoError(t, f.session.PostBarrier(ctx, first, ncclOther, "rank-0"))
+	assert.False(t, releasedInStore(f, ncclOther), "one member posting the same participant twice counts once")
+
+	require.NoError(t, f.session.PostBarrier(ctx, second, ncclOther, "rank-0"))
+	assert.True(t, releasedInStore(f, ncclOther), "another member posting the same participant counts again")
+}
+
+func TestAScopedParticipantNeverReadsAsAnotherPair(t *testing.T) {
+	assert.NotEqual(t, ncclOf("member-a").scope("b/rank-0"), ncclOf("member-a/b").scope("rank-0"))
+}
+
 func TestAwaitBarrierReturnsWhenTheContextIsCancelled(t *testing.T) {
 	f := newFixture(t)
 	require.NoError(t, f.session.CreateBarrier(context.Background(), requestOf(memberA, ""), barrierName, 2))

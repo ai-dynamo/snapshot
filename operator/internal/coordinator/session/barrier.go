@@ -28,7 +28,9 @@ func (s *Session) CreateBarrier(ctx context.Context, r Request, name string, cou
 // many as it was created with. An agent and a relay post as their own member,
 // and any other participant is refused, so a barrier counting members counts
 // each member once. A library posts under the identity of its process, because
-// several processes of one member post to the same barrier. Posting twice
+// several processes of one member post to the same barrier, and the barrier
+// counts it as the pair of its member and that identity, so processes of
+// different members that pick the same identity count apart. Posting twice
 // counts once, and posting before the barrier is created is valid.
 func (s *Session) PostBarrier(ctx context.Context, r Request, name string, participant ParticipantID) error {
 	if err := r.Caller.authorize(name); err != nil {
@@ -37,8 +39,9 @@ func (s *Session) PostBarrier(ctx context.Context, r Request, name string, parti
 	if err := r.Caller.authorizePost(participant); err != nil {
 		return err
 	}
+	scoped := r.Caller.scope(participant)
 	_, err := s.mutate(ctx, r, OpPostBarrier, func(ctx context.Context, sp kv.Space) (int64, error) {
-		return 0, sp.PostBarrier(ctx, name, string(participant))
+		return 0, sp.PostBarrier(ctx, name, scoped)
 	})
 	return err
 }

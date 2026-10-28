@@ -11,7 +11,8 @@ type MemberID string
 // ParticipantID identifies one poster of a barrier. An agent and a relay post
 // as their member, while a library posts under the identity of the process
 // that called it, because several processes of one member post to the same
-// barrier.
+// barrier. A library's participant is scoped by its member, so processes of
+// different members never count as one.
 type ParticipantID string
 
 // RequestID makes a mutating operation idempotent: the session replays the
@@ -109,4 +110,16 @@ func (c Caller) authorizePost(participant ParticipantID) error {
 		return fmt.Errorf("role %q posts as member %q, not as %q: %w", c.Role, c.Member, participant, ErrForbidden)
 	}
 	return nil
+}
+
+// scope returns what a barrier counts a post as. An agent's or a relay's
+// participant is its member already. A library's is the pair of its member and
+// the participant it names, so two members whose processes pick the same name
+// post twice, not once. The member's length leads the pair, so no pair reads
+// as another.
+func (c Caller) scope(participant ParticipantID) string {
+	if c.Role != RoleLibrary {
+		return string(participant)
+	}
+	return fmt.Sprintf("%d:%s/%s", len(c.Member), c.Member, participant)
 }

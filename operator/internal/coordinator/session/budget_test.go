@@ -54,7 +54,8 @@ func TestTheBudgetChargesWhatEachEntryCosts(t *testing.T) {
 			write: func(ctx context.Context, s *Session) error {
 				return s.PostBarrier(ctx, Request{Caller: ncclOf(memberA)}, ncclOther, participant)
 			},
-			want: cost(barrierOverhead, len(ncclOther)) + cost(participantOverhead, len(participant)),
+			want: cost(barrierOverhead, len(ncclOther)) +
+				cost(participantOverhead, len(ncclOf(memberA).scope(participant))),
 		},
 		{
 			name: "a recorded request, beside what it writes",
