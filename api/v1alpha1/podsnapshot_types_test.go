@@ -89,7 +89,7 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 					File: &ControlFileAction{Path: "/tmp/ready"},
 				}},
 				Lifecycle: &SnapshotLifecycle{PostRestore: &PostRestoreAction{PostRestoreHandler: PostRestoreHandler{
-					HTTPPost: &LifecycleHTTPAction{Path: "/resume", Port: 8000},
+					HTTPPost: &HTTPPostAction{Path: "/resume", Port: 8000},
 				}}},
 			}},
 		},

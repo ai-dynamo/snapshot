@@ -74,7 +74,7 @@ type CheckpointReadinessProbeHandler struct {
 
 	// HTTPGet succeeds when a GET to the Pod IP returns 200.
 	// +optional
-	HTTPGet *LifecycleHTTPAction `json:"httpGet,omitempty"`
+	HTTPGet *HTTPGetAction `json:"httpGet,omitempty"`
 }
 
 // SnapshotLifecycle holds actions Snapshot runs at points in the checkpoint
@@ -118,7 +118,7 @@ type PostRestoreHandler struct {
 	// HTTPPost sends a POST with an empty body to the Pod IP. A 200 or 204
 	// response means the application accepted the notification.
 	// +optional
-	HTTPPost *LifecycleHTTPAction `json:"httpPost,omitempty"`
+	HTTPPost *HTTPPostAction `json:"httpPost,omitempty"`
 }
 
 // ControlFileAction names a file inside the container's filesystem.
@@ -135,9 +135,29 @@ type ControlFileAction struct {
 	Path string `json:"path"`
 }
 
-// LifecycleHTTPAction is a plain HTTP request to a port on the Pod IP. Snapshot
-// does not follow redirects, and does not support Pods on the host network.
-type LifecycleHTTPAction struct {
+// HTTPGetAction is a GET to a port on the Pod IP. Snapshot does not follow
+// redirects, and does not support Pods on the host network.
+type HTTPGetAction struct {
+	// Path of the request. It must start with "/" and has no host, query, or
+	// fragment.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.startsWith('//') && !self.contains('?') && !self.contains('#')",message="path must start with / and have no host, query, or fragment"
+	Path string `json:"path"`
+
+	// Port on the Pod IP.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+}
+
+// HTTPPostAction is a POST with an empty body to a port on the Pod IP.
+// Snapshot does not follow redirects, and does not support Pods on the host
+// network. It is a separate type from HTTPGetAction so either can grow fields
+// of its own.
+type HTTPPostAction struct {
 	// Path of the request. It must start with "/" and has no host, query, or
 	// fragment.
 	// +kubebuilder:validation:Required

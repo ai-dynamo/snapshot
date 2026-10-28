@@ -29,7 +29,7 @@ func containerSettings(name string) []snapshotv1alpha1.ContainerSnapshotConfig {
 		},
 		Lifecycle: &snapshotv1alpha1.SnapshotLifecycle{PostRestore: &snapshotv1alpha1.PostRestoreAction{
 			PostRestoreHandler: snapshotv1alpha1.PostRestoreHandler{
-				HTTPPost: &snapshotv1alpha1.LifecycleHTTPAction{Path: "/resume", Port: 8000},
+				HTTPPost: &snapshotv1alpha1.HTTPPostAction{Path: "/resume", Port: 8000},
 			},
 		}},
 	}}

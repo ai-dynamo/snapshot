@@ -222,7 +222,7 @@ func fileProbe(path string) *snapshotv1.CheckpointReadinessProbe {
 
 func httpProbe(path string, port int32) *snapshotv1.CheckpointReadinessProbe {
 	return &snapshotv1.CheckpointReadinessProbe{CheckpointReadinessProbeHandler: snapshotv1.CheckpointReadinessProbeHandler{
-		HTTPGet: &snapshotv1.LifecycleHTTPAction{Path: path, Port: port},
+		HTTPGet: &snapshotv1.HTTPGetAction{Path: path, Port: port},
 	}}
 }
 
@@ -234,7 +234,7 @@ func filePostRestore(path string) *snapshotv1.PostRestoreAction {
 
 func httpPostRestore(path string, port int32) *snapshotv1.PostRestoreAction {
 	return &snapshotv1.PostRestoreAction{PostRestoreHandler: snapshotv1.PostRestoreHandler{
-		HTTPPost: &snapshotv1.LifecycleHTTPAction{Path: path, Port: port},
+		HTTPPost: &snapshotv1.HTTPPostAction{Path: path, Port: port},
 	}}
 }
 
