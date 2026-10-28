@@ -51,6 +51,12 @@ func (e *FailureError) Error() string {
 // Code returns a known wire failure code; unknown codes map to UNSPECIFIED.
 func (e *FailureError) Code() Failure_Code { return e.code }
 
+// NewFailureError builds a broker failure, so callers outside this package can
+// construct the classifications they handle.
+func NewFailureError(code Failure_Code, message string) *FailureError {
+	return &FailureError{code: failureCode(code), message: message}
+}
+
 func isStorageFailure(code Failure_Code) bool {
 	switch code {
 	case Failure_STORE_MISMATCH, Failure_ACCESS_DENIED, Failure_STORAGE_UNAVAILABLE,

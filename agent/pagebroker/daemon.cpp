@@ -3,6 +3,7 @@
 
 #include <sys/syscall.h>
 #include "daemon.hpp"
+#include <set>
 #include "errors.hpp"
 #include "fatal_cleanup.hpp"
 
@@ -21,8 +22,9 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
-#include <charconv>
 #include <optional>
+#include <set>
+#include <limits>
 #include <stdexcept>
 #include <cstring>
 #include <filesystem>
@@ -39,6 +41,7 @@
 
 #include "broker.hpp"
 #include "file_descriptor.hpp"
+#include "utils/config.hpp"
 
 namespace fs = std::filesystem;
 using snapshot::pagebroker::Broker;
@@ -49,6 +52,8 @@ using snapshot::pagebroker::Request;
 using snapshot::pagebroker::Response;
 
 namespace {
+constexpr char kStorageConfigOption[] = "--storage-config";
+constexpr char kModelStreamerConfigOption[] = "--model-streamer-config";
 constexpr uint32_t kMaxMessageSize = 64 << 10;  // 64 KB
 constexpr size_t kMaxPassedFiles = 253;  // Linux SCM_RIGHTS per-message limit.
 constexpr timeval kConnectionTimeout{30, 0};
@@ -683,19 +688,22 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
   }
   gpu_connections.Stop();
   listener = FileDescriptor(-1);
-  broker.CancelGpuWork();
+  broker.Shutdown();
   WaitForHandlers(handlers);
 }
 
 size_t
 ParseSize(std::string_view option, std::string_view input, bool allow_zero)
 {
-  size_t value = 0;
-  const auto [end, error] = std::from_chars(input.data(), input.data() + input.size(), value);
-  if (error != std::errc{} || end != input.data() + input.size() || (!allow_zero && value == 0)) {
+  try {
+    const auto value = snapshot::pagebroker::utils::config::ParseUnsigned(input);
+    if (!allow_zero && value == 0)
+      throw std::invalid_argument("expected positive integer");
+    return value;
+  }
+  catch (const std::invalid_argument&) {
     throw std::invalid_argument("invalid value for " + std::string(option) + ": " + std::string(input));
   }
-  return value;
 }
 
 }  // namespace
@@ -711,12 +719,17 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
   options.socket_path = arguments[0];
   options.staging_directory = arguments[1];
   options.storage_root = arguments[2];
+  std::set<std::string_view> seen;
   for (size_t index = kPathArgumentCount; index < arguments.size(); ++index) {
     const auto option = arguments[index];
+    if (!seen.insert(option).second)
+      throw std::invalid_argument("duplicate option: " + std::string(option));
     if (++index == arguments.size()) {
       throw std::invalid_argument("missing value for " + std::string(option));
     }
     const auto input = arguments[index];
+    if (input.empty())
+      throw std::invalid_argument("empty value for " + std::string(option));
     if (option == "--custom-storage-engine") {
       if (input != "on" && input != "off") {
         throw std::invalid_argument("invalid value for --custom-storage-engine: " + std::string(input));
@@ -730,6 +743,10 @@ ParseDaemonOptions(std::span<const std::string_view> arguments)
       options.gpu.chunk_bytes = ParseSize(option, input, false);
     } else if (option == "--custom-storage-max-pinned-bytes") {
       options.gpu.max_pinned_bytes = ParseSize(option, input, true);
+    } else if (option == kStorageConfigOption) {
+      options.storage_config = input;
+    } else if (option == kModelStreamerConfigOption) {
+      options.model_streamer_config = input;
     } else {
       throw std::invalid_argument("unknown option: " + std::string(option));
     }
@@ -742,6 +759,30 @@ RunDaemon(const DaemonOptions& options)
 {
   shutting_down.store(false, std::memory_order_relaxed);
   snapshot::pagebroker::FatalCleanupShutdown cleanup_shutdown(shutting_down);
+  // Resolve the entire configuration before exposing a socket or creating
+  // worker threads. Cached native settings cannot be changed per operation.
+  using namespace snapshot::pagebroker;
+  std::optional<S3Config> config;
+  model_streamer::settings::Options model_streamer;
+  try {
+    if (!options.storage_config.empty()) {
+      config = ReadS3Config(options.storage_config);
+      if (config->active_transactions >= options.max_concurrent_requests)
+        throw std::invalid_argument("S3 transaction admission must leave a connection available for Abort");
+    }
+    if (!options.model_streamer_config.empty())
+      model_streamer = model_streamer::settings::ReadConfig(options.model_streamer_config);
+    if (config)
+      config->transfer.connection = LoadS3Credentials(std::move(config->transfer.connection));
+    model_streamer = model_streamer::settings::ResolveOptions(std::move(model_streamer), config ? &*config : nullptr);
+  }
+  catch (const std::invalid_argument& error) {
+    // Configuration errors report schema-owned field names, never values.
+    std::cerr << error.what() << '\n';
+    return ExitCode::INVALID_ARGUMENTS;
+  }
+  model_streamer::settings::ConfigureEnvironment(model_streamer, config ? &*config : nullptr);
+
   if (!RaiseFileDescriptorLimit())
     return ExitCode::FAILURE;
   if (BrokerPidfd() < 0)
@@ -771,7 +812,8 @@ RunDaemon(const DaemonOptions& options)
     return Fail("protect control socket", {errno, std::generic_category()});
   }
   try {
-    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine));
+    Broker broker(options.staging_directory, options.storage_root, std::move(gpu_engine), std::move(config),
+        kDefaultTransactionLifetime, std::move(model_streamer));
     Serve(listener, broker, options.max_concurrent_requests);
   } catch (const std::exception& failure) {
     std::cerr << "PageBroker: " << failure.what() << '\n';

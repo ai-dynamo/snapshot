@@ -322,6 +322,54 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 		"the readiness observation made before the failure must survive it")
 }
 
+func TestSnapshotJobReconcileRestartDoesNotOverwriteTerminalFailure(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	snap, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue,
+		Reason: "CRIUDumpFailed", Message: "dump failed",
+	})
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	storedSnap := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), storedSnap))
+	storedSnap.Status.Conditions = nil
+	meta.SetStatusCondition(&storedSnap.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue,
+		Reason: "StaleReady", Message: "late stale observation",
+	})
+	require.NoError(t, r.Update(context.Background(), storedSnap))
+
+	restarted := &SnapshotJobReconciler{
+		Client:             r.Client,
+		NonCacheReadClient: r.NonCacheReadClient,
+		Recorder:           r.Recorder,
+	}
+	_, err = restarted.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, restarted.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, failed.Reason)
+	captured := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	require.NotNil(t, captured)
+	assert.Equal(t, metav1.ConditionFalse, captured.Status)
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+}
+
 // TestSnapshotJobReconcileFailureTargetWinsOverCaptureFailure verifies the
 // condition Kubernetes publishes before terminal Failed=True is sufficient to
 // classify a raced deadline expiry.
@@ -800,4 +848,36 @@ func TestMapPodSnapshotToSnapshotJob(t *testing.T) {
 func TestSnapshotJobOwnerFromPodSnapshotObjRejectsWrongType(t *testing.T) {
 	_, err := snapshotJobOwnerFromPodSnapshotObj(&corev1.Pod{})
 	require.Error(t, err)
+}
+
+// SnapshotJob is the path most captures take, so a retry limit set on its
+// template is the only way most callers can ask for one.
+func TestBuildPodSnapshotCarriesTheRetryLimit(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "warm-worker-abcde", Namespace: "inference", UID: types.UID("pod-uid")},
+	}
+
+	for _, tc := range []struct {
+		name      string
+		requested *int32
+	}{
+		{"an explicit limit reaches the PodSnapshot", ptr.To(int32(2))},
+		{"an explicit zero is a request, not absence", ptr.To(int32(0))},
+		{"absent stays absent, deferring to the cluster default", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sj := minimalSnapshotJob()
+			sj.Spec.PodSnapshotTemplate.CheckpointRetryLimit = tc.requested
+
+			snap, err := buildPodSnapshot(sj, pod)
+			require.NoError(t, err)
+
+			if tc.requested == nil {
+				assert.Nil(t, snap.Spec.CheckpointRetryLimit)
+				return
+			}
+			require.NotNil(t, snap.Spec.CheckpointRetryLimit)
+			assert.Equal(t, *tc.requested, *snap.Spec.CheckpointRetryLimit)
+		})
+	}
 }

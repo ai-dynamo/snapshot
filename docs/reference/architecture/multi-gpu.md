@@ -412,6 +412,9 @@ The ownership mismatch caused the export to fail.
 
 CuInterpose works around this failure by implementing the legacy allocation and IPC calls with tracked VMM backing and the peer exchange described above.
 Applications keep their existing interfaces, while the shim can save and reconstruct the shared memory.
+The VMM backing stays hidden from the application.
+Like `cudaMalloc` memory, a converted allocation or its IPC import cannot be retained with `cuMemRetainAllocationHandle`, and only the converted allocation reports `CU_POINTER_ATTRIBUTE_IS_LEGACY_CUDA_IPC_CAPABLE`.
+Otherwise libraries that probe pointers, such as NCCL buffer registration, take VMM export paths that native `cudaMalloc` never reaches.
 The adapter is temporary, pending the driver fix described under [Planned deprecation](#planned-deprecation).
 
 #### Why allocation must be intercepted before export
@@ -1014,11 +1017,12 @@ The process runtime starts only after an intercepted `cuInit` succeeds.
 | Intercepted APIs | What the shim does |
 | --- | --- |
 | `cuInit` | Initializes the shim alongside CUDA. |
-| `cuMemCreate`, `cuMemRelease`, `cuMemRetainAllocationHandle` | Tracks supported VMM allocations and translates application-visible virtual allocation handles to the CUDA driver handle. |
+| `cuMemCreate`, `cuMemRelease`, `cuMemRetainAllocationHandle` | Tracks supported VMM allocations and translates application-visible virtual allocation handles to the CUDA driver handle. Refuses to retain converted malloc and IPC imports, as CUDA does for `cudaMalloc` memory. |
 | `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess` | Records address ranges, allocation offsets, and access permissions. Access from another GPU selects the host carrier. |
 | `cuMemGetAllocationPropertiesFromHandle` | Resolves virtual handles and preserves application-visible allocation properties. |
 | `cuMemExportToShareableHandle`, `cuMemImportFromShareableHandle` | Replaces raw export FDs with virtual shareable handles and imports the creator's real allocation through a peer request. |
 | `cuMemAlloc_v2`, `cuMemFree_v2`, `cuMemGetAddressRange_v2` | Implements synchronous device malloc with VMM backing, frees it, and reports the application's requested range. |
+| `cuPointerGetAttribute` | Reports `CU_POINTER_ATTRIBUTE_IS_LEGACY_CUDA_IPC_CAPABLE` for converted malloc and IPC imports as CUDA does for `cudaMalloc` memory. Other attributes go to CUDA. |
 | `cuCtxEnablePeerAccess`, `cuCtxDisablePeerAccess` | After peer access is enabled successfully, grants the current GPU access to existing and future converted malloc/IPC mappings owned by the peer context. Disabling peer access stops grants for future mappings but preserves permissions already granted to existing mappings. |
 | `cuCtxDestroy*`, `cuDevicePrimaryCtxReset*`, `cuDevicePrimaryCtxRelease*` | Removes converted malloc/IPC mappings after successful context teardown. Releasing a primary-context reference preserves its mappings if other references remain. |
 | `cuIpcGetMemHandle`, `cuIpcOpenMemHandle`, `cuIpcOpenMemHandle_v2`, `cuIpcCloseMemHandle` | Implements supported memory IPC using the same VMM records and peer export service, without native memory-IPC calls. |

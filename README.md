@@ -86,13 +86,12 @@ Before installing Snapshot, make sure the following are in place:
 - A Kubernetes cluster with NVIDIA GPU nodes running Linux kernel 5.13 or newer
 - containerd or CRI-O as the container runtime
 - [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with MIG disabled
-- NVIDIA kernel-mode driver 580 or newer, and CUDA user-mode driver
-  (`libcuda.so`) 615 or newer. With an older kernel-mode driver, point
-  `LD_LIBRARY_PATH` at a 615 or newer `libcuda.so` in both the workload and
-  PageBroker.
+- NVIDIA kernel-mode driver 580 or newer
 - A `ReadWriteMany` (RWX) storage class
 - The [Helm](https://helm.sh/docs/intro/install) CLI
 - A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
+
+Some features raise this floor — see [Compatibility](docs/reference/compatibility.md).
 
 ## Installation
 
@@ -173,6 +172,7 @@ operations, indexed below.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
 - [Workload contract](docs/reference/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
 - [Restore Pod contract](docs/reference/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
+- [Compatibility](docs/reference/compatibility.md) — minimum GPU driver and other dependency versions, per feature.
 
 **Operations**
 
@@ -185,6 +185,8 @@ operations, indexed below.
 
 - [Building from source](docs/development/build-from-source.md) — build the images and install locally.
 - [Benchmarks](docs/development/benchmarks.md) — how startup performance is measured.
+- [Writing documentation](docs/development/writing-docs.md) — where a change goes and how to write it.
+- [Naming conventions](docs/development/naming.md) — terms and naming patterns for the API, chart, and docs.
 
 **More**
 

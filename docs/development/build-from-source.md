@@ -77,5 +77,8 @@ Common `make` targets from the repo root:
 - `make helm-lint` — lint the Helm chart
 - `make check` — the full pre-merge gate (generate, license headers, fmt, tidy, lint, and more)
 
+The PageBroker image build runs its native unit tests without a local S3 service,
+Python test harness, GPU, or cluster.
+
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.

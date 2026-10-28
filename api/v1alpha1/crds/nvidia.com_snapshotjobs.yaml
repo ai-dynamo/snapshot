@@ -105,6 +105,15 @@ spec:
                   PodSnapshotTemplate defines the properties of the PodSnapshot produced by
                   this job. The controller fills in spec.source from the pod it creates.
                 properties:
+                  checkpointRetryLimit:
+                    description: |-
+                      CheckpointRetryLimit is copied to the generated PodSnapshot: how many
+                      times a failed capture may be retried in place, over and above the first
+                      attempt. Unset defers to the agent's cluster-wide default, which is
+                      distinct from an explicit 0 asking for no retry.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   metadata:
                     description: |-
                       Metadata contains labels and annotations copied to the generated
