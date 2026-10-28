@@ -26,7 +26,7 @@ description.
 | Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Compatibility](../reference/compatibility.md) for the driver and CUDA versions, baseline and per feature, and the README [prerequisites](../../README.md#prerequisites) for the rest of the cluster requirements |
 | What must my workload or Pod do? | [Workload contract](../reference/workload-contract.md), [Restore Pod contract](../reference/restore-pod-contract.md) |
 | How do I install, configure, upgrade, or clean up? | [`docs/operations/`](../operations) |
-| How do I get a first checkpoint and restore working? | [Usage guides](../guides/README.md) |
+| How do I checkpoint a pod and restore it for the first time? | [Usage guides](../guides/README.md) |
 | It failed. Why, and what do I do? | [Troubleshooting](../operations/troubleshooting.md) |
 | What is not supported? | [Limitations](../limitations.md) |
 | How do the pieces fit together? | The [architecture overview](../reference/architecture/README.md) |
@@ -59,7 +59,7 @@ leave them alone when it does not:
 
 | Page | Changes when |
 | --- | --- |
-| Guides | The default path to a first checkpoint and restore changes |
+| Guides | The default first-run path for checkpoint and restore changes |
 | Troubleshooting | An issue, a support case, or the request reports a failure that users hit |
 | Limitations | The change adds or removes an unsupported case |
 | README | A page is added or removed |
@@ -134,8 +134,8 @@ The feature's own page links to that row and does not repeat the number.
 2. Write only what the change description, the code, the chart, the CRD, or a
    test states. A value or behavior you were not given is a question for the
    author. List it in your PR description and leave it out of the docs.
-3. Translate loose wording from the issue or PR, such as "snapshot", "dump",
-   "helper", or "saved state", into the terms in
+3. Translate loose wording from the issue or PR, such as "dump", "helper", or
+   "saved state", into the terms in
    [Naming conventions](naming.md). Describe a feature by what it does for the
    reader, not by the mechanism behind it.
 4. Edit a sentence when the change makes it false or incomplete. Leave the rest
