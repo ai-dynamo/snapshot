@@ -16,8 +16,11 @@
 #          when its own tag is missing or new, and one for the pre-keying tag
 #          behind both. Pull requests never write: a cache a pull request can
 #          write is a cache a fork can poison.
-#   write  --cache-from and --cache-to for the branch. Only pushes to main and
-#          release/* reach this, from push-artifacts.yaml; a release runs the
+#   write  --cache-to for the branch, and --cache-from for the branch with main
+#          behind it, as in read mode. push-artifacts.yaml reaches this for
+#          pushes to main and release/*, and for a manual run on any other
+#          branch; without the fallback, a branch's first build found no cache
+#          of its own and built every layer from scratch. A release runs the
 #          same workflow in read mode, because a tag never recurs and so a
 #          cache published under one is a cache nothing ever reads.
 #
@@ -100,11 +103,13 @@ read)
     printf ' %s' "--cache-from=type=registry,ref=${legacy_ref}"
     ;;
 write)
+    printf '%s' "--cache-from=type=registry,ref=${ref}"
+    if [ "$ref" != "$main_ref" ]; then
+        printf ' %s' "--cache-from=type=registry,ref=${main_ref}"
+    fi
     # image-manifest and oci-mediatypes because GHCR rejects buildkit's
     # default cache manifest type.
-    printf '%s %s' \
-        "--cache-from=type=registry,ref=${ref}" \
-        "--cache-to=type=registry,ref=${ref},mode=max,image-manifest=true,oci-mediatypes=true"
+    printf ' %s' "--cache-to=type=registry,ref=${ref},mode=max,image-manifest=true,oci-mediatypes=true"
     ;;
 *)
     echo "unknown mode: $MODE (expected read or write)" >&2
