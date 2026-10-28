@@ -122,11 +122,13 @@ func (h *probeHarness) checkCount() int {
 	return h.checks
 }
 
-func (h *probeHarness) updatePod(mutate func(*corev1.Pod)) {
+// updatePodStatus changes the source Pod's status. The fake client gives Pods a
+// status subresource, so a plain Update would drop the change.
+func (h *probeHarness) updatePodStatus(mutate func(*corev1.Pod)) {
 	h.t.Helper()
 	pod := getPod(h.t, h.w, "inference", "worker-0")
 	mutate(pod)
-	require.NoError(h.t, h.w.client.Update(context.Background(), pod))
+	require.NoError(h.t, h.w.client.Status().Update(context.Background(), pod))
 }
 
 func fileProbe(path string, period, threshold, delay int32) snapshotv1alpha1.CheckpointReadinessProbe {
@@ -208,7 +210,7 @@ func TestCheckpointProbe_AContainerRestartResetsTheCount(t *testing.T) {
 	require.Equal(t, 1, h.checkCount())
 
 	restartedAt := probeStart.Add(20 * time.Second)
-	h.updatePod(func(pod *corev1.Pod) {
+	h.updatePodStatus(func(pod *corev1.Pod) {
 		pod.Status.ContainerStatuses[0].RestartCount = 1
 		pod.Status.ContainerStatuses[0].ContainerID = "containerd://def456"
 		pod.Status.ContainerStatuses[0].State.Running.StartedAt = metav1.NewTime(restartedAt)
