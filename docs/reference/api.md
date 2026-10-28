@@ -142,7 +142,9 @@ of `file` or `httpPost`. A file path is absolute and clean (no empty, `.` or
 differ.
 
 Without a `checkpointReadinessProbe`, the node agent checkpoints once the
-container is Ready, as before. With one, the probe decides instead. A probe the
+container is Ready, as before. With one, the probe decides instead, and a
+`SnapshotJob` keeps the container's own readiness probe rather than replacing
+it with the `ready-for-snapshot` one. A probe the
 agent can never run fails the `PodSnapshot` with reason
 `InvalidCheckpointReadinessProbe`; while it waits, the source Pod gets a
 `WaitingForCheckpointReadiness` event.
