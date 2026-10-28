@@ -220,7 +220,7 @@ type CheckpointReadinessProbeHandler struct {
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 	// +optional
-	HTTPGet *LifecycleHTTPAction `json:"httpGet,omitempty"`
+	HTTPGet *HTTPGetAction `json:"httpGet,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.file) != has(self.httpPost)",message="select exactly one of file or httpPost"
@@ -241,7 +241,7 @@ type PostRestoreHandler struct {
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 	// +optional
-	HTTPPost *LifecycleHTTPAction `json:"httpPost,omitempty"`
+	HTTPPost *HTTPPostAction `json:"httpPost,omitempty"`
 }
 
 type ControlFileAction struct {
@@ -251,7 +251,18 @@ type ControlFileAction struct {
 	Path string `json:"path"`
 }
 
-type LifecycleHTTPAction struct {
+type HTTPGetAction struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.startsWith('//') && !self.contains('?') && !self.contains('#')",message="path must start with / and have no authority, query, or fragment"
+	Path string `json:"path"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+}
+
+type HTTPPostAction struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=4096
 	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.startsWith('//') && !self.contains('?') && !self.contains('#')",message="path must start with / and have no authority, query, or fragment"
