@@ -285,15 +285,24 @@ def test_snapshotjob_saves_container_settings_in_the_checkpoint(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    # Container settings travel SnapshotJob -> PodSnapshot -> PodSnapshotContent,
-    # with defaults filled in, and the content keeps them for every restore.
+    # Container settings travel SnapshotJob -> PodSnapshot -> PodSnapshotContent.
+    # Values the user set are kept, the rest are filled in with defaults, and
+    # the content keeps the full settings for every restore.
     # The probe reads ready-for-snapshot, which the source already writes, so
     # the capture behaves the same whether or not the agent acts on the probe.
     # Nothing here restores, so the post-restore action never runs.
     settings = {
         "name": workloads.CONTAINER,
-        "checkpointReadinessProbe": {"file": {"path": workloads.SOURCE_READY}},
-        "lifecycle": {"postRestore": {"file": {"path": f"{workloads.STATE_DIR}/released"}}},
+        "checkpointReadinessProbe": {
+            "file": {"path": workloads.SOURCE_READY},
+            "periodSeconds": 2,
+        },
+        "lifecycle": {
+            "postRestore": {
+                "file": {"path": f"{workloads.STATE_DIR}/released"},
+                "timeoutSeconds": 3,
+            }
+        },
     }
     expected = [
         {
@@ -301,7 +310,7 @@ def test_snapshotjob_saves_container_settings_in_the_checkpoint(
             "checkpointReadinessProbe": {
                 "file": {"path": workloads.SOURCE_READY},
                 "initialDelaySeconds": 0,
-                "periodSeconds": 1,
+                "periodSeconds": 2,
                 "timeoutSeconds": 1,
                 "successThreshold": 1,
             },
@@ -309,7 +318,7 @@ def test_snapshotjob_saves_container_settings_in_the_checkpoint(
                 "postRestore": {
                     "file": {"path": f"{workloads.STATE_DIR}/released"},
                     "periodSeconds": 1,
-                    "timeoutSeconds": 1,
+                    "timeoutSeconds": 3,
                 }
             },
         }

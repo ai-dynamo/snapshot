@@ -121,6 +121,26 @@ func TestContainerConfigAdmission(t *testing.T) {
 		assert.Equal(t, int32(1), postRestore.TimeoutSeconds)
 	})
 
+	t.Run("podsnapshot-partial-defaults", func(t *testing.T) {
+		probe := httpProbe("/status", 8000)
+		probe.PeriodSeconds = 5
+		probe.SuccessThreshold = 2
+		postRestore := filePostRestore("/tmp/released")
+		postRestore.TimeoutSeconds = 3
+		snap := newSettingsSnapshot("partial-defaults", config(probe, postRestore))
+		require.NoError(t, cl.Create(ctx, snap))
+		stored := &snapshotv1.PodSnapshot{}
+		require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(snap), stored))
+		gotProbe := stored.Spec.Containers[0].CheckpointReadinessProbe
+		assert.Equal(t, int32(5), gotProbe.PeriodSeconds, "a value the user set is kept")
+		assert.Equal(t, int32(2), gotProbe.SuccessThreshold, "a value the user set is kept")
+		assert.Equal(t, int32(0), gotProbe.InitialDelaySeconds)
+		assert.Equal(t, int32(1), gotProbe.TimeoutSeconds)
+		gotPostRestore := stored.Spec.Containers[0].Lifecycle.PostRestore
+		assert.Equal(t, int32(3), gotPostRestore.TimeoutSeconds, "a value the user set is kept")
+		assert.Equal(t, int32(1), gotPostRestore.PeriodSeconds)
+	})
+
 	t.Run("podsnapshot-two-entries", func(t *testing.T) {
 		snap := newSettingsSnapshot("two-entries", snapshotv1.ContainerSnapshotConfig{Name: "main"})
 		snap.Spec.Containers = append(snap.Spec.Containers, snapshotv1.ContainerSnapshotConfig{Name: "main"})
