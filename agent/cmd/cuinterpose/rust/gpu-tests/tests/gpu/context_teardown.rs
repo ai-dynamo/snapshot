@@ -73,9 +73,7 @@ fn teardown_frees_only_its_mallocs(teardown: Teardown) {
             }
             _ => cuda::malloc(MALLOC_SIZE),
         };
-        let handle = cuda::retain(converted);
-        cuda::assert_handle_namespace(handle, true, "converted malloc");
-        cu!(cuMemRelease(handle));
+        assert_eq!(shim::mapped_location(pid(), converted).id, device);
         cuda::write_bytes(converted, b"converted malloc");
         let properties = cuda::allocation_properties(0, false);
         let (handle, address, size) = cuda::create_mapped(&properties, None);

@@ -216,6 +216,7 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 					Containers: slices.Clone(targetContainers),
 				},
 			},
+			CheckpointRetryLimit: sj.Spec.PodSnapshotTemplate.CheckpointRetryLimit,
 		},
 	}, nil
 }

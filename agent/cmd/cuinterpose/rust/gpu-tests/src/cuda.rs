@@ -221,6 +221,31 @@ pub fn retain(address: CUdeviceptr) -> CUmemGenericAllocationHandle {
     handle
 }
 
+/// Asserts that `address` looks like cudaMalloc memory, or its IPC import, to libraries
+/// that probe it. NCCL, for example, registers retainable memory through cuMem exports,
+/// which a converted malloc must not enable.
+pub fn assert_malloc_semantics(address: CUdeviceptr, import: bool, stage: &str) {
+    let mut handle = 0;
+    // SAFETY: handle is writable and the address is only inspected.
+    let status = unsafe { sys::cuMemRetainAllocationHandle(&mut handle, address as *mut c_void) };
+    assert_eq!(
+        status,
+        sys::CUresult::CUDA_ERROR_INVALID_VALUE,
+        "{stage}: malloc {address:#x} was retainable"
+    );
+    let mut capable = 0u32;
+    cu!(cuPointerGetAttribute(
+        (&raw mut capable).cast(),
+        sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_IS_LEGACY_CUDA_IPC_CAPABLE,
+        address
+    ));
+    assert_eq!(
+        capable != 0,
+        !import,
+        "{stage}: wrong legacy IPC capability for {address:#x}"
+    );
+}
+
 /// Exports a POSIX descriptor. Under the shim, any export marks the backing shared.
 pub fn export_fd(handle: CUmemGenericAllocationHandle) -> OwnedFd {
     let mut fd: i32 = -1;

@@ -96,6 +96,16 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  {{- if eq .Values.storage.type "s3" }}
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    # Top-level "create" cannot be scoped by resourceNames.
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ include "snapshot.pageBrokerS3ConfigName" . | quote }}]
+    verbs: ["get", "update"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

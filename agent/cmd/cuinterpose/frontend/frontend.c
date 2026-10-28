@@ -52,6 +52,7 @@ enum {
     X(cuMemAlloc_v2, (CUdeviceptr *out, size_t size), (out, size)) \
     X(cuMemFree_v2, (CUdeviceptr address), (address)) \
     X(cuMemGetAddressRange_v2, (CUdeviceptr *base, size_t *size, CUdeviceptr address), (base, size, address)) \
+    X(cuPointerGetAttribute, (void *data, CUpointer_attribute attribute, CUdeviceptr address), (data, attribute, address)) \
     X(cuIpcGetMemHandle, (CUipcMemHandle *out, CUdeviceptr address), (out, address)) \
     X(cuIpcOpenMemHandle, (CUdeviceptr *out, CUipcMemHandle handle, unsigned flags), (out, handle, flags)) \
     X(cuIpcOpenMemHandle_v2, (CUdeviceptr *out, CUipcMemHandle handle, unsigned flags), (out, handle, flags)) \
