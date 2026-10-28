@@ -397,7 +397,7 @@ def snapshot_helm_overrides(
     # The operator rejects container settings (SNEP-411) until the agent fully
     # supports them; e2e turns them on to test each step as it lands. Temporary,
     # removed with the chart value. First, so the user's overrides still win.
-    overrides.insert(0, "operator.applicationContracts=true")
+    overrides.insert(0, "operator.lifecycleHooks=true")
     return overrides
 
 

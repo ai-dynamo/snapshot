@@ -35,16 +35,16 @@ func containerSettings(name string) []snapshotv1alpha1.ContainerSnapshotConfig {
 	}}
 }
 
-func TestUsesContainerSettings(t *testing.T) {
-	assert.False(t, usesContainerSettings(nil))
-	assert.False(t, usesContainerSettings([]snapshotv1alpha1.ContainerSnapshotConfig{{Name: "main"}}),
+func TestUsesLifecycleHooks(t *testing.T) {
+	assert.False(t, usesLifecycleHooks(nil))
+	assert.False(t, usesLifecycleHooks([]snapshotv1alpha1.ContainerSnapshotConfig{{Name: "main"}}),
 		"an entry with only a name changes nothing")
 	probeOnly := containerSettings("main")
 	probeOnly[0].Lifecycle = nil
-	assert.True(t, usesContainerSettings(probeOnly))
+	assert.True(t, usesLifecycleHooks(probeOnly))
 	lifecycleOnly := containerSettings("main")
 	lifecycleOnly[0].CheckpointReadinessProbe = nil
-	assert.True(t, usesContainerSettings(lifecycleOnly))
+	assert.True(t, usesLifecycleHooks(lifecycleOnly))
 }
 
 func TestBuildPodSnapshotCarriesContainerSettings(t *testing.T) {
@@ -83,7 +83,7 @@ func TestSnapshotReconciler_BuildPodSnapshotContentSavesContainerSettings(t *tes
 	assert.Nil(t, r.buildPodSnapshotContent(snap, "content-x", scheduledPod()).Spec.Containers)
 }
 
-func TestSnapshotReconciler_ContainerSettingsGate(t *testing.T) {
+func TestSnapshotReconciler_LifecycleHooksGate(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		settings    []snapshotv1alpha1.ContainerSnapshotConfig
@@ -100,7 +100,7 @@ func TestSnapshotReconciler_ContainerSettingsGate(t *testing.T) {
 			snap.Spec.Source.PodRef.Containers = []string{"main"}
 			snap.Spec.Containers = tc.settings
 			r := makeSnapshotReconciler(snapshotReconcilerScheme(), snap, scheduledPod())
-			r.EnableApplicationContracts = tc.enabled
+			r.EnableLifecycleHooks = tc.enabled
 
 			reconcileSnapshot(t, r, snap.Name)
 
@@ -113,8 +113,8 @@ func TestSnapshotReconciler_ContainerSettingsGate(t *testing.T) {
 				assert.Empty(t, contents.Items, "a rejected request must not create content")
 				require.NotNil(t, failed)
 				assert.Equal(t, metav1.ConditionTrue, failed.Status)
-				assert.Equal(t, podSnapshotReasonContainerSettingsDisabled, failed.Reason)
-				assert.Contains(t, failed.Message, "--enable-application-contracts")
+				assert.Equal(t, podSnapshotReasonLifecycleHooksDisabled, failed.Reason)
+				assert.Contains(t, failed.Message, "--enable-lifecycle-hooks")
 				return
 			}
 			assert.Nil(t, failed)
@@ -124,7 +124,7 @@ func TestSnapshotReconciler_ContainerSettingsGate(t *testing.T) {
 	}
 }
 
-func TestSnapshotJobReconcileContainerSettingsGate(t *testing.T) {
+func TestSnapshotJobReconcileLifecycleHooksGate(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		enabled bool
@@ -136,7 +136,7 @@ func TestSnapshotJobReconcileContainerSettingsGate(t *testing.T) {
 			sj := minimalSnapshotJob()
 			sj.Spec.PodSnapshotTemplate.Containers = containerSettings("worker")
 			r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
-			r.EnableApplicationContracts = tc.enabled
+			r.EnableLifecycleHooks = tc.enabled
 
 			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 			require.NoError(t, err)
@@ -154,7 +154,7 @@ func TestSnapshotJobReconcileContainerSettingsGate(t *testing.T) {
 			failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
 			require.NotNil(t, failed)
 			assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, failed.Reason)
-			assert.Contains(t, failed.Message, "--enable-application-contracts")
+			assert.Contains(t, failed.Message, "--enable-lifecycle-hooks")
 		})
 	}
 }

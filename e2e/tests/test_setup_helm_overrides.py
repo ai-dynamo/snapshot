@@ -85,12 +85,12 @@ def test_install_without_overrides_is_unchanged(monkeypatch):
         (
             "vcluster",
             [
-                "operator.applicationContracts=true",
+                "operator.lifecycleHooks=true",
                 "daemonset.nriHostNamespace=snapshot-e2e-vc",
                 "a=user",
             ],
         ),
-        ("direct", ["operator.applicationContracts=true", "a=user"]),
+        ("direct", ["operator.lifecycleHooks=true", "a=user"]),
     ],
 )
 def test_vcluster_restores_only_its_own_pods(mode, expected):
