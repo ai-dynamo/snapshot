@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/lifecyclehooks"
@@ -41,6 +42,8 @@ type postRestoreHarness struct {
 	restores     int
 	httpResults  []error // one per POST; the last one repeats
 	httpIP       string
+	httpPort     int32
+	httpPath     string
 	httpTimeout  time.Duration
 	waits        int
 	maxWaits     int // a wait after this many fails as if the deadline passed
@@ -54,6 +57,7 @@ func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAct
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.PodIP = "10.0.0.9"
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "app-release", MountPath: "/app-release"}}
+	pod.Spec.Containers[0].Ports = []corev1.ContainerPort{{Name: "hooks", ContainerPort: 8000}}
 	pod.Spec.Volumes = []corev1.Volume{{Name: "app-release", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
 	h := &postRestoreHarness{
 		t: t, pod: pod, files: map[string]bool{}, maxWaits: 3,
@@ -91,10 +95,10 @@ func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAct
 		h.events = append(h.events, "marker "+path)
 		return nil
 	}
-	w.postRestoreHTTPFn = func(_ context.Context, ip string, _ *snapshotv1alpha1.HTTPPostAction, timeout time.Duration) error {
+	w.postRestoreHTTPFn = func(_ context.Context, ip string, port int32, path string, timeout time.Duration) error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		h.httpIP, h.httpTimeout = ip, timeout
+		h.httpIP, h.httpPort, h.httpPath, h.httpTimeout = ip, port, path, timeout
 		h.events = append(h.events, "post")
 		if len(h.httpResults) == 0 {
 			return nil
@@ -146,9 +150,13 @@ func filePostRestore(path string) *snapshotv1alpha1.PostRestoreAction {
 }
 
 func httpPostRestore() *snapshotv1alpha1.PostRestoreAction {
+	return httpPostRestoreOn(intstr.FromInt32(8000))
+}
+
+func httpPostRestoreOn(port intstr.IntOrString) *snapshotv1alpha1.PostRestoreAction {
 	return &snapshotv1alpha1.PostRestoreAction{
 		PostRestoreHandler: snapshotv1alpha1.PostRestoreHandler{
-			HTTPPost: &snapshotv1alpha1.HTTPPostAction{Path: "/checkpoint/resume", Port: 8000},
+			HTTPPost: &snapshotv1alpha1.HTTPPostAction{Path: "/checkpoint/resume", Port: port},
 		},
 		PeriodSeconds: 1, TimeoutSeconds: 4,
 	}
@@ -232,6 +240,7 @@ func TestPostRestoreRefusedTargetsFailWithoutCRIU(t *testing.T) {
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 		}},
 		{"HTTP on the host network", httpPostRestore(), func(pod *corev1.Pod) { pod.Spec.HostNetwork = true }},
+		{"HTTP on a port name the destination doesn't have", httpPostRestoreOn(intstr.FromString("metrics")), func(*corev1.Pod) {}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPostRestoreHarness(t, tc.action)
@@ -258,7 +267,17 @@ func TestPostRestoreHTTPRetriesUntilAccepted(t *testing.T) {
 
 	assert.Equal(t, []string{"sentinel " + podcontract.RestoreCompleteFile, "post", "post", "post"}, h.recordedEvents())
 	assert.Equal(t, "10.0.0.9", h.httpIP)
+	assert.Equal(t, int32(8000), h.httpPort)
+	assert.Equal(t, "/checkpoint/resume", h.httpPath)
 	assert.Equal(t, 4*time.Second, h.httpTimeout)
+}
+
+func TestPostRestoreHTTPResolvesANamedPortOnTheDestination(t *testing.T) {
+	h := newPostRestoreHarness(t, httpPostRestoreOn(intstr.FromString("hooks")))
+
+	require.NoError(t, h.run(false))
+
+	assert.Equal(t, int32(8000), h.httpPort)
 }
 
 func TestPostRestoreThatNeverSucceedsFailsTheRestore(t *testing.T) {

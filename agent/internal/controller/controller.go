@@ -91,7 +91,7 @@ type NodeController struct {
 
 	// The post-restore action's seams. postRestoreWaitFn defaults to a timer when nil.
 	createMarkerFn           func(hostPID int, path string) error
-	postRestoreHTTPFn        func(ctx context.Context, podIP string, action *snapshotv1alpha1.HTTPPostAction, timeout time.Duration) error
+	postRestoreHTTPFn        func(ctx context.Context, podIP string, port int32, path string, timeout time.Duration) error
 	controlSentinelModTimeFn func(hostPID int, name string) (time.Time, error)
 	postRestoreWaitFn        func(ctx context.Context, d time.Duration) error
 

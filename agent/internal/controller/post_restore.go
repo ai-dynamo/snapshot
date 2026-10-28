@@ -55,6 +55,11 @@ func (op *restoreOperation) checkPostRestoreBeforeRestore(ctx context.Context, a
 			return postRestoreStepError(executor.StepCheckPostRestore,
 				fmt.Errorf("Pod %s/%s uses the host network; HTTP actions need the Pod's own IP", op.pod.Namespace, op.pod.Name))
 		}
+		// A named port resolves against the destination container, which
+		// runs the restored application.
+		if _, err := lifecyclehooks.ResolvePort(op.pod, op.destination, action.HTTPPost.Port); err != nil {
+			return postRestoreStepError(executor.StepCheckPostRestore, err)
+		}
 		return nil
 	default:
 		return postRestoreStepError(executor.StepCheckPostRestore, errors.New("lifecycle.postRestore has no file or httpPost"))
@@ -130,7 +135,11 @@ func (op *restoreOperation) postRestoreAttempt(ctx context.Context, action *snap
 	if err != nil {
 		return err
 	}
-	return w.postRestoreHTTPFn(ctx, podIP, action.HTTPPost, timeout)
+	port, err := lifecyclehooks.ResolvePort(op.pod, op.destination, action.HTTPPost.Port)
+	if err != nil {
+		return err
+	}
+	return w.postRestoreHTTPFn(ctx, podIP, port, action.HTTPPost.Path, timeout)
 }
 
 // podIP returns the restore Pod's IP, reading the Pod again when the copy this
