@@ -33,6 +33,7 @@ SPDX-License-Identifier: Apache-2.0
     - [HOST_NUMA allocations](#host_numa-allocations)
   - [Capture](#capture)
   - [Restore](#restore)
+  - [Groups of Pods](#groups-of-pods)
   - [API](#api)
     - [Kubernetes opt-in](#kubernetes-opt-in)
     - [Source Pod shaping](#source-pod-shaping)
@@ -91,7 +92,7 @@ CuInterpose addresses those limits while preserving the application's existing a
 
 ### Non-Goals
 
-- Cross-Pod coordination or live sharing between nodes.
+- Sharing between nodes outside a [group of Pods](#groups-of-pods) that captures and restores together.
   Cross-node restore moves the captured group together to a compatible destination.
 - Replacing native CUDA checkpointing, CRIU, or Snapshot's storage interfaces.
 - Automatically draining GPU work, changing the participant group during capture, or retrying and rolling back a failed lifecycle operation.
@@ -123,7 +124,7 @@ CuInterpose is available as an opt-in Beta within this workload contract.
 ### Limitations
 
 CuInterpose supports memory sharing through CUDA legacy memory IPC and VMM APIs between processes in one container on a single node.
-Memory sharing across nodes through [Multi-Node NVLink (MNNVL)](https://docs.nvidia.com/multi-node-nvlink-systems/mnnvl-user-guide/overview.html) is not yet supported.
+Memory sharing across nodes through [Multi-Node NVLink (MNNVL)](https://docs.nvidia.com/multi-node-nvlink-systems/mnnvl-user-guide/overview.html) needs the agent to run each Pod's coordinator in a [group](#groups-of-pods), which the agent does not do yet.
 
 The main operational constraints are:
 
@@ -370,7 +371,7 @@ A multicast team can therefore have devices in several Pods.
 POSIX sharing cannot cross Pods, because a POSIX import names its creator by PID in the importer's own namespace.
 The creator always saves a FABRIC allocation, because its importers do not know its size.
 The coordinator refuses a FABRIC import whose creator is not in the group or no longer holds the allocation.
-Today every Pod's coordinator runs alone, as a group of one, so FABRIC sharing between the processes of one Pod checkpoints and restores, and a Pod that imports FABRIC memory from another Pod is refused at inspection, before anything changes.
+A coordinator started without a session runs its Pod alone, as a group of one, so FABRIC sharing between the processes of one Pod checkpoints and restores, and a Pod that imports FABRIC memory from another Pod is refused at inspection, before anything changes.
 
 #### Multicast tracking
 
@@ -747,6 +748,39 @@ During teardown, participants can remove their existing references concurrently 
 During reconstruction, importers must wait for creators to make the new objects available, and memory binding must wait for every device to join.
 A process can create one resource and import another, so the coordinator applies these dependencies per resource rather than dividing processes into separate creator and importer groups.
 
+### Groups of Pods
+
+Pods that share FABRIC memory across nodes capture and restore as one group.
+Each Pod that uses CuInterpose still runs one coordinator, which reaches its own processes over their sockets.
+In a group, the agent passes the coordinator a socket to the `cuinterpose` namespace of the attempt's coordination session and the group arguments of the [coordinator CLI](#coordinator-cli).
+The coordinator of the lowest rank leads the group. It validates the group's records as [one topology](#creator-and-checkpoint-holder) and keeps the table of old and new FABRIC handles.
+
+Every operation of a mode is one round:
+
+1. The leader inserts the round's command, `<mode>.<k>.cmd`, which names the step and its arguments.
+   Arguments meant for one rank, such as the carrier bytes and owners of `SAVE_ALLOCATIONS`, are keyed by rank.
+2. Every coordinator runs the step on its own processes, and each one except the leader inserts its reply under `<mode>.<k>.reply.<rank>`.
+3. The leader reads every reply, folds the results into the group state, and removes the round's keys.
+
+The modes run these steps, with `<mode>` set to `inspect`, `prepare`, or `restore`:
+
+| Mode | Steps |
+| --- | --- |
+| `inspect` | `INSPECT`, then validation |
+| `prepare` | `BEGIN_CHECKPOINT` with validation, `PREPARE_MULTICAST`, `SAVE_ALLOCATIONS`, `PREPARE_UNICAST` |
+| `restore` | `INSPECT` with the saved records, `LOAD_ALLOCATIONS`, `RESTORE_UNICAST`, the four multicast phases, and a final `INSPECT` |
+
+After the last step, the leader inserts `{done: true}` as the next command, and every coordinator exits.
+At prepare, each coordinator writes its own Pod's `cuinterpose.state` when the mode ends.
+
+The deadline bounds the first round, because at restore each coordinator starts only after its own Pod's CRIU and CUDA restores.
+`--round-timeout-seconds` bounds every later round.
+A coordinator that fails ends the attempt for every member through the session, with reason `Refused` when the leader refuses the topology and `MemberFailed` otherwise.
+Every other coordinator then exits with an error, and each agent handles the failure as for a single Pod.
+
+A Pod alone runs the same steps as the leader of a group of one, without a session.
+The agent side, which creates the socket and serves the session for each coordinator, comes with the agent's group support.
+
 ### API
 
 #### Kubernetes opt-in
@@ -824,6 +858,8 @@ The agent invokes the coordinator with an explicit participant list:
 cuinterpose-coordinator (--inspect | --prepare | --restore)
     --socket-dir DIR --process PID [--process PID ...]
     [--checkpoint-dir DIR]
+    [--session-fd FD --rank RANK --relay-ranks RANK,...
+     --round-timeout-seconds SECONDS --deadline UNIX_SECONDS]
 ```
 
 | Argument | Contract |
@@ -834,6 +870,11 @@ cuinterpose-coordinator (--inspect | --prepare | --restore)
 | `--socket-dir DIR` | Required directory containing participant control sockets. |
 | `--process PID` | Required namespace PID of a participant. Repeat for every participant. The coordinator does not discover additional processes. |
 | `--checkpoint-dir DIR` | Required for `--prepare` and `--restore`, and rejected with `--inspect`. |
+| `--session-fd FD` | The agent's socket for the [group's session](#groups-of-pods). Without it, the Pod runs alone. With it, every argument below is required. |
+| `--rank RANK` | This Pod's rank in the group. |
+| `--relay-ranks RANK,...` | Every rank that runs a coordinator. It must contain `--rank`. The lowest leads the group. |
+| `--round-timeout-seconds SECONDS` | Bounds the leader's wait for the replies of each round after the first. |
+| `--deadline UNIX_SECONDS` | The attempt's deadline. It bounds the first round and every wait of the other coordinators. |
 
 Select exactly one operation.
 The [capture](#capture) and [restore](#restore) sequences define when the agent invokes each operation relative to the CUDA Driver and CRIU.

@@ -13,6 +13,7 @@ use cuinterpose_protocol::{
     AllocationId, AllocationOwner, AllocationReference, BindingSource, FabricHandle, FabricUpdate,
     Manifest, MemberRange, MemoryLocation, MulticastProperties, NamespacePid, Operation, Record,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub type Rank = u32;
@@ -42,13 +43,14 @@ fn local_pid(group_pid: NamespacePid) -> NamespacePid {
 }
 
 /// A Pod alone, as a group of one.
+#[cfg(test)]
 pub fn alone(manifest: Manifest) -> Pods {
     Pods::from([(0, manifest)])
 }
 
 /// What one process does in a phase: the carrier bytes it copies and, in
 /// SaveAllocations, the owner of each host-carrier allocation that it holds.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CarrierPlan {
     pub bytes: u64,
     pub owners: Vec<AllocationOwner>,

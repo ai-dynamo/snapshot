@@ -194,7 +194,10 @@ dependencies = [
  "clap",
  "cudarc",
  "cuinterpose-protocol",
+ "rmp-serde",
  "rustix",
+ "serde",
+ "serde_bytes",
  "tempfile",
 ]
 
