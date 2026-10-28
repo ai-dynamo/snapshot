@@ -42,6 +42,8 @@ SIGTERM_EXIT = 42
 # checkpoint readiness probe on it holds the checkpoint until the test does.
 CHECKPOINT_READY = f"{STATE_DIR}/checkpoint-ready"
 HOOKS_PORT = 8000
+# The source names HOOKS_PORT, so a test can address it by name.
+HOOKS_PORT_NAME = "hooks"
 HOOKS_STATUS_PATH = "/checkpoint/status"
 SOURCE_TOKEN_ENV = "SNAPSHOT_E2E_SOURCE_TOKEN"
 RESTORE_TOKEN_ENV = "SNAPSHOT_E2E_RESTORE_TOKEN"
@@ -105,6 +107,8 @@ def source_pod(
     spec["containers"][0]["env"] = [
         {"name": SOURCE_TOKEN_ENV, "value": run.source_token},
     ]
+    if hooks_server:
+        spec["containers"][0]["ports"] = [{"name": HOOKS_PORT_NAME, "containerPort": HOOKS_PORT}]
     return {
         "apiVersion": "v1",
         "kind": "Pod",

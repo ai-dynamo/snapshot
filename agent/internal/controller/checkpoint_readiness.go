@@ -139,6 +139,9 @@ func checkProbeTarget(pod *corev1.Pod, containerName string, probe *snapshotv1al
 		if pod.Spec.HostNetwork {
 			return fmt.Errorf("checkpoint readiness probe: Pod %s/%s uses the host network; HTTP probes need the Pod's own IP", pod.Namespace, pod.Name)
 		}
+		if _, err := lifecyclehooks.ResolvePort(pod, containerName, probe.HTTPGet.Port); err != nil {
+			return fmt.Errorf("checkpoint readiness probe: %w", err)
+		}
 	default:
 		return fmt.Errorf("checkpoint readiness probe for container %q has no file or httpGet", containerName)
 	}
@@ -170,7 +173,12 @@ func (w *NodeController) runCheckpointProbe(
 	if err != nil {
 		return err
 	}
-	return w.probeHTTPFn(ctx, podIP, probe.HTTPGet, time.Duration(probe.TimeoutSeconds)*time.Second)
+	// checkProbeTarget already resolved it, so this only fails if the Pod changed.
+	port, err := lifecyclehooks.ResolvePort(pod, status.Name, probe.HTTPGet.Port)
+	if err != nil {
+		return err
+	}
+	return w.probeHTTPFn(ctx, podIP, port, probe.HTTPGet.Path, time.Duration(probe.TimeoutSeconds)*time.Second)
 }
 
 func (w *NodeController) checkpointProbeState(name string) *checkpointProbeState {

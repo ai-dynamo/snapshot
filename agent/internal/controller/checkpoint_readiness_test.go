@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -37,6 +38,8 @@ type probeHarness struct {
 	filePID   int
 	filePath  string
 	httpIP    string
+	httpPort  int32
+	httpPath  string
 	httpTO    time.Duration
 	httpCalls int
 }
@@ -46,7 +49,7 @@ func newProbeHarness(t *testing.T, probe snapshotv1alpha1.CheckpointReadinessPro
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	content.Spec.Containers = []snapshotv1alpha1.ContainerSnapshotConfig{{Name: "main", CheckpointReadinessProbe: &probe}}
 	pod := makeSourcePod()
-	pod.Spec.Containers = []corev1.Container{{Name: "main"}}
+	pod.Spec.Containers = []corev1.Container{{Name: "main", Ports: []corev1.ContainerPort{{Name: "hooks", ContainerPort: 8000}}}}
 	pod.Status.PodIP = "10.0.0.5"
 	pod.Status.ContainerStatuses[0].Ready = false // the probe decides, not Ready
 	pod.Status.ContainerStatuses[0].State.Running = &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(probeStart)}
@@ -73,10 +76,10 @@ func newProbeHarness(t *testing.T, probe snapshotv1alpha1.CheckpointReadinessPro
 		err := h.next()
 		return err == nil, nil
 	}
-	h.w.probeHTTPFn = func(_ context.Context, ip string, _ *snapshotv1alpha1.HTTPGetAction, timeout time.Duration) error {
+	h.w.probeHTTPFn = func(_ context.Context, ip string, port int32, path string, timeout time.Duration) error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		h.httpIP, h.httpTO = ip, timeout
+		h.httpIP, h.httpPort, h.httpPath, h.httpTO = ip, port, path, timeout
 		h.httpCalls++
 		return h.next()
 	}
@@ -235,18 +238,30 @@ func TestCheckpointProbe_WaitsForARunningContainer(t *testing.T) {
 }
 
 func TestCheckpointProbe_HTTPGoesToThePodIP(t *testing.T) {
-	probe := snapshotv1alpha1.CheckpointReadinessProbe{
-		CheckpointReadinessProbeHandler: snapshotv1alpha1.CheckpointReadinessProbeHandler{
-			HTTPGet: &snapshotv1alpha1.HTTPGetAction{Path: "/checkpoint/status", Port: 8000},
-		},
-		PeriodSeconds: 1, TimeoutSeconds: 3, SuccessThreshold: 1,
-	}
-	h := newProbeHarness(t, probe, nil)
+	for _, tc := range []struct {
+		name string
+		port intstr.IntOrString
+	}{
+		{"numeric port", intstr.FromInt32(8000)},
+		{"named port", intstr.FromString("hooks")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := snapshotv1alpha1.CheckpointReadinessProbe{
+				CheckpointReadinessProbeHandler: snapshotv1alpha1.CheckpointReadinessProbeHandler{
+					HTTPGet: &snapshotv1alpha1.HTTPGetAction{Path: "/checkpoint/status", Port: tc.port},
+				},
+				PeriodSeconds: 1, TimeoutSeconds: 3, SuccessThreshold: 1,
+			}
+			h := newProbeHarness(t, probe, nil)
 
-	h.reconcile()
-	assert.True(t, h.fc.wasCalled())
-	assert.Equal(t, "10.0.0.5", h.httpIP)
-	assert.Equal(t, 3*time.Second, h.httpTO)
+			h.reconcile()
+			assert.True(t, h.fc.wasCalled())
+			assert.Equal(t, "10.0.0.5", h.httpIP)
+			assert.Equal(t, int32(8000), h.httpPort)
+			assert.Equal(t, "/checkpoint/status", h.httpPath)
+			assert.Equal(t, 3*time.Second, h.httpTO)
+		})
+	}
 }
 
 func TestCheckpointProbe_AnnouncesTheWaitOnce(t *testing.T) {
@@ -270,10 +285,12 @@ func TestCheckpointProbe_AnnouncesTheWaitOnce(t *testing.T) {
 func TestCheckpointProbe_RefusedTargetsFailTheWorkOrder(t *testing.T) {
 	httpProbe := snapshotv1alpha1.CheckpointReadinessProbe{
 		CheckpointReadinessProbeHandler: snapshotv1alpha1.CheckpointReadinessProbeHandler{
-			HTTPGet: &snapshotv1alpha1.HTTPGetAction{Path: "/status", Port: 8000},
+			HTTPGet: &snapshotv1alpha1.HTTPGetAction{Path: "/status", Port: intstr.FromInt32(8000)},
 		},
 		PeriodSeconds: 1, TimeoutSeconds: 1, SuccessThreshold: 1,
 	}
+	unknownPort := *httpProbe.DeepCopy()
+	unknownPort.HTTPGet.Port = intstr.FromString("metrics")
 	for _, tc := range []struct {
 		name      string
 		probe     snapshotv1alpha1.CheckpointReadinessProbe
@@ -286,6 +303,7 @@ func TestCheckpointProbe_RefusedTargetsFailTheWorkOrder(t *testing.T) {
 			}}}
 		}},
 		{"HTTP on the host network", httpProbe, func(pod *corev1.Pod) { pod.Spec.HostNetwork = true }},
+		{"HTTP on a port name the container doesn't have", unknownPort, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newProbeHarness(t, tc.probe, tc.mutatePod)
