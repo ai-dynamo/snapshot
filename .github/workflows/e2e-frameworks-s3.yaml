@@ -152,7 +152,7 @@ jobs:
       SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
       # TEMP default for push-triggered runs, which have no inputs. Scheduled
       # and dispatched runs without a tag resolve it in "Resolve Snapshot image tag".
-      SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ inputs.snapshot_tag || (github.event_name == 'push' && 'v0.0.0-test-s3-vllm-framework-ge7bd1582') || '' }}
+      SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ inputs.snapshot_tag || (github.event_name == 'push' && 'v0.0.0-test-s3-vllm-framework-geb404c53') || '' }}
       SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
       SNAPSHOT_E2E_PVC_SIZE: 64Gi
       SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
