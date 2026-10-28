@@ -21,7 +21,6 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <system_error>
-#include <unordered_map>
 #include <utility>
 
 #include "file_descriptor.hpp"
@@ -36,7 +35,6 @@ using Clock = std::chrono::steady_clock;
 constexpr std::uint64_t kMiB = 1024 * 1024;
 // S3's fixed service limit; larger files require a larger configured part size.
 constexpr std::uint64_t kMaxMultipartParts = 10'000;
-constexpr char kPathField[] = "Path";
 constexpr char kSizeField[] = "Size";
 constexpr char kDirectoryField[] = "IsDir";
 constexpr char kMessageField[] = "msg";
@@ -190,15 +188,6 @@ ValidateUploadFile(const std::filesystem::path& root, const S3UploadFile& file, 
   if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(component)) ||
       std::filesystem::file_size(component) != file.size_bytes)
     throw std::invalid_argument("S3 upload source is missing, not regular, or has the wrong size");
-}
-
-std::uint64_t
-ObjectSize(const nlohmann::json& entry)
-{
-  if (!entry.is_object() || !entry.contains(kSizeField) || !entry[kSizeField].is_number_integer() ||
-      !entry.contains(kDirectoryField) || entry[kDirectoryField] != false || entry[kSizeField].get<std::int64_t>() < 0)
-    throw S3ResponseError("invalid S3 object size response");
-  return entry[kSizeField].get<std::uint64_t>();
 }
 
 std::string
@@ -563,37 +552,11 @@ S3Client::Head(const S3ObjectLocation& object, Cancellation cancellation)
     throw S3ResponseError("invalid S3 object size response");
   if (entries.empty())
     return std::nullopt;
-  return ObjectSize(entries.front());
-}
-
-std::unordered_map<std::string, std::uint64_t>
-S3Client::HeadMany(const std::string& bucket, const std::vector<std::string>& keys, Cancellation cancellation)
-{
-  std::string list;
-  for (const auto& key : keys) {
-    S3ObjectLocation{bucket, key}.Validate();
-    if (key.size() + 1 > kUploadListLimit - list.size())
-      throw std::invalid_argument("S3 object list exceeds size limit");
-    list += key + "\n";
-  }
-  Operation operation(*this, cancellation);
-  if (keys.empty())
-    return {};
-  const auto filter = InputBytes(list);
-  auto command = ReadArguments(kStatCommand, S3ObjectLocation{bucket, keys.front()});
-  command.insert(command.end(), std::begin(kStatArguments), std::end(kStatArguments));
-  const auto bytes = Execute(operation, std::move(command), filter.get(), kMetadataStatLimit * keys.size());
-  const auto entries = nlohmann::json::parse(bytes, nullptr, false);
-  if (!entries.is_array() || entries.size() > keys.size())
+  const auto& value = entries.front();
+  if (!value.is_object() || !value.contains(kSizeField) || !value[kSizeField].is_number_integer() ||
+      !value.contains(kDirectoryField) || value[kDirectoryField] != false || value[kSizeField].get<std::int64_t>() < 0)
     throw S3ResponseError("invalid S3 object size response");
-  std::unordered_map<std::string, std::uint64_t> sizes;
-  for (const auto& entry : entries) {
-    if (!entry.is_object() || !entry.contains(kPathField) || !entry[kPathField].is_string())
-      throw S3ResponseError("invalid S3 object size response");
-    if (!sizes.emplace(entry[kPathField].get<std::string>(), ObjectSize(entry)).second)
-      throw S3ResponseError("invalid S3 object size response");
-  }
-  return sizes;
+  return value[kSizeField].get<std::uint64_t>();
 }
 
 std::optional<std::string>

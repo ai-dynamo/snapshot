@@ -114,7 +114,7 @@ CreateEmptyFile(const CheckpointFile& file, const Path& destination, Cancellatio
   FileDescriptor descriptor(open(destination.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600));
   if (descriptor.get() < 0)
     throw SystemError("create empty restore staging file");
-  // Empty files need no native submission; the backend checks remote existence.
+  // The index defines empty files; they need no remote read or native submission.
   ApplyPermissions(destination, file.permissions, cancellation);
 }
 

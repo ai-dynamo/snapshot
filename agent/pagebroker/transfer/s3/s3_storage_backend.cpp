@@ -228,23 +228,13 @@ S3StorageBackend::LoadCheckpointInventory(const PublishedArtifact& storage, bool
     inventory.root_permissions = fs::perms::owner_all;
     inventory.files.front().permissions = fs::perms::owner_read | fs::perms::owner_write;
   }
-  std::vector<S3ObjectLocation> payloads;
-  std::vector<std::string> keys;
-  payloads.reserve(inventory.files.size());
-  keys.reserve(inventory.files.size());
-  for (const auto& file : inventory.files) {
-    payloads.push_back(Object(storage, kPayloadPrefix + file.relative_path.generic_string()));
-    keys.push_back(payloads.back().key);
-  }
-  const auto sizes = client.HeadMany(config_.bucket, keys, cancellation);
-  for (std::size_t index = 0; index < inventory.files.size(); ++index) {
-    auto& file = inventory.files[index];
-    const auto& payload = payloads[index];
-    const auto size = sizes.find(payload.key);
-    if (size == sizes.end() || size->second != file.size_bytes)
-      throw CheckpointError(Failure::ARTIFACT_CORRUPT, "checkpoint file is absent or has the wrong size");
+  for (auto& file : inventory.files) {
+    cancellation.ThrowIfCancelled();
+    const auto payload = Object(storage, kPayloadPrefix + file.relative_path.generic_string());
+    payload.Validate();
     file.source_locator = kS3UriPrefix + payload.bucket + "/" + payload.key;
   }
+  cancellation.ThrowIfCancelled();
   return inventory;
 }
 
