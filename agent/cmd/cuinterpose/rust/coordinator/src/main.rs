@@ -1,9 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Validate participants, coordinate CUDA lifecycle phases, and publish state.
+//! Validate participants, coordinate CUDA lifecycle phases, and publish state, for one Pod
+//! alone or as the relay of one Pod in a group that shares CUDA memory across Pods.
 
+#[cfg(test)]
+mod fake_agent;
 mod group;
+mod relay;
+mod session;
 mod state;
 #[cfg(test)]
 mod test_records;
@@ -12,14 +17,15 @@ mod topology;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use cuinterpose_protocol::{
-    self as protocol, FabricReplacement, Manifest, NamespacePid, Operation, Record, Reply, Request,
-    Response,
+    self as protocol, Manifest, NamespacePid, Operation, Record, Reply, Request, Response,
 };
-use group::{HandleTable, Topology};
+use group::Rank;
+use relay::{Command, Mode, Outcome};
+use session::Session;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Parser)]
 struct Arguments {
@@ -36,6 +42,41 @@ struct Arguments {
     #[arg(long = "process", required = true, action = clap::ArgAction::Append,
           value_parser = clap::value_parser!(u32).range(1..))]
     processes: Vec<NamespacePid>,
+    /// The agent's end of the attempt's session, inherited from the agent. Without it, the
+    /// Pod runs alone.
+    #[arg(long, requires_all = ["rank", "relay_ranks", "round_timeout_seconds", "deadline"])]
+    session_fd: Option<i32>,
+    /// This Pod's rank in the group.
+    #[arg(long, requires = "session_fd")]
+    rank: Option<group::Rank>,
+    /// Every rank that runs a relay. The lowest leads the group.
+    #[arg(long, requires = "session_fd", value_delimiter = ',')]
+    relay_ranks: Vec<group::Rank>,
+    /// Bounds the leader's wait for the replies of each round after the first.
+    #[arg(long, requires = "session_fd", value_parser = clap::value_parser!(u64).range(1..))]
+    round_timeout_seconds: Option<u64>,
+    /// The attempt's deadline in seconds since the Unix epoch.
+    #[arg(long, requires = "session_fd")]
+    deadline: Option<u64>,
+}
+
+impl Arguments {
+    /// The group that `--session-fd` and its companions describe, if any.
+    fn group(&self) -> Result<Option<(i32, relay::Group)>> {
+        let Some(fd) = self.session_fd else {
+            return Ok(None);
+        };
+        let required = "--session-fd requires its group arguments";
+        let mut group = relay::Group {
+            rank: self.rank.context(required)?,
+            relays: self.relay_ranks.clone(),
+            round_timeout: Duration::from_secs(self.round_timeout_seconds.context(required)?),
+            deadline: SystemTime::UNIX_EPOCH
+                + Duration::from_secs(self.deadline.context(required)?),
+        };
+        group.check()?;
+        Ok(Some((fd, group)))
+    }
 }
 
 struct Peer {
@@ -171,24 +212,6 @@ fn command_all(
     })
 }
 
-/// Run one step on every participant, check each reply against the topology, and return
-/// the FABRIC handles that the participants exported in place of checkpointed ones.
-fn execute(
-    peers: &[Peer],
-    topology: &Topology,
-    operation: impl Fn(NamespacePid) -> Operation,
-) -> Result<Vec<FabricReplacement>> {
-    let operations: BTreeMap<_, _> = peers
-        .iter()
-        .map(|peer| (peer.namespace_pid, operation(peer.namespace_pid)))
-        .collect();
-    let mut replacements = Vec::new();
-    for (pid, reply) in command_all(peers, &operations)? {
-        replacements.extend(topology.completed(0, pid, &operations[&pid], reply)?);
-    }
-    Ok(replacements)
-}
-
 fn collect_records(peers: &[Peer], request: RecordRequest) -> Result<Manifest> {
     peers
         .iter()
@@ -206,6 +229,72 @@ fn collect_records(peers: &[Peer], request: RecordRequest) -> Result<Manifest> {
         .collect()
 }
 
+/// This Pod's processes, on which its relay runs the steps of a mode.
+struct LocalPod<'a> {
+    peers: &'a [Peer],
+    /// Prepare: where the records frozen by BeginCheckpoint are published.
+    state: Option<PathBuf>,
+    /// Restore: the records published at capture.
+    saved: Option<Manifest>,
+    frozen: Option<Manifest>,
+}
+
+impl<'a> LocalPod<'a> {
+    fn new(peers: &'a [Peer], state: Option<PathBuf>, saved: Option<Manifest>) -> Self {
+        Self {
+            peers,
+            state,
+            saved,
+            frozen: None,
+        }
+    }
+}
+
+impl relay::Pod for LocalPod<'_> {
+    fn run(&mut self, command: &Command, rank: Rank) -> Result<Outcome> {
+        let request = match command {
+            Command::Inspect => Some(RecordRequest::Inspect),
+            Command::BeginCheckpoint => Some(RecordRequest::BeginCheckpoint),
+            _ => None,
+        };
+        if let Some(request) = request {
+            let records = collect_records(self.peers, request)?;
+            if matches!(request, RecordRequest::BeginCheckpoint) {
+                self.frozen = Some(records.clone());
+            }
+            return Ok(Outcome::Records {
+                current: records,
+                saved: self.saved.clone(),
+            });
+        }
+        let operations = self
+            .peers
+            .iter()
+            .map(|peer| {
+                let operation = command
+                    .operation(rank, peer.namespace_pid)
+                    .with_context(|| format!("{command} runs no operation"))?;
+                Ok((peer.namespace_pid, operation))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Outcome::Replies(command_all(self.peers, &operations)?))
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        let Some(path) = &self.state else {
+            return Ok(());
+        };
+        let records = self
+            .frozen
+            .as_mut()
+            .context("preparation finished without BeginCheckpoint")?;
+        // Publication failure is also fail-stop, even if publication succeeded before a
+        // directory sync failed. Prepared processes cannot resume safely.
+        state::write_atomic(path, records)
+            .with_context(|| format!("publish checkpoint state {}", path.display()))
+    }
+}
+
 fn run() -> Result<()> {
     let args = Arguments::parse();
     ensure!(
@@ -216,6 +305,7 @@ fn run() -> Result<()> {
         args.socket_dir.starts_with('/'),
         "--socket-dir must be an absolute path"
     );
+    let membership = args.group()?;
     let socket_dir = Path::new(&args.socket_dir);
     let mut seen = BTreeSet::new();
     let mut peers = Vec::with_capacity(args.processes.len());
@@ -230,89 +320,39 @@ fn run() -> Result<()> {
             namespace_pid,
         });
     }
-    if args.inspect {
-        // Preflight inspection does not freeze the registry, so preparation must
-        // validate it again after BeginCheckpoint prevents application mutations.
-        Topology::validate(&group::alone(collect_records(
-            &peers,
-            RecordRequest::Inspect,
-        )?))?;
-        return Ok(());
-    }
-    let path = args
-        .checkpoint_dir
-        .context("--checkpoint-dir is required")?
-        .join("cuinterpose.state");
-    let expected = if args.prepare {
-        // Reject existing output before BeginCheckpoint freezes any participant.
-        match std::fs::symlink_metadata(&path) {
-            Ok(_) => bail!(
-                "{} already exists; use a new checkpoint directory",
-                path.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        Manifest::new()
+    let (mode, state, saved) = if args.inspect {
+        (Mode::Inspect, None, None)
     } else {
-        state::read(&path).with_context(|| format!("cannot parse {}", path.display()))?
-    };
-    if args.restore {
-        ensure!(
-            seen.iter().eq(expected.keys()),
-            "restored processes do not match the checkpointed participants"
-        );
-    }
-    // BeginCheckpoint freezes registries, not GPU work. From this point preparation
-    // is fail-stop: callers must abandon the checkpoint and all source processes.
-    let mut participants = group::alone(collect_records(
-        &peers,
+        let path = args
+            .checkpoint_dir
+            .context("--checkpoint-dir is required")?
+            .join("cuinterpose.state");
         if args.prepare {
-            RecordRequest::BeginCheckpoint
-        } else {
-            RecordRequest::Inspect
-        },
-    )?);
-    let inspected = Topology::validate(&participants)?;
-    if args.prepare {
-        let topology = inspected;
-        execute(&peers, &topology, |_| Operation::PrepareMulticast)?;
-        execute(&peers, &topology, |pid| Operation::SaveAllocations {
-            owners: topology.owners(0, pid),
-        })?;
-        execute(&peers, &topology, |_| Operation::PrepareUnicast)?;
-        // Publication failure is also fail-stop, even if publication succeeded before a
-        // directory sync failed. Prepared processes cannot resume safely.
-        state::write_atomic(&path, participants.get_mut(&0).unwrap())
-            .with_context(|| format!("publish checkpoint state {}", path.display()))?;
-    } else {
-        let saved = group::alone(expected);
-        let topology = Topology::validate(&saved)?;
-        drop(inspected);
-        drop(participants);
-        // Importers need the FABRIC handles that creators export in the step before.
-        let mut handles = HandleTable::default();
-        handles.record(execute(&peers, &topology, |_| Operation::LoadAllocations)?)?;
-        let replacements = handles.replacements();
-        execute(&peers, &topology, |_| Operation::RestoreUnicast {
-            replacements: replacements.clone(),
-        })?;
-        handles.record(execute(&peers, &topology, |_| {
-            Operation::RestoreMulticastCreators
-        })?)?;
-        let replacements = handles.replacements();
-        execute(&peers, &topology, |_| {
-            Operation::RestoreMulticastImporters {
-                replacements: replacements.clone(),
+            // Reject existing output before BeginCheckpoint freezes any participant.
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => bail!(
+                    "{} already exists; use a new checkpoint directory",
+                    path.display()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-        })?;
-        execute(&peers, &topology, |_| Operation::RestoreMulticastDevices)?;
-        execute(&peers, &topology, |_| Operation::RestoreMulticastBindings)?;
-        let participants = collect_records(&peers, RecordRequest::Inspect)
-            .context("inspect restored participants")?;
-        group::verify_restored(&saved, &group::alone(participants), &handles)?;
-    }
-    Ok(())
+            (Mode::Prepare, Some(path), None)
+        } else {
+            let saved =
+                state::read(&path).with_context(|| format!("cannot parse {}", path.display()))?;
+            ensure!(
+                seen.iter().eq(saved.keys()),
+                "restored processes do not match the checkpointed participants"
+            );
+            (Mode::Restore, None, Some(saved))
+        }
+    };
+    let member = match membership {
+        Some((fd, group)) => Some((Session::inherit(fd)?, group)),
+        None => None,
+    };
+    relay::run(member, mode, &mut LocalPod::new(&peers, state, saved))
 }
 
 fn main() -> std::process::ExitCode {

@@ -310,7 +310,7 @@ fn session_frames_carry_a_bare_map_with_a_full_size_value() {
     let small = Insert {
         op: "insert".into(),
         id: 1,
-        key: "cuinterpose/prepare/1/cmd".into(),
+        key: "prepare.1.cmd".into(),
         value: vec![7; 3],
     };
     send_session(&sender, &small).unwrap();
