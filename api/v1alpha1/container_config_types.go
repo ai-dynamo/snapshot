@@ -123,13 +123,15 @@ type PostRestoreHandler struct {
 
 // ControlFileAction names a file inside the container's filesystem.
 type ControlFileAction struct {
-	// Path is an absolute path inside the container, without "." or ".."
-	// parts. It must be on the container's own filesystem or an emptyDir
-	// volume; paths on hostPath and PersistentVolumeClaim volumes are refused.
+	// Path is an absolute, clean path inside the container: no empty, "." or
+	// ".." parts and no trailing slash, so two paths name the same file only
+	// if they are equal. It must be on the container's own filesystem or an
+	// emptyDir volume; paths on hostPath and PersistentVolumeClaim volumes are
+	// refused.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=2
 	// +kubebuilder:validation:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && self.split('/').all(p, p != '.' && p != '..')",message="path must be absolute, without . or .. parts"
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.endsWith('/') && !self.contains('//') && self.split('/').all(p, p != '.' && p != '..')",message="path must be absolute and clean: no empty, . or .. parts and no trailing slash"
 	Path string `json:"path"`
 }
 
