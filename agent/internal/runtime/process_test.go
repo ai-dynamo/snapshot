@@ -400,6 +400,10 @@ func writeCPUInfo(t *testing.T, procPath string, flagsPerProcessor ...string) {
 	t.Helper()
 	var content strings.Builder
 	for i, flags := range flagsPerProcessor {
+		if goruntime.GOARCH == "arm64" {
+			fmt.Fprintf(&content, "processor\t: %d\nBogoMIPS\t: 50.00\nFeatures\t: %s\n\n", i, flags)
+			continue
+		}
 		fmt.Fprintf(&content, "processor\t: %d\nvendor_id\t: GenuineIntel\nflags\t\t: %s\n\n", i, flags)
 	}
 	if err := os.WriteFile(filepath.Join(procPath, "cpuinfo"), []byte(content.String()), 0o600); err != nil {
@@ -408,30 +412,44 @@ func writeCPUInfo(t *testing.T, procPath string, flagsPerProcessor ...string) {
 }
 
 func TestReadCPUFeatures(t *testing.T) {
-	if goruntime.GOARCH != "amd64" {
-		t.Skip("procfs parses cpuinfo per architecture, and the agent ships for amd64 only")
-	}
-
-	tests := []struct {
+	type testCase struct {
 		name  string
 		flags []string
 		want  []string
-	}{
-		{
-			name:  "flags that name no instruction are dropped",
-			flags: []string{"fpu sse2 hypervisor constant_tsc avx2 md_clear"},
-			want:  []string{"avx2", "fpu", "sse2"},
-		},
-		{
-			// A restored process can be scheduled onto either processor, so
-			// only what both offer is offered at all.
-			name: "a flag one processor lacks is not offered",
-			flags: []string{
-				"fpu sse2 avx2 avx512f",
-				"fpu sse2 avx2",
+	}
+	tests, ok := map[string][]testCase{
+		"amd64": {
+			{
+				name:  "flags that name no instruction are dropped",
+				flags: []string{"fpu sse2 hypervisor constant_tsc avx2 md_clear"},
+				want:  []string{"avx2", "fpu", "sse2"},
 			},
-			want: []string{"avx2", "fpu", "sse2"},
+			{
+				// A restored process can be scheduled onto either processor, so
+				// only what both offer is offered at all.
+				name: "a flag one processor lacks is not offered",
+				flags: []string{
+					"fpu sse2 avx2 avx512f",
+					"fpu sse2 avx2",
+				},
+				want: []string{"avx2", "fpu", "sse2"},
+			},
 		},
+		// The arm64 kernel prints the hwcaps every processor offers on each
+		// processor's Features line, so there is no per-processor case.
+		"arm64": {
+			{
+				name: "hwcaps that name no instruction are dropped",
+				flags: []string{
+					"fp asimd evtstrm aes atomics sve sve2",
+					"fp asimd evtstrm aes atomics sve sve2",
+				},
+				want: []string{"aes", "asimd", "atomics", "fp", "sve", "sve2"},
+			},
+		},
+	}[goruntime.GOARCH]
+	if !ok {
+		t.Skip("procfs parses cpuinfo per architecture, and the agent ships for amd64 and arm64 only")
 	}
 
 	for _, tc := range tests {
@@ -454,8 +472,8 @@ func TestReadCPUFeatures(t *testing.T) {
 // would be indistinguishable from a checkpoint this agent version never
 // recorded features for.
 func TestReadCPUFeaturesRejectsWhatItCannotRead(t *testing.T) {
-	if goruntime.GOARCH != "amd64" {
-		t.Skip("procfs parses cpuinfo per architecture, and the agent ships for amd64 only")
+	if goruntime.GOARCH != "amd64" && goruntime.GOARCH != "arm64" {
+		t.Skip("procfs parses cpuinfo per architecture, and the agent ships for amd64 and arm64 only")
 	}
 
 	if _, err := ReadCPUFeatures(t.TempDir()); err == nil {
