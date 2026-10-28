@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // fakeContainer lays out procRoot/<pid>/root/snapshot-control, as the agent
@@ -172,6 +173,30 @@ func TestControlSentinelExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(true, false)
+}
+
+func TestControlSentinelModTime(t *testing.T) {
+	procRoot, pid, controlDir := fakeContainer(t)
+	if err := writeControlSentinel(procRoot, pid, "restore-complete", []byte("pid=42\n")); err != nil {
+		t.Fatal(err)
+	}
+	written := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(controlDir, "restore-complete"), written, written); err != nil {
+		t.Fatal(err)
+	}
+	got, err := controlSentinelModTime(procRoot, pid, "restore-complete")
+	if err != nil || !got.Equal(written) {
+		t.Fatalf("controlSentinelModTime = %v, %v, want %v", got, err, written)
+	}
+	if _, err := controlSentinelModTime(procRoot, pid, "restore-failed"); err == nil {
+		t.Error("controlSentinelModTime found a missing sentinel")
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "x"), filepath.Join(controlDir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlSentinelModTime(procRoot, pid, "linked"); err == nil {
+		t.Error("controlSentinelModTime accepted a symlink")
+	}
 }
 
 func TestControlSentinelExistsWithoutControlDir(t *testing.T) {
