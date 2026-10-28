@@ -129,21 +129,26 @@ or change the normal restored-state assertions.
 
 ### Framework tests over S3 (GPU)
 
-`e2e-frameworks-s3.yaml` runs the vLLM, SGLang and TensorRT-LLM guide workloads
-on the GPU cluster, one vCluster per framework in parallel, with Snapshot installed
-against an S3-compatible store (`test_frameworks_s3.py`). The `framework` input
-selects one. It is started by hand and installs published images: dispatch
-`push-artifacts.yaml` on the branch first and pass its tag as `snapshot_tag`.
+`e2e-frameworks-s3.yaml` runs the vLLM, SGLang and TensorRT-LLM guide workloads on
+the GPU cluster twice, once with Snapshot installed against an S3-compatible store
+and once against the checkpoint volume, one vCluster per framework and store, three
+at a time. It is the same test as the framework workflow (`test_frameworks.py`)
+with `SNAPSHOT_E2E_STORAGE` set to the store, so both runs record the same
+benchmark result. A final job pairs each framework's two results and prints the
+timings side by side in the run summary (`snapshot_e2e.storage_comparison`). The
+`framework` and `storage` inputs select a subset; `storage: s3` or `pvc` skips the
+comparison. The workflow is started by hand and installs published images:
+dispatch `push-artifacts.yaml` on the branch first and pass its tag as
+`snapshot_tag`.
 
 The store runs in the vCluster as a pod. `python -m snapshot_e2e.s3 deploy` creates
 it with the credentials Secret and a default bucket, and `python -m snapshot_e2e.s3
 endpoint` prints the node address the chart is given. The store runs on the host
 network because the agent pod, which hosts PageBroker, does too and cannot resolve
 cluster service names. Each framework job sets its own `SNAPSHOT_E2E_S3_PORT` and
-`SNAPSHOT_E2E_S3_CONSOLE_PORT`, so two jobs on one node do not collide. The test needs no S3 client
-of its own: it checks the descriptor in the PodSnapshotContent status and that
-nothing was written to the checkpoint volume. It carries the `s3_gpu` marker, so
-the existing framework workflow does not select it.
+`SNAPSHOT_E2E_S3_CONSOLE_PORT`, so two jobs on one node do not collide. In S3 mode
+the test needs no S3 client of its own: it checks the descriptor in the
+PodSnapshotContent status and that nothing was written to the checkpoint volume.
 
 ### Local Direct Mode
 
