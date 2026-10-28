@@ -30,7 +30,6 @@ unpublished guide change.
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import re
 
@@ -50,7 +49,6 @@ RESTORE_POD_TO_TRAFFIC_DURATION = "restore.pod_create_to_traffic.duration"
 RESTORE_AGENT_TO_TRAFFIC_DURATION = "restore.agent_complete_to_traffic.duration"
 RESTORE_AGENT_TO_TRAFFIC_DISPLAY_NAME = "Agent restore complete to traffic ready"
 GPU_PRODUCT_NODE_LABEL = "nvidia.com/gpu.product"
-S3_PHASE_TIMEOUT_SECONDS = 1800
 
 
 def over_s3() -> bool:
@@ -100,14 +98,7 @@ def framework(request: pytest.FixtureRequest) -> frameworks.FrameworkSpec:
     name = request.param
     if name not in frameworks.selected_frameworks():
         pytest.skip(f"{name} not selected by SNAPSHOT_E2E_FRAMEWORK")
-    spec = frameworks.framework_spec(name)
-    if over_s3():
-        spec = dataclasses.replace(
-            spec,
-            checkpoint_timeout_seconds=S3_PHASE_TIMEOUT_SECONDS,
-            restore_timeout_seconds=S3_PHASE_TIMEOUT_SECONDS,
-        )
-    return spec
+    return frameworks.framework_spec(name)
 
 
 @pytest.mark.framework
