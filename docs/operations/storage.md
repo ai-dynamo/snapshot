@@ -269,8 +269,9 @@ legacy local-path capture mode; the chart fails the render without it. See
 
 ### S3 settings PageBroker reads
 
-With `storage.type: s3` and a PageBroker image that implements the S3 backend,
-the chart passes PageBroker the settings below. PageBroker reads them once at
+With `storage.type: s3`, the chart passes PageBroker the settings below. The S3
+backend ships with the agent and PageBroker images of a Snapshot release newer
+than v0.2.0; see [Compatibility](../reference/compatibility.md). PageBroker reads them once at
 startup, so changing one restarts PageBroker on each node, and it can fail to
 start briefly until the operator has rewritten its configuration. See
 [PageBroker does not start after an S3 settings change](troubleshooting.md#pagebroker-does-not-start-after-an-s3-settings-change).

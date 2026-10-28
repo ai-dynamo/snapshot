@@ -114,9 +114,9 @@ storage:
     # use the claim root (/); the privileged helper enforces this local mount.
     basePath: /checkpoints
 
-  # S3-compatible object storage (when type=s3). Requires a PageBroker image
-  # implementing the S3 backend. Endpoint, region, bucket and prefix are
-  # identity inputs: see api/storage.S3.StoreID.
+  # S3-compatible object storage (when type=s3). Requires a Snapshot release
+  # newer than v0.2.0; see docs/reference/compatibility.md. Endpoint, region,
+  # bucket and prefix are identity inputs: see api/storage.S3.StoreID.
   s3:
     # S3-compatible endpoint, an absolute http(s) URL with no path, query or
     # userinfo, e.g. "https://s3.example.com".
