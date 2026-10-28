@@ -63,7 +63,20 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 		ActiveDeadlineSeconds: sj.Spec.ActiveDeadlineSeconds,
 		TTLSecondsAfterFinish: nil,
 		WrapLaunchJob:         false,
+
+		CheckpointReadinessProbe: hasCheckpointReadinessProbe(sj.Spec.PodSnapshotTemplate.Containers, targetContainer),
 	})
+}
+
+// hasCheckpointReadinessProbe reports whether the target container's settings
+// set a checkpoint readiness probe.
+func hasCheckpointReadinessProbe(containers []snapshotv1alpha1.ContainerSnapshotConfig, target string) bool {
+	for _, c := range containers {
+		if c.Name == target {
+			return c.CheckpointReadinessProbe != nil
+		}
+	}
+	return false
 }
 
 func injectNonTargetArtifactContract(template *corev1.PodTemplateSpec, policy *snapshotv1alpha1.NonTargetArtifactPolicy, target, uid string) error {
