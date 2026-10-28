@@ -9,7 +9,9 @@ mod record;
 mod transport;
 
 #[doc(inline)]
-pub use identity::{AllocationId, AllocationReference, NamespacePid};
+pub use identity::{
+    AllocationId, AllocationReference, FABRIC_HANDLE_BYTES, FabricHandle, NamespacePid,
+};
 #[doc(inline)]
 pub use record::{
     BindingSource, BindingVersion, MemberRange, MemoryAccess, MemoryLocation, MulticastProperties,
@@ -118,6 +120,14 @@ pub struct AllocationOwner {
     pub owner_pid: NamespacePid,
 }
 
+/// A fabric handle that a restored creator exported in place of the one it exported
+/// before the checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FabricUpdate {
+    pub old: FabricHandle,
+    pub new: FabricHandle,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
@@ -132,6 +142,10 @@ pub enum Request {
     Execute {
         namespace_pid: NamespacePid,
         operation: Operation,
+        /// Replacements for the fabric handles that restore operations import. An empty
+        /// list is not encoded, so requests without fabric handles keep their format.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        imports: Vec<FabricUpdate>,
     },
     SaveAllocations {
         namespace_pid: NamespacePid,
@@ -152,10 +166,23 @@ pub struct Response {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
-    Inspection { records: Vec<Record> },
-    Completed { operation: Operation, bytes: u64 },
-    UnicastExport { size: u64, location: MemoryLocation },
-    MulticastExport { properties: MulticastProperties },
+    Inspection {
+        records: Vec<Record>,
+    },
+    Completed {
+        operation: Operation,
+        bytes: u64,
+        /// Fabric handles that this process exported in place of checkpointed ones.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exports: Vec<FabricUpdate>,
+    },
+    UnicastExport {
+        size: u64,
+        location: MemoryLocation,
+    },
+    MulticastExport {
+        properties: MulticastProperties,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
