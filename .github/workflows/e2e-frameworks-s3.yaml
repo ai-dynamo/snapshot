@@ -11,10 +11,14 @@ name: E2E Framework Tests, S3 and checkpoint volume
 # vCluster as a pod (snapshot_e2e.s3 deploy) on its own host ports, so two jobs
 # that land on one node do not collide.
 #
-# Manual only. It installs published images, so dispatch push-artifacts.yaml on
-# the branch under test first and pass the resulting tag as snapshot_tag.
+# It installs published images. The nightly run resolves the tag of the commit
+# it checked out, like e2e-frameworks.yaml. To test a branch, dispatch
+# push-artifacts.yaml on it first and pass the resulting tag as snapshot_tag.
 
 on:
+  schedule:
+    # 03:00 Pacific Standard Time, after the nightly framework run.
+    - cron: "0 11 * * *"
   # TEMP: GPU runners admit only trusted mirror pushes, so run this before it is
   # on main through the mirror of this PR. Remove with the default tag below
   # before merging.
@@ -45,8 +49,10 @@ on:
       snapshot_tag:
         description: >-
           Operator/agent/pagebroker image tag to install, from a push-artifacts.yaml
-          dispatch on the branch under test.
-        required: true
+          dispatch on the branch under test. pull-request/<number> mirror
+          branches require an explicit tag. Leave empty on main/release/*
+          branches to resolve from the commit under test.
+        required: false
         type: string
 
 permissions:
@@ -70,7 +76,7 @@ jobs:
           STORAGE: ${{ inputs.storage || 'both' }}
         run: |
           set -euo pipefail
-          # Ordered so a framework's two stores start together.
+          # Ordered so a framework's two stores are neighbours in the matrix.
           all='[
             {"framework":"vllm","storage":"pvc","port":0,"console_port":0},
             {"framework":"vllm","storage":"s3","port":19000,"console_port":19001},
@@ -128,8 +134,9 @@ jobs:
     strategy:
       fail-fast: false
       # Six GPU jobs would ask the cluster for more GPUs than the nightly
-      # framework run does; three at a time keeps pods from waiting for one.
-      max-parallel: 3
+      # framework run does. Two at a time keeps a framework's two stores side
+      # by side, in the order of the matrix.
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
     concurrency:
       group: snapshot-e2e-frameworks-s3-${{ matrix.storage }}-${{ matrix.framework }}
@@ -143,8 +150,9 @@ jobs:
       SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
       SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
       SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
-      # TEMP default for push-triggered runs, which have no inputs.
-      SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ inputs.snapshot_tag || 'v0.0.0-test-s3-vllm-framework-ge7bd1582' }}
+      # TEMP default for push-triggered runs, which have no inputs. Scheduled
+      # and dispatched runs without a tag resolve it in "Resolve Snapshot image tag".
+      SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ inputs.snapshot_tag || (github.event_name == 'push' && 'v0.0.0-test-s3-vllm-framework-ge7bd1582') || '' }}
       SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
       SNAPSHOT_E2E_PVC_SIZE: 64Gi
       SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
@@ -201,6 +209,24 @@ jobs:
           enable-cache: "false"
           download-from-astral-mirror: "false"
 
+      - name: Resolve Snapshot image tag
+        if: ${{ env.SNAPSHOT_E2E_SNAPSHOT_TAG == '' }}
+        timeout-minutes: 23
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A PR mirror run with no tag would silently test main's images
+          # instead of the PR's own changes.
+          if [[ "${GITHUB_REF_NAME}" =~ ^pull-request/[0-9]+$ ]]; then
+            echo "::error::Running against PR mirror branch ${GITHUB_REF_NAME} requires an explicit snapshot_tag. Dispatch push-artifacts.yaml on the PR's source branch first, then pass the resulting tag." >&2
+            exit 1
+          fi
+          case "${GITHUB_REF_NAME}" in
+            main|release/*) python3 hack/resolve-snapshot-image-tag.py --wait-seconds 1200 ;;
+            *) python3 hack/resolve-snapshot-image-tag.py --fallback-main ;;
+          esac
+
       - name: Validate host GPU cluster
         timeout-minutes: 3
         run: |
@@ -222,6 +248,13 @@ jobs:
           KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
         run: |
           set -euo pipefail
+          # A store on the node's network gets a login of its own for this run.
+          access_key="$(openssl rand -hex 8)"
+          secret_key="$(openssl rand -hex 16)"
+          echo "::add-mask::${access_key}"
+          echo "::add-mask::${secret_key}"
+          export SNAPSHOT_E2E_S3_ACCESS_KEY="${access_key}"
+          export SNAPSHOT_E2E_S3_SECRET_KEY="${secret_key}"
           uv run --locked --project e2e python -m snapshot_e2e.s3 deploy
           SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT="$(uv run --locked --project e2e python -m snapshot_e2e.s3 endpoint)"
           export SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT

@@ -84,3 +84,16 @@ def test_store_ports_default_to_the_single_job_ports(
     settings: s3.S3Settings,
 ) -> None:
     assert (settings.port, settings.console_port) == (19000, 19001)
+
+
+def test_store_login_follows_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_ACCESS_KEY", "run-access")
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_SECRET_KEY", "run-secret-key")
+    settings = s3.S3Settings.from_env()
+    container = s3.store_deployment(settings, "ns").spec.template.spec.containers[0]
+    env = {item.name: item.value for item in container.env}
+    assert env["MINIO_ROOT_USER"] == "run-access"
+    assert env["MINIO_ROOT_PASSWORD"] == "run-secret-key"
+    credentials = s3.credentials_file(settings)
+    assert "run-access" in credentials and "run-secret-key" in credentials
+    assert "minioadmin" not in credentials
