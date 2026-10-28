@@ -39,6 +39,8 @@ func main() {
 	}
 	bindNewContents := flag.Bool("bind-new-contents", false,
 		"Bind new content to the configured store after all agents support artifact addressing")
+	enableApplicationContracts := flag.Bool("enable-application-contracts", false,
+		"Accept containers[].checkpointReadinessProbe and containers[].lifecycle before the agent supports them; for end-to-end tests only")
 	pageBrokerS3ConfigNamespace := flag.String("pagebroker-s3-config-namespace", "",
 		"Namespace of the ConfigMap PageBroker reads its S3 configuration from; defaults to POD_NAMESPACE")
 	pageBrokerS3ConfigName := flag.String("pagebroker-s3-config-name", DefaultPageBrokerS3ConfigName,
@@ -142,6 +144,8 @@ func main() {
 		Recorder:              mgr.GetEventRecorderFor("podsnapshot-controller"),
 		TestFailureAnnotation: *testFailureAnnotation,
 		StoreID:               captureStoreID,
+
+		EnableApplicationContracts: *enableApplicationContracts,
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")
@@ -174,6 +178,8 @@ func main() {
 		NonCacheReadClient:   mgr.GetAPIReader(),
 		Recorder:             mgr.GetEventRecorderFor("snapshotjob-controller"),
 		CuInterposeContainer: *cuInterposeConfig,
+
+		EnableApplicationContracts: *enableApplicationContracts,
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")

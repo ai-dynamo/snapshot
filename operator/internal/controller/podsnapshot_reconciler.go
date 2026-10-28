@@ -76,6 +76,10 @@ type PodSnapshotReconciler struct {
 	// StoreID binds every new PodSnapshotContent to the configured store. Empty
 	// keeps producing legacy, path-addressed content.
 	StoreID string
+	// EnableApplicationContracts accepts container settings that need agent
+	// support (a checkpoint readiness probe, a post-restore action). Temporary:
+	// see errContainerSettingsDisabled.
+	EnableApplicationContracts bool
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -292,6 +296,10 @@ func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *sn
 // captureFromSourcePod is the no-content path: it resolves and validates the live source pod, then
 // creates the PodSnapshotContent and records the binding.
 func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (ctrl.Result, error) {
+	// Checked before the source pod, so the request fails the same way whatever state the pod is in.
+	if !sr.EnableApplicationContracts && usesContainerSettings(snap.Spec.Containers) {
+		return sr.failPodSnapshot(ctx, snap, podSnapshotReasonContainerSettingsDisabled, errContainerSettingsDisabled)
+	}
 	pod, err := sr.getSourcePod(ctx, snap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -425,7 +433,8 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 				PodRef:   snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: snap.Spec.Source.PodRef.Containers},
 				NodeName: pod.Spec.NodeName,
 			},
-			Storage: storage,
+			Storage:    storage,
+			Containers: copyContainerSettings(snap.Spec.Containers),
 		},
 	}
 }

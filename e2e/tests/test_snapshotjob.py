@@ -281,6 +281,71 @@ def test_snapshotjob_cpu_captures_and_restore_recovers_state(
 
 @pytest.mark.cpu
 @pytest.mark.snapshot_success
+def test_snapshotjob_saves_container_settings_in_the_checkpoint(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # Container settings travel SnapshotJob -> PodSnapshot -> PodSnapshotContent,
+    # with defaults filled in, and the content keeps them for every restore.
+    # The probe reads ready-for-snapshot, which the source already writes, so
+    # the capture behaves the same whether or not the agent acts on the probe.
+    # Nothing here restores, so the post-restore action never runs.
+    settings = {
+        "name": workloads.CONTAINER,
+        "checkpointReadinessProbe": {"file": {"path": workloads.SOURCE_READY}},
+        "lifecycle": {"postRestore": {"file": {"path": f"{workloads.STATE_DIR}/released"}}},
+    }
+    expected = [
+        {
+            "name": workloads.CONTAINER,
+            "checkpointReadinessProbe": {
+                "file": {"path": workloads.SOURCE_READY},
+                "initialDelaySeconds": 0,
+                "periodSeconds": 1,
+                "timeoutSeconds": 1,
+                "successThreshold": 1,
+            },
+            "lifecycle": {
+                "postRestore": {
+                    "file": {"path": f"{workloads.STATE_DIR}/released"},
+                    "periodSeconds": 1,
+                    "timeoutSeconds": 1,
+                }
+            },
+        }
+    ]
+    try:
+        snapshotjob_name = run.snapshotjob_name
+        snap.create_snapshotjob(
+            config.namespace,
+            snapshotjob_name,
+            workloads.snapshotjob_pod_template(config=config, run=run, gpu=False),
+            containers=[settings],
+        )
+
+        sj = snap.wait_for_condition(
+            config.namespace,
+            snapshotjob_name,
+            plural=snap.SNAPSHOTJOBS,
+            condition_type="Completed",
+            timeout=600,
+        )
+        assert_snapshotjob_completed(sj)
+
+        pod_snapshot, content = snap.wait_for_snapshot_ready(
+            config.namespace,
+            sj["status"]["podSnapshotName"],
+            timeout=60,
+        )
+        assert pod_snapshot["spec"]["containers"] == expected
+        assert content["spec"]["containers"] == expected
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
 def test_snapshotjob_waits_for_helper_then_completes(
     config: k8s.E2EConfig,
     run: snap.TestRun,
