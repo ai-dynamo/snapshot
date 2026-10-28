@@ -63,14 +63,12 @@ commit-level history for each release is on its
   up front under the new `lsm-labels` check, which the compatibility bypass does
   not waive. Checkpoints taken by earlier agent versions don't have the record
   and must be taken again.
-- A restore onto a node whose CPU lacks an instruction set the source CPU
-  offered, such as AVX-512 on x86_64 or SVE2 on arm64, is refused with
-  `RestoreIncompatible` before any CRIU work, naming the missing flags
-  (`cpu-features: source avx512f, target missing`), rather than restoring a
-  process that dies with `SIGILL`. Restore semantics change; a checkpoint
-  captured before the upgrade recorded no CPU flags and is not checked, and
-  neither is a restore onto a node whose agent could not read its CPU flags at
-  startup.
+- A restore onto a node whose CPU lacks an instruction set Snapshot knows the
+  source CPU offered, such as AVX-512 on x86_64 or SVE2 on arm64, is refused up
+  front under the new `cpu-features` check rather than restoring a process that
+  dies with `SIGILL`. A checkpoint captured before the upgrade recorded no CPU
+  flags and is not checked. See
+  [Runtime compatibility](docs/reference/workload-contract.md#runtime-compatibility).
 - The agent drives checkpoints from a workqueue rather than per-checkpoint
   `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one
