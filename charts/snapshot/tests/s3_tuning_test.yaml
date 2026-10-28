@@ -332,3 +332,27 @@ tests:
       pageBroker.s3.limits.uploadPartBytes: 9007199254740993
     asserts:
       - failedTemplate: {}
+
+  - it: reads a staging cap written with a negative decimal exponent
+    template: templates/configmap.yaml
+    set:
+      pageBroker.staging.sizeLimit: "10000000000e-1"
+    asserts:
+      - equal:
+          path: data["pagebroker-s3.yaml"]
+          value: |
+            limits:
+              stagingBytes: 1000000000
+
+  - it: keeps the derived staging limit within PageBroker's 1 TiB bound
+    template: templates/configmap.yaml
+    set:
+      pageBroker.staging.sizeLimit: 2Ti
+      daemonset.resources.limits.memory: 4Ti
+      pageBroker.resources.limits.memory: 4Ti
+    asserts:
+      - equal:
+          path: data["pagebroker-s3.yaml"]
+          value: |
+            limits:
+              stagingBytes: 1099511627776

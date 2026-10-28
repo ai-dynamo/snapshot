@@ -95,7 +95,7 @@ Convert a Kubernetes quantity to bytes, or empty when it is not a form we parse.
 {{- else if hasSuffix "T" $q }}{{ mulf (trimSuffix "T" $q | float64) 1000000000000 | int64 }}
 {{- else if hasSuffix "P" $q }}{{ mulf (trimSuffix "P" $q | float64) 1000000000000000 | int64 }}
 {{- else if hasSuffix "E" $q }}{{ mulf (trimSuffix "E" $q | float64) 1000000000000000000 | int64 }}
-{{- else if regexMatch "^[0-9]+(\\.[0-9]+)?[eE]\\+?[0-9]+$" $q }}{{ $q | float64 | int64 }}
+{{- else if regexMatch "^[0-9]+(\\.[0-9]+)?[eE][+-]?[0-9]+$" $q }}{{ $q | float64 | int64 }}
 {{- else if regexMatch "^[0-9]+$" $q }}{{ $q }}
 {{- end }}
 {{- end }}
@@ -222,7 +222,11 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- if not $staging -}}
 {{- fail (printf "pageBroker.staging.sizeLimit %q is not a byte quantity the chart can read" (include "snapshot.stagingSizeLimit" .)) -}}
 {{- end -}}
-{{- $_ := set $limits "stagingBytes" (int64 $staging) -}}
+{{- if le (int64 $staging) 0 -}}
+{{- fail "pageBroker.staging.sizeLimit must be at least one byte" -}}
+{{- end -}}
+{{- /* PageBroker rejects a stagingBytes above 1 TiB. */ -}}
+{{- $_ := set $limits "stagingBytes" (min (int64 $staging) (int64 1099511627776)) -}}
 {{- end -}}
 {{- toYaml $limits -}}
 {{- end -}}
