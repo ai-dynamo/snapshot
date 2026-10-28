@@ -91,9 +91,60 @@ def test_store_login_follows_the_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("SNAPSHOT_E2E_S3_SECRET_KEY", "run-secret-key")
     settings = s3.S3Settings.from_env()
     container = s3.store_deployment(settings, "ns").spec.template.spec.containers[0]
-    env = {item.name: item.value for item in container.env}
-    assert env["MINIO_ROOT_USER"] == "run-access"
-    assert env["MINIO_ROOT_PASSWORD"] == "run-secret-key"
+    env = {item.name: item for item in container.env}
+    for key in ("MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"):
+        assert env[key].value is None
+        assert env[key].value_from.secret_key_ref.name == settings.credentials_secret
+        assert env[key].value_from.secret_key_ref.key == key
     credentials = s3.credentials_file(settings)
     assert "run-access" in credentials and "run-secret-key" in credentials
     assert "minioadmin" not in credentials
+
+
+def test_the_login_is_stored_in_the_secret_the_deployment_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = {}
+
+    class Api:
+        def create_namespace(self, body):
+            pass
+
+        def create_namespaced_secret(self, namespace, secret):
+            created.update(secret.string_data)
+
+    monkeypatch.setattr(s3.client, "CoreV1Api", Api)
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_ACCESS_KEY", "run-access")
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_SECRET_KEY", "run-secret-key")
+
+    s3.ensure_credentials_secret(s3.S3Settings.from_env(), "ns")
+
+    assert created["MINIO_ROOT_USER"] == "run-access"
+    assert created["MINIO_ROOT_PASSWORD"] == "run-secret-key"
+
+
+@pytest.mark.parametrize(
+    ("host_ip", "expected"),
+    [
+        ("10.0.0.5", "http://10.0.0.5:19000"),
+        ("2001:db8::1", "http://[2001:db8::1]:19000"),
+        ("node.example", "http://node.example:19000"),
+    ],
+)
+def test_host_endpoint_brackets_only_ipv6_literals(host_ip: str, expected: str) -> None:
+    assert s3.host_endpoint(host_ip) == expected
+
+
+@pytest.mark.parametrize("missing", ["SNAPSHOT_E2E_S3_ACCESS_KEY", "SNAPSHOT_E2E_S3_SECRET_KEY"])
+def test_deploy_refuses_to_run_without_a_login(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_ACCESS_KEY", "run-access")
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_SECRET_KEY", "run-secret-key")
+    monkeypatch.delenv(missing)
+    monkeypatch.setattr(
+        s3.config, "load_kube_config", lambda *_: pytest.fail("touched the cluster")
+    )
+
+    with pytest.raises(SystemExit):
+        s3.main(["deploy"])

@@ -139,7 +139,9 @@ of the commit it checked out. To test a branch, dispatch `push-artifacts.yaml` o
 and pass the resulting tag as `snapshot_tag`.
 
 The store runs in the vCluster as a pod. `python -m snapshot_e2e.s3 deploy` creates
-it with the credentials Secret and a default bucket, and `python -m snapshot_e2e.s3
+it with the credentials Secret and a default bucket. It needs `SNAPSHOT_E2E_S3_ACCESS_KEY` and
+`SNAPSHOT_E2E_S3_SECRET_KEY`, because the store listens on the node network and must not use a
+default login; the workflow generates both per job. `python -m snapshot_e2e.s3
 endpoint` prints the node address the chart is given. The store runs on the host
 network because the agent pod, which hosts PageBroker, does too and cannot resolve
 cluster service names. Each framework job sets its own `SNAPSHOT_E2E_S3_PORT` and
