@@ -4,7 +4,8 @@
 """The S3-compatible store the S3 e2e suite installs Snapshot against.
 
 The store runs inside the cluster, on the host network of one node, and the
-chart reaches it at ``cluster_endpoint``.
+chart reaches it at ``cluster_endpoint``. Jobs that share a node need different
+``SNAPSHOT_E2E_S3_PORT`` and ``SNAPSHOT_E2E_S3_CONSOLE_PORT`` values.
 
     python -m snapshot_e2e.s3 helm-set   # chart values, one KEY=VALUE per line
     python -m snapshot_e2e.s3 deploy     # the store itself, inside the cluster
@@ -23,8 +24,8 @@ from kubernetes import client, config
 CREDENTIALS_KEY = "credentials"
 DEFAULT_NAMESPACE = "snapshot-e2e"
 STORE_NAME = "snapshot-s3"
-STORE_PORT = 19000
-STORE_CONSOLE_PORT = 19001
+DEFAULT_STORE_PORT = 19000
+DEFAULT_STORE_CONSOLE_PORT = 19001
 STORE_IMAGE = (
     "docker.io/bitnamilegacy/minio:2025.7.23-debian-12-r5"
     "@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20"
@@ -41,6 +42,8 @@ class S3Settings:
     prefix: str
     region: str
     credentials_secret: str
+    port: int
+    console_port: int
 
     @classmethod
     def from_env(cls) -> "S3Settings":
@@ -54,6 +57,10 @@ class S3Settings:
             region=env("SNAPSHOT_E2E_S3_REGION", "us-east-1"),
             credentials_secret=env(
                 "SNAPSHOT_E2E_S3_CREDENTIALS_SECRET", "snapshot-s3-credentials"
+            ),
+            port=int(env("SNAPSHOT_E2E_S3_PORT", str(DEFAULT_STORE_PORT))),
+            console_port=int(
+                env("SNAPSHOT_E2E_S3_CONSOLE_PORT", str(DEFAULT_STORE_CONSOLE_PORT))
             ),
         )
 
@@ -105,17 +112,17 @@ def ensure_credentials_secret(settings: S3Settings, namespace: str) -> None:
         api.replace_namespaced_secret(settings.credentials_secret, namespace, secret)
 
 
-def host_endpoint(host_ip: str) -> str:
-    return f"http://{host_ip}:{STORE_PORT}"
+def host_endpoint(host_ip: str, port: int = DEFAULT_STORE_PORT) -> str:
+    return f"http://{host_ip}:{port}"
 
 
-def store_endpoint(namespace: str) -> str:
+def store_endpoint(namespace: str, port: int = DEFAULT_STORE_PORT) -> str:
     pods = client.CoreV1Api().list_namespaced_pod(
         namespace, label_selector=f"app.kubernetes.io/name={STORE_NAME}"
     )
     for pod in pods.items:
         if pod.status.host_ip:
-            return host_endpoint(pod.status.host_ip)
+            return host_endpoint(pod.status.host_ip, port)
     raise LookupError(f"no {STORE_NAME} pod with a node address in {namespace}")
 
 
@@ -125,17 +132,17 @@ def store_deployment(settings: S3Settings, namespace: str) -> client.V1Deploymen
         "MINIO_ROOT_USER": settings.access_key,
         "MINIO_ROOT_PASSWORD": settings.secret_key,
         "MINIO_DEFAULT_BUCKETS": settings.bucket,
-        "MINIO_API_PORT_NUMBER": str(STORE_PORT),
-        "MINIO_CONSOLE_PORT_NUMBER": str(STORE_CONSOLE_PORT),
+        "MINIO_API_PORT_NUMBER": str(settings.port),
+        "MINIO_CONSOLE_PORT_NUMBER": str(settings.console_port),
     }
     container = client.V1Container(
         name="store",
         image=STORE_IMAGE,
         env=[client.V1EnvVar(name=name, value=value) for name, value in env.items()],
-        ports=[client.V1ContainerPort(container_port=STORE_PORT)],
+        ports=[client.V1ContainerPort(container_port=settings.port)],
         readiness_probe=client.V1Probe(
             http_get=client.V1HTTPGetAction(
-                path="/minio/health/ready", port=STORE_PORT
+                path="/minio/health/ready", port=settings.port
             ),
             period_seconds=2,
         ),
@@ -198,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     config.load_kube_config(os.environ.get("KUBECONFIG"))
     if args.command == "endpoint":
-        print(store_endpoint(namespace))
+        print(store_endpoint(namespace, settings.port))
         return 0
     deploy_store(settings, namespace)
     return 0
