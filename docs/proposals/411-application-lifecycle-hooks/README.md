@@ -80,7 +80,7 @@ Snapshot currently captures one container per PodSnapshot. The API allows
 settings for multiple containers so it can support them later.
 
 The HTTP endpoint must be reachable by the agent at the destination Pod IP,
-before application release, unless `host` selects another destination. A listener bound only to the source Pod's IP may
+before application release. A listener bound only to the source Pod's IP may
 not work after restore. The deployment must allow the agent's traffic through
 any applicable network restrictions.
 
@@ -258,8 +258,6 @@ type HTTPGetAction struct {
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
 	Port intstr.IntOrString `json:"port"`
-	// +optional
-	Host string `json:"host,omitempty"`
 }
 
 type HTTPPostAction struct {
@@ -269,8 +267,6 @@ type HTTPPostAction struct {
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
 	Port intstr.IntOrString `json:"port"`
-	// +optional
-	Host string `json:"host,omitempty"`
 }
 ```
 
@@ -304,11 +300,10 @@ After restoration, it creates the marker with permissions readable by the user
 running the application. Creation must fail if another writer creates the file
 first. Symlinks and other file types are rejected.
 
-Both HTTP action types use Kubernetes-style `path`, `port`, and `host` fields.
-`path` defaults to `/`; `host` defaults to the target Pod IP and selects the
-connection destination. `port` accepts a number from 1 through 65535 or a named
-port resolved against the selected container. Requests use HTTP; POST sends an
-empty body.
+Both HTTP action types use Kubernetes-style `path` and `port` fields. `path`
+defaults to `/`. `port` accepts a number from 1 through 65535 or a named port
+resolved against the selected container. Requests use HTTP and the target Pod IP;
+POST sends an empty body.
 
 **Transport behavior**
 
@@ -342,7 +337,8 @@ type PodSnapshotContentSpec struct {
 When importing a checkpoint, provide its application settings in PodSnapshotContent.
 
 During restore, match each source container's saved settings to its destination
-container. Each restored copy uses those settings with its own container filesystem and Pod IP unless `host` overrides it. Restore reads the settings from PodSnapshotContent.
+container. Each restored copy uses those settings with its own container
+filesystem and Pod IP. Restore reads the settings from PodSnapshotContent.
 
 ### Capture and restore execution
 
@@ -409,10 +405,9 @@ A mount may be shared with other containers or workloads; the application must
 use a dedicated directory for its marker. Newly created markers must be readable
 by the application's user.
 
-**HTTP.** An explicit `host` can direct the agent to an address outside the Pod.
-Deployments must control which destinations the agent can reach and restrict
-access to application endpoints. Do not follow redirects or use environment
-proxies. HTTP actions still exclude host-network Pods. Containers in one Pod
+**HTTP.** Send requests only to the target Pod IP and configured port. Deployments
+must restrict access to application endpoints while allowing the agent to reach
+them. Do not follow redirects or use environment proxies. HTTP actions still exclude host-network Pods. Containers in one Pod
 share its network. Keep response bodies and application memory out of logs and Events.
 
 **Open question:** should HTTP authentication be supported initially, and how
@@ -439,7 +434,7 @@ Log routine unsuccessful probe polls only at debug level.
   and writing the startup marker. Verify that retries keep the original deadline,
   repair state after recorded success, and do not repeat CRIU restore. Cover concurrent
   agents, internal marker recovery, and a crash after creating the application marker.
-- **Transports:** test named and numeric ports, host overrides, status codes,
+- **Transports:** test named and numeric ports, status codes,
   ignored bodies, retries, redirect/proxy and
   host-network rejection, absolute file paths outside the control directory,
   symlink/traversal rejection, readable markers, pre-existing files, nonempty
