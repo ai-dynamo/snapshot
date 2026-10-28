@@ -6,9 +6,10 @@
 #[path = "../src/test_records.rs"]
 mod test_records;
 
+use cudarc::driver::sys::CUmemAllocationHandleType;
 use cuinterpose_protocol::{
-    self as protocol, AllocationOwner, AllocationReference, Manifest, NamespacePid, Operation,
-    Record, Reply, Request, Response,
+    self as protocol, AllocationOwner, AllocationReference, FABRIC_HANDLE_BYTES, FabricHandle,
+    FabricUpdate, Manifest, NamespacePid, Operation, Record, Reply, Request, Response,
 };
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::FdFlags;
@@ -801,4 +802,78 @@ fn unexported_allocation_with_peer_access_is_saved_to_host_carrier() {
     let participants = [vec![accessed, mapping()], vec![]];
     harness.prepare(&participants, &[vec![owner(1, A)], vec![]], [4096, 0]);
     harness.restore(&participants, [4096, 0], &participants, &[]);
+}
+
+// FABRIC sharing within one Pod.
+
+#[test]
+fn fabric_importer_imports_the_handle_that_its_creator_exported_at_restore() {
+    let harness = Harness::new();
+    let fabric = CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0;
+    let [old, new] = [1, 2].map(|byte| FabricHandle([byte; FABRIC_HANDLE_BYTES]));
+    // A fabric import names no creator, and its size is unknown to the importer.
+    let local = AllocationReference {
+        id: [9; 16],
+        creator_pid: 0,
+    };
+    let records = |handle| {
+        [
+            vec![
+                with!(shared(), Allocation.handle_types = fabric),
+                mapping(),
+                Record::FabricExport {
+                    allocation: A,
+                    handle,
+                },
+            ],
+            vec![
+                with!(
+                    shared(),
+                    Allocation.allocation = local,
+                    Allocation.handle_types = fabric,
+                    Allocation.size = 0
+                ),
+                with!(mapping(), Mapping.allocation = local),
+                Record::FabricImport {
+                    allocation: local,
+                    handle,
+                },
+            ],
+        ]
+    };
+    let owners = [
+        vec![owner(1, A)],
+        vec![AllocationOwner {
+            allocation: local,
+            owner_pid: 1,
+        }],
+    ];
+    harness.prepare(&records(old), &owners, [4096, 0]);
+    let update = FabricUpdate { old, new };
+    harness.coordinator("--restore", &[], |_| {
+        harness.answer(RecordRequest::Inspect, &records(old));
+        let [creator, importer] =
+            [1, 2].map(|pid| harness.execute(pid, Operation::LoadAllocations, vec![]));
+        reply(
+            creator,
+            1,
+            Ok(Reply::Completed {
+                operation: Operation::LoadAllocations,
+                bytes: 4096,
+                exports: vec![update],
+            }),
+        );
+        reply(importer, 2, completed(Operation::LoadAllocations, 0));
+        for operation in &RESTORE[1..] {
+            for pid in [1, 2] {
+                let request = Request::Execute {
+                    namespace_pid: pid,
+                    operation: *operation,
+                    imports: vec![update],
+                };
+                reply(harness.request(pid, request), pid, completed(*operation, 0));
+            }
+        }
+        harness.answer(RecordRequest::Inspect, &records(new));
+    });
 }

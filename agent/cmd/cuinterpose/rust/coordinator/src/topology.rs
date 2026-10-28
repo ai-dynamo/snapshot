@@ -10,6 +10,13 @@ use cuinterpose_protocol::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Sharing uses exactly one exportable handle type: POSIX within a Pod or FABRIC across
+/// Pods.
+const EXPORTS: [u64; 2] = [
+    CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0 as u64,
+    CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0 as u64,
+];
+
 pub struct AllocationSummary {
     pub reference: AllocationReference,
     pub size: u64,
@@ -81,10 +88,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         "participant {namespace_pid}: invalid allocation extent for {allocation:?}"
                     );
                     // Creators may be nonexportable. CUDA reports no handle types on imports.
-                    let known_handle_types = *handle_types == 0
-                        || *handle_types
-                            == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
-                                .0;
+                    let known_handle_types =
+                        *handle_types == 0 || EXPORTS.contains(&u64::from(*handle_types));
                     if allocation.creator_pid == *namespace_pid {
                         // Only exportable backing can be shared.
                         ensure!(
@@ -141,13 +146,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         },
                     ..
                 } => {
-                    if *handle_types
-                        != u64::from(
-                            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
-                        )
-                        || *size == 0
-                        || *devices == 0
-                        || *flags != 0
+                    if !EXPORTS.contains(handle_types) || *size == 0 || *devices == 0 || *flags != 0
                     {
                         bail!(
                             "participant {namespace_pid}: invalid multicast properties for {allocation:?}: size={size}, handle_types={handle_types}, devices={devices}, flags={flags}"
@@ -470,21 +469,18 @@ mod tests {
         for handle_types in [
             0,
             CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
+            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0,
         ] {
             let summary =
                 validate(&BTreeMap::from([(1, vec![record(handle_types, false)])])).unwrap();
             assert!(summary[0].uses_host_carrier());
         }
-        for (handle_types, shared) in [
-            (0, true),
-            (
-                CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC.0,
-                false,
-            ),
-        ] {
+        for (handle_types, shared) in [(0, true), (WIN32, false)] {
             assert!(validate(&BTreeMap::from([(1, vec![record(handle_types, shared)])])).is_err());
         }
     }
+
+    const WIN32: u32 = CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_WIN32.0;
 
     /// Validation error for the records of participants 1 and 2, if any.
     struct Rejection(Option<String>);
@@ -534,11 +530,11 @@ mod tests {
             .names("participant 1: missing creator participant");
         alone(with!(allocation(), Allocation.size = 0))
             .names("participant 1: invalid allocation extent");
-        alone(with!(shared(), Allocation.handle_types = 8))
+        alone(with!(shared(), Allocation.handle_types = WIN32))
             .names("participant 1: invalid allocation creator");
         rejection(&[allocation()], &[allocation()])
             .names("participant 2: invalid imported allocation");
-        imported(with!(shared(), Allocation.handle_types = 8))
+        imported(with!(shared(), Allocation.handle_types = WIN32))
             .names("participant 2: invalid imported allocation");
         rejection(&[allocation()], &[shared()])
             .names("participant 2: inconsistent allocation metadata");
