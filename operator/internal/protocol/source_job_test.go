@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
@@ -112,6 +113,44 @@ func TestNewSourceJob(t *testing.T) {
 	}
 	if job.Spec.TTLSecondsAfterFinished == nil || *job.Spec.TTLSecondsAfterFinished != 300 {
 		t.Fatalf("unexpected ttlSecondsAfterFinished: %#v", job.Spec.TTLSecondsAfterFinished)
+	}
+}
+
+func TestNewSourceJobKeepsTheReadinessProbeWithACheckpointReadinessProbe(t *testing.T) {
+	serving := &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+		HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt32(8000)},
+	}}
+	template := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name:           "main",
+		Image:          "test:latest",
+		ReadinessProbe: serving,
+		LivenessProbe:  serving,
+	}}}}
+	opts := SourceJobOptions{Namespace: "test-ns", Name: "test-job", TargetContainer: "main"}
+
+	opts.CheckpointReadinessProbe = true
+	job, err := NewSourceJob(template, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := &job.Spec.Template.Spec.Containers[0]
+	if main.ReadinessProbe == nil || main.ReadinessProbe.HTTPGet == nil || main.ReadinessProbe.HTTPGet.Path != "/health" {
+		t.Fatalf("expected the caller's readiness probe kept, got %#v", main.ReadinessProbe)
+	}
+	if main.LivenessProbe != nil {
+		t.Fatalf("expected the liveness probe cleared as usual, got %#v", main.LivenessProbe)
+	}
+	if len(main.VolumeMounts) != 1 || main.VolumeMounts[0].MountPath != podcontract.SnapshotControlMountPath {
+		t.Fatalf("expected the control volume mounted as usual, got %#v", main.VolumeMounts)
+	}
+
+	opts.CheckpointReadinessProbe = false
+	job, err = NewSourceJob(template, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe := job.Spec.Template.Spec.Containers[0].ReadinessProbe; probe == nil || probe.Exec == nil {
+		t.Fatalf("expected the ready-file readiness probe without a checkpoint readiness probe, got %#v", probe)
 	}
 }
 
