@@ -137,9 +137,9 @@ with `SNAPSHOT_E2E_STORAGE` set to the store, so both runs record the same
 benchmark result. A final job pairs each framework's two results and prints the
 timings side by side in the run summary (`snapshot_e2e.storage_comparison`). The
 `framework` and `storage` inputs select a subset; `storage: s3` or `pvc` skips the
-comparison. The workflow is started by hand and installs published images:
-dispatch `push-artifacts.yaml` on the branch first and pass its tag as
-`snapshot_tag`.
+comparison. The workflow runs nightly on `main` and installs the published images
+of the commit it checked out. To test a branch, dispatch `push-artifacts.yaml` on it
+and pass the resulting tag as `snapshot_tag`.
 
 The store runs in the vCluster as a pod. `python -m snapshot_e2e.s3 deploy` creates
 it with the credentials Secret and a default bucket, and `python -m snapshot_e2e.s3
