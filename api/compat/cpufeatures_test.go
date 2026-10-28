@@ -46,6 +46,11 @@ func TestInstructionSetFeatures(t *testing.T) {
 			want:  []string{"aes", "asimd", "fp", "sve", "sve2"},
 		},
 		{
+			name:  "arm64 hints a processor without them runs as NOPs",
+			flags: []string{"fp", "dgh", "rprfm", "asimd"},
+			want:  []string{"asimd", "fp"},
+		},
+		{
 			name:  "no instruction-set flag at all is unknown",
 			flags: []string{"hypervisor", "constant_tsc"},
 		},
