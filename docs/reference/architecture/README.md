@@ -230,7 +230,9 @@ changing how callers address a checkpoint — see
 
 PageBroker adds a memory-backed staging volume shared with the agent. By default
 CRIU dumps into staging and PageBroker publishes to the checkpoint store on
-success, while restore reads the artifact directly (`pageBroker.restoreMode: direct`). Because
+success. With a PVC, restore reads the artifact directly
+(`pageBroker.restoreMode: direct`); with S3, restore always stages the
+artifact from the bucket first. Because
 staging is RAM, its cap and the agent's memory limit have to be sized together —
 see [Storage](../../operations/storage.md).
 

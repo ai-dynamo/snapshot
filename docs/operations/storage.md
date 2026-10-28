@@ -278,7 +278,7 @@ start briefly until the operator has rewritten its configuration. See
 | Value | Effect | Default |
 |-------|--------|---------|
 | `storage.s3.addressing` | `path` or `virtual` bucket addressing | PageBroker's `virtual` |
-| `storage.s3.allowHttp` | Accepts a plain-http endpoint; the chart refuses one otherwise | `false` |
+| `storage.s3.allowHttp` | Accepts a plain-http endpoint; the chart refuses one otherwise. For local testing only: checkpoint payloads and credentials cross the network unencrypted | `false` |
 | `storage.s3.caBundleConfigMapRef`, `storage.s3.caBundleConfigMapKey` | CA bundle for the endpoint, used by PageBroker and the operator | system trust |
 | `pageBroker.s3.limits` | Transfer and transaction limits; keys, defaults and bounds are in the [values reference](../reference/api.md#s3-transfer-limits) | see reference |
 | `pageBroker.transferEngine.modelStreamer` | Tuning for the engine that reads S3 restores, written as given; keys are in [Model Streamer configuration](../../agent/pagebroker/MODEL_STREAMER.md) | no file |
