@@ -18,12 +18,10 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
   - [API](#api)
     - [Per-container configuration](#per-container-configuration)
     - [SnapshotJob](#snapshotjob)
-    - [Application contract](#application-contract)
-    - [Checkpoint metadata](#checkpoint-metadata)
+    - [Probe and lifecycle types](#probe-and-lifecycle-types)
+    - [PodSnapshotContent](#podsnapshotcontent)
   - [Capture and restore execution](#capture-and-restore-execution)
   - [Security](#security)
-    - [RBAC](#rbac)
-    - [Transport isolation](#transport-isolation)
   - [Monitoring](#monitoring)
   - [Test Plan](#test-plan)
 - [Alternatives](#alternatives)
@@ -35,8 +33,8 @@ Tracking issue: [#411](https://github.com/ai-dynamo/snapshot/issues/411)
 
 Application contracts define how Snapshot checks capture readiness and notifies
 an application after restore. Users configure each captured container in
-PodSnapshot or SnapshotJob. Snapshot saves that configuration with the checkpoint
-and uses it for every restore.
+PodSnapshot or SnapshotJob. Snapshot saves that configuration in
+PodSnapshotContent and uses it for every restore.
 
 ## Motivation
 
@@ -51,7 +49,7 @@ timing settings.
 ### Goals
 
 - Configure both PodSnapshot and SnapshotJob through the same contract API.
-- Preserve each captured container’s contract with its checkpoint for all restores.
+- Save each container’s application settings in PodSnapshotContent for all restores.
 
 ### Non-Goals
 
@@ -62,18 +60,18 @@ timing settings.
 
 ## Proposal
 
-Each container can define an `applicationContract` directly in its settings:
+Each entry in `spec.containers` can define a probe and lifecycle hooks:
 
-- `captureReadinessProbe` checks whether the application is safe to capture.
-- `restoreRelease` tells the application it may resume after Snapshot restores
+- `checkpointReadinessProbe` checks whether the application is safe to capture.
+- `lifecycle.postRestore` tells the application it may resume after Snapshot restores
   its process and GPU state.
 
 Both actions are optional. The application decides when it is safe to capture,
 how to recover after restore, and when it is ready to serve requests.
 
-The agent waits for `captureReadinessProbe` to succeed before capturing the
+The agent waits for `checkpointReadinessProbe` to succeed before capturing the
 container. Success means the application is safe to capture. If the probe is
-omitted, the agent waits for the selected container to be ready. `restoreRelease`
+omitted, the agent waits for the selected container to be ready. `lifecycle.postRestore`
 adds an application notification after process and GPU restoration.
 
 ### Limitations, Risks, and Mitigations
@@ -119,13 +117,16 @@ type PodSnapshotSpec struct {
 	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!(has(self.checkpointReadinessProbe) && has(self.checkpointReadinessProbe.file) && has(self.lifecycle) && has(self.lifecycle.postRestore) && has(self.lifecycle.postRestore.file)) || self.checkpointReadinessProbe.file.path != self.lifecycle.postRestore.file.path",message="probe and postRestore file paths must differ"
 type ContainerSnapshotConfig struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 	// +optional
-	ApplicationContract *ApplicationContract `json:"applicationContract,omitempty"`
+	CheckpointReadinessProbe *CheckpointReadinessProbe `json:"checkpointReadinessProbe,omitempty"`
+	// +optional
+	Lifecycle *ApplicationLifecycle `json:"lifecycle,omitempty"`
 }
 ```
 
@@ -144,12 +145,12 @@ spec:
       containers: [main]
   containers:
     - name: main
-      applicationContract:
-        captureReadinessProbe:
-          httpGet:
-            path: /checkpoint/status
-            port: 8000
-        restoreRelease:
+      checkpointReadinessProbe:
+        httpGet:
+          path: /checkpoint/status
+          port: 8000
+      lifecycle:
+        postRestore:
           httpPost:
             path: /checkpoint/resume
             port: 8000
@@ -176,29 +177,26 @@ spec:
     targetContainers: [main]
     containers:
       - name: main
-        applicationContract:
-          restoreRelease:
+        lifecycle:
+          postRestore:
             httpPost:
               path: /checkpoint/resume
               port: 8000
 ```
 
-#### Application contract
+#### Probe and lifecycle types
 
-Each container defines its contract using the following types.
+The probe checks readiness; the lifecycle hook notifies the restored application.
 
 ```go
-// +kubebuilder:validation:XValidation:rule="!(has(self.captureReadinessProbe) && has(self.captureReadinessProbe.file) && has(self.restoreRelease) && has(self.restoreRelease.file)) || self.captureReadinessProbe.file.path != self.restoreRelease.file.path",message="probe and release file paths must differ"
-type ApplicationContract struct {
+type ApplicationLifecycle struct {
 	// +optional
-	CaptureReadinessProbe *CaptureReadinessProbe `json:"captureReadinessProbe,omitempty"`
-	// +optional
-	RestoreRelease *RestoreRelease `json:"restoreRelease,omitempty"`
+	PostRestore *PostRestore `json:"postRestore,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.file) != has(self.httpGet)",message="select exactly one of file or httpGet"
-type CaptureReadinessProbe struct {
-	CaptureReadinessProbeHandler `json:",inline"`
+type CheckpointReadinessProbe struct {
+	CheckpointReadinessProbeHandler `json:",inline"`
 
 	// +optional
 	// +kubebuilder:default=0
@@ -218,7 +216,7 @@ type CaptureReadinessProbe struct {
 	SuccessThreshold int32 `json:"successThreshold,omitempty"`
 }
 
-type CaptureReadinessProbeHandler struct {
+type CheckpointReadinessProbeHandler struct {
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 	// +optional
@@ -226,8 +224,8 @@ type CaptureReadinessProbeHandler struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.file) != has(self.httpPost)",message="select exactly one of file or httpPost"
-type RestoreRelease struct {
-	RestoreReleaseHandler `json:",inline"`
+type PostRestore struct {
+	PostRestoreHandler `json:",inline"`
 
 	// +optional
 	// +kubebuilder:default=1
@@ -239,7 +237,7 @@ type RestoreRelease struct {
 	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 }
 
-type RestoreReleaseHandler struct {
+type PostRestoreHandler struct {
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 	// +optional
@@ -265,11 +263,11 @@ type LifecycleHTTPAction struct {
 }
 ```
 
-When present, `captureReadinessProbe` requires exactly one of `file` or `httpGet`, and
-`restoreRelease` requires exactly one of `file` or `httpPost`.
+When present, `checkpointReadinessProbe` requires exactly one of `file` or `httpGet`, and
+`lifecycle.postRestore` requires exactly one of `file` or `httpPost`.
 
-`captureReadinessProbe` defaults to `initialDelaySeconds: 0`, `periodSeconds: 1`,
-`timeoutSeconds: 1`, and `successThreshold: 1`. `restoreRelease` defaults to
+`checkpointReadinessProbe` defaults to `initialDelaySeconds: 0`, `periodSeconds: 1`,
+`timeoutSeconds: 1`, and `successThreshold: 1`. `lifecycle.postRestore` defaults to
 `periodSeconds: 1` and `timeoutSeconds: 1`.
 
 The initial delay can be zero; other values must be positive. For both actions,
@@ -287,10 +285,13 @@ do not depend on `SNAPSHOT_CONTROL_DIR`. Reject `.` and `..` path components.
 Probe and release paths must differ. Snapshot's internal control files remain
 reserved and cannot be used as custom release paths.
 The agent enforces reserved paths and filesystem isolation at runtime.
-The application must provide the release file's parent directory. The agent
-creates a marker only if absent, without overwriting an existing file, and makes
-new markers readable by the user running the application. An existing regular file counts as
-success; symlinks and other file types are rejected.
+For a file-based postRestore hook, the application must provide an empty parent
+directory for the marker.
+Before starting restore, the agent fails if that directory is not empty or the
+configured path already exists. It does not remove or overwrite existing files.
+After restoration, it creates the marker with permissions readable by the user
+running the application. Creation must fail if another writer creates the file
+first. Symlinks and other file types are rejected.
 
 HTTP paths must begin with `/` and cannot include a host, query string, or
 fragment. Ports range from 1 through 65535. Only HTTP is supported; the agent
@@ -303,20 +304,19 @@ bodies are not part of this API.
 | --- | --- |
 | File probe | The marker exists as a regular file. |
 | HTTP probe | GET returns `200`. |
-| File release | The marker exists as a regular file after the agent creates it or finds it. |
-| HTTP release | POST with an empty body returns `200` or `204`. This means the application accepted the notification; recovery may still be running. |
+| File postRestore | The agent creates the marker without overwriting an existing path. |
+| HTTP postRestore | POST with an empty body returns `200` or `204`. This means the application accepted the notification; recovery may still be running. |
 
 GET and POST response bodies are ignored; no attempt ID is sent. All unsuccessful
 HTTP release requests, including `404` and connection failures, are retried until the
 restore deadline. Shared HTTP endpoints receive no container identifier and must
 coordinate the required releases.
 
-#### Checkpoint metadata
+#### PodSnapshotContent
 
 Add `containers` to `PodSnapshotContent.spec`. Before capture, apply timing
 defaults to configured actions. Save the resulting settings for
 every selected container in the content spec, where they cannot be changed.
-The agent also saves these settings in the checkpoint metadata.
 
 ```go
 type PodSnapshotContentSpec struct {
@@ -327,12 +327,11 @@ type PodSnapshotContentSpec struct {
 }
 ```
 
-When importing a checkpoint, keep its saved contract settings.
+When importing a checkpoint, provide its application settings in PodSnapshotContent.
 
 During restore, match each source container's saved settings to its destination
 container. Each restored copy uses those settings with its own Pod IP and
-container filesystem. Restore reads the contract from the checkpoint, not from
-the destination Pod or the original PodSnapshot.
+container filesystem. Restore reads the settings from PodSnapshotContent.
 
 ### Capture and restore execution
 
@@ -340,7 +339,7 @@ the destination Pod or the original PodSnapshot.
 
 ```mermaid
 flowchart TD
-    A[Apply timing defaults and save each contract] --> B{Contract has captureReadinessProbe?}
+    A[Apply timing defaults] --> B{checkpointReadinessProbe configured?}
     B -->|Yes| C[Check until successThreshold consecutive successes]
     B -->|No| D[Use existing selected-container readiness check]
     C --> E[Check that the source has not changed]
@@ -356,22 +355,24 @@ after reporting readiness.
 
 The existing file protocol remains: `restore-complete` hands the restored PID
 to the restore proxy, and `restore-failed` reports failure. Applications that
-already wait on these files continue to do so. The configured application release
-is a separate step; overall success is recorded after it succeeds.
+already wait on these files continue to do so. The configured
+`lifecycle.postRestore` hook is a separate step; overall success is recorded after it succeeds.
 
 ```mermaid
 flowchart TD
     A[Restore process and GPU state] --> P[Write restore-complete for the proxy]
-    P --> B{restoreRelease configured?}
+    P --> B{lifecycle.postRestore configured?}
     B -->|Yes| C[Notify application using file or HTTP]
     C --> D[Record overall success]
     B -->|No| D
 ```
 
-Track application release completion separately from the internal marker so
-retries never repeat process restoration. All restore attempts use the
-checkpoint's saved settings. The application must handle repeated release notifications without repeating their effects
-(idempotence). A successful response means the notification was accepted.
+Track postRestore completion separately from the internal marker so retries
+never repeat process restoration. Check for stale files before a new restore,
+not when recovering an operation that already created its marker. Recovery must
+use the recorded operation state; file existence alone does not prove success.
+All restore attempts use the settings saved in PodSnapshotContent. The application
+must handle repeated notifications without repeating their effects (idempotence). A successful response means the notification was accepted.
 The application may still need time to recover before it can serve requests.
 
 **Deadlines.** SnapshotJob's `activeDeadlineSeconds` limits its source lifecycle.
@@ -386,23 +387,23 @@ was lost.
 
 ### Security
 
-#### RBAC
+The agent uses application-supplied paths and endpoints while running with
+privileges the application may not have. Limit each action to its destination.
 
-Kubernetes RBAC controls who can create snapshot requests. A contract can read
-or write files and call HTTP endpoints in the target Pod without changing its
-spec. Permission checks must cover access to that Pod as well as the request.
+**Files.** Resolve paths inside the selected container, never from the host root.
+Reject symlinks and paths that escape that filesystem. Protect Snapshot's internal
+files from custom hook writes. Check the empty directory before restore and use
+exclusive creation for the marker so a race cannot overwrite another file.
+A mount may be shared with other containers or workloads; the application must
+use a dedicated directory for its marker. Newly created markers must be readable
+by the application's user.
 
-#### Transport isolation
+**HTTP.** Send requests only to the target Pod IP and configured port. Do not
+follow redirects or use environment-configured proxies. HTTP actions do not
+support host-network Pods. Deployments must restrict access to these endpoints
+while allowing the agent to reach them. Containers in one Pod share its network.
 
-HTTP calls go directly to the target Pod IP. They do not follow redirects or
-use proxies configured through environment variables.
-HTTP actions do not support host-network Pods. Deployments must restrict listener
-access; containers in the same Pod share its network.
-
-Resolve file paths inside the target container, never from the host root.
-Reject symlinks and paths that escape the container. Permission checks must
-account for writes to mounts shared with other workloads. Protect the agent's
-metadata, and keep response bodies and application memory out of logs and Events.
+Keep response bodies and application memory out of logs and Events.
 
 **Open question:** should HTTP authentication be supported initially, and how
 should capture and restore obtain credentials? The API has no credential fields.
@@ -415,9 +416,9 @@ Log routine unsuccessful probe polls only at debug level.
 
 ### Test Plan
 
-- **API:** validate optional actions, empty contracts, exclusive handlers, timing
+- **API:** validate optional probes and hooks, exclusive handlers, timing
   defaults, rejection of spec changes, unique names, and names that match selected containers.
-  Check that each container’s settings reach the checkpoint from SnapshotJob.
+  Check that each container’s settings reach PodSnapshotContent from SnapshotJob.
 - **Capture:** test success thresholds, source restarts, cancellation, deadlines,
   and the existing capture check when the probe is omitted. Verify that startup,
   readiness, and liveness probe handling remains unchanged.
@@ -427,10 +428,11 @@ Log routine unsuccessful probe polls only at debug level.
 - **Recovery:** inject failures around runtime restore, release, persistence,
   and writing the startup marker. Verify that retries keep the original deadline,
   repair state after recorded success, and do not repeat CRIU restore. Cover concurrent
-  agents and internal marker recovery.
+  agents, internal marker recovery, and a crash after creating the application marker.
 - **Transports:** test status codes, ignored bodies, retries, redirect/proxy and
   host-network rejection, absolute file paths outside the control directory,
-  symlink/traversal rejection, readable markers, no overwrites, and stale markers. Verify target-container path
+  symlink/traversal rejection, readable markers, pre-existing files, nonempty
+  directories, and creation races. Verify target-container path
   resolution, shared-mount effects, and shared-HTTP coordination.
 - **Integrations:** validate file and HTTP with inference after restore. Cover
   new Pod IPs, release before serving, recovery that continues after release,
@@ -441,9 +443,7 @@ Log routine unsuccessful probe polls only at debug level.
 
 A shared contract CRD would let deployments reuse settings, but adds a resource
 to manage and look up. Start with contracts defined directly in container settings.
-Later, an `applicationContractRef` field could let users reference a shared
-contract instead. Users could set at most one of the two fields; Snapshot would
-not merge them.
+A shared reference can be considered separately if reuse is needed.
 
 ## Appendix
 
