@@ -87,6 +87,62 @@ def is_generator(node):
     return False
 
 
+def patch_source(source, package, relative, startup):
+    if "from startup_timing import phase as _startup_phase" in source:
+        return source, []
+    tree = ast.parse(source)
+    lines = source.splitlines(True)
+    edits = []
+    names = []
+
+    def visit(body, prefix=""):
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                visit(node.body, prefix + node.name + ".")
+            elif isinstance(node, ast.FunctionDef):
+                name = prefix + node.name
+                if node.name == "__init__":
+                    select = any(s in relative for s in INIT_MODULES)
+                else:
+                    select = startup.search(node.name)
+                if not select:
+                    continue
+                # Generator execution starts at iteration, not function call.
+                if is_generator(node):
+                    continue
+                label = package + "." + relative[:-3].replace("/", ".") + "." + name
+                edits.append(
+                    (
+                        node.lineno - 1,
+                        " " * node.col_offset + f"@_startup_phase({label!r})\n",
+                    )
+                )
+                names.append(label)
+
+    visit(tree.body)
+    if not edits:
+        return source, []
+    insert = 0
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            and insert == 0
+        ):
+            insert = node.end_lineno
+        elif isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            insert = node.end_lineno
+        else:
+            break
+    edits.append((insert, "from startup_timing import phase as _startup_phase\n"))
+    for index, text in sorted(edits, reverse=True):
+        lines.insert(index, text)
+    patched = "".join(lines)
+    compile(patched, relative, "exec")
+    return patched, names
+
+
 def instrument(profile):
     extra_packages, extra_functions, extra_modules = PROFILES[profile]
     packages = PACKAGES + extra_packages
@@ -105,69 +161,9 @@ def instrument(profile):
                 if not any(s in relative for s in modules):
                     continue
                 source = path.read_text()
-                if "from startup_timing import phase as _startup_phase" in source:
+                patched, names = patch_source(source, package, relative, startup)
+                if not names:
                     continue
-                tree = ast.parse(source)
-                lines = source.splitlines(True)
-                edits = []
-                names = []
-
-                def visit(body, prefix=""):
-                    for node in body:
-                        if isinstance(node, ast.ClassDef):
-                            visit(node.body, prefix + node.name + ".")
-                        elif isinstance(node, ast.FunctionDef):
-                            name = prefix + node.name
-                            if node.name == "__init__":
-                                select = any(s in relative for s in INIT_MODULES)
-                            else:
-                                select = startup.search(node.name)
-                            if not select:
-                                continue
-                            # Generator execution starts at iteration, not function call.
-                            if is_generator(node):
-                                continue
-                            label = (
-                                package
-                                + "."
-                                + relative[:-3].replace("/", ".")
-                                + "."
-                                + name
-                            )
-                            edits.append(
-                                (
-                                    node.lineno - 1,
-                                    " " * node.col_offset
-                                    + f"@_startup_phase({label!r})\n",
-                                )
-                            )
-                            names.append(label)
-
-                visit(tree.body)
-                if not edits:
-                    continue
-                insert = 0
-                for node in tree.body:
-                    if (
-                        isinstance(node, ast.Expr)
-                        and isinstance(node.value, ast.Constant)
-                        and isinstance(node.value.value, str)
-                        and insert == 0
-                    ):
-                        insert = node.end_lineno
-                    elif (
-                        isinstance(node, ast.ImportFrom) and node.module == "__future__"
-                    ):
-                        insert = node.end_lineno
-                    else:
-                        break
-                edits.append(
-                    (insert, "from startup_timing import phase as _startup_phase\n")
-                )
-                for index, text in sorted(edits, reverse=True):
-                    lines.insert(index, text)
-                patched = "".join(lines)
-                compile(patched, str(path), "exec")
                 path.write_text(patched)
                 changes.append(
                     dict(

@@ -41,6 +41,36 @@ def remote_json(namespace, pod, script, *, container="main"):
     return json.loads(records[0])
 
 
+def source_checks_pass(checks):
+    return sorted(c["expected"] for c in checks) == [
+        "berlin",
+        "paris",
+        "tokyo",
+    ] and all(c["expected"] in c["answer"].lower() for c in checks)
+
+
+def restore_checks_pass(checks, token):
+    return sorted(c["expected"] for c in checks) == [
+        "berlin",
+        "paris",
+        "tokyo",
+    ] and all(
+        c["expected"] in c["response"]["text"].lower()
+        and c["response"].get("checkpoint_token") == token
+        for c in checks
+    )
+
+
+def is_gpu_manifest(path):
+    parts = Path(path).parts
+    return (
+        len(parts) == 3
+        and parts[0] == "gpu"
+        and parts[1].isdigit()
+        and parts[2] == "manifest.txt"
+    )
+
+
 def source_measurement(cfg, pod, folder):
     packet = remote_json(
         cfg.workload_namespace,
@@ -93,9 +123,7 @@ print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compres
         for line in text.splitlines()
         if "CR_SEMANTIC_PRECHECK " in line
     ]
-    if sorted(c["expected"] for c in checks) != ["berlin", "paris", "tokyo"] or not all(
-        c["expected"] in c["answer"].lower() for c in checks
-    ):
+    if not source_checks_pass(checks):
         raise ValueError("Source inference checks failed")
     events = [
         json.loads(line.split("CR_PHASE ", 1)[1])
@@ -151,6 +179,32 @@ def agent_log(cfg, node, path):
     return text
 
 
+def parse_checkpoint_inventory(output):
+    fields = output.split("\0")
+    if fields[-2:] != ["BENCHMARK_FIND_COMPLETE", ""] or len(fields[:-2]) % 2:
+        raise RuntimeError("Checkpoint inventory did not complete: " + output[-1000:])
+    files = [
+        dict(path=fields[i], bytes=int(fields[i + 1]))
+        for i in range(0, len(fields) - 2, 2)
+    ]
+    if not files:
+        raise ValueError("Empty checkpoint artifact")
+    return dict(files=files, total_bytes=sum(f["bytes"] for f in files))
+
+
+def find_checkpoint_timing(text, content_name):
+    payloads = []
+    for line in text.splitlines():
+        if "Checkpoint timing summary" not in line or "{" not in line:
+            continue
+        payload = json.loads(line[line.index("{") :])
+        if payload.get("content") == content_name:
+            payloads.append(payload["checkpoint"])
+    if len(payloads) != 1:
+        raise ValueError("Missing or ambiguous checkpoint timing summary")
+    return payloads[0]
+
+
 def checkpoint_measurement(cfg, node, uid, content_name, folder):
     agent = lifecycle.checkpoint_agent_pod(cfg.snapshot_e2e_config(), node)
     root = lifecycle.checkpoint_artifact_path(uid)
@@ -164,36 +218,13 @@ def checkpoint_measurement(cfg, node, uid, content_name, folder):
         + r" -type f -printf '%P\0%s\0' && printf 'BENCHMARK_FIND_COMPLETE\0'",
         container="agent",
     )
-    fields = output.split("\0")
-    if fields[-2:] != ["BENCHMARK_FIND_COMPLETE", ""] or len(fields[:-2]) % 2:
-        raise RuntimeError("Checkpoint inventory did not complete: " + output[-1000:])
-    files = [
-        dict(path=fields[i], bytes=int(fields[i + 1]))
-        for i in range(0, len(fields) - 2, 2)
-    ]
-    if not files:
-        raise ValueError("Empty checkpoint artifact")
-    inventory = dict(files=files, total_bytes=sum(f["bytes"] for f in files))
+    inventory = parse_checkpoint_inventory(output)
     save(folder / "artifacts.json", inventory)
-    if not any(
-        len(parts := Path(f["path"]).parts) == 3
-        and parts[0] == "gpu"
-        and parts[1].isdigit()
-        and parts[2] == "manifest.txt"
-        for f in inventory["files"]
-    ):
+    if not any(is_gpu_manifest(f["path"]) for f in inventory["files"]):
         raise ValueError("Checkpoint lacks PageBroker CustomStorage GPU manifests")
-    payloads = []
-    for line in text.splitlines():
-        if "Checkpoint timing summary" not in line or "{" not in line:
-            continue
-        payload = json.loads(line[line.index("{") :])
-        if payload.get("content") == content_name:
-            payloads.append(payload["checkpoint"])
-    if len(payloads) != 1:
-        raise ValueError("Missing or ambiguous checkpoint timing summary")
-    save(folder / "checkpoint-timing.json", payloads[0])
-    return inventory["total_bytes"], seconds(payloads[0]["duration"])
+    timing = find_checkpoint_timing(text, content_name)
+    save(folder / "checkpoint-timing.json", timing)
+    return inventory["total_bytes"], seconds(timing["duration"])
 
 
 def restored_measurement(cfg, pod, snapshot_name, token, folder):
@@ -214,11 +245,7 @@ print('BENCHMARK_JSON '+json.dumps(dict(checks=checks,phases=phases)))
     )
     save(folder / "inference.json", packet["checks"])
     (folder / "phases.jsonl").write_text(packet["phases"])
-    if not all(
-        c["expected"] in c["response"]["text"].lower()
-        and c["response"].get("checkpoint_token") == token
-        for c in packet["checks"]
-    ):
+    if not restore_checks_pass(packet["checks"], token):
         raise ValueError("Restore inference or process-token check failed")
     save(folder / "pod-final.json", pod)
     text = agent_log(cfg, pod.spec.node_name, folder / "agent.log")

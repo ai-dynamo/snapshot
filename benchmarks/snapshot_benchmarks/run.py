@@ -69,6 +69,11 @@ class BenchmarkConfig:
     work_pvc: str
     drop_page_cache: bool = True
     detailed_timing: bool = False
+    restore_count: int = 3
+
+    def __post_init__(self):
+        if type(self.restore_count) is not int or self.restore_count < 1:
+            raise ValueError("restore_count must be a positive integer")
 
     def configure(self):
         # Supplying a path prevents the helper falling back to in-cluster access
@@ -140,12 +145,7 @@ def _container_started_at(pod, container_name: str) -> datetime.datetime | None:
 
 
 def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> str:
-    """Fails fast, before deploying anything, if no `snapshot-agent` pod is
-    visible in `cfg.snapshot_namespace` for `cfg.release`. The most common
-    cause is simply passing the wrong `--snapshot-namespace`/`--release` --
-    without this check, that mistake is only discovered by `_checkpoint_size`
-    after cold start and checkpoint have already both succeeded, wasting
-    however long those took."""
+    """Find the selected node's agent image before deploying the workload."""
     snapshot_cfg = cfg.snapshot_e2e_config()
     agents = k8s.list_snapshot_pods(
         snapshot_cfg.namespace, snapshot_cfg.release, "snapshot-agent"
@@ -182,7 +182,7 @@ def run_benchmark(
       - "cold_start": deploy the source pod, time cold start, then clean up
         (or leave it running with `keep=True`).
       - "both" (default): measure initialization, checkpoint, delete the source,
-        and restore three times. Each restore must preserve the process token
+        and restore `cfg.restore_count` times. Each restore must preserve the process token
         and pass inference checks. Headline timing stops at wake completion.
 
     `image_pull_policy` overrides the guide's own default (`Always`, which
@@ -346,11 +346,11 @@ def run_benchmark(
             lifecycle.wait_for_pod_deleted(cfg.workload_namespace, source_name)
             source_deleted = True
 
-            for repeat in range(1, 4):
+            for repeat in range(1, cfg.restore_count + 1):
                 restore_name = f"bench-restore-{run_id}-{repeat}"
                 restore_folder = folder / f"restore-{repeat:02d}"
                 restore_folder.mkdir()
-                progress(f"[{run_id}] restoring {repeat}/3 as {restore_name}")
+                progress(f"[{run_id}] restoring {repeat}/{cfg.restore_count} as {restore_name}")
                 restore_manifest = engine.build_restore_pod(
                     name=restore_name,
                     namespace=cfg.workload_namespace,
@@ -424,7 +424,7 @@ def run_benchmark(
                         snapshot_name=snapshot_name,
                     )
                 # Free GPUs before the next repetition, even when --keep retains the checkpoint.
-                if repeat < 3 or not keep:
+                if repeat < cfg.restore_count or not keep:
                     k8s.delete_pod(cfg.workload_namespace, restore_name)
                     lifecycle.wait_for_pod_deleted(cfg.workload_namespace, restore_name)
                     restore_created = False
@@ -550,11 +550,14 @@ def run_benchmark(
                 )
             if cleanup_errors:
                 # Stop the sweep if resources remain, preserving the benchmark error.
-                measurement.save(
-                    folder / "cleanup-errors.json",
-                    [repr(exc) for exc in cleanup_errors],
-                )
                 primary_exc = sys.exc_info()[1]
+                try:
+                    measurement.save(
+                        folder / "cleanup-errors.json",
+                        [repr(exc) for exc in cleanup_errors],
+                    )
+                except OSError as error:
+                    cleanup_errors.append(error)
                 detail = "; ".join(
                     f"{type(exc).__name__}: {exc}" for exc in cleanup_errors
                 )
@@ -613,9 +616,7 @@ def _collect_agent_log_phases(
     restore_name: str,
     snapshot_name: str,
 ) -> AgentLogPhases:
-    """Best-effort: the restore itself has already succeeded by the time this
-    runs, so a failure here (agent pod lookup or log fetch/parse) must never
-    fail the whole run -- it degrades to a warning, same as `_checkpoint_size`."""
+    """Collect optional agent details without failing a completed restore."""
     if not restore_node:
         return AgentLogPhases(
             parse_warnings=["restore pod had no node_name; cannot locate agent"]

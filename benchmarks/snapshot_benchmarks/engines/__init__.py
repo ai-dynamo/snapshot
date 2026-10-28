@@ -71,6 +71,10 @@ class Engine(Protocol):
     container_name: str
     version_probe_command: str
 
+    def benchmark_env(self) -> dict[str, str]: ...
+
+    def constructor_args(self, model: ModelSpec) -> dict[str, Any]: ...
+
     def build_source_pod(
         self,
         *,

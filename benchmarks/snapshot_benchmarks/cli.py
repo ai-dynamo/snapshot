@@ -91,6 +91,7 @@ def _benchmark_config(args: argparse.Namespace) -> BenchmarkConfig:
         work_pvc=getattr(args, "work_pvc", None),
         drop_page_cache=not getattr(args, "no_drop_page_cache", False),
         detailed_timing=getattr(args, "detailed_timing", False),
+        restore_count=getattr(args, "restore_count", 3),
     )
 
 
@@ -386,6 +387,10 @@ def build_parser() -> argparse.ArgumentParser:
     sweep_parser.set_defaults(func=cmd_sweep)
 
     for command in (run_parser, sweep_parser):
+        command.add_argument(
+            "--restore-count", type=int, default=3,
+            help="Number of restores per checkpoint (default: %(default)s)",
+        )
         command.add_argument(
             "--detailed-timing",
             action="store_true",

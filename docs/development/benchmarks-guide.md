@@ -2,7 +2,8 @@
 
 Run cold-start, checkpoint and restore measurements for vLLM, SGLang or TensorRT-LLM
 with the tool in [`benchmarks/`](../../benchmarks). Each run uses one node, captures
-a checkpoint and restores it three times. The runner uses the engine guide workloads
+a checkpoint and restores it three times by default. Set `--restore-count` to change
+the count. The runner uses the engine guide workloads
 and saves JSON results and logs. Use the `report` command to build the tables.
 See the [published results](benchmarks.md).
 
@@ -114,7 +115,7 @@ Each run writes to `benchmarks/results/<date>-<git-sha>-<id>/`. JSON files at th
 level contain complete results. Subdirectories contain manifests, admitted pods, logs,
 timing records, inference responses and failure details. The report reads complete
 results from the top level. Restore values show mean ± sample standard deviation
-across the three attempts. Speedup uses the mean restore time:
+across the recorded attempts. Speedup uses the mean restore time:
 
 ```bash
 uv run --project benchmarks python -m snapshot_benchmarks report \
@@ -129,6 +130,7 @@ uv run --project benchmarks python -m snapshot_benchmarks report \
 | `--ep` | Expert parallelism within those GPUs; must divide TP. vLLM supports EP=1 or EP=TP here. |
 | `--node` | Node for both source and restore pods. |
 | `--engine-args` | JSON constructor arguments using the engine's Python API names. |
+| `--restore-count` | Number of restores per checkpoint; positive integer, default 3. |
 | `--keep` | Retain resources for debugging after the run. |
 | `--detailed-timing` | Enable engine-source patches and import tracing for the cold-start breakdown. Off by default. |
 | `--no-drop-page-cache` | Skip node page-cache eviction and weight residency verification. |

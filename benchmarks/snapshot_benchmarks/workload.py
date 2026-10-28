@@ -28,8 +28,7 @@ def app_configmap(engine, namespace, name):
 
 
 def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
-    if engine.name == "vllm" and model.ep not in (1, model.tp):
-        raise ValueError("vLLM expert parallelism must be 1 or TP")
+    extra = engine.constructor_args(model)
     spec = pod["spec"]
     spec["restartPolicy"] = "Never"
     spec["nodeSelector"]["kubernetes.io/hostname"] = cfg.node
@@ -68,40 +67,13 @@ def instrument_pod(pod, cfg, engine, model, run_id, *, restore=False):
         CUDA_CACHE_PATH="/compile-cache/cuda",
         DG_JIT_CACHE_DIR="/compile-cache/deepgemm",
         FLASHINFER_WORKSPACE_BASE="/compile-cache/flashinfer",
-        TRITON_CACHE_DIR="/snapshot-triton-cache"
-        if engine.name == "sglang"
-        else "/compile-cache/triton",
+        TRITON_CACHE_DIR="/compile-cache/triton",
         TORCH_EXTENSIONS_DIR="/compile-cache/torch-extensions",
         STARTUP_SPAN_DIRECTORY="/startup-spans",
         BENCHMARK_DETAILED_TIMING="1" if cfg.detailed_timing else "0",
         SNAPSHOT_TENSOR_PARALLEL_SIZE=str(model.tp),
     )
-    extra = dict(model.engine_args)
-    if engine.name == "vllm":
-        values.update(
-            VLLM_CACHE_ROOT="/compile-cache/vllm",
-            VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="/compile-cache/vllm/flashinfer_autotune",
-            PYTORCH_ALLOC_CONF="pinned_max_round_threshold_mb:1,pinned_max_cached_size_mb:1",
-        )
-        extra["enable_expert_parallel"] = model.ep > 1
-        extra.update(model=model.hf_id_or_path, tensor_parallel_size=model.tp)
-    elif engine.name == "sglang":
-        extra.setdefault("weight_loader_prefetch_checkpoints", True)
-        values.update(
-            SGLANG_CACHE_DIR="/compile-cache/sglang",
-            SGLANG_JIT_CACHE_DIR="/compile-cache/sglang-jit",
-        )
-        extra["ep_size"] = model.ep
-        extra.update(model_path=model.hf_id_or_path, tp_size=model.tp)
-    else:
-        extra["moe_expert_parallel_size"] = model.ep
-        values.update(
-            OMPI_MCA_pml="ob1",
-            OMPI_MCA_btl="tcp,self",
-            # Loaded/deleted extension files must survive independently per restore.
-            FLASHINFER_WORKSPACE_BASE="/snapshot-flashinfer-cache",
-        )
-        extra.update(model=model.hf_id_or_path, tensor_parallel_size=model.tp)
+    values.update(engine.benchmark_env())
     main["args"] = [] if restore else [json.dumps(extra)]
     for key, value in values.items():
         set_env(main, key, value)
