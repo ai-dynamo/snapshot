@@ -21,8 +21,8 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-// serve starts a server on 127.0.0.1 and returns the IP and an action for path.
-func serve(t *testing.T, path string, handler http.HandlerFunc) (string, *snapshotv1alpha1.LifecycleHTTPAction) {
+// serve starts a server on 127.0.0.1 and returns its IP and port.
+func serve(t *testing.T, handler http.HandlerFunc) (string, int32) {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -34,7 +34,11 @@ func serve(t *testing.T, path string, handler http.HandlerFunc) (string, *snapsh
 	if err != nil {
 		t.Fatal(err)
 	}
-	return host, &snapshotv1alpha1.LifecycleHTTPAction{Path: path, Port: int32(p)}
+	return host, int32(p)
+}
+
+func statusAction(port int32) *snapshotv1alpha1.HTTPGetAction {
+	return &snapshotv1alpha1.HTTPGetAction{Path: "/status", Port: port}
 }
 
 func statusCode(err error) int {
@@ -56,13 +60,13 @@ func TestHTTPGet(t *testing.T) {
 		{http.StatusNotFound, false},
 	} {
 		t.Run(strconv.Itoa(tc.code), func(t *testing.T) {
-			ip, action := serve(t, "/checkpoint/status", func(w http.ResponseWriter, r *http.Request) {
+			ip, port := serve(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet || r.URL.Path != "/checkpoint/status" {
 					t.Errorf("got %s %s", r.Method, r.URL.Path)
 				}
 				w.WriteHeader(tc.code)
 			})
-			err := HTTPGet(t.Context(), ip, action, time.Second)
+			err := HTTPGet(t.Context(), ip, &snapshotv1alpha1.HTTPGetAction{Path: "/checkpoint/status", Port: port}, time.Second)
 			if tc.ok && err != nil {
 				t.Fatalf("HTTPGet = %v, want nil", err)
 			}
@@ -85,14 +89,14 @@ func TestHTTPPost(t *testing.T) {
 		{http.StatusInternalServerError, false},
 	} {
 		t.Run(strconv.Itoa(tc.code), func(t *testing.T) {
-			ip, action := serve(t, "/checkpoint/resume", func(w http.ResponseWriter, r *http.Request) {
+			ip, port := serve(t, func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
 				if r.Method != http.MethodPost || r.URL.Path != "/checkpoint/resume" || len(body) != 0 {
 					t.Errorf("got %s %s with a %d-byte body", r.Method, r.URL.Path, len(body))
 				}
 				w.WriteHeader(tc.code)
 			})
-			err := HTTPPost(t.Context(), ip, action, time.Second)
+			err := HTTPPost(t.Context(), ip, &snapshotv1alpha1.HTTPPostAction{Path: "/checkpoint/resume", Port: port}, time.Second)
 			if tc.ok && err != nil {
 				t.Fatalf("HTTPPost = %v, want nil", err)
 			}
@@ -105,14 +109,14 @@ func TestHTTPPost(t *testing.T) {
 
 func TestHTTPDoesNotFollowRedirects(t *testing.T) {
 	var followed atomic.Bool
-	ip, action := serve(t, "/status", func(w http.ResponseWriter, r *http.Request) {
+	ip, port := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/elsewhere" {
 			followed.Store(true)
 			return
 		}
 		http.Redirect(w, r, "/elsewhere", http.StatusFound)
 	})
-	err := HTTPGet(t.Context(), ip, action, time.Second)
+	err := HTTPGet(t.Context(), ip, statusAction(port), time.Second)
 	if statusCode(err) != http.StatusFound {
 		t.Fatalf("HTTPGet = %v, want a StatusError with 302", err)
 	}
@@ -129,8 +133,8 @@ func TestHTTPIgnoresTheProxyEnvironment(t *testing.T) {
 	t.Setenv("http_proxy", proxy.URL)
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "")
-	ip, action := serve(t, "/status", func(http.ResponseWriter, *http.Request) {})
-	if err := HTTPGet(t.Context(), ip, action, time.Second); err != nil {
+	ip, port := serve(t, func(http.ResponseWriter, *http.Request) {})
+	if err := HTTPGet(t.Context(), ip, statusAction(port), time.Second); err != nil {
 		t.Fatalf("HTTPGet = %v, want nil", err)
 	}
 	if proxied.Load() {
@@ -140,10 +144,10 @@ func TestHTTPIgnoresTheProxyEnvironment(t *testing.T) {
 
 func TestHTTPTimeout(t *testing.T) {
 	release := make(chan struct{})
-	ip, action := serve(t, "/status", func(http.ResponseWriter, *http.Request) { <-release })
+	ip, port := serve(t, func(http.ResponseWriter, *http.Request) { <-release })
 	defer close(release)
 	start := time.Now()
-	err := HTTPGet(t.Context(), ip, action, 100*time.Millisecond)
+	err := HTTPGet(t.Context(), ip, statusAction(port), 100*time.Millisecond)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("HTTPGet = %v, want a deadline error", err)
 	}
@@ -153,7 +157,7 @@ func TestHTTPTimeout(t *testing.T) {
 }
 
 func TestHTTPReadsOnlyPartOfALargeBody(t *testing.T) {
-	ip, action := serve(t, "/status", func(w http.ResponseWriter, _ *http.Request) {
+	ip, port := serve(t, func(w http.ResponseWriter, _ *http.Request) {
 		chunk := []byte(strings.Repeat("x", 64<<10))
 		for range 1024 { // 64 MiB, far more than the limit
 			if _, err := w.Write(chunk); err != nil {
@@ -161,7 +165,7 @@ func TestHTTPReadsOnlyPartOfALargeBody(t *testing.T) {
 			}
 		}
 	})
-	if err := HTTPGet(t.Context(), ip, action, 5*time.Second); err != nil {
+	if err := HTTPGet(t.Context(), ip, statusAction(port), 5*time.Second); err != nil {
 		t.Fatalf("HTTPGet = %v, want nil", err)
 	}
 }
@@ -173,7 +177,7 @@ func TestHTTPConnectionRefused(t *testing.T) {
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
-	action := &snapshotv1alpha1.LifecycleHTTPAction{Path: "/status", Port: int32(port)}
+	action := &snapshotv1alpha1.HTTPPostAction{Path: "/status", Port: int32(port)}
 	err = HTTPPost(t.Context(), "127.0.0.1", action, time.Second)
 	if err == nil || statusCode(err) != 0 {
 		t.Fatalf("HTTPPost = %v, want a connection error", err)
@@ -199,7 +203,7 @@ func TestRequestURL(t *testing.T) {
 		{"pod.example", "/x", 80, ""},
 		{"", "/x", 80, ""},
 	} {
-		got, err := requestURL(tc.ip, &snapshotv1alpha1.LifecycleHTTPAction{Path: tc.path, Port: tc.port})
+		got, err := requestURL(tc.ip, tc.path, tc.port)
 		if tc.want == "" {
 			if err == nil {
 				t.Errorf("requestURL(%q, %q, %d) = %q, want an error", tc.ip, tc.path, tc.port, got)
