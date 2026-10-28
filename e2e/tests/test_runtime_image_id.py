@@ -102,22 +102,32 @@ def test_runtime_image_id_does_not_hide_inspection_failure(monkeypatch):
         lifecycle.runtime_image_id(config, "node", "containerd://container-id")
 
 
-def test_node_cpu_flags_reads_each_processor_on_the_host(monkeypatch):
+@pytest.mark.parametrize(
+    ("output", "want"),
+    [
+        (
+            "flags\t\t: fpu sse2 avx2\nflags\t\t: fpu sse2\n",
+            [{"fpu", "sse2", "avx2"}, {"fpu", "sse2"}],
+        ),
+        ("Features\t: fp asimd sve2\nFeatures\t: fp asimd sve2\n", [{"fp", "asimd", "sve2"}] * 2),
+    ],
+    ids=["x86_64", "arm64"],
+)
+def test_node_cpu_flags_reads_each_processor_on_the_host(monkeypatch, output, want):
     config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
     commands = []
 
     def exec_payload(namespace, pod, command, *, container=None):
         assert (namespace, pod, container) == ("test-ns", "agent-pod", "agent")
         commands.append(shlex.split(command))
-        return "flags\t\t: fpu sse2 avx2\nflags\t\t: fpu sse2\n"
+        return output
 
     monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
     monkeypatch.setattr(k8s, "exec_payload", exec_payload)
 
-    got = lifecycle.node_cpu_flags(config, "node")
-    assert got == [{"fpu", "sse2", "avx2"}, {"fpu", "sse2"}]
+    assert lifecycle.node_cpu_flags(config, "node") == want
     assert commands == [
-        ["nsenter", "-t", "1", "-m", "--", "grep", "^flags", "/proc/cpuinfo"]
+        ["nsenter", "-t", "1", "-m", "--", "grep", "-E", "^(flags|Features)", "/proc/cpuinfo"]
     ]
 
 
