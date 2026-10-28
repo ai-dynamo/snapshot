@@ -15,8 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // maxResponseBody bounds how much of a response is read before the
@@ -59,21 +58,43 @@ func HTTPTarget(pod *corev1.Pod) (string, error) {
 	return pod.Status.PodIP, nil
 }
 
+// ResolvePort returns the port number an action's port names: the number
+// itself, or the containerPort of the container's port with that name, as
+// Kubernetes resolves a probe's named port.
+func ResolvePort(pod *corev1.Pod, container string, port intstr.IntOrString) (int32, error) {
+	if port.Type == intstr.Int {
+		if port.IntVal < 1 || port.IntVal > 65535 {
+			return 0, fmt.Errorf("invalid port %d", port.IntVal)
+		}
+		return port.IntVal, nil
+	}
+	c := findContainer(pod, container)
+	if c == nil {
+		return 0, fmt.Errorf("container %q is not in Pod %s/%s", container, pod.Namespace, pod.Name)
+	}
+	for _, p := range c.Ports {
+		if p.Name == port.StrVal {
+			return p.ContainerPort, nil
+		}
+	}
+	return 0, fmt.Errorf("container %q has no port named %q", container, port.StrVal)
+}
+
 // HTTPGet sends a GET for a probe. It succeeds on 200 only.
-func HTTPGet(ctx context.Context, podIP string, action *snapshotv1alpha1.HTTPGetAction, timeout time.Duration) error {
-	return send(ctx, http.MethodGet, podIP, action.Path, action.Port, timeout, http.StatusOK)
+func HTTPGet(ctx context.Context, podIP string, port int32, path string, timeout time.Duration) error {
+	return send(ctx, http.MethodGet, podIP, port, path, timeout, http.StatusOK)
 }
 
 // HTTPPost sends a POST with an empty body for a notification. It succeeds on
 // 200 or 204, which mean the application accepted it.
-func HTTPPost(ctx context.Context, podIP string, action *snapshotv1alpha1.HTTPPostAction, timeout time.Duration) error {
-	return send(ctx, http.MethodPost, podIP, action.Path, action.Port, timeout, http.StatusOK, http.StatusNoContent)
+func HTTPPost(ctx context.Context, podIP string, port int32, path string, timeout time.Duration) error {
+	return send(ctx, http.MethodPost, podIP, port, path, timeout, http.StatusOK, http.StatusNoContent)
 }
 
-func send(ctx context.Context, method, podIP, path string, port int32,
+func send(ctx context.Context, method, podIP string, port int32, path string,
 	timeout time.Duration, success ...int,
 ) error {
-	target, err := requestURL(podIP, path, port)
+	target, err := requestURL(podIP, port, path)
 	if err != nil {
 		return err
 	}
@@ -97,18 +118,27 @@ func send(ctx context.Context, method, podIP, path string, port int32,
 	return &StatusError{Method: method, URL: target, Code: resp.StatusCode}
 }
 
-// requestURL repeats the API's rules for the path and port, so a value that
-// reached the agent some other way still can't name another host.
-func requestURL(podIP, path string, port int32) (string, error) {
+// requestURL builds the request URL the way kubelet does for an httpGet probe:
+// the path, with a query if it has one, on the Pod IP and port. Whatever the
+// path says about a scheme, user or host is replaced, so it can never send the
+// request anywhere but the Pod. An empty path is "/".
+func requestURL(podIP string, port int32, path string) (string, error) {
 	if net.ParseIP(podIP) == nil {
 		return "", fmt.Errorf("invalid Pod IP %q", podIP)
-	}
-	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsAny(path, "?#") {
-		return "", fmt.Errorf("invalid HTTP path %q", path)
 	}
 	if port < 1 || port > 65535 {
 		return "", fmt.Errorf("invalid port %d", port)
 	}
-	u := url.URL{Scheme: "http", Host: net.JoinHostPort(podIP, strconv.Itoa(int(port))), Path: path}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	u, err := url.Parse(path)
+	if err != nil {
+		u = &url.URL{Path: path}
+	}
+	u.Scheme = "http"
+	u.User = nil
+	u.Host = net.JoinHostPort(podIP, strconv.Itoa(int(port)))
+	u.Fragment = ""
 	return u.String(), nil
 }
