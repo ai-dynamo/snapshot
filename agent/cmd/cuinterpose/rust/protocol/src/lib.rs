@@ -25,7 +25,9 @@ use std::{
     time::Duration,
 };
 #[doc(inline)]
-pub use transport::{connect, receive, send};
+pub use transport::{
+    SESSION_MAX_MESSAGE_BYTES, connect, receive, receive_session, send, send_session,
+};
 
 pub const VERSION: u8 = 2;
 // Limit allocations requested by socket frame prefixes and checkpoint files. Protocol
