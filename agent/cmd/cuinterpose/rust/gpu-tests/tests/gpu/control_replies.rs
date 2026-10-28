@@ -20,6 +20,7 @@ fn only_lost_successful_load_allocations_reply_aborts_process() {
     let load = Request::Execute {
         namespace_pid: pid,
         operation: Operation::LoadAllocations,
+        imports: vec![],
     };
     // Losing the reply to a read-only or rejected request must not abort. The next
     // reply also shows that the serial control worker handled both requests.
@@ -83,6 +84,7 @@ fn reconstruction_failure_after_load_aborts_process() {
         let load = Request::Execute {
             namespace_pid: pid,
             operation: Operation::LoadAllocations,
+            imports: vec![],
         };
         shim::request(pid, &load).unwrap();
     }
@@ -91,6 +93,7 @@ fn reconstruction_failure_after_load_aborts_process() {
     let restore = Request::Execute {
         namespace_pid: importer.pid(),
         operation: Operation::RestoreUnicast,
+        imports: vec![],
     };
     shim::request_without_reply(importer.pid(), &restore);
     let stderr = importer.wait_for_signal(libc::SIGABRT);

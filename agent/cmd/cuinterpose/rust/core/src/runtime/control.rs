@@ -23,7 +23,7 @@ const CONTROL_QUEUE_CAPACITY: usize = 8;
 enum ControlRequest {
     BeginCheckpoint,
     Inspect,
-    Execute(Operation),
+    Execute(Operation, Vec<protocol::FabricUpdate>),
     SaveAllocations(Vec<protocol::AllocationOwner>),
 }
 
@@ -253,7 +253,9 @@ fn dispatch(
     let request = match request {
         Request::BeginCheckpoint { .. } => ControlRequest::BeginCheckpoint,
         Request::Inspect { .. } => ControlRequest::Inspect,
-        Request::Execute { operation, .. } => ControlRequest::Execute(operation),
+        Request::Execute {
+            operation, imports, ..
+        } => ControlRequest::Execute(operation, imports),
         Request::SaveAllocations { owners, .. } => ControlRequest::SaveAllocations(owners),
         Request::Export { allocation, .. } => {
             if super::RUNTIME_FAILED.load(Ordering::Acquire) {
@@ -301,11 +303,14 @@ fn serve(
     request: ControlRequest,
     namespace_pid: NamespacePid,
 ) -> protocol::Result<()> {
-    let load = matches!(request, ControlRequest::Execute(Operation::LoadAllocations));
+    let load = matches!(
+        request,
+        ControlRequest::Execute(Operation::LoadAllocations, _)
+    );
     let result = match request {
         ControlRequest::BeginCheckpoint => checkpoint::begin(),
         ControlRequest::Inspect => checkpoint::inspect(),
-        ControlRequest::Execute(operation) => checkpoint::execute(operation),
+        ControlRequest::Execute(operation, imports) => checkpoint::execute(operation, &imports),
         ControlRequest::SaveAllocations(owners) => checkpoint::save_allocations(&owners),
     };
     let loaded = load && result.is_ok();

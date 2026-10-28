@@ -64,6 +64,7 @@ fn encoding_keeps_the_request_and_state_wire_format() {
     let request = Request::Execute {
         namespace_pid: 1,
         operation: Operation::SaveAllocations,
+        imports: Vec::new(),
     };
     assert_eq!(
         encode(&request).unwrap(),
@@ -98,6 +99,56 @@ fn encoding_keeps_the_request_and_state_wire_format() {
           \xa8location\x82\xadlocation_type\x01\xa2id\x00\
           \xbfvirtual_allocation_handle_count\x01"
     );
+}
+
+#[test]
+fn fabric_handles_are_optional_on_the_wire() {
+    // A coordinator or shim without fabric support sends neither list.
+    let execute = b"\x82\xa7version\x01\xa4body\x83\xa4kind\xa7execute\xadnamespace_pid\x01\
+                    \xa9operation\xafrestore_unicast";
+    let request: Request = decode(execute).unwrap();
+    assert!(matches!(request, Request::Execute { imports, .. } if imports.is_empty()));
+    let completed = Reply::Completed {
+        operation: Operation::LoadAllocations,
+        bytes: 0,
+        exports: Vec::new(),
+    };
+    let bytes = encode(&completed).unwrap();
+    assert_eq!(
+        bytes,
+        b"\x82\xa7version\x01\xa4body\x81\xa9completed\x82\
+          \xa9operation\xb0load_allocations\xa5bytes\x00"
+    );
+    let update = FabricUpdate {
+        old: FabricHandle([1; FABRIC_HANDLE_BYTES]),
+        new: FabricHandle([2; FABRIC_HANDLE_BYTES]),
+    };
+    let exported = encode(&Reply::Completed {
+        operation: Operation::LoadAllocations,
+        bytes: 0,
+        exports: vec![update],
+    })
+    .unwrap();
+    // Each handle travels as one 64-byte bin value.
+    let old = [[0xc4, 64].as_slice(), &[1; FABRIC_HANDLE_BYTES]].concat();
+    assert!(exported.windows(old.len()).any(|window| window == old));
+    let decoded: Reply = decode(&exported).unwrap();
+    assert!(matches!(decoded, Reply::Completed { exports, .. } if exports == [update]));
+}
+
+#[test]
+fn fabric_handles_print_only_a_digest() {
+    let first = format!("{:?}", FabricHandle([1; FABRIC_HANDLE_BYTES]));
+    let second = format!("{:?}", FabricHandle([2; FABRIC_HANDLE_BYTES]));
+    // Any process in the fabric domain can import memory through a handle's bytes.
+    assert_eq!(first.len(), "FabricHandle()".len() + 16, "{first}");
+    assert!(first.starts_with("FabricHandle("), "{first}");
+    assert_ne!(first, second);
+    let record = Record::FabricImport {
+        allocation: AllocationReference::default(),
+        handle: FabricHandle([1; FABRIC_HANDLE_BYTES]),
+    };
+    assert!(format!("{record:?}").contains(&first));
 }
 
 #[test]

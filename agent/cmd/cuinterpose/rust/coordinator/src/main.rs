@@ -121,12 +121,14 @@ impl Peer {
             Request::Execute {
                 namespace_pid: self.namespace_pid,
                 operation,
+                imports: Vec::new(),
             }
         };
         match self.request(&request)? {
             Reply::Completed {
                 operation: actual,
                 bytes,
+                ..
             } => {
                 ensure!(
                     actual == operation && bytes == expected_bytes,
@@ -400,6 +402,7 @@ mod tests {
         let execute = |operation| Request::Execute {
             namespace_pid,
             operation,
+            imports: Vec::new(),
         };
         let cases = [
             (Request::BeginCheckpoint { namespace_pid }, control),

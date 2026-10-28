@@ -7,7 +7,7 @@ use super::{HandleEntry, Memblock, ProcessState, Refcounts, VirtualAllocationHan
 use crate::error::Result;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
-use cuinterpose_protocol::{AllocationId, AllocationReference};
+use cuinterpose_protocol::{AllocationId, AllocationReference, FabricHandle};
 use std::collections::btree_map::Entry;
 
 /// The host carrier must be able to reconstruct tracked unicast memory.
@@ -26,15 +26,19 @@ pub(crate) fn validate_properties(properties: &CUmemAllocationProp) -> Result<()
 
 /// Whether cuMemCreate tracks the backing. Another GPU in this process can map
 /// nonexportable backing, and native CUDA can fail to restore that mapping, so track
-/// every backing the carrier can reconstruct. POSIX is the only supported export.
+/// every backing the carrier can reconstruct. POSIX and FABRIC are the supported exports,
+/// one at a time.
 pub(crate) fn tracked(properties: &CUmemAllocationProp) -> Result<bool> {
     let reconstructible = validate_properties(properties).is_ok();
     if properties.requestedHandleTypes.0 == 0 {
         return Ok(reconstructible);
     }
     if reconstructible
-        && properties.requestedHandleTypes
-            == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+        && matches!(
+            properties.requestedHandleTypes,
+            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+                | CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC
+        )
     {
         return Ok(true);
     }
@@ -56,6 +60,8 @@ pub struct Allocation {
     /// Access from any other GPU is peer access. `None` treats every GPU as a peer.
     pub home_device: Option<i32>,
     pub context: usize,
+    /// The fabric handle that the creator exported, or that an importer imported.
+    pub fabric: Option<FabricHandle>,
 }
 
 impl Allocation {
@@ -341,6 +347,7 @@ mod tests {
                     peer_access_granted: false,
                     home_device,
                     context: 0,
+                    fabric: None,
                 })
                 .unwrap();
             state.mappings.insert(
@@ -415,7 +422,14 @@ mod tests {
                 CU_MEM_LOCATION_TYPE_HOST,
                 Some(false),
             ),
-            ("fabric", fabric, CU_MEM_LOCATION_TYPE_DEVICE, None),
+            ("FABRIC", fabric, CU_MEM_LOCATION_TYPE_DEVICE, Some(true)),
+            ("FABRIC, host", fabric, CU_MEM_LOCATION_TYPE_HOST, None),
+            (
+                "POSIX and FABRIC",
+                CUmemAllocationHandleType_enum(posix.0 | fabric.0),
+                CU_MEM_LOCATION_TYPE_DEVICE,
+                None,
+            ),
         ] {
             let properties = CUmemAllocationProp {
                 type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,

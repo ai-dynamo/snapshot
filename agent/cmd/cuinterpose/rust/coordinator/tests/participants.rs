@@ -72,7 +72,11 @@ fn inspection(records: Vec<Record>) -> Result<Reply, String> {
 }
 
 fn completed(operation: Operation, bytes: u64) -> Result<Reply, String> {
-    Ok(Reply::Completed { operation, bytes })
+    Ok(Reply::Completed {
+        operation,
+        bytes,
+        exports: Vec::new(),
+    })
 }
 
 fn owner(owner_pid: NamespacePid, allocation: AllocationReference) -> AllocationOwner {
@@ -284,6 +288,7 @@ impl Harness {
             Request::Execute {
                 namespace_pid,
                 operation,
+                imports: Vec::new(),
             }
         };
         self.request(pid, expected)

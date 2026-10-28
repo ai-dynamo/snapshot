@@ -19,6 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 - [Design](#design)
   - [Components](#components)
   - [Interposing VMM sharing](#interposing-vmm-sharing)
+    - [Fabric handles](#fabric-handles)
     - [Creator and checkpoint holder](#creator-and-checkpoint-holder)
     - [Multicast tracking](#multicast-tracking)
   - [Adapting legacy allocation and IPC APIs](#adapting-legacy-allocation-and-ipc-apis)
@@ -327,9 +328,26 @@ The [appendix](#handle-and-state-formats) specifies the handle encodings.
 A reply to a unicast export request includes the full backing size and the CUDA location where the creator allocated it.
 The importer queries `cuMemGetAllocationPropertiesFromHandle` and records its own handles and mappings.
 
-Tracked sharing uses only `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR`, with pinned DEVICE or HOST_NUMA backing for unicast allocations.
-Multicast objects must also enable POSIX export.
+Tracked sharing uses `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR` or [`CU_MEM_HANDLE_TYPE_FABRIC`](#fabric-handles), one handle type per allocation, with pinned DEVICE or HOST_NUMA backing for unicast allocations.
+Multicast objects must also enable exactly one of these exports.
 Imports from processes without CuInterpose must be released, together with their mappings, before checkpoint because the shim cannot reconstruct those external sharing relationships.
+
+#### Fabric handles
+
+Processes on other nodes import memory through a FABRIC handle, so their imports cannot go through a creator's socket.
+FABRIC handles therefore stay real at runtime.
+An export returns the driver's handle and an import goes to the driver, so CuInterpose is never on the application's import path.
+
+Instead, the shim records every FABRIC handle that a process exports or imports, and the handle joins each importer to its creator.
+A handle does not name the process that created its memory.
+The importer therefore records the import under creator PID 0, which is never a process, and an allocation ID derived from the handle.
+It cannot observe the allocation's size or a multicast object's properties, so it records size 0 and empty multicast properties.
+The driver does not report whether a handle names memory or a multicast object.
+The shim reads the object kind from the driver's private handle layout and refuses imports of any kind it does not recognize.
+
+During restore, each creator exports a new handle for its recreated backing or multicast object and returns the old and new handles to the coordinator.
+Each importer then imports the new handle that replaces the one it recorded, wherever the creator runs.
+The shim does not translate other handles, so an application must not import a handle that it kept from before the checkpoint.
 
 #### Creator and checkpoint holder
 
@@ -1133,6 +1151,10 @@ multicast_binding:
 The offset nested under `source` identifies a location within the member allocation.
 The outer `offset` field identifies the location where that memory is bound within the multicast object.
 Separate `multicast`, `multicast_device`, and `multicast_mapping` records describe the object, attached devices, and virtual mappings.
+
+[FABRIC sharing](#fabric-handles) adds a `fabric_export` record to the creator and a `fabric_import` record to each importer.
+Both hold an allocation reference and the 64-byte handle as MessagePack binary data.
+Requests and replies carry the old and new handles of a restore only when the process has any, so state and messages without FABRIC sharing keep their format.
 
 ### Further reading
 
