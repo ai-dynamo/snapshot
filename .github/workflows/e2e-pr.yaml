@@ -32,7 +32,7 @@ permissions: {}
 jobs:
   changes:
     name: Detect e2e changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -96,7 +96,7 @@ jobs:
     name: Build ${{ matrix.image }} image
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Sized for the agent: CRIU from source on a CUDA base.
     timeout-minutes: 75
     permissions:
@@ -175,7 +175,7 @@ jobs:
     name: PR E2E
     needs: [changes, cpu, images, gpu, frameworks]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       # Exactly two shapes pass: e2e was needed and every suite succeeded, or it
