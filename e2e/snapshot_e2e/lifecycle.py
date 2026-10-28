@@ -1046,14 +1046,20 @@ def checkpoint_artifact_root(content_uid: str) -> str:
 
 
 def artifact_root_exists(config: k8s.E2EConfig, node: str, content_uid: str) -> bool:
-    marker = "__snapshot_artifact_root_exists__"
+    present = "__snapshot_artifact_root_present__"
+    absent = "__snapshot_artifact_root_absent__"
+    root = checkpoint_artifact_root(content_uid)
     output = k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
-        f"test -d {checkpoint_artifact_root(content_uid)} && printf '%s' {marker}",
+        f"if test -d {root}; then printf '%s' {present}; else printf '%s' {absent}; fi",
         container=AGENT_CONTAINER,
     )
-    return output == marker
+    if present in output and absent not in output:
+        return True
+    if absent in output and present not in output:
+        return False
+    raise AssertionError(f"cannot tell whether {root} exists on {node!r}: {output!r}")
 
 
 def wait_for_artifact_root_absent(

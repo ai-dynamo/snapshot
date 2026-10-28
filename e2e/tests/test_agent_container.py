@@ -3,6 +3,7 @@
 
 """Cluster-free checks that agent-pod helpers target the agent container."""
 
+import contextlib
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,11 @@ DAEMONSET = (
 )
 
 
+def suppress_unreadable(call, *args):
+    with contextlib.suppress(AssertionError):
+        call(*args)
+
+
 @pytest.mark.parametrize(
     "call",
     [
@@ -29,7 +35,7 @@ DAEMONSET = (
         lambda: lifecycle.checkpoint_artifact_listing(CONFIG, "node", "uid"),
         lambda: lifecycle.checkpoint_rootfs_file(CONFIG, "node", "uid", "etc/hosts"),
         lambda: lifecycle.corrupt_checkpoint_image(CONFIG, "node", "uid"),
-        lambda: lifecycle.artifact_root_exists(CONFIG, "node", "uid"),
+        lambda: suppress_unreadable(lifecycle.artifact_root_exists, CONFIG, "node", "uid"),
         lambda: lifecycle.create_artifact_staging_file(CONFIG, "node", "uid"),
         lambda: lifecycle.host_monitoring_agents(CONFIG, "node"),
         lambda: lifecycle._dump_nvidia_smi(CONFIG, "agent-pod", "node"),
@@ -119,3 +125,30 @@ def test_the_agent_pod_really_has_more_than_one_container():
     constraint the cluster no longer has.
     """
     assert len(daemonset_container_names()) > 1
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("__snapshot_artifact_root_present__", True),
+        ("__snapshot_artifact_root_absent__", False),
+        ("banner\n__snapshot_artifact_root_absent__", False),
+    ],
+)
+def test_artifact_root_exists_reads_the_marker(monkeypatch, output, expected):
+    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
+    monkeypatch.setattr(k8s, "exec_command", lambda *args, **kwargs: output)
+
+    assert lifecycle.artifact_root_exists(CONFIG, "node", "uid") is expected
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["", "welcome banner", "__snapshot_artifact_root_present____snapshot_artifact_root_absent__"],
+)
+def test_artifact_root_exists_rejects_output_without_one_marker(monkeypatch, output):
+    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
+    monkeypatch.setattr(k8s, "exec_command", lambda *args, **kwargs: output)
+
+    with pytest.raises(AssertionError, match="cannot tell whether"):
+        lifecycle.artifact_root_exists(CONFIG, "node", "uid")

@@ -224,7 +224,7 @@ def test_pod_logs_returns_the_log_text_not_its_bytes_repr(monkeypatch) -> None:
     def read_namespaced_pod_log(**kwargs):
         if kwargs["_preload_content"]:
             return repr(log)
-        return SimpleNamespace(data=log)
+        return SimpleNamespace(data=log, release_conn=lambda: None)
 
     monkeypatch.setattr(
         k8s.client,
@@ -249,3 +249,60 @@ def test_pod_logs_reports_an_unreadable_log_instead_of_raising(monkeypatch) -> N
     )
 
     assert k8s.pod_logs("ns", "missing").startswith("<logs unavailable:")
+
+
+def test_pod_logs_retries_a_dropped_body_read_once(monkeypatch) -> None:
+    attempts = []
+
+    class Dropped:
+        @property
+        def data(self):
+            raise k8s.urllib3.exceptions.ProtocolError("connection broken")
+
+        def release_conn(self):
+            attempts.append("released")
+
+    responses = [Dropped(), SimpleNamespace(data=b"ok\n", release_conn=lambda: None)]
+    monkeypatch.setattr(
+        k8s.client,
+        "CoreV1Api",
+        lambda: SimpleNamespace(read_namespaced_pod_log=lambda **kwargs: responses.pop(0)),
+    )
+
+    assert k8s.pod_logs("ns", "agent") == "ok\n"
+    assert attempts == ["released"]
+
+
+def test_pod_logs_reports_a_body_read_that_keeps_failing(monkeypatch) -> None:
+    class Dropped:
+        @property
+        def data(self):
+            raise k8s.urllib3.exceptions.ProtocolError("connection broken")
+
+        def release_conn(self):
+            pass
+
+    monkeypatch.setattr(
+        k8s.client,
+        "CoreV1Api",
+        lambda: SimpleNamespace(read_namespaced_pod_log=lambda **kwargs: Dropped()),
+    )
+
+    assert k8s.pod_logs("ns", "agent").startswith("<logs unavailable: ProtocolError")
+
+
+def test_pod_logs_can_read_the_previous_container(monkeypatch) -> None:
+    seen = {}
+
+    def read_namespaced_pod_log(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(data=b"old\n", release_conn=lambda: None)
+
+    monkeypatch.setattr(
+        k8s.client,
+        "CoreV1Api",
+        lambda: SimpleNamespace(read_namespaced_pod_log=read_namespaced_pod_log),
+    )
+
+    assert k8s.pod_logs("ns", "agent", container="agent", previous=True) == "old\n"
+    assert seen["previous"] is True
