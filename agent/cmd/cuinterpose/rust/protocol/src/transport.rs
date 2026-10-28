@@ -130,3 +130,57 @@ pub fn receive<T: DeserializeOwned>(socket: &UnixStream) -> Result<(T, Option<Ow
     // ensures that later errors close all received descriptors.
     Ok((decode(&bytes)?, descriptor))
 }
+
+/// The largest frame on a relay's session socket: a value of `MAX_MESSAGE_BYTES` with its
+/// key and request around it.
+pub const SESSION_MAX_MESSAGE_BYTES: usize = MAX_MESSAGE_BYTES + 1024 * 1024;
+
+/// Send one message on the session socket that a relay inherits from its agent. The body
+/// is a bare MessagePack map, without the version envelope of control messages.
+///
+/// # Errors
+/// Returns serialization or socket errors, and rejects bodies over
+/// `SESSION_MAX_MESSAGE_BYTES`.
+pub fn send_session<T: Serialize>(mut socket: &UnixStream, message: &T) -> Result<()> {
+    let body = rmp_serde::to_vec_named(message)?;
+    if body.len() > SESSION_MAX_MESSAGE_BYTES {
+        return Err(Error::Invalid("session message exceeds size limit"));
+    }
+    let mut bytes = Vec::with_capacity(4 + body.len());
+    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&body);
+    socket.write_all(&bytes)?;
+    Ok(())
+}
+
+/// Receive one message from a relay's session socket. Returns `None` when the agent closed
+/// the socket between messages.
+///
+/// # Errors
+/// Rejects truncated or oversized frames and invalid encoding.
+pub fn receive_session<T: DeserializeOwned>(mut socket: &UnixStream) -> Result<Option<T>> {
+    let mut prefix = [0; 4];
+    let mut read = 0;
+    while read < prefix.len() {
+        match socket.read(&mut prefix[read..]) {
+            Ok(0) if read == 0 => return Ok(None),
+            Ok(0) => return Err(Error::Invalid("session message truncated")),
+            Ok(count) => read += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let size = u32::from_le_bytes(prefix) as usize;
+    if size > SESSION_MAX_MESSAGE_BYTES {
+        return Err(Error::Invalid("session message exceeds size limit"));
+    }
+    let mut body = vec![0; size];
+    socket.read_exact(&mut body)?;
+    let mut decoder = rmp_serde::Deserializer::new(io::Cursor::new(&body));
+    decoder.set_max_depth(32);
+    let message = T::deserialize(&mut decoder)?;
+    if decoder.position() != body.len() as u64 {
+        return Err(Error::Invalid("trailing session message data"));
+    }
+    Ok(Some(message))
+}
