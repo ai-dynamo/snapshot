@@ -114,6 +114,202 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  containers:
+                    description: |-
+                      Containers is copied to the generated PodSnapshot: settings for the
+                      checkpointed containers, matched by name to targetContainers.
+                    items:
+                      description: |-
+                        ContainerSnapshotConfig holds the settings for one checkpointed container,
+                        matched to it by name. Snapshot copies them into the PodSnapshotContent at
+                        checkpoint time, and every restore of that checkpoint uses that copy.
+
+                        Not enabled yet: the operator rejects a checkpointReadinessProbe or a
+                        lifecycle until support is complete.
+                      properties:
+                        checkpointReadinessProbe:
+                          description: |-
+                            CheckpointReadinessProbe tells when the application is safe to
+                            checkpoint. When it is set, Snapshot waits for it instead of the
+                            container's Ready condition. When it is omitted, Snapshot waits for the
+                            container to be Ready, as before.
+                          properties:
+                            file:
+                              description: |-
+                                File succeeds when a regular file exists at the path, inside the
+                                container.
+                              properties:
+                                path:
+                                  description: |-
+                                    Path is an absolute path inside the container, without "." or ".."
+                                    parts. It must be on the container's own filesystem or an emptyDir
+                                    volume; paths on hostPath and PersistentVolumeClaim volumes are refused.
+                                  maxLength: 4096
+                                  minLength: 2
+                                  type: string
+                                  x-kubernetes-validations:
+                                  - message: path must be absolute, without . or ..
+                                      parts
+                                    rule: self.startsWith('/') && self.split('/').all(p,
+                                      p != '.' && p != '..')
+                              required:
+                              - path
+                              type: object
+                            httpGet:
+                              description: HTTPGet succeeds when a GET to the Pod
+                                IP returns 200.
+                              properties:
+                                path:
+                                  description: |-
+                                    Path of the request. It must start with "/" and has no host, query, or
+                                    fragment.
+                                  maxLength: 4096
+                                  minLength: 1
+                                  type: string
+                                  x-kubernetes-validations:
+                                  - message: path must start with / and have no host,
+                                      query, or fragment
+                                    rule: self.startsWith('/') && !self.startsWith('//')
+                                      && !self.contains('?') && !self.contains('#')
+                                port:
+                                  description: Port on the Pod IP.
+                                  format: int32
+                                  maximum: 65535
+                                  minimum: 1
+                                  type: integer
+                              required:
+                              - path
+                              - port
+                              type: object
+                            initialDelaySeconds:
+                              default: 0
+                              description: |-
+                                InitialDelaySeconds is how long to wait after the container starts
+                                before the first check.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            periodSeconds:
+                              default: 1
+                              description: PeriodSeconds is the time between checks.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            successThreshold:
+                              default: 1
+                              description: SuccessThreshold is how many checks in
+                                a row must succeed.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            timeoutSeconds:
+                              default: 1
+                              description: TimeoutSeconds limits each check.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                          type: object
+                          x-kubernetes-validations:
+                          - message: set exactly one of file or httpGet
+                            rule: has(self.file) != has(self.httpGet)
+                        lifecycle:
+                          description: |-
+                            Lifecycle holds actions Snapshot runs at points in the checkpoint and
+                            restore lifecycle.
+                          properties:
+                            postRestore:
+                              description: |-
+                                PostRestore tells the application, after Snapshot restored its process
+                                and GPU state, that it may resume.
+                              properties:
+                                file:
+                                  description: |-
+                                    File creates a regular file at the path, inside the container. The
+                                    parent directory must exist. If the file already exists before the
+                                    restore, the restore fails.
+                                  properties:
+                                    path:
+                                      description: |-
+                                        Path is an absolute path inside the container, without "." or ".."
+                                        parts. It must be on the container's own filesystem or an emptyDir
+                                        volume; paths on hostPath and PersistentVolumeClaim volumes are refused.
+                                      maxLength: 4096
+                                      minLength: 2
+                                      type: string
+                                      x-kubernetes-validations:
+                                      - message: path must be absolute, without .
+                                          or .. parts
+                                        rule: self.startsWith('/') && self.split('/').all(p,
+                                          p != '.' && p != '..')
+                                  required:
+                                  - path
+                                  type: object
+                                httpPost:
+                                  description: |-
+                                    HTTPPost sends a POST with an empty body to the Pod IP. A 200 or 204
+                                    response means the application accepted the notification.
+                                  properties:
+                                    path:
+                                      description: |-
+                                        Path of the request. It must start with "/" and has no host, query, or
+                                        fragment.
+                                      maxLength: 4096
+                                      minLength: 1
+                                      type: string
+                                      x-kubernetes-validations:
+                                      - message: path must start with / and have no
+                                          host, query, or fragment
+                                        rule: self.startsWith('/') && !self.startsWith('//')
+                                          && !self.contains('?') && !self.contains('#')
+                                    port:
+                                      description: Port on the Pod IP.
+                                      format: int32
+                                      maximum: 65535
+                                      minimum: 1
+                                      type: integer
+                                  required:
+                                  - path
+                                  - port
+                                  type: object
+                                periodSeconds:
+                                  default: 1
+                                  description: PeriodSeconds is the time between attempts.
+                                  format: int32
+                                  minimum: 1
+                                  type: integer
+                                timeoutSeconds:
+                                  default: 1
+                                  description: TimeoutSeconds limits each attempt.
+                                  format: int32
+                                  minimum: 1
+                                  type: integer
+                              type: object
+                              x-kubernetes-validations:
+                              - message: set exactly one of file or httpPost
+                                rule: has(self.file) != has(self.httpPost)
+                          type: object
+                        name:
+                          description: Name of the checkpointed container these settings
+                            apply to.
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: checkpointReadinessProbe and lifecycle.postRestore
+                          must use different file paths
+                        rule: '!has(self.checkpointReadinessProbe) || !has(self.checkpointReadinessProbe.file)
+                          || !has(self.lifecycle) || !has(self.lifecycle.postRestore)
+                          || !has(self.lifecycle.postRestore.file) || self.checkpointReadinessProbe.file.path
+                          != self.lifecycle.postRestore.file.path'
+                    maxItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   metadata:
                     description: |-
                       Metadata contains labels and annotations copied to the generated
@@ -151,9 +347,9 @@ spec:
                       may contain any number of additional containers (helpers, sidecars, etc.)
                       — this field controls only the CRIU dump target.
 
-                      v1alpha1: exactly one target is required. The plural form and nested
-                      placement here is intentional: future versions will support per-container
-                      config (e.g. per-container quiesceProbe) by extending this list to objects.
+                      v1alpha1: exactly one target is required. The plural form is
+                      intentional: future versions may checkpoint more than one container.
+                      Per-container settings go in containers, not here.
 
                       Defaults to ["main"]. Each entry must be a valid DNS label
                       (1-63 chars, ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$).
@@ -173,6 +369,9 @@ spec:
                 - message: metadata.labels must not set controller-owned label nvidia.com/snapshot-job-uid
                   rule: '!has(self.metadata) || !has(self.metadata.labels) || !(''nvidia.com/snapshot-job-uid''
                     in self.metadata.labels)'
+                - message: containers must name containers in targetContainers
+                  rule: '!has(self.containers) || self.containers.all(c, c.name in
+                    self.targetContainers)'
               podTemplate:
                 description: |-
                   PodTemplate defines the workload to run and capture. The controller injects

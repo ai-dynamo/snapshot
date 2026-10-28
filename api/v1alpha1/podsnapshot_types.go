@@ -44,6 +44,7 @@ func IsPodSnapshotFailed(s *PodSnapshot) bool {
 }
 
 // PodSnapshotSpec defines the desired state of PodSnapshot.
+// +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.source.podRef.containers)",message="containers must name containers in source.podRef.containers"
 type PodSnapshotSpec struct {
 	// Source identifies the captured workload. It is a struct (rather than an
 	// inlined reference) so future source variants can be added additively.
@@ -57,6 +58,15 @@ type PodSnapshotSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
+
+	// Containers holds settings for the checkpointed containers, matched by
+	// name to source.podRef.containers. It is a separate list so settings stay
+	// the same when other kinds of source are added.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=1
+	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
 }
 
 // PodSnapshotSource identifies the workload captured by a PodSnapshot.

@@ -83,6 +83,15 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 				PodRef:   PodReference{Name: "worker-0", UID: types.UID("pod-uid-1"), Containers: []string{"main"}},
 				NodeName: "node-a",
 			},
+			Containers: []ContainerSnapshotConfig{{
+				Name: "main",
+				CheckpointReadinessProbe: &CheckpointReadinessProbe{CheckpointReadinessProbeHandler: CheckpointReadinessProbeHandler{
+					File: &ControlFileAction{Path: "/tmp/ready"},
+				}},
+				Lifecycle: &SnapshotLifecycle{PostRestore: &PostRestoreAction{PostRestoreHandler: PostRestoreHandler{
+					HTTPPost: &LifecycleHTTPAction{Path: "/resume", Port: 8000},
+				}}},
+			}},
 		},
 		Status: PodSnapshotContentStatus{
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Bound"}},
@@ -110,6 +119,8 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	clone.Status.Source.Node.Name = "node-b"
 	clone.Status.Source.Pod.Memory = "32Gi"
 	clone.Status.Source.Devices.Nvidia.Instances[0].ProductName = "NVIDIA H100"
+	clone.Spec.Containers[0].CheckpointReadinessProbe.File.Path = "/tmp/mutated"
+	clone.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port = 9000
 	if original.Spec.Source.PodRef.Name != "worker-0" {
 		t.Errorf("mutating clone changed original podRef name: got %q", original.Spec.Source.PodRef.Name)
 	}
@@ -127,5 +138,11 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	}
 	if original.Status.Source.Devices.Nvidia.Instances[0].ProductName != "NVIDIA A100-SXM4-80GB" {
 		t.Errorf("mutating clone source device changed original: got %q", original.Status.Source.Devices.Nvidia.Instances[0].ProductName)
+	}
+	if got := original.Spec.Containers[0].CheckpointReadinessProbe.File.Path; got != "/tmp/ready" {
+		t.Errorf("mutating clone probe changed original: got %q", got)
+	}
+	if got := original.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port; got != 8000 {
+		t.Errorf("mutating clone post-restore action changed original: got %d", got)
 	}
 }
