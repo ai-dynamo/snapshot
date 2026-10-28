@@ -36,20 +36,18 @@ type postRestoreHarness struct {
 	pod  *corev1.Pod
 	plan *restorePlan
 
-	mu           sync.Mutex
-	files        map[string]bool
-	events       []string // sentinels written, markers created, and kills, in order
-	restores     int
-	httpResults  []error // one per POST; the last one repeats
-	httpIP       string
-	httpPort     int32
-	httpPath     string
-	httpTimeout  time.Duration
-	waits        int
-	maxWaits     int // a wait after this many fails as if the deadline passed
-	restoreAdds  string
-	completedAt  time.Time
-	completedErr error
+	mu          sync.Mutex
+	files       map[string]bool
+	events      []string // sentinels written, markers created, and kills, in order
+	restores    int
+	httpResults []error // one per POST; the last one repeats
+	httpIP      string
+	httpPort    int32
+	httpPath    string
+	httpTimeout time.Duration
+	waits       int
+	maxWaits    int // a wait after this many fails as if the deadline passed
+	restoreAdds string
 }
 
 func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAction) *postRestoreHarness {
@@ -117,10 +115,6 @@ func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAct
 			return context.DeadlineExceeded
 		}
 		return ctx.Err()
-	}
-	w.controlSentinelModTimeFn = func(_ int, name string) (time.Time, error) {
-		assert.Equal(t, podcontract.RestoreCompleteFile, name)
-		return h.completedAt, h.completedErr
 	}
 	h.w = w
 	return h
@@ -309,7 +303,6 @@ func TestPostRestoreRecoveryRunsOnlyThePostRestoreStep(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPostRestoreHarness(t, tc.action)
 			recoveringPod(h)
-			h.completedAt = time.Now()
 			h.files[postRestoreMarker] = tc.marker
 
 			require.NoError(t, h.run(true))
@@ -320,42 +313,25 @@ func TestPostRestoreRecoveryRunsOnlyThePostRestoreStep(t *testing.T) {
 	}
 }
 
-func TestPostRestoreRecoveryKeepsTheOriginalDeadline(t *testing.T) {
+func TestPostRestoreRecoveryThatNeverSucceedsFailsTheRestore(t *testing.T) {
 	h := newPostRestoreHarness(t, httpPostRestore())
 	recoveringPod(h)
-	h.completedAt = time.Now().Add(-2 * time.Minute) // the 60s restore deadline has passed
 	h.httpResults = []error{errors.New("connection refused")}
-	h.maxWaits = 100
-	h.w.postRestoreWaitFn = nil // the real wait sees the expired deadline
-
-	err := h.run(true)
-
-	require.Error(t, err)
-	assert.Equal(t, executor.StepPostRestore, executor.StepOf(err))
-	assert.Equal(t, []string{"post", "sentinel " + podcontract.RestoreFailedFile, "kill"}, h.recordedEvents(),
-		"one attempt, then the expired deadline fails the restore")
-}
-
-func TestPostRestoreRecoveryWithoutACompletionTimeFails(t *testing.T) {
-	h := newPostRestoreHarness(t, filePostRestore(postRestoreMarker))
-	recoveringPod(h)
-	h.completedErr = errors.New("stat failed")
 
 	err := h.run(true)
 
 	require.Error(t, err)
 	assert.Equal(t, executor.StepPostRestore, executor.StepOf(err))
 	assert.Equal(t, 0, h.restores)
+	events := h.recordedEvents()
+	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, events[len(events)-2:])
 }
 
 func TestNoPostRestoreLeavesRecoveryAsBefore(t *testing.T) {
 	h := newPostRestoreHarness(t, nil)
 	recoveringPod(h)
-	h.w.controlSentinelModTimeFn = func(int, string) (time.Time, error) {
-		t.Fatal("no post-restore action, so nothing reads the completion time")
-		return time.Time{}, nil
-	}
 
 	require.NoError(t, h.run(true))
 	assert.Empty(t, h.recordedEvents())
+	assert.Equal(t, 0, h.restores)
 }

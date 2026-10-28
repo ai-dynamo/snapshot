@@ -90,10 +90,9 @@ type NodeController struct {
 	requeueCaptureFn func(name string, after time.Duration)
 
 	// The post-restore action's seams. postRestoreWaitFn defaults to a timer when nil.
-	createMarkerFn           func(hostPID int, path string) error
-	postRestoreHTTPFn        func(ctx context.Context, podIP string, port int32, path string, timeout time.Duration) error
-	controlSentinelModTimeFn func(hostPID int, name string) (time.Time, error)
-	postRestoreWaitFn        func(ctx context.Context, d time.Duration) error
+	createMarkerFn    func(hostPID int, path string) error
+	postRestoreHTTPFn func(ctx context.Context, podIP string, port int32, path string, timeout time.Duration) error
+	postRestoreWaitFn func(ctx context.Context, d time.Duration) error
 
 	handledRestores sync.Map
 
@@ -269,7 +268,6 @@ func newDefaultController(
 		probeHTTPFn:               lifecyclehooks.HTTPGet,
 		createMarkerFn:            lifecyclehooks.CreateMarker,
 		postRestoreHTTPFn:         lifecyclehooks.HTTPPost,
-		controlSentinelModTimeFn:  snapshotruntime.ControlSentinelModTime,
 	}
 	w.checkpointFn = w.executorCheckpoint
 	w.fetchManifestFn = func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
@@ -1152,26 +1150,20 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 // recoverPostRestore finishes a restore that an agent restart interrupted
 // after restore-complete: only the post-restore action can be left, and CRIU
 // must never run again. Its checks already passed in the interrupted run.
+//
+// The interrupted run's deadline is gone with it, so the action gets a full
+// restoreTimeoutSeconds again: a restart can extend it by one timeout.
 func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 	if op.postRestore == nil {
 		return nil
 	}
-	w := op.controller
-	hostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
-	if err != nil {
-		return op.failRestore(ctx, postRestoreStepError(executor.StepPostRestore, fmt.Errorf("resolve restore container: %w", err)))
-	}
-	completedAt, err := w.controlSentinelModTimeFn(hostPID, podcontract.RestoreCompleteFile)
-	if err != nil {
-		return op.failRestore(ctx, postRestoreStepError(executor.StepPostRestore, fmt.Errorf("read when the restore completed: %w", err)))
-	}
 	postCtx := ctx
-	if deadline, ok := w.postRestoreDeadline(completedAt); ok {
+	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
-		postCtx, cancel = context.WithDeadline(ctx, deadline)
+		postCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	op.log.Info("Resuming the post-restore action after an agent restart", "restore_completed_at", completedAt)
+	op.log.Info("Resuming the post-restore action after an agent restart")
 	if err := op.runPostRestore(postCtx, op.postRestore); err != nil {
 		return op.failRestore(ctx, err)
 	}

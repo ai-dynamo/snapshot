@@ -155,18 +155,6 @@ func (op *restoreOperation) podIP(ctx context.Context) (string, error) {
 	return lifecyclehooks.HTTPTarget(pod)
 }
 
-// postRestoreDeadline is the restore deadline for a post-restore step that an
-// agent restart interrupted. The run that started it is gone, so its deadline
-// is rebuilt from when restore-complete was written: a restart may extend the
-// step by the CRIU restore's own duration, never more.
-func (w *NodeController) postRestoreDeadline(completedAt time.Time) (time.Time, bool) {
-	timeout := w.config.Restore.RestoreTimeout()
-	if timeout <= 0 {
-		return time.Time{}, false
-	}
-	return completedAt.Add(timeout), true
-}
-
 func (w *NodeController) postRestoreWait(ctx context.Context, d time.Duration) error {
 	if w.postRestoreWaitFn != nil {
 		return w.postRestoreWaitFn(ctx, d)
