@@ -3,6 +3,8 @@
 
 package v1alpha1
 
+import "k8s.io/apimachinery/pkg/util/intstr"
+
 // ContainerSnapshotConfig holds the settings for one checkpointed container,
 // matched to it by name. Snapshot copies them into the PodSnapshotContent at
 // checkpoint time, and every restore of that checkpoint uses that copy.
@@ -135,40 +137,35 @@ type ControlFileAction struct {
 	Path string `json:"path"`
 }
 
-// HTTPGetAction is a GET to a port on the Pod IP. Snapshot does not follow
-// redirects, and does not support Pods on the host network.
+// HTTPGetAction is a GET to a port on the Pod IP. Like Kubernetes' own
+// httpGet, it has a path and a port. Snapshot does not follow redirects, and
+// does not support Pods on the host network.
 type HTTPGetAction struct {
-	// Path of the request. It must start with "/" and has no host, query, or
-	// fragment.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.startsWith('//') && !self.contains('?') && !self.contains('#')",message="path must start with / and have no host, query, or fragment"
-	Path string `json:"path"`
+	// Path of the request. Empty means "/".
+	// +optional
+	Path string `json:"path,omitempty"`
 
-	// Port on the Pod IP.
+	// Port on the Pod IP: a number from 1 to 65535, or the name of a port of
+	// the container, resolved when the request is sent.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	Port int32 `json:"port"`
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
+	Port intstr.IntOrString `json:"port"`
 }
 
-// HTTPPostAction is a POST with an empty body to a port on the Pod IP.
-// Snapshot does not follow redirects, and does not support Pods on the host
-// network. It is a separate type from HTTPGetAction so either can grow fields
-// of its own.
+// HTTPPostAction is a POST with an empty body to a port on the Pod IP. Like
+// Kubernetes' own httpGet, it has a path and a port. Snapshot does not follow
+// redirects, and does not support Pods on the host network. It is a separate
+// type from HTTPGetAction so either can grow fields of its own.
 type HTTPPostAction struct {
-	// Path of the request. It must start with "/" and has no host, query, or
-	// fragment.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.startsWith('//') && !self.contains('?') && !self.contains('#')",message="path must start with / and have no host, query, or fragment"
-	Path string `json:"path"`
+	// Path of the request. Empty means "/".
+	// +optional
+	Path string `json:"path,omitempty"`
 
-	// Port on the Pod IP.
+	// Port on the Pod IP: a number from 1 to 65535, or the name of a port of
+	// the container, resolved when the request is sent.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	Port int32 `json:"port"`
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
+	Port intstr.IntOrString `json:"port"`
 }

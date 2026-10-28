@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // TestSchemeRegistersSnapshotKinds verifies the init() registrations expose all
@@ -89,7 +90,7 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 					File: &ControlFileAction{Path: "/tmp/ready"},
 				}},
 				Lifecycle: &SnapshotLifecycle{PostRestore: &PostRestoreAction{PostRestoreHandler: PostRestoreHandler{
-					HTTPPost: &HTTPPostAction{Path: "/resume", Port: 8000},
+					HTTPPost: &HTTPPostAction{Path: "/resume", Port: intstr.FromInt32(8000)},
 				}}},
 			}},
 		},
@@ -120,7 +121,7 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	clone.Status.Source.Pod.Memory = "32Gi"
 	clone.Status.Source.Devices.Nvidia.Instances[0].ProductName = "NVIDIA H100"
 	clone.Spec.Containers[0].CheckpointReadinessProbe.File.Path = "/tmp/mutated"
-	clone.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port = 9000
+	clone.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port = intstr.FromInt32(9000)
 	if original.Spec.Source.PodRef.Name != "worker-0" {
 		t.Errorf("mutating clone changed original podRef name: got %q", original.Spec.Source.PodRef.Name)
 	}
@@ -142,7 +143,7 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	if got := original.Spec.Containers[0].CheckpointReadinessProbe.File.Path; got != "/tmp/ready" {
 		t.Errorf("mutating clone probe changed original: got %q", got)
 	}
-	if got := original.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port; got != 8000 {
-		t.Errorf("mutating clone post-restore action changed original: got %d", got)
+	if got := original.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port; got != intstr.FromInt32(8000) {
+		t.Errorf("mutating clone post-restore action changed original: got %s", got.String())
 	}
 }

@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
@@ -53,9 +54,9 @@ func TestContainerConfigAdmission(t *testing.T) {
 	}{
 		{"name-only", snapshotv1.ContainerSnapshotConfig{Name: "main"}, true},
 		{"file-probe", config(fileProbe("/tmp/ready"), nil), true},
-		{"http-probe", config(httpProbe("/checkpoint/status", 8000), nil), true},
+		{"http-probe", config(httpProbe("/checkpoint/status", intstr.FromInt32(8000)), nil), true},
 		{"file-post-restore", config(nil, filePostRestore("/tmp/released")), true},
-		{"http-post-restore", config(nil, httpPostRestore("/checkpoint/resume", 8000)), true},
+		{"http-post-restore", config(nil, httpPostRestore("/checkpoint/resume", intstr.FromInt32(8000))), true},
 		{"both", config(fileProbe("/tmp/ready"), filePostRestore("/tmp/released")), true},
 		{"empty-lifecycle", snapshotv1.ContainerSnapshotConfig{Name: "main", Lifecycle: &snapshotv1.SnapshotLifecycle{}}, true},
 		{"root-dir-file", config(fileProbe("/x"), nil), true},
@@ -63,13 +64,13 @@ func TestContainerConfigAdmission(t *testing.T) {
 		{"probe-without-handler", config(&snapshotv1.CheckpointReadinessProbe{}, nil), false},
 		{"probe-with-both-handlers", config(func() *snapshotv1.CheckpointReadinessProbe {
 			p := fileProbe("/tmp/ready")
-			p.HTTPGet = httpProbe("/ok", 80).HTTPGet
+			p.HTTPGet = httpProbe("/ok", intstr.FromInt32(80)).HTTPGet
 			return p
 		}(), nil), false},
 		{"post-restore-without-handler", config(nil, &snapshotv1.PostRestoreAction{}), false},
 		{"post-restore-with-both-handlers", config(nil, func() *snapshotv1.PostRestoreAction {
 			a := filePostRestore("/tmp/released")
-			a.HTTPPost = httpPostRestore("/ok", 80).HTTPPost
+			a.HTTPPost = httpPostRestore("/ok", intstr.FromInt32(80)).HTTPPost
 			return a
 		}()), false},
 		{"same-file-path", config(fileProbe("/tmp/marker"), filePostRestore("/tmp/marker")), false},
@@ -81,12 +82,18 @@ func TestContainerConfigAdmission(t *testing.T) {
 		{"trailing-slash-file-path", config(nil, filePostRestore("/tmp/released/")), false},
 		{"same-file-spelled-differently", config(fileProbe("/tmp/marker"), filePostRestore("/tmp//marker")), false},
 		{"long-file-path", config(fileProbe("/"+strings.Repeat("a", 4096)), nil), false},
-		{"http-path-without-slash", config(httpProbe("status", 8000), nil), false},
-		{"http-path-with-host", config(httpProbe("//host/status", 8000), nil), false},
-		{"http-path-with-query", config(nil, httpPostRestore("/resume?now=1", 8000)), false},
-		{"http-path-with-fragment", config(httpProbe("/status#x", 8000), nil), false},
-		{"port-zero", config(httpProbe("/status", 0), nil), false},
-		{"port-too-high", config(nil, httpPostRestore("/resume", 65536)), false},
+		// Like Kubernetes' httpGet, the path is free-form and may be omitted.
+		{"http-path-omitted", config(httpProbe("", intstr.FromInt32(8000)), nil), true},
+		{"http-path-with-query", config(nil, httpPostRestore("/resume?now=1", intstr.FromInt32(8000))), true},
+		{"named-port", config(httpProbe("/status", intstr.FromString("hooks")), nil), true},
+		{"named-port-with-dash", config(nil, httpPostRestore("/resume", intstr.FromString("app-hooks"))), true},
+		{"port-zero", config(httpProbe("/status", intstr.FromInt32(0)), nil), false},
+		{"port-too-high", config(nil, httpPostRestore("/resume", intstr.FromInt32(65536))), false},
+		{"port-name-empty", config(httpProbe("/status", intstr.FromString("")), nil), false},
+		{"port-name-uppercase", config(httpProbe("/status", intstr.FromString("Hooks")), nil), false},
+		{"port-name-digits-only", config(httpProbe("/status", intstr.FromString("8000")), nil), false},
+		{"port-name-double-dash", config(nil, httpPostRestore("/resume", intstr.FromString("app--hooks"))), false},
+		{"port-name-too-long", config(httpProbe("/status", intstr.FromString("abcdefghijklmnop")), nil), false},
 		{"negative-period", config(func() *snapshotv1.CheckpointReadinessProbe {
 			p := fileProbe("/tmp/ready")
 			p.PeriodSeconds = -1
@@ -110,7 +117,7 @@ func TestContainerConfigAdmission(t *testing.T) {
 	}
 
 	t.Run("podsnapshot-defaults", func(t *testing.T) {
-		snap := newSettingsSnapshot("defaults", config(fileProbe("/tmp/ready"), httpPostRestore("/resume", 8000)))
+		snap := newSettingsSnapshot("defaults", config(fileProbe("/tmp/ready"), httpPostRestore("/resume", intstr.FromInt32(8000))))
 		require.NoError(t, cl.Create(ctx, snap))
 		stored := &snapshotv1.PodSnapshot{}
 		require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(snap), stored))
@@ -125,7 +132,7 @@ func TestContainerConfigAdmission(t *testing.T) {
 	})
 
 	t.Run("podsnapshot-partial-defaults", func(t *testing.T) {
-		probe := httpProbe("/status", 8000)
+		probe := httpProbe("/status", intstr.FromInt32(8000))
 		probe.PeriodSeconds = 5
 		probe.SuccessThreshold = 2
 		postRestore := filePostRestore("/tmp/released")
@@ -220,7 +227,7 @@ func fileProbe(path string) *snapshotv1.CheckpointReadinessProbe {
 	}}
 }
 
-func httpProbe(path string, port int32) *snapshotv1.CheckpointReadinessProbe {
+func httpProbe(path string, port intstr.IntOrString) *snapshotv1.CheckpointReadinessProbe {
 	return &snapshotv1.CheckpointReadinessProbe{CheckpointReadinessProbeHandler: snapshotv1.CheckpointReadinessProbeHandler{
 		HTTPGet: &snapshotv1.HTTPGetAction{Path: path, Port: port},
 	}}
@@ -232,7 +239,7 @@ func filePostRestore(path string) *snapshotv1.PostRestoreAction {
 	}}
 }
 
-func httpPostRestore(path string, port int32) *snapshotv1.PostRestoreAction {
+func httpPostRestore(path string, port intstr.IntOrString) *snapshotv1.PostRestoreAction {
 	return &snapshotv1.PostRestoreAction{PostRestoreHandler: snapshotv1.PostRestoreHandler{
 		HTTPPost: &snapshotv1.HTTPPostAction{Path: path, Port: port},
 	}}

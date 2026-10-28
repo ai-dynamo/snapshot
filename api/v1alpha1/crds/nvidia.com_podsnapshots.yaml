@@ -117,25 +117,22 @@ spec:
                             200.
                           properties:
                             path:
-                              description: |-
-                                Path of the request. It must start with "/" and has no host, query, or
-                                fragment.
-                              maxLength: 4096
-                              minLength: 1
+                              description: Path of the request. Empty means "/".
                               type: string
-                              x-kubernetes-validations:
-                              - message: path must start with / and have no host,
-                                  query, or fragment
-                                rule: self.startsWith('/') && !self.startsWith('//')
-                                  && !self.contains('?') && !self.contains('#')
                             port:
-                              description: Port on the Pod IP.
-                              format: int32
-                              maximum: 65535
-                              minimum: 1
-                              type: integer
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: |-
+                                Port on the Pod IP: a number from 1 to 65535, or the name of a port of
+                                the container, resolved when the request is sent.
+                              x-kubernetes-int-or-string: true
+                              x-kubernetes-validations:
+                              - message: port must be 1-65535 or a valid port name
+                                rule: 'type(self) == int ? self >= 1 && self <= 65535
+                                  : self.size() > 0 && self.size() <= 15 && self.matches(''^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'')
+                                  && self.matches(''[a-z]'') && !self.contains(''--'')'
                           required:
-                          - path
                           - port
                           type: object
                         initialDelaySeconds:
@@ -210,25 +207,24 @@ spec:
                                 response means the application accepted the notification.
                               properties:
                                 path:
-                                  description: |-
-                                    Path of the request. It must start with "/" and has no host, query, or
-                                    fragment.
-                                  maxLength: 4096
-                                  minLength: 1
+                                  description: Path of the request. Empty means "/".
                                   type: string
-                                  x-kubernetes-validations:
-                                  - message: path must start with / and have no host,
-                                      query, or fragment
-                                    rule: self.startsWith('/') && !self.startsWith('//')
-                                      && !self.contains('?') && !self.contains('#')
                                 port:
-                                  description: Port on the Pod IP.
-                                  format: int32
-                                  maximum: 65535
-                                  minimum: 1
-                                  type: integer
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: |-
+                                    Port on the Pod IP: a number from 1 to 65535, or the name of a port of
+                                    the container, resolved when the request is sent.
+                                  x-kubernetes-int-or-string: true
+                                  x-kubernetes-validations:
+                                  - message: port must be 1-65535 or a valid port
+                                      name
+                                    rule: 'type(self) == int ? self >= 1 && self <=
+                                      65535 : self.size() > 0 && self.size() <= 15
+                                      && self.matches(''^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'')
+                                      && self.matches(''[a-z]'') && !self.contains(''--'')'
                               required:
-                              - path
                               - port
                               type: object
                             periodSeconds:

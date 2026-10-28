@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -29,7 +30,7 @@ func containerSettings(name string) []snapshotv1alpha1.ContainerSnapshotConfig {
 		},
 		Lifecycle: &snapshotv1alpha1.SnapshotLifecycle{PostRestore: &snapshotv1alpha1.PostRestoreAction{
 			PostRestoreHandler: snapshotv1alpha1.PostRestoreHandler{
-				HTTPPost: &snapshotv1alpha1.HTTPPostAction{Path: "/resume", Port: 8000},
+				HTTPPost: &snapshotv1alpha1.HTTPPostAction{Path: "/resume", Port: intstr.FromInt32(8000)},
 			},
 		}},
 	}}
@@ -75,8 +76,8 @@ func TestSnapshotReconciler_BuildPodSnapshotContentSavesContainerSettings(t *tes
 
 	content := r.buildPodSnapshotContent(snap, "content-x", scheduledPod())
 	assert.Equal(t, snap.Spec.Containers, content.Spec.Containers)
-	content.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port = 9000
-	assert.Equal(t, int32(8000), snap.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port,
+	content.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port = intstr.FromInt32(9000)
+	assert.Equal(t, intstr.FromInt32(8000), snap.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port,
 		"the content gets its own copy")
 
 	snap.Spec.Containers = nil
