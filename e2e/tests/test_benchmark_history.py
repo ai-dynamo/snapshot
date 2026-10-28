@@ -736,20 +736,29 @@ def test_summary_escapes_untrusted_text_and_rejects_unsafe_links() -> None:
 
 
 def test_only_scheduled_main_history_job_has_write_permission() -> None:
-    repository_root = Path(__file__).resolve().parents[2]
-    workflow = yaml.safe_load(
-        (repository_root / ".github/workflows/e2e-frameworks.yaml").read_text()
-    )
+    workflows = Path(__file__).resolve().parents[2] / ".github/workflows"
+    frameworks = yaml.safe_load((workflows / "e2e-frameworks.yaml").read_text())
+    history_workflow = yaml.safe_load((workflows / "e2e-frameworks-history.yaml").read_text())
 
-    read_only = workflow["jobs"]["benchmark-history-read-only"]
-    publisher = workflow["jobs"]["benchmark-history-publish"]
+    # e2e-pr.yaml calls the framework workflow on pull request code with read
+    # access only, so no job there may ask for more.
+    assert frameworks["permissions"] == {"contents": "read", "packages": "read"}
+    for job in frameworks["jobs"].values():
+        assert "write" not in (job.get("permissions") or {}).values()
+
+    read_only = frameworks["jobs"]["benchmark-history-read-only"]
+    publisher = history_workflow["jobs"]["publish"]
+    # workflow_run runs from the default branch, never the pull request's code.
+    assert history_workflow[True]["workflow_run"]["workflows"] == [frameworks["name"]]
+    assert history_workflow["permissions"] == {}
     assert read_only["permissions"]["contents"] == "read"
     assert publisher["permissions"]["contents"] == "write"
-    assert "github.event_name == 'schedule'" in publisher["if"]
-    assert "github.ref == 'refs/heads/main'" in publisher["if"]
+    assert "github.event.workflow_run.event == 'schedule'" in publisher["if"]
+    assert "github.event.workflow_run.head_branch == 'main'" in publisher["if"]
+    assert "github.event.workflow_run.conclusion != 'cancelled'" in publisher["if"]
     assert publisher["concurrency"]["cancel-in-progress"] is False
+    assert "!cancelled()" in read_only["if"]
     for job in (read_only, publisher):
-        assert "!cancelled()" in job["if"]
         assert "always()" not in job["if"]
 
     def step(job: dict, uses: str) -> dict:
@@ -759,6 +768,9 @@ def test_only_scheduled_main_history_job_has_write_permission() -> None:
     # infrastructure_failed results; the job must fail instead.
     for job in (read_only, publisher):
         assert "continue-on-error" not in step(job, "download-artifact")
+    download = step(publisher, "download-artifact")["with"]
+    assert download["run-id"] == "${{ github.event.workflow_run.id }}"
+    assert "${{ github.event.workflow_run.id }}" in download["pattern"]
 
     # Only the publisher pushes, so only it may keep the token in the history
     # checkout; the read-only job runs pull-request code after this step.
