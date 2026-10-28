@@ -18,13 +18,13 @@
 # Build Arguments
 # =============================================================================
 ARG DOCKER_PROXY
-ARG GO_VERSION=1.27.2
+ARG GO_VERSION=1.27.3
 # Digest of golang:${GO_VERSION}. A digest is content-addressed, so it resolves
 # identically through DOCKER_PROXY pull-through mirrors. Docker resolves
 # tag@digest by digest and never checks the tag against it, so the two must be
 # updated together — the go-base stage asserts they agree rather than trusting
 # the tag.
-ARG GO_IMAGE_DIGEST=sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
+ARG GO_IMAGE_DIGEST=sha256:6928d94d1142af58816fed5a62338d605a266ccd53a0deaab6b1096f19059261
 # Keep in step with GOLANGCI_LINT_VERSION in hack/tools.mk. Used by the linter
 # stage, which is a developer target (`--target linter`) and so is not covered
 # by the CI `check` job.

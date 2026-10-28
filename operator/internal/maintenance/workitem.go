@@ -17,8 +17,9 @@ const ArtifactCleanupBlockedReason = "ArtifactCleanupBlocked"
 type Mode string
 
 const (
-	ModeDeleteContent Mode = "delete-content"
-	ModeSweep         Mode = "sweep"
+	ModeDeleteContent  Mode = "delete-content"
+	ModeSweep          Mode = "sweep"
+	ModeNonTargetSweep Mode = "non-target-sweep"
 )
 
 // Enqueuer is the subset of Queue used to schedule work, so callers (and
@@ -32,8 +33,8 @@ type Enqueuer interface {
 //
 // Name/UID matter only for ModeDeleteContent: the worker re-reads the object
 // and compares UID, so a content deleted and recreated under the same name
-// never matches a stale key. ModeSweep carries no identity, so duplicate
-// sweep triggers coalesce into one key.
+// never matches a stale key. Sweep modes carry no identity, so duplicate
+// triggers for either sweep coalesce into one key.
 type WorkItemKey struct {
 	Mode Mode
 	Name string
@@ -46,4 +47,8 @@ func newDeleteContentKey(name string, uid types.UID) WorkItemKey {
 
 func newSweepKey() WorkItemKey {
 	return WorkItemKey{Mode: ModeSweep}
+}
+
+func newNonTargetSweepKey() WorkItemKey {
+	return WorkItemKey{Mode: ModeNonTargetSweep}
 }

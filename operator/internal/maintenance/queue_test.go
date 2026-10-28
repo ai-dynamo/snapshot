@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -37,7 +39,7 @@ func TestEnqueueSweepCoalescesDuplicates(t *testing.T) {
 	q.EnqueueSweep()
 	q.EnqueueSweep()
 
-	assert.Equal(t, 1, q.queue.Len())
+	assert.Equal(t, 2, q.queue.Len(), "each sweep mode has its own coalesced deadline")
 }
 
 func TestStartRunsImmediateSweepAndShutsDownCleanly(t *testing.T) {
@@ -287,7 +289,8 @@ func TestSweepRecoversDeleteContentAfterRetryExhaustion(t *testing.T) {
 			}}
 			q.EnqueueSweep()
 			require.True(t, q.processNextItem(ctx, logr.Discard()))
-			require.Equal(t, 1, q.queue.Len(), "sweep must rediscover the dropped deletion")
+			require.Equal(t, 2, q.queue.Len(), "content sweep rediscovers deletion beside the independent non-target sweep")
+			require.True(t, q.processNextItem(ctx, logr.Discard()))
 			require.True(t, q.processNextItem(ctx, logr.Discard()))
 			require.Zero(t, q.queue.Len())
 			require.Zero(t, q.queue.NumRequeues(key), "success must reset the retry count")
@@ -307,10 +310,12 @@ func TestFailedSweepWaitsForNextTrigger(t *testing.T) {
 
 	q.EnqueueSweep()
 	require.True(t, q.processNextItem(context.Background(), logr.Discard()))
+	require.True(t, q.processNextItem(context.Background(), logr.Discard()))
 
 	assert.Equal(t, q.config.ListAttempts, reader.calls)
 	assert.Zero(t, q.queue.Len())
 	assert.Zero(t, q.queue.NumRequeues(newSweepKey()))
+	assert.Zero(t, q.queue.NumRequeues(newNonTargetSweepKey()))
 }
 
 type stubBackend struct {
@@ -373,4 +378,34 @@ func TestProcessNextItemRetriesItemThatOverranItsTimeout(t *testing.T) {
 	}
 	assert.Equal(t, 1, q.queue.NumRequeues(key))
 	requireFinalizerRetained(t, q)
+}
+
+func TestSweepRetainsCompletedAndCanaryArtifactRoots(t *testing.T) {
+	base := t.TempDir()
+	for _, uid := range []string{"completed", "canary", "orphan"} {
+		root, err := artifact.ResolveContentRoot(base, uid)
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(root, 0o750))
+	}
+	q, _ := newTestQueue(t, base)
+	q.apiReader = &metadataReader{list: func(list *metav1.PartialObjectMetadataList, _ *client.ListOptions) error {
+		emptyMetadataPage(list, "1", "")
+		list.Items = []metav1.PartialObjectMetadata{
+			{ObjectMeta: metav1.ObjectMeta{UID: types.UID("completed")}},
+			// A live content UID is an active writer's lease on its artifact
+			// root. Sweeping it would race the writer.
+			{ObjectMeta: metav1.ObjectMeta{UID: types.UID("canary")}},
+		}
+		return nil
+	}}
+
+	require.NoError(t, q.processSweep(context.Background(), logr.Discard()))
+	for _, uid := range []string{"completed", "canary"} {
+		root, err := artifact.ResolveContentRoot(base, uid)
+		require.NoError(t, err)
+		require.DirExists(t, root)
+	}
+	orphanRoot, err := artifact.ResolveContentRoot(base, "orphan")
+	require.NoError(t, err)
+	require.NoDirExists(t, orphanRoot)
 }

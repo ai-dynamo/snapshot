@@ -89,11 +89,13 @@ fn cumemalloc_returns_tracked_vmm_with_native_bounds_and_rdma_flag() {
                     cuda::address_range(address + size as u64 - 1),
                     (address, size)
                 );
-                let handle = cuda::retain(address);
-                cuda::assert_handle_namespace(handle, true, "converted malloc");
-                let properties = cuda::properties_of(handle);
-                assert_eq!(properties.location.id, device);
-                assert_eq!(properties.allocFlags.gpuDirectRDMACapable != 0, rdma);
+                assert_eq!(shim::mapped_location(pid(), address).id, device);
+                cuda::assert_malloc_semantics(address, false, "converted malloc");
+                cuda::assert_malloc_semantics(
+                    address + size as u64 - 1,
+                    false,
+                    "converted malloc end",
+                );
                 let mut capable = 0u32;
                 let attribute =
                     sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_IS_GPU_DIRECT_RDMA_CAPABLE;
@@ -103,7 +105,6 @@ fn cumemalloc_returns_tracked_vmm_with_native_bounds_and_rdma_flag() {
                     address
                 ));
                 assert_eq!(capable != 0, rdma);
-                cu!(cuMemRelease(handle));
                 let last = address + size as u64 - 1;
                 cuda::write_bytes(last, b"x");
                 cuda::assert_bytes(last, b"x", "malloc bounds");

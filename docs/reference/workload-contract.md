@@ -157,9 +157,11 @@ Producing them programmatically is the
 ## Multi-GPU workloads
 
 A workload that uses several GPUs meets the same contract, with its GPUs on a
-single node; multi-node workloads are not supported. The source pod also enables
-multi-GPU support with the `nvidia.com/snapshot-multi-gpu: enabled` annotation.
-What else it carries depends on what creates it:
+single node; multi-node workloads are not supported. Which multi-GPU workloads
+can be restored depends on the CUDA user-mode driver version; see
+[Compatibility](compatibility.md). The source Pod also enables multi-GPU support
+with the `nvidia.com/snapshot-multi-gpu: enabled` annotation. What else it
+carries depends on what creates it:
 
 - **A `SnapshotJob`** needs only the annotation, on
   `spec.podTemplate.metadata.annotations`. The controller prepares the source Pod

@@ -75,8 +75,8 @@ TEST(EngineValidation, PreservesInheritedCancellationReason)
 {
   for (bool deadline : {false, true}) {
     Cancellation parent(deadline ? Cancellation::Clock::now() : Cancellation::Clock::time_point::max());
-    Cancellation child(&parent);
-    Cancellation grandchild(&child);
+    Cancellation child = Cancellation::ChildOf(parent);
+    Cancellation grandchild = Cancellation::ChildOf(child);
     if (!deadline) {
       EXPECT_NO_THROW(grandchild.ThrowIfCancelled());
       parent.Cancel();
@@ -130,6 +130,17 @@ TEST(EngineValidation, RejectsInvalidParticipantSets)
        }) {
     EXPECT_THROW(ValidateParticipants(captured, invalid), std::invalid_argument);
   }
+}
+
+TEST(EngineValidation, OrdersRestoreSetupWithDataFirst)
+{
+  const std::array<size_t, 7> mixed{0, 1, 0, 0, 2, 1, 0};
+  EXPECT_EQ(RestoreSetupOrder(mixed), (std::vector<size_t>{1, 4, 5, 0, 2, 3, 6}));
+  const std::array<size_t, 3> all_data{2, 1, 1};
+  EXPECT_EQ(RestoreSetupOrder(all_data), (std::vector<size_t>{0, 1, 2}));
+  const std::array<size_t, 2> no_data{0, 0};
+  EXPECT_EQ(RestoreSetupOrder(no_data), (std::vector<size_t>{0, 1}));
+  EXPECT_TRUE(RestoreSetupOrder({}).empty());
 }
 
 TEST_F(ArtifactTest, RollsBackCreatedDirectoriesWithoutRemovingExistingData)

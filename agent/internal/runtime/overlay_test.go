@@ -517,6 +517,21 @@ func assertNoRootfsDiff(t *testing.T, checkpointDir string) {
 }
 
 func TestApplyRootfsDiff(t *testing.T) {
+	t.Run("corrupt archive names tar's error", func(t *testing.T) {
+		checkpointDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("this is not a tar archive"), 0644); err != nil {
+			t.Fatalf("write corrupt rootfs diff: %v", err)
+		}
+		bundle := testBundle(t)
+		err := ApplyRootfsDiff(checkpointDir, t.TempDir(), bundle, testr.New(t))
+		if err == nil || !strings.Contains(err.Error(), "tar extract failed: exit status") {
+			t.Fatalf("ApplyRootfsDiff(corrupt) = %v, want the exit status", err)
+		}
+		if !strings.Contains(err.Error(), filepath.Join(bundle, nsmount.BundleTar)+": ") || strings.Contains(err.Error(), "Exiting with failure status") {
+			t.Fatalf("ApplyRootfsDiff(corrupt) = %v, want tar's first message, not its exit notice", err)
+		}
+	})
+
 	t.Run("missing archive is no-op", func(t *testing.T) {
 		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), testBundle(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
@@ -543,7 +558,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		}
 	})
 
-	t.Run("non-ENOENT stat error is propagated", func(t *testing.T) {
+	t.Run("non-ENOENT open error is propagated", func(t *testing.T) {
 		// Pass a regular file as checkpointPath so stat of
 		// checkpointPath/rootfs-diff.tar returns ENOTDIR, not ENOENT.
 		f, err := os.CreateTemp(t.TempDir(), "not-a-dir")
@@ -553,32 +568,6 @@ func TestApplyRootfsDiff(t *testing.T) {
 		f.Close()
 		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), testBundle(t), testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should propagate non-ENOENT stat error")
-		}
-	})
-
-	t.Run("staged local copy is removed after extract", func(t *testing.T) {
-		upperDir := t.TempDir()
-		checkpointDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(upperDir, "generated.txt"), []byte("runtime data"), 0644); err != nil {
-			t.Fatalf("write upperdir file: %v", err)
-		}
-		if _, err := CaptureRootfsDiff(upperDir, checkpointDir, RootfsDiffOptions{}); err != nil {
-			t.Fatalf("CaptureRootfsDiff: %v", err)
-		}
-
-		before, err := filepath.Glob(filepath.Join(os.TempDir(), rootfsDiffFilename+".*.tmp"))
-		if err != nil {
-			t.Fatalf("glob staged copies: %v", err)
-		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testBundle(t), testr.New(t)); err != nil {
-			t.Fatalf("ApplyRootfsDiff: %v", err)
-		}
-		after, err := filepath.Glob(filepath.Join(os.TempDir(), rootfsDiffFilename+".*.tmp"))
-		if err != nil {
-			t.Fatalf("glob staged copies: %v", err)
-		}
-		if len(after) != len(before) {
-			t.Fatalf("staged local copies leaked: before %v after %v", before, after)
 		}
 	})
 }

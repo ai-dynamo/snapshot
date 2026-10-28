@@ -16,6 +16,7 @@
         cuMemAlloc_v2;
         cuMemFree_v2;
         cuMemGetAddressRange_v2;
+        cuPointerGetAttribute;
         cuIpcGetMemHandle;
         cuIpcOpenMemHandle;
         cuIpcOpenMemHandle_v2;

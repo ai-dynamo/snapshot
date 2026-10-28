@@ -39,6 +39,10 @@ const (
 	// snapshotContentDeleteRequeue is the delay between cascade-delete progress checks.
 	snapshotContentDeleteRequeue = time.Second
 
+	// testCaptureFailureReadyRequeue keeps the test-only failure hook from racing
+	// workload-defined readiness.
+	testCaptureFailureReadyRequeue = time.Second
+
 	// podSnapshotSourcePodNameField indexes PodSnapshots by their namespaced source-pod name.
 	// List calls using this field are also scoped to the pod's namespace.
 	podSnapshotSourcePodNameField = "spec.source.podRef.name"
@@ -66,8 +70,12 @@ var errContentConflict = errors.New("existing PodSnapshotContent belongs to anot
 // back to the PodSnapshot, and cascades deletion to the PodSnapshotContent.
 type PodSnapshotReconciler struct {
 	client.Client
-	NonCacheReadClient client.Reader
-	Recorder           record.EventRecorder
+	NonCacheReadClient    client.Reader
+	Recorder              record.EventRecorder
+	TestFailureAnnotation string
+	// StoreID binds every new PodSnapshotContent to the configured store. Empty
+	// keeps producing legacy, path-addressed content.
+	StoreID string
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -301,7 +309,14 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 		}
 		return ctrl.Result{}, fmt.Errorf("validate source pod: %w", err)
 	}
-
+	if annotation := sr.TestFailureAnnotation; annotation != "" && pod.Annotations[annotation] == "true" {
+		target := snap.Spec.Source.PodRef.Containers[0]
+		if !containerReady(pod, target) {
+			return ctrl.Result{RequeueAfter: testCaptureFailureReadyRequeue}, nil
+		}
+		return sr.failPodSnapshot(ctx, snap, "TestCaptureFailure",
+			fmt.Errorf("test-only capture failure requested by source pod annotation %q", annotation))
+	}
 	content, err := sr.ensurePodSnapshotContent(ctx, snap, podSnapshotContentName(snap), pod)
 	if err != nil {
 		if errors.Is(err, errContentConflict) {
@@ -310,6 +325,15 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 		return ctrl.Result{}, err
 	}
 	return sr.bindContent(ctx, snap, content.Name)
+}
+
+func containerReady(pod *corev1.Pod, name string) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == name {
+			return status.Ready
+		}
+	}
+	return false
 }
 
 // verifyContentBacklink errors when a content's complete backref does not point at this PodSnapshot
@@ -375,6 +399,10 @@ func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, s
 
 // buildPodSnapshotContent constructs the desired cluster-scoped PodSnapshotContent for a PodSnapshot.
 func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.PodSnapshot, contentName string, pod *corev1.Pod) *snapshotv1alpha1.PodSnapshotContent {
+	var storage *snapshotv1alpha1.CheckpointStorageBinding
+	if sr.StoreID != "" {
+		storage = &snapshotv1alpha1.CheckpointStorageBinding{StoreID: sr.StoreID}
+	}
 	return &snapshotv1alpha1.PodSnapshotContent{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: snapshotv1alpha1.GroupVersion.String(),
@@ -397,6 +425,7 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 				PodRef:   snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: snap.Spec.Source.PodRef.Containers},
 				NodeName: pod.Spec.NodeName,
 			},
+			Storage: storage,
 		},
 	}
 }

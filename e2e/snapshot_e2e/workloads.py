@@ -29,6 +29,8 @@ RESTORE_PROXY = f"{CONTROL_DIR}/snapshot-restore-proxy"
 INERT_COMMAND = ["sleep", "infinity"]
 # The process the CUDA workload runs as, from CUDA_SOURCE.
 CUDA_HOLD = "/tmp/cuda_hold"
+RESTORE_INITIAL_TOKEN = f"{CONTROL_DIR}/initial-restore-token"
+HELPER_SYNC_DIR = "/e2e-helper-sync"
 STATE_DIR = "/tmp/e2e-state"
 FILE_TOKEN = f"{STATE_DIR}/file-token"
 OBSERVATIONS = f"{STATE_DIR}/observations.log"
@@ -261,6 +263,8 @@ def base_pod_spec(
     # agent's own pod, not the workload pod — see checkpoint_agent_pod() /
     # checkpoint_artifact_path() in lifecycle.py), a real caller's pod no
     # longer needs to carry this volume at all.
+    if gpu and config.cpu_only:
+        raise ValueError("GPU workloads cannot run in CPU-only E2E mode")
     container: dict[str, Any] = {
         "name": CONTAINER,
         "image": run.image,
@@ -289,7 +293,7 @@ def base_pod_spec(
         # Kubernetes default 30s graceful termination window between tests.
         "terminationGracePeriodSeconds": 1,
         "containers": [container],
-        **workload_scheduling(),
+        **workload_scheduling(cpu_only=config.cpu_only),
         "volumes": volumes,
     }
     if gpu:
@@ -311,7 +315,11 @@ def restore_proxy() -> bool:
     return os.environ.get("SNAPSHOT_E2E_RESTORE_PROXY", "true") != "false"
 
 
-def workload_scheduling() -> dict[str, Any]:
+def workload_scheduling(*, cpu_only: bool | None = None) -> dict[str, Any]:
+    if cpu_only is None:
+        cpu_only = k8s.cpu_only_mode()
+    if cpu_only:
+        return {}
     # Keep all workload pods on GPU nodes so the shared RWO checkpoint PVC binds in
     # a zone where both source and restore pods can schedule.
     node_selector = {
@@ -398,18 +406,47 @@ def snapshotjob_helper_pod_template(
     config: k8s.E2EConfig,
     run: TestRun,
     helper_command: str,
+    wait_for_helper_before_capture: bool = False,
+    wait_for_capture_release: bool = False,
 ) -> dict[str, Any]:
     # Two containers: the CRIU target plus a helper doing independent work
     # (the design's GMS-saver pattern). The dump kills only the target; the
     # SnapshotJob must wait for the helper before completing, and a helper
     # failure must fail the run even though the capture succeeded.
     template = snapshotjob_pod_template(config=config, run=run, gpu=False)
+    if wait_for_helper_before_capture or wait_for_capture_release:
+        waits = []
+        if wait_for_helper_before_capture:
+            waits.append(f"while [ ! -f {HELPER_SYNC_DIR}/helper-finished ]; do sleep 0.1; done")
+            # The fail-capture hook is triggered by container readiness, so
+            # retain this gate until the helper has completed.
+            template["spec"]["containers"][0]["readinessProbe"] = {
+                "exec": {"command": ["cat", f"{HELPER_SYNC_DIR}/helper-finished"]},
+                "periodSeconds": 1,
+            }
+        if wait_for_capture_release:
+            waits.append(f"while [ ! -f {HELPER_SYNC_DIR}/capture-release ]; do sleep 0.1; done")
+        template["spec"]["containers"][0]["command"] = [
+            "/bin/bash",
+            "-lc",
+            f"""set -euo pipefail
+mkdir -p {STATE_DIR}
+{chr(10).join(waits)}
+{CPU_SOURCE}
+""",
+        ]
+    template["spec"]["volumes"].append({"name": "e2e-helper-sync", "emptyDir": {}})
+    for container in template["spec"]["containers"]:
+        container.setdefault("volumeMounts", []).append(
+            {"name": "e2e-helper-sync", "mountPath": HELPER_SYNC_DIR}
+        )
     template["spec"]["containers"].append(
         {
             "name": "helper",
             "image": run.image,
             "imagePullPolicy": "IfNotPresent",
             "command": ["/bin/bash", "-lc", helper_command],
+            "volumeMounts": [{"name": "e2e-helper-sync", "mountPath": HELPER_SYNC_DIR}],
         }
     )
     return template

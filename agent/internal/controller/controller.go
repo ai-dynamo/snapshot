@@ -81,6 +81,11 @@ type NodeController struct {
 
 	handledRestores sync.Map
 
+	// startedRestoreContainers holds, per restoreContainerKey, the ID of a
+	// restore destination container the NRI plugin saw start, so a restore
+	// begins before kubelet publishes the container in the Pod status.
+	startedRestoreContainers sync.Map
+
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
 	contentIndexer cache.Indexer
@@ -397,6 +402,35 @@ func (w *NodeController) forgetRestorePod(obj interface{}) {
 		return
 	}
 	w.handledRestores.Delete(string(pod.UID))
+	prefix := string(pod.UID) + "/"
+	w.startedRestoreContainers.Range(func(key, _ any) bool {
+		if strings.HasPrefix(key.(string), prefix) {
+			w.startedRestoreContainers.Delete(key)
+		}
+		return true
+	})
+}
+
+// RestoreContainerStarted records a restore destination's container that the
+// NRI plugin saw start, and requeues its Pod so the restore begins without
+// waiting for kubelet to publish the container in the Pod status. In a
+// vCluster tenant that status is also the only other way to find the
+// container: the runtime labels it with the host Pod's name.
+func (w *NodeController) RestoreContainerStarted(pod ktypes.NamespacedName, uid ktypes.UID, container, containerID string) {
+	w.startedRestoreContainers.Store(restoreContainerKey(uid, container), containerID)
+	w.restoreQueue.Add(pod)
+}
+
+// RestoreContainerStopped forgets a reported destination container that has
+// stopped, unless a later container already replaced the report. A restore
+// into it would fail the Pod's restore instead of waiting for the container
+// kubelet starts next.
+func (w *NodeController) RestoreContainerStopped(uid ktypes.UID, container, containerID string) {
+	w.startedRestoreContainers.CompareAndDelete(restoreContainerKey(uid, container), containerID)
+}
+
+func restoreContainerKey(uid ktypes.UID, container string) string {
+	return string(uid) + "/" + container
 }
 
 func (w *NodeController) restorePodRequested(pod *corev1.Pod) bool {
@@ -435,6 +469,11 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 			w.restoreQueue.AddAfter(key, restoreSafetyRequeueInterval)
 		}
 	}()
+	// Registered after the Done defer so it runs first, leaving requeue false.
+	var panicked *corev1.Pod
+	defer recoverPanic(w.log, "restore work order", func(err error) {
+		w.failRestoreAfterPanic(ctx, key, panicked, err)
+	}, "pod", key.String())
 
 	pod, err := w.restorePodLister.Pods(key.Namespace).Get(key.Name)
 	if apierrors.IsNotFound(err) {
@@ -446,6 +485,7 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		return
 	}
 	pod = pod.DeepCopy()
+	panicked = pod
 	if w.skipRequestedAfterRefusal(pod) {
 		// The skip request is the way back for a pod the gates turned down, so
 		// it has to clear the in-process marker as well as the condition below.
@@ -703,7 +743,8 @@ func (w *NodeController) resolveRestoreArtifact(
 		return nil, err
 	}
 	if !ready {
-		return nil, newRestorePendingError("ArtifactPending", fmt.Sprintf("Waiting for artifact %s", path))
+		// Ready guarantees a usable artifact; absence is stale state, not a retryable dependency.
+		return nil, fmt.Errorf("artifact %s for Ready PodSnapshotContent %s is missing", path, content.Name)
 	}
 	return &restoreArtifact{
 		SnapshotName:        target.SnapshotName,
@@ -756,6 +797,11 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	for i, mapping := range plan.mappings {
 		i, destination := i, mapping.Destination
 		workers.Go(func() {
+			// sync.WaitGroup.Go recovers only to re-panic, so a panic here
+			// would kill the agent. Report it as a failed destination instead.
+			results[i] = restoreResult{destination: destination, state: restoreResultFailed,
+				reason: "agent panicked restoring this container"}
+			defer recoverPanic(w.log, "restore destination", nil, "pod", podKey, "destination", destination)
 			results[i] = w.restoreDestination(ctx, pod, plan, destination, podKey, recovering)
 		})
 	}
@@ -822,6 +868,14 @@ func tallyRestoreResults(results []restoreResult) restoreTally {
 		}
 	}
 	return tally
+}
+
+// logWithStep adds the failing step as a structured key when the error names one.
+func logWithStep(log logr.Logger, err error) logr.Logger {
+	if step := executor.StepOf(err); step != "" {
+		return log.WithValues("step", string(step))
+	}
+	return log
 }
 
 // verdict concludes one pass, still in progress or terminal, from the counts
@@ -925,7 +979,7 @@ func (w *NodeController) restoreDestination(
 		}
 		result.state = restoreResultFailed
 		result.reason = err.Error()
-		log.Error(err, "Restore controller worker failed")
+		logWithStep(log, err).Error(err, "Restore controller worker failed")
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 		return result
 	}
@@ -934,7 +988,8 @@ func (w *NodeController) restoreDestination(
 }
 
 // resolveRestoreContainerID uses the kubelet-published status fast path, then
-// polls the node runtime inline while this Pod's queue key remains in progress.
+// polls inline while this Pod's queue key remains in progress: first for the
+// container the NRI plugin saw start, then the node runtime.
 func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *corev1.Pod, destination, podKey string) (string, bool) {
 	if containerID := restoreContainerIDFromStatus(pod, destination); containerID != "" {
 		return containerID, false
@@ -950,6 +1005,17 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 	tick := time.NewTicker(restoreContainerResolveInterval)
 	defer tick.Stop()
 	for {
+		// Taken, not read: a restore consumes it, and a container started
+		// later is reported again.
+		if started, ok := w.startedRestoreContainers.LoadAndDelete(restoreContainerKey(pod.UID, destination)); ok {
+			w.log.V(1).Info("Resolved restore container started under NRI",
+				"pod", podKey,
+				"container", destination,
+				"container_id", started,
+			)
+			return started.(string), false
+		}
+
 		resolveCtx, cancel := restoreContainerResolveAttemptContext(ctx, deadlineAt)
 		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, destination)
 		cancel()
@@ -985,8 +1051,12 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //     CRIU-restored process resumes inside the polling loop that waits on
 //     this file, exits quiescence, and resumes the engine. On failure, write
 //     restore-failed and kill the placeholder instead.
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) error {
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) (retErr error) {
 	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
+	// Without this the placeholder keeps waiting for a restore that panicked.
+	defer recoverPanic(op.log, "restore", func(err error) {
+		retErr = op.failRestore(ctx, err)
+	}, "destination", destination)
 	if recovering {
 		completed, err := op.recoverCompletedRestore(ctx)
 		if err != nil {
@@ -1017,7 +1087,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if !errors.As(err, &cleanupErr) {
 			return op.failRestore(ctx, err)
 		}
-		op.log.Error(cleanupErr, "Restore completed with cleanup errors")
+		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
 	return op.completeRestore(ctx, restored)
@@ -1091,7 +1161,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (executor.Restor
 
 func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) error {
 	w := op.controller
-	op.log.Error(restoreErr, "External restore failed")
+	logWithStep(op.log, restoreErr).Error(restoreErr, "External restore failed")
 	// Re-resolve because restore may fail before discovering the placeholder PID.
 	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
 	if err != nil {
@@ -1350,6 +1420,11 @@ func (w *NodeController) runCaptureQueue(ctx context.Context) {
 // meanwhile collapse into one redelivery after Done.
 func (w *NodeController) processCaptureQueueItem(ctx context.Context, name string) {
 	defer w.captureQueue.Done(name)
+	// A panic here would otherwise kill every other capture and restore on
+	// this node.
+	defer recoverPanic(w.log, "capture work order", func(err error) {
+		w.failCaptureAfterPanic(ctx, name, err)
+	}, "content", name)
 
 	if err := w.reconcileCapture(ctx, name); err != nil {
 		w.log.Error(err, "Failed to reconcile capture work order", "content", name)

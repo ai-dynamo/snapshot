@@ -23,6 +23,9 @@ race as a contract.
 
 from __future__ import annotations
 
+import os
+import shlex
+import time
 from typing import Any
 
 import pytest
@@ -32,6 +35,15 @@ from kubernetes.client import ApiException
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle as snap
 from snapshot_e2e import workloads
+
+
+def require_snapshotjob_test_hook(config: k8s.E2EConfig, description: str) -> None:
+    if k8s.snapshot_operator_test_hook_enabled(config.namespace, config.release):
+        return
+    message = f"operator release does not enable {description}"
+    if os.environ.get("SNAPSHOT_E2E_REQUIRE_TEST_HOOKS") == "true":
+        pytest.fail(f"required CPU E2E setup is unavailable: {message}")
+    pytest.skip(message)
 
 
 @pytest.fixture
@@ -304,6 +316,7 @@ def test_snapshotjob_waits_for_helper_then_completes(
 
 @pytest.mark.cpu
 @pytest.mark.snapshot_failure
+@pytest.mark.serial
 def test_snapshotjob_fails_when_helper_fails_after_capture(
     config: k8s.E2EConfig,
     run: snap.TestRun,
@@ -311,6 +324,7 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
     # A helper that exits non-zero after the capture is an incomplete
     # deliverable: the SnapshotJob must fail with JobFailed while Captured
     # stays True and the artifact remains usable.
+    require_snapshotjob_test_hook(config, "E2E reconciliation acknowledgments")
     try:
         snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
@@ -319,8 +333,36 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
             workloads.snapshotjob_helper_pod_template(
                 config=config,
                 run=run,
-                helper_command="sleep 20; echo '[helper] failing'; exit 3",
+                helper_command=(
+                    f"while [ ! -f {workloads.HELPER_SYNC_DIR}/helper-release ]; "
+                    "do sleep 0.1; done; echo '[helper] failing'; exit 3"
+                ),
             ),
+        )
+
+        captured_sj = snap.wait_for_condition(
+            config.namespace,
+            snapshotjob_name,
+            plural=snap.SNAPSHOTJOBS,
+            condition_type="Captured",
+            timeout=600,
+        )
+        assert snap.condition(captured_sj, "Captured").get("status") == "True"
+        completed = snap.condition(captured_sj, "Completed")
+        assert completed is not None and completed.get("status") != "True"
+        assert completed.get("reason") == "WaitingForPodCompletion"
+
+        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        snap.wait_for_container_running(
+            config.namespace,
+            source_pod.metadata.name,
+            container="helper",
+        )
+        k8s.exec_command(
+            config.namespace,
+            source_pod.metadata.name,
+            f"touch {workloads.HELPER_SYNC_DIR}/helper-release",
+            container="helper",
         )
 
         sj = snap.wait_for_condition(
@@ -344,6 +386,240 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
 
         # The artifact survives the failure: the capture itself succeeded.
         snap.wait_for_snapshot_ready(config.namespace, sj["status"]["podSnapshotName"], timeout=60)
+        k8s.restart_snapshot_operator(
+            config.namespace,
+            config.release,
+            after_rollout=lambda: snap.acknowledge_snapshotjob_reconcile(
+                config.namespace, snapshotjob_name
+            ),
+        )
+        after_restart = snap.get_custom_object(
+            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
+        )
+        after_restart_failed = snap.condition(after_restart, "Failed")
+        assert after_restart_failed and after_restart_failed.get("status") == "True"
+        assert after_restart_failed.get("reason") == "JobFailed"
+        assert snap.condition(after_restart, "Completed").get("status") != "True"
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+@pytest.mark.serial
+def test_snapshotjob_fails_when_capture_fails_after_helper_succeeds(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    require_snapshotjob_test_hook(config, "the capture-failure test hook")
+    try:
+        snapshotjob_name = run.snapshotjob_name
+        template = workloads.snapshotjob_helper_pod_template(
+            config=config,
+            run=run,
+            helper_command=f"touch {workloads.HELPER_SYNC_DIR}/helper-finished; exit 0",
+            wait_for_capture_release=True,
+        )
+        template["metadata"]["annotations"] = {
+            "snapshot-e2e.nvidia.com/fail-capture": "true",
+        }
+        snap.create_snapshotjob(config.namespace, snapshotjob_name, template)
+
+        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        helper_exit_code = snap.wait_for_container_exit(
+            config.namespace,
+            source_pod.metadata.name,
+            container="helper",
+        )
+        assert helper_exit_code == 0
+        snap.wait_for_container_running(
+            config.namespace,
+            source_pod.metadata.name,
+            container=workloads.CONTAINER,
+        )
+        assert snap.file_present(
+            config.namespace,
+            source_pod.metadata.name,
+            f"{workloads.HELPER_SYNC_DIR}/helper-finished",
+            container=workloads.CONTAINER,
+        )
+        k8s.exec_command(
+            config.namespace,
+            source_pod.metadata.name,
+            f"touch {workloads.HELPER_SYNC_DIR}/capture-release",
+            container=workloads.CONTAINER,
+        )
+
+        sj = snap.wait_for_condition(
+            config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, condition_type="Failed", timeout=180
+        )
+        failed = snap.condition(sj, "Failed")
+        assert failed and failed.get("reason") == "CaptureFailed"
+        captured = snap.condition(sj, "Captured")
+        assert captured and captured.get("status") == "False"
+        assert snap.condition(sj, "Completed").get("status") != "True"
+        assert k8s.read_job(config.namespace, snapshotjob_name) is not None
+        pod_snapshot = snap.get_custom_object(
+            client.CustomObjectsApi(),
+            config.namespace,
+            sj["status"]["podSnapshotName"],
+            snap.PODSNAPSHOTS,
+        )
+        pod_snapshot_failed = snap.condition(pod_snapshot, "Failed")
+        assert pod_snapshot_failed and pod_snapshot_failed.get("reason") == "TestCaptureFailure"
+        contents = client.CustomObjectsApi().list_cluster_custom_object(
+            snap.GROUP, snap.VERSION, snap.PODSNAPSHOTCONTENTS
+        )["items"]
+        assert not any(
+            item.get("spec", {}).get("snapshotRef", {}).get("namespace") == config.namespace
+            and item.get("spec", {}).get("snapshotRef", {}).get("name") == snapshotjob_name
+            for item in contents
+        )
+        # The helper marker is in a test-owned emptyDir, so deleting its source
+        # pod is the observable cleanup boundary for this failed attempt.
+        assert k8s.delete_job(config.namespace, snapshotjob_name)
+        snap.wait_for_pod_deleted(config.namespace, source_pod.metadata.name)
+        k8s.restart_snapshot_operator(
+            config.namespace,
+            config.release,
+            after_rollout=lambda: snap.acknowledge_snapshotjob_reconcile(
+                config.namespace, snapshotjob_name
+            ),
+        )
+        after_restart = snap.get_custom_object(
+            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
+        )
+        after_restart_failed = snap.condition(after_restart, "Failed")
+        assert after_restart_failed and after_restart_failed.get("status") == "True"
+        assert after_restart_failed.get("reason") == "CaptureFailed"
+        assert snap.condition(after_restart, "Completed").get("status") != "True"
+        assert snap.condition(after_restart, "Captured").get("status") == "False"
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+@pytest.mark.serial
+def test_snapshotjob_restart_preserves_capture_waiting_for_helper(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    require_snapshotjob_test_hook(config, "E2E reconciliation acknowledgments")
+    try:
+        snapshotjob_name = run.snapshotjob_name
+        snap.create_snapshotjob(
+            config.namespace,
+            snapshotjob_name,
+            workloads.snapshotjob_helper_pod_template(
+                config=config,
+                run=run,
+                helper_command=(
+                    f"touch {workloads.HELPER_SYNC_DIR}/helper-finished; "
+                    f"while [ ! -f {workloads.HELPER_SYNC_DIR}/helper-release ]; do sleep 0.1; done; exit 0"
+                ),
+                wait_for_helper_before_capture=True,
+            ),
+        )
+        snap.wait_for_condition(
+            config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, condition_type="Captured", timeout=300
+        )
+        before_restart = snap.get_custom_object(
+            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
+        )
+        assert snap.condition(before_restart, "Completed").get("status") != "True"
+        assert snap.condition(before_restart, "Captured").get("status") == "True"
+        k8s.restart_snapshot_operator(
+            config.namespace,
+            config.release,
+            after_rollout=lambda: snap.acknowledge_snapshotjob_reconcile(
+                config.namespace, snapshotjob_name
+            ),
+        )
+        after_restart = snap.get_custom_object(
+            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
+        )
+        completed = snap.condition(after_restart, "Completed")
+        assert completed and completed.get("status") != "True"
+        assert completed.get("reason") == "WaitingForPodCompletion"
+        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        snap.wait_for_container_running(
+            config.namespace,
+            source_pod.metadata.name,
+            container="helper",
+        )
+        k8s.exec_command(
+            config.namespace,
+            source_pod.metadata.name,
+            f"touch {workloads.HELPER_SYNC_DIR}/helper-release",
+            container="helper",
+        )
+        sj = snap.wait_for_condition(
+            config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, condition_type="Completed", timeout=300
+        )
+        assert_snapshotjob_completed(sj)
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+@pytest.mark.serial
+def test_snapshotjob_restart_preserves_pending_capture(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    require_snapshotjob_test_hook(config, "E2E reconciliation acknowledgments")
+    try:
+        snapshotjob_name = run.snapshotjob_name
+        snap.create_snapshotjob(
+            config.namespace,
+            snapshotjob_name,
+            workloads.snapshotjob_helper_pod_template(
+                config=config,
+                run=run,
+                helper_command="sleep infinity",
+                wait_for_capture_release=True,
+            ),
+        )
+        snap.wait_for_status_field(
+            config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, field="podSnapshotName"
+        )
+        pending = snap.get_custom_object(
+            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
+        )
+        assert snap.condition(pending, "Captured").get("status") == "False"
+        k8s.restart_snapshot_operator(
+            config.namespace,
+            config.release,
+            after_rollout=lambda: snap.acknowledge_snapshotjob_reconcile(
+                config.namespace, snapshotjob_name
+            ),
+        )
+        before_release = snap.get_custom_object(
+            client.CustomObjectsApi(), config.namespace, snapshotjob_name, snap.SNAPSHOTJOBS
+        )
+        assert snap.condition(before_release, "Captured").get("status") == "False"
+        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
+        snap.wait_for_container_running(
+            config.namespace,
+            source_pod.metadata.name,
+            container=workloads.CONTAINER,
+        )
+        k8s.exec_command(
+            config.namespace,
+            source_pod.metadata.name,
+            f"touch {workloads.HELPER_SYNC_DIR}/capture-release",
+            container=workloads.CONTAINER,
+        )
+        sj = snap.wait_for_condition(
+            config.namespace, snapshotjob_name, plural=snap.SNAPSHOTJOBS, condition_type="Captured", timeout=300
+        )
+        assert snap.condition(sj, "Captured").get("status") == "True"
+        assert snap.condition(sj, "Completed").get("status") != "True"
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
         raise
@@ -385,6 +661,120 @@ def test_snapshotjob_deadline_exceeded_when_helper_overruns(
             "the capture finished long before the deadline; only the helper overran"
         )
         assert k8s.read_job(config.namespace, snapshotjob_name) is not None
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_snapshotjob_deadline_removed_pod_retains_non_target_artifacts(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # A Job deadline can remove its source Pod before maintenance observes
+    # terminal container statuses. The opt-in policy must fail closed in that
+    # case, even if the Job itself reports Failed.
+    try:
+        name = run.snapshotjob_name
+        created = snap.create_snapshotjob(
+            config.namespace,
+            name,
+            workloads.snapshotjob_helper_pod_template(
+                config=config,
+                run=run,
+                helper_command="sleep infinity",
+            ),
+            active_deadline_seconds=60,
+            non_target_artifacts={"containers": ["helper"], "onFailure": "Cleanup"},
+        )
+        uid = created["metadata"]["uid"]
+        source = snap.wait_for_job_source_pod(config.namespace, name)
+        source_name = source.metadata.name
+        def source_node() -> str | None:
+            return k8s.read_pod(config.namespace, source_name).spec.node_name
+
+        node = snap.wait_for("source Pod node assignment", source_node, 120)
+        failed_job = snap.wait_for_condition(
+            config.namespace, name, plural=snap.SNAPSHOTJOBS,
+            condition_type="Failed", timeout=300,
+        )
+        assert snap.condition(failed_job, "Failed")["reason"] == "DeadlineExceeded"
+
+        def source_job_failed() -> bool | None:
+            job = k8s.read_job(config.namespace, name)
+            if job and job.status and any(
+                c.type == "Failed" and c.status == "True"
+                for c in job.status.conditions or []
+            ):
+                return True
+            return None
+
+        snap.wait_for("terminal source Job", source_job_failed, 120)
+
+        # If the Job controller retained a terminal Pod, remove only that
+        # stopped record to exercise the same no-Pod proof boundary.
+        def stopped_or_gone() -> bool | None:
+            try:
+                pod = k8s.read_pod(config.namespace, source_name)
+            except ApiException as exc:
+                if exc.status == 404:
+                    return True
+                raise
+            if pod.status.phase not in {"Failed", "Succeeded"}:
+                return None
+            statuses = {s.name: s for s in pod.status.container_statuses or []}
+            if all(statuses.get(c.name) and statuses[c.name].state.terminated for c in pod.spec.containers):
+                return True
+            return None
+
+        snap.wait_for("source Pod termination or removal", stopped_or_gone, 120)
+        try:
+            k8s.read_pod(config.namespace, source_name)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+        else:
+            client.CoreV1Api().delete_namespaced_pod(source_name, config.namespace)
+            snap.wait_for_pod_deleted(config.namespace, source_name)
+
+        agent = snap.checkpoint_agent_pod(config, node)
+        root = f"{snap.AGENT_CHECKPOINT_DIR}/non-target-artifacts/{uid}"
+        marker = f"{root}/retained-e2e-marker"
+        # Model bytes left by a helper after Pod GC. Create them after the Pod
+        # is gone so the sweep cannot remove the root in the earlier safe phase.
+        try:
+            k8s.exec_command(
+                config.namespace, agent,
+                f"mkdir -p {shlex.quote(root)} && printf proof > {shlex.quote(marker)}",
+                container=snap.AGENT_CONTAINER,
+            )
+
+            def retention_warning() -> bool | None:
+                if any(
+                    event.reason == "NonTargetArtifactsRetained" and event.involved_object.uid == uid
+                    for event in k8s.list_events(config.namespace)
+                ):
+                    return True
+                return None
+
+            snap.wait_for("non-target artifact retention warning", retention_warning, 120)
+            # The warning can precede the marker. Let at least one more scan
+            # pass to prove the no-Pod policy preserves the bytes afterward.
+            time.sleep(12)
+            output = k8s.exec_command(
+                config.namespace, agent,
+                f"test -f {shlex.quote(marker)} && printf retained",
+                container=snap.AGENT_CONTAINER,
+            )
+            assert output == "retained", "the failed attempt's root must remain after Pod removal"
+        finally:
+            # This test owns the synthetic root; never leave it on the shared PVC.
+            k8s.exec_command(
+                config.namespace, agent,
+                f"rm -rf -- {shlex.quote(root)}",
+                container=snap.AGENT_CONTAINER,
+            )
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
         raise

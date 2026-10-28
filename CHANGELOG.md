@@ -34,6 +34,9 @@ commit-level history for each release is on its
 
 ### Added
 
+- `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
+  and opt into cleanup after failure; omission or `Retain` preserves output.
+  CRD change: deploy the matching CRD and operator together.
 - `PodSnapshotContent.status.source` records what a checkpoint was captured on:
   the source node's name, architecture and kernel version, the captured
   container's image, image digest and CPU and memory limits, and the NVIDIA
@@ -46,10 +49,19 @@ commit-level history for each release is on its
 
 ### Changed
 
+- Checkpoint and restore failure messages open with the step they came from,
+  as `while <step>: <cause>`, on the pod's `nvidia.com/Restored` condition, the
+  `PodSnapshotContent` `Failed` condition, the restore events and the agent
+  log, which also carries the step as a structured `step` key. Alerts or log
+  filters that match on the previous wrap text need updating. The
+  troubleshooting guide has one entry per step, including the steps inside
+  nsrestore.
 - Restoring into a container that has an AppArmor profile or SELinux label now
-  requires a checkpoint that saved the processes' labels. Checkpoints taken by
-  earlier agent versions on AppArmor nodes don't have them and must be taken
-  again.
+  requires a checkpoint that saved the processes' labels. Capture records
+  whether it did in the manifest, and a restore without that record is refused
+  up front under the new `lsm-labels` check, which the compatibility bypass does
+  not waive. Checkpoints taken by earlier agent versions don't have the record
+  and must be taken again.
 - The agent drives checkpoints from a workqueue rather than per-checkpoint
   `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one

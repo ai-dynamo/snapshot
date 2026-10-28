@@ -33,7 +33,7 @@ jobs:
   cuinterpose:
     name: cuinterpose CPU checks
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       SNAPSHOT_CUINTERPOSE_TEST_IMAGE: snapshot-cuinterpose-test:ci
     steps:
@@ -43,7 +43,7 @@ jobs:
       - run: make -C agent cuinterpose-test TEST_IMAGE="$SNAPSHOT_CUINTERPOSE_TEST_IMAGE"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -53,26 +53,29 @@ jobs:
         run: go test ./internal/protocol -run '^TestCuInterposeInstallerImage' -count=1 -v
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
             go.work.sum
       - run: make test
+      - name: Test operator E2E build
+        working-directory: operator
+        run: go test -tags snapshot_e2e ./...
       - run: make test-integration
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -80,12 +83,12 @@ jobs:
       - run: make build
 
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -96,7 +99,7 @@ jobs:
   # framework guide manifests against the restore-pod contract. Seconds to
   # run, so they gate every pull request rather than only the GPU e2e flows.
   e2e-static:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV_LINK_MODE: copy
     steps:
@@ -110,12 +113,14 @@ jobs:
       - run: |
           uv run --locked --project e2e pytest \
             e2e/tests/test_agent_container.py \
+            e2e/tests/test_cpu_restore_failure_probe.py \
             e2e/tests/test_benchmark.py \
             e2e/tests/test_benchmark_outcomes.py \
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_inference.py \
+            e2e/tests/test_k8s.py \
             e2e/tests/test_pod_status_writers.py \
             e2e/tests/test_prune_ghcr.py \
             e2e/tests/test_required_tests.py \
@@ -132,7 +137,7 @@ jobs:
   # Runs on every pull request so cross-cutting changes (shared workflows, the
   # history writer's output shape) cannot silently break the dashboard.
   benchmark-dashboard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -158,7 +163,7 @@ jobs:
 
   helm-test:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: helm plugin install https://github.com/helm-unittest/helm-unittest
@@ -166,7 +171,7 @@ jobs:
 
   pagebroker-image:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       # Read-only, and deliberately so: this job reads the layer cache that
@@ -175,6 +180,12 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       # A pull request from a fork gets a token that cannot read the package.
       # cache-from treats that as a miss and builds cold, which is what this
@@ -192,4 +203,4 @@ jobs:
           # that fails inside a simple command does not trip `set -e`, so an
           # inline call would drop the cache flags and still build.
           cache_flags="$(hack/ci-cache-flags.sh read pagebroker "${CACHE_BRANCH}")"
-          make docker-build-pagebroker DOCKER_BUILD_ARGS="${cache_flags}"
+          make docker-build-pagebroker REGISTRY=local VERSION=ci DOCKER_BUILD_ARGS="${cache_flags} --load"

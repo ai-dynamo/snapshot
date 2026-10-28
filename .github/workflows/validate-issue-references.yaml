@@ -39,7 +39,7 @@ jobs:
   validate:
     name: PR links an approved issue
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       # Read the pull request body and the issues it references.
@@ -162,7 +162,7 @@ jobs:
   revalidate:
     name: Re-run validation for linked pull requests
     if: github.event_name == 'issues'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       # Re-run this workflow for the pull requests affected by the issue change.

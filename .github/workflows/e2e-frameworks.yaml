@@ -68,14 +68,14 @@ permissions:
 jobs:
   check:
     name: Validate repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.2"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -505,7 +505,7 @@ jobs:
     name: compare framework benchmark history
     needs: e2e
     if: ${{ !cancelled() && !(github.event_name == 'schedule' && github.ref == 'refs/heads/main') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       actions: read
@@ -576,7 +576,7 @@ jobs:
     # synthesize and permanently publish infrastructure_failed records that
     # identity dedup then stops a re-run from replacing.
     if: ${{ !cancelled() && github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
       group: snapshot-e2e-benchmark-history

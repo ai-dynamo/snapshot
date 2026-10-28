@@ -41,8 +41,7 @@ Hex(const std::string& bytes)
 
 TEST(StorageContract, SharedWireFixtures)
 {
-  // These are the same golden bytes used by the Go protocol test. An encoder
-  // round trip alone would miss a coordinated field-number or enum-value change.
+  // Shared Go/C++ wire fixtures catch tag and enum changes that round trips would miss.
   std::ifstream file("testdata/storage-contract/wire.json");
   ASSERT_TRUE(file.is_open());
   const std::string json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -51,7 +50,7 @@ TEST(StorageContract, SharedWireFixtures)
   ASSERT_TRUE(status.ok()) << status.ToString();
   ASSERT_TRUE(fixtures.fields().contains("cases"));
   const auto& cases = fixtures.fields().at("cases").list_value().values();
-  ASSERT_EQ(cases.size(), 22);
+  ASSERT_EQ(cases.size(), 24);
 
   for (const auto& fixture : cases) {
     const auto& fields = fixture.struct_value().fields();

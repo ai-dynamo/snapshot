@@ -9,6 +9,7 @@ import json
 import os
 import shlex
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -148,6 +149,7 @@ def create_snapshotjob(
     *,
     target_containers: list[str] | None = None,
     active_deadline_seconds: int | None = None,
+    non_target_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "podTemplate": pod_template,
@@ -155,6 +157,8 @@ def create_snapshotjob(
     }
     if active_deadline_seconds is not None:
         spec["activeDeadlineSeconds"] = active_deadline_seconds
+    if non_target_artifacts is not None:
+        spec["nonTargetArtifacts"] = non_target_artifacts
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "SnapshotJob",
@@ -183,6 +187,52 @@ def wait_for_job_source_pod(namespace: str, job_name: str, timeout: int = 300) -
         return f"pods={[p.metadata.name for p in k8s.list_job_pods(namespace, job_name)]}"
 
     return wait_for(f"pod for Job {namespace}/{job_name}", found, timeout, detail=detail)
+
+
+def wait_for_container_running(
+    namespace: str,
+    name: str,
+    container: str = CONTAINER,
+    timeout: int = 600,
+) -> client.V1Pod:
+    """Wait for one container to be Running without requiring pod readiness."""
+
+    def running() -> client.V1Pod | None:
+        pod = k8s.read_pod(namespace, name)
+        for status in pod.status.container_statuses or []:
+            if status.name != container:
+                continue
+            if status.state and status.state.running:
+                return pod
+            if status.state and status.state.terminated:
+                raise AssertionError(
+                    f"pod {namespace}/{name} container {container} terminated "
+                    f"with exit code {status.state.terminated.exit_code}"
+                )
+        if pod.status.phase in TERMINAL_POD_PHASES:
+            raise AssertionError(
+                f"pod {namespace}/{name} reached phase {pod.status.phase} before "
+                f"container {container} became Running"
+            )
+        return None
+
+    def detail() -> str:
+        try:
+            pod = k8s.read_pod(namespace, name)
+        except ApiException as exc:
+            return f"api_error={k8s.api_error_detail(exc)}"
+        statuses = [
+            f"{status.name}:{'running' if status.state and status.state.running else 'not-running'}"
+            for status in pod.status.container_statuses or []
+        ]
+        return f"phase={pod.status.phase} containers={statuses}"
+
+    return wait_for(
+        f"pod {namespace}/{name} container {container} Running",
+        running,
+        timeout,
+        detail=detail,
+    )
 
 
 def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.V1Pod:
@@ -226,13 +276,19 @@ def wait_for_container_exit(
     )
 
 
-def file_present(namespace: str, pod: str, path: str) -> bool:
+def file_present(
+    namespace: str,
+    pod: str,
+    path: str,
+    *,
+    container: str = CONTAINER,
+) -> bool:
     # Require a stdout marker because exec does not expose remote exit status,
     # and look for it rather than match on it: exec returns stderr too, and a
     # login shell is free to write to it.
     marker = "__snapshot_e2e_file_present__"
     command = f"[[ -f {shlex.quote(path)} ]] && printf '%s' {shlex.quote(marker)}"
-    return marker in k8s.exec_command(namespace, pod, command)
+    return marker in k8s.exec_command(namespace, pod, command, container=container)
 
 
 def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> None:
@@ -589,6 +645,55 @@ def wait_for_status_field(
         return f"status={obj.get('status', {})}"
 
     return wait_for(f"{plural}/{name} status.{field} set", check, timeout, detail=detail)
+
+
+def wait_for_snapshotjob_reconcile_ack(
+    namespace: str,
+    name: str,
+    *,
+    token: str,
+    timeout: int = 120,
+) -> None:
+    """Wait for the E2E-only controller acknowledgment event."""
+
+    def check() -> bool | None:
+        for event in k8s.list_events(
+            namespace,
+            field_selector={
+                "involvedObject.kind": "SnapshotJob",
+                "involvedObject.name": name,
+                "reason": "SnapshotJobReconciled",
+            },
+        ):
+            if token in (event.message or ""):
+                return True
+        return None
+
+    return wait_for(
+        f"SnapshotJob/{name} reconciliation acknowledgment {token}",
+        check,
+        timeout,
+    )
+
+
+def acknowledge_snapshotjob_reconcile(
+    namespace: str,
+    name: str,
+    *,
+    timeout: int = 120,
+) -> str:
+    """Request and wait for one E2E-only reconcile after an operator restart."""
+    token = uuid.uuid4().hex
+    client.CustomObjectsApi().patch_namespaced_custom_object(
+        GROUP,
+        VERSION,
+        namespace,
+        SNAPSHOTJOBS,
+        name,
+        {"metadata": {"annotations": {"snapshot-e2e.nvidia.com/reconcile-ack": token}}},
+    )
+    wait_for_snapshotjob_reconcile_ack(namespace, name, token=token, timeout=timeout)
+    return token
 
 
 def assert_snapshotjob_failure_vector(

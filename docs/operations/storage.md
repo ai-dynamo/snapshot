@@ -44,6 +44,40 @@ is `/`, independent of the container-local `/checkpoints` mount. Neither a
 caller-supplied store ID nor an additional PVC namespace setting is required.
 `storage.pvc.basePath` retains its existing mount-path meaning.
 
+The operator validates this resolved identity at startup and uses it to check
+artifact cleanup against each content's recorded store. New captures use the
+legacy filesystem flow by default. Artifact addressing requires a compatible
+PageBroker image and the separate activation steps below. S3 remains unsupported.
+
+### Enable artifact addressing
+
+The operator Deployment and agent DaemonSet roll independently. Keep new content
+unbound while upgrading agents: an older agent cannot record a bound publication
+descriptor. Use two Helm upgrades when enabling this contract on an existing
+installation:
+
+1. Select matching agent/operator/PageBroker images that implement the artifact
+   contract, including the PageBroker PVC backend. Set
+   `pageBroker.artifactAddressing=true` and keep
+   `operator.bindNewContents=false`. This configures compatible brokers while
+   allowing legacy captures throughout the rollout. Wait for the agent DaemonSet
+   rollout to complete on every node before continuing.
+2. Set `operator.bindNewContents=true`, keeping
+   `pageBroker.artifactAddressing=true`. This changes only the operator's capture
+   activation; it does not roll the agents again. New contents now record the
+   configured store and require publication descriptors.
+
+Both settings default to `false`, so the chart adds no artifact-backend
+arguments until explicitly enabled. Agent and PageBroker images must still
+match. A fresh installation with compatible images may enable both settings
+together, provided no captures are submitted until all agents are ready.
+Existing unbound contents remain readable through the legacy path.
+
+Once bound content exists, keep a compatible broker with artifact addressing
+enabled for its reads and restores. Turning off `operator.bindNewContents` stops
+new bound captures while preserving support for existing ones; it does not
+convert their storage format or permit downgrading the agents to a legacy build.
+
 If the cluster has no default storage class that can provision RWX, set one:
 
 ```bash
@@ -94,26 +128,96 @@ the sidecar:
   staging. Setting `pageBroker.restoreMode: staged` has PageBroker copy the
   artifact into staging first, and CRIU restores from memory instead.
 
+With `pageBroker.artifactAddressing=true`, the sidecar receives the resolved
+store configuration (`--storage-config /etc/snapshot/storage.yaml`) and derives
+the store identity from it at startup. Checkpoints bound to that store are addressed by
+identity rather than by path: the agent names the store, the content UID and
+the container, and PageBroker publishes the image at
+`artifacts/<contentUID>/containers/<name>/`, the same layout as before, with a
+`publication.json` next to `manifest.yaml` recording the store ID, the
+artifact handle and the deterministic commit ID. Commit returns that handle
+as the publication descriptor; restores and metadata reads name the
+descriptor, and PageBroker refuses a descriptor from another store
+(`STORE_MISMATCH`), a publication that is missing (`ARTIFACT_NOT_FOUND`) or
+whose evidence does not match (`ARTIFACT_CORRUPT`). A transaction that
+outlives PageBroker's fixed 2h5m lifetime fails Commit with
+`TRANSACTION_EXPIRED`. PageBroker begins expiry cleanup, but active GPU work
+or a filesystem cleanup error can defer removal until a later sweep. Legacy
+path-addressed requests are unchanged, and content without a store binding
+keeps using them.
+
 Because the staging volume is RAM, size the agent pod for it:
 
 | Value                                | Purpose                                                                                        | Default      |
 |---------------------------------------|--------------------------------------------------------------------------------------------------|--------------|
-| `pageBroker.staging.sizeLimit`       | Cap on the shared staging volume, used for checkpoint and staged restore                        | `64Gi`       |
+| `pageBroker.staging.sizeLimit`       | Cap on the RAM-backed staging volume shared by checkpoint and staged restore; unbounded without it | `56Gi`       |
 | `daemonset.resources.limits.memory`  | Bounds the largest checkpoint image, since CRIU writes staging from the agent container         | `64Gi`       |
 | `pageBroker.resources.limits.memory` | Bounds staged-restore prefetch, since PageBroker fills staging only in staged restore mode       | `256Gi`      |
 | `pageBroker.resources.requests`      | GPU transfer rings and process memory; added to the agent's requests when scheduling            | 8 CPU / 32Gi |
 
-Pages written to the staging volume are charged to the container that wrote
-them (the agent during checkpoint, PageBroker during staged restore), not to
-the volume. By default `sizeLimit` and `daemonset.resources.limits.memory` are
-both `64Gi`, leaving no headroom for the agent's own process and CRIU memory
-while staging a checkpoint near that size. Leave that headroom — either lower
-`sizeLimit` or raise the agent memory limit — when sizing for your workloads.
+### Why the staging volume needs a cap
+
+Staging is an `emptyDir` with `medium: Memory`: a tmpfs living in the node's
+RAM, where a checkpoint is written before it is committed to the checkpoint
+store, and where an artifact is prefetched before CRIU restores from it. It is
+not accounted like a disk. A memory-backed `emptyDir` has no size of its own,
+so **without a `sizeLimit` it grows until the node runs out of memory**, and
+its pages are charged to the cgroup of whichever container wrote them — not to
+the volume, and not to the pod as a whole.
+
+Two containers write it, each against its own limit:
+
+| Writer | When | Charged to |
+|---|---|---|
+| agent | checkpoint — CRIU writes the image | `daemonset.resources.limits.memory` |
+| PageBroker | staged restore — prefetching the artifact | `pageBroker.resources.limits.memory` |
+
+So one oversized request is enough to exceed a container's limit, and the
+kernel OOM-kills **that container**, not the request. The agent or PageBroker
+restarts, and every other capture and restore in flight on that node dies with
+it — including other tenants'. A single workload too large to stage therefore
+takes checkpointing and restore off the whole node rather than failing its own
+request.
+
+A `sizeLimit` converts that into an ordinary failure. The tmpfs fills before
+the cgroup does, the write fails with `ENOSPC`, and the request fails while the
+node keeps serving everything else.
+
+### How the cap is chosen
+
+The limit has to leave room rather than merely match: the volume's pages and
+the writing container's own allocations share one cgroup, so a cap equal to the
+container limit lets the two together reach it while the volume is still under
+its cap.
+
+**The chart enforces this.** A `sizeLimit` that does not leave room is lowered
+to one that does — the **smaller** of the two writers' memory limits, less a
+reserve of 8Gi or an eighth of a smaller limit. The smaller limit is what
+matters because either container can be the one that fills the volume. Nothing
+is rejected: a chart that refuses to render would break installs that work
+today, so the cap is made safe instead.
+
+The defaults already fit, so a release on chart defaults renders `56Gi`
+unchanged, as does any configuration that leaves its own headroom. A lowered
+cap appears in the rendered manifest as a byte count, which is where to look if
+a capture fails with less staging than expected.
+
+Configurations the chart lowers, all of which could otherwise OOM-kill a
+container:
+
+- `sizeLimit` at or above either writer's memory limit.
+- Either memory limit lowered without lowering the cap with it, including small
+  test clusters that only set the limits.
+
+To keep a specific staging size, raise **both** writers' memory limits above it
+rather than raising the cap alone — the cap follows whichever is smaller.
+
 The staging-space check (`INSUFFICIENT_STORAGE`) only rejects a transfer that
 would exceed `sizeLimit`; it does not guarantee protection from an OOM kill,
-and it has no way to know the size of a checkpoint before CRIU writes it.
-Leaving `sizeLimit` missing, null, or empty falls back to the chart's `64Gi`
-default, not the node's allocatable memory.
+and it has no way to know the size of a checkpoint before CRIU writes it — the
+headroom above is what makes an oversized checkpoint fail the capture instead
+of the agent. Leaving `sizeLimit` missing, null, or empty falls back to the
+chart's `56Gi` default, not the node's allocatable memory.
 
 To checkpoint workloads whose CPU memory exceeds the defaults, raise the
 staging cap and the agent memory limit together, leaving headroom above the

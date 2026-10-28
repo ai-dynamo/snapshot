@@ -5,8 +5,8 @@
 #
 # The cluster is k3d, so the Kubernetes node is a Docker container and CRIU
 # dumps a workload nested inside it. That works: see the proof run linked from
-# issue 241. Images are built in this job and imported into the cluster, because
-# a pull request has no published images to pull.
+# issue 241. Images are built in this job and pushed to its disposable local
+# registry, from which the cluster pulls them.
 #
 # The GPU suite stays on its own schedule in e2e.yaml; this job shares the
 # chart installer with it and differs only in the cluster it installs into.
@@ -15,30 +15,12 @@ name: E2E CPU (k3d)
 
 on:
   pull_request:
-    # Scoped to what can change the result: the two images this job builds, the
-    # chart it installs, the CRDs they serve, and the harness that drives them.
-    paths:
-      - "agent/**"
-      - "api/**"
-      - "charts/snapshot/**"
-      - "e2e/**"
-      - "operator/**"
-      - "go.work"
-      - "go.work.sum"
-      - "**/go.mod"
-      - "**/go.sum"
-      - "Makefile"
-      - "hack/tools.mk"
-      # A named build context of the agent image, so it changes that image.
-      - "hack/compliance/**"
-      - "hack/k3d-cpu-e2e.sh"
-      - "hack/verify-bundle-glibc.sh"
-      - "hack/ci-cache-flags.sh"
-      - "hack/ci-phase.sh"
-      - "hack/ci-phase-summary.sh"
-      - ".github/workflows/e2e-cpu.yaml"
   workflow_dispatch:
     inputs:
+      qualify_restore_failure:
+        description: "Corrupt a checkpoint and require restore success; this probe must fail"
+        type: boolean
+        default: false
       cache_scope_suffix:
         description: >-
           Appended to every layer-cache tag. Any unused value points the build
@@ -52,8 +34,9 @@ on:
         default: "3"
 
 concurrency:
-  group: snapshot-e2e-cpu-${{ github.ref }}
-  cancel-in-progress: true
+  # PR runs cancel superseded runs; manual qualification retains its evidence.
+  group: snapshot-e2e-cpu-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -78,6 +61,7 @@ env:
   # to set it up fails the tests.
   SNAPSHOT_E2E_RESTORE_PROXY: "true"
   SNAPSHOT_E2E_MODE: direct
+  SNAPSHOT_E2E_CPU_ONLY: "true"
   SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
   SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
   SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
@@ -99,7 +83,7 @@ env:
 jobs:
   cpu-e2e:
     name: CPU checkpoint/restore
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       # setup.py and kubectl both read KUBECONFIG; in direct mode the target
@@ -110,6 +94,7 @@ jobs:
       # Not ${IMAGE_REGISTRY}: a job-level env cannot read another job-level
       # env. Keep in step with IMAGE_REGISTRY and IMAGE_TAG above.
       SNAPSHOT_E2E_WORKLOAD_IMAGE: localhost:5000/agent:cpu-e2e
+      SNAPSHOT_E2E_REQUIRE_TEST_HOOKS: "true"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -172,7 +157,7 @@ jobs:
           make docker-build-operator \
             REGISTRY="${IMAGE_REGISTRY}" \
             TAGS="${IMAGE_TAG}" \
-            DOCKER_BUILD_ARGS="--push ${cache_flags}"
+            DOCKER_BUILD_ARGS="--push --build-arg GO_BUILD_TAGS=snapshot_e2e ${cache_flags}"
           hack/ci-phase.sh "Build operator image" "${start}" \
             "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}"
 
@@ -301,7 +286,8 @@ jobs:
           image.pageBroker.repository=${IMAGE_REGISTRY}/pagebroker
           image.operator.pullPolicy=IfNotPresent
           image.agent.pullPolicy=IfNotPresent
-          image.pageBroker.pullPolicy=IfNotPresent"
+          image.pageBroker.pullPolicy=IfNotPresent
+          operator.testFailCaptureSourceAnnotation=snapshot-e2e.nvidia.com/fail-capture"
           # For the install without the restore proxy, below.
           printf 'SNAPSHOT_E2E_HELM_SET<<EOF\n%s\nEOF\n' "${SNAPSHOT_E2E_HELM_SET}" >>"${GITHUB_ENV}"
           uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
@@ -320,29 +306,45 @@ jobs:
         run: uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
       - name: Run CPU checkpoint/restore tests
-        id: tests
+        id: cpu_tests
         timeout-minutes: 25
         env:
-          # The cases this job exists to prove. pytest exits 0 when a test is
-          # deselected or skips, so without naming them a marker change could
-          # leave the check green while it tested no round trip at all.
-          SNAPSHOT_E2E_REQUIRED_TESTS: >-
-            test_one_cpu_snapshot_restores_into_two_containers,
-            test_snapshotjob_cpu_captures_and_restore_recovers_state
+          # Dispatch-only negative control; normal PR runs disable it.
+          SNAPSHOT_E2E_RESTORE_FAILURE_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.qualify_restore_failure && 'true' || 'false' }}
         run: |
           set -euo pipefail
+          # The cases this job exists to prove. pytest exits 0 when a test is
+          # deselected or skips, so each execution phase guards the tests it
+          # selects. Restart cases mutate the shared operator Deployment and
+          # must run alone.
+          parallel_required_tests="test_one_cpu_snapshot_restores_into_two_containers,test_snapshotjob_cpu_captures_and_restore_recovers_state,test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot,test_snapshotjob_deadline_removed_pod_retains_non_target_artifacts,test_snapshotjob_deadline_exceeded_when_helper_overruns"
+          serial_required_tests="test_snapshotjob_fails_when_capture_fails_after_helper_succeeds,test_snapshotjob_fails_when_helper_fails_after_capture,test_snapshotjob_restart_preserves_capture_waiting_for_helper,test_snapshotjob_restart_preserves_pending_capture"
           start=$(date +%s)
           # Recorded even when the suite fails, so a slow run is still
           # measurable; the trap keeps the pipeline's exit status.
           trap 'hack/ci-phase.sh "Run CPU tests" "${start}"' EXIT
           rc=0
-          uv run --locked --project e2e pytest e2e/tests -m "cpu and not serial" \
-            -n "${CPU_E2E_WORKERS}" -vv || rc=$?
+          SNAPSHOT_E2E_REQUIRED_TESTS="${parallel_required_tests}" \
+            uv run --locked --project e2e pytest e2e/tests -m "cpu and not serial" \
+            -n "${CPU_E2E_WORKERS}" -vv \
+            --junitxml="${RUNNER_TEMP}/cpu-e2e-junit.xml" || rc=$?
           # Then the tests that must be alone on the node, one at a time. They
           # run even when the first pass fails, so a red run still reports them.
-          SNAPSHOT_E2E_REQUIRED_TESTS= uv run --locked --project e2e pytest e2e/tests \
-            -m "cpu and serial" -vv -s || rc=$?
+          SNAPSHOT_E2E_REQUIRED_TESTS="${serial_required_tests}" \
+            uv run --locked --project e2e pytest e2e/tests \
+            -m "cpu and serial" -vv -s \
+            --junitxml="${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" || rc=$?
           exit "${rc}"
+
+      - name: Verify restore-failure negative control
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.qualify_restore_failure && steps.cpu_tests.outcome != 'skipped' }}
+        env:
+          CPU_PYTEST_OUTCOME: ${{ steps.cpu_tests.outcome }}
+        run: |
+          uv run --locked --project e2e python -m snapshot_e2e.restore_failure_qualification \
+            "${RUNNER_TEMP}/cpu-e2e-junit.xml" \
+            "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" \
+            --pytest-outcome "${CPU_PYTEST_OUTCOME}"
 
       # On nodes whose runtime is too old for the restore proxy, the agent
       # restores without it. Check that path on k3s 1.32, whose containerd 2.1
@@ -350,7 +352,7 @@ jobs:
       # and a failed one. Only after a pass, as it replaces the cluster that
       # the diagnostics below would read.
       - name: Run CPU tests without the restore proxy
-        if: ${{ steps.tests.outcome == 'success' }}
+        if: ${{ steps.cpu_tests.outcome == 'success' }}
         timeout-minutes: 25
         env:
           SNAPSHOT_E2E_K3S_IMAGE: docker.io/rancher/k3s:v1.32.13-k3s1
@@ -394,6 +396,12 @@ jobs:
           set +e
           out="${RUNNER_TEMP}/diagnostics"
           mkdir -p "${out}"
+          if [ -f "${RUNNER_TEMP}/cpu-e2e-junit.xml" ]; then
+            cp "${RUNNER_TEMP}/cpu-e2e-junit.xml" "${out}/cpu-e2e-junit.xml"
+          fi
+          if [ -f "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" ]; then
+            cp "${RUNNER_TEMP}/cpu-e2e-serial-junit.xml" "${out}/cpu-e2e-serial-junit.xml"
+          fi
           kubectl get pods -A -o wide >"${out}/pods.txt"
           kubectl describe pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" >"${out}/pods-describe.txt"
           kubectl get events -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \

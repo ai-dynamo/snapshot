@@ -41,6 +41,15 @@ type Queue struct {
 	locker *coordination.Locker
 
 	queue workqueue.TypedRateLimitingInterface[WorkItemKey]
+	// Sweeps use one coalesced work-queue key, so this cursor is advanced by
+	// only one worker at a time. It lets a bounded scan reach blocked attempts.
+	nonTargetCursor types.UID
+	// A metadata scan may span work items; keep its consistent-list continuation
+	// until all pages have been read before considering any deletion.
+	nonTargetScan *nonTargetJobScan
+	// A sweep key is processed by one worker at a time. Avoid repeating the
+	// same permanent-retention warning on every scan.
+	nonTargetRetentionWarned map[types.UID]struct{}
 }
 
 // NewQueue constructs a Queue; register it with the manager (mgr.Add) to run
@@ -100,9 +109,11 @@ func (q *Queue) EnqueueDeleteContent(name string, uid types.UID) {
 	q.queue.Add(newDeleteContentKey(name, uid))
 }
 
-// EnqueueSweep schedules an orphan sweep; repeated calls coalesce.
+// EnqueueSweep schedules the independent content and failed-attempt sweeps.
+// Each gets its own work-item deadline, and repeated calls coalesce.
 func (q *Queue) EnqueueSweep() {
 	q.queue.Add(newSweepKey())
+	q.queue.Add(newNonTargetSweepKey())
 }
 
 // Start implements manager.Runnable: an immediate sweep, then one per
@@ -157,7 +168,7 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 	if err := q.processWithDeadline(ctx, key, logger); err != nil {
 		switch {
 		case ctx.Err() != nil:
-		case key.Mode == ModeSweep:
+		case key.Mode == ModeSweep || key.Mode == ModeNonTargetSweep:
 			logger.Error(err, "Maintenance sweep failed; retrying at the next scan interval")
 		case q.queue.NumRequeues(key) < maxKeyRetries:
 			logger.Error(err, "Maintenance work item failed; requeuing with backoff",
@@ -196,6 +207,12 @@ func (q *Queue) process(ctx context.Context, key WorkItemKey, logger logr.Logger
 		return q.processDeleteContent(ctx, key)
 	case ModeSweep:
 		return q.processSweep(ctx, logger)
+	case ModeNonTargetSweep:
+		backend, err := q.backend()
+		if err != nil {
+			return err
+		}
+		return q.processNonTargetArtifactSweep(ctx, backend, logger)
 	default:
 		return fmt.Errorf("unknown maintenance mode %q", key.Mode)
 	}

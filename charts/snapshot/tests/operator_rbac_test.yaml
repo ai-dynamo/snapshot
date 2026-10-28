@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: operator RBAC
+templates:
+  - templates/operator-rbac.yaml
+release:
+  name: snapshot
+tests:
+  - it: does not grant any PageBroker S3 configuration access for a PVC install
+    documentSelector:
+      path: kind
+      value: Role
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps"]
+            verbs: ["create"]
+
+  - it: grants unscoped create and name-scoped get/update for the PageBroker S3 ConfigMap
+    documentSelector:
+      path: kind
+      value: Role
+    set:
+      storage.type: s3
+      storage.s3.endpoint: https://s3.example.com
+      storage.s3.region: us-east-1
+      storage.s3.bucket: snapshot-bucket
+    asserts:
+      # RBAC cannot scope create by resourceNames, so it must be its own
+      # unscoped rule; a single rule with both create and resourceNames would
+      # leave create silently unauthorized.
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps"]
+            verbs: ["create"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps"]
+            resourceNames: ["snapshot-pagebroker-storage-config"]
+            verbs: ["get", "update"]
