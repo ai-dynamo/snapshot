@@ -39,17 +39,17 @@ var x86InstructionSets = strings.Fields(`
 // arm64InstructionSets are the hwcaps the arm64 kernel prints on the Features
 // line, hwcap_str in arch/arm64/kernel/cpuinfo.c as of Linux 7.3, which tell a
 // process what it may use. The kernel prints only what every processor offers.
-// evtstrm is left out because it says the generic timer sends a periodic
-// event, which virtual machines often turn off, rather than that an
-// instruction exists.
+// Three are left out: evtstrm says the generic timer sends a periodic event,
+// which virtual machines often turn off, rather than that an instruction
+// exists, and dgh and rprfm are hints a processor without them runs as NOPs.
 var arm64InstructionSets = strings.Fields(`
 	fp asimd aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm
 	jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat
 	ilrcpc flagm ssbs sb paca pacg gcs ls64 dcpodp
 	sve2 sveaes svepmull svebitperm svesha3 svesm4 flagm2 frint
-	svei8mm svef32mm svef64mm svebf16 i8mm bf16 dgh rng bti mte
+	svei8mm svef32mm svef64mm svebf16 i8mm bf16 rng bti mte
 	ecv afp rpres mte3 sme smei16i64 smef64f64 smei8i32 smef16f32 smeb16f32
-	smef32f32 smefa64 wfxt ebf16 sveebf16 cssc rprfm sve2p1 sme2 sme2p1
+	smef32f32 smefa64 wfxt ebf16 sveebf16 cssc sve2p1 sme2 sme2p1
 	smei16i32 smebi32i32 smeb16b16 smef16f16 mops hbc sveb16b16 lrcpc3 lse128
 	fpmr lut faminmax f8cvt f8fma f8dp4 f8dp2 f8e4m3 f8e5m2 smelutv2
 	smef8f16 smef8f32 smesf8fma smesf8dp4 smesf8dp2 poe

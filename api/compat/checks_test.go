@@ -112,6 +112,11 @@ func TestCPUFeaturesCheck(t *testing.T) {
 			target: features("asimd", "fp"),
 		},
 		{
+			name:   "arm64 hints never refuse",
+			source: features("asimd", "dgh", "fp", "rprfm"),
+			target: features("asimd", "fp"),
+		},
+		{
 			name:   "checkpoint taken before CPU features were recorded",
 			target: features("avx2"),
 		},
