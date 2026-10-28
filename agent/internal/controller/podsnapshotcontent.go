@@ -81,17 +81,9 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if err != nil {
 		return err
 	}
-	if content == nil {
-		return nil
-	}
-
-	if content.Spec.Source.NodeName != w.config.NodeName {
-		return nil
-	}
-	if !content.DeletionTimestamp.IsZero() {
-		return nil
-	}
-	if isContentTerminal(content) {
+	if content == nil || content.Spec.Source.NodeName != w.config.NodeName ||
+		!content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
+		w.checkpointProbes.Delete(name)
 		return nil
 	}
 
@@ -177,9 +169,8 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return fmt.Errorf("mark source pod %s capture-eligible: %w", podKey.String(), err)
 	}
 
-	if !isContainerReady(pod, containerName) {
-		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName)
-		return nil
+	if ready, err := w.sourceReadyForCheckpoint(ctx, content, pod, containerName); !ready {
+		return err
 	}
 
 	containerID := containerIDForName(pod, containerName)
