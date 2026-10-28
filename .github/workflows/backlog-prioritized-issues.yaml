@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Giving an issue a priority is the triage decision, so an issue on the Snapshot
+# project that has a Priority value or a `priority: P<n>` or `priority/P<n>`
+# label moves from Needs Triage to Backlog.
+name: Backlog prioritized issues
+
+on:
+  workflow_dispatch:
+  # Setting a project field emits no event a repository workflow can receive,
+  # so a schedule is the only way to notice a new Priority value.
+  schedule:
+    - cron: "17 5 * * *"
+  issues:
+    types:
+      - labeled
+
+permissions: {}
+
+env:
+  PROJECT_OWNER: ai-dynamo
+  PROJECT_NUMBER: 15
+  FROM_STATUS: Needs Triage
+  TO_STATUS: Backlog
+
+jobs:
+  backlog:
+    name: Move prioritized issues out of triage
+    if: github.event_name != 'issues' || startsWith(github.event.label.name, 'priority')
+    # Job-level so that a skipped run for an unrelated label never replaces a
+    # pending run in the group.
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Move prioritized issues to Backlog
+        env:
+          # GITHUB_TOKEN cannot read or write an organization project.
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "::error::The PROJECT_TOKEN secret is not set."
+            exit 1
+          fi
+
+          project_id=$(gh project view "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --format json --jq .id)
+          fields=$(gh project field-list "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --format json)
+          field_id=$(jq -r '.fields[] | select(.name == "Status") | .id' <<<"${fields}")
+          option_id=$(jq -r --arg to "${TO_STATUS}" \
+            '.fields[] | select(.name == "Status") | .options[] | select(.name == $to) | .id' <<<"${fields}")
+          if [[ -z "${field_id}" || -z "${option_id}" ]]; then
+            echo "::error::The project has no Status field with a \"${TO_STATUS}\" option."
+            exit 1
+          fi
+
+          # `gh project item-list` returns only the first 10 labels of an item, so
+          # each candidate is re-read here with its full label list.
+          item_query=$(cat <<'GRAPHQL'
+          query($id: ID!) {
+            node(id: $id) {
+              ... on ProjectV2Item {
+                status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                priority: fieldValueByName(name: "Priority") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                content { ... on Issue { labels(first: 100) { nodes { name } } } }
+              }
+            }
+          }
+          GRAPHQL
+          )
+
+          gh project item-list "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --limit 10000 --format json |
+            jq -r --arg from "${FROM_STATUS}" '
+              .items[]
+              | select(.content.type == "Issue" and .status == $from)
+              | [.id, .content.url] | @tsv' |
+            while IFS=$'\t' read -r item_id url; do
+              item=$(gh api graphql -f query="${item_query}" -f id="${item_id}" --jq '
+                .data.node
+                | [(.status.name // ""),
+                   ((.priority.name // "") != "" or any(.content.labels.nodes[]?; .name | test("^priority(: |/)P[0-9]+$")) | tostring)]
+                | @tsv')
+              IFS=$'\t' read -r current_status prioritized <<<"${item}"
+              if [[ "${current_status}" != "${FROM_STATUS}" ]]; then
+                echo "Skipped ${url}: its status changed to \"${current_status}\" during this run"
+                continue
+              fi
+              if [[ "${prioritized}" != "true" ]]; then
+                continue
+              fi
+              gh project item-edit --project-id "${project_id}" --id "${item_id}" \
+                --field-id "${field_id}" --single-select-option-id "${option_id}" > /dev/null
+              echo "Moved ${url} to ${TO_STATUS}"
+            done

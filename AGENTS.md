@@ -71,7 +71,8 @@ make generate     # regenerate CRDs from api/ types
 `make check` is the one that matters before opening a pull request. It runs, in
 order: `verify-crds`, `install-tools`, `generate`, `pagebroker-check-generated`,
 `add-license-headers`, `fmt`, `tidy`, `verify-license-headers`, `lint`,
-`govulncheck`, and `helm-lint`. It deliberately does not run in parallel
+`govulncheck`, `helm-lint`, `verify-toc`, and `verify-troubleshooting-steps`.
+It deliberately does not run in parallel
 (`.NOTPARALLEL:`) because the stages mutate files that later stages read.
 
 To scope work to one module, use its own Makefile — `make -C operator test`.
@@ -182,6 +183,27 @@ rg -l '1\.27\.1' go.work */go.mod hack/tools.mk agent/Dockerfile .github/workflo
 vim operator/Dockerfile   # FROM golang:1.28-alpine
 ```
 
+**Document a feature's version floor in the compatibility reference, not just
+in an error message.** Snapshot's general minimum driver and GPU Operator
+version lives in the README's
+[Prerequisites](README.md#prerequisites). A feature that needs more than that
+floor must add a row to
+[docs/reference/compatibility.md](docs/reference/compatibility.md) in the same
+change — see
+[CONTRIBUTING.md](CONTRIBUTING.md#documenting-a-feature-specific-version-floor).
+A version requirement that only exists as a runtime failure string is
+invisible to anyone deciding whether to adopt the feature.
+
+```go
+// Good — floor is documented in docs/reference/compatibility.md and enforced here
+if !driverSupports(minLaunchJobDriverVersion) {
+    return fmt.Errorf("cuda-checkpoint --launch-job requires NVIDIA driver %s or newer", minLaunchJobDriverVersion)
+}
+
+// Bad — the 610 floor exists only in this string; nothing else references it
+echo "cuda-checkpoint --launch-job requires NVIDIA driver 610 or newer" >&2
+```
+
 ## Secrets and credentials
 
 **Never commit credentials, secrets, API keys, tokens, kubeconfigs, or `.env`
@@ -204,6 +226,16 @@ Specifically:
 
 When a task genuinely needs a credential, read it from an environment variable
 and document the variable name — never the value.
+
+## Documentation and names
+
+Before you add or change Markdown under `docs/`, a README, or `CHANGELOG.md`, or
+add a version requirement such as a minimum driver or CUDA version, read
+[docs/development/writing-docs.md](docs/development/writing-docs.md).
+Before you introduce a name (a field, Helm value, annotation, label,
+environment variable, event reason, flag, file, or a new term in prose), read
+[docs/development/naming.md](docs/development/naming.md). A name that a user
+sees describes the capability, not the mechanism behind it.
 
 ## Working style
 

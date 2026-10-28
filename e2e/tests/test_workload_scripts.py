@@ -124,6 +124,50 @@ def test_no_workload_waits_on_snapshot_complete(gpu: bool) -> None:
 
 
 @pytest.mark.workload
+def test_snapshotjob_helper_waits_before_signalling_capture_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", "snapshot-workload:test")
+    config = k8s.E2EConfig(
+        namespace="snapshot-e2e",
+        release="snapshot",
+        pvc_name="snapshot-pvc",
+        kubeconfig=None,
+    )
+    template = workloads.snapshotjob_helper_pod_template(
+        config=config,
+        run=workloads.TestRun.new("helper-ready"),
+        helper_command="true",
+        wait_for_helper_before_capture=True,
+    )
+
+    command = template["spec"]["containers"][0]["command"][2]
+    target = template["spec"]["containers"][0]
+    helper_wait = f"while [ ! -f {workloads.HELPER_SYNC_DIR}/helper-finished ]; do sleep 0.1; done"
+    capture_ready = f"echo ready > {workloads.SOURCE_READY}"
+    assert command.index(helper_wait) < command.index(capture_ready)
+    assert target["readinessProbe"]["exec"]["command"] == [
+        "cat",
+        f"{workloads.HELPER_SYNC_DIR}/helper-finished",
+    ]
+
+    release_gated_template = workloads.snapshotjob_helper_pod_template(
+        config=config,
+        run=workloads.TestRun.new("helper-release-gated"),
+        helper_command="true",
+        wait_for_helper_before_capture=False,
+        wait_for_capture_release=True,
+    )
+    release_gated_target = release_gated_template["spec"]["containers"][0]
+    release_command = release_gated_target["command"][2]
+    capture_release = (
+        f"while [ ! -f {workloads.HELPER_SYNC_DIR}/capture-release ]; do sleep 0.1; done"
+    )
+    assert release_command.index(capture_release) < release_command.index(capture_ready)
+    assert "readinessProbe" not in release_gated_target
+
+
+@pytest.mark.workload
 def test_snapshotjob_exit_template_never_signals_ready() -> None:
     # The exit templates drive the died-before-capture failure classes; they
     # must terminate without touching the quiesce protocol at all.

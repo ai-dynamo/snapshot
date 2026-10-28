@@ -6,6 +6,7 @@
 # Tracks the toolchain pinned in go.work, the three go.mod files, hack/tools.mk,
 # agent/Dockerfile, and the workflows. Move them together, never this one alone.
 FROM golang:1.27-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS builder
+ARG GO_BUILD_TAGS
 WORKDIR /workspace
 COPY go.work go.work.sum ./
 COPY api/ api/
@@ -14,7 +15,7 @@ COPY operator/ operator/
 WORKDIR /workspace/operator
 # CGO_ENABLED=0 keeps the binaries free of any libc linkage, so the musl-based
 # builder can't produce something the glibc-based runtime below won't load.
-RUN CGO_ENABLED=0 go build -o bin/manager ./cmd/manager
+RUN CGO_ENABLED=0 go build -tags "${GO_BUILD_TAGS}" -o bin/manager ./cmd/manager
 RUN CGO_ENABLED=0 go build -o bin/crd-installer ./cmd/crdinstaller
 
 # The runtime image is distroless (no shell), so the source tree and the

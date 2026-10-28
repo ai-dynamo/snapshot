@@ -12,7 +12,8 @@ use cudarc::driver::sys::CUresult::{
 use cudarc::driver::sys::{
     CUcontext, CUdevice, CUdevice_attribute, CUdeviceptr, CUmemAccessDesc,
     CUmemAllocationGranularity_flags, CUmemAllocationHandleType, CUmemAllocationProp,
-    CUmemGenericAllocationHandle, CUmulticastObjectProp, CUresult, CUstream_flags,
+    CUmemGenericAllocationHandle, CUmulticastObjectProp, CUpointer_attribute, CUresult,
+    CUstream_flags,
 };
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -128,6 +129,7 @@ functions! {
         cuCtxSynchronize();
         cuMemFree_v2(address: CUdeviceptr);
         cuMemGetAddressRange_v2(base: *mut CUdeviceptr, size: *mut usize, address: CUdeviceptr);
+        cuPointerGetAttribute(data: *mut c_void, attribute: CUpointer_attribute, address: CUdeviceptr);
         cuCtxGetCurrent(context: *mut *mut c_void);
         cuCtxGetDevice(device: *mut CUdevice);
         cuCtxSetCurrent(context: *mut c_void);

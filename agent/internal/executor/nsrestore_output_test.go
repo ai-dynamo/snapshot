@@ -55,6 +55,25 @@ func TestNSRestoreOutputFailure(t *testing.T) {
 			want:   "CRIU restore failed: mnt-v2: Can't stat mountpoint /cache/vllm",
 		},
 		{
+			name:   "reported step is kept without a second prefix",
+			stdout: `{"error":"while applying rootfs diff: rootfs diff failed: tar: boom","step":"applying rootfs diff"}` + "\n",
+			runErr: exitStatusError(t, "exit 1"),
+			want:   "while applying rootfs diff: rootfs diff failed: tar: boom",
+		},
+		{
+			name:   "reported step is attached when the text lacks it",
+			stdout: `{"error":"CRIU restore failed: boom","step":"restoring with CRIU"}` + "\n",
+			runErr: exitStatusError(t, "exit 1"),
+			want:   "while restoring with CRIU: CRIU restore failed: boom",
+		},
+		{
+			name:   "reported step keeps the timeout suffix",
+			stdout: `{"error":"while restoring with CRIU: CRIU restore failed: context canceled","step":"restoring with CRIU"}` + "\n",
+			runErr: exitStatusError(t, "exit 1"),
+			ctxErr: context.DeadlineExceeded,
+			want:   "while restoring with CRIU: CRIU restore failed: context canceled; the restore timeout expired",
+		},
+		{
 			name:   "reported cause names the timeout",
 			stdout: `{"restoredPID":0,"error":"CRIU restore failed: context canceled"}` + "\n",
 			runErr: exitStatusError(t, "exit 1"),
@@ -143,6 +162,16 @@ func TestNSRestoreOutputFailure(t *testing.T) {
 				t.Fatalf("failure() = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestNSRestoreOutputFailureCarriesTheReportedStep(t *testing.T) {
+	err := nsrestoreOutputOf(t, `{"error":"while restoring with CRIU: boom","step":"restoring with CRIU"}`, "").failure(exitStatusError(t, "exit 1"), context.DeadlineExceeded)
+	if got := StepOf(err); got != StepRestoreCRIU {
+		t.Fatalf("StepOf = %q, want %q (err %v)", got, StepRestoreCRIU, err)
+	}
+	if got := StepOf(nsrestoreOutputOf(t, `{"error":"boom"}`, "").failure(exitStatusError(t, "exit 1"), nil)); got != "" {
+		t.Fatalf("StepOf(no step) = %q, want empty", got)
 	}
 }
 
