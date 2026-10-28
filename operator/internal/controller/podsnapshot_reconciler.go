@@ -76,10 +76,6 @@ type PodSnapshotReconciler struct {
 	// StoreID binds every new PodSnapshotContent to the configured store. Empty
 	// keeps producing legacy, path-addressed content.
 	StoreID string
-	// EnableLifecycleHooks accepts container settings that need agent
-	// support (a checkpoint readiness probe, a post-restore action). Temporary:
-	// see errLifecycleHooksDisabled.
-	EnableLifecycleHooks bool
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -296,10 +292,6 @@ func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *sn
 // captureFromSourcePod is the no-content path: it resolves and validates the live source pod, then
 // creates the PodSnapshotContent and records the binding.
 func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (ctrl.Result, error) {
-	// Checked before the source pod, so the request fails the same way whatever state the pod is in.
-	if !sr.EnableLifecycleHooks && usesLifecycleHooks(snap.Spec.Containers) {
-		return sr.failPodSnapshot(ctx, snap, podSnapshotReasonLifecycleHooksDisabled, errLifecycleHooksDisabled)
-	}
 	pod, err := sr.getSourcePod(ctx, snap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {

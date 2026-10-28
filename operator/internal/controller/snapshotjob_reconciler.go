@@ -60,9 +60,6 @@ type SnapshotJobReconciler struct {
 	NonCacheReadClient   client.Reader
 	Recorder             record.EventRecorder
 	CuInterposeContainer operatortypes.CuInterposeContainerConfiguration
-	// EnableLifecycleHooks accepts container settings that need agent
-	// support. Temporary: see errLifecycleHooksDisabled.
-	EnableLifecycleHooks bool
 }
 
 type snapshotJobFailure struct {
@@ -163,10 +160,6 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 				return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
 			}
 			return r.reconcileAcceptedSourceJob(ctx, sj, authoritativeJob)
-		}
-		// Rejected before the source Job exists, so the workload never starts for a request that would fail.
-		if !r.EnableLifecycleHooks && usesLifecycleHooks(sj.Spec.PodSnapshotTemplate.Containers) {
-			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, errLifecycleHooksDisabled), ctrl.Result{}, nil
 		}
 		cuInterposeEnabled, err := podcontract.ParseCuInterposeAnnotation(sj.Spec.PodTemplate.Annotations)
 		if err != nil {
