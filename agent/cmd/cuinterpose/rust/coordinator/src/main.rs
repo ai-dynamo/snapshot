@@ -3,6 +3,7 @@
 
 //! Validate participants, coordinate CUDA lifecycle phases, and publish state.
 
+mod group;
 mod state;
 #[cfg(test)]
 mod test_records;
@@ -11,14 +12,14 @@ mod topology;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use cuinterpose_protocol::{
-    self as protocol, AllocationOwner, Manifest, NamespacePid, Operation, Record, Reply, Request,
+    self as protocol, FabricUpdate, Manifest, NamespacePid, Operation, Record, Reply, Request,
     Response,
 };
+use group::{CarrierPlan, HandleTable, Topology};
 use std::collections::BTreeSet;
 use std::os::unix::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use topology::AllocationSummary;
 
 #[derive(Parser)]
 struct Arguments {
@@ -106,35 +107,38 @@ impl Peer {
         }
     }
 
+    /// Run one phase and return the FABRIC handles that it exported in place of checkpointed
+    /// ones.
     fn execute(
         &self,
         operation: Operation,
-        expected_bytes: u64,
-        owners: Vec<AllocationOwner>,
-    ) -> Result<()> {
+        plan: CarrierPlan,
+        imports: &[FabricUpdate],
+    ) -> Result<Vec<FabricUpdate>> {
+        let expected_bytes = plan.bytes;
         let request = if operation == Operation::SaveAllocations {
             Request::SaveAllocations {
                 namespace_pid: self.namespace_pid,
-                owners,
+                owners: plan.owners,
             }
         } else {
             Request::Execute {
                 namespace_pid: self.namespace_pid,
                 operation,
-                imports: Vec::new(),
+                imports: imports.to_vec(),
             }
         };
         match self.request(&request)? {
             Reply::Completed {
                 operation: actual,
                 bytes,
-                ..
+                exports,
             } => {
                 ensure!(
                     actual == operation && bytes == expected_bytes,
                     "unexpected response or transfer size: expected operation {operation:?}, actual {actual:?}, expected_bytes {expected_bytes}, bytes {bytes}"
                 );
-                Ok(())
+                Ok(exports)
             }
             actual => bail!(
                 "expected {operation:?} completion with {expected_bytes} bytes, actual {actual:?}"
@@ -145,48 +149,32 @@ impl Peer {
 
 /// Every rank must reply before a phase can advance, so a bounded worker pool could
 /// deadlock a rank waiting for an exchange that has not started. Every started exchange
-/// is joined even if a participant fails.
+/// is joined even if a participant fails. `plan` says what each participant does, and the
+/// returned FABRIC handles replace checkpointed ones.
 fn command_all(
     peers: &[Peer],
     operation: Operation,
-    allocations: &[AllocationSummary],
-) -> Result<()> {
-    let expected_bytes: Vec<_> = peers
+    plan: &dyn Fn(NamespacePid) -> Result<CarrierPlan>,
+    imports: &[FabricUpdate],
+) -> Result<Vec<FabricUpdate>> {
+    let plans: Vec<_> = peers
         .iter()
         .map(|peer| {
-            allocations
-                .iter()
-                .filter(|a| a.uses_host_carrier() && a.owner_pid == peer.namespace_pid)
-                .try_fold(0u64, |sum, a| {
-                    sum.checked_add(a.size).context("allocation size overflow")
-                })
-                .with_context(|| {
-                    format!(
-                        "participant {} ({})",
-                        peer.namespace_pid,
-                        peer.endpoint.display()
-                    )
-                })
+            plan(peer.namespace_pid).with_context(|| {
+                format!(
+                    "participant {} ({})",
+                    peer.namespace_pid,
+                    peer.endpoint.display()
+                )
+            })
         })
         .collect::<Result<_>>()?;
     std::thread::scope(|scope| {
         let mut jobs = Vec::with_capacity(peers.len());
         let mut failures = Vec::new();
-        for (peer, bytes) in peers.iter().zip(expected_bytes) {
-            let owners = if operation == Operation::SaveAllocations {
-                allocations
-                    .iter()
-                    .filter(|a| a.uses_host_carrier() && a.holders.contains(&peer.namespace_pid))
-                    .map(|a| AllocationOwner {
-                        allocation: a.reference,
-                        owner_pid: a.owner_pid,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        for (peer, plan) in peers.iter().zip(plans) {
             match std::thread::Builder::new()
-                .spawn_scoped(scope, move || peer.execute(operation, bytes, owners))
+                .spawn_scoped(scope, move || peer.execute(operation, plan, imports))
             {
                 Ok(job) => jobs.push((peer, job)),
                 Err(error) => failures.push(format!(
@@ -196,6 +184,7 @@ fn command_all(
                 )),
             }
         }
+        let mut exports = Vec::new();
         for (peer, job) in jobs {
             let participant = format!(
                 "participant {} ({})",
@@ -203,7 +192,7 @@ fn command_all(
                 peer.endpoint.display()
             );
             match job.join() {
-                Ok(Ok(())) => {}
+                Ok(Ok(exported)) => exports.extend(exported),
                 Ok(Err(error)) => {
                     failures.push(format!("{participant}: {error:#}"));
                 }
@@ -218,7 +207,7 @@ fn command_all(
             }
         }
         ensure!(failures.is_empty(), "{}", failures.join("\n"));
-        Ok(())
+        Ok(exports)
     })
 }
 
@@ -266,14 +255,17 @@ fn run() -> Result<()> {
     if args.inspect {
         // Preflight inspection does not freeze the registry, so preparation must
         // validate it again after BeginCheckpoint prevents application mutations.
-        topology::validate(&collect_records(&peers, RecordRequest::Inspect)?)?;
+        Topology::validate(&group::alone(collect_records(
+            &peers,
+            RecordRequest::Inspect,
+        )?))?;
         return Ok(());
     }
     let path = args
         .checkpoint_dir
         .context("--checkpoint-dir is required")?
         .join("cuinterpose.state");
-    let mut expected = if args.prepare {
+    let expected = if args.prepare {
         // Reject existing output before BeginCheckpoint freezes any participant.
         match std::fs::symlink_metadata(&path) {
             Ok(_) => bail!(
@@ -295,63 +287,61 @@ fn run() -> Result<()> {
     }
     // BeginCheckpoint freezes registries, not GPU work. From this point preparation
     // is fail-stop: callers must abandon the checkpoint and all source processes.
-    let mut participants = collect_records(
+    let mut participants = group::alone(collect_records(
         &peers,
         if args.prepare {
             RecordRequest::BeginCheckpoint
         } else {
             RecordRequest::Inspect
         },
-    )?;
-    let inspected_allocations = topology::validate(&participants)?;
+    )?);
+    let inspected = Topology::validate(&participants)?;
     if args.prepare {
-        let allocations = inspected_allocations;
-        command_all(&peers, Operation::PrepareMulticast, &[]).context("PrepareMulticast")?;
-        command_all(&peers, Operation::SaveAllocations, &allocations).context("SaveAllocations")?;
-        command_all(&peers, Operation::PrepareUnicast, &[]).context("PrepareUnicast")?;
+        let topology = inspected;
+        for operation in [
+            Operation::PrepareMulticast,
+            Operation::SaveAllocations,
+            Operation::PrepareUnicast,
+        ] {
+            command_all(
+                &peers,
+                operation,
+                &|pid| topology.plan(operation, 0, pid),
+                &[],
+            )
+            .with_context(|| format!("{operation:?}"))?;
+        }
         // Publication failure is also fail-stop, even if publication succeeded before a
         // directory sync failed. Prepared processes cannot resume safely.
-        state::write_atomic(&path, &mut participants)
+        state::write_atomic(&path, participants.get_mut(&0).unwrap())
             .with_context(|| format!("publish checkpoint state {}", path.display()))?;
     } else {
-        let allocations = topology::validate(&expected)?;
-        drop(inspected_allocations);
+        let saved = group::alone(expected);
+        let topology = Topology::validate(&saved)?;
+        drop(inspected);
         drop(participants);
-        command_all(&peers, Operation::LoadAllocations, &allocations).context("LoadAllocations")?;
-        command_all(&peers, Operation::RestoreUnicast, &[]).context("RestoreUnicast")?;
+        // Importers need the FABRIC handles that creators export in the phase before.
+        let mut handles = HandleTable::default();
         for operation in [
+            Operation::LoadAllocations,
+            Operation::RestoreUnicast,
             Operation::RestoreMulticastCreators,
             Operation::RestoreMulticastImporters,
             Operation::RestoreMulticastDevices,
             Operation::RestoreMulticastBindings,
         ] {
-            command_all(&peers, operation, &[]).with_context(|| format!("{operation:?}"))?;
+            let exports = command_all(
+                &peers,
+                operation,
+                &|pid| topology.plan(operation, 0, pid),
+                &handles.imports(),
+            )
+            .with_context(|| format!("{operation:?}"))?;
+            handles.record(exports)?;
         }
-        let mut participants = collect_records(&peers, RecordRequest::Inspect)
+        let participants = collect_records(&peers, RecordRequest::Inspect)
             .context("inspect restored participants")?;
-        for (id, actual) in &mut participants {
-            let expected = expected
-                .get_mut(id)
-                .with_context(|| format!("restored participant {id} is not in the manifest"))?;
-            actual.sort();
-            expected.sort();
-            ensure!(
-                actual.len() == expected.len(),
-                "restored topology does not match the checkpoint for participant {id}: expected {} records, actual {} records",
-                expected.len(),
-                actual.len()
-            );
-            if let Some((index, (actual, expected))) = actual
-                .iter()
-                .zip(expected.iter())
-                .enumerate()
-                .find(|(_, (actual, expected))| actual != expected)
-            {
-                bail!(
-                    "restored topology does not match the checkpoint for participant {id}: record {index}: expected {expected:?}, actual {actual:?}"
-                );
-            }
-        }
+        group::verify_restored(&saved, &group::alone(participants), &handles)?;
     }
     Ok(())
 }
