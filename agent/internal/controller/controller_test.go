@@ -99,6 +99,10 @@ func (r *fakeRuntime) TerminateContainer(_ context.Context, _ string) error {
 	return errors.New("not implemented")
 }
 
+func (r *fakeRuntime) ExecSync(context.Context, string, []string, time.Duration) ([]byte, []byte, error) {
+	return nil, nil, errors.New("not implemented")
+}
+
 func (r *fakeRuntime) Close() error { return nil }
 
 type noopInjector struct{}
