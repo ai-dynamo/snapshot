@@ -67,6 +67,13 @@ on:
         description: Operator/agent/pagebroker image tag to install.
         required: true
         type: string
+      datadog_gpu_monitoring:
+        description: >-
+          "disable" turns Datadog GPU monitoring off for this run; "leave" when
+          the caller already holds it off across other suites too.
+        required: false
+        default: disable
+        type: string
 
 permissions:
   contents: read
