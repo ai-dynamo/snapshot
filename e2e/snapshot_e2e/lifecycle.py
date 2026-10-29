@@ -998,6 +998,25 @@ def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str
     return (status.get("imageId") or "").strip()
 
 
+def node_cpu_flags(config: k8s.E2EConfig, node: str) -> list[set[str]]:
+    """The flags each processor on the node reports in its /proc/cpuinfo, on
+    its flags line on x86_64 and its Features line on arm64."""
+    output = k8s.exec_payload(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        "nsenter -t 1 -m -- grep -E '^(flags|Features)' /proc/cpuinfo",
+        container=AGENT_CONTAINER,
+    )
+    processors = [
+        set(line.partition(":")[2].split())
+        for line in output.splitlines()
+        if line.startswith(("flags", "Features"))
+    ]
+    if not processors:
+        raise AssertionError(f"{node} reported no CPU flags: {output!r}")
+    return processors
+
+
 def visible_gpus(namespace: str, pod: str) -> list[dict[str, str]]:
     """The GPUs a pod can see, as nvidia-smi inside that pod reports them.
 

@@ -564,7 +564,7 @@ func TestInspectRestoreUsesDestinationNameForPodLookup(t *testing.T) {
 		types.CRIUDumpManifest{},
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},
-		types.NewHostManifest("6.17.0"),
+		types.NewHostManifest("6.17.0", nil),
 	)
 	rt := &restoreFakeRuntime{}
 	_, _, err := inspectRestore(

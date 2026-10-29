@@ -50,6 +50,11 @@ func main() {
 	} else {
 		cfg.HostKernelVersion = kernelVersion
 	}
+	if cpuFeatures, err := snapshotruntime.ReadCPUFeatures(snapshotruntime.HostProcPath); err != nil {
+		agentLog.Error(err, "Failed to read the host CPU features; checkpoints taken here will not record them")
+	} else {
+		cfg.HostCPUFeatures = cpuFeatures
+	}
 
 	rt, err := snapshotruntime.New(*runtimeType, *runtimeSocket)
 	if err != nil {

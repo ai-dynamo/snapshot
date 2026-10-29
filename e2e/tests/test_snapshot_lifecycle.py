@@ -229,7 +229,8 @@ def test_snapshot_records_the_cpu_environment_a_restore_is_checked_against(
 
     The GPU test covers the device facts; these are the ones a cluster without
     a GPU can still prove, and they are the facts most of the compatibility
-    gates actually decide on: the kernel and architecture the node reports, and
+    gates actually decide on: the kernel, architecture and CPU flags the node
+    reports, and
     the image, image ID and memory limit the pod was admitted with. All of them
     are read at capture and can never be recovered afterwards.
     """
@@ -1009,6 +1010,17 @@ def assert_recorded_environment(
     host = manifest["host"]
     assert host["kernelVersion"] == node_info.kernel_version
     assert host["cpuArch"] == node_info.architecture
+    # Which flags count as instruction sets is the agent's list, so the node
+    # cannot supply the whole expectation. It can say that every recorded flag
+    # is one all its processors report, and that a sample of instruction sets
+    # is recorded exactly when the node offers it.
+    processors = snap.node_cpu_flags(config, source_node)
+    offered = set.intersection(*processors)
+    features = host["cpuFeatures"]
+    assert features == sorted(set(features))
+    assert set(features) <= offered
+    for isa in ("sse2", "ssse3", "sse4_2", "avx", "avx2", "avx512f", "fp", "asimd", "sve2"):
+        assert (isa in features) == (isa in offered), isa
 
     pod = k8s.read_pod(config.namespace, run.source_pod)
     container = next(c for c in pod.spec.containers if c.name == snap.CONTAINER)
@@ -1032,6 +1044,7 @@ def assert_recorded_environment(
         "name": source_node,
         "architecture": node_info.architecture,
         "kernelVersion": node_info.kernel_version,
+        "cpuFeatures": features,
     }
     # Exact equality, because the CPU limit this pod never set must stay
     # absent here as well as in the manifest.

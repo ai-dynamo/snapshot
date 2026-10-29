@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cluster-free regressions for optional CRI image IDs in environment checks."""
+"""Cluster-free regressions for environment checks: optional CRI image IDs and
+the node's CPU flags."""
 
 import json
 import shlex
@@ -101,6 +102,44 @@ def test_runtime_image_id_does_not_hide_inspection_failure(monkeypatch):
         lifecycle.runtime_image_id(config, "node", "containerd://container-id")
 
 
+@pytest.mark.parametrize(
+    ("output", "want"),
+    [
+        (
+            "flags\t\t: fpu sse2 avx2\nflags\t\t: fpu sse2\n",
+            [{"fpu", "sse2", "avx2"}, {"fpu", "sse2"}],
+        ),
+        ("Features\t: fp asimd sve2\nFeatures\t: fp asimd sve2\n", [{"fp", "asimd", "sve2"}] * 2),
+    ],
+    ids=["x86_64", "arm64"],
+)
+def test_node_cpu_flags_reads_each_processor_on_the_host(monkeypatch, output, want):
+    config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
+    commands = []
+
+    def exec_payload(namespace, pod, command, *, container=None):
+        assert (namespace, pod, container) == ("test-ns", "agent-pod", "agent")
+        commands.append(shlex.split(command))
+        return output
+
+    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
+    monkeypatch.setattr(k8s, "exec_payload", exec_payload)
+
+    assert lifecycle.node_cpu_flags(config, "node") == want
+    assert commands == [
+        ["nsenter", "-t", "1", "-m", "--", "grep", "-E", "^(flags|Features)", "/proc/cpuinfo"]
+    ]
+
+
+@pytest.mark.parametrize("output", ["", "grep: /proc/cpuinfo: No such file or directory\n"])
+def test_node_cpu_flags_reports_a_node_that_printed_none(monkeypatch, output):
+    config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
+    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
+    monkeypatch.setattr(k8s, "exec_payload", lambda *_, **__: output)
+    with pytest.raises(AssertionError, match="reported no CPU flags"):
+        lifecycle.node_cpu_flags(config, "node")
+
+
 @pytest.mark.parametrize("image_id", ["", "sha256:" + "a" * 64])
 @pytest.mark.parametrize(
     "defect",
@@ -111,6 +150,8 @@ def test_runtime_image_id_does_not_hide_inspection_failure(monkeypatch):
         "wrong_manifest_identity",
         "wrong_published_identity",
         "kernel",
+        "cpu_features",
+        "published_cpu_features",
         "memory",
         "gpu",
     ],
@@ -142,7 +183,11 @@ def test_environment_check_preserves_assertions_with_optional_image_id(
         manifest_pod["imageId"] = image_id
         published_pod["imageDigest"] = image_id
     manifest = {
-        "host": {"kernelVersion": "test-kernel", "cpuArch": "amd64"},
+        "host": {
+            "kernelVersion": "test-kernel",
+            "cpuArch": "amd64",
+            "cpuFeatures": ["avx", "avx2", "sse2", "sse4_2", "ssse3"],
+        },
         "k8s": manifest_pod,
         "cudaRestore": {
             "sourceGpus": [{"uuid": gpu["uuid"], "productName": gpu["name"]}],
@@ -157,6 +202,7 @@ def test_environment_check_preserves_assertions_with_optional_image_id(
                     "name": "node",
                     "architecture": "amd64",
                     "kernelVersion": "test-kernel",
+                    "cpuFeatures": ["avx", "avx2", "sse2", "sse4_2", "ssse3"],
                 },
                 "pod": published_pod,
                 "devices": {
@@ -184,6 +230,10 @@ def test_environment_check_preserves_assertions_with_optional_image_id(
         published_pod["imageDigest"] = "sha256:" + "b" * 64
     elif defect == "kernel":
         manifest["host"]["kernelVersion"] = "wrong-kernel"
+    elif defect == "cpu_features":
+        manifest["host"]["cpuFeatures"].remove("avx2")
+    elif defect == "published_cpu_features":
+        del content["status"]["source"]["node"]["cpuFeatures"]
     elif defect == "memory":
         manifest_pod["memoryLimit"] = "wrong-memory"
     elif defect == "gpu":
@@ -196,6 +246,8 @@ def test_environment_check_preserves_assertions_with_optional_image_id(
     monkeypatch.setattr(lifecycle, "wait_for_state_observations", lambda *_a, **_k: None)
     monkeypatch.setattr(lifecycle, "visible_gpus", lambda *_: [gpu])
     monkeypatch.setattr(lifecycle, "runtime_image_id", lambda *_: image_id)
+    cpu_flags = {"fpu", "sse2", "ssse3", "sse4_2", "avx", "avx2", "rep_good"}
+    monkeypatch.setattr(lifecycle, "node_cpu_flags", lambda *_: [cpu_flags, cpu_flags])
     monkeypatch.setattr(lifecycle, "create_podsnapshot", lambda *args: captures.append(args))
     monkeypatch.setattr(lifecycle, "wait_for_snapshot_ready", lambda *_: (None, content))
     monkeypatch.setattr(lifecycle, "checkpoint_manifest", lambda *_: manifest)

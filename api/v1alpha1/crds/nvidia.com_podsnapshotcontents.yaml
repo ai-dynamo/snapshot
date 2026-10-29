@@ -462,6 +462,14 @@ spec:
                         description: Architecture is the node's CPU architecture,
                           as GOARCH spells it.
                         type: string
+                      cpuFeatures:
+                        description: |-
+                          CPUFeatures are the instruction-set flags from the node's /proc/cpuinfo
+                          that every processor reported, sorted. A restore needs a target that
+                          offers all of them.
+                        items:
+                          type: string
+                        type: array
                       kernelVersion:
                         description: KernelVersion is the node's kernel release.
                         type: string
