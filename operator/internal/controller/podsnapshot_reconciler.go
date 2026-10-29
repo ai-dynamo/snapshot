@@ -49,7 +49,7 @@ const (
 
 	// podSnapshotReasonSourcePodGone is the pending-capture failure written when the source pod
 	// turned terminal (Failed or deleting) with no capture result. It is failed only after
-	// sourcePodTerminalGrace, because a checkpoint that terminates its source produces exactly this
+	// the source-pod terminal grace, because a checkpoint that terminates its source produces exactly this
 	// pod state shortly before the agent writes content Ready.
 	podSnapshotReasonSourcePodGone = "SourcePodGone"
 )
@@ -76,6 +76,9 @@ type PodSnapshotReconciler struct {
 	// StoreID binds every new PodSnapshotContent to the configured store. Empty
 	// keeps producing legacy, path-addressed content.
 	StoreID string
+	// SourcePodTerminalGrace is how long a pending capture may stay unresolved after its
+	// source pod turned terminal. Zero uses DefaultSourcePodTerminalGrace.
+	SourcePodTerminalGrace time.Duration
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -202,27 +205,39 @@ func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Conte
 	if reason == podSnapshotReasonSourcePodGone {
 		// A checkpoint that terminates its source fails the pod before the agent
 		// writes content Ready; wait out the grace window instead of racing it.
-		if wait := sourcePodTerminalGraceRemaining(pod, time.Now()); wait > 0 {
+		if wait := sourcePodTerminalGraceRemaining(pod, time.Now(), sr.sourcePodTerminalGrace()); wait > 0 {
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 	}
 	return sr.failPodSnapshot(ctx, snap, reason, cause)
 }
 
-// sourcePodTerminalGrace is how long a pending capture may stay unresolved
-// after its source pod turned terminal before the pod's state becomes the
-// capture failure — the backstop for an agent that never publishes a result.
-const sourcePodTerminalGrace = 5 * time.Minute
+// DefaultSourcePodTerminalGrace is how long a pending capture may stay unresolved
+// after its source pod turned terminal before the controller fails the PodSnapshot
+//  — the backstop for an agent that never publishes a result.
+// The window must cover the agent's upload of the largest checkpoint, so
+// deployments with large images or slow storage raise it with
+// --source-pod-terminal-grace.
+const DefaultSourcePodTerminalGrace = 5 * time.Minute
+
+// sourcePodTerminalGrace returns the configured grace window, falling back to
+// DefaultSourcePodTerminalGrace when the reconciler was built without one.
+func (sr *PodSnapshotReconciler) sourcePodTerminalGrace() time.Duration {
+	if sr.SourcePodTerminalGrace > 0 {
+		return sr.SourcePodTerminalGrace
+	}
+	return DefaultSourcePodTerminalGrace
+}
 
 // sourcePodTerminalGraceRemaining returns how much of the grace window is left
 // for a terminal source pod. An unknown transition time returns zero — failing
 // immediately — rather than requeueing on a clock that can never expire.
-func sourcePodTerminalGraceRemaining(pod *corev1.Pod, now time.Time) time.Duration {
+func sourcePodTerminalGraceRemaining(pod *corev1.Pod, now time.Time, grace time.Duration) time.Duration {
 	terminalAt := podTerminalTime(pod)
 	if terminalAt.IsZero() {
 		return 0
 	}
-	return sourcePodTerminalGrace - now.Sub(terminalAt)
+	return grace - now.Sub(terminalAt)
 }
 
 // podTerminalTime returns the latest observable time at which the source pod

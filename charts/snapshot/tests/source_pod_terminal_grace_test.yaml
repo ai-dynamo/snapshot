@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: source pod terminal grace on the operator
+templates:
+  - templates/operator-deployment.yaml
+tests:
+  - it: defaults the grace to five minutes
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --source-pod-terminal-grace=5m
+
+  - it: passes a configured grace to the operator
+    set:
+      operator.sourcePodTerminalGrace: 20m
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --source-pod-terminal-grace=20m

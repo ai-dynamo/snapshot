@@ -45,7 +45,13 @@ func main() {
 		"Name of the ConfigMap PageBroker reads its S3 configuration from")
 	releaseName := flag.String("release-name", "",
 		"Helm release name, used to label the PageBroker S3 configuration ConfigMap this binary writes outside Helm's own apply step")
+	sourcePodTerminalGrace := flag.Duration("source-pod-terminal-grace", controller.DefaultSourcePodTerminalGrace,
+		"How long a capture may wait for the agent's result after its source pod turned terminal; must cover the largest checkpoint's upload")
 	flag.Parse()
+	if *sourcePodTerminalGrace <= 0 {
+		ctrl.Log.Error(fmt.Errorf("got %v", *sourcePodTerminalGrace), "--source-pod-terminal-grace must be positive")
+		os.Exit(1)
+	}
 	storageCfg, storeID := mustStorageConfig(*storageConfigPath)
 	captureStoreID, err := newContentStoreID(storeID, *bindNewContents)
 	if err != nil {
@@ -137,11 +143,12 @@ func main() {
 	}
 
 	podSnapshotReconciler := &controller.PodSnapshotReconciler{
-		Client:                mgr.GetClient(),
-		NonCacheReadClient:    mgr.GetAPIReader(),
-		Recorder:              mgr.GetEventRecorderFor("podsnapshot-controller"),
-		TestFailureAnnotation: *testFailureAnnotation,
-		StoreID:               captureStoreID,
+		Client:                 mgr.GetClient(),
+		NonCacheReadClient:     mgr.GetAPIReader(),
+		Recorder:               mgr.GetEventRecorderFor("podsnapshot-controller"),
+		TestFailureAnnotation:  *testFailureAnnotation,
+		StoreID:                captureStoreID,
+		SourcePodTerminalGrace: *sourcePodTerminalGrace,
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")

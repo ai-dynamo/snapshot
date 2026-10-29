@@ -421,7 +421,7 @@ func TestSnapshotReconciler_FailedSourcePodWaitsForCaptureResultWithinGrace(t *t
 	// out the grace window instead of racing the agent's Ready write.
 	res := reconcileSnapshot(t, r, snap.Name)
 	assert.Greater(t, res.RequeueAfter, time.Duration(0))
-	assert.LessOrEqual(t, res.RequeueAfter, sourcePodTerminalGrace)
+	assert.LessOrEqual(t, res.RequeueAfter, DefaultSourcePodTerminalGrace)
 
 	updated := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
@@ -449,7 +449,7 @@ func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *test
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name: "main",
 		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-			ExitCode: 137, FinishedAt: metav1.NewTime(time.Now().Add(-sourcePodTerminalGrace - time.Minute)),
+			ExitCode: 137, FinishedAt: metav1.NewTime(time.Now().Add(-DefaultSourcePodTerminalGrace - time.Minute)),
 		}},
 	}}
 	r := makeSnapshotReconciler(s, snap, content, pod)
@@ -462,6 +462,31 @@ func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *test
 	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, failed, "an agent that never publishes a result must not hold the capture pending forever")
 	assert.Equal(t, podSnapshotReasonSourcePodGone, failed.Reason)
+}
+
+func TestSnapshotReconciler_FailedSourcePodHonorsConfiguredGrace(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, content := pendingBoundSnapshotContent()
+	pod := scheduledPod()
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "main",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 137, FinishedAt: metav1.NewTime(time.Now().Add(-DefaultSourcePodTerminalGrace - time.Minute)),
+		}},
+	}}
+	r := makeSnapshotReconciler(s, snap, content, pod)
+	r.SourcePodTerminalGrace = 20 * time.Minute
+
+	// A large checkpoint can still be uploading past the default window; a longer
+	// configured grace keeps the capture pending for the remainder.
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Greater(t, res.RequeueAfter, 13*time.Minute)
+	assert.LessOrEqual(t, res.RequeueAfter, 14*time.Minute)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
 func TestSnapshotReconciler_FailedSourcePodWithoutTerminalTimeFailsImmediately(t *testing.T) {
