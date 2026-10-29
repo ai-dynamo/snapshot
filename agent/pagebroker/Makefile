@@ -61,7 +61,7 @@ daemon: generate
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DAEMON_SOURCES) v1/pagebroker.pb.cc \
 		-Wl,-Bstatic -lprotobuf -Wl,-Bdynamic $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o pagebroker
 
-test: rclone-process-test generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test    | build
+test: s3-restore-inventory-test rclone-process-test generate build/cancellation-test build/gpu-cuda-driver.o build/gpu-engine-test    | build
 	./build/cancellation-test
 	./build/gpu-engine-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PAGEBROKER_SOURCES) daemon.cpp tests/daemon_test.cpp $(BROKER_TEST_SOURCES) tests/filesystem_storage_test.cpp tests/storage_contract_test.cpp $(TRANSFER_TEST_SOURCES) v1/pagebroker.pb.cc $(BROKER_TEST_WRAP_FLAGS) -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o build/pagebroker-test
@@ -117,3 +117,13 @@ rclone-process-test: build/rclone-child-helper
 	./build/rclone-process-test
 
 .PHONY: rclone-process-test
+
+# Intercept only metadata GET; payload probes must not be part of preparation.
+s3-restore-inventory-test: generate | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(ENGINE_SOURCES) gpu/storage_manifest.cpp \
+		transfer/s3/tests/s3_restore_inventory_test.cpp v1/pagebroker.pb.cc \
+		-Wl,--wrap=_ZN8snapshot10pagebroker8S3Client3GetB5cxx11ERKNS0_16S3ObjectLocationEmNS0_12CancellationE \
+		-lprotobuf $(GTEST_FLAGS) $(TRANSFER_FLAGS) -o build/s3-restore-inventory-test
+	./build/s3-restore-inventory-test
+
+.PHONY: s3-restore-inventory-test

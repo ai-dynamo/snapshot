@@ -24,7 +24,7 @@ class ModelStreamerTransferEngine final : public TransferEngine {
   // Identifies the Model Streamer transfer implementation.
   IoEngine type() const override;
 
-  // Loads and validates the published index and payload sizes for staging.
+  // Loads and validates the published index and payload keys for staging.
   PreparedRestore PrepareRestore(const StorageBackend& source, Cancellation cancellation = {},
       const PublishedArtifact* artifact = nullptr, bool metadata_only = false,
       TransferMode mode = TransferMode::Staged) const override;
