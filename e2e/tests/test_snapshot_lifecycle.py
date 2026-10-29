@@ -792,6 +792,154 @@ def test_skip_annotation_lets_a_refused_cpu_restore_through(
         raise
 
 
+WORKLOAD_MOUNTS = tuple(f"/cache/volume-{index}" for index in range(10))
+MISSING_MOUNT = WORKLOAD_MOUNTS[-1]
+
+
+def with_workload_mounts(pod: dict[str, Any], paths: tuple[str, ...]) -> dict[str, Any]:
+    for index, path in enumerate(paths):
+        with_empty_dir(pod, path, name=f"workload-mount-{index}")
+    return pod
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_restore_into_a_pod_missing_a_mount_is_refused_by_path(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        k8s.create_pod(
+            with_workload_mounts(
+                snap.source_pod(config=config, run=run, gpu=False), WORKLOAD_MOUNTS
+            )
+        )
+        source = snap.wait_for_pod_ready(config.namespace, run.source_pod)
+        snap.wait_for_file(config.namespace, run.source_pod, snap.SOURCE_READY)
+        snap.create_podsnapshot(
+            config.namespace, run.snapshot_name, run.source_pod, source.metadata.uid
+        )
+        snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            with_workload_mounts(
+                snap.restore_pod(
+                    config=config, run=run, gpu=False, source_node=source.spec.node_name
+                ),
+                WORKLOAD_MOUNTS[:-1],
+            )
+        )
+        pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreIncompatible"
+        )
+
+        refusal = snap.pod_condition(pod, snap.RESTORED_CONDITION)
+        assert "mount" in refusal.message
+        assert MISSING_MOUNT in refusal.message
+        for present in WORKLOAD_MOUNTS[:-1]:
+            assert present not in refusal.message
+
+        assert_restore_events(config.namespace, run.restore_pod, {"RestoreIncompatible"})
+        assert "RestoreFailed" not in restore_event_reasons(config.namespace, run.restore_pod)
+        assert not snap.file_present(config.namespace, run.restore_pod, snap.RESTORE_DONE)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_restore_into_a_pod_with_every_mount_succeeds(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        k8s.create_pod(
+            with_workload_mounts(
+                snap.source_pod(config=config, run=run, gpu=False), WORKLOAD_MOUNTS
+            )
+        )
+        source = snap.wait_for_pod_ready(config.namespace, run.source_pod)
+        snap.wait_for_file(config.namespace, run.source_pod, snap.SOURCE_READY)
+        snap.create_podsnapshot(
+            config.namespace, run.snapshot_name, run.source_pod, source.metadata.uid
+        )
+        snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            with_workload_mounts(
+                snap.restore_pod(
+                    config=config, run=run, gpu=False, source_node=source.spec.node_name
+                ),
+                WORKLOAD_MOUNTS,
+            )
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+        assert "RestoreIncompatible" not in restore_event_reasons(
+            config.namespace, run.restore_pod
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_failed_restore_into_a_pod_missing_a_mount_names_the_mount(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        k8s.create_pod(
+            with_workload_mounts(
+                snap.source_pod(config=config, run=run, gpu=False), WORKLOAD_MOUNTS
+            )
+        )
+        source = snap.wait_for_pod_ready(config.namespace, run.source_pod)
+        snap.wait_for_file(config.namespace, run.source_pod, snap.SOURCE_READY)
+        snap.create_podsnapshot(
+            config.namespace, run.snapshot_name, run.source_pod, source.metadata.uid
+        )
+        snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        body = with_workload_mounts(
+            snap.restore_pod(
+                config=config, run=run, gpu=False, source_node=source.spec.node_name
+            ),
+            WORKLOAD_MOUNTS[:-1],
+        )
+        body["metadata"]["annotations"]["nvidia.com/snapshot-skip-compat-check"] = "true"
+        k8s.create_pod(body)
+
+        pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreFailed"
+        )
+
+        failure = snap.pod_condition(pod, snap.RESTORED_CONDITION)
+        assert MISSING_MOUNT in failure.message
+        assert "binfmt_misc" not in failure.message
+
+        assert_restore_events(config.namespace, run.restore_pod, {"RestoreFailed"})
+        assert "RestoreIncompatible" not in restore_event_reasons(
+            config.namespace, run.restore_pod
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 @pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_direct_content_deletion_removes_complete_artifact_root(
@@ -926,12 +1074,10 @@ def create_ready_source(
     return pod, pod.spec.node_name
 
 
-def with_empty_dir(pod: dict[str, Any], path: str) -> dict[str, Any]:
+def with_empty_dir(pod: dict[str, Any], path: str, name: str = "own-mount") -> dict[str, Any]:
     # An emptyDir at path in the Pod's first container.
-    pod["spec"]["volumes"].append({"name": "own-mount", "emptyDir": {}})
-    pod["spec"]["containers"][0]["volumeMounts"].append(
-        {"name": "own-mount", "mountPath": path}
-    )
+    pod["spec"]["volumes"].append({"name": name, "emptyDir": {}})
+    pod["spec"]["containers"][0]["volumeMounts"].append({"name": name, "mountPath": path})
     return pod
 
 

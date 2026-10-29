@@ -70,36 +70,62 @@ func LastRestoreError(checkpointPath, workDir string) string {
 	return lastCRIUError(string(data))
 }
 
+// criuRestoreSummary is the line CRIU logs once restore has already failed.
+// Errors logged after it come from teardown, not from what stopped the restore.
+const criuRestoreSummary = "Restoring FAILED."
+
 // criuFollowOnError matches errors CRIU logs after the failure that caused
 // them: the restore summary and the exit of a task that hit the real error.
 var criuFollowOnError = regexp.MustCompile(`^(Restoring FAILED\.|\d+ exited, status=\d+|\d+ killed by signal \d+: .*)$`)
 
-// lastCRIUError returns the message of the last "Error (file:line): msg" line,
-// skipping follow-on errors unless nothing else was logged.
+// lastCRIUError returns the message of the last "Error (file:line): msg" line
+// logged before the restore summary, skipping follow-on errors unless nothing
+// else was logged.
 func lastCRIUError(content string) string {
 	lines := strings.Split(content, "\n")
+	summary := len(lines)
+	for i, line := range lines {
+		if criuErrorMessage(line) == criuRestoreSummary {
+			summary = i
+			break
+		}
+	}
 	fallback := ""
-	for i := len(lines) - 1; i >= 0; i-- {
-		_, rest, found := strings.Cut(lines[i], "Error (")
-		if !found {
-			continue
-		}
-		_, msg, found := strings.Cut(rest, "): ")
-		if !found {
-			continue
-		}
-		msg = strings.TrimSpace(msg)
-		if msg == "" {
+	for i := min(summary, len(lines)-1); i >= 0; i-- {
+		msg := criuErrorMessage(lines[i])
+		if msg == "" || msg == criuRestoreSummary {
 			continue
 		}
 		if !criuFollowOnError.MatchString(msg) {
 			return msg
 		}
-		if fallback == "" && msg != "Restoring FAILED." {
+		if fallback == "" {
 			fallback = msg
 		}
 	}
-	return fallback
+	if fallback != "" {
+		return fallback
+	}
+	for i := len(lines) - 1; i > summary; i-- {
+		if msg := criuErrorMessage(lines[i]); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// criuErrorMessage returns the message of an "Error (file:line): msg" line, or
+// "" for any other line.
+func criuErrorMessage(line string) string {
+	_, rest, found := strings.Cut(line, "Error (")
+	if !found {
+		return ""
+	}
+	_, msg, found := strings.Cut(rest, "): ")
+	if !found {
+		return ""
+	}
+	return strings.TrimSpace(msg)
 }
 
 // findRestoreLog returns the CRIU restore.log path, trying the work dir first
