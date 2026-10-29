@@ -8,10 +8,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -94,39 +98,139 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 	return uuids, nil
 }
 
-// DiscoverVisibleGPUs describes the GPUs a container can see, by running
-// nvidia-smi inside its mount and PID namespaces. The model and the driver
-// version come from the same call as the UUIDs: nothing else on the restore path
-// gets to look at the source node's GPUs, so what is not read here cannot be
-// compared later.
-//
-// Every path ends here, and under DRA this is the only path that reports GPUs
-// at all, because the kubelet publishes no nvidia.com/gpu devices when the
-// NVIDIA DRA driver allocates them instead of the device plugin.
-func DiscoverVisibleGPUs(ctx context.Context, hostProcPath string, pid int, timeout time.Duration) (compat.GPUInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	output, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "--query-gpu=gpu_uuid,name,driver_version", "--format=csv,noheader")
-	if err != nil {
-		return compat.GPUInfo{}, err
-	}
-	return parseNvidiaSmiGPUs(string(output)), nil
+// VisibleGPUs is what a container sees of the node's GPUs.
+type VisibleGPUs struct {
+	// GPUs are the cards in the container's ordinal order, described by
+	// model and driver version. A card carved into MIG slices is listed as
+	// the card.
+	GPUs compat.GPUInfo
+	// MIGSlices are the slices listed under those cards. No DiscoverGPUs path
+	// can stand in for them: DRA drops a slice's MIG- UUID.
+	MIGSlices []string
 }
 
-// DiscoverMIGSlices lists the MIG slices a container can see, by running
-// nvidia-smi -L inside its mount and PID namespaces. No DiscoverGPUs path can
-// stand in for it: DRA drops a slice's MIG- UUID, and --query-gpu reports the
-// card a slice is carved from as though it were whole.
-func DiscoverMIGSlices(ctx context.Context, hostProcPath string, pid int) ([]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
-	defer cancel()
+// VisibleGPULister answers what one container sees of the node's GPUs.
+type VisibleGPULister func() (VisibleGPUs, error)
 
-	output, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "-L")
-	if err != nil {
-		return nil, err
+// ListVisibleGPUs returns a lister for the container whose host PID is pid. On
+// its first call it reads the container's cards from the driver's procfs, or,
+// when that cannot answer exactly (MIG), runs nvidia-smi -L inside the
+// container's mount and PID namespaces; every later call gets the same answer.
+// nvidia-smi spends most of its time initializing NVML, 0.1 to 0.2 s on an idle
+// eight-GPU node and seconds while other processes start CUDA, so a capture or
+// restore lists once for both its MIG check and GPU discovery.
+//
+// The model comes from the same source as the UUIDs, and the driver version
+// from the kernel module's version file: nothing else on the restore path
+// gets to look at the source node's GPUs, so what is not read here cannot be
+// compared later. nvidia-smi runs only against the module version it was
+// built for, so that file holds the version nvidia-smi would report, and
+// every container on the node shares it.
+//
+// Under DRA this is the only path that reports GPUs at all, because the
+// kubelet publishes no nvidia.com/gpu devices when the NVIDIA DRA driver
+// allocates them instead of the device plugin.
+func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int) VisibleGPULister {
+	return sync.OnceValues(func() (VisibleGPUs, error) {
+		if visible, ok := listProcfsGPUs(hostProcPath, pid); ok {
+			return visible, nil
+		}
+		ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
+		defer cancel()
+
+		output, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "-L")
+		if err != nil {
+			return VisibleGPUs{}, err
+		}
+		visible := parseNvidiaSmiList(string(output))
+		if len(visible.GPUs.Devices) > 0 {
+			visible.GPUs.DriverVersion = readDriverVersion(hostProcPath)
+		}
+		return visible, nil
+	})
+}
+
+// listProcfsGPUs reads the cards a container can open from the driver's procfs:
+// the cards under its /proc/driver/nvidia/gpus whose /dev/nvidia<minor> it has,
+// in PCI bus order, which is the order nvidia-smi -L lists them in. It avoids
+// NVML, which brings up every GPU it can open and takes seconds when other
+// processes on the node, such as a GMS sidecar, start CUDA at the same time.
+// It reports !ok whenever it cannot answer exactly, including when the
+// container has MIG capability nodes, because procfs does not list slices.
+func listProcfsGPUs(hostProcPath string, pid int) (VisibleGPUs, bool) {
+	root := filepath.Join(hostProcPath, strconv.Itoa(pid), "root")
+	if caps, err := os.ReadDir(filepath.Join(root, "dev", "nvidia-caps")); err == nil && len(caps) > 0 {
+		return VisibleGPUs{}, false
 	}
-	return parseNvidiaSmiMIGSlices(string(output)), nil
+	gpusDir := filepath.Join(root, "proc", "driver", "nvidia", "gpus")
+	entries, err := os.ReadDir(gpusDir)
+	if err != nil {
+		return VisibleGPUs{}, false
+	}
+	busIDs := make([]string, 0, len(entries))
+	devices := map[string]compat.GPUDevice{}
+	for _, entry := range entries {
+		information, err := os.ReadFile(filepath.Join(gpusDir, entry.Name(), "information"))
+		if err != nil {
+			return VisibleGPUs{}, false
+		}
+		fields := parseProcfsGPUInformation(string(information))
+		uuid, minor := fields["GPU UUID"], fields["Device Minor"]
+		if uuid == "" || minor == "" {
+			return VisibleGPUs{}, false
+		}
+		if _, err := os.Stat(filepath.Join(root, "dev", "nvidia"+minor)); err != nil {
+			continue
+		}
+		busID := strings.ToLower(entry.Name())
+		busIDs = append(busIDs, busID)
+		devices[busID] = compat.GPUDevice{UUID: uuid, ProductName: fields["Model"]}
+	}
+	if len(busIDs) == 0 {
+		return VisibleGPUs{}, false
+	}
+	sort.Strings(busIDs)
+	var visible VisibleGPUs
+	for _, busID := range busIDs {
+		visible.GPUs.Devices = append(visible.GPUs.Devices, devices[busID])
+	}
+	visible.GPUs.DriverVersion = readDriverVersion(hostProcPath)
+	return visible, true
+}
+
+// parseProcfsGPUInformation reads a card's information file, lines of
+// "Key: \t value", such as "GPU UUID: \t GPU-..." and "Device Minor: \t 6".
+func parseProcfsGPUInformation(information string) map[string]string {
+	fields := map[string]string{}
+	for _, line := range strings.Split(information, "\n") {
+		if key, value, ok := strings.Cut(line, ":"); ok {
+			fields[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	return fields
+}
+
+// readDriverVersion returns the loaded kernel module's version, or nothing
+// when the file cannot be read, as when nvidia-smi reports it N/A.
+func readDriverVersion(hostProcPath string) string {
+	banner, err := os.ReadFile(filepath.Join(hostProcPath, "driver", "nvidia", "version"))
+	if err != nil {
+		return ""
+	}
+	return parseDriverVersion(string(banner))
+}
+
+// driverVersionPattern reads the open module's banner,
+// "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  615.71.09  Release Build ...",
+// and the proprietary one's,
+// "NVRM version: NVIDIA UNIX x86_64 Kernel Module  550.54.15  Tue Mar  5 ...".
+var driverVersionPattern = regexp.MustCompile(`Kernel Module(?: for \S+)?\s+(\d+(?:\.\d+)+)\s`)
+
+func parseDriverVersion(banner string) string {
+	if match := driverVersionPattern.FindStringSubmatch(banner); match != nil {
+		return match[1]
+	}
+	return ""
 }
 
 func nsenterNvidiaSMI(ctx context.Context, hostProcPath string, pid int, args ...string) ([]byte, error) {
@@ -149,24 +253,40 @@ func nsenterNvidiaSMI(ctx context.Context, hostProcPath string, pid int, args ..
 	return output, nil
 }
 
-// parseNvidiaSmiMIGSlices reads the line nvidia-smi -L nests under a card for
-// each of its slices, "  MIG 1g.10gb Device 0: (UUID: MIG-...)", as
-// "1g.10gb MIG-...". A line it cannot take apart is still a slice, so it is
+// parseNvidiaSmiList reads nvidia-smi -L: a line per card,
+// "GPU 0: NVIDIA B200 (UUID: GPU-...)", and nested under it a line per slice,
+// "  MIG 1g.10gb Device 0: (UUID: MIG-...)", which becomes "1g.10gb MIG-...".
+// A card line without a UUID is not a GPU, because the device map is built
+// from UUIDs. A slice line it cannot take apart is still a slice, so it is
 // reported as printed rather than dropped.
-func parseNvidiaSmiMIGSlices(output string) []string {
-	var slices []string
+func parseNvidiaSmiList(output string) VisibleGPUs {
+	var visible VisibleGPUs
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] != "MIG" {
+		if len(fields) == 0 {
 			continue
 		}
-		slice := strings.Join(fields, " ")
-		if uuid := listedUUID(fields); uuid != "" && len(fields) > 1 {
-			slice = fields[1] + " " + uuid
+		uuid := listedUUID(fields)
+		switch fields[0] {
+		case "GPU":
+			if uuid == "" {
+				continue
+			}
+			device := compat.GPUDevice{UUID: uuid}
+			if _, described, ok := strings.Cut(line, ": "); ok {
+				name, _, _ := strings.Cut(described, " (UUID:")
+				device.ProductName = nvidiaSmiValue(name)
+			}
+			visible.GPUs.Devices = append(visible.GPUs.Devices, device)
+		case "MIG":
+			slice := strings.Join(fields, " ")
+			if uuid != "" && len(fields) > 1 {
+				slice = fields[1] + " " + uuid
+			}
+			visible.MIGSlices = append(visible.MIGSlices, slice)
 		}
-		slices = append(slices, slice)
 	}
-	return slices
+	return visible
 }
 
 func listedUUID(fields []string) string {
@@ -217,11 +337,9 @@ func nvidiaSmiValue(value string) string {
 	}
 }
 
-type visibleGPUDiscovery func(context.Context, string, int, time.Duration) (compat.GPUInfo, error)
-
 // DiscoverGPUUUIDs resolves GPU UUIDs in the container's runtime ordinal order.
 func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
-	env, err := DiscoverGPUs(ctx, clientset, podName, podNamespace, containerName, hostProcPath, pid, nil, log)
+	env, err := DiscoverGPUs(ctx, clientset, podName, podNamespace, containerName, nil, ListVisibleGPUs(ctx, hostProcPath, pid), log)
 	if err != nil {
 		return nil, err
 	}
@@ -234,27 +352,27 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 // what gets recorded does not depend on how this cluster allocates GPUs.
 // Explicit environment selections are resolved on the host; disabled legacy
 // selections inspect only container visibility, which can include CDI devices.
-func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, env []string, log logr.Logger) (compat.GPUInfo, error) {
+// visible is what the container sees, from ListVisibleGPUs.
+func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName string, env []string, visible VisibleGPULister, log logr.Logger) (compat.GPUInfo, error) {
 	if value := VisibleDevicesValue(env); value != nil && *value != "all" {
 		if *value == "" || *value == "none" || *value == "void" {
 			// These disable legacy injection, not CDI. Inspect only actual
 			// container visibility; never substitute host/allocation UUIDs.
-			return DiscoverVisibleGPUs(ctx, hostProcPath, pid, nvidiaSMITimeout)
+			listed, err := visible()
+			return listed.GPUs, err
 		}
-		return resolveSelectedGPUs(ctx, *value)
+		selected, err := resolveSelectedGPUs(ctx, *value)
+		if err != nil {
+			return selected, err
+		}
+		// The variable may name its GPUs in any order; the container lists them in bus order.
+		listed, err := visible()
+		if err != nil {
+			return compat.GPUInfo{}, fmt.Errorf("list selected GPUs in bus order: %w", err)
+		}
+		return describeGPUs(GPUUUIDs(selected), listed.GPUs)
 	}
-	return discoverGPUs(
-		ctx,
-		clientset,
-		podName,
-		podNamespace,
-		containerName,
-		hostProcPath,
-		pid,
-		nvidiaSMITimeout,
-		DiscoverVisibleGPUs,
-		log,
-	)
+	return discoverGPUs(ctx, clientset, podName, podNamespace, containerName, visible, log)
 }
 
 func discoverGPUs(
@@ -262,13 +380,11 @@ func discoverGPUs(
 	clientset kubernetes.Interface,
 	podName,
 	podNamespace,
-	containerName,
-	hostProcPath string,
-	pid int,
-	timeout time.Duration,
-	discoverVisibleGPUs visibleGPUDiscovery,
+	containerName string,
+	visible VisibleGPULister,
 	log logr.Logger,
 ) (compat.GPUInfo, error) {
+
 	gpuUUIDs, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, containerName, log)
 	if err != nil {
 		if hasNVIDIADRAAllocation {
@@ -288,14 +404,14 @@ func discoverGPUs(
 				"DRA GPU allocation has no resolvable UUIDs",
 			)
 		}
-		visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid, timeout)
+		listed, err := visible()
 		if err != nil {
 			return compat.GPUInfo{}, fmt.Errorf(
 				"discover DRA GPUs in container ordinal order: %w",
 				err,
 			)
 		}
-		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, GPUUUIDs(visible))
+		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, GPUUUIDs(listed.GPUs))
 		if err != nil {
 			return compat.GPUInfo{}, err
 		}
@@ -303,7 +419,7 @@ func discoverGPUs(
 			"resolved DRA GPU UUIDs in container ordinal order",
 			"uuids", orderedUUIDs,
 		)
-		return describeGPUs(orderedUUIDs, visible), nil
+		return describeGPUs(orderedUUIDs, listed.GPUs)
 	}
 
 	gpuUUIDs, err = GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
@@ -311,48 +427,54 @@ func discoverGPUs(
 		return compat.GPUInfo{}, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
 	}
 	if len(gpuUUIDs) > 0 {
-		// This path has its GPUs already and needs nvidia-smi only to describe
-		// them, so a failure here costs the description, not the checkpoint.
-		visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid, timeout)
+		// kubelet lists the GPUs in allocation order; only the container's
+		// listing gives their bus order.
+		listed, err := visible()
 		if err != nil {
-			log.V(1).Info("Failed to describe PodResources GPUs; recording their UUIDs alone",
-				"pid", pid,
-				"error", err,
-			)
-			return describeGPUs(gpuUUIDs, compat.GPUInfo{}), nil
+			return compat.GPUInfo{}, fmt.Errorf("list PodResources GPUs in bus order: %w", err)
 		}
-		return describeGPUs(gpuUUIDs, visible), nil
+		return describeGPUs(gpuUUIDs, listed.GPUs)
 	}
 
-	log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
-	visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid, timeout)
+	log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi")
+	listed, err := visible()
 	if err != nil {
 		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 	}
-	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", GPUUUIDs(visible))
-	return visible, nil
+	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", GPUUUIDs(listed.GPUs))
+	return listed.GPUs, nil
 }
 
-// describeGPUs keeps the allocated order and fills each UUID in from what
-// nvidia-smi reported about it. A UUID nvidia-smi did not report keeps its
-// place undescribed rather than dropping out of the set.
-func describeGPUs(uuids []string, visible compat.GPUInfo) compat.GPUInfo {
-	described := make(map[string]compat.GPUDevice, len(visible.Devices))
-	for _, device := range visible.Devices {
-		described[device.UUID] = device
+// describeGPUs puts the allocated GPUs in the order the container lists them,
+// PCI bus order, and describes each from that listing. Bus order is the one
+// order a checkpoint and its restore always agree on, whatever order kubelet or
+// NVIDIA_VISIBLE_DEVICES names the GPUs in, so BuildDeviceMap can pair them by
+// position. A GPU the listing does not report has no bus position to take, so
+// it fails discovery: any other order could pair it with another rank's GPU.
+func describeGPUs(uuids []string, listed compat.GPUInfo) (compat.GPUInfo, error) {
+	allocated := make(map[string]bool, len(uuids))
+	for _, uuid := range uuids {
+		allocated[uuid] = true
 	}
 	env := compat.GPUInfo{
-		DriverVersion: visible.DriverVersion,
-		Devices:       make([]compat.GPUDevice, 0, len(uuids)),
+		DriverVersion: listed.DriverVersion,
+		Devices:       make([]compat.GPUDevice, 0, len(allocated)),
 	}
-	for _, uuid := range uuids {
-		device, ok := described[uuid]
-		if !ok {
-			device = compat.GPUDevice{UUID: uuid}
+	for _, device := range listed.Devices {
+		if allocated[device.UUID] {
+			env.Devices = append(env.Devices, device)
+			delete(allocated, device.UUID)
 		}
-		env.Devices = append(env.Devices, device)
 	}
-	return env
+	if len(allocated) > 0 {
+		missing := make([]string, 0, len(allocated))
+		for uuid := range allocated {
+			missing = append(missing, uuid)
+		}
+		sort.Strings(missing)
+		return compat.GPUInfo{}, fmt.Errorf("container does not list allocated GPUs %v", missing)
+	}
+	return env, nil
 }
 
 // GPUUUIDs returns device UUIDs in discovery order.
@@ -439,11 +561,11 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 }
 
 // BuildDeviceMap creates a cuda-checkpoint-helper --device-map value from source and target GPU UUID lists.
-// When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
-// unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
-// Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
-// If all mappings are identity mappings, it returns an empty string so same-GPU restores use the
-// default CUDA restore path instead of forcing the GPU migration path.
+// The i-th source GPU maps to the i-th target GPU, so each process keeps its position among the pod's
+// GPUs. DiscoverGPUs lists every pod's GPUs in PCI bus order, so that position is the GPU's bus position,
+// and GPU Memory Service places each GPU's restored weights by bus position.
+// A restore onto the same set of GPUs returns an empty string instead, so it uses the default CUDA
+// restore path rather than the GPU migration path even when kubelet lists the set in another order.
 func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string, error) {
 	if len(sourceUUIDs) != len(targetUUIDs) {
 		return "", fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
@@ -457,46 +579,20 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 	for _, t := range targetUUIDs {
 		targetSet[t] = true
 	}
-
-	// First pass: identity-map any source UUID that exists in the target set
-	mapping := make(map[string]string, len(sourceUUIDs))
-	usedTargets := make(map[string]bool, len(targetUUIDs))
+	sameGPUs := true
 	for _, src := range sourceUUIDs {
-		if targetSet[src] {
-			mapping[src] = src
-			usedTargets[src] = true
-		}
-	}
-
-	// Second pass: pair remaining source UUIDs with remaining target UUIDs positionally
-	var remainingTargets []string
-	for _, t := range targetUUIDs {
-		if !usedTargets[t] {
-			remainingTargets = append(remainingTargets, t)
-		}
-	}
-	idx := 0
-	for _, src := range sourceUUIDs {
-		if _, ok := mapping[src]; !ok {
-			mapping[src] = remainingTargets[idx]
-			idx++
-		}
-	}
-
-	allIdentity := true
-	for _, src := range sourceUUIDs {
-		if mapping[src] != src {
-			allIdentity = false
+		if !targetSet[src] {
+			sameGPUs = false
 			break
 		}
 	}
-	if allIdentity {
+	if sameGPUs {
 		return "", nil
 	}
 
 	pairs := make([]string, len(sourceUUIDs))
 	for i, src := range sourceUUIDs {
-		pairs[i] = src + "=" + mapping[src]
+		pairs[i] = src + "=" + targetUUIDs[i]
 	}
 	return strings.Join(pairs, ","), nil
 }
