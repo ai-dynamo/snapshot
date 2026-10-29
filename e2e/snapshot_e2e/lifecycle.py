@@ -151,11 +151,14 @@ def create_snapshotjob(
     target_containers: list[str] | None = None,
     active_deadline_seconds: int | None = None,
     non_target_artifacts: dict[str, Any] | None = None,
+    containers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "podTemplate": pod_template,
         "podSnapshotTemplate": {"targetContainers": target_containers or [CONTAINER]},
     }
+    if containers is not None:
+        spec["podSnapshotTemplate"]["containers"] = containers
     if active_deadline_seconds is not None:
         spec["activeDeadlineSeconds"] = active_deadline_seconds
     if non_target_artifacts is not None:

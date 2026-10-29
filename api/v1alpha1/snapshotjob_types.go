@@ -173,6 +173,7 @@ type SnapshotJobSpec struct {
 // controller fills in identity, ownership, and spec.source automatically.
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-job"
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job-uid' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-job-uid"
+// +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.targetContainers)",message="containers must name containers in targetContainers"
 type PodSnapshotTemplate struct {
 	// Metadata contains labels and annotations copied to the generated
 	// PodSnapshot. SnapshotJob ownership labels are reserved for the controller
@@ -184,9 +185,9 @@ type PodSnapshotTemplate struct {
 	// may contain any number of additional containers (helpers, sidecars, etc.)
 	// — this field controls only the CRIU dump target.
 	//
-	// v1alpha1: exactly one target is required. The plural form and nested
-	// placement here is intentional: future versions will support per-container
-	// config (e.g. per-container quiesceProbe) by extending this list to objects.
+	// v1alpha1: exactly one target is required. The plural form is
+	// intentional: future versions may checkpoint more than one container.
+	// Per-container settings go in containers, not here.
 	//
 	// Defaults to ["main"]. Each entry must be a valid DNS label
 	// (1-63 chars, ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$).
@@ -206,6 +207,14 @@ type PodSnapshotTemplate struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
+
+	// Containers is copied to the generated PodSnapshot: settings for the
+	// checkpointed containers, matched by name to targetContainers.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=1
+	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
 }
 
 // PodSnapshotTemplateMetadata is the caller-owned metadata propagated to a

@@ -22,6 +22,7 @@ func IsPodSnapshotContentFailed(c *PodSnapshotContent) bool {
 // PodSnapshotContentSpec defines the desired state of PodSnapshotContent. It is
 // populated by the PodSnapshotReconciler (operator) at creation time and is
 // immutable thereafter.
+// +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.source.podRef.containers)",message="containers must name containers in source.podRef.containers"
 type PodSnapshotContentSpec struct {
 	// PodSnapshotRef is the back-pointer to the bound PodSnapshot. It may span
 	// namespaces because PodSnapshotContent is cluster-scoped.
@@ -37,6 +38,16 @@ type PodSnapshotContentSpec struct {
 	// Like the rest of spec it cannot be added, removed or changed after creation.
 	// +optional
 	Storage *CheckpointStorageBinding `json:"storage,omitempty"`
+
+	// Containers is the PodSnapshot's container settings, with defaults
+	// applied, saved at creation. Every restore of this checkpoint uses them,
+	// even if the PodSnapshot or SnapshotJob that asked for it changes or is
+	// gone.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=1
+	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
 }
 
 // PodSnapshotReference is a cross-namespace reference to a PodSnapshot.

@@ -97,6 +97,9 @@ spec:
             {{- if .Values.operator.bindNewContents }}
             - --bind-new-contents=true
             {{- end }}
+            {{- if .Values.operator.lifecycleHooks }}
+            - --enable-lifecycle-hooks=true
+            {{- end }}
             {{- if eq .Values.storage.type "s3" }}
             - {{ printf "--pagebroker-s3-config-namespace=%s" .Release.Namespace | quote }}
             - {{ printf "--pagebroker-s3-config-name=%s" (include "snapshot.pageBrokerS3ConfigName" .) | quote }}
