@@ -46,6 +46,17 @@ kubectl logs <agent-pod> -n <ns> -c pagebroker | grep '^skip GPU'
 Once the GPU is healthy and has free memory again, restart the agent pod so
 PageBroker sets it up.
 
+## PageBroker does not start after an S3 settings change
+
+After a change to `storage.s3.addressing` or the CA bundle, a PageBroker pod can
+start before the operator has rewritten its configuration. PageBroker refuses to
+start while its environment and its configuration disagree, and the pod
+recovers after the operator's configuration catches up and PageBroker restarts.
+PageBroker also refuses to start on a key it does not know in
+`pageBroker.transferEngine.modelStreamer`, so a misspelled key shows up as a
+failing pod, not as a rendering error. Read the PageBroker container log for the
+rejected setting.
+
 ## CRIU reports `Unable to create tun`
 
 `Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory`

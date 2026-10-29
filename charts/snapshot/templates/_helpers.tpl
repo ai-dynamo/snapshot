@@ -87,10 +87,15 @@ Convert a Kubernetes quantity to bytes, or empty when it is not a form we parse.
 {{- else if hasSuffix "Mi" $q }}{{ mulf (trimSuffix "Mi" $q | float64) 1048576 | int64 }}
 {{- else if hasSuffix "Gi" $q }}{{ mulf (trimSuffix "Gi" $q | float64) 1073741824 | int64 }}
 {{- else if hasSuffix "Ti" $q }}{{ mulf (trimSuffix "Ti" $q | float64) 1099511627776 | int64 }}
+{{- else if hasSuffix "Pi" $q }}{{ mulf (trimSuffix "Pi" $q | float64) 1125899906842624 | int64 }}
+{{- else if hasSuffix "Ei" $q }}{{ mulf (trimSuffix "Ei" $q | float64) 1152921504606846976 | int64 }}
 {{- else if hasSuffix "k" $q }}{{ mulf (trimSuffix "k" $q | float64) 1000 | int64 }}
 {{- else if hasSuffix "M" $q }}{{ mulf (trimSuffix "M" $q | float64) 1000000 | int64 }}
 {{- else if hasSuffix "G" $q }}{{ mulf (trimSuffix "G" $q | float64) 1000000000 | int64 }}
 {{- else if hasSuffix "T" $q }}{{ mulf (trimSuffix "T" $q | float64) 1000000000000 | int64 }}
+{{- else if hasSuffix "P" $q }}{{ mulf (trimSuffix "P" $q | float64) 1000000000000000 | int64 }}
+{{- else if hasSuffix "E" $q }}{{ mulf (trimSuffix "E" $q | float64) 1000000000000000000 | int64 }}
+{{- else if regexMatch "^[0-9]+(\\.[0-9]+)?[eE][+-]?[0-9]+$" $q }}{{ $q | float64 | int64 }}
 {{- else if regexMatch "^[0-9]+$" $q }}{{ $q }}
 {{- end }}
 {{- end }}
@@ -180,6 +185,79 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{/* Directory the S3 credentials Secret (storage.s3.credentialsSecretRef) is
      mounted at, shared by the PageBroker and operator containers. */}}
 {{- define "snapshot.s3CredentialsMountDir" -}}/etc/snapshot-s3-credentials{{- end -}}
+
+{{/* Directory and file the S3 CA bundle (storage.s3.caBundleConfigMapRef) is
+     mounted at, shared by PageBroker and the operator. */}}
+{{- define "snapshot.s3CABundleMountDir" -}}/etc/snapshot-s3-ca{{- end -}}
+{{- define "snapshot.s3CABundlePath" -}}
+{{- printf "%s/%s" (include "snapshot.s3CABundleMountDir" .) (required "storage.s3.caBundleConfigMapKey is required with storage.s3.caBundleConfigMapRef" .Values.storage.s3.caBundleConfigMapKey) -}}
+{{- end -}}
+
+{{/* Where PageBroker reads the Model Streamer tuning file (pageBroker.transferEngine.modelStreamer). */}}
+{{- define "snapshot.modelStreamerMountDir" -}}/etc/snapshot-model-streamer{{- end -}}
+
+{{/* Rolls the operator and PageBroker when the values behind storage.yaml and
+     pagebroker-s3.yaml change, so an upgrade doesn't leave either running on
+     stale config. Hashes the raw values rather than including configmap.yaml,
+     which would re-run its required()/fail() checks from this context and
+     misattribute their errors to the including template. Includes the
+     rendered stagingSizeLimit, not just pageBroker.staging.sizeLimit: the
+     default stagingBytes is derived from it together with both containers'
+     memory limits, so a change to either limit must also roll both. */}}
+{{- define "snapshot.operatorConfigChecksum" -}}
+{{- toYaml (dict "storage" .Values.storage "pageBrokerS3" .Values.pageBroker.s3 "modelStreamer" .Values.pageBroker.transferEngine.modelStreamer "stagingSizeLimit" (include "snapshot.stagingSizeLimit" .)) | sha256sum -}}
+{{- end -}}
+{{- define "snapshot.modelStreamerConfigPath" -}}{{ include "snapshot.modelStreamerMountDir" . }}/model-streamer.json{{- end -}}
+
+{{/* PageBroker's S3 limits object: the configured limits, with the staging
+     volume cap as stagingBytes unless one was given. Values pass through
+     int64 so floats never reach the rendered YAML. */}}
+{{- define "snapshot.pageBrokerS3Limits" -}}
+{{- $limits := dict -}}
+{{- range $key, $value := ((.Values.pageBroker.s3 | default dict).limits | default dict) -}}
+{{- $_ := set $limits $key (int64 $value) -}}
+{{- end -}}
+{{- if not (hasKey $limits "stagingBytes") -}}
+{{- $staging := include "snapshot.quantityBytes" (include "snapshot.stagingSizeLimit" .) -}}
+{{- if not $staging -}}
+{{- fail (printf "pageBroker.staging.sizeLimit %q is not a byte quantity the chart can read" (include "snapshot.stagingSizeLimit" .)) -}}
+{{- end -}}
+{{- if le (int64 $staging) 0 -}}
+{{- fail "pageBroker.staging.sizeLimit must be at least one byte" -}}
+{{- end -}}
+{{- /* PageBroker rejects a stagingBytes above 1 TiB. */ -}}
+{{- $_ := set $limits "stagingBytes" (min (int64 $staging) (int64 1099511627776)) -}}
+{{- end -}}
+{{- toYaml $limits -}}
+{{- end -}}
+
+{{/* Fails the render on S3 settings PageBroker would refuse at startup. */}}
+{{- define "snapshot.validateS3Settings" -}}
+{{- if eq .Values.storage.type "s3" -}}
+{{- $s3 := .Values.storage.s3 -}}
+{{- $addressing := $s3.addressing | default "" -}}
+{{- if not (has $addressing (list "" "path" "virtual")) -}}
+{{- fail (printf "storage.s3.addressing must be \"path\" or \"virtual\", got %q" $addressing) -}}
+{{- end -}}
+{{- if and (not $s3.allowHttp) (hasPrefix "http://" ($s3.endpoint | default "" | lower)) -}}
+{{- fail "storage.s3.endpoint is plain http; set storage.s3.allowHttp=true to accept it" -}}
+{{- end -}}
+{{- $allowed := list "transactionSeconds" "stagingBytes" "activeTransactions" "uploadPartBytes" "uploadBufferBytes" "uploadActiveFiles" "requestSeconds" "uploadRequestRetries" "uploadConnectSeconds" -}}
+{{- $limits := ((.Values.pageBroker.s3 | default dict).limits | default dict) -}}
+{{- range $key, $_ := $limits -}}
+{{- if not (has $key $allowed) -}}
+{{- fail (printf "pageBroker.s3.limits.%s is not a PageBroker S3 limit" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- $activeTransactions := int64 8 -}}
+{{- if hasKey $limits "activeTransactions" -}}
+{{- $activeTransactions = int64 $limits.activeTransactions -}}
+{{- end -}}
+{{- if ge $activeTransactions (int64 .Values.pageBroker.maxConcurrentRequests) -}}
+{{- fail "pageBroker.s3.limits.activeTransactions must be below pageBroker.maxConcurrentRequests" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 
 {{/* Driver access shared by the agent and PageBroker. */}}
 {{- define "snapshot.nvidiaEnvironment" -}}

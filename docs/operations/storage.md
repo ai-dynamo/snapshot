@@ -1,8 +1,9 @@
 # Storage
 
-Snapshot keeps every checkpoint in a single shared volume that all node agents
-mount. Each agent's PageBroker sidecar publishes checkpoint artifacts there and
-reads them back for restore; workload pods never mount checkpoint storage.
+Snapshot keeps every checkpoint in one store that all node agents reach: a
+checkpoint volume by default, or an S3-compatible bucket with `storage.type: s3`.
+Each agent's PageBroker sidecar publishes checkpoint artifacts there and reads
+them back for restore; workload pods never mount checkpoint storage.
 
 The checkpoint store must prevent unauthorized modification of artifacts through
 filesystem permissions or the storage server's access controls. PageBroker requests
@@ -12,14 +13,16 @@ as SMB can report these modes from mount settings rather than per-directory perm
 
 ## The checkpoint volume
 
-Today the checkpoint store is a Kubernetes PersistentVolumeClaim (PVC). Because
+With `storage.type: pvc`, the default, the checkpoint store is a Kubernetes
+PersistentVolumeClaim (PVC). Because
 agents on multiple GPU nodes mount it concurrently, it must support
 `ReadWriteMany` (RWX). The chart provisions one PVC per cluster by default and
 mounts it at `/checkpoints` in every agent.
 
 ## Configuration
 
-The chart's `storage.pvc` values control the PVC:
+For `storage.type: pvc`, the chart's `storage.pvc` values control the PVC (for
+`s3`, see [Other backends](#other-backends)):
 
 | Value                      | Purpose                                             | Default        |
 |----------------------------|-----------------------------------------------------|----------------|
@@ -47,7 +50,8 @@ caller-supplied store ID nor an additional PVC namespace setting is required.
 The operator validates this resolved identity at startup and uses it to check
 artifact cleanup against each content's recorded store. New captures use the
 legacy filesystem flow by default. Artifact addressing requires a compatible
-PageBroker image and the separate activation steps below. S3 remains unsupported.
+PageBroker image and the separate activation steps below; see
+[Other backends](#other-backends) for `storage.type: s3`.
 
 ### Enable artifact addressing
 
@@ -256,8 +260,37 @@ survive an uninstall.
 
 ## Other backends
 
-`storage.type` currently supports `pvc`. Object-storage backends (`s3`, `oci`) are
-reserved in the chart for future use and are not supported today.
+`storage.type` supports `pvc` and `s3`. `oci` is reserved in the chart for
+future use and is not supported today.
+
+`storage.type: s3` requires `operator.bindNewContents: true`, because S3 has no
+legacy local-path capture mode; the chart fails the render without it. See
+[Enable artifact addressing](#enable-artifact-addressing) for the rollout order.
+
+### S3 settings PageBroker reads
+
+With `storage.type: s3`, the chart passes PageBroker the settings below. The S3
+backend ships with the agent and PageBroker images of a Snapshot release newer
+than v0.2.0; see [Compatibility](../reference/compatibility.md). PageBroker reads them once at
+startup, so changing one restarts PageBroker on each node, and it can fail to
+start briefly until the operator has rewritten its configuration. See
+[PageBroker does not start after an S3 settings change](troubleshooting.md#pagebroker-does-not-start-after-an-s3-settings-change).
+After changing the endpoint, bucket, region or prefix, restart the agent
+DaemonSet once the operator pod is Ready, so PageBroker reads the operator's
+current configuration; PageBroker does not re-read it while running.
+
+| Value | Effect | Default |
+|-------|--------|---------|
+| `storage.s3.addressing` | `path` or `virtual` bucket addressing | PageBroker's `virtual` |
+| `storage.s3.allowHttp` | Accepts a plain-http endpoint; the chart refuses one otherwise. For local testing only: checkpoint payloads and credentials cross the network unencrypted | `false` |
+| `storage.s3.caBundleConfigMapRef`, `storage.s3.caBundleConfigMapKey` | CA bundle for the endpoint, used by PageBroker and the operator | system trust |
+| `pageBroker.s3.limits` | Transfer and transaction limits; keys, defaults and bounds are in the [values reference](../reference/api.md#s3-transfer-limits) | see reference |
+| `pageBroker.transferEngine.modelStreamer` | Tuning for the engine that reads S3 restores, written as given; keys are in [Model Streamer configuration](../../agent/pagebroker/MODEL_STREAMER.md) | no file |
+
+When `pageBroker.s3.limits.stagingBytes` is omitted, the chart fills it from the
+staging volume cap, so PageBroker refuses a staged restore the volume cannot
+hold instead of filling it. An explicit `stagingBytes` is not checked against
+the volume.
 
 ### PageBroker restore source
 

@@ -19,10 +19,14 @@ spec:
       labels:
         {{- include "snapshot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: operator
-      {{- if .Values.openshift.enabled }}
       annotations:
+        # Rolls the operator when the S3/storage settings it reads at
+        # startup change, so an upgrade doesn't leave it running on stale
+        # config and silently skip rewriting PageBroker's ConfigMap.
+        checksum/config: {{ include "snapshot.operatorConfigChecksum" . }}
+        {{- if .Values.openshift.enabled }}
         openshift.io/required-scc: anyuid
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.operatorServiceAccountName" . }}
       {{- with .Values.image.operator.imagePullSecrets }}
@@ -98,6 +102,10 @@ spec:
             - {{ printf "--pagebroker-s3-config-name=%s" (include "snapshot.pageBrokerS3ConfigName" .) | quote }}
             - {{ printf "--release-name=%s" .Release.Name | quote }}
             - {{ printf "--artifact-cleanup-s3-credentials-path=%s/%s" (include "snapshot.s3CredentialsMountDir" .) .Values.storage.s3.credentialsSecretKey | quote }}
+            - --pagebroker-s3-settings=/etc/snapshot/pagebroker-s3.yaml
+            {{- if .Values.storage.s3.caBundleConfigMapRef }}
+            - {{ printf "--artifact-cleanup-s3-ca-bundle-path=%s" (include "snapshot.s3CABundlePath" .) | quote }}
+            {{- end }}
             {{- end }}
           {{- if .Values.operator.testFailCaptureSourceAnnotation }}
           env:
@@ -117,6 +125,11 @@ spec:
               mountPath: {{ include "snapshot.s3CredentialsMountDir" . }}
               readOnly: true
             {{- end }}
+            {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
+            - name: s3-ca-bundle
+              mountPath: {{ include "snapshot.s3CABundleMountDir" . }}
+              readOnly: true
+            {{- end }}
       volumes:
         {{- if eq .Values.storage.type "pvc" }}
         - name: checkpoints
@@ -129,6 +142,10 @@ spec:
             items:
               - key: storage.yaml
                 path: storage.yaml
+              {{- if eq .Values.storage.type "s3" }}
+              - key: pagebroker-s3.yaml
+                path: pagebroker-s3.yaml
+              {{- end }}
         {{- if eq .Values.storage.type "s3" }}
         - name: s3-credentials
           secret:
@@ -136,4 +153,12 @@ spec:
             items:
               - key: {{ .Values.storage.s3.credentialsSecretKey }}
                 path: {{ .Values.storage.s3.credentialsSecretKey }}
+        {{- end }}
+        {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.caBundleConfigMapRef }}
+        - name: s3-ca-bundle
+          configMap:
+            name: {{ .Values.storage.s3.caBundleConfigMapRef }}
+            items:
+              - key: {{ .Values.storage.s3.caBundleConfigMapKey }}
+                path: {{ .Values.storage.s3.caBundleConfigMapKey }}
         {{- end }}

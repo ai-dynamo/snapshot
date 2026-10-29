@@ -87,8 +87,8 @@ tests:
 
   - it: honours a quantity it cannot parse
     set:
-      pageBroker.staging.sizeLimit: "64e9"
+      pageBroker.staging.sizeLimit: "64Q"
     asserts:
       - equal:
           path: spec.template.spec.volumes[?(@.name=="pagebroker")].emptyDir.sizeLimit
-          value: "64e9"
+          value: "64Q"

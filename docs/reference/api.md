@@ -192,17 +192,48 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 
 ### Storage
 
-| Value                           | Default        | Description                                                                                                                                                                                               |
-|---------------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `pageBroker.restoreMode`        | `direct`       | PageBroker restore source: `staged` copies CPU images into staging, `direct` reads the original artifact.                                                                                                 |
-| `storage.type`                  | `pvc`          | Checkpoint store backend: `pvc` or `s3`.                                                                                                                                                                  |
-| `storage.pvc.create`            | `true`         | Create the PVC; set `false` to use an existing one.                                                                                                                                                       |
-| `storage.pvc.name`              | `snapshot-pvc` | Shared PVC name.                                                                                                                                                                                          |
-| `storage.pvc.size`              | `1Ti`          | Requested size.                                                                                                                                                                                           |
-| `storage.pvc.storageClass`      | `""`           | Storage class; empty uses the cluster default. Must support `ReadWriteMany`.                                                                                                                              |
-| `storage.pvc.basePath`          | `/checkpoints` | Fixed agent mount path; cannot be changed.                                                                                                                                                                |
-| `pageBroker.artifactAddressing` | `false`        | Pass store configuration to a compatible PageBroker artifact backend. Deploy this before enabling `operator.bindNewContents`.                                                                             |
-| `operator.bindNewContents`      | `false`        | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../operations/storage.md#enable-artifact-addressing). |
+| Value                                     | Default        | Description                                                                                                                                                                                               |
+|-------------------------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `pageBroker.restoreMode`                  | `direct`       | PageBroker restore source: `staged` copies CPU images into staging, `direct` reads the original artifact.                                                                                                 |
+| `storage.type`                            | `pvc`          | Checkpoint store backend: `pvc` or `s3`.                                                                                                                                                                  |
+| `storage.pvc.create`                      | `true`         | Create the PVC; set `false` to use an existing one.                                                                                                                                                       |
+| `storage.pvc.name`                        | `snapshot-pvc` | Shared PVC name.                                                                                                                                                                                          |
+| `storage.pvc.size`                        | `1Ti`          | Requested size.                                                                                                                                                                                           |
+| `storage.pvc.storageClass`                | `""`           | Storage class; empty uses the cluster default. Must support `ReadWriteMany`.                                                                                                                              |
+| `storage.pvc.basePath`                    | `/checkpoints` | Fixed agent mount path; cannot be changed.                                                                                                                                                                |
+| `storage.s3.endpoint`                     | `""`           | Required with `storage.type: s3`. S3-compatible endpoint, an absolute http(s) URL.                                                                                                                        |
+| `storage.s3.region`                       | `""`           | Required with `storage.type: s3`. Bucket region.                                                                                                                                                          |
+| `storage.s3.bucket`                       | `""`           | Required with `storage.type: s3`. Bucket holding the checkpoints.                                                                                                                                         |
+| `storage.s3.prefix`                       | `""`           | Key prefix inside the bucket; empty is the bucket root.                                                                                                                                                   |
+| `storage.s3.credentialsSecretRef`         | `""`           | Required with `storage.type: s3`. Secret holding a shared-credentials file, mounted into PageBroker and the operator.                                                                                     |
+| `storage.s3.credentialsSecretKey`         | `credentials`  | Key in that Secret holding the credentials file.                                                                                                                                                          |
+| `storage.s3.addressing`                   | `""`           | Bucket addressing PageBroker uses: `virtual` (its default when empty) or `path`.                                                                                                                          |
+| `storage.s3.allowHttp`                    | `false`        | Accept a plain-http endpoint.                                                                                                                                                                             |
+| `storage.s3.caBundleConfigMapRef`         | `""`           | ConfigMap holding the CA bundle for the endpoint's TLS certificate, mounted into PageBroker and the operator.                                                                                             |
+| `storage.s3.caBundleConfigMapKey`         | `ca.crt`       | Key in that ConfigMap holding the bundle.                                                                                                                                                                 |
+| `pageBroker.artifactAddressing`           | `false`        | Pass store configuration to a compatible PageBroker artifact backend. Deploy this before enabling `operator.bindNewContents`.                                                                             |
+| `operator.bindNewContents`                | `false`        | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../operations/storage.md#enable-artifact-addressing). Required for `storage.type: s3`. |
+| `pageBroker.s3.limits`                    | `{}`           | PageBroker's S3 transfer and transaction limits; see [S3 transfer limits](#s3-transfer-limits) for the keys and bounds.                                                                                |
+| `pageBroker.transferEngine.modelStreamer` | `{}`           | Tuning for the engine that reads S3 restores, written as given; keys are in [Model Streamer configuration](../../agent/pagebroker/MODEL_STREAMER.md).                                                |
+
+### S3 transfer limits
+
+`pageBroker.s3.limits` accepts PageBroker's own keys, with its bounds. The chart
+rejects a key PageBroker does not know, an `activeTransactions` at or above
+`pageBroker.maxConcurrentRequests`, and an `addressing` other than `path` or
+`virtual`; PageBroker enforces the remaining bounds at startup.
+
+| Key | Default | Bounds |
+|-----|---------|--------|
+| `transactionSeconds` | 7200 | 1 to 7200 |
+| `stagingBytes` | the staging volume cap, `pageBroker.staging.sizeLimit` as lowered in [How the cap is chosen](../operations/storage.md#how-the-cap-is-chosen), and at most 1 TiB | 1 byte to 1 TiB |
+| `activeTransactions` | 8 | 1 to 1024, below `pageBroker.maxConcurrentRequests` |
+| `uploadPartBytes` | 64 MiB | 8 MiB to 1 GiB |
+| `uploadBufferBytes` | 1 GiB | at most 16 GiB, and at least `uploadActiveFiles` × (`uploadPartBytes` rounded up to a whole MiB, plus 1 MiB) |
+| `uploadActiveFiles` | 2 | 1 to 64 |
+| `requestSeconds` | 60 | 1 to 60 |
+| `uploadRequestRetries` | 3 | 0 to 10 |
+| `uploadConnectSeconds` | the smaller of 5 and `requestSeconds` | 1 to `requestSeconds` |
 
 ### PageBroker GPU engine
 

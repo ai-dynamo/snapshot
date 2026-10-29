@@ -43,7 +43,7 @@ flowchart LR
     end
     wl["Workload container<br/>(source or destination)"]
   end
-  store[("Checkpoint store<br/>RWX PVC")]
+  store[("Checkpoint store<br/>RWX PVC or S3")]
 
   caller -->|"PodSnapshot · SnapshotJob<br/>restore-from annotation"| op
   op -->|"PodSnapshotContent<br/>(work order, node-labelled)"| agent
@@ -216,9 +216,10 @@ hatch.
 
 ## Storage
 
-Every checkpoint lives in one store shared by all node agents. Today that store
-is a single `ReadWriteMany` PVC, mounted at `/checkpoints` in the agent and in
-PageBroker. Workload pods never mount it.
+Every checkpoint lives in one store shared by all node agents: by default a
+single `ReadWriteMany` PVC, mounted at `/checkpoints` in the agent and in
+PageBroker, or an S3-compatible bucket with `storage.type: s3`. Workload pods
+never mount the PVC.
 
 An artifact is addressed by the `PodSnapshotContent` UID and the captured
 container name, so a deleted-and-recreated content object can never adopt a
@@ -228,8 +229,10 @@ changing how callers address a checkpoint — see
 [SNEP-237: S3-compatible object storage](../../proposals/237-s3-storage/README.md).
 
 PageBroker adds a memory-backed staging volume shared with the agent. By default
-CRIU dumps into staging and PageBroker publishes to the PVC on success, while
-restore reads the artifact directly (`pageBroker.restoreMode: direct`). Because
+CRIU dumps into staging and PageBroker publishes to the checkpoint store on
+success. With a PVC, restore reads the artifact directly
+(`pageBroker.restoreMode: direct`); with S3, restore always stages the
+artifact from the bucket first. Because
 staging is RAM, its cap and the agent's memory limit have to be sized together —
 see [Storage](../../operations/storage.md).
 

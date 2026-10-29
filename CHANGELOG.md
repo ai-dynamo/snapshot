@@ -46,6 +46,12 @@ commit-level history for each release is on its
   already `Ready` before it is not backfilled.
 - `config.checkpoint.checkpointTimeoutSeconds` (default `3600`) fails a
   checkpoint that outruns it.
+- S3 connection and transfer settings for `storage.type: s3`:
+  `storage.s3.addressing`, `storage.s3.allowHttp`, a CA bundle
+  (`storage.s3.caBundleConfigMapRef`), `pageBroker.s3.limits` and
+  `pageBroker.transferEngine.modelStreamer`. Changing one restarts PageBroker.
+  An install that sets none of them is unchanged. See
+  [Storage](docs/operations/storage.md#other-backends).
 
 ### Changed
 
