@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Merge these data entries into the administrator-owned configuration.
+# This file is also usable as a local input to the Argo CD health evaluator.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+data:
+  resource.customizations.health.nvidia.com_SnapshotJob: |
+    hs = {status = "Progressing", message = "Waiting for checkpoint capture"}
+    for _, c in ipairs((obj.status or {}).conditions or {}) do
+      if c.type == "Failed" and c.status == "True" then
+        return {status = "Degraded", message = c.message or c.reason or "Capture failed"}
+      end
+    end
+    for _, c in ipairs((obj.status or {}).conditions or {}) do
+      if c.type == "Completed" and c.status == "True" then
+        return {status = "Healthy", message = "Capture complete"}
+      end
+    end
+    return hs
+  resource.customizations.knownTypeFields.nvidia.com_SnapshotJob: |
+    - field: spec.podTemplate.spec
+      type: core/v1/PodSpec

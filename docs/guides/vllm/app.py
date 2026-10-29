@@ -78,6 +78,11 @@ async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
             **({"checkpoint_token": benchmark_token} if benchmark_token else {}),
         }
 
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        await engine.check_health()
+        return {"status": "ok"}
+
     server = uvicorn.Server(
         uvicorn.Config(
             app,
