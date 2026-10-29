@@ -1076,20 +1076,19 @@ func TestRestoreAndUnlockProcessTreeConcurrency(t *testing.T) {
 
 	for _, tc := range []struct {
 		name        string
-		concurrency string
+		gpuCount    int
 		maxDuration time.Duration
 		minDuration time.Duration
 	}{
-		{name: "serial by default", concurrency: "", minDuration: time.Duration(len(pids)) * sleep},
-		{name: "invalid value stays serial", concurrency: "nonsense", minDuration: time.Duration(len(pids)) * sleep},
-		{name: "concurrent when asked", concurrency: "4", maxDuration: 2 * sleep},
+		{name: "one rank per GPU", gpuCount: 4, maxDuration: 2 * sleep},
+		{name: "fewer GPUs than ranks limits the width", gpuCount: 2, minDuration: 2 * sleep, maxDuration: 3 * sleep},
+		{name: "unknown GPU count restores serially", gpuCount: 0, minDuration: time.Duration(len(pids)) * sleep},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(RestoreConcurrencyEnv, tc.concurrency)
 			helper, actions := fakeRestoreHelper(t, sleep)
 
 			started := time.Now()
-			timings, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", helper, logr.Discard())
+			timings, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", helper, tc.gpuCount, logr.Discard())
 			duration := time.Since(started)
 			if err != nil {
 				t.Fatalf("RestoreAndUnlockProcessTree() error = %v", err)

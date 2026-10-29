@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -34,10 +33,6 @@ const (
 	// DefaultHelperBinaryPath is the agent-side cuda-checkpoint-helper absolute path.
 	// In the placeholder namespace pass filepath.Join(bundleDir, HelperBinaryName) instead.
 	DefaultHelperBinaryPath = "/usr/local/bin/" + HelperBinaryName
-
-	// RestoreConcurrencyEnv bounds how many ranks RestoreAndUnlockProcessTree restores at
-	// once.
-	RestoreConcurrencyEnv = "SNAPSHOT_CUDA_RESTORE_CONCURRENCY"
 
 	// nvidiaSMITimeout is what the agent bounds every nsenter nvidia-smi call
 	// by. The agent's own context carries no deadline, so a hung one would block
@@ -536,29 +531,15 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 	return timings, nil
 }
 
-func restoreConcurrency(log logr.Logger) int {
-	value := strings.TrimSpace(os.Getenv(RestoreConcurrencyEnv))
-	if value == "" {
-		return 1
-	}
-	limit, err := strconv.Atoi(value)
-	if err != nil || limit < 1 {
-		log.Info("ignoring invalid CUDA restore concurrency, restoring one rank at a time",
-			"env", RestoreConcurrencyEnv, "value", value)
-		return 1
-	}
-	return limit
-}
-
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs. It
 // runs inside nsrestore and shares its process group so cancellation reaches the CUDA
 // helper. helperBinaryPath identifies the binary in that namespace, including through
 // an inherited descriptor opened before CRIU restores the workload filesystem.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, gpuCount int, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 
 	start := time.Now()
-	limit := restoreConcurrency(log)
+	limit := max(gpuCount, 1)
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(limit)
 	for _, pid := range cudaPIDs {
