@@ -162,9 +162,8 @@ spec:
                               - path
                               type: object
                             httpGet:
-                              description: |-
-                                HTTPGet succeeds when a GET to the Pod IP returns a status from 200 to
-                                399.
+                              description: HTTPGet succeeds when a GET to the Pod
+                                IP returns a 2xx status.
                               properties:
                                 path:
                                   description: Path of the request. Empty means "/".
@@ -260,8 +259,8 @@ spec:
                                   type: object
                                 httpPost:
                                   description: |-
-                                    HTTPPost sends a POST with an empty body to the Pod IP. A status from
-                                    200 to 399 means the application accepted the notification.
+                                    HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
+                                    means the application accepted the notification.
                                   properties:
                                     path:
                                       description: Path of the request. Empty means

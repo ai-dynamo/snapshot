@@ -47,7 +47,8 @@ func NewHTTPClient() *http.Client {
 
 // sameHostRedirects follows a redirect to the same host, at most maxRedirects
 // times. A redirect to another host isn't followed, and its 3xx response is
-// the result, as with kubelet's RedirectChecker.
+// the result, as with kubelet's RedirectChecker. Unlike kubelet, which passes
+// that response, send fails it.
 func sameHostRedirects(req *http.Request, via []*http.Request) error {
 	if req.URL.Hostname() != via[0].URL.Hostname() {
 		return http.ErrUseLastResponse
@@ -119,15 +120,15 @@ func RequestURL(podIP string, port int, path string) *url.URL {
 	return u
 }
 
-// HTTPGet sends a probe's GET. It succeeds on a status from 200 to 399.
+// HTTPGet sends a probe's GET. It succeeds on a 2xx status.
 func HTTPGet(ctx context.Context, client *http.Client, u *url.URL, timeout time.Duration) error {
 	return send(ctx, client, http.MethodGet, u, timeout)
 }
 
 // HTTPPost sends a notification's POST, with an empty body. It succeeds on a
-// status from 200 to 399, the probe's rule. Kubelet's own lifecycle hooks
-// accept any response; this one must confirm that the application accepted
-// the notification.
+// 2xx status, the probe's rule. Kubelet's own lifecycle hooks accept any
+// response; this one must confirm that the application accepted the
+// notification.
 func HTTPPost(ctx context.Context, client *http.Client, u *url.URL, timeout time.Duration) error {
 	return send(ctx, client, http.MethodPost, u, timeout)
 }
@@ -147,7 +148,10 @@ func send(ctx context.Context, client *http.Client, method string, u *url.URL, t
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest {
+	// Kubelet passes 200 to 399. A 3xx left at this point is a redirect to
+	// another host, which wasn't followed, so the application never answered;
+	// only a 2xx passes.
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		return nil
 	}
 	// Like kubelet's message, it leaves the body out.
