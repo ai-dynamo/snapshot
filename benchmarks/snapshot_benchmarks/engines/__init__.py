@@ -3,15 +3,12 @@
 
 """The engine interface `run.py` drives.
 
-Only `vllm` is implemented today ("the agreed day-one vLLM comparison"). This
-module exists so SGLang and TensorRT-LLM -- which already have parallel guides
-under docs/guides/sglang/ and docs/guides/tensorrt-llm/ -- can be added later
-by implementing this same `Engine` protocol, without reworking `run.py`.
+Each implementation loads the corresponding manual guide templates.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
@@ -21,8 +18,43 @@ class ModelSpec:
 
     label: str
     hf_id_or_path: str
-    reported_weights_bytes: int | None = None
     env: dict[str, str] | None = None
+    tp: int = 1
+    ep: int = 1
+    engine_args: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if (
+            type(self.tp) is not int
+            or type(self.ep) is not int
+            or self.tp < 1
+            or self.ep < 1
+            or self.tp % self.ep
+        ):
+            raise ValueError("TP and EP must be positive; EP must divide TP")
+        reserved = {
+            "model",
+            "model_path",
+            "tensor_parallel_size",
+            "tp_size",
+            "ep_size",
+            "enable_expert_parallel",
+            "moe_expert_parallel_size",
+            "dp_size",
+            "pp_size",
+            "pipeline_parallel_size",
+            "data_parallel_size",
+        }
+        if not isinstance(self.engine_args, dict) or reserved & self.engine_args.keys():
+            raise ValueError(
+                "Use the model and TP/EP flags, not engine-args, for topology"
+            )
+
+    @property
+    def parallelism(self):
+        if self.ep == 1:
+            return f"TP{self.tp}"
+        return f"TP{self.tp}/EP{self.ep}"
 
 
 class Engine(Protocol):
@@ -35,8 +67,13 @@ class Engine(Protocol):
     """
 
     name: str
+    guide: str
     container_name: str
     version_probe_command: str
+
+    def benchmark_env(self) -> dict[str, str]: ...
+
+    def constructor_args(self, model: ModelSpec) -> dict[str, Any]: ...
 
     def build_source_pod(
         self,
