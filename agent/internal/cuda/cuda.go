@@ -539,22 +539,11 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap,
 	var timings RestorePhaseTimings
 
 	start := time.Now()
-	limit := max(gpuCount, 1)
 	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(limit)
+	group.SetLimit(max(gpuCount, 1))
 	for _, pid := range cudaPIDs {
 		group.Go(func() error {
-			began := time.Since(start)
-			if err := restoreProcess(groupCtx, pid, deviceMap, helperBinaryPath, log); err != nil {
-				return err
-			}
-			log.Info("CUDA rank restored",
-				"pid", pid,
-				"restore_concurrency", limit,
-				"started_after", began,
-				"duration", time.Since(start)-began,
-			)
-			return nil
+			return restoreProcess(groupCtx, pid, deviceMap, helperBinaryPath, log)
 		})
 	}
 	if err := group.Wait(); err != nil {
@@ -562,10 +551,7 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap,
 		return timings, err
 	}
 
-	restored := time.Since(start)
-
 	for _, pid := range cudaPIDs {
-		unlockStart := time.Now()
 		if err := unlock(ctx, pid, helperBinaryPath, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			state, stateErr := getState(ctx, pid, helperBinaryPath)
@@ -575,16 +561,8 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap,
 			}
 			return timings, err
 		}
-		log.Info("CUDA rank unlocked", "pid", pid, "duration", time.Since(unlockStart))
 	}
 	timings.TotalDuration = time.Since(start)
 
-	log.Info("CUDA process tree restored and unlocked",
-		"ranks", len(cudaPIDs),
-		"restore_concurrency", limit,
-		"restore_duration", restored,
-		"unlock_duration", timings.TotalDuration-restored,
-		"duration", timings.TotalDuration,
-	)
 	return timings, nil
 }
