@@ -59,6 +59,10 @@ func (checkpointPathRuntime) TerminateContainer(context.Context, string) error {
 	return errors.New("not implemented")
 }
 
+func (checkpointPathRuntime) ExecSync(context.Context, string, []string, time.Duration) ([]byte, []byte, error) {
+	return nil, nil, errors.New("not implemented")
+}
+
 func (checkpointPathRuntime) Close() error { return nil }
 
 type checkpointImageRuntime struct {

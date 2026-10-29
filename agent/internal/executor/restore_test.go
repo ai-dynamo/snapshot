@@ -298,6 +298,10 @@ func (r *restoreFakeRuntime) TerminateContainer(context.Context, string) error {
 	return errors.New("not implemented")
 }
 
+func (r *restoreFakeRuntime) ExecSync(context.Context, string, []string, time.Duration) ([]byte, []byte, error) {
+	return nil, nil, errors.New("not implemented")
+}
+
 func (r *restoreFakeRuntime) Close() error { return nil }
 
 func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
