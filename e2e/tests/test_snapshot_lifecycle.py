@@ -1015,7 +1015,7 @@ def assert_recorded_environment(
     features = host["cpuFeatures"]
     assert features == sorted(set(features))
     assert set(features) <= offered
-    for isa in ("sse2", "ssse3", "sse4_2", "avx", "avx2", "avx512f"):
+    for isa in ("sse2", "ssse3", "sse4_2", "avx", "avx2", "avx512f", "fp", "asimd", "sve2"):
         assert (isa in features) == (isa in offered), isa
 
     pod = k8s.read_pod(config.namespace, run.source_pod)
