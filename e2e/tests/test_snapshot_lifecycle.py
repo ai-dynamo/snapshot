@@ -459,6 +459,137 @@ def test_checkpoint_readiness_probe_on_a_shared_volume_fails(
         raise
 
 
+POST_RESTORE_ACTIONS = {
+    "file": {"file": {"path": snap.RELEASE_MARKER}},
+    "http": {"httpPost": {"path": snap.HOOKS_RESUME_PATH, "port": snap.HOOKS_PORT}},
+}
+
+
+def checkpoint_with_post_restore(
+    config: k8s.E2EConfig, run: snap.TestRun, handler: str
+) -> tuple[str, int]:
+    """Checkpoint a CPU source whose container has a post-restore action, and
+    delete the source. Returns the source node and the observations taken."""
+    source, source_node = create_ready_source(
+        config, run, gpu=False, hooks_server=handler == "http", release_dir=True
+    )
+    checkpoint_observations = snap.wait_for_state_observations(
+        config.namespace, run.source_pod, run.source_token, gpu=False, minimum=2
+    )
+    snap.create_podsnapshot(
+        config.namespace,
+        run.snapshot_name,
+        run.source_pod,
+        source.metadata.uid,
+        containers=[
+            {
+                "name": snap.CONTAINER,
+                "lifecycle": {"postRestore": POST_RESTORE_ACTIONS[handler]},
+            }
+        ],
+    )
+    pod_snapshot, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+    assert_podsnapshot_ready(pod_snapshot, content, source, source_node)
+    k8s.delete_pod(config.namespace, run.source_pod)
+    snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+    return source_node, checkpoint_observations
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+@pytest.mark.parametrize("handler", sorted(POST_RESTORE_ACTIONS))
+def test_post_restore_notifies_the_restored_application(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+    handler: str,
+) -> None:
+    # The restore succeeds only after the application was notified: the file
+    # action creates the marker, and the HTTP action reaches the restored
+    # server at the new Pod IP, which creates it.
+    try:
+        source_node, checkpoint_observations = checkpoint_with_post_restore(config, run, handler)
+
+        k8s.create_pod(
+            snap.add_release_dir(
+                snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node)
+            )
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        assert snap.file_present(config.namespace, run.restore_pod, snap.RELEASE_MARKER)
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+        snap.assert_restored_state(
+            config.namespace,
+            run.restore_pod,
+            source_token=run.source_token,
+            restore_token=run.restore_token,
+            checkpoint_observations=checkpoint_observations,
+            gpu=False,
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_post_restore_file_that_already_exists_fails_the_restore(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # A marker already in place would be taken for the notification, so the
+    # application would never get one. The agent refuses it before restoring.
+    try:
+        source_node, _ = checkpoint_with_post_restore(config, run, "file")
+
+        k8s.create_pod(
+            snap.add_stale_release_marker(
+                snap.add_release_dir(
+                    snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node)
+                )
+            )
+        )
+        restored = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreFailed"
+        )
+        condition = next(
+            c for c in restored.status.conditions if c.type == snap.RESTORED_CONDITION
+        )
+        assert "checking the post-restore action" in condition.message, condition.message
+        assert "already exists" in condition.message, condition.message
+        # Found before CRIU, not after the restored files were applied.
+        assert "before restore" in condition.message, condition.message
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+def test_post_restore_runs_for_each_restored_copy(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # Each copy gets its own notification, in its own filesystem. (Copies in
+    # one Pod can't share an HTTP port, so this uses the file action.)
+    try:
+        source_node, _ = checkpoint_with_post_restore(config, run, "file")
+
+        restore_pod, _ = snap.multi_restore_pod(config=config, run=run, source_node=source_node)
+        k8s.create_pod(snap.add_release_dir(restore_pod))
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        for destination in ("engine-0", "engine-1"):
+            assert snap.file_present(
+                config.namespace, run.restore_pod, snap.RELEASE_MARKER, container=destination
+            ), destination
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 @pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_one_cpu_snapshot_restores_into_two_containers(
@@ -1131,18 +1262,18 @@ def create_ready_source(
     memory_limit: str | None = None,
     handle_sigterm: bool = False,
     hooks_server: bool = False,
+    release_dir: bool = False,
 ) -> tuple[object, str]:
-    k8s.create_pod(
-        snap.source_pod(
-            config=config,
-            run=run,
-            gpu=gpu,
-            annotations=annotations,
-            memory_limit=memory_limit,
-            handle_sigterm=handle_sigterm,
-            hooks_server=hooks_server,
-        )
+    pod = snap.source_pod(
+        config=config,
+        run=run,
+        gpu=gpu,
+        annotations=annotations,
+        memory_limit=memory_limit,
+        handle_sigterm=handle_sigterm,
+        hooks_server=hooks_server,
     )
+    k8s.create_pod(snap.add_release_dir(pod) if release_dir else pod)
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)
     snap.wait_for_file(config.namespace, run.source_pod, snap.SOURCE_READY)
     return pod, pod.spec.node_name

@@ -132,16 +132,20 @@ def hooks_status(port: int, path: str = workloads.HOOKS_STATUS_PATH, method: str
 
 
 @pytest.mark.workload
-def test_hooks_server_reports_checkpoint_readiness(tmp_path: Path) -> None:
-    # The HTTP checkpoint readiness probe e2e test drives this server: 503
-    # until the test creates CHECKPOINT_READY, then 200.
+def test_hooks_server_answers_the_lifecycle_hooks(tmp_path: Path) -> None:
+    # The HTTP lifecycle hook e2e tests drive this server: the probe gets 503
+    # until the test creates CHECKPOINT_READY, then 200; the post-restore POST
+    # leaves RELEASE_MARKER, as a file action would.
     control_dir = tmp_path / "snapshot-control"
     state_dir = tmp_path / "e2e-state"
+    release_dir = tmp_path / "app-release"
     control_dir.mkdir()
+    release_dir.mkdir()
     script = (
         workloads.source_command("test-image", gpu=False, hooks_server=True)
         .replace(workloads.CONTROL_DIR, str(control_dir))
         .replace(workloads.STATE_DIR, str(state_dir))
+        .replace(workloads.RELEASE_DIR, str(release_dir))
         .replace("/tmp/hooks-server.pl", str(tmp_path / "hooks-server.pl"))
     )
     port = free_port()
@@ -171,9 +175,29 @@ def test_hooks_server_reports_checkpoint_readiness(tmp_path: Path) -> None:
         assert hooks_status(port) == 200
         assert hooks_status(port, path="/other") == 404
         assert hooks_status(port, method="POST") == 404
+        assert not (release_dir / "released").exists()
+        assert hooks_status(port, path=workloads.HOOKS_RESUME_PATH, method="POST") == 204
+        assert (release_dir / "released").exists()
+        assert hooks_status(port, path=workloads.HOOKS_RESUME_PATH) == 404
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait(timeout=10)
+
+
+@pytest.mark.workload
+def test_release_dir_helpers_give_each_container_its_own_marker() -> None:
+    pod = {
+        "spec": {
+            "containers": [{"name": "engine-0", "image": "img"}, {"name": "engine-1", "image": "img"}],
+            "volumes": [],
+        }
+    }
+    workloads.add_stale_release_marker(workloads.add_release_dir(pod))
+    mounts = [c["volumeMounts"][0] for c in pod["spec"]["containers"]]
+    assert [m["subPath"] for m in mounts] == ["engine-0", "engine-1"]
+    assert {m["mountPath"] for m in mounts} == {workloads.RELEASE_DIR}
+    touch = pod["spec"]["initContainers"][0]["command"][-1]
+    assert "/release/engine-0/released" in touch and "/release/engine-1/released" in touch
 
 
 @pytest.mark.workload
