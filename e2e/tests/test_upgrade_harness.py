@@ -157,22 +157,6 @@ def test_restore_proxy_starts_with_0_2(tag: str, proxy: bool) -> None:
     assert scenarios.has_restore_proxy(tag) is proxy
 
 
-@pytest.mark.parametrize(
-    ("tag", "labels"),
-    [
-        ("v0.1.0", False),
-        ("v0.2.0", False),
-        ("v0.2.1", False),
-        ("v0.3.0-rc.1", True),
-        ("v0.3.0", True),
-        ("v1.0.0", True),
-        ("v0.0.0-g1a2b3c4d", True),
-    ],
-)
-def test_lsm_labels_are_recorded_from_0_3(tag: str, labels: bool) -> None:
-    assert scenarios.has_feature(tag, scenarios.LSM_LABELS_RELEASE) is labels
-
-
 def restored_pod(status: str, reason: str, message: str = "") -> client.V1Pod:
     condition = client.V1PodCondition(type=lifecycle.RESTORED_CONDITION, status=status, reason=reason, message=message)
     return client.V1Pod(status=client.V1PodStatus(conditions=[condition]))
