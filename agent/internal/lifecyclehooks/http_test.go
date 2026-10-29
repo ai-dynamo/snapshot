@@ -41,7 +41,7 @@ func TestHTTPStatus(t *testing.T) {
 	}{
 		{http.StatusOK, true},
 		{http.StatusNoContent, true},
-		{http.StatusNotModified, true},
+		{http.StatusNotModified, false},
 		{http.StatusBadRequest, false},
 		{http.StatusNotFound, false},
 		{http.StatusServiceUnavailable, false},
@@ -108,9 +108,9 @@ func TestHTTPFollowsRedirectsOnlyToTheSameHost(t *testing.T) {
 		u := serve(t, "/", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "http://other.invalid/", http.StatusFound)
 		})
-		// Not followed: the 302 itself is the result, and it passes.
-		if err := HTTPGet(t.Context(), NewHTTPClient(), u, time.Second); err != nil {
-			t.Fatalf("HTTPGet = %v, want the 302 to pass", err)
+		// Not followed: the 302 itself is the result, and it fails.
+		if err := HTTPGet(t.Context(), NewHTTPClient(), u, time.Second); err == nil || !strings.Contains(err.Error(), "302") {
+			t.Fatalf("HTTPGet = %v, want the 302 to fail", err)
 		}
 	})
 	t.Run("loop", func(t *testing.T) {

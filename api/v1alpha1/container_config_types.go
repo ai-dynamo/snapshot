@@ -75,8 +75,7 @@ type CheckpointReadinessProbeHandler struct {
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 
-	// HTTPGet succeeds when a GET to the Pod IP returns a status from 200 to
-	// 399.
+	// HTTPGet succeeds when a GET to the Pod IP returns a 2xx status.
 	// +optional
 	HTTPGet *HTTPGetAction `json:"httpGet,omitempty"`
 }
@@ -121,8 +120,8 @@ type PostRestoreHandler struct {
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 
-	// HTTPPost sends a POST with an empty body to the Pod IP. A status from
-	// 200 to 399 means the application accepted the notification.
+	// HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
+	// means the application accepted the notification.
 	// +optional
 	HTTPPost *HTTPPostAction `json:"httpPost,omitempty"`
 }
@@ -144,8 +143,9 @@ type ControlFileAction struct {
 }
 
 // HTTPGetAction is a GET to a port on the Pod IP. Like Kubernetes' own
-// httpGet, it has a path and a port, and Snapshot follows redirects only to
-// the same host. It does not support Pods on the host network.
+// httpGet, it has a path and a port. Snapshot follows redirects only to the
+// same host; a redirect to another host fails. It does not support Pods on
+// the host network.
 type HTTPGetAction struct {
 	// Path of the request. Empty means "/".
 	// +optional
@@ -160,9 +160,9 @@ type HTTPGetAction struct {
 }
 
 // HTTPPostAction is a POST with an empty body to a port on the Pod IP. Like
-// Kubernetes' own httpGet, it has a path and a port, and Snapshot follows
-// redirects only to the same host. It does not support Pods on the host
-// network. It is a separate type from HTTPGetAction so either can grow fields
+// Kubernetes' own httpGet, it has a path and a port. Snapshot follows
+// redirects only to the same host; a redirect to another host fails. It does
+// not support Pods on the host network. It is a separate type from HTTPGetAction so either can grow fields
 // of its own.
 type HTTPPostAction struct {
 	// Path of the request. Empty means "/".
