@@ -11,38 +11,51 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// maxResponseBody bounds how much of a response is read before the
-// connection is closed. The body is never used or logged.
-const maxResponseBody = 4 << 10
+// The HTTP actions behave like a Kubernetes httpGet probe. Each choice below
+// follows kubelet's prober (pkg/probe/http), unless it says otherwise.
+const (
+	// maxResponseBody bounds how much of a response is read. The body is
+	// never used or logged.
+	maxResponseBody = 10 << 10
+	// maxRedirects is how many same-host redirects a request follows.
+	maxRedirects = 10
+	// userAgent names the agent the way kubelet's kube-probe names kubelet.
+	userAgent = "snapshot-agent"
+)
 
-// client sends every hook request. It goes straight to the Pod IP: no proxy
-// from the agent's environment, which would send Pod traffic elsewhere, and no
-// redirects, which could send the agent somewhere the Pod chose. A redirect
-// comes back as its own 3xx response and counts as a failure.
-var client = &http.Client{
-	Transport: &http.Transport{
-		Proxy:             nil,
-		DisableKeepAlives: true,
-	},
-	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+// NewHTTPClient returns the client hook requests go through. Like kubelet's
+// prober, it ignores the agent's proxy environment, which would send Pod
+// traffic elsewhere; it opens a new connection for every request and asks for
+// no compression; and it follows redirects only to the same host.
+func NewHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:              nil,
+			DisableKeepAlives:  true,
+			DisableCompression: true,
+		},
+		CheckRedirect: sameHostRedirects,
+	}
 }
 
-// StatusError is a response with a status that doesn't count as success.
-type StatusError struct {
-	Method string
-	URL    string
-	Code   int
-}
-
-func (e *StatusError) Error() string {
-	return fmt.Sprintf("%s %s returned %d", e.Method, e.URL, e.Code)
+// sameHostRedirects follows a redirect to the same host, at most maxRedirects
+// times. A redirect to another host isn't followed, and its 3xx response is
+// the result, as with kubelet's RedirectChecker.
+func sameHostRedirects(req *http.Request, via []*http.Request) error {
+	if req.URL.Hostname() != via[0].URL.Hostname() {
+		return http.ErrUseLastResponse
+	}
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	return nil
 }
 
 // HTTPTarget returns the address hook requests go to: the Pod IP. A Pod on
@@ -59,86 +72,84 @@ func HTTPTarget(pod *corev1.Pod) (string, error) {
 }
 
 // ResolvePort returns the port number an action's port names: the number
-// itself, or the containerPort of the container's port with that name, as
-// Kubernetes resolves a probe's named port.
-func ResolvePort(pod *corev1.Pod, container string, port intstr.IntOrString) (int32, error) {
-	if port.Type == intstr.Int {
-		if port.IntVal < 1 || port.IntVal > 65535 {
-			return 0, fmt.Errorf("invalid port %d", port.IntVal)
+// itself, or the containerPort of the container's port with that name. Like
+// kubelet's ResolveContainerPort, it returns -1 with the error when the port
+// is not a valid port number.
+func ResolvePort(pod *corev1.Pod, container string, port intstr.IntOrString) (int, error) {
+	number := -1
+	switch port.Type {
+	case intstr.Int:
+		number = port.IntValue()
+	case intstr.String:
+		c := findContainer(pod, container)
+		if c == nil {
+			return -1, fmt.Errorf("container %q is not in Pod %s/%s", container, pod.Namespace, pod.Name)
 		}
-		return port.IntVal, nil
-	}
-	c := findContainer(pod, container)
-	if c == nil {
-		return 0, fmt.Errorf("container %q is not in Pod %s/%s", container, pod.Namespace, pod.Name)
-	}
-	for _, p := range c.Ports {
-		if p.Name == port.StrVal {
-			return p.ContainerPort, nil
+		found := false
+		for _, p := range c.Ports {
+			if p.Name == port.StrVal {
+				number, found = int(p.ContainerPort), true
+				break
+			}
 		}
-	}
-	return 0, fmt.Errorf("container %q has no port named %q", container, port.StrVal)
-}
-
-// HTTPGet sends a GET for a probe. It succeeds on 200 only.
-func HTTPGet(ctx context.Context, podIP string, port int32, path string, timeout time.Duration) error {
-	return send(ctx, http.MethodGet, podIP, port, path, timeout, http.StatusOK)
-}
-
-// HTTPPost sends a POST with an empty body for a notification. It succeeds on
-// 200 or 204, which mean the application accepted it.
-func HTTPPost(ctx context.Context, podIP string, port int32, path string, timeout time.Duration) error {
-	return send(ctx, http.MethodPost, podIP, port, path, timeout, http.StatusOK, http.StatusNoContent)
-}
-
-func send(ctx context.Context, method, podIP string, port int32, path string,
-	timeout time.Duration, success ...int,
-) error {
-	target, err := requestURL(podIP, port, path)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, target, http.NoBody)
-	if err != nil {
-		return fmt.Errorf("build %s %s: %w", method, target, err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, target, err)
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
-	_ = resp.Body.Close()
-	for _, code := range success {
-		if resp.StatusCode == code {
-			return nil
+		if !found {
+			return -1, fmt.Errorf("container %q has no port named %q", container, port.StrVal)
 		}
+	default:
+		return -1, fmt.Errorf("port %v has no type", port)
 	}
-	return &StatusError{Method: method, URL: target, Code: resp.StatusCode}
+	if len(validation.IsValidPortNum(number)) > 0 {
+		return -1, fmt.Errorf("invalid port number: %d", number)
+	}
+	return number, nil
 }
 
-// requestURL builds the request URL the way kubelet does for an httpGet probe:
-// the path, with a query if it has one, on the Pod IP and port. Whatever the
-// path says about a scheme, user or host is replaced, so it can never send the
-// request anywhere but the Pod. An empty path is "/".
-func requestURL(podIP string, port int32, path string) (string, error) {
-	if net.ParseIP(podIP) == nil {
-		return "", fmt.Errorf("invalid Pod IP %q", podIP)
-	}
-	if port < 1 || port > 65535 {
-		return "", fmt.Errorf("invalid port %d", port)
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
+// RequestURL builds a hook request's URL the way kubelet builds an httpGet
+// probe's: the path as parsed, with the scheme and host set to http and the
+// Pod IP and port. Setting the host replaces any host the path names, so the
+// request goes to the Pod.
+func RequestURL(podIP string, port int, path string) *url.URL {
 	u, err := url.Parse(path)
 	if err != nil {
+		// Like kubelet, pass a path that doesn't parse along as it is.
 		u = &url.URL{Path: path}
 	}
 	u.Scheme = "http"
-	u.User = nil
-	u.Host = net.JoinHostPort(podIP, strconv.Itoa(int(port)))
-	u.Fragment = ""
-	return u.String(), nil
+	u.Host = net.JoinHostPort(podIP, strconv.Itoa(port))
+	return u
+}
+
+// HTTPGet sends a probe's GET. It succeeds on a status from 200 to 399.
+func HTTPGet(ctx context.Context, client *http.Client, u *url.URL, timeout time.Duration) error {
+	return send(ctx, client, http.MethodGet, u, timeout)
+}
+
+// HTTPPost sends a notification's POST, with an empty body. It succeeds on a
+// status from 200 to 399, the probe's rule. Kubelet's own lifecycle hooks
+// accept any response; this one must confirm that the application accepted
+// the notification.
+func HTTPPost(ctx context.Context, client *http.Client, u *url.URL, timeout time.Duration) error {
+	return send(ctx, client, http.MethodPost, u, timeout)
+}
+
+func send(ctx context.Context, client *http.Client, method string, u *url.URL, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), http.NoBody)
+	if err != nil {
+		return fmt.Errorf("failed to build the %s request for %s: %w", method, u.Redacted(), err)
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "*/*")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP %s failed: %w", method, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest {
+		return nil
+	}
+	// Like kubelet's message, it leaves the body out.
+	return fmt.Errorf("HTTP %s %s failed with statuscode: %d", method, u.Redacted(), resp.StatusCode)
 }
