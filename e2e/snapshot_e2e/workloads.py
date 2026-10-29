@@ -36,6 +36,8 @@ FILE_TOKEN = f"{STATE_DIR}/file-token"
 OBSERVATIONS = f"{STATE_DIR}/observations.log"
 # The CPU loop exits with the code written here, so a test can end it.
 EXIT_REQUEST = f"{STATE_DIR}/exit-request"
+# The CPU loop exits with this code on SIGTERM, when a test asks for it.
+SIGTERM_EXIT = 42
 SOURCE_TOKEN_ENV = "SNAPSHOT_E2E_SOURCE_TOKEN"
 RESTORE_TOKEN_ENV = "SNAPSHOT_E2E_RESTORE_TOKEN"
 
@@ -79,6 +81,7 @@ def source_pod(
     gpu: bool,
     annotations: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    handle_sigterm: bool = False,
 ) -> dict[str, Any]:
     metadata = {
         "name": run.source_pod,
@@ -86,7 +89,9 @@ def source_pod(
         "labels": run.labels,
         "annotations": annotations or {},
     }
-    spec = base_pod_spec(config, run, source_command(run.image, gpu), gpu, memory_limit)
+    spec = base_pod_spec(
+        config, run, source_command(run.image, gpu, handle_sigterm=handle_sigterm), gpu, memory_limit
+    )
     spec["containers"][0]["env"] = [
         {"name": SOURCE_TOKEN_ENV, "value": run.source_token},
     ]
@@ -378,12 +383,17 @@ def same_node_affinity(node: str) -> dict[str, Any]:
     }
 
 
-def source_command(image: str, gpu: bool) -> str:
+def source_command(image: str, gpu: bool, *, handle_sigterm: bool = False) -> str:
+    # handle_sigterm makes the CPU loop exit with SIGTERM_EXIT on SIGTERM. Off
+    # by default, so every other test keeps a workload that only SIGKILL ends.
+    if handle_sigterm and gpu:
+        raise ValueError("only the CPU loop handles SIGTERM")
     state_loop = CUDA_SOURCE if gpu else CPU_SOURCE
+    on_sigterm = f"trap 'exit {SIGTERM_EXIT}' TERM\n" if handle_sigterm else ""
     return f"""set -euo pipefail
 echo "[source] image={image}"
 mkdir -p {STATE_DIR}
-{state_loop}
+{on_sigterm}{state_loop}
 """
 
 

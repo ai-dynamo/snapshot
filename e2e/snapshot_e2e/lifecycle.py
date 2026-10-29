@@ -26,6 +26,7 @@ from snapshot_e2e.workloads import FILE_TOKEN
 from snapshot_e2e.workloads import OBSERVATIONS
 from snapshot_e2e.workloads import RESTORE_DONE
 from snapshot_e2e.workloads import RESTORE_PROXY
+from snapshot_e2e.workloads import SIGTERM_EXIT
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import multi_restore_pod
@@ -256,23 +257,53 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
     return wait_for(f"pod {namespace}/{name} Ready", ready, timeout, detail=detail)
 
 
+def container_exit_code(pod: Any, container: str) -> int | None:
+    """The container's exit code, or None while it has not ended."""
+    for status in (pod.status and pod.status.container_statuses) or []:
+        if status.name == container and status.state and status.state.terminated:
+            return status.state.terminated.exit_code
+    return None
+
+
 def wait_for_container_exit(
     namespace: str, name: str, container: str = CONTAINER, timeout: int = 120
 ) -> int:
     """Wait for a container to end, and return its exit code."""
 
     def exited() -> int | None:
-        pod = k8s.read_pod(namespace, name)
-        for status in pod.status.container_statuses or []:
-            if status.name == container and status.state and status.state.terminated:
-                return status.state.terminated.exit_code
-        return None
+        return container_exit_code(k8s.read_pod(namespace, name), container)
 
     return wait_for(
         f"container {container} of pod {namespace}/{name} to exit",
         exited,
         timeout,
         poll_interval=2,
+    )
+
+
+def delete_pod_and_wait_for_exit(
+    namespace: str, name: str, container: str = CONTAINER, timeout: int = 120
+) -> int:
+    """Delete a Pod, and return the exit code its container ended with.
+
+    The Pod is removed soon after its containers stop, so polling can miss the
+    final status. kubelet posts that status before it removes the Pod, so a
+    watch started before the delete sees it.
+    """
+    resource_version = k8s.read_pod(namespace, name).metadata.resource_version
+    k8s.delete_pod(namespace, name)
+    seen = "no events"
+    for event in k8s.watch_pod(namespace, name, resource_version, timeout):
+        pod = event["object"]
+        code = container_exit_code(pod, container)
+        if code is not None:
+            return code
+        seen = f"last event {event['type']}, phase={pod.status.phase if pod.status else None}"
+        if event["type"] == "DELETED":
+            break
+    raise AssertionError(
+        f"pod {namespace}/{name} went away or timed out without an exit code "
+        f"for container {container} ({seen})"
     )
 
 

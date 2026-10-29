@@ -19,6 +19,7 @@ state loop with two contractual properties this file pins down:
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -110,6 +111,48 @@ def test_cpu_source_logs_and_exits_on_request(tmp_path: Path) -> None:
 
     assert proc.returncode == 7
     assert "[source] observation seq=0" in output
+
+
+@pytest.mark.workload
+def test_cpu_source_exits_with_its_code_on_sigterm_when_asked(tmp_path: Path) -> None:
+    # The pod deletion e2e test checks this code: the restored workload
+    # handled the SIGTERM the restore proxy forwarded.
+    control_dir = tmp_path / "snapshot-control"
+    state_dir = tmp_path / "e2e-state"
+    control_dir.mkdir()
+    script = workloads.source_command("test-image", gpu=False, handle_sigterm=True)
+    script = script.replace(workloads.CONTROL_DIR, str(control_dir)).replace(
+        workloads.STATE_DIR, str(state_dir)
+    )
+    proc = subprocess.Popen(
+        ["bash", "-c", script],
+        env={**os.environ, workloads.SOURCE_TOKEN_ENV: "unit-source-token"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (control_dir / "ready-for-snapshot").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert (control_dir / "ready-for-snapshot").exists(), "source never became ready"
+        proc.send_signal(signal.SIGTERM)
+        # bash runs the trap once the loop's sleep returns.
+        proc.communicate(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    assert proc.returncode == workloads.SIGTERM_EXIT
+
+
+@pytest.mark.workload
+def test_only_an_opted_in_cpu_source_handles_sigterm() -> None:
+    assert "trap" not in workloads.source_command("test-image", gpu=False)
+    assert "trap" not in workloads.snapshotjob_source_command("test-image", gpu=False)
+    with pytest.raises(ValueError):
+        workloads.source_command("test-image", gpu=True, handle_sigterm=True)
 
 
 @pytest.mark.workload
