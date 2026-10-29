@@ -38,6 +38,9 @@ jobs:
     env:
       SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
       SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      SOURCE_EVENT: ${{ github.event.workflow_run.event }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -67,23 +70,32 @@ jobs:
           bootstrap: "true"
           persist-credentials: "true"
 
+      # The source run's identity, not this run's: results are matched by run
+      # ID, and GITHUB_RUN_ID, GITHUB_SHA and GITHUB_EVENT_NAME here describe
+      # this workflow_run job.
       - name: Aggregate and index benchmark results
         env:
           SNAPSHOT_E2E_HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
         run: |
           set -euo pipefail
-          echo "SNAPSHOT_E2E_HISTORY_DIR=${SNAPSHOT_E2E_HISTORY_DIR}" >> "${GITHUB_ENV}"
           PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history aggregate \
             --artifacts-dir "${RUNNER_TEMP}/e2e-framework-benchmark-results" \
             --history-dir "${SNAPSHOT_E2E_HISTORY_DIR}" \
             --output-dir "${RUNNER_TEMP}/e2e-framework-benchmark-comparison" \
             --summary-file "${GITHUB_STEP_SUMMARY}" \
+            --run-id "${SOURCE_RUN_ID}" \
+            --run-attempt "${SOURCE_RUN_ATTEMPT}" \
+            --source-commit "${SOURCE_SHA}" \
+            --source-ref "refs/heads/${SOURCE_BRANCH}" \
+            --source-event "${SOURCE_EVENT}" \
             --expected-case vllm \
             --expected-case sglang \
             --expected-case tensorrt-llm \
             --publish
 
       - name: Commit and push benchmark history
+        env:
+          SNAPSHOT_E2E_HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
         run: |
           set -euo pipefail
           git -C "${SNAPSHOT_E2E_HISTORY_DIR}" config user.name "github-actions[bot]"
