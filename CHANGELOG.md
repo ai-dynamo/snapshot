@@ -34,6 +34,16 @@ commit-level history for each release is on its
 
 ### Added
 
+- Lifecycle hooks: `PodSnapshot.spec.containers` and
+  `SnapshotJob.spec.podSnapshotTemplate.containers` can set a
+  `checkpointReadinessProbe`, which decides when to checkpoint instead of the
+  container's Ready condition, and a `lifecycle.postRestore` action, which
+  notifies the restored application by file or HTTP. A restore succeeds only
+  once its action succeeds. `PodSnapshotContent.spec.containers` keeps the
+  settings for every restore. CRD change: deploy the matching CRDs, operator and
+  node agent together. See
+  [Lifecycle hooks](docs/reference/workload-contract.md#lifecycle-hooks).
+
 - `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
   and opt into cleanup after failure; omission or `Retain` preserves output.
   CRD change: deploy the matching CRD and operator together.

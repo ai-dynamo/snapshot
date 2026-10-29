@@ -8,9 +8,6 @@ import "k8s.io/apimachinery/pkg/util/intstr"
 // ContainerSnapshotConfig holds the settings for one checkpointed container,
 // matched to it by name. Snapshot copies them into the PodSnapshotContent at
 // checkpoint time, and every restore of that checkpoint uses that copy.
-//
-// Not enabled yet: the operator rejects a checkpointReadinessProbe or a
-// lifecycle until support is complete.
 // +kubebuilder:validation:XValidation:rule="!has(self.checkpointReadinessProbe) || !has(self.checkpointReadinessProbe.file) || !has(self.lifecycle) || !has(self.lifecycle.postRestore) || !has(self.lifecycle.postRestore.file) || self.checkpointReadinessProbe.file.path != self.lifecycle.postRestore.file.path",message="checkpointReadinessProbe and lifecycle.postRestore must use different file paths"
 type ContainerSnapshotConfig struct {
 	// Name of the checkpointed container these settings apply to.

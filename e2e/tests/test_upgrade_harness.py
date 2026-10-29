@@ -279,11 +279,7 @@ def test_upgrade_reapplies_the_install_helm_overrides(env: pytest.MonkeyPatch) -
 
     configs.get("full").apply(UpgradeContext(config=config, settings=UpgradeSettings.from_env()))
 
-    assert calls[0]["helm_overrides"] == [
-        "operator.lifecycleHooks=true",
-        "image.agent.pullPolicy=IfNotPresent",
-        "runtime.storageDir=/var/lib/k3s",
-    ]
+    assert calls[0]["helm_overrides"] == ["image.agent.pullPolicy=IfNotPresent", "runtime.storageDir=/var/lib/k3s"]
 
 
 def test_upgrade_keeps_the_vcluster_to_its_own_pods(env: pytest.MonkeyPatch) -> None:
@@ -297,7 +293,6 @@ def test_upgrade_keeps_the_vcluster_to_its_own_pods(env: pytest.MonkeyPatch) -> 
     configs.get("full").apply(UpgradeContext(config=config, settings=UpgradeSettings.from_env()))
 
     assert calls[0]["helm_overrides"] == [
-        "operator.lifecycleHooks=true",
         "daemonset.nriHostNamespace=snapshot-e2e-upg",
         "image.agent.pullPolicy=IfNotPresent",
     ]

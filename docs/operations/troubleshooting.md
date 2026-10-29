@@ -25,6 +25,26 @@ guides](../guides/README.md) -- missing the control volume, seccomp profile,
 or readiness gate Snapshot relies on -- or that omits mounts or secrets the
 replica needs to start.
 
+When the container has a `checkpointReadinessProbe`, the agent waits for that
+probe, not for Ready, and the source pod has a `WaitingForCheckpointReadiness`
+event. The agent logs each failed check at debug level. Check the probe's file
+or endpoint from inside the source container. The wait has no deadline of its
+own, so a probe that never passes waits until you delete the `PodSnapshot`, or
+until a `SnapshotJob`'s `activeDeadlineSeconds`.
+
+## A checkpoint fails with `InvalidCheckpointReadinessProbe`
+
+The agent refused the container's `checkpointReadinessProbe` before running it,
+because it can never pass. The message says why:
+
+- The file is on a volume other than an `emptyDir`, such as a `hostPath` or a
+  `PersistentVolumeClaim`. Use a path on the container's own filesystem or an
+  `emptyDir`.
+- The source pod uses the host network. HTTP probes need the pod's own IP.
+- The container has no port with the probe's port name.
+
+The `PodSnapshot`'s spec can't change, so create a new one with a fixed probe.
+
 ## The agent or a restore pod will not start
 
 The `snapshot-agent` runs privileged with `hostPID`, `hostIPC`, and `hostNetwork`.

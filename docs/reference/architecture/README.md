@@ -97,7 +97,9 @@ From a ready pod to a stored artifact:
 4. **Quiesce.** The agent waits for the target container to report Ready. That
    readiness probe gates on `ready-for-snapshot`, which the workload writes only
    once no GPU work is in flight — see the
-   [workload contract](../workload-contract.md).
+   [workload contract](../workload-contract.md). A container with a
+   `checkpointReadinessProbe` waits for that probe instead; see
+   [Lifecycle hooks](lifecycle-hooks.md).
 5. **Capture**, in this order, into a PageBroker transaction:
    GPU state first (PageBroker's GPU engine, or `cuda-checkpoint`), then the
    CRIU dump, then the overlay rootfs diff. The dump always terminates the
@@ -161,9 +163,11 @@ restore time into:
 4. **Wake / remap** — temporary mounts are released, the PageBroker transaction
    is committed, and the restored process is validated. The agent then writes
    `restore-complete` into the control volume, which is what the restored
-   workload is blocked on; it leaves quiescence and resumes serving. The agent
-   sets `nvidia.com/Restored=True`, and the proxy follows the restored process
-   from there, forwarding signals and exiting with its code.
+   workload is blocked on; it leaves quiescence and resumes serving. A container
+   with a `lifecycle.postRestore` action is notified next, and the restore
+   succeeds only once that succeeds; see [Lifecycle hooks](lifecycle-hooks.md).
+   The agent sets `nvidia.com/Restored=True`, and the proxy follows the restored
+   process from there, forwarding signals and exiting with its code.
 
 A pod gets exactly one restore. On failure the agent writes `restore-failed`,
 kills the destination container, and reports the reason on the pod condition;
@@ -297,6 +301,7 @@ survive. CuInterpose, the opt-in component that provides this, is described in
 | `operator/internal/controller` | `PodSnapshot`, `PodSnapshotContent` and `SnapshotJob` reconcilers. |
 | `operator/internal/maintenance` | Artifact cleanup queue and backends. |
 | `agent/internal/controller` | The node-local control loop: capture and restore queues. |
+| `agent/internal/lifecyclehooks` | The file and HTTP actions of [lifecycle hooks](lifecycle-hooks.md). |
 | `agent/internal/executor` | The checkpoint and restore workflows, including `nsrestore`. |
 | `agent/internal/criu`, `agent/internal/cuda` | CRIU and CUDA primitives. |
 | `agent/internal/nri`, `agent/internal/restoreproxy` | Proxy injection and the proxy itself. |

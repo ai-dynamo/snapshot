@@ -134,6 +134,37 @@ contract admits — any inference server that fills in its own column of the tab
 and meets the pod and runtime requirements below is snapshot-ready. See
 [Support a new inference server](#support-a-new-inference-server).
 
+## Lifecycle hooks
+
+Instead of the readiness gate and `restore-complete`, a workload can name its
+own signals in the `PodSnapshot`'s
+[container settings](api.md#container-settings):
+
+- `checkpointReadinessProbe`: a file, or an HTTP GET that returns `200`, that
+  says the workload is safe to checkpoint. It replaces the Ready condition for
+  this purpose, so the readiness probe can mean "ready to serve". Step 7 applies
+  to it: succeed only once step 4 holds.
+- `lifecycle.postRestore`: after the restore, Snapshot creates a file, or sends
+  a POST with an empty body, that tells the workload it may resume. It replaces
+  step 9's wait on `restore-complete`.
+
+A workload that uses them:
+
+- **MUST** keep a file on the container's own filesystem or on an `emptyDir`
+  volume, on a path with no symlink. Snapshot refuses `hostPath`,
+  `PersistentVolumeClaim`, and other volumes.
+- **MUST NOT** have the `postRestore` file in place before the restore, not even
+  in the checkpointed filesystem: the restore fails if it exists. A path on an
+  `emptyDir` that only the restore Pod mounts avoids this. In a restore Pod with
+  several destination containers, give each its own path, for example with
+  `subPath`.
+- **MUST** answer HTTP on all of the container's addresses, not only the source
+  Pod's IP: requests go to the Pod IP, which changes on restore. A NetworkPolicy
+  must let the node agent reach the port.
+- **MUST** answer the `postRestore` POST with `200` or `204` and handle it more
+  than once. Snapshot retries until it gets one, and repeats it after an agent
+  restart.
+
 ## Pod requirements
 
 The source pod gives the workload the shared directory and the conditions
