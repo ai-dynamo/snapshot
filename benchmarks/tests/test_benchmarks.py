@@ -48,6 +48,7 @@ def config():
 def cold_measurement():
     return dict(
         weights_bytes=1503300328,
+        inference_checks=[dict(prompt=prompt, answer="baseline") for prompt in measurement.INFERENCE_PROMPTS],
         cold_start_s=31,
         unattributed_s=0,
         phases_s={
@@ -133,7 +134,7 @@ def cluster():
         ),
         "metadata.engine_version": "test-version",
         "measurement.source_measurement": (cold_measurement(), "preserved-token"),
-        "measurement.checkpoint_measurement": (2_000_000_000, 2),
+        "measurement.checkpoint_measurement": (2_000_000_000, 2, {}),
         "measurement.restored_measurement": metrics,
     }
     with contextlib.ExitStack() as stack:
@@ -313,10 +314,10 @@ class BenchmarkTests(unittest.TestCase):
                     dict(stage=stage, elapsed_s=elapsed, wall_time_ns=elapsed * 10**9)
                 )
             )
-        for expected in ("paris", "berlin", "tokyo"):
+        for prompt in measurement.INFERENCE_PROMPTS:
             lines.append(
                 "CR_SEMANTIC_PRECHECK "
-                + json.dumps(dict(expected=expected, answer=expected))
+                + json.dumps(dict(prompt=prompt, answer="a must-visit destination for anyone interested"))
             )
         lines.append('CR_PHASE {"checkpoint_token":"token"}')
         spans = []
@@ -358,6 +359,7 @@ class BenchmarkTests(unittest.TestCase):
                         success=True,
                         node_page_cache_dropped=True,
                         weights_bytes=1503300328,
+                        model_directory="/hf-cache/test",
                         total_pages=1,
                         resident_pages_after=0,
                     )
@@ -375,6 +377,7 @@ class BenchmarkTests(unittest.TestCase):
 
             with (
                 patch.object(measurement.k8s, "exec_command", side_effect=execute),
+                patch.object(measurement, "model_directory_measurement", return_value={"total_bytes": 1600000000}),
                 patch.object(
                     measurement.k8s, "pod_logs", return_value="\n".join(lines)
                 ),
@@ -391,6 +394,8 @@ class BenchmarkTests(unittest.TestCase):
                     )
                 analysis.assert_not_called()
                 self.assertEqual(basic["cold_start_s"], 10)
+                self.assertEqual(basic["inference_checks"], value["inference_checks"])
+                self.assertEqual(basic["inference_checks"][0]["answer"], "a must-visit destination for anyone interested")
                 self.assertEqual(basic_token, token)
                 self.assertFalse(basic["detailed_timing"])
                 self.assertNotIn("phases_s", basic)
@@ -430,7 +435,7 @@ class BenchmarkTests(unittest.TestCase):
             )
             measurement.save(
                 folder / "timing.json",
-                dict(duration="3s", phases=dict(criu_restore="1s", cuda_restore="1s")),
+                dict(duration="3s", phases=dict(criu_restore="1s", cuda_restore="1s", pagebroker_stage="0.4s")),
             )
 
             def write_events():
@@ -439,7 +444,10 @@ class BenchmarkTests(unittest.TestCase):
                 )
 
             write_events()
-            self.assertEqual(restore_metrics(folder)["total_s"], 4)
+            metrics = restore_metrics(folder)
+            self.assertEqual(metrics["total_s"], 4)
+            self.assertEqual(metrics["staging_s"], 0.4)
+            self.assertEqual(metrics["other_setup_s"], 0.6)
             events.pop(1)
             write_events()
             with self.assertRaisesRegex(ValueError, "wake completion"):
@@ -504,7 +512,8 @@ class BenchmarkTests(unittest.TestCase):
     def test_basic_run_report_keeps_totals_without_cold_start_breakdown(self):
         with tempfile.TemporaryDirectory() as tmp, cluster() as mocks:
             mocks["measurement.source_measurement"].return_value = (
-                dict(cold_start_s=31, detailed_timing=False, weights_bytes=1503300328),
+                dict(cold_start_s=31, detailed_timing=False, weights_bytes=1503300328,
+                     inference_checks=cold_measurement()["inference_checks"]),
                 "preserved-token",
             )
             result = run.run_benchmark(
@@ -784,6 +793,8 @@ class BenchmarkTests(unittest.TestCase):
                         total_s=total,
                         agent_s=total * 0.75,
                         setup_s=total / 4,
+                        staging_s=total / 8,
+                        other_setup_s=total / 8,
                         criu_s=total / 4,
                         cuda_s=total / 4,
                         wake_handoff_s=total / 4,
@@ -818,7 +829,7 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertIn("3.88×", text)
                 self.assertIn("8.00 ± 4.00", text)
                 self.assertIn(
-                    "| 2.00 ± 1.00 | 2.00 ± 1.00 | 2.00 ± 1.00 | 2.00 ± 1.00 | 8.00 ± 4.00 |",
+                    "| 1.00 ± 0.50 | 1.00 ± 0.50 | 2.00 ± 1.00 | 2.00 ± 1.00 | 2.00 ± 1.00 | 8.00 ± 4.00 |",
                     text,
                 )
                 self.assertIn("| 4.00 | 2.00 | 7.00 | 18.00 | 31.00 |", text)
@@ -958,7 +969,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(
                 measurement.checkpoint_measurement(
                     config(), "gpu-node", "uid", "content", Path(tmp)
-                ),
+                )[:2],
                 (12, 1.2),
             )
             self.assertNotIn("python", execute.call_args.args[2])
@@ -996,7 +1007,7 @@ class BenchmarkTests(unittest.TestCase):
                     return_value='Checkpoint timing summary {"content":"content", "checkpoint":{"duration":"1s"}}',
                 ),
             ):
-                size, duration = measurement.checkpoint_measurement(
+                size, duration, _ = measurement.checkpoint_measurement(
                     config(), "node", "uid", "content", root
                 )
                 self.assertEqual((size, duration), (16, 1))

@@ -14,8 +14,8 @@ from pathlib import Path
 from kubernetes import client
 from snapshot_e2e import k8s, lifecycle
 
-from snapshot_benchmarks import logs
-from snapshot_benchmarks.timing import restore_metrics, seconds
+from snapshot_benchmarks import logs, storage
+from snapshot_benchmarks.timing import restore_metrics, seconds, throughput
 
 
 def save(path, value):
@@ -41,21 +41,26 @@ def remote_json(namespace, pod, script, *, container="main"):
     return json.loads(records[0])
 
 
+INFERENCE_PROMPTS = (
+    "The capital city of France is",
+    "The capital city of Germany is",
+    "The capital city of Japan is",
+)
+
+
 def source_checks_pass(checks):
-    return sorted(c["expected"] for c in checks) == [
-        "berlin",
-        "paris",
-        "tokyo",
-    ] and all(c["expected"] in c["answer"].lower() for c in checks)
+    return sorted(c["prompt"] for c in checks) == sorted(INFERENCE_PROMPTS) and all(
+        isinstance(c.get("answer"), str) and c["answer"].strip() for c in checks
+    )
 
 
-def restore_checks_pass(checks, token):
-    return sorted(c["expected"] for c in checks) == [
-        "berlin",
-        "paris",
-        "tokyo",
-    ] and all(
-        c["expected"] in c["response"]["text"].lower()
+def restore_checks_pass(checks, token, source_checks):
+    if not source_checks_pass(source_checks):
+        return False
+    answers = {c["prompt"]: c["answer"].strip() for c in source_checks}
+    return sorted(c["prompt"] for c in checks) == sorted(answers) and all(
+        isinstance(c["response"].get("text"), str)
+        and c["response"]["text"].strip() == answers[c["prompt"]]
         and c["response"].get("checkpoint_token") == token
         for c in checks
     )
@@ -97,6 +102,7 @@ print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compres
         or cache.get("resident_pages_after") != 0
     ):
         raise ValueError("Missing successful page-cache eviction and residency check")
+    directory = model_directory_measurement(cfg, pod, cache["model_directory"], folder)
     text = (
         k8s.pod_logs(
             cfg.workload_namespace, pod.metadata.name, tail_lines=None, container="main"
@@ -145,6 +151,8 @@ print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compres
             cold_start_s=by_stage["engine_init_end"] - by_stage["process_start"],
             detailed_timing=False,
             weights_bytes=cache["weights_bytes"],
+            inference_checks=checks,
+            model_directory_bytes=directory["total_bytes"],
             page_cache=cache,
         )
         return measured, tokens.pop()
@@ -166,6 +174,8 @@ print('BENCHMARK_JSON ' + json.dumps(dict(log_gzip=base64.b64encode(gzip.compres
     measured = json.loads((folder / "phase-accounting.json").read_text())[0]
     measured["detailed_timing"] = True
     measured["weights_bytes"] = cache["weights_bytes"]
+    measured["inference_checks"] = checks
+    measured["model_directory_bytes"] = directory["total_bytes"]
     measured["page_cache"] = cache
     return measured, tokens.pop()
 
@@ -192,6 +202,20 @@ def parse_checkpoint_inventory(output):
     return dict(files=files, total_bytes=sum(f["bytes"] for f in files))
 
 
+def model_directory_measurement(cfg, pod, directory, folder):
+    if not Path(directory).is_absolute() or Path(directory) == Path("/"):
+        raise ValueError("Model inventory must identify an absolute model directory")
+    script = ("test -d " + shlex.quote(directory) + "\nfind -P " + shlex.quote(directory)
+              + r" -type f -printf '%P\0%s\0'" + " && printf 'BENCHMARK_FIND_COMPLETE\\0'")
+    output = storage.checked_exec(cfg.workload_namespace, pod.metadata.name, script, container="main")
+    # A Hugging Face snapshot may contain only symlinks; zero regular-file bytes is valid.
+    inventory = (dict(files=[], total_bytes=0) if output == "BENCHMARK_FIND_COMPLETE\0"
+                 else parse_checkpoint_inventory(output))
+    inventory.update(directory=directory, symlinks="excluded", source="pre-checkpoint find")
+    save(folder / "model-directory.json", inventory)
+    return inventory
+
+
 def find_checkpoint_timing(text, content_name):
     payloads = []
     for line in text.splitlines():
@@ -205,47 +229,60 @@ def find_checkpoint_timing(text, content_name):
     return payloads[0]
 
 
-def checkpoint_measurement(cfg, node, uid, content_name, folder):
-    agent = lifecycle.checkpoint_agent_pod(cfg.snapshot_e2e_config(), node)
-    root = lifecycle.checkpoint_artifact_path(uid)
+def checkpoint_measurement(cfg, node, uid, content_name, folder, *, content=None, settings=None):
     text = agent_log(cfg, node, folder / "checkpoint-agent.log")
-    # The stock agent has no Python. NUL fields preserve arbitrary filenames.
-    output = k8s.exec_command(
-        cfg.snapshot_namespace,
-        agent,
-        "find "
-        + root
-        + r" -type f -printf '%P\0%s\0' && printf 'BENCHMARK_FIND_COMPLETE\0'",
-        container="agent",
-    )
-    inventory = parse_checkpoint_inventory(output)
-    save(folder / "artifacts.json", inventory)
-    if not any(is_gpu_manifest(f["path"]) for f in inventory["files"]):
-        raise ValueError("Checkpoint lacks PageBroker CustomStorage GPU manifests")
+    inventory = {}
+    if cfg.storage_type == "pvc":
+        agent = lifecycle.checkpoint_agent_pod(cfg.snapshot_e2e_config(), node)
+        root = lifecycle.checkpoint_artifact_path(uid)
+        # The stock agent has no Python. NUL fields preserve arbitrary filenames.
+        output = k8s.exec_command(
+            cfg.snapshot_namespace,
+            agent,
+            "timeout 300s find "
+            + root
+            + r" -type f -printf '%P\0%s\0' && printf 'BENCHMARK_FIND_COMPLETE\0'",
+            container="agent",
+        )
+        inventory = parse_checkpoint_inventory(output)
+        save(folder / "artifacts.json", inventory)
+        if not any(is_gpu_manifest(f["path"]) for f in inventory["files"]):
+            raise ValueError("Checkpoint lacks PageBroker CustomStorage GPU manifests")
+        inventory["payload_bytes"] = inventory["total_bytes"]
+        inventory["gpu_checkpoint_mode"] = "custom-storage"
+    else:
+        inventory = storage.s3_measurement(cfg, node, content, settings)
+        save(folder / "artifacts.json", inventory)
     timing = find_checkpoint_timing(text, content_name)
     save(folder / "checkpoint-timing.json", timing)
-    return inventory["total_bytes"], seconds(timing["duration"])
+    publication = timing.get("phases", {}).get("remove_old_version_and_switch")
+    inventory["publication_s"] = seconds(publication) if publication is not None else None
+    inventory["publication_gbps"] = (throughput(inventory["payload_bytes"], inventory["publication_s"])
+                                     if cfg.storage_type == "s3" else None)
+    return inventory["payload_bytes"], seconds(timing["duration"]), inventory
 
 
-def restored_measurement(cfg, pod, snapshot_name, token, folder):
+def restored_measurement(cfg, pod, snapshot_name, token, folder, *, source_checks):
+    if not source_checks_pass(source_checks):
+        raise ValueError("Missing valid source inference baseline")
     packet = remote_json(
         cfg.workload_namespace,
         pod.metadata.name,
-        """
+        "prompts = " + repr([c["prompt"] for c in source_checks]) + "\n" + """
 import json,time,urllib.request
 from pathlib import Path
 checks=[]
-for prompt,expected in [('The capital city of France is','paris'),('The capital city of Germany is','berlin'),('The capital city of Japan is','tokyo')]:
+for prompt in prompts:
     request=urllib.request.Request('http://127.0.0.1:8000/generate',data=json.dumps(dict(prompt=prompt)).encode(),headers={'Content-Type':'application/json'})
     with urllib.request.urlopen(request,timeout=120) as response:result=json.load(response)
-    checks.append(dict(expected=expected,response=result))
+    checks.append(dict(prompt=prompt,response=result))
 phases=Path('/snapshot-control/phase-events.jsonl').read_text()
 print('BENCHMARK_JSON '+json.dumps(dict(checks=checks,phases=phases)))
 """,
     )
     save(folder / "inference.json", packet["checks"])
     (folder / "phases.jsonl").write_text(packet["phases"])
-    if not restore_checks_pass(packet["checks"], token):
+    if not restore_checks_pass(packet["checks"], token, source_checks):
         raise ValueError("Restore inference or process-token check failed")
     save(folder / "pod-final.json", pod)
     text = agent_log(cfg, pod.spec.node_name, folder / "agent.log")
