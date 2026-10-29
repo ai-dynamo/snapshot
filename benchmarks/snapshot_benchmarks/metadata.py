@@ -8,8 +8,8 @@ product/driver via `nvidia-smi` exec'd into the running pod, storage class and
 its provisioner via the PVC/StorageClass objects, and node placement via the
 pods' own `spec.node_name`. There is no size field on `PodSnapshot` or
 `PodSnapshotContent` status (checked in api/v1alpha1/podsnapshotcontent_types.go),
-so checkpoint size is measured separately, on the node, via `du -sb` — see
-`run.py`.
+so checkpoint size is measured by a regular-file inventory on the node — see
+`measurement.py`.
 """
 
 from __future__ import annotations

@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Default model sweep -- the 7 models published in
-# docs/development/benchmarks.md, in the same order.
+# Example model sweep. Edit it for the engine, model revisions and GPUs you use.
+# This is not the configuration matrix for the published results.
 #
-# `reported_weights_bytes` is informational only (decimal GB, from the
-# published doc's Weights column), never authoritative -- the benchmark
-# measures the actual checkpoint artifact size itself (`checkpoint_artifact_bytes`
-# in each run's JSON output).
+# Weight sizes are measured from the cached model files.
 #
 # `env` overrides `VLLM_MAX_MODEL_LEN` / `VLLM_GPU_MEMORY_UTILIZATION` (see
 # docs/guides/vllm/capture/qwen3-0.6b.yaml, which defaults to 2048 / 0.30, sized for a
@@ -34,39 +31,32 @@
 models:
   - label: "Qwen3 0.6B"
     hf_id_or_path: "Qwen/Qwen3-0.6B"
-    reported_weights_bytes: 1500000000
     env: {}
 
   - label: "Qwen3 8B"
     hf_id_or_path: "Qwen/Qwen3-8B"
-    reported_weights_bytes: 16400000000
     env: {}
 
   - label: "Qwen3 14B"
     hf_id_or_path: "Qwen/Qwen3-14B"
-    reported_weights_bytes: 29500000000
     env: {}
 
   - label: "GPT-OSS 120B"
     hf_id_or_path: "openai/gpt-oss-120b"
-    reported_weights_bytes: 65300000000
     env:
       VLLM_GPU_MEMORY_UTILIZATION: "0.75"
 
   - label: "Qwen3 32B"
     hf_id_or_path: "Qwen/Qwen3-32B"
-    reported_weights_bytes: 65500000000
     env:
       VLLM_GPU_MEMORY_UTILIZATION: "0.75"
 
   - label: "Llama 3.3 70B FP8"
     hf_id_or_path: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
-    reported_weights_bytes: 72700000000
     env:
       VLLM_GPU_MEMORY_UTILIZATION: "0.80"
 
   - label: "Qwen2.5 72B"
     hf_id_or_path: "Qwen/Qwen2.5-72B-Instruct"
-    reported_weights_bytes: 145400000000
     env:
       VLLM_GPU_MEMORY_UTILIZATION: "0.92"
