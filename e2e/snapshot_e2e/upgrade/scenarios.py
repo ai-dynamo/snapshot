@@ -85,14 +85,6 @@ def delete_source(ctx: UpgradeContext, state: ScenarioState) -> None:
 # The first release whose agent restores through the restore proxy.
 RESTORE_PROXY_RELEASE = (0, 2)
 
-# The first release whose agent records the security labels of a checkpointed
-# process. A newer agent needs them to restore into a container that runs
-# under an LSM profile, such as AppArmor, so there it refuses an older
-# checkpoint with an lsm-labels mismatch. On a node without one, the older
-# checkpoint still restores.
-LSM_LABELS_RELEASE = (0, 3)
-LSM_LABELS_CHECK = "lsm-labels"
-
 
 def has_feature(agent_tag: str, release: tuple[int, int]) -> bool:
     """Whether the agent at agent_tag has a feature that shipped in release.
@@ -110,17 +102,23 @@ def has_restore_proxy(agent_tag: str) -> bool:
     return has_feature(agent_tag, RESTORE_PROXY_RELEASE)
 
 
-def records_lsm_labels(agent_tag: str) -> bool:
-    """Whether checkpoints from the agent at agent_tag record security labels."""
-    return has_feature(agent_tag, LSM_LABELS_RELEASE)
+# Agents before this release don't record the security labels of a
+# checkpointed process. A newer agent needs them to restore into a container
+# under an LSM profile, such as AppArmor, so on such a node it refuses an older
+# checkpoint under its lsm-labels check. Elsewhere the checkpoint restores.
+# restore_succeeded is the one place the scenarios allow for that.
+LSM_LABELS_RELEASE = (0, 3)
 
 
-def wait_for_restore_or_unlabeled_refusal(namespace: str, pod_name: str, timeout: int = 600) -> bool:
-    """Waits for a restore of a checkpoint without security labels to end.
+def restore_succeeded(namespace: str, pod_name: str, *, checkpointed_by: str, restored_by: str) -> bool:
+    """Waits for the restore of pod_name to end, and returns whether it succeeded.
 
-    Returns True when it succeeds, and False when the agent refuses it only for
-    the missing labels. Any other refusal or failure fails the test.
+    It returns False only for the expected lsm-labels refusal described above.
+    Any other refusal or failure fails the test.
     """
+    if has_feature(checkpointed_by, LSM_LABELS_RELEASE) or not has_feature(restored_by, LSM_LABELS_RELEASE):
+        lifecycle.wait_for_restored_condition(namespace, pod_name, "True", "RestoreSucceeded")
+        return True
 
     def check() -> bool | None:
         restored = lifecycle.pod_condition(k8s.read_pod(namespace, pod_name), lifecycle.RESTORED_CONDITION)
@@ -129,9 +127,8 @@ def wait_for_restore_or_unlabeled_refusal(namespace: str, pod_name: str, timeout
         if restored.status == "True" and restored.reason == "RestoreSucceeded":
             return True
         if restored.reason == "RestoreIncompatible":
-            assert LSM_LABELS_CHECK in (restored.message or ""), (
-                f"restore of {namespace}/{pod_name} refused for a reason other than {LSM_LABELS_CHECK}: "
-                f"{restored.message}"
+            assert "lsm-labels" in (restored.message or ""), (
+                f"restore of {namespace}/{pod_name} refused for a reason other than lsm-labels: {restored.message}"
             )
             return False
         if restored.reason in {"RestoreFailed", "RestorePartiallySucceeded"}:
@@ -141,11 +138,17 @@ def wait_for_restore_or_unlabeled_refusal(namespace: str, pod_name: str, timeout
             )
         return None
 
-    return lifecycle.wait_for(
-        f"nvidia.com/Restored=True/RestoreSucceeded, or an {LSM_LABELS_CHECK} refusal, on {namespace}/{pod_name}",
+    succeeded = lifecycle.wait_for(
+        f"nvidia.com/Restored=True/RestoreSucceeded, or an lsm-labels refusal, on {namespace}/{pod_name}",
         check,
-        timeout,
+        timeout=600,
     )
+    if not succeeded:
+        print(
+            f"{restored_by} refused a checkpoint from {checkpointed_by} under lsm-labels, as expected on this node",
+            flush=True,
+        )
+    return succeeded
 
 
 def restoring_agent_tag(ctx: UpgradeContext, *, upgraded: bool) -> str:
@@ -164,9 +167,7 @@ def restore_from_snapshot(
 ) -> client.V1Pod | None:
     """Restores the scenario's checkpoint and checks the restored state.
 
-    After the upgrade, a checkpoint the old release took without security
-    labels may be refused instead (see LSM_LABELS_RELEASE). Then this returns
-    None, and there is no restored state to check.
+    Returns None when the restore was refused as expected; see restore_succeeded.
     """
     namespace = ctx.config.namespace
     run = state.run
@@ -176,16 +177,13 @@ def restore_from_snapshot(
             config=ctx.config, run=run, gpu=gpu, source_node=state.node, snapshot_name=snapshot_name
         )
     )
-    if upgraded and not records_lsm_labels(ctx.settings.from_tag):
-        if not wait_for_restore_or_unlabeled_refusal(namespace, run.restore_pod):
-            print(
-                f"{ctx.settings.from_tag} took the checkpoint without security labels; "
-                f"the upgraded agent refused it ({LSM_LABELS_CHECK}), as expected on this node",
-                flush=True,
-            )
-            return None
-    else:
-        lifecycle.wait_for_restored_condition(namespace, run.restore_pod, "True", "RestoreSucceeded")
+    if not restore_succeeded(
+        namespace,
+        run.restore_pod,
+        checkpointed_by=ctx.settings.from_tag,
+        restored_by=restoring_agent_tag(ctx, upgraded=upgraded),
+    ):
+        return None
     pod = lifecycle.wait_for_pod_ready(namespace, run.restore_pod, timeout=300)
     lifecycle.assert_restored_state(
         namespace,
@@ -418,8 +416,6 @@ class CompatCheckStillEnforced(UpgradeScenario):
         )
         pod = lifecycle.wait_for_restored_condition(namespace, run.restore_pod, "False", "RestoreIncompatible")
         refusal = lifecycle.pod_condition(pod, lifecycle.RESTORED_CONDITION)
-        # An unlabeled checkpoint can also be refused for lsm-labels; the
-        # memory-limit mismatch must still be named next to it.
         assert "memory-limit" in refusal.message, refusal.message
 
 
