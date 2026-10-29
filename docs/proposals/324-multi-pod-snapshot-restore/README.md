@@ -27,6 +27,7 @@ SPDX-License-Identifier: Apache-2.0
   - [Communication libraries](#communication-libraries)
   - [Cross-Pod TCP connections](#cross-pod-tcp-connections)
   - [Failure handling and recovery](#failure-handling-and-recovery)
+  - [Protocol semantics](#protocol-semantics)
   - [Deadlines](#deadlines)
   - [API](#api)
   - [Security](#security)
@@ -254,7 +255,7 @@ integrate without changing it.
 | Component | Runs as | Responsibility |
 | --- | --- | --- |
 | Set controllers | Snapshot operator | Validate sets, pin identities, create member `PodSnapshot`s, enforce the deadline, and aggregate member results into one outcome. |
-| Snapshot coordinator | Deployment with one active replica and a standby | Host one in-memory session per attempt, authorize every request, enforce the deadline, and fail every member when one fails. |
+| Snapshot coordinator | Deployment with one active replica, elected through a Lease, and a standby | Host one in-memory session per attempt, authorize every request, enforce the deadline, and fail every member when one fails. |
 | Group executor | Snapshot agent | Run each member's capture or restore as session phases around the existing CUDA and CRIU steps, and record its intent before destructive work. |
 | Session proxy | Snapshot agent | Hold one stream per hosted member, serve the relay's socket and the Pod's endpoint, and stamp member identity on every request. |
 | cuInterpose relay | Short-lived process in each Pod that uses cuInterpose | Fan commands out to the Pod's processes as in SNEP-295 and, in the lowest rank that runs one, also lead the group. |
@@ -297,6 +298,21 @@ Snapshot's or cuInterpose's keys. Every member takes part in the agents'
 barriers, including members that run no relay, and an agent that hosts several
 members of the same set attaches once per member and drives them concurrently,
 because handling them one after the other would deadlock the first barrier.
+
+Barriers and retries rely on two separate identities. A barrier counts
+distinct participants, so a participant that posts again, after a reconnect or
+for any other reason, counts once. An agent and a relay always post as their
+own member, and the coordinator refuses any other participant from them, so a
+phase barrier counts each member exactly once; a library posts under a
+participant name of its own choosing, since several processes of one Pod may
+post to the same barrier, and the coordinator scopes that name by member, so
+names local to a process never collide across Pods. Request identifiers, by
+contrast, are scoped to the caller that sends them and only decide whether a
+retried write applies again or returns the outcome recorded for it.
+`BarrierCreate` fixes the expected count once: creating a barrier again with the
+same count succeeds, which makes retries safe, whereas a different count, or
+one below one, is refused, and posting or waiting before the creation is valid.
+A barrier releases once and then stays released.
 
 ![Coordination session and member records](diagrams/session-lifecycle.svg)
 
@@ -458,10 +474,10 @@ cuInterpose phases. Finally,
 every agent locks and checkpoints CUDA, passes a `net-freeze` barrier, and only
 then runs CRIU, which drops all traffic in the Pod's network namespace as soon
 as it freezes the processes and keeps it dropped after the source ends. The
-barrier makes every member reach that lock before any member can finish its
-dump, so dumps can finish at different times without one member's
-disappearance resetting another member's sockets, as
-[Cross-Pod TCP connections](#cross-pod-tcp-connections) explains. Every
+barrier guarantees that no member's network is frozen while a peer still has a
+step that needs it; after the barrier, each member locks and dumps at its own
+pace, and dumps that finish at different times reset no other member's sockets,
+as [Cross-Pod TCP connections](#cross-pod-tcp-connections) explains. Every
 artifact records the capture ID, which is the `PodSetSnapshot`'s UID, its own member ID, and the ordered table of all
 members with their Pod UIDs, containers, and Pod IPs, which is what a restore
 later uses to check that all members come from the same capture and to build
@@ -504,7 +520,7 @@ cuInterpose state. Every agent therefore ends
 admission holding the complete IP map, built from the member table in its own
 artifact and the new IPs, together with the assurance that all members restore
 the same capture onto a placement that can work. When the operator records a
-member as Admitted, it also pins the target's Pod UID, container ID, and Pod IP
+member as Admitted, it also pins the target's Pod UID, container IDs, and Pod IP
 from the Pod's own status, and an agent whose Pod or validated container no
 longer matches what was pinned fails the member with `PodIPChanged` instead of
 restoring with a stale map.
@@ -667,11 +683,16 @@ the Pod's network namespace marked as external, CRIU treats it as the dumped
 processes' own namespace, drops all incoming and outgoing traffic in it as soon
 as it freezes them, and never lifts that lock after a dump that ends them, so a
 dumped member cannot reset its peers while its Pod exists. The `net-freeze`
-barrier right before CRIU keeps preserved connections live until every member is
-ready and makes every member reach that lock before any member can finish its
-dump. That covers in practice the one case the lock cannot, a source Pod
-deleted, and its IP reused by a new Pod that resets the peer, while a peer has
-not dumped yet, and owners close it entirely by keeping sources until the set's
+barrier right before CRIU guarantees that no member's network is frozen while
+any member still has a step that needs its peers, such as CUDA's prepare phase
+or a cuInterpose round, so preserved connections stay live until every member is
+ready to dump. It does not order one member's lock against another member's
+dump, and it need not: after the barrier, each member's CRIU locks and dumps at
+its own pace, and because a dumped member's lock stays in place while its Pod
+exists, its peers' packets are dropped rather than answered with a reset,
+whichever member finishes first. The one case the lock cannot cover is a source
+Pod that is deleted, and whose IP a new Pod reuses and then resets a peer that
+has not dumped yet, which owners rule out by keeping sources until the set's
 capture has ended.
 
 CRIU's lock covers all of a member's IP traffic from its freeze onwards, but
@@ -755,7 +776,7 @@ restart fails every attempt in flight with `CoordinatorLost`, and the owner
 retries with a new attempt, which for a restore means fresh Pods. The protocol
 does not depend on that choice, however. Every mutating request carries an ID
 that the session remembers, so re-issuing it is harmless; a barrier records
-which members posted rather than how many; and the epoch in `Welcome`
+which participants posted rather than how many; and the epoch in `Welcome`
 identifies the coordinator incarnation that holds the session. An agent whose
 stream breaks therefore reattaches and re-issues its pending requests, which
 already lets an attempt survive a transient disconnection, and only a reattach
@@ -770,6 +791,76 @@ sensitive, owned by the set resource so that they disappear with it, and it
 would help only when a takeover completes well within the hold, probe, and
 library timeouts that keep running meanwhile, so this SNEP leaves the choice to
 operational evidence ([Appendix A](#a-open-questions)).
+
+### Protocol semantics
+
+Snapshot defines its own distributed coordination protocol, built from
+established store-backed rendezvous patterns. The comparisons below identify
+related designs and deliberate differences; they do not imply identical
+semantics or inherited failure guarantees. The normative guarantees come from
+Snapshot's membership, retry, session-lifetime, and failure rules, which the
+end of this section states.
+
+The protocol has two layers. The operations that clients see mirror CUDA
+Checkpoint's restore-time rendezvous interface, from which come per-library
+namespaces, write-once keys, reads that wait for a key, atomic counters and
+compare-and-swap, and named barriers whose count the creator supplies. That
+interface is not yet published, so this SNEP assumes the semantics that
+[The coordination session](#the-coordination-session) summarizes,
+[Appendix A](#a-open-questions) lists the asks it depends on, and the SNEP will
+cite the published interface once it is available. Snapshot adds everything
+about who takes part and what happens when something goes wrong: the roles and
+member identities that the agent stamps on every request, and the namespaces
+enforced from them; barrier participants and their scoping; request identifiers
+for retries; `Attach`, `Leave`, and `Fail`; the epoch, the grace period, and the
+deadline; and the `ABORTED` status that unblocks every pending call when an
+attempt fails, which Appendix A asks CUDA's interface to adopt.
+
+| Snapshot rule | Related precedent | Snapshot's difference |
+| --- | --- | --- |
+| `Insert`, `Get` with a wait, `Incr`, `Decr`, `CAS` | PyTorch's c10d store (`set`, `get` with a timeout, `add`, `compare_set`) and PMIx `Put` and `Get` | `Insert` is write-once and refuses a different value, whereas c10d's `set` overwrites; PMIx data becomes visible to peers only after a commit and exchange, whereas an `Insert` is visible at once; and a failed session ends every wait with `ABORTED` |
+| Barriers that count distinct participants, with a count the creator supplies | Store-based barriers built on c10d's `add` and `wait`, and ZooKeeper's barrier recipe with one node per participant | A participant that posts again counts once, unlike a counter; agents and relays post only as their member, and library barrier participant identifiers are scoped by member |
+| An all-gather after a barrier, fixed ranks, and `Fail` aborting every member | The PMIx and MPI job model: a fence with data collection, `PMIx_Abort`, and errors that are fatal to the job | Membership comes from the set resource rather than a launcher, and a failure ends one attempt, after which each member acts on its own durable record |
+| A broken stream reattaches within a grace period, and otherwise its member fails | ZooKeeper sessions, which survive a reconnect within the session timeout | Expiry fails the attempt rather than removing the client's ephemeral state, and the period starts only once the coordinator detects the broken stream |
+| The epoch in `Welcome`, and `CoordinatorLost` for a stale one | Incarnation identifiers, such as ZooKeeper's epochs or etcd's cluster ID | The epoch only detects that the coordinator changed; it does not fence an earlier instance or revoke what that instance delivered |
+| Request identifiers whose outcomes the session records | Client sessions in Raft, and idempotency keys | A record lasts only as long as its session |
+
+Three differences are deliberate. Membership is fixed, unlike elastic
+rendezvous such as PyTorch's, because ranks and process identities must match
+between capture and restore. Failure is fail-stop, because shared GPU state
+cannot be left half-prepared. And in alpha the coordinator keeps no durable
+state, so its restart fails the attempt; a later version could persist
+sessions without changing any client, provided that it stores every mutation
+together with its replay record and keeps the epoch with the stored state.
+
+The guarantees assume crash-stop failures, trusted agents, and one serving
+coordinator per attempt. For safety, a write that a caller re-issues with the
+same request identifier applies at most once while the session holds its
+records, and a barrier counts each participant once however often it posts.
+Once a session fails, every caller the coordinator can still reach receives
+`ABORTED`. A disconnected agent cannot determine whether an unanswered
+operation completed: it reconnects within the permitted window and reissues
+its requests with their original identifiers, and if it receives an abort or
+reaches its local timeout, it follows its member's durable recovery record. For
+progress, every wait ends at the attempt deadline, at its phase
+timeout, or when the session ends, and a lost member fails the attempt once the
+coordinator has detected its broken stream, which keepalive bounds, and the
+grace period has elapsed. The protocol does not use clocks to order operations.
+Deadline accuracy and leader election depend on timing assumptions, since the
+deadline counts from the creation time that the API server records, measured
+against the coordinator's clock, and Lease renewal assumes bounded drift and
+pauses.
+
+Alpha assumes one serving coordinator per attempt. Lease election provides
+best-effort ownership, and losing leadership must stop admission and close
+existing streams. Epoch checks detect changed coordination state on reconnect;
+they do not fence an earlier instance. Stronger guarantees during overlapping
+ownership remain an availability requirement. The contract extends by version
+and by namespace: the coordinator's gRPC API is versioned by its package,
+agents advertise the set protocol versions they support, which the set
+controllers check before creating any member work, a new kind of participant
+receives a namespace of its own, and library namespaces already carry their
+version.
 
 ### Deadlines
 
@@ -822,10 +913,9 @@ spec:                                   # immutable
   targets:                              # one per member id
   - id: worker-0
     podRef: {name: llm-worker-0-r1}     # the UID is optional and pinned at admission
-    containerMapping: {source: main, destination: main}
+    containerMappings: [{source: main, destination: server}]
   - id: worker-1
-    podRef: {name: llm-worker-1-r1, uid: <uid>}
-    containerMapping: {source: main, destination: main}
+    podRef: {name: llm-worker-1-r1, uid: <uid>}  # no mappings: same-name restore
 status:
   members:                              # keyed by id; bindings are pinned at admission
   - {id: worker-0, pod: {name: llm-worker-0-r1, uid: <uid>}, nodeName: node-c, targetPodIP: 10.1.9.2, startedAt: "2026-10-16T18:20:40Z", phase: Released}
@@ -836,9 +926,18 @@ status:
 The specs follow the shape of the existing resources. A member's `source` is the
 same `PodSnapshotSource` that a standalone capture uses, and its `id` is a stable
 name that links capture to restore, whereas its rank is simply its position in
-the list. Lists are keyed by `id`, which keeps status updates mergeable, and
-every reference that matters carries a UID, so name reuse cannot redirect an
-attempt; a restore target may omit its UID, in which case admission pins it. A
+the list. That list is ordered and atomic, so the spec's immutability covers
+its order and no update can change a rank. Every other list is keyed by `id`,
+which keeps status updates mergeable, and a restore target takes the rank of
+the snapshot member with the same `id`, so the order of targets carries no
+meaning. Every reference that matters carries a UID, so name reuse cannot
+redirect an attempt; a restore target may omit its UID, in which case admission
+pins it. Every field that names containers is a list capped at one entry, as
+`PodReference.Containers` already is, so supporting several containers per
+member later only relaxes validation, whereas multi-container capture itself
+depends on runtime support and stays out of scope; a restore target that omits
+its container mappings restores each captured container into the container of
+the same name, as a standalone restore does. A
 single deadline bounds each attempt, and the limit of 256 members is the
 capacity of the address-remap plugin rather than a qualified scale.
 
@@ -1213,17 +1312,19 @@ type PodSetSnapshotMember struct {
 	Source PodSnapshotSource `json:"source"`
 }
 
+// +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.exists_one(n, n.id == m.id))",message="member IDs must be unique"
 // +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.filter(n, n.source.podRef.name == m.source.podRef.name).size() == 1)",message="source Pods must be distinct"
 type PodSetSnapshotSpec struct {
 	// DeadlineSeconds bounds the capture, counted from creation.
 	// +kubebuilder:validation:Minimum=1
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
-	// Members in rank order: list order is the rank, and the spec is
-	// immutable. 256 is the capacity of the address-remap plugin.
+	// Members in rank order: list order is the rank. The list is atomic, so
+	// CEL compares it in order and the spec's immutability rule also refuses
+	// a reorder; the rule above keeps member IDs unique. 256 is the capacity
+	// of the address-remap plugin.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=256
-	// +listType=map
-	// +listMapKey=id
+	// +listType=atomic
 	Members []PodSetSnapshotMember `json:"members"`
 }
 
@@ -1324,9 +1425,18 @@ type PodSetRestoreTarget struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	ID               string             `json:"id"`
-	PodRef           TargetPodReference `json:"podRef"`
-	ContainerMapping ContainerMapping   `json:"containerMapping"`
+	ID     string             `json:"id"`
+	PodRef TargetPodReference `json:"podRef"`
+	// ContainerMappings maps each captured container to the restore Pod's
+	// container that receives its processes. Omitted, each captured container
+	// restores into the container of the same name. Capped at one entry, like
+	// PodReference.Containers, so more containers per member are additive.
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +listType=map
+	// +listMapKey=source
+	ContainerMappings []ContainerMapping `json:"containerMappings,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="self.targets.all(t, self.targets.filter(n, n.podRef.name == t.podRef.name).size() == 1)",message="target Pods must be distinct"
@@ -1336,6 +1446,8 @@ type PodSetRestoreSpec struct {
 	// refuses targets whose startup probe cannot cover what remains of it.
 	// +kubebuilder:validation:Minimum=1
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
+	// Targets are keyed by ID and their order carries no meaning: each takes
+	// the rank of the snapshot member with the same ID.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=256
 	// +listType=map
@@ -1356,7 +1468,7 @@ const (
 
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.pod) || (has(self.pod) && self.pod == oldSelf.pod)",message="target Pod is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName == oldSelf.nodeName)",message="target node is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.containerID) || (has(self.containerID) && self.containerID == oldSelf.containerID)",message="admitted container is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.containers) || (has(self.containers) && self.containers == oldSelf.containers)",message="admitted containers are immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.targetPodIP) || (has(self.targetPodIP) && self.targetPodIP == oldSelf.targetPodIP)",message="target Pod IP is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.startedAt) || (has(self.startedAt) && self.startedAt == oldSelf.startedAt)",message="startedAt is write-once"
 // +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Released', 'Failed']) || self.phase == oldSelf.phase",message="final phases are immutable"
@@ -1364,15 +1476,19 @@ type PodSetRestoreMemberStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	ID string `json:"id"`
-	// Pod, NodeName, ContainerID, and TargetPodIP are pinned by the operator
+	// Pod, NodeName, Containers, and TargetPodIP are pinned by the operator
 	// from the Pod's status when it records the member Admitted.
 	// +optional
 	Pod *ObjectIdentity `json:"pod,omitempty"`
 	// +optional
 	NodeName string `json:"nodeName,omitempty"`
+	// Containers are the restore Pod's destination containers, with the ID
+	// each had at admission. Capped at one entry, like the mappings.
 	// +optional
-	// +kubebuilder:validation:MaxLength=1024
-	ContainerID string `json:"containerID,omitempty"`
+	// +kubebuilder:validation:MaxItems=1
+	// +listType=map
+	// +listMapKey=name
+	Containers []PodSetRestoreContainerStatus `json:"containers,omitempty"`
 	// +optional
 	// +kubebuilder:validation:Format=ipv4
 	TargetPodIP string `json:"targetPodIP,omitempty"`
@@ -1388,6 +1504,16 @@ type PodSetRestoreMemberStatus struct {
 	Reason string `json:"reason,omitempty"`
 	// +optional
 	Message string `json:"message,omitempty"`
+}
+
+// PodSetRestoreContainerStatus pins one destination container of a restore Pod.
+type PodSetRestoreContainerStatus struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	ContainerID string `json:"containerID"`
 }
 
 type PodSetRestoreStatus struct {
@@ -1455,10 +1581,12 @@ type PodSetManifest struct {
 }
 
 type PodSetManifestMember struct {
-	ID            string `yaml:"id"`
-	PodUID        string `yaml:"podUID"`
-	ContainerName string `yaml:"containerName"`
-	PodIP         string `yaml:"podIP"`
+	ID     string `yaml:"id"`
+	PodUID string `yaml:"podUID"`
+	// Containers are the member's captured containers: one today, as in
+	// PodReference.Containers.
+	Containers []string `yaml:"containers"`
+	PodIP      string   `yaml:"podIP"`
 }
 ```
 
