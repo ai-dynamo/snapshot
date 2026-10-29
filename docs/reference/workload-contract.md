@@ -224,6 +224,17 @@ custom image still has to meet these:
 - **glibc floor and architecture.** The restore bundle requires a recent glibc,
   which the reference runtime images already clear. The workload image must
   match the node architecture (x86_64 or arm64).
+- **A target CPU with every instruction set the source had.** A process picks
+  its code paths for the CPU it starts on. If the restored process runs on a CPU
+  without one of those instructions, it dies with `SIGILL`. The agent records
+  the instruction sets the source node offers, its CPU flags on x86_64 and its
+  hwcaps on arm64, and refuses a restore onto a node missing any of them, naming
+  the missing flags (`cpu-features: source avx512f, target missing`). A target
+  that offers more is fine. Only the instruction sets in Snapshot's list are
+  compared, so a restore onto a CPU missing one it does not list, such as
+  `waitpkg` on x86_64, goes ahead. The check needs both lists, so a checkpoint
+  taken before the agent recorded them, or a restore onto a node whose agent
+  could not read its own, is admitted unchecked.
 - **All file handles must be reopenable.** Disable caches that leave handles CRIU
   cannot reopen after restore — for example `HF_HUB_DISABLE_XET=1`, and loading
   models from a local cache with `HF_HUB_OFFLINE=1`.

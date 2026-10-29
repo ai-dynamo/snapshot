@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Cluster-free regressions for environment checks: optional CRI image IDs and
-the node's CPU flags."""
+CPU flags."""
 
 import json
 import shlex
@@ -138,6 +138,48 @@ def test_node_cpu_flags_reports_a_node_that_printed_none(monkeypatch, output):
     monkeypatch.setattr(k8s, "exec_payload", lambda *_, **__: output)
     with pytest.raises(AssertionError, match="reported no CPU flags"):
         lifecycle.node_cpu_flags(config, "node")
+
+
+def test_record_cpu_feature_adds_one_flag_and_leaves_the_rest_as_written(monkeypatch):
+    config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
+    written = (
+        "artifact:\n"
+        "    contentUID: content-uid\n"
+        "createdAt: 2026-10-12T09:00:00.123456789Z\n"
+        "host:\n"
+        "    kernelVersion: test-kernel\n"
+        "    cpuFeatures:\n"
+        "        - avx2\n"
+        "        - sse2\n"
+    )
+    manifest = {"text": written}
+
+    def exec_command(namespace, pod, command, *, container=None):
+        assert (namespace, pod, container) == ("test-ns", "agent-pod", "agent")
+        args = shlex.split(command)
+        assert args[0] == "printf" and args[3] == ">"
+        assert args[4].endswith("/content-uid/containers/main/manifest.yaml")
+        manifest["text"] = args[2]
+        return ""
+
+    monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
+    monkeypatch.setattr(lifecycle, "checkpoint_artifact_manifest", lambda *_: manifest["text"])
+    monkeypatch.setattr(k8s, "exec_command", exec_command)
+
+    lifecycle.record_cpu_feature(config, "node", "content-uid", "amx_tile")
+
+    assert manifest["text"] == written.replace(
+        "    cpuFeatures:\n", "    cpuFeatures:\n        - amx_tile\n"
+    )
+
+
+def test_record_cpu_feature_reports_a_checkpoint_that_recorded_none(monkeypatch):
+    config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
+    monkeypatch.setattr(
+        lifecycle, "checkpoint_artifact_manifest", lambda *_: "host:\n    cpuArch: amd64\n"
+    )
+    with pytest.raises(AssertionError, match="recorded no CPU features"):
+        lifecycle.record_cpu_feature(config, "node", "content-uid", "amx_tile")
 
 
 @pytest.mark.parametrize("image_id", ["", "sha256:" + "a" * 64])
