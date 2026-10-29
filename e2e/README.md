@@ -127,6 +127,28 @@ rejects non-CPU mode and invalid boolean values before capture. Do not use it
 against customer or shared checkpoint data. It does not add a second runner
 or change the normal restored-state assertions.
 
+### Framework tests over S3 (GPU)
+
+`e2e-frameworks-s3.yaml` runs the vLLM, SGLang and TensorRT-LLM guide workloads on
+the GPU cluster with Snapshot installed against an S3-compatible store instead of
+the checkpoint volume, one vCluster per framework in parallel. It is the same test as
+the framework workflow (`test_frameworks.py`) with `SNAPSHOT_E2E_STORAGE=s3`, so it
+records the same benchmark result, uploaded per framework. The `framework` input
+selects one. The workflow runs nightly on `main` and installs the published images
+of the commit it checked out. To test a branch, dispatch `push-artifacts.yaml` on it
+and pass the resulting tag as `snapshot_tag`.
+
+The store runs in the vCluster as a pod. `python -m snapshot_e2e.s3 deploy` creates
+it with the credentials Secret and a default bucket. It needs `SNAPSHOT_E2E_S3_ACCESS_KEY` and
+`SNAPSHOT_E2E_S3_SECRET_KEY`, because the store listens on the node network and must not use a
+default login; the workflow generates both per job. `python -m snapshot_e2e.s3
+endpoint` prints the node address the chart is given. The store runs on the host
+network because the agent pod, which hosts PageBroker, does too and cannot resolve
+cluster service names. Each framework job sets its own `SNAPSHOT_E2E_S3_PORT` and
+`SNAPSHOT_E2E_S3_CONSOLE_PORT`, so two jobs on one node do not collide. In S3 mode
+the test needs no S3 client of its own: it checks the descriptor in the
+PodSnapshotContent status and that nothing was written to the checkpoint volume.
+
 ### Local Direct Mode
 
 Use direct mode when `KUBECONFIG` already points at the cluster where Snapshot

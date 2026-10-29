@@ -1,0 +1,462 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: E2E Framework Tests over S3
+
+# Checkpoint/restore of the inference framework guide workloads (vLLM, SGLang,
+# TensorRT-LLM) with Snapshot installed against an S3-compatible store instead
+# of the checkpoint volume, one vCluster per framework in parallel, on the same
+# GPU cluster and vCluster layout as e2e-frameworks.yaml. The store runs inside
+# each vCluster as a pod (snapshot_e2e.s3 deploy) on its own host ports, so two
+# jobs that land on one node do not collide.
+#
+# It installs published images. The nightly run resolves the tag of the commit
+# it checked out, like e2e-frameworks.yaml. To test a branch, dispatch
+# push-artifacts.yaml on it first and pass the resulting tag as snapshot_tag.
+
+on:
+  schedule:
+    # 03:00 Pacific Standard Time, after the nightly framework run.
+    - cron: "0 11 * * *"
+  # TEMP: GPU runners admit only trusted mirror pushes, so run this before it is
+  # on main through the mirror of this PR. Remove with the default tag below
+  # before merging.
+  push:
+    branches: ['pull-request/727']
+  workflow_dispatch:
+    inputs:
+      framework:
+        description: Framework to test (all, vllm, sglang, tensorrt-llm)
+        required: false
+        default: all
+        type: choice
+        options: [all, vllm, sglang, tensorrt-llm]
+      datadog_gpu_monitoring:
+        description: >-
+          Datadog GPU monitoring on the host cluster during the run. "disable"
+          turns it off before the tests and back on afterwards if it was on.
+        required: false
+        default: disable
+        type: choice
+        options: [disable, leave]
+      snapshot_tag:
+        description: >-
+          Operator/agent/pagebroker image tag to install, from a push-artifacts.yaml
+          dispatch on the branch under test. pull-request/<number> mirror
+          branches require an explicit tag. Leave empty on main/release/*
+          branches to resolve from the commit under test.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  select:
+    name: select frameworks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Build the framework matrix
+        id: matrix
+        env:
+          SELECTED: ${{ inputs.framework || 'all' }}
+        run: |
+          set -euo pipefail
+          all='[
+            {"framework":"vllm","port":19000,"console_port":19001},
+            {"framework":"sglang","port":19010,"console_port":19011},
+            {"framework":"tensorrt-llm","port":19020,"console_port":19021}
+          ]'
+          matrix="$(jq -c --arg selected "${SELECTED}" \
+            '{include: [.[] | select($selected == "all" or .framework == $selected)]}' <<< "${all}")"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+
+  # Datadog's GPU monitoring is a suspected interferer for CRIU/CUDA checkpoint
+  # and restore; see the same gate in e2e-frameworks.yaml, whose concurrency
+  # group this shares so overlapping runs hand off correctly.
+  datadog-gate:
+    name: datadog gpu monitoring off
+    needs: select
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 5
+    concurrency:
+      group: snapshot-e2e-frameworks-datadog-gate
+      cancel-in-progress: false
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve mode
+        id: mode
+        env:
+          MODE: ${{ inputs.datadog_gpu_monitoring || 'disable' }}
+        run: echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+
+      - name: Report Datadog GPU monitoring state
+        run: python3 hack/datadog-gpu-monitoring.py status
+
+      - name: Disable Datadog GPU monitoring for this run
+        if: ${{ steps.mode.outputs.mode == 'disable' }}
+        run: python3 hack/datadog-gpu-monitoring.py disable --holder "${{ github.run_id }}-${{ github.run_attempt }}"
+
+  e2e:
+    name: ${{ matrix.framework }} over S3
+    needs: [select, datadog-gate]
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    concurrency:
+      group: snapshot-e2e-frameworks-s3-${{ matrix.framework }}
+      cancel-in-progress: false
+    env:
+      HOST_NAMESPACE: snapshot-e2e-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_NAME: snapshot-e2e-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
+      SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+      # TEMP default for push-triggered runs, which have no inputs. Scheduled
+      # and dispatched runs without a tag resolve it in "Resolve Snapshot image tag".
+      SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ inputs.snapshot_tag || (github.event_name == 'push' && 'v0.0.0-g2185d93e') || '' }}
+      SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
+      SNAPSHOT_E2E_PVC_SIZE: 64Gi
+      SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
+      SNAPSHOT_E2E_MODE: vcluster
+      SNAPSHOT_E2E_AVOID_MIG: "true"
+      SNAPSHOT_E2E_RESTORE_PROXY: auto
+      SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
+      SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
+      SNAPSHOT_E2E_HELM_TIMEOUT: 6m
+      SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
+      SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
+      SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
+      SNAPSHOT_E2E_STORAGE: s3
+      SNAPSHOT_E2E_BENCHMARK_DIR: ${{ github.workspace }}/.e2e-benchmark-results
+      SNAPSHOT_E2E_S3_PORT: ${{ matrix.port }}
+      SNAPSHOT_E2E_S3_CONSOLE_PORT: ${{ matrix.console_port }}
+      SNAPSHOT_E2E_DATADOG_GPU_MONITORING: ${{ needs.datadog-gate.outputs.mode }}
+      SNAPSHOT_E2E_MODEL_CACHE_SERVER: ${{ vars.SNAPSHOT_E2E_MODEL_CACHE_SERVER || 'dynamoinfracimodelcache.file.core.windows.net' }}
+      SNAPSHOT_E2E_MODEL_CACHE_PATH: ${{ vars.SNAPSHOT_E2E_MODEL_CACHE_PATH || '/dynamoinfracimodelcache/models' }}
+      PYTHONUNBUFFERED: "1"
+      UV_LINK_MODE: copy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare the diagnostics directory
+        run: |
+          mkdir -p "${RUNNER_TEMP}/diagnostics"
+          echo "DIAGNOSTICS_DIR=${RUNNER_TEMP}/diagnostics" >> "$GITHUB_ENV"
+
+      - name: Capture host kubeconfig
+        id: host
+        run: |
+          echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install vCluster CLI
+        timeout-minutes: 3
+        uses: ./.github/actions/install-vcluster-cli
+
+      - name: Install Python tooling (ARM64)
+        if: ${{ runner.arch == 'ARM64' }}
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: "23003df007937dd607409c8ddf010baa82bad2673e60e254632ca5b04edcce13"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Install Python tooling (X64)
+        if: ${{ runner.arch == 'X64' }}
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Resolve Snapshot image tag
+        if: ${{ env.SNAPSHOT_E2E_SNAPSHOT_TAG == '' }}
+        timeout-minutes: 23
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A PR mirror run with no tag would silently test main's images
+          # instead of the PR's own changes.
+          if [[ "${GITHUB_REF_NAME}" =~ ^pull-request/[0-9]+$ ]]; then
+            echo "::error::Running against PR mirror branch ${GITHUB_REF_NAME} requires an explicit snapshot_tag. Dispatch push-artifacts.yaml on the PR's source branch first, then pass the resulting tag." >&2
+            exit 1
+          fi
+          case "${GITHUB_REF_NAME}" in
+            main|release/*) python3 hack/resolve-snapshot-image-tag.py --wait-seconds 1200 ;;
+            *) python3 hack/resolve-snapshot-image-tag.py --fallback-main ;;
+          esac
+
+      - name: Validate host GPU cluster
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase host-preflight
+
+      - name: Create vCluster target
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase vcluster
+
+      - name: Deploy the S3 store in the vCluster
+        timeout-minutes: 8
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          # A store on the node's network gets a login of its own for this run.
+          access_key="$(openssl rand -hex 8)"
+          secret_key="$(openssl rand -hex 16)"
+          echo "::add-mask::${access_key}"
+          echo "::add-mask::${secret_key}"
+          export SNAPSHOT_E2E_S3_ACCESS_KEY="${access_key}"
+          export SNAPSHOT_E2E_S3_SECRET_KEY="${secret_key}"
+          uv run --locked --project e2e python -m snapshot_e2e.s3 deploy
+          SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT="$(uv run --locked --project e2e python -m snapshot_e2e.s3 endpoint)"
+          export SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT
+          values="$(uv run --locked --project e2e python -m snapshot_e2e.s3 helm-set)"
+          values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.level=INFO"
+          values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.toStderr=true"
+          {
+            echo "SNAPSHOT_E2E_HELM_SET<<SNAPSHOT_E2E_HELM_SET_END"
+            echo "${values}"
+            echo "SNAPSHOT_E2E_HELM_SET_END"
+          } >> "${GITHUB_ENV}"
+
+      - name: Install Snapshot in vCluster
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-install
+
+      - name: Wait for Snapshot components
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-ready
+
+      - name: Export vCluster kubeconfig
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = json.loads(Path(os.environ["SNAPSHOT_E2E_RESULT_FILE"]).read_text())
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"KUBECONFIG={result['target_kubeconfig']}\n")
+              env.write(f"SNAPSHOT_E2E_HOST_NAMESPACE={result.get('host_namespace', '')}\n")
+              env.write(f"SNAPSHOT_E2E_VCLUSTER_NAME={result.get('vcluster_name', '')}\n")
+              env.write(f"SNAPSHOT_E2E_TEST_NAMESPACE={result['test_namespace']}\n")
+              env.write(f"SNAPSHOT_E2E_TARGET_KUBECONFIG={result['target_kubeconfig']}\n")
+              env.write(f"SNAPSHOT_E2E_SNAPSHOT_RELEASE={result['snapshot_release']}\n")
+              env.write(f"SNAPSHOT_E2E_PVC_NAME={result['pvc_name']}\n")
+          PY
+
+      - name: Inspect vCluster target
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          kubectl get nodes -o wide
+          kubectl get pods -n "${TEST_NAMESPACE}" -o wide
+
+      - name: Run environment validation
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e pytest e2e/tests -m environment -vv
+
+      - name: Run ${{ matrix.framework }} checkpoint/restore test over S3
+        id: framework_test
+        timeout-minutes: 56
+        env:
+          SNAPSHOT_E2E_REQUIRED_TESTS: test_framework_checkpoint_restore_serves_inference[${{ matrix.framework }}]
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          store_pod="$(kubectl get pods -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 -o name | head -1)"
+          kubectl exec -n "${TEST_NAMESPACE}" "${store_pod}" -- sh -c \
+            'mc alias set local http://localhost:'"${SNAPSHOT_E2E_S3_PORT}"' "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; exec mc admin trace --json local' \
+            > "${out}/s3-trace.jsonl" 2> "${out}/s3-trace.err" &
+          trace_pid=$!
+          timeout --signal=INT --kill-after=150s 52m \
+            uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+          status=$?
+          if [[ "${status}" -eq 124 ]]; then
+            PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
+              --suite framework-checkpoint-restore \
+              --case "${{ matrix.framework }}" \
+              --test test_framework_checkpoint_restore_serves_inference \
+              --outcome timed_out \
+              --message "pytest exceeded the 52 minute timeout"
+          fi
+          kill "${trace_pid}" 2>/dev/null
+          exit "${status}"
+
+      - name: Ensure benchmark result exists
+        if: ${{ always() }}
+        env:
+          TEST_STEP_OUTCOME: ${{ steps.framework_test.outcome }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
+            --suite framework-checkpoint-restore \
+            --case "${{ matrix.framework }}" \
+            --test test_framework_checkpoint_restore_serves_inference \
+            --outcome infrastructure_failed \
+            --message "pytest produced no benchmark result; step outcome=${TEST_STEP_OUTCOME}"
+
+      - name: Upload benchmark result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-framework-benchmark-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SNAPSHOT_E2E_BENCHMARK_DIR }}/*.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+
+      - name: Collect diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 5
+        run: |
+          set +e
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          kubectl get pods -n "${TEST_NAMESPACE}" -o yaml > "${out}/pods.yaml"
+          kubectl describe pods -n "${TEST_NAMESPACE}" > "${out}/pods-describe.txt"
+          kubectl get events -n "${TEST_NAMESPACE}" --sort-by=.lastTimestamp > "${out}/events.txt"
+          kubectl get podsnapshots -n "${TEST_NAMESPACE}" -o yaml > "${out}/podsnapshots.yaml"
+          kubectl get podsnapshotcontents -o yaml > "${out}/podsnapshotcontents.yaml"
+          kubectl get configmap -n "${TEST_NAMESPACE}" -o yaml > "${out}/configmaps.yaml"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=snapshot-agent \
+            --all-containers --tail=-1 --prefix > "${out}/snapshot-agent.log"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=operator \
+            --all-containers --tail=-1 --prefix > "${out}/snapshot-operator.log"
+          for pod in $(kubectl get pods -n "${TEST_NAMESPACE}" -l snapshot-e2e-test -o name); do
+            kubectl logs -n "${TEST_NAMESPACE}" "${pod}" --all-containers --tail=-1 \
+              > "${out}/${pod#pod/}.log"
+          done
+
+      - name: Collect S3 store diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 5
+        run: |
+          set +e
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 \
+            --all-containers --tail=-1 --prefix > "${out}/s3-store.log"
+          store_pod="$(kubectl get pods -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 -o name | head -1)"
+          store_mc() {
+            kubectl exec -n "${TEST_NAMESPACE}" "${store_pod}" -- sh -c \
+              'mc alias set local http://localhost:'"${SNAPSHOT_E2E_S3_PORT}"' "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; mc "$@"' sh "$@"
+          }
+          store_mc --json ls --recursive local/snapshot-e2e > "${out}/s3-objects.jsonl" 2> "${out}/s3-objects.err"
+          n=0
+          for key in $(python3 -c 'import json,sys; [print(json.loads(l)["key"]) for l in open(sys.argv[1]) if l.strip().endswith("}") and json.loads(l).get("key","").endswith("/index.json")]' "${out}/s3-objects.jsonl"); do
+            n=$((n + 1))
+            echo "${key}" > "${out}/s3-index-${n}.key"
+            store_mc cat "local/snapshot-e2e/${key}" > "${out}/s3-index-${n}.json" 2>/dev/null
+          done
+          python3 - "${out}" > "${out}/s3-index-check.txt" 2>&1 <<'PY'
+          import glob
+          import json
+          import sys
+
+          out = sys.argv[1]
+          objects = {}
+          for line in open(f"{out}/s3-objects.jsonl"):
+              line = line.strip()
+              if line.startswith("{"):
+                  item = json.loads(line)
+                  if "key" in item:
+                      objects[item["key"]] = item.get("size")
+          print(f"objects in bucket: {len(objects)}, bytes: {sum(v or 0 for v in objects.values())}")
+          for key_file in sorted(glob.glob(f"{out}/s3-index-*.key")):
+              key = open(key_file).read().strip()
+              prefix = key.rsplit("/", 1)[0]
+              index = json.load(open(key_file.replace(".key", ".json")))
+              files = index["files"]
+              problems = []
+              for entry in files:
+                  object_key = f"{prefix}/data/{entry['path']}"
+                  size = objects.get(object_key)
+                  if size is None:
+                      problems.append(f"missing  {entry['path']} (index {entry['size']})")
+                  elif size != entry["size"]:
+                      problems.append(f"size     {entry['path']} (index {entry['size']}, object {size})")
+              print(f"{prefix}: {len(files)} files in the index, {len(problems)} problems")
+              for problem in problems[:40]:
+                  print("  " + problem)
+          PY
+
+      - name: Upload diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-frameworks-diagnostics-s3-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DIAGNOSTICS_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup e2e vCluster
+        if: ${{ always() }}
+        env:
+          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
+        run: |
+          set +e
+          helm uninstall vcluster-hpm -n "${HOST_NAMESPACE}"
+          if command -v vcluster >/dev/null 2>&1; then
+            vcluster delete "${VCLUSTER_NAME}" --namespace "${HOST_NAMESPACE}"
+          fi
+          kubectl delete namespace "${HOST_NAMESPACE}" --ignore-not-found --wait=false
+
+  datadog-restore:
+    name: datadog gpu monitoring back on
+    needs: [datadog-gate, e2e]
+    if: ${{ always() && needs.datadog-gate.result == 'success' && needs.datadog-gate.outputs.mode == 'disable' }}
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 5
+    concurrency:
+      group: snapshot-e2e-frameworks-datadog-gate
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Restore Datadog GPU monitoring
+        run: python3 hack/datadog-gpu-monitoring.py restore --holder "${{ github.run_id }}-${{ github.run_attempt }}"

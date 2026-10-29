@@ -401,7 +401,6 @@ def dump_diagnostics(ctx: UpgradeContext) -> None:
         dump_operator_rollout(ctx)
     except Exception as exc:
         print(f"operator rollout dump failed: {type(exc).__name__}: {exc}")
-    core = client.CoreV1Api()
     for component in (OPERATOR, AGENT):
         for pod in snapshot_pods(ctx, component):
             print(f"pod {pod.metadata.name} phase={pod.status.phase} node={pod.spec.node_name}")
@@ -409,16 +408,13 @@ def dump_diagnostics(ctx: UpgradeContext) -> None:
                 print(f"  {status.name} ready={status.ready} restarts={status.restart_count} state={status.state}")
                 print(k8s.pod_logs(ctx.config.namespace, pod.metadata.name, tail_lines=80, container=status.name))
                 if status.restart_count:
-                    try:
-                        print(
-                            core.read_namespaced_pod_log(
-                                pod.metadata.name,
-                                ctx.config.namespace,
-                                container=status.name,
-                                previous=True,
-                                tail_lines=80,
-                            )
+                    print(
+                        k8s.pod_logs(
+                            ctx.config.namespace,
+                            pod.metadata.name,
+                            tail_lines=80,
+                            container=status.name,
+                            previous=True,
                         )
-                    except ApiException as exc:
-                        print(f"<previous logs unavailable: {k8s.api_error_detail(exc)}>")
+                    )
     print("--- end debug ---\n")
