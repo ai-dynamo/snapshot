@@ -158,6 +158,64 @@ def test_restore_proxy_starts_with_0_2(tag: str, proxy: bool) -> None:
 
 
 @pytest.mark.parametrize(
+    ("tag", "labels"),
+    [
+        ("v0.1.0", False),
+        ("v0.2.0", False),
+        ("v0.2.1", False),
+        ("v0.3.0-rc.1", True),
+        ("v0.3.0", True),
+        ("v1.0.0", True),
+        ("v0.0.0-g1a2b3c4d", True),
+    ],
+)
+def test_checkpoints_record_security_labels_from_0_3(tag: str, labels: bool) -> None:
+    assert scenarios.records_lsm_labels(tag) is labels
+
+
+def restored_pod(status: str, reason: str, message: str = "") -> client.V1Pod:
+    condition = client.V1PodCondition(
+        type=lifecycle.RESTORED_CONDITION, status=status, reason=reason, message=message
+    )
+    return client.V1Pod(status=client.V1PodStatus(conditions=[condition]))
+
+
+@pytest.mark.parametrize(
+    ("pod", "outcome"),
+    [
+        (restored_pod("True", "RestoreSucceeded"), True),
+        (
+            restored_pod(
+                "False",
+                "RestoreIncompatible",
+                "Refused restore; this node cannot run the checkpoint: lsm-labels: source no recorded "
+                "process labels, target apparmor:cri-containerd.apparmor.d",
+            ),
+            False,
+        ),
+    ],
+)
+def test_an_unlabeled_checkpoint_may_restore_or_be_refused_for_its_labels(
+    env: pytest.MonkeyPatch, pod: client.V1Pod, outcome: bool
+) -> None:
+    env.setattr(scenarios.k8s, "read_pod", lambda namespace, name: pod)
+    assert scenarios.wait_for_restore_or_unlabeled_refusal("ns", "restore", timeout=5) is outcome
+
+
+@pytest.mark.parametrize(
+    "pod",
+    [
+        restored_pod("False", "RestoreIncompatible", "Refused restore: memory-limit: source 4Gi, target 1Gi"),
+        restored_pod("False", "RestoreFailed", "nsrestore failed"),
+    ],
+)
+def test_an_unlabeled_checkpoint_fails_on_any_other_outcome(env: pytest.MonkeyPatch, pod: client.V1Pod) -> None:
+    env.setattr(scenarios.k8s, "read_pod", lambda namespace, name: pod)
+    with pytest.raises(AssertionError):
+        scenarios.wait_for_restore_or_unlabeled_refusal("ns", "restore", timeout=5)
+
+
+@pytest.mark.parametrize(
     ("name", "upgraded", "agent"),
     [
         ("full", False, "v0.1.0"),
