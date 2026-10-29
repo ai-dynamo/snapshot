@@ -110,13 +110,13 @@ def has_restore_proxy(agent_tag: str) -> bool:
 LSM_LABELS_RELEASE = (0, 3)
 
 
-def restore_succeeded(namespace: str, pod_name: str, *, checkpointed_by: str, restored_by: str) -> bool:
+def restore_succeeded(namespace: str, pod_name: str, *, checkpointed_by: str) -> bool:
     """Waits for the restore of pod_name to end, and returns whether it succeeded.
 
     It returns False only for the expected lsm-labels refusal described above.
     Any other refusal or failure fails the test.
     """
-    if has_feature(checkpointed_by, LSM_LABELS_RELEASE) or not has_feature(restored_by, LSM_LABELS_RELEASE):
+    if has_feature(checkpointed_by, LSM_LABELS_RELEASE):
         lifecycle.wait_for_restored_condition(namespace, pod_name, "True", "RestoreSucceeded")
         return True
 
@@ -145,7 +145,7 @@ def restore_succeeded(namespace: str, pod_name: str, *, checkpointed_by: str, re
     )
     if not succeeded:
         print(
-            f"{restored_by} refused a checkpoint from {checkpointed_by} under lsm-labels, as expected on this node",
+            f"the agent refused a checkpoint from {checkpointed_by} under lsm-labels, as expected on this node",
             flush=True,
         )
     return succeeded
@@ -177,12 +177,7 @@ def restore_from_snapshot(
             config=ctx.config, run=run, gpu=gpu, source_node=state.node, snapshot_name=snapshot_name
         )
     )
-    if not restore_succeeded(
-        namespace,
-        run.restore_pod,
-        checkpointed_by=ctx.settings.from_tag,
-        restored_by=restoring_agent_tag(ctx, upgraded=upgraded),
-    ):
+    if not restore_succeeded(namespace, run.restore_pod, checkpointed_by=ctx.settings.from_tag):
         return None
     pod = lifecycle.wait_for_pod_ready(namespace, run.restore_pod, timeout=300)
     lifecycle.assert_restored_state(

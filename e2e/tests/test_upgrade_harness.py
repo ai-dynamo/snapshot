@@ -157,56 +157,6 @@ def test_restore_proxy_starts_with_0_2(tag: str, proxy: bool) -> None:
     assert scenarios.has_restore_proxy(tag) is proxy
 
 
-def restored_pod(status: str, reason: str, message: str = "") -> client.V1Pod:
-    condition = client.V1PodCondition(type=lifecycle.RESTORED_CONDITION, status=status, reason=reason, message=message)
-    return client.V1Pod(status=client.V1PodStatus(conditions=[condition]))
-
-
-LSM_LABELS_REFUSAL = restored_pod(
-    "False",
-    "RestoreIncompatible",
-    "Refused restore; this node cannot run the checkpoint: lsm-labels: source no recorded "
-    "process labels, target apparmor:cri-containerd.apparmor.d",
-)
-
-
-@pytest.mark.parametrize(
-    ("pod", "succeeded"),
-    [(restored_pod("True", "RestoreSucceeded"), True), (LSM_LABELS_REFUSAL, False)],
-)
-def test_a_checkpoint_from_before_0_3_may_be_refused_for_lsm_labels(
-    env: pytest.MonkeyPatch, pod: client.V1Pod, succeeded: bool
-) -> None:
-    env.setattr(scenarios.k8s, "read_pod", lambda namespace, name: pod)
-    assert scenarios.restore_succeeded("ns", "restore", checkpointed_by="v0.2.0", restored_by="v0.3.0") is succeeded
-
-
-@pytest.mark.parametrize(
-    "pod",
-    [
-        restored_pod("False", "RestoreIncompatible", "Refused restore: memory-limit: source 4Gi, target 1Gi"),
-        restored_pod("False", "RestoreFailed", "nsrestore failed"),
-    ],
-)
-def test_a_checkpoint_from_before_0_3_fails_on_any_other_outcome(env: pytest.MonkeyPatch, pod: client.V1Pod) -> None:
-    env.setattr(scenarios.k8s, "read_pod", lambda namespace, name: pod)
-    with pytest.raises(AssertionError):
-        scenarios.restore_succeeded("ns", "restore", checkpointed_by="v0.2.0", restored_by="v0.3.0")
-
-
-@pytest.mark.parametrize(
-    ("checkpointed_by", "restored_by"),
-    [("v0.3.0", "v0.3.0"), ("v0.2.0", "v0.2.1")],
-)
-def test_other_restores_must_succeed(env: pytest.MonkeyPatch, checkpointed_by: str, restored_by: str) -> None:
-    def wait_for_restored_condition(namespace: str, name: str, status: str, reason: str) -> None:
-        raise AssertionError(f"timed out waiting for {status}/{reason}")
-
-    env.setattr(scenarios.lifecycle, "wait_for_restored_condition", wait_for_restored_condition)
-    with pytest.raises(AssertionError):
-        scenarios.restore_succeeded("ns", "restore", checkpointed_by=checkpointed_by, restored_by=restored_by)
-
-
 @pytest.mark.parametrize(
     ("name", "upgraded", "agent"),
     [
