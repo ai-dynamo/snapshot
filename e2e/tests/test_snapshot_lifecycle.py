@@ -322,6 +322,143 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
         raise
 
 
+# How long a test checks that the agent is still waiting for a checkpoint
+# readiness probe. Without the probe it dumps a CPU source within seconds of
+# the PodSnapshot, because the source is Ready from its start.
+CHECKPOINT_HOLD_SECONDS = 15
+
+CHECKPOINT_READINESS_PROBES = {
+    "file": {"file": {"path": snap.CHECKPOINT_READY}},
+    # By name, so the agent resolves it against the source container.
+    "http": {"httpGet": {"path": snap.HOOKS_STATUS_PATH, "port": snap.HOOKS_PORT_NAME}},
+}
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_success
+@pytest.mark.parametrize("handler", sorted(CHECKPOINT_READINESS_PROBES))
+def test_checkpoint_waits_for_the_checkpoint_readiness_probe(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+    handler: str,
+) -> None:
+    # The probe, not the container's Ready condition, decides when to
+    # checkpoint: the source is Ready from its start, but nothing creates the
+    # probe's file until the test does.
+    try:
+        source, source_node = create_ready_source(
+            config, run, gpu=False, hooks_server=handler == "http"
+        )
+        checkpoint_observations = snap.wait_for_state_observations(
+            config.namespace, run.source_pod, run.source_token, gpu=False, minimum=2
+        )
+        snap.create_podsnapshot(
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
+            source.metadata.uid,
+            containers=[
+                {
+                    "name": snap.CONTAINER,
+                    "checkpointReadinessProbe": CHECKPOINT_READINESS_PROBES[handler],
+                }
+            ],
+        )
+
+        deadline = time.monotonic() + CHECKPOINT_HOLD_SECONDS
+        while time.monotonic() < deadline:
+            pod_snapshot = snap.get_custom_object(
+                client.CustomObjectsApi(), config.namespace, run.snapshot_name, snap.PODSNAPSHOTS
+            )
+            assert snap.condition(pod_snapshot, "Ready") is None or (
+                snap.condition(pod_snapshot, "Ready").get("status") != "True"
+            ), "checkpointed before the checkpoint readiness probe passed"
+            assert snap.condition(pod_snapshot, "Failed") is None or (
+                snap.condition(pod_snapshot, "Failed").get("status") != "True"
+            ), f"the PodSnapshot failed while waiting: {pod_snapshot.get('status')}"
+            assert k8s.read_pod(config.namespace, run.source_pod).status.phase == "Running"
+            time.sleep(2)
+
+        k8s.exec_command(config.namespace, run.source_pod, f"touch {snap.CHECKPOINT_READY}")
+        pod_snapshot, content = snap.wait_for_snapshot_ready(
+            config.namespace, run.snapshot_name, timeout=120
+        )
+        assert_podsnapshot_ready(pod_snapshot, content, source, source_node)
+        # restore_event_reasons reads every Event about a Pod, not only restore ones.
+        assert_restore_events(config.namespace, run.source_pod, {"WaitingForCheckpointReadiness"})
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+        k8s.create_pod(
+            snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node)
+        )
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+        snap.assert_restored_state(
+            config.namespace,
+            run.restore_pod,
+            source_token=run.source_token,
+            restore_token=run.restore_token,
+            checkpoint_observations=checkpoint_observations,
+            gpu=False,
+        )
+        if handler == "http":
+            # The server came back with the restored process and answers at
+            # the restore Pod's own IP, as a post-restore action needs.
+            pod_ip = k8s.read_pod(config.namespace, run.restore_pod).status.pod_ip
+            url = f"http://{pod_ip}:{snap.HOOKS_PORT}{snap.HOOKS_STATUS_PATH}"
+            output = k8s.exec_command(
+                config.namespace,
+                run.restore_pod,
+                f"curl -sS -o /dev/null -w 'status=%{{http_code}}' --max-time 5 {url}",
+            )
+            assert "status=200" in output, output
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.cpu
+@pytest.mark.snapshot_failure
+def test_checkpoint_readiness_probe_on_a_shared_volume_fails(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # The agent reads probe files as root, so it refuses one on a volume that
+    # other Pods or the node may share; the source's checkpoint PVC is one.
+    try:
+        source, _ = create_ready_source(config, run, gpu=False)
+        snap.create_podsnapshot(
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
+            source.metadata.uid,
+            containers=[
+                {
+                    "name": snap.CONTAINER,
+                    "checkpointReadinessProbe": {
+                        "file": {"path": f"{snap.CHECKPOINT_DIR}/ready"}
+                    },
+                }
+            ],
+        )
+        pod_snapshot, content = snap.wait_for_snapshot_failed(
+            config.namespace, run.snapshot_name, timeout=120
+        )
+        assert content is not None
+        failed = snap.condition(content, "Failed")
+        assert failed and failed.get("reason") == "InvalidCheckpointReadinessProbe", failed
+        assert "emptyDir" in failed.get("message", ""), failed
+        assert k8s.read_pod(config.namespace, run.source_pod).status.phase == "Running", (
+            "a refused probe must not touch the source"
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 @pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_one_cpu_snapshot_restores_into_two_containers(
@@ -993,6 +1130,7 @@ def create_ready_source(
     annotations: dict[str, str] | None = None,
     memory_limit: str | None = None,
     handle_sigterm: bool = False,
+    hooks_server: bool = False,
 ) -> tuple[object, str]:
     k8s.create_pod(
         snap.source_pod(
@@ -1002,6 +1140,7 @@ def create_ready_source(
             annotations=annotations,
             memory_limit=memory_limit,
             handle_sigterm=handle_sigterm,
+            hooks_server=hooks_server,
         )
     )
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)

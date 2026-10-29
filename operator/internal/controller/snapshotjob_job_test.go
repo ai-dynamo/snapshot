@@ -35,6 +35,41 @@ func minimalSnapshotJob() *snapshotv1alpha1.SnapshotJob {
 	}
 }
 
+func TestBuildSourceJobKeepsTheReadinessProbeForACheckpointReadinessProbe(t *testing.T) {
+	serving := &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"serving-check"}}}}
+	for _, tc := range []struct {
+		name     string
+		settings []snapshotv1alpha1.ContainerSnapshotConfig
+		keep     bool
+	}{
+		{"no settings", nil, false},
+		{"settings without a probe", []snapshotv1alpha1.ContainerSnapshotConfig{{Name: "worker"}}, false},
+		{"a probe on the target", []snapshotv1alpha1.ContainerSnapshotConfig{{
+			Name:                     "worker",
+			CheckpointReadinessProbe: &snapshotv1alpha1.CheckpointReadinessProbe{},
+		}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sj := minimalSnapshotJob()
+			sj.Spec.PodTemplate.Spec.Containers[0].ReadinessProbe = serving
+			sj.Spec.PodSnapshotTemplate.Containers = tc.settings
+
+			job, err := buildSourceJob(sj)
+			require.NoError(t, err)
+
+			probe := requireContainer(t, job.Spec.Template.Spec.Containers, "worker").ReadinessProbe
+			require.NotNil(t, probe)
+			require.NotNil(t, probe.Exec)
+			if tc.keep {
+				assert.Equal(t, []string{"serving-check"}, probe.Exec.Command, "the workload's own readiness probe is kept")
+				return
+			}
+			assert.Equal(t, []string{"cat", podcontract.SnapshotControlMountPath + "/" + podcontract.ReadyForSnapshotFile},
+				probe.Exec.Command, "Ready gates the checkpoint, so the ready-file probe replaces the workload's")
+		})
+	}
+}
+
 func TestBuildSourceJobNonTargetArtifactContract(t *testing.T) {
 	makeJob := func() *snapshotv1alpha1.SnapshotJob {
 		sj := minimalSnapshotJob()

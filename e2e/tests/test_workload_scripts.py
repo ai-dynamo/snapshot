@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -111,6 +114,85 @@ def test_cpu_source_logs_and_exits_on_request(tmp_path: Path) -> None:
 
     assert proc.returncode == 7
     assert "[source] observation seq=0" in output
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def hooks_status(port: int, path: str = workloads.HOOKS_STATUS_PATH, method: str = "GET") -> int:
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        return error.code
+
+
+@pytest.mark.workload
+def test_hooks_server_reports_checkpoint_readiness(tmp_path: Path) -> None:
+    # The HTTP checkpoint readiness probe e2e test drives this server: 503
+    # until the test creates CHECKPOINT_READY, then 200.
+    control_dir = tmp_path / "snapshot-control"
+    state_dir = tmp_path / "e2e-state"
+    control_dir.mkdir()
+    script = (
+        workloads.source_command("test-image", gpu=False, hooks_server=True)
+        .replace(workloads.CONTROL_DIR, str(control_dir))
+        .replace(workloads.STATE_DIR, str(state_dir))
+        .replace("/tmp/hooks-server.pl", str(tmp_path / "hooks-server.pl"))
+    )
+    port = free_port()
+    proc = subprocess.Popen(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            workloads.SOURCE_TOKEN_ENV: "unit-source-token",
+            "SNAPSHOT_E2E_HOOKS_PORT": str(port),
+        },
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,  # so the server, a child of bash, is stopped too
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                status = hooks_status(port)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
+        assert status == 503
+        (state_dir / "checkpoint-ready").touch()
+        assert hooks_status(port) == 200
+        assert hooks_status(port, path="/other") == 404
+        assert hooks_status(port, method="POST") == 404
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=10)
+
+
+@pytest.mark.workload
+def test_only_an_opted_in_cpu_source_runs_the_hooks_server() -> None:
+    assert "perl" not in workloads.source_command("test-image", gpu=False)
+    assert "perl" not in workloads.snapshotjob_source_command("test-image", gpu=False)
+    with pytest.raises(ValueError):
+        workloads.source_command("test-image", gpu=True, hooks_server=True)
+
+
+@pytest.mark.workload
+def test_the_workload_image_has_perl_for_the_hooks_server() -> None:
+    # The workload image is the agent image. verify-base-packages keeps this
+    # list equal to its base image, so a base image without Perl fails here,
+    # in the same PR, instead of in a cluster run.
+    root = Path(__file__).resolve().parents[2]
+    for name in ("base-packages.tsv", "base-packages.arm64.tsv"):
+        packages = (root / "agent" / "compliance" / name).read_text().splitlines()
+        assert any(line.startswith("perl-base\t") for line in packages), name
 
 
 @pytest.mark.workload
