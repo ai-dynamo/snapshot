@@ -1050,3 +1050,29 @@ func TestOrderDRAUUIDsByRuntimeRejectsMismatches(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoreAndUnlockProcessTreeConcurrency(t *testing.T) {
+	const sleep = 200 * time.Millisecond
+	pids := []int{11, 12, 13, 14}
+	installFakeCUDAHelper(t, fmt.Sprintf(`case " $* " in *" --action restore "*) sleep %.2f ;; esac`, sleep.Seconds()))
+
+	for _, tc := range []struct {
+		name        string
+		gpuCount    int
+		maxDuration time.Duration
+	}{
+		{name: "one rank per GPU", gpuCount: 4, maxDuration: 2 * sleep},
+		// errgroup blocks forever on a limit of zero.
+		{name: "unknown GPU count still completes", gpuCount: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			started := time.Now()
+			if _, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", cudaCheckpointHelperBinary, tc.gpuCount, logr.Discard()); err != nil {
+				t.Fatalf("RestoreAndUnlockProcessTree() error = %v", err)
+			}
+			if duration := time.Since(started); tc.maxDuration > 0 && duration > tc.maxDuration {
+				t.Fatalf("restored %d ranks in %s, expected under %s", len(pids), duration, tc.maxDuration)
+			}
+		})
+	}
+}

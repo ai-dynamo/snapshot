@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/client-go/kubernetes"
@@ -534,15 +535,20 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 // runs inside nsrestore and shares its process group so cancellation reaches the CUDA
 // helper. helperBinaryPath identifies the binary in that namespace, including through
 // an inherited descriptor opened before CRIU restores the workload filesystem.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, gpuCount int, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 
 	start := time.Now()
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(max(gpuCount, 1))
 	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, helperBinaryPath, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
-		}
+		group.Go(func() error {
+			return restoreProcess(groupCtx, pid, deviceMap, helperBinaryPath, log)
+		})
+	}
+	if err := group.Wait(); err != nil {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 
 	for _, pid := range cudaPIDs {

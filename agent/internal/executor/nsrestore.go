@@ -316,7 +316,7 @@ func executeRestore(
 		if m.CUDA.CustomStorage {
 			err = restoreCustomStorage(ctx, opts, m.CUDA.PIDs, restorePIDs, log)
 		} else {
-			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, len(m.CUDA.SourceGPUUUIDs), log)
 		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
