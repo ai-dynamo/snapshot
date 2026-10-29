@@ -14,6 +14,14 @@ on:
           published for all three images in GHCR, otherwise the run fails.
         required: false
         type: string
+  # Called by e2e-pr.yaml on copy-pr-bot mirror branches, after the CPU suite
+  # passes, with the tag of the images it built from the mirrored commit.
+  workflow_call:
+    inputs:
+      snapshot_tag:
+        description: Operator/agent/pagebroker image tag to install.
+        required: false
+        type: string
   schedule:
     # 23:00 Pacific Standard Time.
     - cron: "0 7 * * *"
@@ -70,10 +78,17 @@ jobs:
       - name: Use provided Snapshot image tag
         if: ${{ (inputs.snapshot_tag || '') != '' }}
         timeout-minutes: 1
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
         run: |
           set -euo pipefail
-          echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${{ inputs.snapshot_tag }}" >> "$GITHUB_ENV"
-          echo "Using provided Snapshot image tag: ${{ inputs.snapshot_tag }}"
+          # A dispatch input is free text, and this line writes GITHUB_ENV.
+          if [[ ! "${SNAPSHOT_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::snapshot_tag is not a valid image tag: ${SNAPSHOT_TAG}" >&2
+            exit 2
+          fi
+          echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${SNAPSHOT_TAG}" >> "$GITHUB_ENV"
+          echo "Using provided Snapshot image tag: ${SNAPSHOT_TAG}"
 
       - name: Capture host kubeconfig
         id: host

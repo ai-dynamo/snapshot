@@ -40,13 +40,32 @@ there, runs the environment check, then runs the snapshot lifecycle tests.
 The workflow resolves the latest published Snapshot operator/agent image tag and
 passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
+### Pull requests
+
+Pull requests are tested by `e2e-pr.yaml` on their copy-pr-bot mirror branch
+(`pull-request/<number>`), because the GPU runners accept push events but not
+`pull_request`. A pull request from a trusted author with signed commits is
+mirrored automatically; any other needs a maintainer's `/ok to test <sha>`.
+
+On each mirror push the workflow first checks whether the pull request touches
+the images, chart, CRDs, harness, or these workflows, comparing against where it
+branched from `main`. If it does, the CPU suite runs while the operator, agent,
+and pagebroker images are built from the mirrored commit and pushed to GHCR as
+`v0.0.0-pull-request-<number>-g<sha8>`. The GPU suite in `e2e.yaml` and the
+framework suites in `e2e-frameworks.yaml` run only once both succeed, and
+install those images rather than main's.
+
+The `PR E2E` check passes only when every suite the change needed passed, or
+when the change needed none of them. The scheduled registry prune deletes
+pull request images seven days after they are pushed.
+
 ### CPU Mode (k3d)
 
-`e2e-cpu.yaml` runs on every pull request, where no GPU cluster is available.
-It builds the operator, agent, and PageBroker images from the pull request,
-creates a k3d cluster, pushes the images to its disposable registry,
-installs the chart through the same `setup.py` phases the GPU workflow uses, and
-runs `pytest -m cpu`.
+`e2e-cpu.yaml` runs from `e2e-pr.yaml`, where no GPU cluster is available. It
+builds the operator, agent, and PageBroker images from the pull request, creates
+a k3d cluster, pushes the images to its disposable registry, installs the chart
+through the same `setup.py` phases the GPU workflow uses, and runs
+`pytest -m cpu`.
 
 The CPU workflow and local runner set `SNAPSHOT_E2E_CPU_ONLY=true`. This
 explicit mode requires direct setup and exactly one ready, schedulable node.
@@ -529,15 +548,14 @@ The dashboard deployment summary links to the resulting Pages URL.
 
 #### Viewing a pull request's benchmark preview
 
-1. Get an `E2E Framework Tests` run against your PR. This does not happen
-   automatically: first dispatch `push-artifacts.yaml` (Actions tab,
-   `workflow_dispatch`) on your PR's source branch to build its own
-   operator/agent/pagebroker images, then dispatch
+1. Get an `E2E Framework Tests` run against your PR. The framework suites in
+   `PR E2E` do not publish a preview: dispatch
    `.github/workflows/e2e-frameworks.yaml` (`workflow_dispatch`, `ref`: your
    PR's `pull-request/<number>` mirror branch, created by `copy-pr-bot`) with
-   `snapshot_tag` set to the tag `push-artifacts.yaml` just built. Dispatching
-   against the `pull-request/<number>` branch (not your source branch) is what
-   keys the benchmark preview to your PR.
+   `snapshot_tag` set to the `v0.0.0-pull-request-<number>-g<sha8>` tag that
+   `PR E2E` built for the commit. Dispatching against the
+   `pull-request/<number>` branch (not your source branch) is what keys the
+   benchmark preview to your PR.
 2. Wait for it to finish, then open the **E2E Benchmark Dashboard** workflow
    run it triggers (`.github/workflows/e2e-benchmark-pages.yaml`, via
    `workflow_run`) -- filter the Actions tab to that workflow and your PR's

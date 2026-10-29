@@ -585,6 +585,47 @@ def test_atomic_write_leaves_no_temporary_file_on_failure(
     assert list(target.parent.iterdir()) == []
 
 
+def test_cli_aggregate_attributes_a_missing_result_to_the_source_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workflow_run publisher's own GITHUB_SHA and event describe a different run."""
+    monkeypatch.setenv("GITHUB_SHA", "publisher-sha")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_run")
+    monkeypatch.setenv("GITHUB_RUN_ID", "publisher-run")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "vllm.json").write_text(json.dumps(_result(run_id="42")), encoding="utf-8")
+    output_dir = tmp_path / "output"
+
+    assert history.main([
+        "aggregate",
+        "--artifacts-dir", str(artifacts),
+        "--history-dir", str(tmp_path / "history"),
+        "--output-dir", str(output_dir),
+        "--expected-case", "vllm",
+        "--expected-case", "sglang",
+        "--test", "test_framework",
+        "--run-id", "42",
+        "--run-attempt", "1",
+        "--source-commit", "nightly-sha",
+        "--source-ref", "refs/heads/main",
+        "--source-event", "schedule",
+    ]) == 0
+
+    benchmarks = {
+        item["result"]["identity"]["case"]: item["result"]
+        for item in json.loads((output_dir / "comparison.json").read_text())["benchmarks"]
+    }
+    assert benchmarks["vllm"]["outcome"] == "passed"
+    missing = benchmarks["sglang"]
+    assert missing["outcome"] == "infrastructure_failed"
+    assert missing["identity"]["runId"] == "42"
+    assert missing["source"]["commit"] == "nightly-sha"
+    assert missing["source"]["event"] == "schedule"
+
+
 def test_cli_aggregate_appends_summary_and_rebuild_prints_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -736,20 +777,29 @@ def test_summary_escapes_untrusted_text_and_rejects_unsafe_links() -> None:
 
 
 def test_only_scheduled_main_history_job_has_write_permission() -> None:
-    repository_root = Path(__file__).resolve().parents[2]
-    workflow = yaml.safe_load(
-        (repository_root / ".github/workflows/e2e-frameworks.yaml").read_text()
-    )
+    workflows = Path(__file__).resolve().parents[2] / ".github/workflows"
+    frameworks = yaml.safe_load((workflows / "e2e-frameworks.yaml").read_text())
+    history_workflow = yaml.safe_load((workflows / "e2e-frameworks-history.yaml").read_text())
 
-    read_only = workflow["jobs"]["benchmark-history-read-only"]
-    publisher = workflow["jobs"]["benchmark-history-publish"]
+    # e2e-pr.yaml calls the framework workflow on pull request code with read
+    # access only, so no job there may ask for more.
+    assert frameworks["permissions"] == {"contents": "read", "packages": "read"}
+    for job in frameworks["jobs"].values():
+        assert "write" not in (job.get("permissions") or {}).values()
+
+    read_only = frameworks["jobs"]["benchmark-history-read-only"]
+    publisher = history_workflow["jobs"]["publish"]
+    # workflow_run runs from the default branch, never the pull request's code.
+    assert history_workflow[True]["workflow_run"]["workflows"] == [frameworks["name"]]
+    assert history_workflow["permissions"] == {}
     assert read_only["permissions"]["contents"] == "read"
     assert publisher["permissions"]["contents"] == "write"
-    assert "github.event_name == 'schedule'" in publisher["if"]
-    assert "github.ref == 'refs/heads/main'" in publisher["if"]
+    assert "github.event.workflow_run.event == 'schedule'" in publisher["if"]
+    assert "github.event.workflow_run.head_branch == 'main'" in publisher["if"]
+    assert "github.event.workflow_run.conclusion != 'cancelled'" in publisher["if"]
     assert publisher["concurrency"]["cancel-in-progress"] is False
+    assert "!cancelled()" in read_only["if"]
     for job in (read_only, publisher):
-        assert "!cancelled()" in job["if"]
         assert "always()" not in job["if"]
 
     def step(job: dict, uses: str) -> dict:
@@ -759,6 +809,16 @@ def test_only_scheduled_main_history_job_has_write_permission() -> None:
     # infrastructure_failed results; the job must fail instead.
     for job in (read_only, publisher):
         assert "continue-on-error" not in step(job, "download-artifact")
+    download = step(publisher, "download-artifact")["with"]
+    assert download["run-id"] == "${{ github.event.workflow_run.id }}"
+    assert "${{ github.event.workflow_run.id }}" in download["pattern"]
+    # Results are matched by run ID, which defaults to this run's own.
+    assert publisher["env"]["SOURCE_RUN_ID"] == "${{ github.event.workflow_run.id }}"
+    aggregate = next(item["run"] for item in publisher["steps"]
+                     if "benchmark_history aggregate" in item.get("run", ""))
+    for flag in ("--run-id \"${SOURCE_RUN_ID}\"", "--run-attempt \"${SOURCE_RUN_ATTEMPT}\"",
+                 "--source-commit", "--source-ref", "--source-event"):
+        assert flag in aggregate
 
     # Only the publisher pushes, so only it may keep the token in the history
     # checkout; the read-only job runs pull-request code after this step.
