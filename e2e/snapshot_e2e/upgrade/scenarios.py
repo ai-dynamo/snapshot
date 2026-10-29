@@ -86,15 +86,69 @@ def delete_source(ctx: UpgradeContext, state: ScenarioState) -> None:
 RESTORE_PROXY_RELEASE = (0, 2)
 
 
-def has_restore_proxy(agent_tag: str) -> bool:
-    """Whether the agent at agent_tag restores through the restore proxy.
+def has_feature(agent_tag: str, release: tuple[int, int]) -> bool:
+    """Whether the agent at agent_tag has a feature that shipped in release.
 
     Dev builds (v0.0.0-...) come from this tree, so they have it. Release
     candidates count as their release.
     """
     if agent_tag.startswith("v0.0.0-"):
         return True
-    return Version(agent_tag.removeprefix("v")).release >= RESTORE_PROXY_RELEASE
+    return Version(agent_tag.removeprefix("v")).release >= release
+
+
+def has_restore_proxy(agent_tag: str) -> bool:
+    """Whether the agent at agent_tag restores through the restore proxy."""
+    return has_feature(agent_tag, RESTORE_PROXY_RELEASE)
+
+
+# Agents before this release don't record the security labels of a
+# checkpointed process. A newer agent needs them to restore into a container
+# under an LSM profile, such as AppArmor, so on such a node it refuses an older
+# checkpoint under its lsm-labels check. Elsewhere the checkpoint restores.
+# restore_succeeded is the one place the scenarios allow for that.
+LSM_LABELS_RELEASE = (0, 3)
+
+
+def restore_succeeded(namespace: str, pod_name: str, *, checkpointed_by: str) -> bool:
+    """Waits for the restore of pod_name to end, and returns whether it succeeded.
+
+    It returns False only for the expected lsm-labels refusal described above.
+    Any other refusal or failure fails the test.
+    """
+    if has_feature(checkpointed_by, LSM_LABELS_RELEASE):
+        lifecycle.wait_for_restored_condition(namespace, pod_name, "True", "RestoreSucceeded")
+        return True
+
+    def check() -> bool | None:
+        restored = lifecycle.pod_condition(k8s.read_pod(namespace, pod_name), lifecycle.RESTORED_CONDITION)
+        if restored is None:
+            return None
+        if restored.status == "True" and restored.reason == "RestoreSucceeded":
+            return True
+        if restored.reason == "RestoreIncompatible":
+            assert "lsm-labels" in (restored.message or ""), (
+                f"restore of {namespace}/{pod_name} refused for a reason other than lsm-labels: {restored.message}"
+            )
+            return False
+        if restored.reason in {"RestoreFailed", "RestorePartiallySucceeded"}:
+            raise AssertionError(
+                f"restore reached unexpected terminal condition for {namespace}/{pod_name}: "
+                f"{restored.reason}: {restored.message}"
+            )
+        return None
+
+    succeeded = lifecycle.wait_for(
+        f"nvidia.com/Restored=True/RestoreSucceeded, or an lsm-labels refusal, on {namespace}/{pod_name}",
+        check,
+        timeout=600,
+    )
+    if not succeeded:
+        print(
+            f"the agent refused a checkpoint from {checkpointed_by} under lsm-labels, as expected on this node",
+            flush=True,
+        )
+    return succeeded
 
 
 def restoring_agent_tag(ctx: UpgradeContext, *, upgraded: bool) -> str:
@@ -110,7 +164,11 @@ def restore_from_snapshot(
     gpu: bool,
     upgraded: bool,
     snapshot_name: str | None = None,
-) -> client.V1Pod:
+) -> client.V1Pod | None:
+    """Restores the scenario's checkpoint and checks the restored state.
+
+    Returns None when the restore was refused as expected; see restore_succeeded.
+    """
     namespace = ctx.config.namespace
     run = state.run
     delete_source(ctx, state)
@@ -119,7 +177,8 @@ def restore_from_snapshot(
             config=ctx.config, run=run, gpu=gpu, source_node=state.node, snapshot_name=snapshot_name
         )
     )
-    lifecycle.wait_for_restored_condition(namespace, run.restore_pod, "True", "RestoreSucceeded")
+    if not restore_succeeded(namespace, run.restore_pod, checkpointed_by=ctx.settings.from_tag):
+        return None
     pod = lifecycle.wait_for_pod_ready(namespace, run.restore_pod, timeout=300)
     lifecycle.assert_restored_state(
         namespace,
