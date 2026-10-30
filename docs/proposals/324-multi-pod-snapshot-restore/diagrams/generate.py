@@ -275,9 +275,9 @@ ROUND = (
      ("R", "Relay", "rank 1", "t")],
     [
         ("m", "R", "AB", "Get cuinterpose/round/k/cmd, waits"),
-        ("m", "AB", "C", "Get, stamped rank 1, role relay"),
+        ("m", "AB", "C", "Get on rank 1's connection, relay namespace checked"),
         ("m", "L", "AA", "Insert cuinterpose/round/k/cmd: the step and its arguments, keyed by rank where needed"),
-        ("m", "AA", "C", "Insert, stamped with the leader's rank, role relay"),
+        ("m", "AA", "C", "Insert on the leader's connection, relay namespace checked"),
         ("m", "C", "AB", "command, written by the leader", 1),
         ("m", "AB", "R", "command", 1),
         ("g", "par · every rank runs the phase at the same time"),
@@ -286,7 +286,7 @@ ROUND = (
         ("s", "R", "keep its own entries, run the step's handler on every local process at once"),
         ("x",),
         ("m", "R", "AB", "Insert cuinterpose/round/k/reply/1: status and the step's result"),
-        ("m", "AB", "C", "Insert, stamped rank 1"),
+        ("m", "AB", "C", "Insert on rank 1's connection"),
         ("m", "R", "AB", "Get the round k+1 command, waits"),
         ("m", "L", "AA", "Get every round k reply"),
         ("m", "AA", "C", "one Get per rank"),
@@ -307,8 +307,8 @@ CHECKPOINT = (
         ("s", "W", "quiesce: no new work on shared memory, communicators, or peers; until CUDA Checkpoint drives NCCL, "
                    "the app also calls NCCL Checkpoint's prepare"),
         ("m", "W", "A", "ready-for-snapshot (readiness probe)"),
-        ("m", "A", "C", "Attach(session UID, member ID) with a Pod-bound token"),
-        ("m", "C", "A", "Welcome {epoch, rank, size, members, deadline}", 1),
+        ("m", "A", "C", "connect for (session UID, member ID) with a Pod-bound token"),
+        ("m", "C", "A", "read meta {members, ranks, deadline, epoch}", 1),
         ("g", "admission · no side effects"),
         ("m", "A", "C", "all-gather snapshot/admit {Pod IP, fabric domain, versions, cuInterpose}"),
         ("m", "C", "A", "payloads of every rank", 1),
@@ -326,7 +326,7 @@ CHECKPOINT = (
         ("x",),
         ("g", "alt · refused"),
         ("m", "L", "C", "Fail(reason)"),
-        ("m", "C", "A", "SessionFailed", 1),
+        ("m", "C", "A", "ended: every wait returns with the reason", 1),
         ("s", "A", "no record written: source as found, member Failed with reason Refused"),
         ("e", "else · accepted"),
         ("m", "L", "A", "relay exits: topology accepted (leader's agent only)"),
@@ -373,8 +373,8 @@ RESTORE = (
     [
         ("m", "O", "A", "restore Pods with restore-set, PodSetRestore mapping member IDs to Pods"),
         ("s", "A", "preflight: artifact, compatibility, GPU map, probe budget"),
-        ("m", "A", "C", "Attach(session UID, member ID) with a Pod-bound token"),
-        ("m", "C", "A", "Welcome {epoch, rank, size, members, deadline}", 1),
+        ("m", "A", "C", "connect for (session UID, member ID) with a Pod-bound token"),
+        ("m", "C", "A", "read meta {members, ranks, deadline, epoch}", 1),
         ("g", "admission · no side effects"),
         ("m", "A", "C", "all-gather snapshot/admit {new IP, capture ID, fabric domain, GPUs, cuInterpose}"),
         ("m", "C", "A", "payloads of every rank: IP map with the artifact table, checks", 1),
@@ -428,24 +428,24 @@ RESTORE = (
 )
 
 LIBRARIES = (
-    [("N0", "NCCL rank 0", "comm X, Pod A", "g"), ("AA", "Agent A", "", "t"),
-     ("C", "Coordinator", "session", "p"), ("AB", "Agent B", "", "t"),
+    [("N0", "NCCL rank 0", "comm X, Pod A", "g"), ("AA", "Agent A", "library endpoint", "t"),
+     ("C", "Coordinator", "session", "p"), ("AB", "Agent B", "library endpoint", "t"),
      ("Nk", "NCCL rank k", "comm X, Pod B", "g")],
     [
-        ("n", "N0", "Nk", "during CUDA resume, inside each library's restore callback"),
+        ("n", "N0", "Nk", "after restore-complete with NCCL Checkpoint today, or during CUDA resume once NCCL restores there"),
         ("s", "N0", "read the endpoint file"),
         ("s", "Nk", "read the endpoint file"),
-        ("m", "Nk", "AB", "Get cuda/nccl/v1/restore/X/uid, waits"),
-        ("m", "AB", "C", "Get, stamped rank B, role app"),
+        ("m", "Nk", "AB", "GET X/uid, polls every 10 ms"),
+        ("m", "AB", "C", "Get in the library bucket, waits"),
         ("s", "N0", "create a new unique ID for comm X"),
-        ("m", "N0", "AA", "Insert cuda/nccl/v1/restore/X/uid, 128 bytes"),
-        ("m", "AA", "C", "Insert, stamped rank A, role app"),
+        ("m", "N0", "AA", "SET X/uid, 128 bytes"),
+        ("m", "AA", "C", "Insert in the library bucket"),
         ("m", "C", "AB", "value", 1),
-        ("m", "AB", "Nk", "value", 1),
+        ("m", "AB", "Nk", "value, then later polls from the node's cache", 1),
         ("m", "N0", "Nk", "NCCL bootstrap and transport setup over the Pod network, no Snapshot hop"),
-        ("s", "N0", "callback returns, resume completes"),
-        ("s", "Nk", "callback returns, resume completes"),
-        ("n", "AA", "AB", "with NCCL Checkpoint today, the same exchange runs after restore-complete through the agent's Redis-protocol endpoint: GET polls every 10 ms and the agent answers from a cache filled by one upstream Get per key"),
+        ("s", "N0", "restore continues"),
+        ("s", "Nk", "restore continues"),
+        ("n", "AA", "AB", "the endpoint speaks the small subset of the Redis protocol that NCCL Checkpoint uses (SET, GET, DEL) and confines the library to the session's library bucket"),
     ],
 )
 
@@ -456,26 +456,26 @@ FAILURES = (
     [
         ("g", "alt · refusal before the commit (capture admission)"),
         ("m", "L", "AA", "Fail(reason)"),
-        ("m", "AA", "C", "Fail, stamped with the leader's rank"),
-        ("m", "C", "AA", "event SessionFailed", 1),
-        ("m", "C", "AB", "event SessionFailed", 1),
-        ("m", "AB", "R", "pending Get returns ABORTED", 1),
+        ("m", "AA", "C", "Fail: create ended with the reason"),
+        ("m", "C", "AA", "ended, seen by every watch", 1),
+        ("m", "C", "AB", "ended, seen by every watch", 1),
+        ("m", "AB", "R", "pending Get returns with the reason", 1),
         ("s", "R", "nothing to undo, since INSPECT only reads; exits with status refused"),
         ("s", "L", "nothing to undo; exits with status refused"),
         ("n", "AA", "AB", "no agent wrote a record, so every workload is left as found and every member is Failed with reason Refused"),
         ("e", "else · error after the commit"),
         ("m", "R", "AB", "Fail(RESTORE_UNICAST error)"),
-        ("m", "AB", "C", "Fail, stamped rank 1"),
-        ("m", "C", "AA", "event SessionFailed naming rank 1", 1),
-        ("m", "C", "AB", "event SessionFailed naming rank 1", 1),
-        ("m", "AA", "L", "pending Get returns ABORTED", 1),
+        ("m", "AB", "C", "Fail: create ended, naming rank 1"),
+        ("m", "C", "AA", "ended, naming rank 1", 1),
+        ("m", "C", "AB", "ended, naming rank 1", 1),
+        ("m", "AA", "L", "pending Get returns with the reason", 1),
         ("s", "L", "exit failed"),
         ("n", "AA", "AB", "each agent acts on its own record: with Started or RestoreStarted it terminates its source or fails "
                           "its restore, without one it leaves the workload as found, and after restore-complete it leaves "
                           "the workload running"),
-        ("e", "else · agent stream lost or deadline passed"),
-        ("s", "C", "rank 1's stream not back within the grace period, or ranks missing at the deadline"),
-        ("m", "C", "AA", "event SessionFailed naming rank 1", 1),
+        ("e", "else · agent connection lost or deadline passed"),
+        ("s", "C", "rank 1's connection not back within the grace period, or ranks missing at the deadline"),
+        ("m", "C", "AA", "ended, naming rank 1", 1),
         ("n", "AA", "AB", "handled as above: each agent acts on its own record"),
         ("x",),
     ],
@@ -491,7 +491,7 @@ def architecture():
     b = []
     b += box(40, 40, 180, 56, "g", "Kubernetes API", "PodSet CRDs, status")
     b += box(245, 40, 180, 56, "g", "Snapshot operator", "set controllers")
-    b += box(450, 40, 190, 56, "p", "Snapshot coordinator", "one session per attempt")
+    b += box(450, 40, 190, 56, "p", "Snapshot coordinator", "sessions in embedded NATS")
     b.append(line(223, 68, 242, 68, both=True))
     for x, label in ((40, "Node A"), (350, "Node B")):
         b.append(f'<rect class="cont" x="{x}" y="140" width="290" height="340" rx="16" stroke-width="1" stroke-dasharray="5 4"/>')
@@ -510,14 +510,14 @@ def architecture():
     b.append(line(580, 172, 580, 99, cls="arwp", marker="ahP", width=1.6))
     b.append(line(297, 426, 403, 426, dash="4 3", both=True, width=1))
     b.append(line(40, 506, 70, 506, cls="arwp", marker=None, width=1.6))
-    b.append(T(80, 506, "Session stream from each agent to the coordinator (gRPC over TLS)", "tm", 12, anchor="start"))
+    b.append(T(80, 506, "Session connection from each agent to the coordinator's embedded NATS (TLS)", "tm", 12, anchor="start"))
     b.append(line(40, 530, 70, 530, marker=None, width=1.2))
     b.append(T(80, 530, "Local hop: inherited socket, per-Pod endpoint, per-process sockets", "tm", 12, anchor="start"))
     b.append(line(40, 554, 70, 554, marker=None, dash="4 3", width=1))
     b.append(T(80, 554, "Workload traffic: GPU fabric and preserved TCP, never through Snapshot", "tm", 12, anchor="start"))
     svg("architecture.svg", 680, 580, "Multi-Pod snapshot architecture",
         "Kubernetes API, Snapshot operator and Snapshot coordinator on top; two nodes, each with a Snapshot agent "
-        "and a Pod holding a cuInterpose relay and the workload processes. Agents hold a session stream to the "
+        "and a Pod holding a cuInterpose relay and the workload processes. Agents hold a session connection to the "
         "coordinator; Pods reach the coordinator only through their agent.", b)
 
 
@@ -529,9 +529,9 @@ def lifecycle():
     b.append(T(30, 26, "Session", "tx", 14, True, "start"))
     b.append('<circle class="dot" cx="38" cy="92" r="6"/>')
     b.append(line(45, 92, 68, 92))
-    b += box(70, 70, 170, 44, "p", "Open", "attach, admit, work")
+    b += box(70, 70, 170, 44, "p", "Open", "connect, admit, work")
     b += box(540, 40, 170, 44, "t", "Closed")
-    b += box(540, 112, 330, 44, "r", "Failed", "every pending read and barrier returns ABORTED")
+    b += box(540, 112, 330, 44, "r", "Failed", "every pending wait returns with the reason")
     b.append(path("M240 84 L290 84 L290 62 L538 62"))
     b.append(T(302, 50, "every member has left", "tm", 12, anchor="start"))
     b.append(path("M240 100 L290 100 L290 134 L538 134"))
@@ -553,7 +553,7 @@ def lifecycle():
             b.append(T(cx, 312 + i * 16, s, "tm", 12))
     svg("session-lifecycle.svg", 900, 350, "Coordination session and member records",
         "The session is open until every member has left, when it closes, or until any failure, deadline, lost "
-        "member or cancellation, when it fails and every pending operation returns ABORTED. Each member moves from "
+        "member or cancellation, when it fails and every pending wait returns with the reason. Each member moves from "
         "no record, to a durable record written after the commit and before its first irreversible step, to "
         "restore-complete after release; a failure leaves a member without a record as found, fails a member with "
         "one, and only ends the rendezvous for a released member.", b)
@@ -680,8 +680,8 @@ def main():
              "restore and the cuInterpose rounds, resume barrier and CUDA resume, release barrier; the workload waits "
              "from CRIU restore until restore-complete.", *RESTORE, width=1000)
     sequence("library-rendezvous.svg", "Library rendezvous through the session",
-             "During CUDA resume, rank 0 of a communicator inserts a new unique ID that the other ranks read through "
-             "their agents.", *LIBRARIES, width=860)
+             "Rank 0 of a communicator sets a new unique ID through its agent's library endpoint, and the other "
+             "ranks read it through theirs.", *LIBRARIES, width=860)
     sequence("failure-paths.svg", "Failure paths",
              "Every failure fails the session; each agent then acts on its own record: no record leaves the workload "
              "as found, a record fails the member, and restore-complete leaves it running.", *FAILURES, width=860)
