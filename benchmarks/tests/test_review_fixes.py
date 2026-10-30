@@ -130,28 +130,32 @@ class ReviewFixTests(unittest.TestCase):
             self.assertIn("disk full", error.getvalue())
             mocks["measurement.source_measurement"].assert_called_once()
 
-    def test_inference_helpers_require_all_answers_and_the_same_token(self):
+    def test_inference_helpers_require_source_answers_and_the_same_token(self):
         source = [
-            dict(expected=x, answer=x.upper()) for x in ("paris", "berlin", "tokyo")
+            dict(prompt=prompt, answer=answer)
+            for prompt, answer in zip(measurement.INFERENCE_PROMPTS, [
+                "a must-visit destination for anyone interested", "Berlin", "Tokyo",
+            ])
         ]
         restored = [
-            dict(
-                expected=x["expected"],
-                response=dict(text=x["answer"], checkpoint_token="token"),
-            )
+            dict(prompt=x["prompt"], response=dict(text=x["answer"], checkpoint_token="token"))
             for x in source
         ]
         self.assertTrue(measurement.source_checks_pass(source))
-        self.assertTrue(measurement.restore_checks_pass(restored, "token"))
-        self.assertFalse(measurement.restore_checks_pass(restored, "wrong"))
+        self.assertTrue(measurement.restore_checks_pass(restored, "token", source))
+        self.assertFalse(measurement.restore_checks_pass(restored, "wrong", source))
         for checks in ([], source[:2], source[:2] + source[:1]):
             self.assertFalse(measurement.source_checks_pass(checks))
         for checks in ([], restored[:2], restored[:2] + restored[:1]):
-            self.assertFalse(measurement.restore_checks_pass(checks, "token"))
-        source[0]["answer"] = "wrong"
-        restored[0]["response"]["text"] = "wrong"
-        self.assertFalse(measurement.source_checks_pass(source))
-        self.assertFalse(measurement.restore_checks_pass(restored, "token"))
+            self.assertFalse(measurement.restore_checks_pass(checks, "token", source))
+        # A factual answer still fails if the restored model changed its response.
+        restored[0]["response"]["text"] = "Paris"
+        self.assertFalse(measurement.restore_checks_pass(restored, "token", source))
+        for empty in ("", "  ", None):
+            source[0]["answer"] = empty
+            restored[0]["response"]["text"] = empty
+            self.assertFalse(measurement.source_checks_pass(source))
+            self.assertFalse(measurement.restore_checks_pass(restored, "token", source))
 
     def test_checkpoint_helpers_reject_bad_inventory_and_ambiguous_timing(self):
         self.assertTrue(measurement.is_gpu_manifest("gpu/123/manifest.txt"))

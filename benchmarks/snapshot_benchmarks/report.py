@@ -114,6 +114,7 @@ def render(results: list[dict]) -> str:
     if not current:
         return _render_legacy(legacy)
     headline, cold, restore, environment = [], [], [], []
+    sizes, transfers = [], []
     f = lambda value: "-" if value is None else f"{value:.2f}"
     for r in current:
         model, engine, env = r["model"], r["engine"], r["environment"]
@@ -132,7 +133,9 @@ def render(results: list[dict]) -> str:
         restored = mean(t["total_s"] for t in timings) if timings else None
 
         def spread(key):
-            values = [t[key] for t in timings]
+            values = [t.get(key) for t in timings]
+            if not values or any(value is None for value in values):
+                return "-"
             return (
                 f(mean(values)) + " ± " + (f(stdev(values)) if len(values) > 1 else "—")
             )
@@ -161,7 +164,8 @@ def render(results: list[dict]) -> str:
                 + [
                     spread(k)
                     for k in (
-                        "setup_s",
+                        "staging_s",
+                        "other_setup_s",
                         "criu_s",
                         "cuda_s",
                         "wake_handoff_s",
@@ -169,6 +173,22 @@ def render(results: list[dict]) -> str:
                     )
                 ]
             )
+        checkpoint = r.get("checkpoint") or {}
+        measured_storage = checkpoint.get("measurement") or {}
+        sizes.append(prefix + [
+            _fmt_bytes(model.get("reported_weights_bytes")),
+            _fmt_bytes(model.get("model_directory_bytes")),
+            _fmt_bytes(measured_storage.get("local_payload_bytes")),
+            _fmt_bytes(model.get("checkpoint_artifact_bytes")),
+            _fmt_bytes(measured_storage.get("metadata_bytes")),
+            _fmt_bytes(measured_storage.get("total_bytes")),
+        ])
+        if env.get("storage_type") == "s3":
+            transfers.append(prefix + [
+                f(measured_storage.get("publication_s")),
+                f(measured_storage.get("publication_gbps")),
+                spread("staging_s"), spread("staging_gbps"),
+            ])
         capture, destination = env.get("capture") or {}, env.get("restore") or {}
         environment.append(
             prefix
@@ -178,8 +198,9 @@ def render(results: list[dict]) -> str:
                 _fmt_driver(capture),
                 destination.get("gpu_product") or "-",
                 _fmt_driver(destination),
-                env.get("storage_class") or "-",
+                "s3" if env.get("storage_type") == "s3" else env.get("storage_class") or "-",
                 env.get("placement") or "-",
+                measured_storage.get("gpu_checkpoint_mode") or "unknown",
             ]
         )
     text = "# Snapshot benchmark results\n\n## Cold start compared with Snapshot\n\n"
@@ -188,8 +209,8 @@ def render(results: list[dict]) -> str:
             "Model",
             "Engine",
             "Parallelism",
-            "Weights",
-            "Checkpoint size",
+            "Model weights (measured)",
+            "Checkpoint payload size",
             "Checkpoint (s)",
             "Cold start (s)",
             "Restore (s, mean ± SD)",
@@ -198,6 +219,17 @@ def render(results: list[dict]) -> str:
         headline,
     )
     text += "\n\nThe report averages the recorded restore times and shows their sample standard deviation. Cold-start and checkpoint values are reported without a standard deviation. Speedup uses the mean restore time. Older single-attempt results show — for standard deviation.\n"
+    text += "\n\n## Measured sizes\n\n" + _table(
+        ["Model", "Engine", "Parallelism", "Model weights", "Model directory before checkpoint",
+         "Local payload (pre-upload inventory)", "Published payload", "S3 index metadata", "Stored total"], sizes,
+    )
+    text += "\n\nSizes use logical bytes (GB = 10^9 bytes). Model directory sizes exclude symlinks and directory metadata. Local S3 payload size comes from the pre-upload inventory; published payload size is independently listed in S3. Missing historical measurements remain unavailable.\n"
+    if transfers:
+        text += "\n\n## Effective S3 throughput\n\n" + _table(
+            ["Model", "Engine", "Parallelism", "Publication (s)", "Publication (GB/s)",
+             "S3 → staging (s, mean ± SD)", "S3 → staging (GB/s, mean ± SD)"], transfers,
+        )
+        text += "\n\nRates divide measured payload bytes by each operation's duration, including overhead; they are not network-only bandwidth. Publication is the agent checkpoint commit phase. Restore rates are computed per attempt before averaging.\n"
     if cold:
         text += "\n\n## Where the cold start time goes (s)\n\n"
         text += _table(
@@ -219,7 +251,8 @@ def render(results: list[dict]) -> str:
             "Model",
             "Engine",
             "Parallelism",
-            "Agent setup / rootfs",
+            "Staging",
+            "Other agent setup / cleanup",
             "CRIU restore",
             "CUDA restore",
             "Wake",
@@ -227,7 +260,7 @@ def render(results: list[dict]) -> str:
         ],
         restore,
     )
-    text += "\n\nRestore ends at wake/resume completion, before inference. CUDA restore includes multi-GPU reconstruction.\n\n## Observed environment\n\n"
+    text += "\n\nRestore starts at agent external-restore entry and ends at wake/resume completion, before inference. Scheduling and container startup are excluded. Staging is separated from other agent setup/cleanup; older results without that split show unavailable values. CUDA restore includes multi-GPU reconstruction.\n\n## Observed environment\n\n"
     text += (
         _table(
             [
@@ -239,8 +272,9 @@ def render(results: list[dict]) -> str:
                 "Capture driver",
                 "Restore GPU",
                 "Restore driver",
-                "Storage class",
+                "Storage",
                 "Placement",
+                "GPU checkpoint mode",
             ],
             environment,
         )
@@ -326,7 +360,7 @@ def _render_legacy(results: list[dict]) -> str:
                 cdriver=_fmt_driver(capture_gpu),
                 rgpu=restore_gpu.get("gpu_product") or "-",
                 rdriver=_fmt_driver(restore_gpu),
-                storage=env.get("storage_class") or "-",
+                storage="s3" if env.get("storage_type") == "s3" else env.get("storage_class") or "-",
                 placement=env.get("placement") or "-",
             )
         )

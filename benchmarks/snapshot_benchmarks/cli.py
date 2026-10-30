@@ -70,6 +70,10 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         help="Helm release name. Defaults to E2EConfig.from_env().",
     )
     parser.add_argument(
+        "--storage-type", choices=["pvc", "s3"], default="pvc",
+        help="Checkpoint backend of the installed Snapshot release.",
+    )
+    parser.add_argument(
         "--pvc-name",
         default=None,
         help="Checkpoint PVC name. Defaults to E2EConfig.from_env().",
@@ -85,6 +89,7 @@ def _benchmark_config(args: argparse.Namespace) -> BenchmarkConfig:
         release=args.release or base.release,
         pvc_name=args.pvc_name or base.pvc_name,
         kubeconfig=base.kubeconfig,
+        storage_type=args.storage_type,
         context=args.context,
         node=getattr(args, "node", None),
         model_pvc=getattr(args, "model_pvc", None),
@@ -140,7 +145,8 @@ def cmd_metadata(args: argparse.Namespace) -> int:
     cfg = _benchmark_config(args)
     cfg.configure()
     env = metadata.collect_environment(
-        pvc_namespace=cfg.snapshot_namespace, pvc_name=cfg.pvc_name
+        pvc_namespace=cfg.snapshot_namespace, pvc_name=cfg.pvc_name,
+        storage_type=cfg.storage_type, release=cfg.release,
     )
     print(json.dumps(_to_json(env), indent=2))
     return 0

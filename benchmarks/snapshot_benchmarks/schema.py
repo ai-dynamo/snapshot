@@ -66,6 +66,8 @@ class BenchmarkEnvironment:
     restore timing to the wrong hardware.
     """
 
+    storage_type: str = "pvc"
+    s3: dict[str, str] | None = None
     storage_class: str | None = None
     storage_provisioner: str | None = None
     k8s_version: str | None = None
@@ -88,6 +90,7 @@ class ModelInfo:
     label: str
     hf_id_or_path: str
     reported_weights_bytes: int | None = None  # measured logical weight-file bytes
+    model_directory_bytes: int | None = None
     checkpoint_artifact_bytes: int | None = None  # sum of regular-file logical bytes
     tp: int = 1
     ep: int = 1
@@ -135,6 +138,7 @@ class CheckpointTiming:
     podsnapshot_created_at: datetime.datetime | None = None
     ready_at: datetime.datetime | None = None
     agent_seconds: float | None = None
+    measurement: dict[str, Any] | None = None
 
     @property
     def checkpoint_seconds(self) -> float | None:
