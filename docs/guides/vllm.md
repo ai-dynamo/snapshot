@@ -17,6 +17,11 @@ This is stage 1 of the [usage guides](README.md). Complete
 > This example is validated on vLLM 0.31.0 (the pinned
 > `vllm/vllm-openai:v0.31.0-ubuntu2404` image).
 
+For customers using 0.27.x, see
+[Earlier vLLM versions](#earlier-vllm-versions-027x). The numbered steps use
+`spawn` for the single-GPU path. For other configurations, see
+[Alternative launch methods](#alternative-launch-methods).
+
 ## How the example works
 
 The program loads the model selected in the capture manifest, runs one
@@ -25,9 +30,10 @@ generation to initialize vLLM, and then calls `pause_generation()` and
 the GPU for capture, without a CPU copy of the weights. It writes
 `ready-for-snapshot` only when the process is safe to checkpoint. In a restore
 container, Snapshot runs its restore proxy in place of the program and restores
-the checkpointed process. That process calls `wake_up()` and `resume_generation()`, runs another
-generation, starts an API on port 8000, and writes `vllm-restore-ready` when the API is
-listening. [Restore](restore.md#4-verify-the-restored-replica) shows how to confirm the restore.
+the checkpointed process. That process calls `wake_up()` and
+`resume_generation()`, runs another generation, starts an API on port 8000,
+and writes `vllm-restore-ready` when the API is listening.
+[Restore](restore.md#4-verify-the-restored-replica) shows how to confirm the restore.
 
 The capture manifests run vLLM's own Ubuntu 24.04 build of the 0.31.0 image
 (`v0.31.0-ubuntu2404`) unmodified, which already matches the glibc floor the
@@ -99,7 +105,7 @@ no custom model code. Add other `AsyncEngineArgs` keyword arguments, such as
 > [!NOTE]
 > This example runs vLLM directly through `AsyncLLM` rather than `vllm serve`, so
 > the standard `vllm serve` command-line arguments do not apply. Engine keyword
-> arguments come from the JSON argument, and other runtime settings are supplied through
+> arguments come from the JSON argument, and other runtime settings come from
 > vLLM's [environment variables](https://docs.vllm.ai/en/v0.31.0/configuration/env_vars/)
 > set in the Deployment's Pod template.
 
@@ -162,7 +168,63 @@ kubectl get pods \
 Use that Pod name in the `PodSnapshot` created in the next stage. The
 readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
 
-## Next steps
+## 4. Checkpoint and restore
 
-- [Checkpoint a replica](checkpoint.md)
-- [Restore a replica](restore.md)
+Follow [Checkpoint a replica](checkpoint.md#option-1--podsnapshot-checkpoint-a-running-replica)
+to create a `PodSnapshot` for the source pod and wait for it to become Ready.
+Then follow [Restore a replica](restore.md), using your recipe's restore
+profile and the same runtime image as the source.
+Verify restored inference through the application's `/generate` endpoint.
+
+## Alternative launch methods
+
+The numbered walkthrough uses `spawn`. When vLLM is used as a Python
+library, workers can default to
+[`fork`, rather than `spawn`](https://docs.vllm.ai/en/latest/design/multiprocessing/).
+Forked workers can inherit CUDA state and NVIDIA device handles. CUDA
+checkpointing must handle that state across the worker process tree.
+
+### Single-node multi-GPU workloads
+
+If you are still using Snapshot 0.1.0, first
+[install](../operations/install.md#install-from-a-release) or
+[upgrade](../operations/install.md#upgrade-an-existing-release) to Snapshot
+0.2 or later. Use a [multi-GPU recipe](README.md#choose-your-recipe) or follow
+the [SnapshotJob setup](checkpoint.md#option-2--snapshotjob-checkpoint-a-throwaway-replica).
+The opt-in prepares the CUDA processes for checkpointing; it does not
+configure vLLM parallelism or GPU requests. Match the source and restore
+GPU counts and follow the [workload contract](../reference/workload-contract.md#multi-gpu-workloads).
+
+### Native CUDA job wrapping
+
+For a single-GPU workload, launching the application with
+[`cuda-checkpoint --launch-job`](https://github.com/NVIDIA/cuda-checkpoint)
+groups its CUDA processes into a job so checkpointing can coordinate their
+state. This is an alternative to changing worker startup to `spawn`, not
+an additional prerequisite. SnapshotJob does **not** automatically add native
+CUDA job wrapping.
+
+Use the [driver version recommended for native CUDA job wrapping](../reference/compatibility.md#minimum-versions-by-feature).
+
+## Earlier vLLM versions (0.27.x)
+
+For customers remaining on vLLM 0.27.x, use the same single-GPU steps above
+with a matching runtime image. The example below pins the previously
+validated `v0.27.1-ubuntu2404` image. Before creating the
+ConfigMap in step 1, replace `await engine.release_kv_cache_memory()` with
+`await engine.sleep()` in your local `vllm/app.py` and set both the source
+and restore manifests to that image:
+
+```bash
+export VLLM_IMAGE=vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+
+for manifest in vllm/capture/qwen3-0.6b.yaml vllm/restore/1-gpu.yaml; do
+  kubectl set image --local --filename "$manifest" \
+    "*=$VLLM_IMAGE" --output yaml > "$manifest.tmp" &&
+    mv "$manifest.tmp" "$manifest"
+done
+```
+
+Continue with step 1, then checkpoint and restore as usual. Source and
+restore must use the same image; do not restore a 0.27.x checkpoint into
+the default 0.31.0 image.

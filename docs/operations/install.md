@@ -27,6 +27,24 @@ requests 10 CPU and 33Gi of memory per GPU node by default, and its memory
 limits decide the largest checkpoint it can take. See
 [PageBroker staging](storage.md#pagebroker-staging) for how to size it.
 
+## Upgrade an existing release
+
+With Helm 3.14 or newer, apply the new chart's CRDs before upgrading the
+release; Helm does not upgrade CRDs automatically:
+
+```bash
+helm show crds oci://ghcr.io/ai-dynamo/snapshot/snapshot --version 0.2.0 \
+  | kubectl apply --server-side -f -
+
+helm upgrade snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+  --version 0.2.0 \
+  --namespace snapshot --reset-then-reuse-values
+```
+
+Use your existing release name and namespace if they differ. The upgrade
+applies the new chart defaults while retaining the release's configured
+values. Verify the installation after the rollout completes.
+
 ## Verify the installation
 
 ```bash
