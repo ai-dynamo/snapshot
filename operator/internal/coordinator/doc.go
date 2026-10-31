@@ -1,0 +1,71 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+// Package coordinator is SNEP-324's Snapshot coordinator: it serves each
+// attempt's coordination session from a NATS server with JetStream embedded in
+// the process. It owns the server, the sessions, and authentication, and
+// nothing else. It shares only package session
+// (github.com/ai-dynamo/snapshot/agent/pkg/session) with the session client:
+// the bucket names and key layout, the default limits, the user name a member
+// connects under, the subjects its connection is permitted, Meta, and the
+// errors. The reconciler that follows the set resources, the TokenReview
+// Authorizer, and the binary sit above this package.
+//
+// # The embedded server
+//
+// The server keeps every bucket in memory only, as a single replica, with no
+// cluster, no HTTP monitoring port, and its log routed into the coordinator's
+// with key-value subjects redacted. It has two accounts. Members and the
+// coordinator's own connection share the application account, the only one
+// with JetStream. The system account carries the server's connect and
+// disconnect events, which a second in-process connection follows. Both
+// in-process connections authenticate with a token drawn at startup, which
+// never leaves the process's memory. The client listener uses TLS.
+//
+// Each bucket limits the size of its values, and the library bucket also its
+// number of keys. No bucket reserves memory. Every session shares the memory
+// cap, Config.MaxBytes, so a session that fills it makes other sessions'
+// writes fail with session.ErrTooMany until it is removed.
+//
+// # Authentication
+//
+// Every client goes through the server's custom authentication. A member
+// presents its user name, session.UserName(uid, member), the agent's
+// ServiceAccount token, and as its password the epoch it last read, if any.
+// The coordinator refuses every member until MarkReady, then asks the
+// Authorizer, then checks the attempt's session and its membership, and
+// admits the member with session.MemberPermissions: both of the attempt's
+// buckets, and in the Snapshot bucket only its own arrivals and departure
+// besides the shared keys, never meta, another attempt's buckets, the system
+// account, or the API that creates and deletes buckets.
+//
+// # Sessions
+//
+// The reconciler drives sessions, level-triggered: Ensure while an attempt's
+// set resource is unfinished, and Remove once it is deleted, or once it is
+// final and its session has ended. A session ends exactly once, through the
+// ended key, which is only ever created: by a member's Fail; by the
+// coordinator when every member has left, when the deadline passes, when a
+// member's grace period runs out, when it removes a session still open, and
+// when it shuts down; or by a member that finds the coordinator lost the
+// session it joined.
+//
+// # The grace period
+//
+// The coordinator follows every member's connections through the connect and
+// disconnect events, by user name. When a member has no connection left, its
+// grace period starts, and a new connection ends it; if it runs out while the
+// session is open, the session fails with session.ReasonMemberFailed. A member
+// that has left still gets one, since its relay and its libraries keep using
+// the connection until the session ends.
+//
+// # Restarts and the epoch
+//
+// A coordinator restart loses every session. The reconciler ensures them again
+// with new epochs before the host calls MarkReady, and a member that
+// reconnects presents the epoch it read: a different one makes the coordinator
+// fail the recreated session with session.ReasonCoordinatorLost before
+// admitting the member, so the member never writes to a session it did not
+// join. The member itself then reads meta, finds the other epoch, and reports
+// session.ErrCoordinatorLost.
+package coordinator

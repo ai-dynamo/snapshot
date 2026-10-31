@@ -12,8 +12,10 @@ build:
 	go build -o bin/manager ./cmd/manager
 	go build -o bin/crd-installer ./cmd/crdinstaller
 
+# -race costs about half again the run time, and the coordinator's concurrency
+# is what most needs it.
 test:
-	go test ./...
+	go test -race ./...
 
 # Runs admission tests requiring a real apiserver (envtest kube-apiserver/etcd),
 # gated behind the integration tag so plain `go test ./...`/`make test` stays
