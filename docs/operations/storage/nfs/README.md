@@ -5,22 +5,50 @@ SPDX-License-Identifier: Apache-2.0
 
 # NFS
 
-Part of [Storage best practices](../README.md). Initial outline.
+Part of [Storage best practices](../README.md).
+
+## Check the storage limits
+
+Check the read throughput available to each restore node. Include the storage
+service limit, network speed, and other clients that use the same storage.
+More connections cannot increase throughput beyond these limits.
+
+Check the NFS version and client support before you select mount options.
+Use the backend examples below; one configuration does not fit every server.
 
 ## Direct I/O (`O_DIRECT`)
 
-TODO: When to use it, filesystem support, and the Snapshot settings that apply
-to CPU images and GPU payloads.
+Direct I/O bypasses the client page cache. Check that the filesystem supports
+it, then compare restore times with buffered I/O.
+
+Set `config.criu.imageIoMode: direct` for CRIU images. This is an application
+setting, not an NFS mount option. It does not select the GPU payload I/O mode.
+See the [configuration reference](../../../reference/api.md#agent-config-config).
 
 ## Buffered I/O
 
-TODO: When to use it, page-cache behavior, memory requirements, and the settings
-that apply. Distinguish cold and warm restores.
+Set `config.criu.imageIoMode: writeback` for buffered CRIU image I/O. Buffered
+reads can use the client page cache and read-ahead. Allow memory for that cache.
+Compare cold and warm restores separately. See [EFS](efs.md) for its starting
+configuration.
 
 ## Mount options
 
-TODO: NFS version, `rsize`/`wsize`, connection count, and how to inspect the
-effective mount options. Keep vendor-specific options in the examples below.
+| Option | What to check |
+| --- | --- |
+| `vers`, `proto` | NFS version and transport supported by the client and server |
+| `rsize`, `wsize` | Maximum NFS read/write request sizes; larger requests can reduce overhead |
+| `nconnect` | Number of transport connections; the supported range depends on the client |
+| `spread_reads`, `remoteports` | VAST client options; see the [VAST example](vast.md) |
+
+Check the mount options in use on the restore node:
+
+```bash
+findmnt --types nfs,nfs4 --output TARGET,SOURCE,OPTIONS
+```
+
+Check client/kernel support for the application's I/O method too. Support for
+`io_uring` alone does not show that the restore path uses it.
 
 ## Examples
 
@@ -29,5 +57,6 @@ effective mount options. Keep vendor-specific options in the examples below.
 
 ## Validate a configuration
 
-TODO: Checkpoint and restore with inference verification; record storage and
-client versions, mount options, I/O mode, cache state, and restore timings.
+Checkpoint the workload, restore it, and check inference after each restore.
+Record storage and client versions, mount options, I/O mode, cache state, and
+restore times. Keep these conditions fixed when you compare configurations.
