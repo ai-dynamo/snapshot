@@ -10,6 +10,11 @@ and staging memory, see [Storage configuration](../storage.md).
 
 This is an initial outline; sections marked TODO need validated guidance.
 
+## Slow restores
+
+Start with [Why is my restore slow?](slow-restore.md) to check timings, client
+versions, mount options, and storage performance with fio.
+
 ## Backends
 
 - [NFS](nfs/README.md) — direct and buffered I/O, mount options, and examples.

@@ -2,6 +2,8 @@
 
 Common issues when running Snapshot, and where to look.
 
+For performance issues, start with [Why is my restore slow?](storage/slow-restore.md).
+
 ## A checkpoint never becomes Ready
 
 A `PodSnapshot` becomes Ready only after the `snapshot-agent` confirms the

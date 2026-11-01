@@ -178,6 +178,7 @@ operations, indexed below.
 - [Installation](docs/operations/install.md) — Helm install and uninstall.
 - [Storage](docs/operations/storage.md) — the shared checkpoint volume and how to configure it.
 - [Storage best practices](docs/operations/storage/README.md) — backend tuning and examples (initial outline).
+- [Slow restores](docs/operations/storage/slow-restore.md) — check timings, NFS clients, mount options, and fio results.
 - [Troubleshooting](docs/operations/troubleshooting.md) — common failures and where to look.
 - [Security](docs/operations/security.md) — the privileged agent, seccomp, and Pod Security.
 
