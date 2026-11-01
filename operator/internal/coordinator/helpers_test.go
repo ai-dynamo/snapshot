@@ -233,9 +233,15 @@ func (m *member) arrive(ctx context.Context, barrier string) error {
 	return err
 }
 
-// leave records the member's departure.
+// leave records the member's departure. Like the client's Leave, it succeeds
+// if the session closed: the last departure closes it, and the member's own
+// watch may see that, and close the connection, before the write's reply
+// arrives.
 func (m *member) leave(ctx context.Context) error {
 	_, err := m.snapshot.Put(ctx, session.LeftKey(m.id), nil)
+	if err != nil && errors.Is(m.Err(), session.ErrClosed) {
+		return nil
+	}
 	return err
 }
 
