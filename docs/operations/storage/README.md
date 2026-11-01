@@ -12,7 +12,7 @@ memory, see [Storage configuration](../storage.md).
 
 VAST NFS is validated with Snapshot; see the published
 [benchmark results](../../development/benchmarks.md). The EFS, local
-NVMe/RAID0, and S3 pages provide general guidance.
+NVMe/RAID0, and S3 pages cover setup and tuning.
 
 | Backend | Shared across nodes | Restore on a different node | Durability | Setup effort |
 | --- | --- | --- | --- | --- |

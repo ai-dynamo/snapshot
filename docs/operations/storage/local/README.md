@@ -5,8 +5,6 @@ SPDX-License-Identifier: Apache-2.0
 
 # Local NVMe and RAID0
 
-General guidance.
-
 Use this setup for snapshots on a node-local array. This local-PVC example
 places the operator and node agent on one storage node. Schedule source Pods
 and restore Pods on that node through their workload manifests.

@@ -5,8 +5,6 @@ SPDX-License-Identifier: Apache-2.0
 
 # Amazon EFS
 
-General guidance.
-
 Tune an existing EFS-backed PVC for Snapshot. Start with the
 [NFS guidance](README.md); see [Storage best practices](../README.md) for
 other backends.
