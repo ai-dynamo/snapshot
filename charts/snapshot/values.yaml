@@ -26,7 +26,7 @@ operator:
   # annotation key to request a deterministic capture failure for a test pod.
   testFailCaptureSourceAnnotation: ""
 
-  # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/configure-storage.md.
+  # Enable only after the compatible agent/PageBroker rollout completes; see docs/operate/configure-storage.md.
   bindNewContents: false
 
   # Temporary, for end-to-end tests only: accept containers[].checkpointReadinessProbe
@@ -163,7 +163,7 @@ storage:
     uri: ""
 
 # PageBroker sidecar: stages checkpoint images in memory and publishes them to
-# the checkpoint PVC it shares with the agent. See docs/operations/configure-storage.md.
+# the checkpoint PVC it shares with the agent. See docs/operate/configure-storage.md.
 pageBroker:
   # Requires a PageBroker image implementing the PVC artifact backend. Roll this out before binding new contents.
   artifactAddressing: false
@@ -172,7 +172,7 @@ pageBroker:
   maxConcurrentRequests: 16
   staging:
     # RAM on the node, unbounded without this cap. Lowered to fit when it does
-    # not leave the writing container room; see docs/operations/configure-storage.md.
+    # not leave the writing container room; see docs/operate/configure-storage.md.
     sizeLimit: 56Gi
   # Allocate and register the full ring before accepting GPU work.
   # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.

@@ -25,11 +25,11 @@ description.
 | Which Helm values exist? | [Helm Chart Values](../reference/helm-values.md) and the [chart README](../../charts/snapshot/README.md) |
 | Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Compatibility](../get-started/prerequisites.md) for the driver and CUDA versions, baseline and per feature, and the README [Prerequisites](../../README.md#prerequisites) for the rest of the cluster requirements |
 | What must my workload or Pod do? | [Workload Contract](../integrate/workload-contract.md), [Restore Pod Contract](../integrate/restore-pod-contract.md) |
-| How do I install, configure, upgrade, or clean up? | [`docs/operations/`](../operations) |
+| How do I install, configure, upgrade, or clean up? | [`docs/operate/`](../operate) |
 | How do I checkpoint a pod and restore it for the first time? | [Checkpoint and Restore](../guides/README.md) |
 | It failed. Why, and what do I do? | [Troubleshooting](../troubleshooting/reading-a-failure-message.md) |
-| What is not supported? | [Limitations](../limitations.md) |
-| How do the pieces fit together? | The [architecture overview](../reference/architecture/README.md) |
+| What is not supported? | [Limitations](../overview/limitations.md) |
+| How do the pieces fit together? | The [architecture overview](../overview/architecture-overview.md) |
 | How does one subsystem or flow work inside? | A detailed page in [`docs/design/`](../design), such as [Multi-GPU](../design/multi-gpu/README.md) |
 | Why was it designed this way? | A [SNEP](../design/README.md) |
 | What changed in this release? | [CHANGELOG.md](../../CHANGELOG.md) |
@@ -46,7 +46,7 @@ answers. A new option or feature usually alters these:
 
 1. The API reference: its rows.
 2. A contract page: what it requires of a workload or Pod, if anything.
-3. One section in `docs/operations/`, if an operator must do something.
+3. One section in `docs/operate/`, if an operator must do something.
 4. [Compatibility](../get-started/prerequisites.md): one row, if the feature needs
    a newer driver, CUDA, GPU Operator, kernel, or runtime than the baseline.
 5. Architecture: the overview, if the change adds or removes a component, a
@@ -92,7 +92,7 @@ easy to read.
 
 | | Overview | Detailed page |
 | --- | --- | --- |
-| Page | [Architecture](../reference/architecture/README.md) | One per subsystem or flow in [`docs/reference/architecture/`](../reference/architecture) |
+| Page | [Architecture](../overview/architecture-overview.md) | One per subsystem or flow in [`docs/overview/`](../overview) |
 | Reader | Anyone who wants the mental model | A contributor changing that subsystem |
 | Holds | The components and what each is responsible for, the resources, how a checkpoint and a restore proceed in a few steps, where data lives, the trust boundaries | How the subsystem works: algorithms, ordering and why, queues and retries, failure reasons and timeouts, protocols and file formats |
 | Names | Components and resources | Functions, queues, files, reasons, and settings, as the code spells them |
@@ -149,7 +149,7 @@ The feature's own page links to that row and does not repeat the number.
 | Why this design, and the alternatives that lost | A SNEP |
 | What behaved differently before, or what this change did | The CHANGELOG entry and the PR description |
 | How you tested it | The PR description |
-| Work that is planned but not done | A GitHub issue; a [Limitations](../limitations.md) bullet if users hit the gap |
+| Work that is planned but not done | A GitHub issue; a [Limitations](../overview/limitations.md) bullet if users hit the gap |
 | A warning about a mistake nobody has made | Nowhere |
 
 ## Style

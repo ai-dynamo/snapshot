@@ -256,5 +256,5 @@ sees describes the capability, not the mechanism behind it.
 - [README.md](README.md) — what the system does and how it is used
 - [docs/development/build-from-source.md](docs/development/build-from-source.md) — full build instructions
 - [docs/reference](docs/reference) — API reference
-- [docs/operations](docs/operations) — install, storage, and operational guides
+- [docs/operate](docs/operate) — install, storage, and operational guides
 - [e2e/README.md](e2e/README.md) — running the end-to-end suite

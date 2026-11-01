@@ -21,7 +21,7 @@ listed per feature. If a feature is not listed, the baseline is all it needs.
   kernel-mode driver is refused with the `driver-minimum` check.
 - A `ReadWriteMany` storage class, or an existing `ReadWriteMany` claim, for the
   snapshot volume. See
-  [Configure Storage](../operations/configure-storage.md).
+  [Configure Storage](../operate/configure-storage.md).
 - A cluster that allows a privileged DaemonSet with `hostPID`, `hostIPC`, and
   `hostNetwork` for the node agent. See
   [Allow the Privileged Node Agent](installation.md#allow-the-privileged-node-agent).
@@ -35,7 +35,7 @@ Requires a Snapshot release newer than v0.2.0, with the chart, agent, and
 PageBroker images from the same release. The v0.2.0 images do not include the
 S3 backend. The chart ships the agent and PageBroker as a pair, so
 `image.agent.tag` selects both. With S3, you do not need a `ReadWriteMany`
-storage class. See [Other Backends](../operations/configure-storage.md#other-backends).
+storage class. See [Other Backends](../operate/configure-storage.md#other-backends).
 
 ### Multi-GPU Workloads
 

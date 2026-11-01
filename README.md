@@ -115,7 +115,7 @@ helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
 ```
 
 By default the chart provisions its own RWX snapshot volume, shared by every
-checkpoint. See [Configure Storage](docs/operations/configure-storage.md) for the volume model and options
+checkpoint. See [Configure Storage](docs/operate/configure-storage.md) for the volume model and options
 (including reusing an existing claim), and [Installation](docs/get-started/installation.md)
 for install and uninstall.
 
@@ -138,7 +138,7 @@ primitives into their own control loop.
 | `nvidia.com/restore-from` | Namespaced | Pod annotation that triggers a restore from a named `PodSnapshot` in the same namespace. |
 
 Under the hood, a control-plane operator and a per-node agent perform the CRIU
-and `cuda-checkpoint` work; see [Architecture](docs/reference/architecture/).
+and `cuda-checkpoint` work; see [Architecture](docs/overview/architecture-overview.md).
 The [API Reference](docs/reference/api.md) covers the resources and the
 checkpoint/restore lifecycle.
 
@@ -167,7 +167,7 @@ operations, indexed below.
 **Reference**
 
 - [API](docs/reference/api.md) — `PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, and the `restore-from` annotation.
-- [Architecture](docs/reference/architecture/) — operator and node-agent design, the checkpoint/restore internals, and multi-GPU support.
+- [Architecture](docs/overview/architecture-overview.md) — operator and node-agent design, the checkpoint/restore internals, and multi-GPU support.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
 - [Workload Contract](docs/integrate/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
 - [Restore Pod Contract](docs/integrate/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
@@ -176,7 +176,7 @@ operations, indexed below.
 **Operations**
 
 - [Installation](docs/get-started/installation.md) — Helm install and uninstall.
-- [Configure Storage](docs/operations/configure-storage.md) — the shared snapshot volume and how to configure it.
+- [Configure Storage](docs/operate/configure-storage.md) — the shared snapshot volume and how to configure it.
 - [Troubleshooting](docs/troubleshooting/reading-a-failure-message.md) — common failures and where to look.
 - [Allow the Privileged Node Agent](docs/get-started/installation.md#allow-the-privileged-node-agent) — the privileged agent, seccomp, and Pod Security.
 
@@ -189,7 +189,7 @@ operations, indexed below.
 
 **More**
 
-- [Limitations & known issues](docs/limitations.md) — current limitations and what's on the roadmap.
+- [Limitations & known issues](docs/overview/limitations.md) — current limitations and what's on the roadmap.
 - [Snapshot Enhancement Proposals](docs/design/README.md) — the design process for significant Snapshot changes.
 
 ## Adopters

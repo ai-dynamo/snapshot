@@ -35,13 +35,13 @@ navigation:
         path: ../docs/overview/core-concepts.md
         slug: core-concepts
       - page: Architecture Overview
-        path: ../docs/reference/architecture/README.md
+        path: ../docs/overview/architecture-overview.md
         slug: architecture-overview
       - page: Performance
         path: ../docs/overview/performance.md
         slug: performance
       - page: Limitations
-        path: ../docs/limitations.md
+        path: ../docs/overview/limitations.md
         slug: limitations
   - section: Get Started
     slug: get-started
@@ -101,10 +101,10 @@ navigation:
     slug: operate
     contents:
       - page: Configure Storage
-        path: ../docs/operations/configure-storage.md
+        path: ../docs/operate/configure-storage.md
         slug: configure-storage
       - page: Upgrade Snapshot and the CRDs
-        path: ../docs/operations/upgrade.md
+        path: ../docs/operate/upgrade.md
         slug: upgrade
   - section: Reference
     slug: reference

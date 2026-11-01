@@ -95,7 +95,7 @@ Snapshot installs as one Helm release with these parts:
 The node agent uses CRIU and `cuda-checkpoint` to do the checkpoint and restore
 work. Snapshot runs on GPU nodes that have the NVIDIA GPU Operator and driver
 installed, and it keeps snapshots in shared storage. See the
-[Architecture Overview](../reference/architecture/README.md) for how the parts
+[Architecture Overview](architecture-overview.md) for how the parts
 work together.
 
 ## Where Snapshot Fits

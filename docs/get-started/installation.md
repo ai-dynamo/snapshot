@@ -54,7 +54,7 @@ helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
   does not check the claim's access mode, so verify that it is `ReadWriteMany`
   before you install.
 
-See [Configure Storage](../operations/configure-storage.md) for the volume model and
+See [Configure Storage](../operate/configure-storage.md) for the volume model and
 other options.
 
 ### Node Agent Resources
@@ -65,7 +65,7 @@ other options.
 - By default, the agent pod requests 10 CPU and 33Gi of memory on each GPU node.
 - The pod's memory limit sets the largest snapshot it can take.
 
-See [PageBroker Staging](../operations/configure-storage.md#pagebroker-staging) for how to
+See [PageBroker Staging](../operate/configure-storage.md#pagebroker-staging) for how to
 size it.
 
 ## Install on OpenShift
@@ -156,7 +156,7 @@ registry:
   secret.
 - Set `daemonset.imagePullSecrets` only when you override the agent image with
   a private one.
-- When you upgrade, see [Upgrade Snapshot and the CRDs](../operations/upgrade.md#upgrade-snapshot).
+- When you upgrade, see [Upgrade Snapshot and the CRDs](../operate/upgrade.md#upgrade-snapshot).
 
 ## Verify the Installation
 
@@ -177,7 +177,7 @@ helm uninstall snapshot --namespace snapshot
 ```
 
 Chart-created snapshot volumes are retained on uninstall, so snapshots survive
-removal. See [Retention](../operations/configure-storage.md#retention). To clear the
+removal. See [Retention](../operate/configure-storage.md#retention). To clear the
 stored snapshots, delete the claim yourself:
 
 ```bash

@@ -58,7 +58,7 @@ restoring. See [Checkpoint a Pod](../guides/checkpoint.md).
 Snapshots are kept in one snapshot store that every node agent reaches. By
 default the store is a `ReadWriteMany` volume, the snapshot volume, which the
 chart provisions. It can also be an S3-compatible bucket. Workload pods never
-mount the store. See [Configure Storage](../operations/configure-storage.md).
+mount the store. See [Configure Storage](../operate/configure-storage.md).
 
 ## Compatibility
 
@@ -67,7 +67,7 @@ Before a restore, Snapshot compares the snapshot with the node: CPU
 architecture, kernel version, image digest, CPU and memory limits, mounts, GPU
 model and count, and driver version. When something does not match, Snapshot
 refuses the restore and names the check that failed. See
-[Compatibility Gates](../reference/architecture/README.md#compatibility-gates).
+[Compatibility Gates](architecture-overview.md#compatibility-gates).
 
 ## Multi-GPU Workloads
 

@@ -18,7 +18,7 @@ roadmap.
   restore containers. On a node without NRI, or with an older runtime, the
   agent restores without the proxy: restore Pods need an inert command there,
   and the container does not follow the restored workload. See
-  [Nodes Without the Restore Proxy](integrate/restore-pod-contract.md#nodes-without-the-restore-proxy).
+  [Nodes Without the Restore Proxy](../integrate/restore-pod-contract.md#nodes-without-the-restore-proxy).
 - A Pod gets one restore. If a restored container starts again, for example
   under `restartPolicy: Always` after the restored process exits, it ends in
   `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in

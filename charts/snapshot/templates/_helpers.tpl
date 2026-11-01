@@ -102,7 +102,7 @@ Convert a Kubernetes quantity to bytes, or empty when it is not a form we parse.
 
 {{/*
 The staging sizeLimit, lowered to leave the agent room to survive filling it.
-Sizing is in docs/operations/configure-storage.md. Falls back when pageBroker.staging is
+Sizing is in docs/operate/configure-storage.md. Falls back when pageBroker.staging is
 explicitly null, as helm upgrade --reuse-values leaves it.
 */}}
 {{- define "snapshot.stagingSizeLimit" -}}
