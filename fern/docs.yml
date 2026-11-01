@@ -28,10 +28,7 @@ navigation:
   - section: Overview
     slug: overview
     contents:
-      - page: README
-        path: ../README.md
-        slug: readme
-      - page: What is Snapshot?
+      - page: What Is Snapshot?
         path: ../docs/overview/what-is-snapshot.md
         slug: what-is-snapshot
       - page: Core Concepts
@@ -41,7 +38,7 @@ navigation:
         path: ../docs/reference/architecture/README.md
         slug: architecture-overview
       - page: Performance
-        path: ../docs/development/benchmarks.md
+        path: ../docs/overview/performance.md
         slug: performance
       - page: Limitations
         path: ../docs/limitations.md
@@ -49,11 +46,11 @@ navigation:
   - section: Get Started
     slug: get-started
     contents:
-      - page: Prerequisites and Compatibility
-        path: ../docs/reference/compatibility.md
-        slug: prerequisites-and-compatibility
+      - page: Prerequisites
+        path: ../docs/get-started/prerequisites.md
+        slug: prerequisites
       - page: Installation
-        path: ../docs/operations/install.md
+        path: ../docs/get-started/installation.md
         slug: installation
       - page: Quickstart - Checkpoint and Restore One Pod
         path: ../docs/get-started/quickstart.md
@@ -64,54 +61,60 @@ navigation:
       - page: Overview
         path: ../docs/guides/README.md
         slug: overview
-      - page: vLLM
-        path: ../docs/guides/vllm.md
-        slug: vllm
-      - page: SGLang
-        path: ../docs/guides/sglang.md
-        slug: sglang
-      - page: TensorRT-LLM
-        path: ../docs/guides/tensorrt-llm.md
-        slug: tensorrt-llm
-      - page: Use Your Own Framework or Image
-        path: ../docs/guides/use-your-own-framework.md
-        slug: use-your-own-framework
+      - section: Supported Frameworks
+        slug: supported-frameworks
+        contents:
+          - page: vLLM
+            path: ../docs/guides/supported-frameworks/vllm.md
+            slug: vllm
+          - page: SGLang
+            path: ../docs/guides/supported-frameworks/sglang.md
+            slug: sglang
+          - page: TensorRT-LLM
+            path: ../docs/guides/supported-frameworks/tensorrt-llm.md
+            slug: tensorrt-llm
       - page: Checkpoint a Pod
         path: ../docs/guides/checkpoint.md
         slug: checkpoint-a-pod
       - page: Restore a Pod
         path: ../docs/guides/restore.md
         slug: restore-a-pod
+  - section: Integrate
+    slug: integrate
+    contents:
+      - page: Overview
+        path: ../docs/integrate/overview.md
+        slug: overview
+      - page: Use Your Own Framework or Image
+        path: ../docs/integrate/use-your-own-framework.md
+        slug: use-your-own-framework
+      - page: Workload Contract
+        path: ../docs/integrate/workload-contract.md
+        slug: workload-contract
+      - page: Write Your Own SnapshotJob
+        path: ../docs/integrate/write-your-own-snapshotjob.md
+        slug: write-your-own-snapshotjob
+      - page: Restore Pod Contract
+        path: ../docs/integrate/restore-pod-contract.md
+        slug: restore-pod-contract
   - section: Operate
     slug: operate
     contents:
       - page: Configure Storage
-        path: ../docs/operations/storage.md
+        path: ../docs/operations/configure-storage.md
         slug: configure-storage
-      - page: Secure the Node Agent
-        path: ../docs/operations/security.md
-        slug: secure-the-node-agent
       - page: Upgrade Snapshot and the CRDs
         path: ../docs/operations/upgrade.md
         slug: upgrade
   - section: Reference
     slug: reference
     contents:
-      - page: Reference Overview
-        path: ../docs/reference/overview.md
-        slug: reference-overview
       - page: API
         path: ../docs/reference/api.md
         slug: api
       - page: snapshotctl CLI
         path: ../docs/reference/cli.md
         slug: snapshotctl-cli
-      - page: Workload Contract
-        path: ../docs/reference/workload-contract.md
-        slug: workload-contract
-      - page: Restore Pod Contract
-        path: ../docs/reference/restore-pod-contract.md
-        slug: restore-pod-contract
       - page: Helm Chart Values
         path: ../docs/reference/helm-values.md
         slug: helm-chart-values
