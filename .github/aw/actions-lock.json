@@ -1,0 +1,14 @@
+{
+  "entries": {
+    "github/gh-aw-actions/setup@v1.0.1": {
+      "repo": "github/gh-aw-actions/setup",
+      "version": "v1.0.1",
+      "sha": "221ba4f4319de6b8e809d1a15528b3ae6a818aa5"
+    },
+    "github/gh-aw/actions/setup@0627fdbe4beb5f3b71aa569f8d97150b87f2111a": {
+      "repo": "github/gh-aw/actions/setup",
+      "version": "0627fdbe4beb5f3b71aa569f8d97150b87f2111a",
+      "sha": "0627fdbe4beb5f3b71aa569f8d97150b87f2111a"
+    }
+  }
+}
