@@ -201,7 +201,8 @@ func TestInvalidReason(t *testing.T) {
 }
 
 // TestRemove covers removing a session: one still open fails with Cancelled,
-// and its buckets go.
+// and its buckets go. What a member makes of that is the session client's to
+// test: a member may find the buckets gone before it receives the end.
 func TestRemove(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
@@ -209,11 +210,10 @@ func TestRemove(t *testing.T) {
 	t.Run("an open session is cancelled, then deleted", func(t *testing.T) {
 		h := h.sub(t)
 		spec := h.ensure(2)
-		members := h.connectAll(spec)
 		require.NoError(t, h.srv.Remove(ctx, spec.UID))
-		for _, m := range members {
-			require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonCancelled})
-		}
+		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
+			5*time.Millisecond)
+		assert.Equal(t, "failed "+string(spec.UID)+" "+session.ReasonCancelled, h.observer.of(spec.UID)[1])
 		for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)),
 			session.LibraryBucket(string(spec.UID))} {
 			_, err := h.srv.js.KeyValue(ctx, bucket)
@@ -229,10 +229,10 @@ func TestRemove(t *testing.T) {
 		m := h.connect(spec, 0)
 		require.NoError(t, m.fail(ctx, "Refused"))
 		require.NoError(t, h.srv.Remove(ctx, spec.UID))
-		require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: "Refused"})
 		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
 			5*time.Millisecond)
-		assert.Equal(t, "failed "+string(spec.UID)+" Refused", h.observer.of(spec.UID)[1])
+		assert.Equal(t, []string{"opened " + string(spec.UID), "failed " + string(spec.UID) + " Refused"},
+			h.observer.of(spec.UID))
 	})
 
 	t.Run("an unknown attempt", func(t *testing.T) {

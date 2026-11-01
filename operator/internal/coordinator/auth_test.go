@@ -175,20 +175,19 @@ func TestEpochFence(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
 	spec := h.ensure(2)
-	stale := h.connect(spec, 0)
+	old := h.srv.lookup(spec.UID).epoch
 	// The reconciler never recreates an attempt it removed; a test may, to
 	// give it another epoch, as a restart would.
 	require.NoError(t, h.srv.Remove(ctx, spec.UID))
-	require.ErrorIs(t, awaitEnd(t, stale), &session.AbortError{Reason: session.ReasonCancelled})
-
 	spec2 := spec
 	require.NoError(t, h.srv.Ensure(ctx, spec2))
+	require.NotEqual(t, old, h.srv.lookup(spec2.UID).epoch)
 	fresh := h.connect(spec2, 1)
 	require.NoError(t, fresh.Err())
 
 	// A member presenting the old epoch is admitted only after the
 	// coordinator has failed the session.
-	nc, err := h.dial(spec, spec.Members[0].ID, agentToken, stale.meta.Epoch)
+	nc, err := h.dial(spec, spec.Members[0].ID, agentToken, old)
 	require.NoError(t, err)
 	defer nc.Close()
 	reason, ok := h.ended(spec2)

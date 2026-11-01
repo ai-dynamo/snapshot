@@ -334,9 +334,11 @@ func (s *Server) closeSession(ctx context.Context, a *attempt) {
 
 // Remove discards the session of an attempt the reconciler is done with: it
 // fails the session first with session.ReasonCancelled if it is still open,
-// so every member still waiting is told, then deletes both buckets and forgets
-// the session. The rule is to remove a session once its set resource is
-// deleted, or once the resource is final and the session has ended.
+// recording the end when the memory cap allows, then deletes both buckets and
+// forgets the session. A member that has not received the end by then learns
+// from finding its session gone, with session.ErrCoordinatorLost. The rule is
+// to remove a session once its set resource is deleted, or once the resource
+// is final and the session has ended.
 //
 // A final state alone is not enough. A PodSetRestore is final once every
 // member is released, yet its session stays open until the members leave,
