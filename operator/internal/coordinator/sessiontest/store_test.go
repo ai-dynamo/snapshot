@@ -43,7 +43,7 @@ func TestInsert(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := within(t)
-			sessions := h.session(2).connectAll()
+			sessions := h.session(t, 2).connectAll(t)
 			require.NoError(t, sessions[0].Namespace(tt.ns).Insert(ctx, tt.key, tt.first))
 			err := sessions[1].Namespace(tt.ns).Insert(ctx, tt.key, tt.second)
 			if tt.wantErr != nil {
@@ -63,7 +63,7 @@ func TestInsert(t *testing.T) {
 func TestInsertRaceHasOneWinner(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
-	sessions := h.session(2).connectAll()
+	sessions := h.session(t, 2).connectAll(t)
 	for i := range 20 {
 		key := fmt.Sprintf("race.%d", i)
 		errs := make([]error, 2)
@@ -95,7 +95,7 @@ func TestInsertRaceHasOneWinner(t *testing.T) {
 func TestNamespacesAreSeparate(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
-	s := h.session(1).connect(0)
+	s := h.session(t, 1).connect(t, 0)
 	namespaces := []session.Namespace{session.NamespaceSnapshot, session.NamespaceCuInterpose, session.NamespaceLibrary}
 	for _, ns := range namespaces {
 		require.NoError(t, s.Namespace(ns).Insert(ctx, "k", []byte(ns)))
@@ -110,7 +110,7 @@ func TestNamespacesAreSeparate(t *testing.T) {
 // TestKeys covers the keys a Store refuses before sending anything.
 func TestKeys(t *testing.T) {
 	h := newHarness(t)
-	s := h.session(1).connect(0)
+	s := h.session(t, 1).connect(t, 0)
 	tests := []struct {
 		name    string
 		ns      session.Namespace
@@ -199,7 +199,7 @@ func TestGet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessions := h.session(2).connectAll()
+			sessions := h.session(t, 2).connectAll(t)
 			if tt.before != nil {
 				tt.before(t, sessions)
 			}
@@ -248,7 +248,7 @@ func insert(ns session.Namespace, value string) func(*testing.T, []client.Sessio
 func TestDelete(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
-	s := h.session(1).connect(0)
+	s := h.session(t, 1).connect(t, 0)
 	for _, ns := range []session.Namespace{session.NamespaceSnapshot, session.NamespaceCuInterpose, session.NamespaceLibrary} {
 		store := s.Namespace(ns)
 		require.NoError(t, store.Delete(ctx, "never-inserted"), "deleting an absent key")
@@ -286,7 +286,7 @@ func TestStoreLimits(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := within(t)
-			s := newHarness(t, tt.limits).session(1).connect(0)
+			s := newHarness(t, tt.limits).session(t, 1).connect(t, 0)
 			value := make([]byte, tt.value)
 			var err error
 			for i := 0; err == nil; i++ {

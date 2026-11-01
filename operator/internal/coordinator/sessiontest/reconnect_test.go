@@ -19,8 +19,8 @@ func TestReconnect(t *testing.T) {
 
 	t.Run("a waiting Get completes after reconnecting", func(t *testing.T) {
 		ctx := within(t)
-		ses := h.session(2)
-		sessions := ses.connectAll()
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
 		type result struct {
 			value []byte
 			err   error
@@ -42,8 +42,8 @@ func TestReconnect(t *testing.T) {
 
 	t.Run("a waiting Barrier completes after reconnecting", func(t *testing.T) {
 		ctx := within(t)
-		ses := h.session(2)
-		sessions := ses.connectAll()
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
 		wait := barrier(ctx, sessions[0], "admitted")
 		requireWaiting(t, wait)
 		ses.cut(0)
@@ -53,8 +53,8 @@ func TestReconnect(t *testing.T) {
 
 	t.Run("a write sent while reconnecting is delivered", func(t *testing.T) {
 		ctx := within(t)
-		ses := h.session(2)
-		sessions := ses.connectAll()
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
 		ses.cut(0)
 		require.NoError(t, sessions[0].Namespace(session.NamespaceSnapshot).Insert(ctx, "ip.0", []byte("10.0.0.1")))
 		require.NoError(t, sessions[0].Leave(ctx))
@@ -65,8 +65,8 @@ func TestReconnect(t *testing.T) {
 
 	t.Run("the session survives repeated breaks", func(t *testing.T) {
 		ctx := within(t)
-		ses := h.session(2)
-		sessions := ses.connectAll()
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
 		for i := range 3 {
 			ses.cut(0)
 			ses.cut(1)
@@ -88,8 +88,8 @@ func TestCoordinatorLost(t *testing.T) {
 	t.Run("the session was recreated with another epoch", func(t *testing.T) {
 		h := newHarness(t)
 		ctx := within(t)
-		ses := h.session(2)
-		sessions := ses.connectAll()
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
 		got := make(chan error, 1)
 		go func() {
 			_, err := sessions[0].Namespace(session.NamespaceSnapshot).Get(ctx, "k", time.Minute)
@@ -103,13 +103,13 @@ func TestCoordinatorLost(t *testing.T) {
 			awaitDone(t, s)
 			require.ErrorIs(t, s.Err(), session.ErrCoordinatorLost)
 		}
-		assert.Equal(t, "failed "+session.ReasonCoordinatorLost, ses.awaitOutcome(),
+		assert.Equal(t, "failed "+session.ReasonCoordinatorLost, ses.awaitOutcome(t),
 			"the recreated session must be failed")
 	})
 
 	t.Run("the session is gone", func(t *testing.T) {
 		h := newHarness(t)
-		s := h.session(1).connect(0)
+		s := h.session(t, 1).connect(t, 0)
 		// The coordinator admits a member of an attempt it holds no session
 		// for only if the member presents an epoch, so this also shows the
 		// client presents the epoch it read when it reconnects.
@@ -124,7 +124,7 @@ func TestCoordinatorLost(t *testing.T) {
 	t.Run("a session that ended stays ended", func(t *testing.T) {
 		h := newHarness(t)
 		ctx := within(t)
-		s := h.session(1).connect(0)
+		s := h.session(t, 1).connect(t, 0)
 		require.NoError(t, s.Fail(ctx, "Refused"))
 		h.restart()
 		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: "Refused"})

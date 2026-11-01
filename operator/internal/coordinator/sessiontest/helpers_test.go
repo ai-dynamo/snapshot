@@ -117,20 +117,21 @@ type testSession struct {
 	proxies []*proxy
 }
 
-// session ensures a session with n members.
-func (h *harness) session(n int) *testSession {
-	h.t.Helper()
+// session ensures a session with n members for the test t, whose members'
+// proxies stop when t ends.
+func (h *harness) session(t *testing.T, n int) *testSession {
+	t.Helper()
 	ses := &testSession{h: h, spec: coordinator.Spec{
 		UID:      types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())),
 		Deadline: time.Now().Add(time.Hour),
 	}}
 	for i := range n {
 		ses.spec.Members = append(ses.spec.Members, session.Member{ID: fmt.Sprintf("member-%d", i), Rank: i})
-		p := newProxy(h.t, h.srv.Addr().String())
+		p := newProxy(t, h.srv.Addr().String())
 		h.proxies = append(h.proxies, p)
 		ses.proxies = append(ses.proxies, p)
 	}
-	require.NoError(h.t, h.srv.Ensure(within(h.t), ses.spec))
+	require.NoError(t, h.srv.Ensure(within(t), ses.spec))
 	return ses
 }
 
@@ -147,9 +148,8 @@ func (ses *testSession) config(member int) client.Config {
 	}
 }
 
-// connect connects one member, and closes its session when the test ends.
-func (ses *testSession) connect(member int) client.Session {
-	t := ses.h.t
+// connect connects one member, and closes its session when the test t ends.
+func (ses *testSession) connect(t *testing.T, member int) client.Session {
 	t.Helper()
 	s, err := client.Connect(within(t), ses.config(member))
 	require.NoError(t, err)
@@ -157,11 +157,12 @@ func (ses *testSession) connect(member int) client.Session {
 	return s
 }
 
-// connectAll connects every member.
-func (ses *testSession) connectAll() []client.Session {
+// connectAll connects every member for the test t.
+func (ses *testSession) connectAll(t *testing.T) []client.Session {
+	t.Helper()
 	sessions := make([]client.Session, len(ses.spec.Members))
 	for i := range ses.spec.Members {
-		sessions[i] = ses.connect(i)
+		sessions[i] = ses.connect(t, i)
 	}
 	return sessions
 }
@@ -221,8 +222,7 @@ func awaitKey(t *testing.T, kv jetstream.KeyValue, key string) {
 
 // awaitOutcome waits until the coordinator has seen the session end, and
 // returns how: "closed", or "failed" and the reason.
-func (ses *testSession) awaitOutcome() string {
-	t := ses.h.t
+func (ses *testSession) awaitOutcome(t *testing.T) string {
 	t.Helper()
 	var events []string
 	require.Eventually(t, func() bool {

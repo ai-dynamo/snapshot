@@ -45,7 +45,7 @@ func TestBarrier(t *testing.T) {
 
 	t.Run("releases only when every member has arrived", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(3).connectAll()
+		sessions := h.session(t, 3).connectAll(t)
 		first, second := barrier(ctx, sessions[0], "admitted"), barrier(ctx, sessions[1], "admitted")
 		requireWaiting(t, first)
 		requireWaiting(t, second)
@@ -56,7 +56,7 @@ func TestBarrier(t *testing.T) {
 
 	t.Run("arriving twice counts once", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(2).connectAll()
+		sessions := h.session(t, 2).connectAll(t)
 		first := barrier(ctx, sessions[0], "admitted")
 		again := barrier(ctx, sessions[0], "admitted")
 		requireWaiting(t, first)
@@ -68,7 +68,7 @@ func TestBarrier(t *testing.T) {
 
 	t.Run("a released barrier returns at once", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(2).connectAll()
+		sessions := h.session(t, 2).connectAll(t)
 		first := barrier(ctx, sessions[0], "resume")
 		require.NoError(t, sessions[1].Barrier(ctx, "resume"))
 		require.NoError(t, <-first)
@@ -81,8 +81,8 @@ func TestBarrier(t *testing.T) {
 
 	t.Run("an arrival already recorded still counts after its wait is cancelled", func(t *testing.T) {
 		ctx := within(t)
-		ses := h.session(2)
-		sessions := ses.connectAll()
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
 		waiting, cancel := context.WithCancel(ctx)
 		wait := barrier(waiting, sessions[0], "net-freeze")
 		awaitKey(t, ses.raw(t, 1), session.BarrierKey("net-freeze", ses.spec.Members[0].ID))
@@ -92,8 +92,8 @@ func TestBarrier(t *testing.T) {
 	})
 
 	t.Run("a Barrier whose context is already done returns its error", func(t *testing.T) {
-		ses := h.session(2)
-		s := ses.connect(0)
+		ses := h.session(t, 2)
+		s := ses.connect(t, 0)
 		done, cancel := context.WithCancel(within(t))
 		cancel()
 		require.ErrorIs(t, s.Barrier(done, "net-freeze"), context.Canceled)
@@ -103,7 +103,7 @@ func TestBarrier(t *testing.T) {
 
 	t.Run("cancelling a waiting barrier returns at once", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(2).connectAll()
+		sessions := h.session(t, 2).connectAll(t)
 		waiting, cancel := context.WithCancel(ctx)
 		wait := barrier(waiting, sessions[0], "release")
 		requireWaiting(t, wait)
@@ -114,7 +114,7 @@ func TestBarrier(t *testing.T) {
 
 	t.Run("barriers are independent", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(2).connectAll()
+		sessions := h.session(t, 2).connectAll(t)
 		wait := barrier(ctx, sessions[0], "one")
 		second := barrier(ctx, sessions[1], "two")
 		requireWaiting(t, wait)
@@ -127,7 +127,7 @@ func TestBarrier(t *testing.T) {
 
 	t.Run("every waiter returns when the session fails", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(3).connectAll()
+		sessions := h.session(t, 3).connectAll(t)
 		first, second := barrier(ctx, sessions[0], "admitted"), barrier(ctx, sessions[1], "admitted")
 		requireWaiting(t, first)
 		require.NoError(t, sessions[2].Fail(ctx, "Refused"))
@@ -137,7 +137,7 @@ func TestBarrier(t *testing.T) {
 
 	t.Run("every waiter returns when the session closes", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(2).connectAll()
+		sessions := h.session(t, 2).connectAll(t)
 		first, second := barrier(ctx, sessions[0], "admitted"), barrier(ctx, sessions[1], "other")
 		requireWaiting(t, first)
 		for _, s := range sessions {
@@ -148,7 +148,7 @@ func TestBarrier(t *testing.T) {
 	})
 
 	t.Run("a name must be one token", func(t *testing.T) {
-		s := h.session(1).connect(0)
+		s := h.session(t, 1).connect(t, 0)
 		require.ErrorIs(t, s.Barrier(within(t), "a.b"), session.ErrInvalid)
 		require.ErrorIs(t, s.Barrier(within(t), "*"), session.ErrInvalid)
 	})
@@ -159,8 +159,8 @@ func TestBarrier(t *testing.T) {
 func TestLeave(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
-	ses := h.session(2)
-	sessions := ses.connectAll()
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
 	require.NoError(t, sessions[0].Leave(ctx))
 	require.NoError(t, sessions[0].Leave(ctx), "leaving twice")
 	require.NoError(t, sessions[0].Namespace(session.NamespaceLibrary).Insert(ctx, "after", []byte("left")),
@@ -171,7 +171,7 @@ func TestLeave(t *testing.T) {
 		awaitDone(t, s)
 		require.ErrorIs(t, s.Err(), session.ErrClosed)
 	}
-	assert.Equal(t, "closed", ses.awaitOutcome())
+	assert.Equal(t, "closed", ses.awaitOutcome(t))
 }
 
 // TestSessionFail covers Fail: the first reason wins, and every later Fail
@@ -181,13 +181,13 @@ func TestSessionFail(t *testing.T) {
 
 	t.Run("the first reason wins", func(t *testing.T) {
 		ctx := within(t)
-		ses := h.session(3)
-		sessions := ses.connectAll()
+		ses := h.session(t, 3)
+		sessions := ses.connectAll(t)
 		require.NoError(t, sessions[0].Fail(ctx, "PodIPChanged"))
 		require.ErrorIs(t, sessions[1].Fail(ctx, "MemberFailed"), &session.AbortError{Reason: "PodIPChanged"},
 			"a second Fail reports the first reason")
 		require.NoError(t, sessions[2].Fail(ctx, "PodIPChanged"), "failing with the same reason is no error")
-		assert.Equal(t, "failed PodIPChanged", ses.awaitOutcome())
+		assert.Equal(t, "failed PodIPChanged", ses.awaitOutcome(t))
 		for _, s := range sessions {
 			awaitDone(t, s)
 			require.ErrorIs(t, s.Err(), &session.AbortError{Reason: "PodIPChanged"})
@@ -196,14 +196,14 @@ func TestSessionFail(t *testing.T) {
 
 	t.Run("failing again is no error", func(t *testing.T) {
 		ctx := within(t)
-		s := h.session(1).connect(0)
+		s := h.session(t, 1).connect(t, 0)
 		require.NoError(t, s.Fail(ctx, "Refused"))
 		require.NoError(t, s.Fail(ctx, "Refused"))
 	})
 
 	t.Run("every operation after the end reports it", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(2).connectAll()
+		sessions := h.session(t, 2).connectAll(t)
 		require.NoError(t, sessions[0].Fail(ctx, "Refused"))
 		awaitDone(t, sessions[1])
 		abort := &session.AbortError{Reason: "Refused"}
@@ -216,7 +216,7 @@ func TestSessionFail(t *testing.T) {
 
 	t.Run("a session that closed reports it", func(t *testing.T) {
 		ctx := within(t)
-		s := h.session(1).connect(0)
+		s := h.session(t, 1).connect(t, 0)
 		require.NoError(t, s.Leave(ctx))
 		awaitDone(t, s)
 		require.ErrorIs(t, s.Err(), session.ErrClosed)
@@ -224,8 +224,8 @@ func TestSessionFail(t *testing.T) {
 	})
 
 	t.Run("an ended key that holds no reason reports InvalidReason", func(t *testing.T) {
-		ses := h.session(2)
-		s := ses.connect(0)
+		ses := h.session(t, 2)
+		s := ses.connect(t, 0)
 		_, err := ses.raw(t, 1).Create(within(t), session.KeyEnded, []byte("not a reason\x00"))
 		require.NoError(t, err)
 		awaitDone(t, s)
@@ -233,7 +233,7 @@ func TestSessionFail(t *testing.T) {
 	})
 
 	t.Run("a reason must be a condition reason", func(t *testing.T) {
-		s := h.session(1).connect(0)
+		s := h.session(t, 1).connect(t, 0)
 		for _, reason := range []string{"", "has space", "1Digit", "Trailing:"} {
 			require.ErrorIs(t, s.Fail(within(t), reason), session.ErrInvalid, "reason %q", reason)
 		}
@@ -247,8 +247,8 @@ func TestConnect(t *testing.T) {
 	h := newHarness(t)
 
 	t.Run("reads meta", func(t *testing.T) {
-		ses := h.session(3)
-		meta := ses.connect(1).Meta()
+		ses := h.session(t, 3)
+		meta := ses.connect(t, 1).Meta()
 		assert.Equal(t, ses.spec.Members, meta.Members)
 		assert.True(t, ses.spec.Deadline.Equal(meta.Deadline))
 		assert.NotZero(t, meta.Epoch)
@@ -257,7 +257,7 @@ func TestConnect(t *testing.T) {
 	})
 
 	t.Run("waits while the coordinator refuses it", func(t *testing.T) {
-		ses := h.session(1)
+		ses := h.session(t, 1)
 		h.auth.refuse.Store(true)
 		defer h.auth.refuse.Store(false)
 		connected := make(chan error, 1)
@@ -274,7 +274,7 @@ func TestConnect(t *testing.T) {
 	})
 
 	t.Run("reports a refusal that lasts", func(t *testing.T) {
-		ses := h.session(1)
+		ses := h.session(t, 1)
 		h.auth.refuse.Store(true)
 		defer h.auth.refuse.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -285,7 +285,7 @@ func TestConnect(t *testing.T) {
 	})
 
 	t.Run("refuses a member the session does not have", func(t *testing.T) {
-		cfg := h.session(1).config(0)
+		cfg := h.session(t, 1).config(0)
 		cfg.Member = "stranger"
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -294,7 +294,7 @@ func TestConnect(t *testing.T) {
 	})
 
 	t.Run("accepts several URLs", func(t *testing.T) {
-		ses := h.session(1)
+		ses := h.session(t, 1)
 		cfg := ses.config(0)
 		cfg.URLs = []string{"tls://127.0.0.1:1", cfg.URLs[0]}
 		s, err := client.Connect(within(t), cfg)
@@ -313,7 +313,7 @@ func TestConnect(t *testing.T) {
 		{"a member that is not a name", func(c *client.Config) { c.Member = "a/b" }},
 	} {
 		t.Run("refuses a config with "+tt.name, func(t *testing.T) {
-			cfg := h.session(1).config(0)
+			cfg := h.session(t, 1).config(0)
 			tt.modify(&cfg)
 			_, err := client.Connect(within(t), cfg)
 			require.ErrorIs(t, err, session.ErrInvalid)
@@ -326,8 +326,8 @@ func TestConnect(t *testing.T) {
 func TestClose(t *testing.T) {
 	h := newHarness(t, func(cfg *coordinator.Config) { cfg.Grace = 2 * time.Second })
 	ctx := within(t)
-	ses := h.session(2)
-	sessions := ses.connectAll()
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
 	wait := barrier(ctx, sessions[0], "admitted")
 	requireWaiting(t, wait)
 	require.NoError(t, sessions[0].Close())
