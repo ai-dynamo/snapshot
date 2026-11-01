@@ -193,7 +193,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	}
 	// Refused before the suspend, so the workload is never disturbed for a
 	// capture the node cannot stage.
-	if err := w.checkStagingCapacity(containerPID); err != nil {
+	if err := w.checkStagingCapacity(ctx, containerPID); err != nil {
 		return w.setSnapshotContentFailed(ctx, content, reasonImageTooLarge, err)
 	}
 	return w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, cuInterposeRequested, contentUID, artifactPath)

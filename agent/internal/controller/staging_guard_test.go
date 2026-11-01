@@ -18,16 +18,17 @@ import (
 )
 
 // guardController wires both measurements, so a test can state the only two
-// numbers the decision turns on.
-func guardController(stagingPath string, total, minimum int64, measureErr error) *NodeController {
+// numbers the decision turns on. Each measurement fails on its own, because
+// a shared error would never reach the second one.
+func guardController(stagingPath string, total, minimum int64, capacityErr, sizeErr error) *NodeController {
 	return &NodeController{
 		log:    logr.Discard(),
 		config: &snapshottypes.AgentConfig{PageBroker: snapshottypes.PageBrokerSpec{StagingPath: stagingPath}},
 		stagingCapacityFn: func(string) (int64, error) {
-			return total, measureErr
+			return total, capacityErr
 		},
 		minimumImageSizeFn: func(string, []int) (int64, error) {
-			return minimum, measureErr
+			return minimum, sizeErr
 		},
 	}
 }
@@ -45,9 +46,9 @@ func TestCheckStagingCapacity(t *testing.T) {
 		{name: "nothing resident yet", total: 8 << 30, minimum: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := guardController("/pagebroker/staging", tc.total, tc.minimum, nil)
+			w := guardController("/pagebroker/staging", tc.total, tc.minimum, nil, nil)
 
-			err := w.checkStagingCapacity(1)
+			err := w.checkStagingCapacity(context.Background(), 1)
 
 			if !tc.wantRefusal {
 				assert.NoError(t, err)
@@ -65,16 +66,18 @@ func TestCheckStagingCapacitySkipsWhatItCannotMeasure(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		stagingPath string
-		measureErr  error
+		capacityErr error
+		sizeErr     error
 	}{
 		{name: "no staging path configured", stagingPath: ""},
-		{name: "staging cannot be measured", stagingPath: "/pagebroker/staging", measureErr: errors.New("statfs failed")},
+		{name: "the volume cannot be measured", stagingPath: "/pagebroker/staging", capacityErr: errors.New("statfs failed")},
+		{name: "the image cannot be sized", stagingPath: "/pagebroker/staging", sizeErr: errors.New("read /proc: no such process")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Numbers that would refuse, so only the unmeasurable path can pass this.
-			w := guardController(tc.stagingPath, 1<<30, 4<<30, tc.measureErr)
+			w := guardController(tc.stagingPath, 1<<30, 4<<30, tc.capacityErr, tc.sizeErr)
 
-			assert.NoError(t, w.checkStagingCapacity(1))
+			assert.NoError(t, w.checkStagingCapacity(context.Background(), 1))
 		})
 	}
 }
@@ -84,9 +87,9 @@ func TestCheckStagingCapacitySkipsWhatItCannotMeasure(t *testing.T) {
 func TestCheckStagingCapacityIgnoresWhatOtherCapturesHold(t *testing.T) {
 	// The volume holds 8GiB and this image needs 4GiB, so it fits — whatever
 	// else is resident in staging right now.
-	w := guardController("/pagebroker/staging", 8<<30, 4<<30, nil)
+	w := guardController("/pagebroker/staging", 8<<30, 4<<30, nil, nil)
 
-	assert.NoError(t, w.checkStagingCapacity(1))
+	assert.NoError(t, w.checkStagingCapacity(context.Background(), 1))
 }
 
 // The refusal has to reach the work order, or the capture suspends a workload

@@ -4,7 +4,10 @@
 package controller
 
 import (
+	"context"
 	"fmt"
+
+	"github.com/go-logr/logr"
 
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
@@ -22,20 +25,21 @@ const reasonImageTooLarge = "ImageTooLarge"
 // the floor on what the dump must write, against the volume's total size. A
 // capture that passes here can still run out of room, which arrives later as
 // ENOSPC.
-func (w *NodeController) checkStagingCapacity(containerPID int) error {
+func (w *NodeController) checkStagingCapacity(ctx context.Context, containerPID int) error {
 	stagingPath := w.config.PageBroker.StagingPath
 	if stagingPath == "" {
 		return nil
 	}
+	logger := logr.FromContextOrDiscard(ctx)
 	total, err := w.stagingCapacityFn(stagingPath)
 	if err != nil {
-		w.log.V(1).Info("Cannot measure staging; skipping the capacity check", "error", err.Error())
+		logger.V(1).Info("Cannot measure staging; skipping the capacity check", "error", err.Error())
 		return nil
 	}
 	pids := snapshotruntime.ProcessTreePIDs(containerPID)
 	minimum, err := w.minimumImageSizeFn(snapshotruntime.HostProcPath, pids)
 	if err != nil {
-		w.log.V(1).Info("Cannot size the image; skipping the capacity check", "error", err.Error())
+		logger.V(1).Info("Cannot size the image; skipping the capacity check", "error", err.Error())
 		return nil
 	}
 	if shortfall := snapshotruntime.StagingShortfall(minimum, total); shortfall > 0 {
