@@ -21,9 +21,32 @@ RAID0 is node-local. It does not make snapshots available on other nodes or
 replace the shared PVC in a multi-node installation. See
 [Storage configuration](../storage.md).
 
-A local-PVC deployment needs an existing claim on the array. Pin the operator,
-node agents, and restore Pods to that node. The chart creates RWX claims by
-default; creating a RAID0 array does not configure a PVC or Pod placement.
+For a single-node local-PVC deployment, create a local PV whose `local.path`
+points to the mounted array. Set its `nodeAffinity` to the storage node and
+bind a matching `ReadWriteOnce` PVC in the Snapshot release namespace. Use
+that claim instead of the chart's default RWX claim:
+
+```yaml
+storage:
+  type: pvc
+  pvc:
+    create: false
+    name: snapshot-local
+operator:
+  nodeSelector:
+    kubernetes.io/hostname: "<storage-node>"
+daemonset:
+  nodeSelector:
+    kubernetes.io/hostname: "<storage-node>"
+    nvidia.com/gpu.present: "true"
+```
+
+Replace the claim name and hostname with your values. These selectors place
+the operator and node agent on the node that can mount the local PV.
+
+Schedule checkpoint and restore Pods on that node too. Workload Pods do not
+mount the checkpoint claim, but their local agent must read and write the
+snapshot files. A Pod on another node cannot restore from this local array.
 
 RAID0 has no redundancy. Keep another copy of snapshots that must survive a
 drive failure. See [Linux RAID arrays](https://docs.kernel.org/admin-guide/md.html).
