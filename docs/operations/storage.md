@@ -1,5 +1,7 @@
 # Storage
 
+For backend tuning and examples, see [Storage best practices](storage/README.md).
+
 Snapshot keeps every checkpoint in one store that all node agents reach: a
 checkpoint volume by default, or an S3-compatible bucket with `storage.type: s3`.
 Each agent's PageBroker sidecar publishes checkpoint artifacts there and reads
