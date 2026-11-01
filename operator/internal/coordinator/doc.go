@@ -37,7 +37,11 @@
 // admits the member with session.MemberPermissions: both of the attempt's
 // buckets, and in the Snapshot bucket only its own arrivals and departure
 // besides the shared keys, never meta, another attempt's buckets, the system
-// account, or the API that creates and deletes buckets.
+// account, or the API that creates and deletes buckets. A member can still add
+// messages to another attempt's buckets under its own subjects, through a
+// consumer whose deliveries its permissions do not bound (nats-server#8274),
+// which count against that attempt's limits but never change its keys.
+// SNEP-324 lists this with the memory cap every session shares.
 //
 // # Sessions
 //

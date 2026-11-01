@@ -4,6 +4,7 @@
 package coordinator
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -133,6 +134,56 @@ func TestPermissionsConfineAllowedRequests(t *testing.T) {
 		_, err = sub.NextMsg(pending)
 		require.ErrorIs(t, err, nats.ErrTimeout, "another attempt's key must not reach this member")
 	})
+}
+
+// TestDeliveriesCannotChangeAnotherAttemptsKeys guards another attempt's keys
+// against a member. JetStream does not bound a push consumer's deliveries by
+// its creator's publish permissions (nats-server#8274), so a member may
+// deliver its own writes to another attempt's subjects. A delivery keeps its
+// original subject, under the member's own bucket, so it can never change
+// another attempt's keys; the test fails if that ever changes.
+func TestDeliveriesCannotChangeAnotherAttemptsKeys(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	spec, other := h.ensure(1), h.ensure(1)
+	own, theirs := session.SnapshotBucket(string(spec.UID)), session.SnapshotBucket(string(other.UID))
+	b := h.srv.lookup(other.UID).snapshot
+	meta, err := b.Get(ctx, session.KeyMeta)
+	require.NoError(t, err)
+	m := h.connect(spec, 0)
+	require.NoError(t, m.insert(ctx, session.NamespaceSnapshot, "x", []byte("Forged")))
+
+	for _, key := range []string{session.KeyEnded, session.KeyMeta} {
+		// The coordinator's connection shares the members' account, so it
+		// sees what the consumer delivers.
+		deliver := "$KV." + theirs + "." + key
+		delivered, err := h.srv.conn.SubscribeSync(deliver)
+		require.NoError(t, err)
+		require.NoError(t, h.srv.conn.Flush())
+		reply, err := m.nc.Request("$JS.API.CONSUMER.CREATE.KV_"+own+".forge-"+key,
+			[]byte(`{"stream_name":"KV_`+own+`","config":{"name":"forge-`+key+`","deliver_subject":"`+deliver+
+				`","ack_policy":"none","filter_subject":"$KV.`+own+`.snapshot.x"}}`), 2*time.Second)
+		require.NoError(t, err)
+		var created struct {
+			Error *struct{ Description string } `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(reply.Data, &created))
+		require.Nil(t, created.Error, "a member may create a consumer of its own stream")
+		_, err = delivered.NextMsg(10 * time.Second)
+		require.NoError(t, err, "the consumer must have delivered to %s", key)
+		require.NoError(t, delivered.Unsubscribe())
+	}
+
+	// Had a delivery changed the other attempt's keys, its bucket would have
+	// stored it before this write.
+	_, err = b.Put(ctx, "snapshot.probe", nil)
+	require.NoError(t, err)
+	_, ok := h.ended(other)
+	assert.False(t, ok, "another attempt's ended key must stay absent")
+	after, err := b.Get(ctx, session.KeyMeta)
+	require.NoError(t, err)
+	assert.Equal(t, meta.Revision(), after.Revision(), "another attempt's meta must stay unchanged")
+	assert.Equal(t, meta.Value(), after.Value(), "another attempt's meta must stay unchanged")
 }
 
 // requireViolation waits for the server to report a permission violation

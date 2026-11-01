@@ -13,6 +13,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/pkg/session"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -104,6 +105,18 @@ func TestAuthentication(t *testing.T) {
 		h := h.sub(t)
 		_, err := h.dial(h.ensure(1), "stranger", agentToken, 0)
 		require.ErrorIs(t, err, nats.ErrAuthorization)
+	})
+
+	t.Run("admits a member reconnecting to no session, which finds no bucket", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.spec(1)
+		nc, err := h.dial(spec, spec.Members[0].ID, agentToken, 1)
+		require.NoError(t, err)
+		defer nc.Close()
+		js, err := jetstream.New(nc)
+		require.NoError(t, err)
+		_, err = js.KeyValue(within(t), session.SnapshotBucket(string(spec.UID)))
+		require.ErrorIs(t, err, jetstream.ErrBucketNotFound)
 	})
 
 	t.Run("admits a member once its attempt has a session", func(t *testing.T) {
