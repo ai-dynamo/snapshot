@@ -18,9 +18,7 @@ Use the largest phase to choose the next check:
 | `criu_restore` | Check CPU image size, the CRIU source (PVC or staging), and I/O mode. For PVC reads, compare the same mount with fio. |
 | `cuda_restore` | Compare GPU payload size with sustained storage bandwidth. If storage is fast, check CUDA setup and GPU transfers before increasing buffers. |
 | `pagebroker_stage` | Check backend download/read throughput and staging memory. For S3, check the Region, instance bandwidth, and reader concurrency. |
-| `pagebroker_mount` | Check preparation and mounting of the restore source. |
-| `pagebroker_commit` | Check PageBroker transaction completion and cleanup. |
-| `criu_prepare` | Check CRIU preparation before process-state restoration. |
+| `pagebroker_mount`, `pagebroker_commit`, `criu_prepare` | Inspect the surrounding agent logs for mount, transaction, or CRIU preparation delays. |
 
 Measure application readiness and the first inference request separately.
 Framework wake, compilation, and autotuning after agent completion are not
@@ -33,14 +31,13 @@ more time. Compare your workload with the published
 and [phase breakdown](../../development/benchmarks.md#where-the-restore-time-goes),
 using the same model, GPU count, and engine where possible.
 For example, the published vLLM Qwen3-14B TP1 restore took 5.72 seconds on
-one B200 with VAST NFS. Use that setup as a reference, not a target for every
-backend or workload.
+one B200 with VAST NFS.
 
 For a slow CUDA phase, PageBroker's NVTX ranges separate CUDA setup, payload
 transfer, storage waits, and completion. Use NVTX-only tracing; CUDA API tracing
 can interfere with checkpoint operations. Tune `pageBroker.transferBufferCount`
 and `pageBroker.transferChunkBytes` together, accounting for their product on
-every visible GPU. Confirm any gain with an unprofiled restore.
+every visible GPU.
 
 ## 2. Check the storage configuration
 
@@ -107,10 +104,9 @@ For S3, measure parallel downloads from the restore node using the same
 endpoint and route as PageBroker. Measure the destination disk separately
 if the download writes to a file.
 
-This fio test keeps existing file-cache contents. Record whether the file is cold
-or warm. For an asynchronous direct-read test, use `--ioengine=libaio`,
-`--direct=1`, and a suitable `--iodepth`. Check the achieved depth in fio's
-output. Compare results only when the test conditions match.
+This fio test keeps the existing file cache. For an asynchronous direct-read
+test, use `--ioengine=libaio`, `--direct=1`, and a suitable `--iodepth`. Check
+the achieved depth in fio's output.
 
 fio reuses destination buffers, so resident buffers usually avoid repeated
 first-touch allocation faults. It measures the storage path; a fast fio result

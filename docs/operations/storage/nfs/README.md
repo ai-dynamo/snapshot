@@ -15,7 +15,7 @@ service limit, network speed, and other clients that use the same storage.
 More connections cannot increase throughput beyond these limits.
 
 Check the NFS version and client support before you select mount options.
-Use the backend examples below; one configuration does not fit every server.
+Use the backend examples below.
 
 ## Direct I/O (`O_DIRECT`)
 

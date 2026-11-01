@@ -22,9 +22,7 @@ Measure the actual restore as well as storage bandwidth.
 
 ## Setup
 
-RAID0 is node-local. It does not make snapshots available on other nodes or
-replace the shared PVC in a multi-node installation. See
-[Storage configuration](../../storage.md).
+For installation values, see [Storage configuration](../../storage.md).
 
 For a single-node local-PVC deployment, create a local PV whose `local.path`
 points to the mounted array. Set its `nodeAffinity` to the storage node and
@@ -46,13 +44,11 @@ daemonset:
     nvidia.com/gpu.present: "true"
 ```
 
-Replace the claim name and hostname with your values. These selectors place
-the operator and node agent on the node that can mount the local PV.
+Replace the claim name and hostname with your values.
 If that node is tainted, set `operator.tolerations` to match its taints.
 
-Schedule source Pods and restore Pods on that node too. Workload Pods do not
-mount the local PVC, but their local agent must read and write the snapshot
-files. A Pod on another node cannot restore from this local array.
+Workload Pods do not mount the local PVC; their node agent reads and writes
+the snapshot files. This is why they must run on the storage node.
 
 RAID0 has no redundancy. Keep another copy of snapshots that must survive a
 drive failure. See [Linux RAID arrays](https://docs.kernel.org/admin-guide/md.html).
@@ -91,6 +87,3 @@ Follow the [common measurement procedure](../slow-restore.md#5-repeat-the-real-r
 Test direct I/O on the array as well as buffered I/O.
 
 Also record drive count, RAID level, stripe chunk size, and filesystem.
-If you compare RAID0 with software sharding, keep the drive count and workload
-fixed. They distribute data at different layers; their gains are not additive
-by default.
