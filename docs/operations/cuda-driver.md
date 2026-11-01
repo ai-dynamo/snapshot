@@ -17,8 +17,6 @@ On the node, inspect each process's loaded library:
 sudo sed -n '/libcuda\.so/s/^[^/]*//p' /proc/<host-pid>/maps | sort -u
 ```
 
-The output retains ` (deleted)` if the loaded library's file was removed.
-
 Use matching user-mode driver libraries for the workload, node agent's CUDA
 helper, and PageBroker. On a compatible older kernel-mode driver, the
 `cuda-compat-13-4` package provides the newer libraries. Select them explicitly
