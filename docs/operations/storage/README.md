@@ -21,8 +21,7 @@ recommendations without published Snapshot benchmark results.
 | [Amazon S3](s3.md) | Yes | Yes | Provided by S3 | Bucket, credentials, and network access |
 
 For NFS, select the [VAST](nfs/vast.md) or [EFS](nfs/efs.md) setup after
-reading the common I/O guidance. For GPU transfers, check the
-[CustomStorage driver requirement](../../reference/compatibility.md#minimum-versions-by-feature).
+reading the common I/O guidance.
 
 ## Why is my restore slow?
 

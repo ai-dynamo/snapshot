@@ -64,10 +64,6 @@ uname -r
 nvidia-smi --query-gpu=name,driver_version --format=csv
 ```
 
-For GPU CustomStorage, check the CUDA user-mode driver loaded by the workload
-and PageBroker against the compatibility requirements. The host driver
-version alone is not enough.
-
 S3 has no snapshot filesystem mount; check its endpoint, reader settings,
 and network path instead of running the mount command below.
 
