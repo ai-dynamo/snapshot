@@ -207,6 +207,7 @@ Redis-compatible server.
 | CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
 | At capture, CRIU's network lock covers a member's IP traffic only from the moment CRIU freezes it, and never covers RDMA, shared volumes, or external services, while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
 | The coordinator is a single point of failure for attempts in flight, because sessions live only in its memory. | Failure is fail-stop and reported as `CoordinatorLost`, a standby replica serves new attempts, and a broken connection that reconnects does not fail an attempt; every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
+| Sessions share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts fail until its own attempt ends at its deadline. | Sessions stay isolated otherwise: no client can read or write another session, libraries are bounded per session, and the cap protects the coordinator itself. A byte limit per session would reserve that memory whether a session uses it or not, so alpha shares it, and beta revisits the choice once cuInterpose's largest records are measured. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
 | Importing GPU memory shared from another node after a native CUDA restore depends on a driver fix, and cuInterpose currently infers the kind of an imported FABRIC handle from its opaque contents. | Cross-node sharing in alpha requires a driver with the fix, and a public query for the handle kind is a beta prerequisite. |
 | CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, the application calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. |
@@ -276,12 +277,12 @@ A session is two key-value buckets in the coordinator's embedded NATS server,
 both held in memory. One serves Snapshot's own components, the agents and
 relays, and holds a `meta` key with the members, their ranks, the deadline, and
 an epoch, which every agent reads when it connects; the other holds library
-keys, such as NCCL Checkpoint's communicator identifiers. Each bucket has its
-own byte limit and maximum value size, the library bucket's being small, so the
-workload cannot exhaust what Snapshot's barriers need, and the server caps the
-memory of all sessions together. Members coordinate through six patterns, each
-built from standard NATS key-value operations, which
-[Session semantics](#session-semantics) defines precisely.
+keys, such as NCCL Checkpoint's communicator identifiers. Each bucket limits the
+size of a value, and the library bucket also limits its number of keys, so
+libraries cannot exhaust what Snapshot's own keys need. Neither bucket reserves
+memory: one cap bounds the memory of all sessions, which they share. Members
+coordinate through six patterns, each built from standard NATS key-value
+operations, which [Session semantics](#session-semantics) defines precisely.
 
 | Pattern | Purpose | Used by |
 | --- | --- | --- |
@@ -1015,26 +1016,28 @@ workload.
 The agent's privileges do not grow in kind, because it already enters workload
 namespaces, although it now also creates a loopback listener and narrow packet
 rules there, both of which it removes on every exit path. The coordinator needs
-no write access to the API. As for abuse, a compromised workload can at worst
-fail its own set's attempt: its keys are confined to the library bucket, whose
-byte limit and maximum value size are small, the server caps the memory of all
-sessions together and disconnects a client that stops reading, so a flood can
-delay an attempt into a timeout but cannot exhaust the coordinator or corrupt
-another session. Pods that use the host network are refused unless their
-libraries use the Unix-socket endpoint, because their loopback interface is
-shared with the node.
+no write access to the API. As for abuse, a compromised workload cannot read or
+corrupt another session. Its libraries' keys are confined to the library bucket,
+whose number of keys and value size are small, and the server caps the memory of
+all sessions together and disconnects a client that stops reading, so a flood
+cannot exhaust the coordinator. Sessions do share that memory, however, so
+records forged through the workload's relay can make concurrent attempts fail
+until its own attempt ends ([Limitations, Risks, and
+Mitigations](#limitations-risks-and-mitigations)). Pods that use the host
+network are refused unless their libraries use the Unix-socket endpoint, because
+their loopback interface is shared with the node.
 
 ### Configuration
 
 Multi-Pod support is enabled the way Snapshot enables its other features: by
 installing the `PodSetSnapshot` and `PodSetRestore` CRDs and setting one chart
-value, off by default in alpha, that deploys the coordinator and turns on the set
-controllers. The chart gains the coordinator's TLS, resource, and replica
+value, off by default in alpha, that deploys the coordinator and turns on the
+set controllers. The chart gains the coordinator's TLS, resource, and replica
 settings, together with the limits of its embedded NATS server, namely total
-memory, maximum message size, and the byte limits of each session's buckets,
-while the agent gains a switch for the library endpoint. No NATS deployment is
-needed, since the server runs inside the coordinator, and a plain `PodSnapshot`
-needs no configuration change.
+memory, maximum message size, the value limits of each session's buckets, and
+the key limit of its library bucket, while the agent gains a switch for the
+library endpoint. No NATS deployment is needed, since the server runs inside the
+coordinator, and a plain `PodSnapshot` needs no configuration change.
 
 Sets also need agents that understand them, because an older agent would treat
 a member's `PodSnapshotContent` as an ordinary capture and dump its source
@@ -1152,12 +1155,11 @@ measured durations of both restore windows, with fail-stop verified in each;
 and an unchanged result for the existing single-Pod suite.
 
 **Beta** requires integration with CUDA Checkpoint's prepare and resume phases;
-a released driver
-with the cross-node import fix and a public way to identify FABRIC handle
-kinds; scale measured beyond 16 Pods; decisions on IPv6, on the coordinator's
-availability model, and on an enforced execution hold, informed by operational
-evidence; and an API review that settles the open questions in
-[Appendix A](#a-open-questions).
+a released driver with the cross-node import fix and a public way to identify
+FABRIC handle kinds; scale measured beyond 16 Pods; decisions on IPv6, on the
+coordinator's availability model, on isolating the memory of sessions, and on an
+enforced execution hold, informed by operational evidence; and an API review
+that settles the open questions in [Appendix A](#a-open-questions).
 
 **GA** is not planned by this SNEP.
 
