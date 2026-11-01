@@ -39,10 +39,11 @@ type Session interface {
 	// Barrier records that this member has arrived at the barrier name, then
 	// returns nil once every member in Meta has arrived. A barrier needs no
 	// count and no creation; arriving again changes nothing; and once it has
-	// released, a later arrival returns at once. The arrival is recorded even
-	// if ctx is already done, so cancelling stops the wait, never the arrival.
-	// The wait returns early, with how the session ended, if it ends first.
-	// Only agents use barriers.
+	// released, a later arrival returns at once. An arrival that was recorded
+	// stays recorded: cancelling ctx stops the wait and never undoes the
+	// arrival. A call whose ctx is already done returns its error and records
+	// nothing. The wait returns early, with how the session ended, if it ends
+	// first. Only agents use barriers.
 	Barrier(ctx context.Context, name string) error
 
 	// Leave records that this member's agent is done. The session closes once
@@ -193,7 +194,7 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 		return err
 	}
 	arrival := session.BarrierKey(name, s.member)
-	if err := s.do(context.WithoutCancel(ctx), func(ctx context.Context) error {
+	if err := s.do(ctx, func(ctx context.Context) error {
 		_, err := s.snapshot.Put(ctx, arrival, nil)
 		return err
 	}); err != nil {
@@ -258,10 +259,14 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 }
 
 // do runs op, sending it again while it fails transiently, until it succeeds,
-// fails for good, the session ends or is closed, or ctx is done.
+// fails for good, the session ends or is closed, or ctx is done. It never sends
+// op once ctx is done.
 func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 	for {
 		if err := s.alive(); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		err := s.try(ctx, op)

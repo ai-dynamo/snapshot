@@ -30,6 +30,8 @@ import (
 	client "github.com/ai-dynamo/snapshot/agent/pkg/coordinator"
 	"github.com/ai-dynamo/snapshot/agent/pkg/session"
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 	"k8s.io/apimachinery/pkg/types"
@@ -167,6 +169,55 @@ func (ses *testSession) connectAll() []client.Session {
 // cut breaks every connection of a member, as a broken network would, so its
 // client reconnects.
 func (ses *testSession) cut(member int) { ses.proxies[member].cut() }
+
+// raw returns the session's Snapshot bucket over a plain NATS connection of
+// member, made the way package session defines, which reaches the keys the
+// client keeps to itself. The connection closes when the test ends.
+func (ses *testSession) raw(t *testing.T, member int) jetstream.KeyValue {
+	t.Helper()
+	uid, id := string(ses.spec.UID), ses.spec.Members[member].ID
+	nc, err := nats.Connect("tls://"+ses.h.srv.Addr().String(),
+		nats.Secure(&tls.Config{RootCAs: ses.h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
+		nats.UserInfo(session.UserName(uid, id), ""),
+		nats.Token(memberToken),
+		nats.CustomInboxPrefix(session.InboxPrefix(uid, id)),
+		nats.NoReconnect())
+	require.NoError(t, err)
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	kv, err := js.KeyValue(within(t), session.SnapshotBucket(uid))
+	require.NoError(t, err)
+	return kv
+}
+
+// awaitKey waits until kv holds key, and fails the test if it does not within
+// the test's bound.
+func awaitKey(t *testing.T, kv jetstream.KeyValue, key string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(within(t))
+	w, err := kv.Watch(ctx, key)
+	if err != nil {
+		cancel()
+		require.NoError(t, err)
+	}
+	defer func() {
+		cancel()
+		// The watch's channel closes once its subscription has.
+		for range w.Updates() {
+		}
+	}()
+	for {
+		select {
+		case e := <-w.Updates():
+			if e != nil && e.Operation() == jetstream.KeyValuePut {
+				return
+			}
+		case <-ctx.Done():
+			t.Fatalf("%s was not written", key)
+		}
+	}
+}
 
 // awaitOutcome waits until the coordinator has seen the session end, and
 // returns how: "closed", or "failed" and the reason.

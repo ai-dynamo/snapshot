@@ -12,6 +12,7 @@ import (
 	client "github.com/ai-dynamo/snapshot/agent/pkg/coordinator"
 	"github.com/ai-dynamo/snapshot/agent/pkg/session"
 	"github.com/ai-dynamo/snapshot/operator/internal/coordinator"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,13 +79,26 @@ func TestBarrier(t *testing.T) {
 		}
 	})
 
-	t.Run("a cancelled wait still counts the arrival", func(t *testing.T) {
+	t.Run("an arrival already recorded still counts after its wait is cancelled", func(t *testing.T) {
 		ctx := within(t)
-		sessions := h.session(2).connectAll()
-		cancelled, cancel := context.WithCancel(ctx)
+		ses := h.session(2)
+		sessions := ses.connectAll()
+		waiting, cancel := context.WithCancel(ctx)
+		wait := barrier(waiting, sessions[0], "net-freeze")
+		awaitKey(t, ses.raw(t, 1), session.BarrierKey("net-freeze", ses.spec.Members[0].ID))
 		cancel()
-		require.ErrorIs(t, sessions[0].Barrier(cancelled, "net-freeze"), context.Canceled)
+		require.ErrorIs(t, <-wait, context.Canceled)
 		require.NoError(t, sessions[1].Barrier(ctx, "net-freeze"), "the cancelled member's arrival must count")
+	})
+
+	t.Run("a Barrier whose context is already done returns its error", func(t *testing.T) {
+		ses := h.session(2)
+		s := ses.connect(0)
+		done, cancel := context.WithCancel(within(t))
+		cancel()
+		require.ErrorIs(t, s.Barrier(done, "net-freeze"), context.Canceled)
+		_, err := ses.raw(t, 1).Get(within(t), session.BarrierKey("net-freeze", ses.spec.Members[0].ID))
+		require.ErrorIs(t, err, jetstream.ErrKeyNotFound, "the arrival must not be recorded")
 	})
 
 	t.Run("cancelling a waiting barrier returns at once", func(t *testing.T) {
