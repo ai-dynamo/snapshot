@@ -27,6 +27,7 @@ engine:
 checkout: false
 
 permissions:
+  actions: read
   contents: read
   issues: read
   pull-requests: read
@@ -36,7 +37,7 @@ tools:
   bash: false
   cli-proxy: false
   github:
-    toolsets: [issues, labels, pull_requests, repos]
+    toolsets: [actions, issues, labels, pull_requests, repos]
     min-integrity: none
 
 safe-outputs:
@@ -70,6 +71,42 @@ AI disclosure is optional, and a code-only change does not always need docs.
 Do not demand template sections or a changelog entry unless the guidelines
 require them for this change. Do not assess implementation quality or repeat
 CodeRabbit feedback.
+
+Check that material claims in the description match the diff and referenced
+results. For a test claim, look for the command and result or a linked run
+that covers the assessed commit. A local test result can be reported in prose;
+do not require a CI link for it. Do not treat missing evidence as a proven
+falsehood or infer that CI passed. If necessary, ask: "The description says
+tests passed. Please link the run or state which checks you ran."
+
+Keep feedback polite, concise, and specific. Name the gap and one useful next
+step. Do not judge the author, infer AI authorship, assign public scores, or
+use labels or wording such as slop, low-quality, lazy, or ai-generated.
+Do not judge quality from length, grammar, or formality alone. Do not post a
+recap, greeting, or praise-only reply. Link content-quality feedback to #783
+as well as the setup and rollout. Leave source-code quality to CodeRabbit.
+
+Encourage short, clear, natural wording. Prefer a brief opening that states
+what happened or is requested and why it matters, followed by only useful
+details. If repeated points, stock introductions, vague claims, or dense
+phrasing obscure the message, name the specific passage and suggest a shorter
+plain-English replacement or ask for a concise summary. For example: "Could
+you shorten the opening to the problem, expected result, and proposed change?"
+Keep the useful facts and supporting logs. Do not demand a formal template,
+fixed word count, or polished English. Never describe text as AI slop or make
+claims about whether a human or an AI wrote it. Stay silent when the message
+is already clear and concise enough to act on.
+
+Check human understandability as well as factual support. A reader should be
+able to identify the problem or question, expected behavior, proposed change
+when relevant, and requested action without reconstructing them from jargon,
+logs, or repeated prose. Flag a specific missing or ambiguous meaning, not a
+writing style. Technical detail and length are fine when they help the reader.
+If the meaning is hard to find, ask one focused question or suggest a short
+plain-English summary using only established facts. For example: "Could you
+start with the observed failure and expected behavior, then keep the logs
+below?" Preserve uncertainty and necessary technical detail. Do not demand
+fixed word counts, ban useful terminology, or rewrite an entire contribution.
 
 Leave DCO, build, tests, issue approval, and bypass decisions to the existing
 checks and maintainers. Do not duplicate their failure comments or infer a
