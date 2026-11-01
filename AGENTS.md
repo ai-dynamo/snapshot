@@ -236,6 +236,8 @@ Before you introduce a name (a field, Helm value, annotation, label,
 environment variable, event reason, flag, file, or a new term in prose), read
 [docs/development/naming.md](docs/development/naming.md). A name that a user
 sees describes the capability, not the mechanism behind it.
+Before you write or edit release notes under `docs/release-notes/`, read
+[docs/development/writing-release-notes.md](docs/development/writing-release-notes.md).
 
 ## Working style
 
