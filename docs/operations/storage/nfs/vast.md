@@ -5,26 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 
 # VAST NFS
 
-Validated with Snapshot. See the published
-[benchmark results](../../../development/benchmarks.md).
-
 Configure an existing VAST-backed PVC for large snapshot files. This page
-covers the VAST client, storage NICs, and mount options. Start with the
-[NFS guidance](README.md); see [Storage best practices](../README.md) for
-other backends.
+covers storage NICs and mount options validated with Snapshot in the
+published [benchmarks](../../../development/benchmarks.md).
+See [Storage best practices](../README.md) for other backends.
 
 ## Setup
 
-### Check the client
-
 Install a compatible VAST NFS client on each node that checkpoints or restores.
-Check the running client on the node:
-
-```bash
-vastnfs-ctl status
-```
-
-The VAST client provides `remoteports`, `localports`, and `spread_reads`.
+The client provides `remoteports`, `localports`, and `spread_reads`.
 
 ### Choose the NFS version
 
@@ -80,34 +69,38 @@ For separate addresses, use `remoteports=<vip1>~<vip2>`. Adjust `nconnect` for
 the storage link and add `localports` for multiple NICs. The 1 MiB request
 sizes reduce overhead on large reads and writes.
 
-Keep normal cache sharing when several mounts access the same writable export.
-The [Snapshot benchmark setup](../../../development/benchmarks-guide.md#reference-setup)
-also used `nosharecache` and `nosharetransport` for mount isolation; those
-options are omitted here.
+Leave `nosharecache` and `nosharetransport` out of this starting configuration:
+
+- `nosharecache` gives each mount its own file cache. If the same file is
+  writable through several mounts on one node, those caches can disagree.
+  See the [NFS manual](https://man7.org/linux/man-pages/man5/nfs.5.html).
+- `nosharetransport` gives each mount its own network connections. It is useful
+  when a benchmark must use connections separate from other mounts.
+
+The published benchmark enabled both flags. To reproduce that run, use its
+[complete mount options](../../../development/benchmarks-guide.md#reference-setup).
 
 ### Select I/O mode
 
-Start with `config.criu.imageIoMode: direct` for CRIU images. Compare with
-`writeback` if repeated restores on the same node can reuse the page cache.
-See [NFS I/O modes](README.md).
+Start with `config.criu.imageIoMode: direct` before taking a snapshot.
+For comparison with `writeback`, take a separate snapshot in each mode.
 
 VAST notes that `spread_reads` can be slower for a single-threaded direct
-reader with one request in flight. Use the concurrency of the actual restore when comparing
-settings. See [VAST's benchmark guide](https://kb.vastdata.com/docs/how-to-benchmark-vast-data-with-fio).
+reader with one request in flight. Use the concurrency of the actual restore
+when comparing settings. See [VAST's benchmark guide](https://kb.vastdata.com/docs/how-to-benchmark-vast-data-with-fio).
 
 ## Verify
 
 Inspect the mount in the node agent container using the
 [restore-node checks](../slow-restore.md#3-check-the-restore-node).
-On the node, inspect the active VAST connections and storage NIC traffic:
+On the node, check traffic on each storage NIC:
 
 ```bash
-vastnfs-ctl rpc-clients "<node-mount>"
 ip -s link show dev "<storage-nic>"
 ```
 
 Check traffic counters on each selected NIC before and after a restore. If
 only one NIC carries traffic, check `localports` and routing before adding
-connections. See [VAST client diagnostics](https://vastnfs.vastdata.com/docs/4.5/usage/vastnfs-ctl.html).
+connections.
 
 Use the [common measurement procedure](../slow-restore.md#5-repeat-the-real-restore).

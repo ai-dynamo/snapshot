@@ -44,12 +44,16 @@ every visible GPU. Confirm any gain with an unprofiled restore.
 
 ## 2. Check the storage configuration
 
-For NFS, read the [NFS guidance](nfs/README.md), then your backend page:
-[VAST](nfs/vast.md) or [EFS](nfs/efs.md). For local storage, read
-[Local NVMe and RAID0](local/README.md).
-For object storage, check [S3 Region and instance bandwidth](s3.md).
-Check storage throughput limits before tuning. For filesystem storage, also
-compare direct and buffered I/O.
+Identify whether the snapshot is on a PVC or in S3. For a PVC, check whether
+CRIU reads directly from storage or from PageBroker staging:
+
+- `pageBroker.restoreMode: direct` reads CPU images from the PVC.
+- `pageBroker.restoreMode: staged` copies CPU images to tmpfs before CRIU runs.
+
+Check the CRIU I/O mode saved in the snapshot. Changing
+`config.criu.imageIoMode` affects new snapshots, not existing ones.
+For S3, check that the bucket and restore node use the same Region and that
+the endpoint and credentials match the bucket.
 
 ## 3. Check the restore node
 
@@ -63,12 +67,12 @@ uname -r
 nvidia-smi --query-gpu=name,driver_version --format=csv
 ```
 
-For GPU CustomStorage, also check the
-[loaded CUDA user-mode driver](../cuda-driver.md)
-in the workload and PageBroker. The host driver version alone is not enough.
+For GPU CustomStorage, check the CUDA user-mode driver loaded by the workload
+and PageBroker against the compatibility requirements. The host driver
+version alone is not enough.
 
-S3 has no snapshot filesystem mount; use the
-[S3 endpoint, reader, and network checks](s3.md).
+S3 has no snapshot filesystem mount; check its endpoint, reader settings,
+and network path instead of running the mount command below.
 
 For filesystem storage, select the node agent Pod on the restore node. Run
 `findmnt` in its container so path lookup uses the agent's mount namespace
@@ -81,8 +85,8 @@ kubectl --context "<context>" --namespace "<snapshot-namespace>" \
   --output TARGET,SOURCE,FSTYPE,OPTIONS
 ```
 
-For VAST, follow the [client and network checks](nfs/vast.md). Check the running
-client, storage NICs, and connections before increasing transfer buffers.
+For NFS, confirm the client supports the mount options shown by `findmnt`.
+Check storage NIC traffic and routing before increasing transfer buffers.
 
 ## 4. Measure storage with fio
 
@@ -91,8 +95,7 @@ requests and reports bandwidth, IOPS, and latency. Match the file, I/O mode,
 request size, and concurrency to the restore path.
 
 For filesystem storage, this example reads an existing file with one buffered
-request at a time. For S3, use the [download measurements](s3.md#verify).
-Run it through the same storage mount as the node agent:
+request at a time. Run it through the same storage mount as the node agent:
 
 ```bash
 fio --name=restore-read --filename=<snapshot-file> \
@@ -100,7 +103,11 @@ fio --name=restore-read --filename=<snapshot-file> \
   --ioengine=sync --iodepth=1 --direct=0 --invalidate=0 --group_reporting
 ```
 
-This test keeps existing file-cache contents. Record whether the file is cold
+For S3, measure parallel downloads from the restore node using the same
+endpoint and route as PageBroker. Measure the destination disk separately
+if the download writes to a file.
+
+This fio test keeps existing file-cache contents. Record whether the file is cold
 or warm. For an asynchronous direct-read test, use `--ioengine=libaio`,
 `--direct=1`, and a suitable `--iodepth`. Check the achieved depth in fio's
 output. Compare results only when the test conditions match.

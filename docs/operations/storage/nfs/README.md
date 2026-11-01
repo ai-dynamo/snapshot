@@ -35,7 +35,6 @@ each mode, then restore each one.
 
 Set `config.criu.imageIoMode: writeback` for buffered CRIU image I/O. Buffered
 reads can use the client page cache and read-ahead. Allow memory for that cache.
-See [EFS](efs.md) for its starting configuration.
 
 ## Mount options
 
