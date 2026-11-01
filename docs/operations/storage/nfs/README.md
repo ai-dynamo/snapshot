@@ -26,6 +26,11 @@ Set `config.criu.imageIoMode: direct` for CRIU images. This is an application
 setting, not an NFS mount option. It does not select the GPU payload I/O mode.
 See the [configuration reference](../../../reference/api.md#agent-config-config).
 
+Snapshot saves `config.criu.imageIoMode` when it takes the snapshot. Restore
+uses that saved mode; changing the Helm value does not change an existing
+snapshot. To compare direct and buffered I/O, take a separate snapshot in
+each mode, then restore each one.
+
 ## Buffered I/O
 
 Set `config.criu.imageIoMode: writeback` for buffered CRIU image I/O. Buffered

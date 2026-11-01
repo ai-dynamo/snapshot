@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Amazon EFS
 
+General guidance.
+
 Tune an existing EFS-backed PVC for Snapshot. Start with the
 [NFS guidance](README.md); see [Storage best practices](../README.md) for
 other backends.
@@ -12,7 +14,7 @@ other backends.
 ## Setup
 
 For the default `pageBroker.restoreMode: direct`, start with buffered CRIU
-image I/O on EFS. Set this Helm value:
+image I/O on EFS. Set this Helm value before taking the snapshot:
 
 ```yaml
 config:

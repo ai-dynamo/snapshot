@@ -112,7 +112,9 @@ does not include the work to populate workload memory or restore CPU/GPU state.
 ## 5. Repeat the real restore
 
 Change one setting at a time. Keep the model revision, snapshot, workload image,
-GPU count, and checkpoint preparation fixed. Compare cold and warm restores
+GPU count, and checkpoint preparation fixed. For a CRIU I/O-mode comparison,
+take a separate snapshot with each `config.criu.imageIoMode` value; restore
+uses the mode saved in each snapshot. Compare cold and warm restores
 separately. Record:
 
 - Snapshot images and running digests, kernel, GPU driver, and storage/client versions.

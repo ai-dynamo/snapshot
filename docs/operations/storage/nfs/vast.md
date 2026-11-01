@@ -5,6 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # VAST NFS
 
+Validated with Snapshot. See the published
+[benchmark results](../../../development/benchmarks.md).
+
 Configure an existing VAST-backed PVC for large snapshot files. This page
 covers the VAST client, storage NICs, and mount options. Start with the
 [NFS guidance](README.md); see [Storage best practices](../README.md) for
