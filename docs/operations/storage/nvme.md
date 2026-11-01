@@ -43,6 +43,7 @@ daemonset:
 
 Replace the claim name and hostname with your values. These selectors place
 the operator and node agent on the node that can mount the local PV.
+If that node is tainted, set `operator.tolerations` to match its taints.
 
 Schedule checkpoint and restore Pods on that node too. Workload Pods do not
 mount the checkpoint claim, but their local agent must read and write the
