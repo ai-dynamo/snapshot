@@ -50,7 +50,10 @@ type Session interface {
 	// every member has left. Leaving twice changes nothing. A member that has
 	// left keeps its connection until the session ends, because its relay and
 	// its libraries may still use it, and the coordinator fails the session if
-	// the connection is lost first.
+	// the connection is lost first. Leave returns nil if the session closed,
+	// since it closes only once every member has left, this one included: the
+	// last member's departure closes it, and the member may learn that before
+	// the reply to its write. It reports any other ending.
 	Leave(ctx context.Context) error
 
 	// Fail ends the session with reason, a valid condition reason, if it has
@@ -219,14 +222,15 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 
 // Leave implements Session.
 func (s *client) Leave(ctx context.Context) error {
-	if err := s.alive(); err != nil {
-		return err
-	}
 	left := session.LeftKey(s.member)
-	return s.do(ctx, func(ctx context.Context) error {
+	err := s.do(ctx, func(ctx context.Context) error {
 		_, err := s.snapshot.Put(ctx, left, nil)
 		return err
 	})
+	if errors.Is(err, session.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 // Fail implements Session.

@@ -155,7 +155,8 @@ func TestBarrier(t *testing.T) {
 }
 
 // TestLeave covers Leave: leaving twice changes nothing, a member that has left
-// keeps using the session, and the session closes once every member has left.
+// keeps using the session, and the session closes once every member has left,
+// after which leaving still succeeds.
 func TestLeave(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
@@ -170,8 +171,28 @@ func TestLeave(t *testing.T) {
 	for _, s := range sessions {
 		awaitDone(t, s)
 		require.ErrorIs(t, s.Err(), session.ErrClosed)
+		require.NoError(t, s.Leave(ctx), "leaving a session that closed")
 	}
 	assert.Equal(t, "closed", ses.awaitOutcome(t))
+}
+
+// TestLeaveThatClosesTheSession covers the last member's Leave, whose own
+// departure closes the session: the client may see the session end before
+// the reply to its write, and Leave still succeeds. Each session gives the
+// race one chance, so the test runs many.
+func TestLeaveThatClosesTheSession(t *testing.T) {
+	h := newHarness(t)
+	for i := range 50 {
+		sessions := h.session(t, 2).connectAll(t)
+		for member, s := range sessions {
+			require.NoError(t, s.Leave(within(t)), "session %d, member %d", i, member)
+		}
+		for _, s := range sessions {
+			awaitDone(t, s)
+			require.ErrorIs(t, s.Err(), session.ErrClosed)
+			require.NoError(t, s.Close())
+		}
+	}
 }
 
 // TestSessionFail covers Fail: the first reason wins, and every later Fail
