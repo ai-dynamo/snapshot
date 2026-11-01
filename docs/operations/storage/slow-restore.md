@@ -13,12 +13,18 @@ See [Storage best practices](README.md) for backend setup.
 Read the `Restore timing summary` from the node agent that handled the restore.
 Use the largest phase to choose the next check:
 
-| Slow phase | Check next |
+| Summary phase key | Check next |
 | --- | --- |
-| CPU (`criu_restore`) | Check CPU image size, effective mount options, and CRIU I/O mode. Compare reads through the same mount with fio. |
-| GPU (`cuda_restore`) | Compare GPU payload size with sustained storage bandwidth. If storage is fast, check CUDA setup and GPU transfers before increasing buffers. |
-| Staging | Check backend download/read throughput and staging memory. For S3, check the Region, instance bandwidth, and reader concurrency. |
-| Application readiness after restore | Check framework wake, compilation, and autotuning separately from agent restore time. |
+| `criu_restore` | Check CPU image size, the CRIU source (PVC or staging), and I/O mode. For PVC reads, compare the same mount with fio. |
+| `cuda_restore` | Compare GPU payload size with sustained storage bandwidth. If storage is fast, check CUDA setup and GPU transfers before increasing buffers. |
+| `pagebroker_stage` | Check backend download/read throughput and staging memory. For S3, check the Region, instance bandwidth, and reader concurrency. |
+| `pagebroker_mount` | Check preparation and mounting of the restore source. |
+| `pagebroker_commit` | Check PageBroker transaction completion and cleanup. |
+| `criu_prepare` | Check CRIU preparation before process-state restoration. |
+
+Measure application readiness and the first inference request separately.
+Framework wake, compilation, and autotuning after agent completion are not
+phases in this summary.
 
 For a storage lower bound, divide payload bytes by measured sustained bandwidth:
 520 GB at 25 GB/s takes at least 21 seconds to read. Other restore work can add

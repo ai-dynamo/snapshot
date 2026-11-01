@@ -13,10 +13,10 @@ memory, see [Storage configuration](../storage.md).
 These backends have been validated with Snapshot. The published
 [benchmark results](../../development/benchmarks.md) use VAST NFS.
 
-| Backend | Shared across nodes | Multi-node restores | Durability | Setup effort |
+| Backend | Shared across nodes | Restore on a different node | Durability | Setup effort |
 | --- | --- | --- | --- | --- |
 | [NFS: VAST or EFS](nfs/README.md) | Yes | Yes | Provided by the storage service | Shared PVC and NFS client |
-| [Local NVMe and RAID0](local/README.md) | No | This example restores on one node | RAID0 has no redundancy; EC2 instance store is temporary | Local array, PV/PVC, and node placement |
+| [Local NVMe and RAID0](local/README.md) | No | No, node-local in this setup | RAID0 has no redundancy; EC2 instance store is temporary | Local array, PV/PVC, and node placement |
 | [Amazon S3](s3.md) | Yes | Yes | Provided by S3 | Bucket, credentials, and network access |
 
 For NFS, select the [VAST](nfs/vast.md) or [EFS](nfs/efs.md) setup after

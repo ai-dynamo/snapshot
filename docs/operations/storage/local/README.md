@@ -6,7 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # Local NVMe and RAID0
 
 Use this setup for snapshots on a node-local array. This local-PVC example
-keeps the operator, source Pods, and restore Pods on one storage node.
+places the operator and node agent on one storage node. Schedule source Pods
+and restore Pods on that node through their workload manifests.
 See [Storage best practices](../README.md) for shared backends.
 
 ## When to use it
