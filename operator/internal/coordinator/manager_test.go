@@ -175,6 +175,31 @@ func TestFail(t *testing.T) {
 		h.observer.of(spec.UID))
 }
 
+// TestInvalidReason covers a member that writes the ended key with bytes that
+// are no condition reason: the session fails with InvalidReason, and the bytes
+// reach neither the Observer nor the log.
+func TestInvalidReason(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	spec := h.ensure(2)
+	m := h.connect(spec, 1)
+	nc, _ := h.raw(spec, 0)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	kv, err := js.KeyValue(ctx, session.SnapshotBucket(string(spec.UID)))
+	require.NoError(t, err)
+	_, err = kv.Create(ctx, session.KeyEnded, []byte("not a reason: secret\x00"))
+	require.NoError(t, err)
+
+	require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonInvalid})
+	require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
+		5*time.Millisecond)
+	assert.Equal(t, "failed "+string(spec.UID)+" "+session.ReasonInvalid, h.observer.of(spec.UID)[1])
+	for _, line := range h.logs.all() {
+		assert.NotContains(t, line, "secret")
+	}
+}
+
 // TestRemove covers removing a session: one still open fails with Cancelled,
 // and its buckets go.
 func TestRemove(t *testing.T) {

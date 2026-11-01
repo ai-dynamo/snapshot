@@ -69,9 +69,10 @@ func (e *AbortError) Is(target error) bool {
 	return ok && t.Reason == e.Reason
 }
 
-// The reasons the coordinator, or a member that finds the coordinator lost,
-// fails a session with. They match the condition reasons the operator reports on
-// the set resource. A member supplies its own reasons to Fail.
+// The reasons a session fails with besides those a member supplies to Fail:
+// the coordinator's, a member's that finds the coordinator lost, and the one
+// that replaces an ended key that holds no reason. They match the condition
+// reasons the operator reports on the set resource.
 const (
 	// ReasonDeadlineExceeded is the reason the coordinator fails a session
 	// with when its deadline passes.
@@ -88,6 +89,11 @@ const (
 	// ReasonCancelled is the reason the coordinator fails a session still open
 	// when it removes it, which means the set resource was deleted.
 	ReasonCancelled = "Cancelled"
+
+	// ReasonInvalid is the reason EndedError reports for a session whose ended
+	// key holds bytes that are not a valid condition reason, which any
+	// member's connection may write.
+	ReasonInvalid = "InvalidReason"
 )
 
 // The rule for a Kubernetes condition reason, which apimachinery holds but does
@@ -113,11 +119,17 @@ func ValidateReason(reason string) error {
 	return nil
 }
 
-// EndedError returns how a session ended, from the value of its ended key:
-// ErrClosed for no bytes, and an *AbortError with the reason otherwise.
+// EndedError returns how a session ended, from the value of its ended key, and
+// is the one place either side decodes that value: ErrClosed for no bytes, an
+// *AbortError with the reason for a valid condition reason, and an *AbortError
+// with ReasonInvalid for anything else. Any member's connection may write the
+// key, with up to the bucket's largest value, so the value is never trusted.
 func EndedError(value []byte) error {
-	if len(value) == 0 {
+	switch {
+	case len(value) == 0:
 		return ErrClosed
+	case len(value) > maxReasonLength || !reasonRE.Match(value):
+		return &AbortError{Reason: ReasonInvalid}
 	}
 	return &AbortError{Reason: string(value)}
 }

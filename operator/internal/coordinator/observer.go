@@ -6,7 +6,8 @@ package coordinator
 import "k8s.io/apimachinery/pkg/types"
 
 // Observer receives what sessions do, for metrics. A reason is a valid
-// condition reason, so it is a bounded metric label.
+// condition reason, so it is a bounded metric label: a session whose ended key
+// holds anything else is reported with session.ReasonInvalid.
 //
 // A Server calls an Observer from the goroutine that ended a session, or that
 // saw it end, and never while holding the lock that guards sessions' state. An

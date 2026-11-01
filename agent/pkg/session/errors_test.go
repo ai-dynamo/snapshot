@@ -4,6 +4,7 @@
 package session
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -27,6 +28,21 @@ func TestAbortError(t *testing.T) {
 	err := fmt.Errorf("wrapped: %w", &AbortError{Reason: ReasonCoordinatorLost})
 	require.ErrorIs(t, err, ErrCoordinatorLost)
 	require.NotErrorIs(t, &AbortError{Reason: ReasonMemberFailed}, ErrCoordinatorLost)
+}
+
+// TestEndedError covers decoding the ended key, which any member may write:
+// no bytes close the session, a valid reason fails it with that reason, and
+// anything else fails it with ReasonInvalid.
+func TestEndedError(t *testing.T) {
 	require.ErrorIs(t, EndedError(nil), ErrClosed)
+	require.ErrorIs(t, EndedError([]byte{}), ErrClosed)
 	require.ErrorIs(t, EndedError([]byte("Refused")), &AbortError{Reason: "Refused"})
+	for name, value := range map[string][]byte{
+		"not a reason":                []byte("has space"),
+		"binary":                      {0xff, 0x00},
+		"one byte over a reason":      []byte("A" + strings.Repeat("a", maxReasonLength)),
+		"the Snapshot bucket's value": bytes.Repeat([]byte("A"), MaxValue),
+	} {
+		require.ErrorIs(t, EndedError(value), &AbortError{Reason: ReasonInvalid}, name)
+	}
 }

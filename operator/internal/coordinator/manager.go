@@ -447,8 +447,10 @@ func ended(err error) bool {
 	return errors.As(err, &abort) || errors.Is(err, session.ErrClosed)
 }
 
-// end records once how a session ended: it stops the session's deadline and
-// grace timers, and reports the outcome.
+// end records once how a session ended, from the value of its ended key: it
+// stops the session's deadline and grace timers, and reports the outcome. A
+// value that is no condition reason is reported as session.ReasonInvalid, and
+// logged only by its size.
 func (s *Server) end(a *attempt, value []byte) {
 	s.mu.Lock()
 	if a.ended {
@@ -458,13 +460,18 @@ func (s *Server) end(a *attempt, value []byte) {
 	a.ended = true
 	a.stopTimers()
 	s.mu.Unlock()
-	if len(value) == 0 {
+	var abort *session.AbortError
+	if !errors.As(session.EndedError(value), &abort) {
 		s.cfg.Observer.SessionClosed(a.spec.UID)
 		s.log.Info("Session closed", "attempt", a.spec.UID)
 		return
 	}
-	s.cfg.Observer.SessionFailed(a.spec.UID, string(value))
-	s.log.Info("Session failed", "attempt", a.spec.UID, "reason", string(value))
+	s.cfg.Observer.SessionFailed(a.spec.UID, abort.Reason)
+	log := s.log.WithValues("attempt", a.spec.UID, "reason", abort.Reason)
+	if abort.Reason == session.ReasonInvalid {
+		log = log.WithValues("bytes", len(value))
+	}
+	log.Info("Session failed")
 }
 
 // discard stops everything a session runs.

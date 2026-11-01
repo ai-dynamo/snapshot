@@ -223,6 +223,15 @@ func TestSessionFail(t *testing.T) {
 		require.ErrorIs(t, s.Fail(ctx, "Late"), session.ErrClosed)
 	})
 
+	t.Run("an ended key that holds no reason reports InvalidReason", func(t *testing.T) {
+		ses := h.session(2)
+		s := ses.connect(0)
+		_, err := ses.raw(t, 1).Create(within(t), session.KeyEnded, []byte("not a reason\x00"))
+		require.NoError(t, err)
+		awaitDone(t, s)
+		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonInvalid})
+	})
+
 	t.Run("a reason must be a condition reason", func(t *testing.T) {
 		s := h.session(1).connect(0)
 		for _, reason := range []string{"", "has space", "1Digit", "Trailing:"} {
