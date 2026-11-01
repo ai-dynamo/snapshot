@@ -230,9 +230,7 @@ labeled `lifecycle/stale` and closed 30 days later, as described below.
 ## Triage, priority, and inactivity
 
 Maintainers triage new issues weekly and set a priority label. Issue Triage can
-apply only the labels allowed in its [workflow](.github/workflows/issue-triage.md)
-and clear resolved `needs-information` and `possible-duplicate` hints. Feedback
-names the missing detail and a useful next step without judging the author.
+apply only the labels allowed in its [workflow](.github/workflows/issue-triage.md).
 Maintainers control all other labels and priorities.
 
 | Label | Meaning | Target fix |
