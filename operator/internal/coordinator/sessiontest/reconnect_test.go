@@ -4,10 +4,12 @@
 package sessiontest
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/agent/pkg/session"
+	"github.com/ai-dynamo/snapshot/operator/internal/coordinator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -129,4 +131,76 @@ func TestCoordinatorLost(t *testing.T) {
 		h.restart()
 		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: "Refused"})
 	})
+}
+
+// TestRemoved removes a session under its connected members. Each member learns
+// that its session is gone, from the ended key the coordinator records, or,
+// when it has not received the key by the time the buckets go, from finding its
+// session gone: every wait returns, and the session ends, with Cancelled or
+// CoordinatorLost, never hanging and never reporting a closed connection.
+func TestRemoved(t *testing.T) {
+	t.Run("while members wait", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := within(t)
+		ses := h.session(t, 3)
+		sessions := ses.connectAll(t)
+		arrived := barrier(ctx, sessions[0], "admitted")
+		awaitKey(t, ses.raw(t, 2), session.BarrierKey("admitted", ses.spec.Members[0].ID))
+		got := make(chan error, 1)
+		go func() {
+			_, err := sessions[1].Namespace(session.NamespaceLibrary).Get(ctx, "comm", time.Minute)
+			got <- err
+		}()
+		require.NoError(t, h.srv.Remove(ctx, ses.spec.UID))
+
+		for _, wait := range []<-chan error{arrived, got} {
+			select {
+			case err := <-wait:
+				requireRemoved(t, err)
+			case <-ctx.Done():
+				t.Fatal("a wait did not return")
+			}
+		}
+		for _, s := range sessions {
+			awaitDone(t, s)
+			requireRemoved(t, s.Err())
+		}
+	})
+
+	t.Run("with no room left to record its end", func(t *testing.T) {
+		h := newHarness(t, func(cfg *coordinator.Config) { cfg.MaxBytes, cfg.MaxValue = 1<<20, 64<<10 })
+		ctx := within(t)
+		ses := h.session(t, 2)
+		sessions := ses.connectAll(t)
+		// Large values, then empty ones, until neither fits: the ended key is
+		// no smaller than an empty value under a longer key.
+		store := sessions[0].Namespace(session.NamespaceSnapshot)
+		for i, size := 0, 60<<10; size >= 0; size -= 60 << 10 {
+			for ; ; i++ {
+				err := store.Insert(ctx, fmt.Sprintf("fill-%d", i), make([]byte, size))
+				if err != nil {
+					require.ErrorIs(t, err, session.ErrTooMany)
+					break
+				}
+			}
+		}
+
+		start := time.Now()
+		require.NoError(t, h.srv.Remove(ctx, ses.spec.UID))
+		assert.Equal(t, []string{"opened"}, h.observer.of(ses.spec.UID), "the end must not have been recorded")
+		for _, s := range sessions {
+			awaitDone(t, s)
+			require.ErrorIs(t, s.Err(), session.ErrCoordinatorLost)
+		}
+		t.Logf("every member found its session gone %s after Remove", time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// requireRemoved checks that err says a removed session ended: Cancelled, if
+// the member received the end, or CoordinatorLost, if it found the session gone.
+func requireRemoved(t *testing.T, err error) {
+	t.Helper()
+	var abort *session.AbortError
+	require.ErrorAs(t, err, &abort)
+	assert.Contains(t, []string{session.ReasonCancelled, session.ReasonCoordinatorLost}, abort.Reason)
 }

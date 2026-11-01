@@ -72,10 +72,19 @@ func transient(err error) bool {
 	return errors.Is(err, errRetry) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, nats.ErrTimeout) ||
-		errors.Is(err, nats.ErrNoResponders) ||
-		errors.Is(err, jetstream.ErrNoStreamResponse) ||
 		errors.Is(err, nats.ErrConnectionReconnecting) ||
 		errors.Is(err, nats.ErrDisconnected)
+}
+
+// missing reports whether an operation that failed with err may have found
+// its bucket gone: no stream answered a write or a read, or the stream does not
+// exist.
+func missing(err error) bool {
+	return errors.Is(err, nats.ErrNoResponders) ||
+		errors.Is(err, jetstream.ErrNoStreamResponse) ||
+		errors.Is(err, jetstream.ErrStreamNotFound) ||
+		errors.Is(err, jetstream.ErrBucketNotFound) ||
+		errors.Is(err, nats.ErrStreamNotFound)
 }
 
 // errRetry asks for an operation to be sent again at once, such as an Insert

@@ -100,14 +100,14 @@ func Connect(ctx context.Context, cfg Config) (Session, error) {
 		return nil, err
 	}
 	s := &client{
-		attempt:     cfg.Attempt,
-		member:      cfg.Member,
-		log:         cfg.Log.WithValues("attempt", cfg.Attempt, "member", cfg.Member),
-		connected:   make(chan struct{}),
-		reconnected: make(chan struct{}, 1),
-		closing:     make(chan struct{}),
-		done:        make(chan struct{}),
-		wake:        make(chan struct{}),
+		attempt:   cfg.Attempt,
+		member:    cfg.Member,
+		log:       cfg.Log.WithValues("attempt", cfg.Attempt, "member", cfg.Member),
+		connected: make(chan struct{}),
+		verify:    make(chan struct{}, 1),
+		closing:   make(chan struct{}),
+		done:      make(chan struct{}),
+		wake:      make(chan struct{}),
 	}
 	nc, err := nats.Connect(strings.Join(cfg.URLs, ","), s.options(cfg)...)
 	if err != nil {
@@ -154,10 +154,7 @@ func (s *client) options(cfg Config) []nats.Option {
 		nats.ConnectHandler(func(*nats.Conn) { s.connect.Do(func() { close(s.connected) }) }),
 		nats.ReconnectHandler(func(*nats.Conn) {
 			s.log.Info("Reconnected to the coordinator")
-			select {
-			case s.reconnected <- struct{}{}:
-			default:
-			}
+			s.wakeVerifier()
 		}),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			s.inflight.interrupt()
@@ -178,8 +175,8 @@ func (s *client) options(cfg Config) []nats.Option {
 }
 
 // join waits until the coordinator admits the connection, binds both buckets,
-// reads Meta, and starts following the session's end and the connection's
-// reconnects.
+// reads Meta, and starts verifying the session when asked and following its
+// end.
 func (s *client) join(ctx context.Context) error {
 	select {
 	case <-s.connected:
@@ -199,7 +196,9 @@ func (s *client) join(ctx context.Context) error {
 	if s.library, err = s.bind(ctx, js, session.LibraryBucket(s.attempt)); err != nil {
 		return err
 	}
-	reconnects := s.reconnects()
+	s.mu.Lock()
+	target := s.target()
+	s.mu.Unlock()
 	if err := s.do(ctx, func(ctx context.Context) error {
 		s.meta, err = readMeta(ctx, s.snapshot)
 		return err
@@ -214,15 +213,13 @@ func (s *client) join(ctx context.Context) error {
 		return fmt.Errorf("the session has no member %q: %w", s.member, session.ErrForbidden)
 	}
 	s.epoch.Store(s.meta.Epoch)
-	s.verified = reconnects
+	// Reading Meta verified every reconnect before it.
+	s.settled(target)
+	s.joined = true
 
-	ended, err := s.watch(ctx, s.snapshot, []string{session.KeyEnded})
-	if err != nil {
-		return err
-	}
 	s.wg.Add(2)
-	go s.followEnd(ended)
-	go s.followReconnects()
+	go s.verifier()
+	go s.followEnd()
 	return nil
 }
 
@@ -232,9 +229,6 @@ func (s *client) bind(ctx context.Context, js jetstream.JetStream, bucket string
 	err := s.do(ctx, func(ctx context.Context) error {
 		var err error
 		kv, err = js.KeyValue(ctx, bucket)
-		if errors.Is(err, jetstream.ErrBucketNotFound) {
-			return fmt.Errorf("attempt %s has no session: %w", s.attempt, session.ErrNotFound)
-		}
 		return err
 	})
 	return kv, err
@@ -256,13 +250,39 @@ func readMeta(ctx context.Context, kv jetstream.KeyValue) (session.Meta, error) 
 	return meta, nil
 }
 
-// followReconnects checks the epoch after every reconnect.
-func (s *client) followReconnects() {
+// target returns how many verifications the session must have passed: one
+// for each request, and one for each reconnect, which nats.go counts before
+// the new connection delivers anything. The caller holds s.mu.
+func (s *client) target() uint64 { return s.requested + s.nc.Stats().Reconnects }
+
+// request asks for the session to be verified, as whatever may have found the
+// session gone does: a watch that stopped on its own, or an operation that
+// found its bucket missing. It returns the target a verification answers it
+// by reaching.
+func (s *client) request() uint64 {
+	s.mu.Lock()
+	s.requested++
+	target := s.target()
+	s.mu.Unlock()
+	s.wakeVerifier()
+	return target
+}
+
+// wakeVerifier has the verifier run, unless it is already due to.
+func (s *client) wakeVerifier() {
+	select {
+	case s.verify <- struct{}{}:
+	default:
+	}
+}
+
+// verifier verifies the session whenever asked, one verification at a time.
+func (s *client) verifier() {
 	defer s.wg.Done()
 	for {
 		select {
-		case <-s.reconnected:
-			s.checkEpoch()
+		case <-s.verify:
+			s.check()
 		case <-s.closing:
 			return
 		case <-s.done:
@@ -271,15 +291,18 @@ func (s *client) followReconnects() {
 	}
 }
 
-// checkEpoch reads Meta again after a reconnect. The same epoch means the
-// coordinator still holds the session the member joined. Another epoch, or no
-// Meta, means it recreated the session after losing it, and no bucket means it
-// lost the session for good: either way, the session ends with
+// check verifies the session by reading Meta again. The same epoch means the
+// coordinator still holds the session the member joined, which answers every
+// request and reconnect before check began. Another epoch, or no Meta, means it
+// recreated the session after losing it, and no bucket means it no longer
+// holds the session at all: either way, the session ends with
 // session.ErrCoordinatorLost, after failing a recreated session with that
 // reason.
-func (s *client) checkEpoch() {
+func (s *client) check() {
 	for {
-		reconnects := s.reconnects()
+		s.mu.Lock()
+		target := s.target()
+		s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
 		_, err := s.snapshot.Status(ctx)
 		var meta session.Meta
@@ -289,7 +312,7 @@ func (s *client) checkEpoch() {
 		cancel()
 		switch {
 		case err == nil && meta.Epoch == s.meta.Epoch:
-			s.settled(reconnects)
+			s.settled(target)
 			return
 		case err == nil, errors.Is(err, session.ErrNotFound):
 			s.lose(true)
@@ -322,27 +345,41 @@ func (s *client) lose(recreated bool) {
 	s.finish(session.ErrCoordinatorLost)
 }
 
-// settled records that the epoch was found unchanged on the connection made by
-// reconnect number reconnects, and wakes every caller waiting for it.
-func (s *client) settled(reconnects uint64) {
+// settled records that a verification that reached target found the session
+// still there, and wakes every caller waiting for it.
+func (s *client) settled(target uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if reconnects > s.verified {
-		s.verified = reconnects
+	if target > s.verified {
+		s.verified = target
 		close(s.wake)
 		s.wake = make(chan struct{})
 	}
 }
 
-// settle returns once the epoch has been checked on the current connection. A
-// wait calls it before returning what it read, so it never reports a value or
-// a release it read from a session the coordinator recreated: after a
-// coordinator restart, a watch resumes on the recreated bucket, and it may
-// deliver an entry before the epoch check has ended the session.
+// confirm has the session verified, and returns nil once a verification
+// answering its request has found it still there, or how it ended.
+func (s *client) confirm(ctx context.Context) error { return s.verifiedTo(ctx, s.request()) }
+
+// settle returns once the session has been verified as far as was due when
+// settle was called: every reconnect and request until then. A wait calls it
+// before returning what it read, so it never reports a value or a release it
+// read from a session the coordinator recreated: after a coordinator restart,
+// a watch resumes on the recreated bucket, and it may deliver an entry before
+// the verification of the reconnect has ended the session.
 func (s *client) settle(ctx context.Context) error {
+	s.mu.Lock()
+	target := s.target()
+	s.mu.Unlock()
+	return s.verifiedTo(ctx, target)
+}
+
+// verifiedTo returns nil once a verification that reached target has found
+// the session still there, and how the session ended if it ends first.
+func (s *client) verifiedTo(ctx context.Context, target uint64) error {
 	for {
 		s.mu.Lock()
-		ok, wake := s.verified >= s.reconnects(), s.wake
+		ok, wake := s.verified >= target, s.wake
 		s.mu.Unlock()
 		if ok {
 			return nil
@@ -358,9 +395,6 @@ func (s *client) settle(ctx context.Context) error {
 		}
 	}
 }
-
-// reconnects returns how many times the connection has reconnected.
-func (s *client) reconnects() uint64 { return s.nc.Stats().Reconnects }
 
 // Meta implements Session.
 func (s *client) Meta() session.Meta {

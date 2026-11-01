@@ -84,10 +84,12 @@ type client struct {
 	log             logr.Logger
 	nc              *nats.Conn
 
-	// Set by join, and read-only afterwards.
+	// Set by join, and read-only afterwards. joined is set last, as the
+	// verifier starts.
 	snapshot, library jetstream.KeyValue
 	meta              session.Meta
 	ranks             map[string]int
+	joined            bool
 
 	// epoch is the epoch the client presents when it connects, zero until it
 	// has read Meta.
@@ -95,38 +97,48 @@ type client struct {
 
 	inflight inflight
 
-	connected   chan struct{}
-	connect     sync.Once
-	reconnected chan struct{}
-	closing     chan struct{}
-	done        chan struct{}
-	end         sync.Once
-	err         error
+	connected chan struct{}
+	connect   sync.Once
+	// verify holds a pending request to verify the session, so requests made
+	// while one is pending coalesce.
+	verify  chan struct{}
+	closing chan struct{}
+	done    chan struct{}
+	end     sync.Once
+	err     error
 
 	mu sync.Mutex
-	// verified is the reconnect count at which the client last found its
-	// epoch in Meta; wake is closed and replaced when it advances.
-	verified uint64
-	wake     chan struct{}
+	// requested counts the requests to verify the session, and verified is the
+	// target, which target returns, that the last verification to find the
+	// session still there reached; wake is closed and replaced when verified
+	// advances.
+	requested, verified uint64
+	wake                chan struct{}
 	// closed is set by Close before it waits for the goroutines in wg.
 	closed bool
 	wg     sync.WaitGroup
 }
 
-// followEnd ends the session once the ended key appears.
-func (s *client) followEnd(w watcher) {
+// followEnd ends the session once the ended key appears, or the session is
+// found gone, which await reports. A session never runs without its end being
+// watched, so followEnd watches again after any other failure until the
+// session ends or is closed. It waits attemptTimeout between tries, so a
+// failure that persists, which only a bug should cause, is logged rarely.
+func (s *client) followEnd() {
 	defer s.wg.Done()
-	defer s.stop(w)
 	for {
+		err := s.await(context.Background(), s.snapshot, nil, func(string, []byte, bool) bool { return false })
+		var abort *session.AbortError
+		switch {
+		case errors.As(err, &abort), errors.Is(err, session.ErrClosed):
+			s.finish(err)
+			return
+		case errors.Is(err, net.ErrClosed):
+			return
+		}
+		s.log.Error(err, "Watching the session's end failed; watching again")
 		select {
-		case e, ok := <-w.Updates():
-			if !ok {
-				return
-			}
-			if e != nil && e.Operation() == jetstream.KeyValuePut {
-				s.finish(session.EndedError(e.Value()))
-				return
-			}
+		case <-time.After(attemptTimeout):
 		case <-s.closing:
 			return
 		case <-s.done:
@@ -283,7 +295,17 @@ func (s *client) do(ctx context.Context, op func(context.Context) error) error {
 		if ended := s.alive(); ended != nil {
 			return ended
 		}
-		if !transient(err) {
+		switch {
+		case missing(err) && !s.joined:
+			// Nothing verifies the session yet: it was removed as the member
+			// joined.
+			return fmt.Errorf("attempt %s has no session: %w", s.attempt, session.ErrNotFound)
+		case missing(err):
+			// The bucket may be gone with the session.
+			if err := s.confirm(ctx); err != nil {
+				return err
+			}
+		case !transient(err):
 			return mapError(err)
 		}
 		select {
@@ -361,16 +383,24 @@ func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string
 	if err != nil {
 		return err
 	}
-	defer s.stop(w)
+	defer func() { s.stop(w) }()
 	for {
 		select {
 		case e, ok := <-w.Updates():
 			switch {
 			case !ok:
-				if err := s.alive(); err != nil {
+				// A watch that stops on its own may have lost its bucket with
+				// the session. While the session is still there, a new watch
+				// delivers the current entries again.
+				if err := s.confirm(ctx); err != nil {
 					return err
 				}
-				return net.ErrClosed
+				again, err := s.watch(ctx, kv, keys)
+				if err != nil {
+					return err
+				}
+				s.stop(w)
+				w = again
 			case e == nil:
 				// The end of the current entries.
 			case watchesEnd && e.Key() == session.KeyEnded:

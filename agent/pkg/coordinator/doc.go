@@ -33,9 +33,13 @@
 //
 // The coordinator keeps sessions only in memory, so a restart loses them, and
 // it recreates the session of every unfinished attempt with a new epoch before
-// it admits any client. A member presents the epoch it read from Meta whenever
-// it connects, and after every reconnect it reads Meta again: another epoch, or
-// no session, means the coordinator lost what the member had, so the session
-// ends with session.ErrCoordinatorLost, after failing a recreated session with
+// it admits any client. It also deletes a session's buckets once it removes
+// the session, whether or not every member has received its end. A member
+// presents the epoch it read from Meta whenever it connects, and verifies its
+// session, by reading Meta again, whenever the session may be gone: after a
+// reconnect, when a watch stops on its own, and when an operation finds its
+// bucket missing. Another epoch, or no session, means the coordinator no
+// longer holds what the member had, so the session ends with
+// session.ErrCoordinatorLost, after failing a recreated session with
 // session.ReasonCoordinatorLost so every other member learns at once.
 package coordinator

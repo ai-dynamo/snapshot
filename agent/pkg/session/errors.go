@@ -45,11 +45,12 @@ var (
 	// namespace, or a configuration.
 	ErrInvalid = errors.New("invalid argument")
 
-	// ErrCoordinatorLost reports that the coordinator lost the session, most
-	// often because it restarted: the member reconnected to a session with
-	// another epoch, or to none. It is an *AbortError, so it also matches a
-	// session that ended with ReasonCoordinatorLost for any other reason, such
-	// as another member noticing first.
+	// ErrCoordinatorLost reports that the coordinator no longer holds the
+	// session, because it restarted, or removed the session before this member
+	// received its end: the member found a session with another epoch, or
+	// none. It is an *AbortError, so it also matches a session that ended with
+	// ReasonCoordinatorLost for any other reason, such as another member
+	// noticing first.
 	ErrCoordinatorLost error = &AbortError{Reason: ReasonCoordinatorLost}
 )
 
