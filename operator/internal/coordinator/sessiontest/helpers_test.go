@@ -3,7 +3,7 @@
 
 // Package sessiontest holds only tests: those of the session client, package
 // coordinator of the agent module, against the real coordinator, and the test
-// that ties the client's keepalive to the coordinator's grace period. It is the
+// that ties the client's connection settings to the coordinator's. It is the
 // only package that imports both. Each member reaches the coordinator through
 // a TCP proxy of its own, which a test cuts to break the member's connection,
 // and points at a new coordinator to restart it.

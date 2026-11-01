@@ -9,9 +9,10 @@ import "time"
 // is added and, for a library key, before it is encoded.
 const MaxKeyLength = 1024
 
-// The client's keepalive. A client whose coordinator stops answering gives up
-// on the connection after ClientPingInterval × (ClientMaxPingsOut + 1), at most
-// half the coordinator's grace period, which leaves it the rest to reconnect.
+// The client's connection to the coordinator. A client whose coordinator stops
+// answering gives up on the connection after ClientPingInterval ×
+// (ClientMaxPingsOut + 1), then connects again within ClientConnectTimeout,
+// and both together fit within the coordinator's grace period.
 const (
 	// ClientPingInterval is how often a client pings the coordinator.
 	ClientPingInterval = 3 * time.Second
@@ -19,4 +20,9 @@ const (
 	// ClientMaxPingsOut is how many pings a client leaves unanswered before it
 	// drops the connection and reconnects.
 	ClientMaxPingsOut = 2
+
+	// ClientConnectTimeout bounds each connection a client makes, the first
+	// and every reconnect: dialing, the TLS handshake, and the coordinator's
+	// authentication, which answers within it.
+	ClientConnectTimeout = 5 * time.Second
 )

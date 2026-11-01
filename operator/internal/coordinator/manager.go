@@ -393,6 +393,10 @@ func (s *Server) Fail(ctx context.Context, uid types.UID, reason string) error {
 	return err
 }
 
+// expireTimeout bounds failing a session when its deadline or a member's grace
+// period runs out.
+const expireTimeout = 5 * time.Second
+
 // expire fails a session when its deadline or a member's grace period runs
 // out. A timer that was stopped or replaced may fire all the same, so claim,
 // which expire calls under Server.mu, reports whether the timer that fired is
@@ -410,7 +414,7 @@ func (s *Server) expire(a *attempt, reason string, claim func() bool) {
 		return
 	}
 	defer s.wg.Done()
-	ctx, cancel := context.WithTimeout(context.Background(), authorizeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), expireTimeout)
 	defer cancel()
 	if err := s.endWith(ctx, a, []byte(reason)); err != nil && !ended(err) {
 		s.log.Error(err, "Failing a session failed", "attempt", a.spec.UID, "reason", reason)

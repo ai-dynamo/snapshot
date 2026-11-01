@@ -48,15 +48,19 @@ var (
 // coordinator logs.
 //
 // A member's grace period keeps running while its new connection is being
-// authorized, so Authorize must answer within a small fraction of it, for
+// authorized, so Authorize must answer well within AuthorizeTimeout, for
 // example by caching TokenReviews.
 type Authorizer interface {
 	Authorize(ctx context.Context, uid types.UID, member, token string) error
 }
 
-// authorizeTimeout bounds one call to the Authorizer, well within the grace
-// period.
-const authorizeTimeout = 5 * time.Second
+// AuthorizeTimeout bounds authenticating a member's connection: the call to the
+// Authorizer, and failing a session the member joined under an earlier
+// coordinator. It is shorter than the time a client gives the coordinator to
+// answer a connection, the session client's ClientConnectTimeout, so a slow
+// TokenReview is answered before the client gives up and connects again, which
+// would ask the Authorizer again.
+const AuthorizeTimeout = 3 * time.Second
 
 // authenticator is the embedded server's client authentication.
 type authenticator struct{ s *Server }
@@ -88,7 +92,9 @@ func (a authenticator) Check(c server.ClientAuthentication) bool {
 		log.Info("Refused a member that presented a malformed epoch")
 		return false
 	}
-	if !s.authorize(log, uid, member, opts.Token) || !s.admit(log, uid, member, epoch) {
+	ctx, cancel := context.WithTimeout(context.Background(), AuthorizeTimeout)
+	defer cancel()
+	if !s.authorize(ctx, log, uid, member, opts.Token) || !s.admit(ctx, log, uid, member, epoch) {
 		return false
 	}
 	p := session.MemberPermissions(attempt, member)
@@ -131,9 +137,7 @@ func parseEpoch(password string) (uint64, error) {
 }
 
 // authorize asks the Authorizer, and logs a refusal by its kind.
-func (s *Server) authorize(log logr.Logger, uid types.UID, member, token string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), authorizeTimeout)
-	defer cancel()
+func (s *Server) authorize(ctx context.Context, log logr.Logger, uid types.UID, member, token string) bool {
 	err := s.cfg.Authorizer.Authorize(ctx, uid, member, token)
 	switch {
 	case err == nil:
@@ -156,7 +160,7 @@ func (s *Server) authorize(log logr.Logger, uid types.UID, member, token string)
 // session.ReasonCoordinatorLost before admitting the member; or to no session
 // at all, which the member finds out once admitted. Either way, a member that
 // lost its session is never admitted to a session it could write to.
-func (s *Server) admit(log logr.Logger, uid types.UID, member string, epoch uint64) bool {
+func (s *Server) admit(ctx context.Context, log logr.Logger, uid types.UID, member string, epoch uint64) bool {
 	a := s.lookup(uid)
 	switch {
 	case a == nil && epoch == 0:
@@ -168,8 +172,6 @@ func (s *Server) admit(log logr.Logger, uid types.UID, member string, epoch uint
 		log.Info("Refused a client that is not a member of the attempt")
 		return false
 	case epoch != 0 && epoch != a.epoch:
-		ctx, cancel := context.WithTimeout(context.Background(), authorizeTimeout)
-		defer cancel()
 		if err := s.endWith(ctx, a, []byte(session.ReasonCoordinatorLost)); err != nil && !ended(err) {
 			log.Error(err, "Failing a session whose member joined it under an earlier coordinator failed")
 			return false

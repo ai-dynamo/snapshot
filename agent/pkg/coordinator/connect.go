@@ -123,7 +123,7 @@ func Connect(ctx context.Context, cfg Config) (Session, error) {
 }
 
 // options returns the connection's options, which carry the session's identity
-// and its reconnection and keepalive settings.
+// and its connect, reconnection, and keepalive settings.
 func (s *client) options(cfg Config) []nats.Option {
 	return []nats.Option{
 		nats.Secure(&tls.Config{RootCAs: cfg.RootCAs, ServerName: cfg.ServerName, MinVersion: tls.VersionTLS12}),
@@ -148,6 +148,7 @@ func (s *client) options(cfg Config) []nats.Option {
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(reconnectWait),
 		nats.ReconnectJitter(reconnectJitter, reconnectJitter),
+		nats.Timeout(ClientConnectTimeout),
 		nats.PingInterval(ClientPingInterval),
 		nats.MaxPingsOutstanding(ClientMaxPingsOut),
 		nats.ConnectHandler(func(*nats.Conn) { s.connect.Do(func() { close(s.connected) }) }),

@@ -28,7 +28,7 @@
 // reached, and every operation is safe to send again, which the session does
 // itself for an operation that was not answered. The coordinator's grace
 // period covers a connection that breaks while the agent and the coordinator
-// keep running, and the client's keepalive notices a dead connection well
+// keep running: the client notices a dead connection, and connects again,
 // within it.
 //
 // The coordinator keeps sessions only in memory, so a restart loses them, and
