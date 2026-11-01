@@ -5,18 +5,42 @@ SPDX-License-Identifier: Apache-2.0
 
 # Why is my restore slow?
 
+Use this walkthrough to find the slow phase before changing storage settings.
+See [Storage best practices](README.md) for backend setup.
+
 ## 1. Find the slow phase
 
 Read the `Restore timing summary` from the node agent that handled the restore.
-Compare CPU restore, GPU restore, and staging times. Measure application
-readiness and the first inference request separately.
-See [restore timing guidance](../storage.md#diagnose-slow-gpu-restores).
+Use the largest phase to choose the next check:
+
+| Slow phase | Check next |
+| --- | --- |
+| CPU (`criu_restore`) | Check CPU image size, effective mount options, and CRIU I/O mode. Compare reads through the same mount with fio. |
+| GPU (`cuda_restore`) | Compare GPU payload size with sustained storage bandwidth. If storage is fast, check CUDA setup and GPU transfers before increasing buffers. |
+| Staging | Check backend download/read throughput and staging memory. For S3, check the Region, instance bandwidth, and reader concurrency. |
+| Application readiness after restore | Check framework wake, compilation, and autotuning separately from agent restore time. |
+
+For a storage lower bound, divide payload bytes by measured sustained bandwidth:
+520 GB at 25 GB/s takes at least 21 seconds to read. Other restore work can add
+more time. Compare your workload with the published
+[restore results](../../development/benchmarks.md#cold-start-compared-with-snapshot)
+and [phase breakdown](../../development/benchmarks.md#where-the-restore-time-goes),
+using the same model, GPU count, and engine where possible.
+For example, the published vLLM Qwen3-14B TP1 restore took 5.72 seconds on
+one B200 with VAST NFS. Use that setup as a reference, not a target for every
+backend or workload.
+
+For a slow CUDA phase, PageBroker's NVTX ranges separate CUDA setup, payload
+transfer, storage waits, and completion. Use NVTX-only tracing; CUDA API tracing
+can interfere with checkpoint operations. Tune `pageBroker.transferBufferCount`
+and `pageBroker.transferChunkBytes` together, accounting for their product on
+every visible GPU. Confirm any gain with an unprofiled restore.
 
 ## 2. Check the storage configuration
 
 For NFS, read the [NFS guidance](nfs/README.md), then your backend page:
 [VAST](nfs/vast.md) or [EFS](nfs/efs.md). For local storage, read
-[Local NVMe and RAID0](nvme.md).
+[Local NVMe and RAID0](local/README.md).
 For object storage, check [S3 Region and instance bandwidth](s3.md).
 Check storage throughput limits before tuning. For filesystem storage, also
 compare direct and buffered I/O.
@@ -34,7 +58,7 @@ nvidia-smi --query-gpu=name,driver_version --format=csv
 ```
 
 For GPU CustomStorage, also check the
-[loaded CUDA user-mode driver](../../reference/compatibility.md#check-the-customstorage-driver)
+[loaded CUDA user-mode driver](../cuda-driver.md)
 in the workload and PageBroker. The host driver version alone is not enough.
 
 S3 has no snapshot filesystem mount; use the
@@ -61,7 +85,7 @@ requests and reports bandwidth, IOPS, and latency. Match the file, I/O mode,
 request size, and concurrency to the restore path.
 
 For filesystem storage, this example reads an existing file with one buffered
-request at a time. For S3, use the [download measurements](s3.md#4-measure-from-a-restore-node).
+request at a time. For S3, use the [download measurements](s3.md#verify).
 Run it through the same storage mount as the node agent:
 
 ```bash
@@ -75,26 +99,23 @@ or warm. For an asynchronous direct-read test, use `--ioengine=libaio`,
 `--direct=1`, and a suitable `--iodepth`. Check the achieved depth in fio's
 output. Compare results only when the test conditions match.
 
-### Why fio can be faster than restore
-
-For normal file reads, fio reuses a pool of destination buffers. Once those
-pages are resident, later reads usually avoid first-touch allocation faults.
-It does not allocate fresh destination pages for every file block.
-See the [fio 3.41 buffer setup](https://github.com/axboe/fio/blob/fio-3.41/backend.c#L1327-L1405)
-and [buffer reuse](https://github.com/axboe/fio/blob/fio-3.41/io_u.c#L812-L838).
-
-Memory pressure can evict buffer pages and cause more faults. File-cache
-misses are separate from destination-buffer faults; `direct=1` does not
-remove the latter.
-
-A restore must also populate the workload's memory and restore process and
-GPU state. Use fio to check the storage path; its bandwidth alone does not
-predict the full restore time.
+fio reuses destination buffers, so resident buffers usually avoid repeated
+first-touch allocation faults. It measures the storage path; a fast fio result
+does not include the work to populate workload memory or restore CPU/GPU state.
 
 ## 5. Repeat the real restore
 
-Change one setting at a time. Keep the workload and snapshot fixed. Record
-phase times, cache state, mount options, and versions for each run.
-Check inference after every restore. Use the
+Change one setting at a time. Keep the model revision, snapshot, workload image,
+GPU count, and checkpoint preparation fixed. Compare cold and warm restores
+separately. Record:
+
+- Snapshot images and running digests, kernel, GPU driver, and storage/client versions.
+- Mount options in use for filesystem storage.
+- `config.criu.imageIoMode` and `pageBroker.restoreMode`.
+- Cache state, request size, and concurrency for storage measurements.
+- CPU, GPU, staging, and application readiness times, plus backend-specific settings.
+
+Check inference after each restore. Preserve compatible model, compiler, and
+autotuning caches when taking a new snapshot. Use the
 [Snapshot benchmarks](../../development/benchmarks-guide.md) for repeatable
 workload measurements.

@@ -5,7 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # NFS
 
-Part of [Storage best practices](../README.md).
+Use this guidance for shared NFS storage, then select your backend setup.
+See [Storage best practices](../README.md) for other backends.
 
 ## Check the storage limits
 
@@ -29,8 +30,7 @@ See the [configuration reference](../../../reference/api.md#agent-config-config)
 
 Set `config.criu.imageIoMode: writeback` for buffered CRIU image I/O. Buffered
 reads can use the client page cache and read-ahead. Allow memory for that cache.
-Compare cold and warm restores separately. See [EFS](efs.md) for its starting
-configuration.
+See [EFS](efs.md) for its starting configuration.
 
 ## Mount options
 
@@ -50,6 +50,4 @@ resolved. Follow the [restore-node checks](../slow-restore.md#3-check-the-restor
 
 ## Validate a configuration
 
-Checkpoint the workload, restore it, and check inference after each restore.
-Record storage and client versions, mount options, I/O mode, cache state, and
-restore times. Keep these conditions fixed when you compare configurations.
+Use the [common measurement procedure](../slow-restore.md#5-repeat-the-real-restore).

@@ -5,7 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # VAST NFS
 
-## 1. Check the client
+Configure an existing VAST-backed PVC for large snapshot files. This page
+covers the VAST client, storage NICs, and mount options. Start with the
+[NFS guidance](README.md); see [Storage best practices](../README.md) for
+other backends.
+
+## Setup
+
+### Check the client
 
 Install a compatible VAST NFS client on each node that checkpoints or restores.
 Check the running client on the node:
@@ -16,7 +23,7 @@ vastnfs-ctl status
 
 The VAST client provides `remoteports`, `localports`, and `spread_reads`.
 
-## 2. Choose the NFS version
+### Choose the NFS version
 
 Start with NFSv3 for large snapshot files. It supports `spread_reads`, which
 distributes reads from one file across existing connections. Combine it with
@@ -27,11 +34,13 @@ address and can use multiple connections to that address. If your installation
 requires NFSv4.1, set `vers=4.1` and omit
 `spread_reads`. See [VAST's protocol comparison](https://kb.vastdata.com/docs/7-vast-client-nfs-multipathing).
 
-## 3. Select NICs and connections
+## Tuning
+
+### Select NICs and connections
 
 Count the NICs that connect the restore node to the VAST storage network.
 GPU-interconnect and other network interfaces do not add storage bandwidth.
-The VAST client uses one local interface by default. `nconnect` adds TCP
+The VAST client uses one local interface by default. `nconnect` adds transport
 connections; `localports` selects additional local interfaces.
 
 For TCP, VAST recommends starting with eight connections per 100 Gbit/s:
@@ -47,7 +56,7 @@ options. Use interfaces with IP addresses and routes to the selected VAST
 server addresses. Configure source-based routing and ARP as described in
 [VAST's client network setup](https://vastnfs.vastdata.com/docs/4.5/usage/mount-params.html).
 
-## 4. Set mount options
+### Set mount options
 
 This example uses NFSv3 over TCP on a 400 Gbit/s storage path. Put the options
 on your NFS PV or provisioning StorageClass:
@@ -73,7 +82,17 @@ The [Snapshot benchmark setup](../../../development/benchmarks-guide.md#referenc
 also used `nosharecache` and `nosharetransport` for mount isolation; those
 options are omitted here.
 
-## 5. Check the active path
+### Select I/O mode
+
+Start with `config.criu.imageIoMode: direct` for CRIU images. Compare with
+`writeback` if repeated restores on the same node can reuse the page cache.
+See [NFS I/O modes](README.md).
+
+VAST notes that `spread_reads` can be slower for a single-threaded direct
+reader with one request in flight. Use the concurrency of the actual restore when comparing
+settings. See [VAST's benchmark guide](https://kb.vastdata.com/docs/how-to-benchmark-vast-data-with-fio).
+
+## Verify
 
 Inspect the mount in the node agent container using the
 [restore-node checks](../slow-restore.md#3-check-the-restore-node).
@@ -88,14 +107,4 @@ Check traffic counters on each selected NIC before and after a restore. If
 only one NIC carries traffic, check `localports` and routing before adding
 connections. See [VAST client diagnostics](https://vastnfs.vastdata.com/docs/4.5/usage/vastnfs-ctl.html).
 
-## 6. Select I/O mode and measure
-
-Start with `config.criu.imageIoMode: direct` for CRIU images. Compare with
-`writeback` if repeated restores on the same node can reuse the page cache.
-See [NFS I/O modes](README.md).
-
-Run fio and a real restore through the configured mount. VAST notes that
-`spread_reads` can be slower for a single-threaded direct reader with one
-request in flight. Use the concurrency of the actual restore when comparing
-settings. See [VAST's benchmark guide](https://kb.vastdata.com/docs/how-to-benchmark-vast-data-with-fio)
-and [Why is my restore slow?](../slow-restore.md).
+Use the [common measurement procedure](../slow-restore.md#5-repeat-the-real-restore).

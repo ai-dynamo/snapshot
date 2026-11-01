@@ -5,11 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Amazon EFS
 
-See [NFS guidance](README.md).
+Tune an existing EFS-backed PVC for Snapshot. Start with the
+[NFS guidance](README.md); see [Storage best practices](../README.md) for
+other backends.
 
-## I/O mode
+## Setup
 
-Start with buffered CRIU image I/O on EFS. Set this Helm value:
+For the default `pageBroker.restoreMode: direct`, start with buffered CRIU
+image I/O on EFS. Set this Helm value:
 
 ```yaml
 config:
@@ -17,12 +20,17 @@ config:
     imageIoMode: writeback
 ```
 
-This selects buffered I/O for CRIU images. GPU payloads use a separate I/O path.
+This selects buffered I/O for CRIU images read from EFS. With
+`pageBroker.restoreMode: staged`, PageBroker first copies CPU images into
+tmpfs; CRIU then reads tmpfs, so this value does not select the EFS read path.
+GPU payloads use a separate I/O path.
 
 [AWS's EFS performance guidance](https://docs.aws.amazon.com/efs/latest/ug/performance-tips.html)
 states that each request with `O_DIRECT` requires a round trip to EFS.
 `O_DIRECT` bypasses the client cache and read-ahead. This can reduce
 performance, especially with small reads or one read at a time.
+
+## Tuning
 
 ### Buffered I/O and read-ahead
 
@@ -30,7 +38,8 @@ AWS recommends about 15 MB of NFS read-ahead. On Linux 5.4 or later, the EFS
 mount helper in `amazon-efs-utils` 1.33.2 or later sets it to 15 times `rsize`.
 This requires `optimize_readahead`, which is enabled by default. With
 `rsize=1048576`, that is 15360 KiB. Check the value on the restore node where
-EFS is mounted:
+EFS is mounted. Run this shell block inside the node agent container, using
+the execution context from the [restore-node checks](../slow-restore.md#3-check-the-restore-node):
 
 ```bash
 EFS_MOUNT="<efs-mount>"
@@ -44,7 +53,7 @@ mounted. Follow the "Optimizing the NFS read_ahead_kb size" section in the
 AWS guidance above. Read-ahead helps buffered reads; it does not tune
 `O_DIRECT` reads.
 
-## Throughput and mount options
+### Throughput and mount options
 
 Check the EFS throughput mode before changing client settings. Provisioned
 throughput limits and Bursting credits can limit the storage path. AWS
@@ -56,18 +65,8 @@ Use 1 MiB read/write request sizes (`rsize=1048576`, `wsize=1048576`), as in
 EFS does not support `nconnect`; use the mount helper and read-ahead settings
 above to tune buffered reads.
 
-## Validation and limits
+## Verify
 
-Test cold restores (data outside the client cache) and warm restores (data in
-the client cache) separately. Check that inference works after each restore.
-
-Record these settings and results:
-
-- I/O mode
-- Mount options in use, including `rsize` and `wsize`
-- NFS client version
-- Linux kernel version
-- `amazon-efs-utils` version
-- EFS throughput mode
-- Effective `read_ahead_kb`
-- Restore times
+Use the [common measurement procedure](../slow-restore.md#5-repeat-the-real-restore).
+Also record the EFS throughput mode, `amazon-efs-utils` version, and effective
+`read_ahead_kb`.
