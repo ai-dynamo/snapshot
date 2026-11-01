@@ -18,3 +18,4 @@ versions, mount options, and storage performance with fio.
 ## Backends
 
 - [NFS](nfs/README.md) — direct and buffered I/O, mount options, and examples.
+- [Local NVMe and RAID0](nvme.md) — striping, node placement, and measurement.

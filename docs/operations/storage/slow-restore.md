@@ -15,7 +15,8 @@ See [restore timing guidance](../storage.md#diagnose-slow-gpu-restores).
 ## 2. Check the storage configuration
 
 Read the [NFS guidance](nfs/README.md), then the page for your backend:
-[VAST](nfs/vast.md) or [EFS](nfs/efs.md).
+[VAST](nfs/vast.md) or [EFS](nfs/efs.md). For local storage, read
+[Local NVMe and RAID0](nvme.md).
 Check storage throughput limits and direct versus buffered I/O before tuning.
 
 ## 3. Check the restore node
