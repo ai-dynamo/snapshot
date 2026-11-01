@@ -8,8 +8,6 @@ SPDX-License-Identifier: Apache-2.0
 Configuration and tuning guidance by storage backend. For installation settings
 and staging memory, see [Storage configuration](../storage.md).
 
-This is an initial outline; sections marked TODO need validated guidance.
-
 ## Slow restores
 
 Start with [Why is my restore slow?](slow-restore.md) to check timings, client

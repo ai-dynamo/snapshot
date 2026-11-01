@@ -13,13 +13,11 @@ Use a compatible VAST NFS client on each restore node. The options below apply
 to NFSv3 over TCP. `spread_reads` and `remoteports` require the VAST client;
 do not copy them to the EFS configuration.
 
-TODO: CSI driver and StorageClass/PVC example.
-
 ## Configuration example
 
 ### Mount options
 
-Start from the mount options in the
+Use this subset of the mount options in the
 [Snapshot benchmark setup](../../../development/benchmarks-guide.md#reference-setup):
 
 ```yaml
@@ -31,8 +29,6 @@ mountOptions:
   - nconnect=32
   - spread_reads
   - remoteports=<first-vip>-<last-vip>
-  - nosharecache
-  - nosharetransport
 ```
 
 Replace the address range with the VAST storage addresses for your installation.
@@ -44,9 +40,14 @@ This is a mount-options fragment, not a complete StorageClass or PV.
 | `spread_reads` | Allow reads from one file to use multiple connections |
 | `remoteports` | Connect to multiple VAST server addresses |
 | `rsize=1048576`, `wsize=1048576` | Allow NFS requests up to 1 MiB |
-| `nosharecache`, `nosharetransport` | Use separate cache and transports for this mount, as in the benchmark |
 
-VAST documents this combination in its
+The benchmark also used `nosharecache` and `nosharetransport` to isolate its
+cache and connections. This example keeps the default sharing behavior.
+`nosharecache` can leave cached copies of the same writable file inconsistent
+across mounts on one client. See the
+[NFS manual](https://man7.org/linux/man-pages/man5/nfs.5.html).
+
+VAST documents connection and read-distribution options in its
 [benchmark guide](https://kb.vastdata.com/docs/how-to-guide-for-benchmarking-vast-data).
 `spread_reads` applies to NFSv3, not NFSv4. More connections are not always
 faster; select the count for your network and workload.

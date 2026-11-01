@@ -7,10 +7,6 @@ SPDX-License-Identifier: Apache-2.0
 
 See [NFS guidance](README.md).
 
-## Prerequisites
-
-TODO: EFS filesystem, mount targets, CSI driver, and network requirements.
-
 ## I/O mode
 
 Start with buffered I/O on EFS. Use `O_DIRECT` only if restore tests with your
@@ -26,10 +22,11 @@ We recommend buffered I/O based on this AWS guidance. AWS does not prohibit
 
 ### Buffered I/O and read-ahead
 
-AWS recommends about 15 MB of NFS read-ahead. With `amazon-efs-utils` 1.33.2 or
-later, the EFS mount helper automatically sets read-ahead to 15 times `rsize`.
-With `rsize=1048576`, that is 15360 KiB. Check the value on the restore node
-where EFS is mounted:
+AWS recommends about 15 MB of NFS read-ahead. On Linux 5.4 or later, the EFS
+mount helper in `amazon-efs-utils` 1.33.2 or later sets it to 15 times `rsize`.
+This requires `optimize_readahead`, which is enabled by default. With
+`rsize=1048576`, that is 15360 KiB. Check the value on the restore node where
+EFS is mounted:
 
 ```bash
 EFS_MOUNT="<efs-mount>"
@@ -67,8 +64,6 @@ config:
 This controls CRIU images, not GPU payload I/O. See the
 [configuration reference](../../../reference/api.md#agent-config-config).
 
-TODO: StorageClass/PVC example.
-
 ## Validation and limits
 
 Test cold restores (data outside the client cache) and warm restores (data in
@@ -84,7 +79,3 @@ Record these settings and results:
 - EFS throughput mode
 - Effective `read_ahead_kb`
 - Restore times
-
-We have not tested Snapshot restore performance on EFS for this guide.
-
-TODO: Tested configuration and measured results.

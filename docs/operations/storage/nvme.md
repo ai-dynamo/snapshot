@@ -17,10 +17,13 @@ Measure the actual restore as well as storage bandwidth.
 
 ## Storage and scheduling
 
-RAID0 is node-local. It does not make snapshots available on other nodes.
-Snapshot still needs a PVC and the placement described in
-[Storage configuration](../storage.md). Components that mount a local claim
-must run on its node, and a restore must have access to the snapshot there.
+RAID0 is node-local. It does not make snapshots available on other nodes or
+replace the shared PVC in a multi-node installation. See
+[Storage configuration](../storage.md).
+
+A local-PVC deployment needs an existing claim on the array. Pin the operator,
+node agents, and restore Pods to that node. The chart creates RWX claims by
+default; creating a RAID0 array does not configure a PVC or Pod placement.
 
 RAID0 has no redundancy. Keep another copy of snapshots that must survive a
 drive failure. On EC2, instance-store data is also lost when the instance stops
@@ -51,5 +54,3 @@ by default.
 
 If fio is fast but restore is slow, check the CPU and CUDA phase times before
 adding drives. A storage test does not measure the full GPU restore path.
-
-TODO: Tested local-PVC configuration and RAID0 versus single-drive results.

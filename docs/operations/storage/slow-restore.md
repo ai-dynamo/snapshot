@@ -30,10 +30,14 @@ uname -r
 nvidia-smi --query-gpu=name,driver_version --format=csv
 ```
 
-Check the actual storage mount in the node agent's mount namespace:
+Select the node agent Pod on the restore node. Run `findmnt` in its container
+so path lookup uses the agent's mount namespace and root:
 
 ```bash
-findmnt --target <snapshot-path> --output TARGET,SOURCE,FSTYPE,OPTIONS
+kubectl --context "<context>" --namespace "<snapshot-namespace>" \
+  exec "<node-agent-pod>" --container agent -- \
+  /usr/bin/findmnt --target "<snapshot-path>" \
+  --output TARGET,SOURCE,FSTYPE,OPTIONS
 ```
 
 For VAST, check the loaded client version on the node:
