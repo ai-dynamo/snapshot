@@ -1,19 +1,19 @@
-# Performance Benchmarks
+# Performance
 
 We tested 22 configurations of vLLM, SGLang and TensorRT-LLM on one to eight B200 GPUs.
 Restore was 8.1–35.9 times faster than cold start. Both measurements end when the engine
-is ready, before inference. Read the [limitations](#limitations) before you compare
+is ready, before inference. Read the [Limitations](#limitations) before you compare
 these results with another setup.
 
 > [!TIP]
-> See the [benchmark guide](benchmarks-guide.md) for setup and commands, and the
+> See the [benchmark guide](../development/benchmarks-guide.md) for setup and commands, and the
 > [runner README](../../benchmarks/README.md) for the code layout.
 
 During cold start, the engine loads weights, creates workers and sets up device memory.
 It also compiles and tunes kernels, then captures CUDA graphs. Snapshot restores the
 process with this work complete and the engine ready to serve requests.
 
-## Benchmarking setup
+## Benchmarking Setup
 
 | Property | Value |
 |---|---|
@@ -33,15 +33,15 @@ process with this work complete and the engine ready to serve requests.
 - Results apply to this B200 and VAST NFS setup. GPU, driver, storage and engine settings can change the times.
 - Timing instrumentation adds work during cold start.
 
-Weight size is the sum of the logical sizes of cached weight files. Checkpoint size is
+Weight size is the sum of the logical sizes of cached weight files. Snapshot size is
 the sum of the logical sizes of saved container files. It includes CPU state, GPU state
 and the root filesystem archive. Both sizes use decimal GB. File size can differ from
 GPU memory use and the disk space used.
 
-Before capture, we asked each engine to release KV cache memory. For vLLM, model
-weights are resident on the GPU at capture time.
+Before the checkpoint, we asked each engine to release KV cache memory. For vLLM, model
+weights are resident on the GPU at checkpoint time.
 
-## Measurement boundaries
+## Measurement Boundaries
 
 **Cold start** begins at the process-start marker and ends when engine initialization
 returns. This time excludes model download, pod scheduling, image pull and container
@@ -53,10 +53,10 @@ application completes its wake and resume calls. The destination container alrea
 exists. We then check inference and the saved process token. These checks are outside
 the measured time.
 
-**Checkpoint time** is the time the agent takes to capture the process. It excludes the
-application's sleep or memory-release call before capture.
+**Checkpoint time** is the time the agent takes to checkpoint the process. It excludes the
+application's sleep or memory-release call before the checkpoint.
 
-### Cold-start stages
+### Cold-Start Stages
 
 | Stage | What is included |
 |---|---|
@@ -65,7 +65,7 @@ application's sleep or memory-release call before capture.
 | Initialization | Memory profiling, attention/sampler initialization and remaining measured engine warmup. |
 | Compilation, autotuning & graph capture | The combined measured time for kernel compilation, tuning and graph-capture scopes, including compilation inside those scopes. |
 
-### Restore stages
+### Restore Stages
 
 | Stage | What is included |
 |---|---|
@@ -79,9 +79,9 @@ application's sleep or memory-release call before capture.
 All times are in seconds. Speedup is cold-start time divided by restore time.
 Cold-start values use the mean when multiple samples are available.
 
-### Cold start compared with Snapshot
+### Cold Start Compared with Snapshot
 
-| Model | Engine | Parallelism | Weights (GB) | Checkpoint (GB) | Checkpoint (s) | Cold start (s) | Restore (s) | Speedup |
+| Model | Engine | Parallelism | Weights (GB) | Snapshot (GB) | Checkpoint (s) | Cold start (s) | Restore (s) | Speedup |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Qwen3-0.6B | vLLM | TP1 | 1.50 | 8.13 | 15.30 | 104.43 | 4.66 | 22.40× |
 | Qwen3-0.6B | SGLang | TP1 | 1.50 | 9.42 | 20.71 | 87.08 | 3.59 | 24.26× |
@@ -129,7 +129,7 @@ Figures 1–3 compare cold start with restore time for each engine.
 
 *Figure 3. Cold start and restore on TensorRT-LLM.*
 
-### Where the cold start time goes
+### Where the Cold Start Time Goes
 
 | Model | Engine | Parallelism | Startup | Model load | Initialization | Compilation, autotuning & graph capture | Total |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -159,7 +159,7 @@ Figures 1–3 compare cold start with restore time for each engine.
 Cold-start phases may not sum to the total because logging and instrumentation do not
 capture every interval. Each run saves the raw timings.
 
-### Where the restore time goes
+### Where the Restore Time Goes
 
 | Model | Engine | Parallelism | Agent setup / rootfs | CRIU restore | CUDA restore | Wake | Total |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -199,24 +199,24 @@ Figure 4 shows how much each stage contributes to vLLM restore.
 
 *Figure 4. Restore on vLLM, split into the four reported stages.*
 
-## Reading the results
+## Reading the Results
 
-### Startup work
+### Startup Work
 
 Restore skips model loading, kernel compilation, autotuning and CUDA graph capture.
 Compilation can run during tuning and graph capture, so the table groups these phases
 in one column.
 
-### Restore work and storage
+### Restore Work and Storage
 
 CUDA restore takes 19.37–28.98 seconds for the eight-GPU vLLM models. For Qwen3-0.6B,
 agent setup and CRIU take 3.66 of the 4.66-second restore.
 
-Checkpoint size, storage throughput and parallel reads affect restore time. The
-81.56 GB vLLM GPT-OSS TP1 checkpoint restores in 10.09 seconds. The 119.69 GB TP4
-checkpoint restores in 11.62 seconds.
+Snapshot size, storage throughput and parallel reads affect restore time. The
+81.56 GB vLLM GPT-OSS TP1 snapshot restores in 10.09 seconds. The 119.69 GB TP4
+snapshot restores in 11.62 seconds.
 
-### SGLang model loading
+### SGLang Model Loading
 
 Qwen3-14B TP1 loads in 20.79 seconds,
 compared with 26.15 seconds on vLLM. GPT-OSS TP1 loads in 34.44 seconds on SGLang and

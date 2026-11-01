@@ -57,7 +57,7 @@ That pod manifest must:
 - match the runtime-relevant worker settings you care about preserving
 
 `snapshotctl restore` applies Snapshot's generic
-[restore Pod contract](../../../docs/reference/restore-pod-contract.md), including the
+[restore Pod contract](../../../docs/integrate/restore-pod-contract.md), including the
 annotations, control volume, environment, startup gate, and seccomp profile. It
 keeps the container commands: the node agent replaces each restore
 destination's command with its restore proxy when the container is created.

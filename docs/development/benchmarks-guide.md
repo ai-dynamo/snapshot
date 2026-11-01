@@ -1,11 +1,11 @@
-# Reproducing the benchmarks
+# Reproducing the Benchmarks
 
 Run cold-start, checkpoint and restore measurements for vLLM, SGLang or TensorRT-LLM
 with the tool in [`benchmarks/`](../../benchmarks). Each run uses one node, captures
 a checkpoint and restores it three times by default. Set `--restore-count` to change
 the count. The runner uses the engine guide workloads
 and saves JSON results and logs. Use the `report` command to build the tables.
-See the [published results](benchmarks.md).
+See the [published results](../overview/performance.md).
 
 ## Prerequisites
 
@@ -33,9 +33,9 @@ start marker. The run fails if these records are missing.
 > The runner does not install infrastructure, change node reservations or stop
 > other users' workloads.
 
-## Reference setup
+## Reference Setup
 
-The [published setup](benchmarks.md#benchmarking-setup) used B200 GPUs and driver
+The [published setup](../overview/performance.md#benchmarking-setup) used B200 GPUs and driver
 615.71.09. It used Snapshot v0.2.0-rc.2, vLLM 0.31.0, SGLang 0.5.21 and TensorRT-LLM
 1.3.0rc24. Set `--image` to the image you want to measure. The guide's default image can
 differ. The runner records the image and reads its installed engine version.
@@ -58,11 +58,11 @@ it does not set their options.
 > Check the actual `/proc/mounts` records saved in `startup.log`. A PV declaration
 > alone does not prove the client uses the requested mount options.
 
-## Quick start
+## Quick Start
 
 Run these commands from the repository root.
 
-### 1. Set the cluster and workload values
+### 1. Set the Cluster and Workload Values
 
 ```bash
 export BENCHMARK_CONTEXT=<context>
@@ -76,7 +76,7 @@ export BENCHMARK_NODE=<node>
 export ENGINE_IMAGE=<engine-image>
 ```
 
-### 2. Check the installation
+### 2. Check the Installation
 
 ```bash
 uv run --project benchmarks python -m snapshot_benchmarks metadata \
@@ -85,7 +85,7 @@ uv run --project benchmarks python -m snapshot_benchmarks metadata \
   --pvc-name "$CHECKPOINT_PVC"
 ```
 
-### 3. Check the workload manifest
+### 3. Check the Workload Manifest
 
 This dry run writes manifests without making Kubernetes calls.
 
@@ -99,7 +99,7 @@ uv run --project benchmarks python -m snapshot_benchmarks run \
   --image "$ENGINE_IMAGE" --tp 1 --dry-run
 ```
 
-### 4. Run the benchmark
+### 4. Run the Benchmark
 
 Repeat step 3 without `--dry-run`. Use `--engine sglang` or `--engine trtllm`
 with a compatible image for those engines. Run each topology separately.
@@ -109,7 +109,7 @@ published results. SGLang 0.5.21 uses four prefetch threads by default. To measu
 without prefetch, pass `--engine-args '{"weight_loader_prefetch_checkpoints":false}'`.
 The source pod records the engine arguments.
 
-### 5. Generate a report
+### 5. Generate a Report
 
 Each run writes to `benchmarks/results/<date>-<git-sha>-<id>/`. JSON files at the top
 level contain complete results. Subdirectories contain manifests, admitted pods, logs,
@@ -122,7 +122,7 @@ uv run --project benchmarks python -m snapshot_benchmarks report \
   --results-dir benchmarks/results/<invocation> --out tables.md
 ```
 
-## Workload options
+## Workload Options
 
 | Flag | Meaning |
 | --- | --- |
@@ -154,7 +154,7 @@ the list. Entries can set `tp`, `ep`, `engine_args` and `env`. Use the same
 cluster, image and PVC flags with `sweep`, plus `--models FILE` for a custom
 list. `--tp` and `--ep` override the list's values.
 
-## Offline runs
+## Offline Runs
 
 Copy the model files to the model PVC before the run. The runner mounts it read-only and
 enables Hugging Face offline mode.
@@ -163,7 +163,7 @@ For a fully offline run, also prepare the kernel artifacts required by your imag
 FlashInfer 0.6.16 uses `FLASHINFER_NO_DOWNLOAD=1` and `FLASHINFER_CUBIN_DIR`. Set these
 in the model's `env` settings and keep prebuilt artifacts separate from the JIT cache.
 
-## Measurements and verification
+## Measurements and Verification
 
 Before each cold start, an unprivileged init container resolves and checks the model files.
 A separate helper, using a digest-pinned official Python image, checks write access to
@@ -183,7 +183,7 @@ This controls client page cache; it does not clear storage-server caches. Restor
 pods do not clear caches. Use `--no-drop-page-cache` to skip this preparation;
 the run records whether cache preparation was skipped.
 
-See [Measurement boundaries](benchmarks.md#measurement-boundaries) for the timing
+See [Measurement Boundaries](../overview/performance.md#measurement-boundaries) for the timing
 endpoints and stage definitions. Inference checks are outside the measured
 cold-start and restore intervals.
 
@@ -207,14 +207,14 @@ Before capture, the application pauses requests and asks the engine to release K
 memory. Weights remain on the GPU. SGLang requests KV-only release without a CPU
 weight backup. TRT-LLM uses its KV sleep/wakeup RPC.
 
-## Interpreting results
+## Interpreting Results
 
-Compare your settings with the [reference setup](benchmarks.md#benchmarking-setup).
+Compare your settings with the [reference setup](../overview/performance.md#benchmarking-setup).
 Check the GPU, driver, engine image, model precision, parallelism, constructor
 arguments, storage and cache conditions. Read the
-[limitations](benchmarks.md#limitations).
+[Limitations](../overview/performance.md#limitations).
 
-## Reporting a reproducibility mismatch
+## Reporting a Reproducibility Mismatch
 
 To report unexpected results, include the command and expected and actual results.
 Attach the run's JSON, manifests, `startup.log`, restore agent logs, timing files and

@@ -92,7 +92,7 @@ not touch the operator or the agent. See the
 [usage guides](docs/guides/README.md) for the shape of the flow.
 
 To add one, follow an existing framework end to end —
-[vLLM](docs/guides/vllm.md) is the smallest — and provide the same three pieces
+[vLLM](docs/guides/supported-frameworks/vllm.md) is the smallest — and provide the same three pieces
 under `docs/guides/<framework>/`:
 
 | File | What it does |
@@ -108,7 +108,7 @@ model you add.
 The contract your entrypoint has to honor — the control volume, the startup
 gate, the `SNAPSHOT_CONTROL_DIR` environment variable, and the seccomp profile
 — is specified in the
-[Restore Pod contract](docs/reference/restore-pod-contract.md). Read that
+[Restore Pod contract](docs/integrate/restore-pod-contract.md). Read that
 before writing `app.py`; everything a framework must do to be checkpointable is
 there.
 
@@ -124,7 +124,7 @@ driver version — in the README's
 [Prerequisites](README.md#prerequisites). If your feature only works on a
 newer driver, GPU Operator, or other dependency version than that floor, add a
 row for it to the table in
-[Compatibility](docs/reference/compatibility.md) in the same pull request.
+[Prerequisites by Feature](docs/get-started/prerequisites.md#prerequisites-by-feature) in the same pull request.
 Don't leave the floor implicit in an error message or a code comment — someone
 deciding whether to adopt the feature needs to find it in the docs, not in the
 failure path. If you're drafting an SNEP, record it under that proposal's
@@ -377,6 +377,6 @@ By making a contribution to this project, I certify that:
 ## Snapshot Enhancement Proposals (SNEPs)
 
 For a substantial new capability, public API change, or architectural change,
-start a [Snapshot Enhancement Proposal (SNEP)](docs/proposals/README.md) before
+start a [Snapshot Enhancement Proposal (SNEP)](docs/design/README.md) before
 implementation. A SNEP records the motivation, design, trade-offs, and test
 plan so maintainers and contributors can discuss the direction early.

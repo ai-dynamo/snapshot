@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Workload contract
+# Workload Contract
 
 Snapshot checkpoints a running GPU workload and restores it later. Capturing a
 workload before it's ready produces a wrong, oversized, or unrestorable
@@ -12,11 +12,11 @@ lifecycle: reach a state that's safe to capture, signal when it does, and
 resume correctly once restored. That cooperation — not any particular image —
 is the requirement. This page defines it.
 
-The [usage guides](../guides/README.md) package workloads as a self-contained
+The [Checkpoint and Restore](../guides/README.md) guides package workloads as a self-contained
 custom image. Other packaging methods work too — for example mounting the
 entrypoint into a stock image and overriding the command — as long as the
 container's entrypoint satisfies this contract; see
-[Packaging methods](#packaging-methods).
+[Packaging Methods](#packaging-methods).
 
 A snapshot-ready workload has two parts:
 
@@ -24,7 +24,7 @@ A snapshot-ready workload has two parts:
 - **pod requirements** that give the process the shared directory and the
   runtime conditions CRIU needs.
 
-## Coordinating with the agent
+## Coordinating with the Agent
 
 The workload and the Snapshot node agent coordinate through a shared directory: a
 per-pod `emptyDir` the agent mounts into the container. The workload finds it
@@ -40,11 +40,11 @@ through an environment variable and signals across it with sentinel files.
 
 The agent-owned side of this shared directory (and its `cuda-checkpoint-job`
 file) is described in
-[The snapshot-control volume](api.md#the-snapshot-control-volume).
+[The Snapshot-Control Volume](../reference/api.md#the-snapshot-control-volume).
 The restore-pod side — annotations, the restore proxy, startup gate — is the
-[Restore Pod contract](restore-pod-contract.md).
+[Restore Pod Contract](restore-pod-contract.md).
 
-## The capture and restore steps
+## The Capture and Restore Steps
 
 These steps are built from the sentinels above. A sentinel the workload writes
 (`ready-for-snapshot`, `<framework>-restore-ready`) is a *promise that a
@@ -59,7 +59,7 @@ Steps marked **MUST** are load-bearing for correctness — violating one produce
 wrong, oversized, or failed checkpoint. Steps marked **SHOULD** keep a correct
 workload useful and operable.
 
-### Capture (source workload)
+### Capture (Source Workload)
 
 1. **MUST** clear any stale `ready-for-snapshot` before initializing. A leftover
    file from a previous run would signal readiness before the engine is ready.
@@ -83,7 +83,7 @@ workload useful and operable.
    promise the rest of the system trusts; the agent captures the process as soon
    as the pod reports Ready.
 
-### Restore (restored workload)
+### Restore (Restored Workload)
 
 8. **MUST NOT** rely on its entrypoint running in the restore container.
    Snapshot replaces the restore container's command with its restore proxy,
@@ -91,7 +91,7 @@ workload useful and operable.
    restored process continues from the checkpoint; nothing the entrypoint does
    at startup happens again. On nodes without the restore proxy, the restore
    Pod's own inert command runs instead; see
-   [Nodes without the restore proxy](restore-pod-contract.md#nodes-without-the-restore-proxy).
+   [Nodes Without the Restore Proxy](restore-pod-contract.md#nodes-without-the-restore-proxy).
 9. **MUST** wait for `restore-complete` before touching the engine.
 10. **MUST** bring the engine back to a serving-ready state in this order: let
     `cuda-checkpoint` restore GPU memory (CUDA contexts, streams, and device
@@ -101,7 +101,7 @@ workload useful and operable.
 11. **SHOULD** write the `<framework>-restore-ready` sentinel only after the API
     socket is actually listening, so readiness reflects true serving capacity.
 
-### Matching configuration, per-engine calls
+### Matching Configuration
 
 **MUST** keep the capture and restore processes configured identically — the
 restored process *is* the captured process; a different configuration is
@@ -109,6 +109,8 @@ undefined. This is easy to overlook for loader flags that change what gets
 loaded or how, for example vLLM's
 [`trust_remote_code`](https://docs.vllm.ai/en/v0.27.1/configuration/engine_args.html#-trust-remote-code-no-trust-remote-code),
 which permits executing a model repo's custom Python code during load.
+
+### Per-Engine Calls
 
 Steps 3-6 (capture: warm up, quiesce) and step 10 (restore: bring the engine
 back to serving) each break down into the same sub-requirements across
@@ -129,22 +131,22 @@ working checkpoint, just a larger or colder one.
 | Restore GPU memory | MUST | `wake_up()` | `_collective_rpc("wakeup", (["kv_cache"],))` | `resume_memory_occupation(tags=["kv_cache"])` |
 | Resume | MUST | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` |
 
-The three are the engines the guides document, not the limit of what the
+The three are the supported frameworks, not the limit of what the
 contract admits — any inference server that fills in its own column of the table
 and meets the pod and runtime requirements below is snapshot-ready. See
-[Support a new inference server](#support-a-new-inference-server).
+[Support a New Inference Server](#support-a-new-inference-server).
 
-## Pod requirements
+## Pod Requirements
 
 The source pod gives the workload the shared directory and the conditions
 checkpointing needs. The framework capture manifests referenced from the
-[usage guides](../guides/README.md) are the complete reference; the load-bearing
+[Checkpoint and Restore](../guides/README.md) are the complete reference; the load-bearing
 fields are:
 
 - the `snapshot-control` `emptyDir`, mounted at `/snapshot-control` with `subPath`
   equal to the container name, and `SNAPSHOT_CONTROL_DIR` set to that mount;
 - a seccomp profile that blocks io_uring (`profiles/block-iouring.json`), which
-  CRIU cannot checkpoint — see [Security](../operations/security.md); and
+  CRIU cannot checkpoint — see [Allow the Privileged Node Agent](../get-started/installation.md#allow-the-privileged-node-agent); and
 - a readiness gate on `/snapshot-control/ready-for-snapshot`, so the pod reports
   Ready only once it is safe to checkpoint.
 
@@ -152,14 +154,48 @@ Restore pods carry different requirements — the `nvidia.com/restore-from`
 annotation, the source's command (Snapshot replaces it with its restore proxy),
 `restartPolicy: Never`, and the optional startup gate.
 Producing them programmatically is the
-[Restore Pod contract](restore-pod-contract.md).
+[Restore Pod Contract](restore-pod-contract.md).
 
-## Multi-GPU workloads
+## Runtime Compatibility
+
+CRIU restores a process only if everything in it is checkpointable, so the
+workload's *environment* — not just its logic — has to cooperate. In the
+reference images this is why the build starts from the framework's tested runtime
+image and sets a few environment variables. A packaging method that skips the
+custom image still has to meet these:
+
+- **glibc floor and architecture.** The restore bundle requires a recent glibc,
+  which the reference runtime images already clear. The workload image must
+  match the node architecture (x86_64 or arm64).
+- **A target CPU with every instruction set the source had.** A process picks
+  its code paths for the CPU it starts on. If the restored process runs on a CPU
+  without one of those instructions, it dies with `SIGILL`. The agent records
+  the instruction sets the source node offers, its CPU flags on x86_64 and its
+  hwcaps on arm64, and refuses a restore onto a node missing any of them, naming
+  the missing flags (`cpu-features: source avx512f, target missing`). A target
+  that offers more is fine. Only the instruction sets in Snapshot's list are
+  compared, so a restore onto a CPU missing one it does not list, such as
+  `waitpkg` on x86_64, goes ahead. The check needs both lists, so a checkpoint
+  taken before the agent recorded them, or a restore onto a node whose agent
+  could not read its own, is admitted unchecked.
+- **All file handles must be reopenable.** Disable caches that leave handles CRIU
+  cannot reopen after restore — for example `HF_HUB_DISABLE_XET=1`, and loading
+  models from a local cache with `HF_HUB_OFFLINE=1`.
+- **All device mappings must be restorable.** Turn off transports CRIU cannot
+  restore — for example TensorRT-LLM's `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` and
+  `UCX_TLS=tcp,self`.
+- **`spawn`, not `fork`.** Multiprocess engines start workers with `spawn` (for
+  example `VLLM_WORKER_MULTIPROC_METHOD=spawn`). This is a CUDA limitation:
+  forking a process that already holds a CUDA context produces a child with an
+  unreliable copy of that context, so a worker forked before checkpoint may not
+  restore correctly.
+
+## Multi-GPU Workloads
 
 A workload that uses several GPUs meets the same contract, with its GPUs on a
 single node; multi-node workloads are not supported. Which multi-GPU workloads
 can be restored depends on the CUDA user-mode driver version; see
-[Compatibility](compatibility.md). The source Pod also enables multi-GPU support
+[Multi-GPU Workloads](../get-started/prerequisites.md#multi-gpu-workloads). The source Pod also enables multi-GPU support
 with the `nvidia.com/snapshot-multi-gpu: enabled` annotation. What else it
 carries depends on what creates it:
 
@@ -210,62 +246,28 @@ carries depends on what creates it:
           emptyDir: {}
   ```
 
-The eight-GPU recipes in the [usage guides](../guides/README.md#choose-your-recipe)
+The eight-GPU recipes in the [Checkpoint and Restore guides](../guides/README.md#choose-your-recipe)
 are complete examples of both.
 
-## Runtime compatibility
-
-CRIU restores a process only if everything in it is checkpointable, so the
-workload's *environment* — not just its logic — has to cooperate. In the
-reference images this is why the build starts from the framework's tested runtime
-image and sets a few environment variables. A packaging method that skips the
-custom image still has to meet these:
-
-- **glibc floor and architecture.** The restore bundle requires a recent glibc,
-  which the reference runtime images already clear. The workload image must
-  match the node architecture (x86_64 or arm64).
-- **A target CPU with every instruction set the source had.** A process picks
-  its code paths for the CPU it starts on. If the restored process runs on a CPU
-  without one of those instructions, it dies with `SIGILL`. The agent records
-  the instruction sets the source node offers, its CPU flags on x86_64 and its
-  hwcaps on arm64, and refuses a restore onto a node missing any of them, naming
-  the missing flags (`cpu-features: source avx512f, target missing`). A target
-  that offers more is fine. Only the instruction sets in Snapshot's list are
-  compared, so a restore onto a CPU missing one it does not list, such as
-  `waitpkg` on x86_64, goes ahead. The check needs both lists, so a checkpoint
-  taken before the agent recorded them, or a restore onto a node whose agent
-  could not read its own, is admitted unchecked.
-- **All file handles must be reopenable.** Disable caches that leave handles CRIU
-  cannot reopen after restore — for example `HF_HUB_DISABLE_XET=1`, and loading
-  models from a local cache with `HF_HUB_OFFLINE=1`.
-- **All device mappings must be restorable.** Turn off transports CRIU cannot
-  restore — for example TensorRT-LLM's `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` and
-  `UCX_TLS=tcp,self`.
-- **`spawn`, not `fork`.** Multiprocess engines start workers with `spawn` (for
-  example `VLLM_WORKER_MULTIPROC_METHOD=spawn`). This is a CUDA limitation:
-  forking a process that already holds a CUDA context produces a child with an
-  unreliable copy of that context, so a worker forked before checkpoint may not
-  restore correctly.
-
-## Packaging methods
+## Packaging Methods
 
 - **Custom image (reference).** Start from the framework runtime image, add a
   small entrypoint that implements the capture and restore steps, and set it as
-  the command. The [usage guides](../guides/README.md) walk through this for
+  the command. The [Checkpoint and Restore](../guides/README.md) guides walk through this for
   vLLM, SGLang, and TensorRT-LLM.
 - **Any equivalent.** Mounting the entrypoint into a stock image and overriding
   the command, or a framework that implements these steps natively, is equally
   valid — provided the running container satisfies this contract and the runtime
   compatibility constraints above.
 
-## Support a new inference server
+## Support a New Inference Server
 
 The documented engines are examples, not the boundary: any inference server that
 satisfies this contract is snapshot-ready, and the node agent checkpoints and
 restores it with no Snapshot-side change. To bring one:
 
 1. **Map each requirement to the engine's API** — fill in its own column of the
-   [table](#matching-configuration-per-engine-calls): warm up, stop in-flight
+   [table](#per-engine-calls): warm up, stop in-flight
    work, park and restore GPU memory, resume. Any mechanism qualifies as long as
    it meets the requirement; an engine with no explicit memory-park call can
    rely on a synchronous request returning idle, as TensorRT-LLM does.
@@ -274,16 +276,16 @@ restores it with no Snapshot-side change. To bring one:
    wait on `restore-complete`, and
    write a `<framework>-restore-ready` sentinel once the API is serving.
 3. **Clear the [runtime-compatibility](#runtime-compatibility) constraints** and
-   **meet the [pod requirements](#pod-requirements)**, then package it by
+   **meet the [Pod Requirements](#pod-requirements)**, then package it by
    either method above.
 
 Nothing about the engine's identity is special to Snapshot; satisfying the
 contract is the whole requirement.
 
-## See also
+## See Also
 
-- [Usage guides](../guides/README.md) — a worked example per framework.
-- [Restore Pod contract](restore-pod-contract.md) — the restore-pod interface for
+- [Checkpoint and Restore](../guides/README.md) — a worked example per framework.
+- [Restore Pod Contract](restore-pod-contract.md) — the restore-pod interface for
   programmatic restore.
-- [API reference](api.md#the-snapshot-control-volume) — the control volume and
+- [API reference](../reference/api.md#the-snapshot-control-volume) — the control volume and
   sentinel files.

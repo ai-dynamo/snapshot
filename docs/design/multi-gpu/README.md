@@ -61,7 +61,7 @@ SPDX-License-Identifier: Apache-2.0
 <!-- /toc -->
 
 This page is for contributors. It describes CuInterpose, the component behind Snapshot's multi-GPU support.
-To run a multi-GPU workload, follow the [usage guides](../../guides/README.md) instead.
+To run a multi-GPU workload, follow [Checkpoint and Restore](../../guides/README.md) instead.
 
 CuInterpose enables Snapshot to checkpoint CUDA memory shared by processes in one container and restore those processes together on a compatible node.
 It preserves each process's application pointers, the memory contents, and the sharing relationships between processes, so existing CUDA graphs can replay after restore without recapture.
@@ -723,7 +723,7 @@ A process can create one resource and import another, so the coordinator applies
 #### Kubernetes opt-in
 
 CuInterpose opt-in is the multi-GPU annotation on the source Pod, including when that Pod is captured through a PodSnapshot.
-Its key is [`podcontract.CuInterposeAnnotation`](../../../api/podcontract/protocol.go), and the [usage guides](../../guides/README.md) show it in each multi-GPU manifest.
+Its key is [`podcontract.CuInterposeAnnotation`](../../../api/podcontract/protocol.go), and the [supported frameworks](../../guides/README.md) show it in each multi-GPU manifest.
 
 - With SnapshotJob, set the annotation in `spec.podTemplate.metadata.annotations`.
 - With a Pod you deploy yourself, set it in that Pod's `metadata.annotations`.
@@ -1138,5 +1138,5 @@ Separate `multicast`, `multicast_device`, and `multicast_mapping` records descri
 
 - [Building Snapshot from source](../../development/build-from-source.md)
 - [Checkpointing with PodSnapshot and SnapshotJob](../../guides/checkpoint.md)
-- [Workload contract](../workload-contract.md)
-- [Restore Pod contract](../restore-pod-contract.md)
+- [Workload contract](../../integrate/workload-contract.md)
+- [Restore Pod contract](../../integrate/restore-pod-contract.md)

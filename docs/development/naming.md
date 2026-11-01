@@ -3,14 +3,14 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Naming conventions
+# Naming Conventions
 
 Terms and naming patterns for the API, the chart, the CLI, and the docs. Use one
 name per concept, and use it everywhere: field, value, docs, log line, event,
 error message, and test. When a concept has two names, readers assume there are
 two things.
 
-## User-facing and internal names
+## User-Facing and Internal Names
 
 Snapshot has two kinds of names. Keep them apart.
 
@@ -78,7 +78,7 @@ out of the reference.
 Add a row when a concept could be called two ways, or when one definition has to
 hold across pages. A feature name does not need a row.
 
-## Naming a user-facing thing
+## Naming a User-Facing Thing
 
 These patterns are for user-facing names. An internal name follows its package.
 
@@ -97,7 +97,7 @@ These patterns are for user-facing names. An internal name follows its package.
 | Object, volume, or file that Snapshot creates | Kebab-case | `snapshot-agent`, `snapshot-control`, `ready-for-snapshot` |
 | Docs file | Kebab-case `.md`, except `README.md`, which indexes a directory or holds a SNEP. A framework guide is `docs/guides/<framework>.md`, with its manifests in `docs/guides/<framework>/` | `tensorrt-llm.md` |
 
-## Before you add a name
+## Before You Add a Name
 
 1. Decide who sees it. If a user, workload author, integrator, or operator can
    type it, read it, or see it, it is user-facing, and the rules above apply.

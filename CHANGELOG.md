@@ -52,7 +52,7 @@ commit-level history for each release is on its
   (`storage.s3.caBundleConfigMapRef`), `pageBroker.s3.limits` and
   `pageBroker.transferEngine.modelStreamer`. Changing one restarts PageBroker.
   An install that sets none of them is unchanged. See
-  [Storage](docs/operations/storage.md#other-backends).
+  [Storage](docs/operations/configure-storage.md#other-backends).
 
 ### Changed
 
@@ -74,7 +74,7 @@ commit-level history for each release is on its
   front under the new `cpu-features` check rather than restoring a process that
   dies with `SIGILL`. A checkpoint captured before the upgrade recorded no CPU
   flags and is not checked. See
-  [Runtime compatibility](docs/reference/workload-contract.md#runtime-compatibility).
+  [Runtime compatibility](docs/integrate/workload-contract.md#runtime-compatibility).
 - The agent drives checkpoints from a workqueue rather than per-checkpoint
   `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
   occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one

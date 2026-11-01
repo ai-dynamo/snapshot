@@ -17,8 +17,8 @@ Submit SNEPs as Markdown files in a GitHub pull request. Follow these rules:
 
 1. Create a [tracking issue](https://github.com/ai-dynamo/snapshot/issues).
    Its issue number is also the SNEP number.
-2. Create a descriptively named directory under `docs/proposals`, prefixed with
-   that number—for example, `docs/proposals/123-multi-gpu-support`.
+2. Create a descriptively named directory under `docs/design`, prefixed with
+   that number—for example, `docs/design/123-multi-gpu-support`.
 3. Name the proposal document `README.md`.
 4. Start with the [SNEP template](NNNN-template/README.md).
 5. Generate the table of contents with `make update-toc` before opening or

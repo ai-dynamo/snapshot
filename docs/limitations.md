@@ -1,9 +1,9 @@
-# Limitations and known issues
+# Limitations and Known Issues
 
 Snapshot currently focuses on inference cold-start; further use cases are on the
 roadmap.
 
-## Current limitations
+## Current Limitations
 
 - Linux nodes on x86_64 or arm64.
 - Workloads, including multi-GPU workloads, must run on a single node. Multi-node is on the roadmap.
@@ -18,7 +18,7 @@ roadmap.
   restore containers. On a node without NRI, or with an older runtime, the
   agent restores without the proxy: restore Pods need an inert command there,
   and the container does not follow the restored workload. See
-  [Nodes without the restore proxy](reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
+  [Nodes Without the Restore Proxy](integrate/restore-pod-contract.md#nodes-without-the-restore-proxy).
 - A Pod gets one restore. If a restored container starts again, for example
   under `restartPolicy: Always` after the restored process exits, it ends in
   `CrashLoopBackOff`. Delete the Pod to restore again. Retrying a restore in
@@ -28,7 +28,7 @@ roadmap.
   namespace. An installation with it empty acts on every restore Pod on its
   nodes.
 
-## GPU device selection and restore paths
+## GPU Device Selection and Restore Paths
 
 Explicit `NVIDIA_VISIBLE_DEVICES` index or full-UUID lists take precedence over
 allocation discovery. Indices refer to the host inventory, not CUDA ordinals.
@@ -39,7 +39,7 @@ not fall back to host or allocation UUIDs for disabled legacy selections.
 `CUDA_VISIBLE_DEVICES` is not rewritten.
 
 Restoring onto a different physical `/dev/nvidiaN` path requires a fresh
-checkpoint containing UUID-to-device-path metadata. Older checkpoints retain
+snapshot containing UUID-to-device-path metadata. Older snapshots retain
 their existing behavior; Snapshot does not infer missing device mappings.
 This path remapping does not relax hardware, driver, or CUDA-state compatibility
 requirements, nor establish multi-GPU workload support.

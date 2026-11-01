@@ -48,16 +48,16 @@ new replica comes online in seconds instead of minutes.
 
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/development/img/vllm-cold-start-vs-snapshot-dark.png">
-    <img width="900" alt="Cold start and Snapshot restore for vLLM on a single B200 node, using one to eight GPUs." src="docs/development/img/vllm-cold-start-vs-snapshot.png">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/overview/img/vllm-cold-start-vs-snapshot-dark.png">
+    <img width="900" alt="Cold start and Snapshot restore for vLLM on a single B200 node, using one to eight GPUs." src="docs/overview/img/vllm-cold-start-vs-snapshot.png">
   </picture>
 </div>
 
 <p align="center"><i><b>Figure 1.</b> Cold start and Snapshot restore for vLLM on a single B200 node, using one to eight GPUs.</i></p>
 
-For the experiment setup, the per stage breakdown, and the full results, see [benchmarks](docs/development/benchmarks.md).
+For the experiment setup, the per stage breakdown, and the full results, see [benchmarks](docs/overview/performance.md).
 
-## When to use it
+## When to Use It
 
 - **Autoscaling inference** — scale out from an existing snapshot: bring the N+1
   replica and beyond online in seconds to keep pace with demand.
@@ -69,7 +69,7 @@ For the experiment setup, the per stage breakdown, and the full results, see [be
 Snapshot currently focuses on inference cold-start; further use cases are on the
 roadmap.
 
-## Who it's for
+## Who It's For
 
 Snapshot is a building block for the teams that build and operate inference
 infrastructure:
@@ -88,9 +88,9 @@ Before installing Snapshot, make sure the following are in place:
 - NVIDIA kernel-mode driver 580 or newer
 - A `ReadWriteMany` (RWX) storage class
 - The [Helm](https://helm.sh/docs/intro/install) CLI
-- A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
+- A cluster that permits privileged pods for the node agent — see [Allow the Privileged Node Agent](docs/get-started/installation.md#allow-the-privileged-node-agent)
 
-Some features raise this floor — see [Compatibility](docs/reference/compatibility.md).
+Some features raise this floor — see [Prerequisites by Feature](docs/get-started/prerequisites.md#prerequisites-by-feature).
 
 ## Installation
 
@@ -103,27 +103,27 @@ Snapshot can be installed:
 - **From a release** (recommended)
 - **From source** (build the images and install locally)
 
-### From a release
+### From a Release
 
-Install the published chart (see the [releases page](https://github.com/ai-dynamo/snapshot/releases)
-for other versions):
+Install the published chart. Replace `<version>` with the release you want from
+the [releases page](https://github.com/ai-dynamo/snapshot/releases):
 
 ```bash
 helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
-  --version 0.2.0 \
+  --version <version> \
   --namespace snapshot --create-namespace
 ```
 
-By default the chart provisions its own RWX checkpoint volume, shared by every
-checkpoint. See [Storage](docs/operations/storage.md) for the volume model and options
-(including reusing an existing claim), and [Installation](docs/operations/install.md)
+By default the chart provisions its own RWX snapshot volume, shared by every
+checkpoint. See [Configure Storage](docs/operations/configure-storage.md) for the volume model and options
+(including reusing an existing claim), and [Installation](docs/get-started/installation.md)
 for install and uninstall.
 
-### From source
+### From Source
 
-Follow the instructions in [Building from source](docs/development/build-from-source.md).
+Follow the instructions in [Building from Source](docs/development/build-from-source.md).
 
-## How to use it
+## How to Use It
 
 Snapshot is driven entirely through Kubernetes resources, with standard tooling.
 Create a `PodSnapshot` to checkpoint a running pod, and annotate a new pod with
@@ -139,10 +139,10 @@ primitives into their own control loop.
 
 Under the hood, a control-plane operator and a per-node agent perform the CRIU
 and `cuda-checkpoint` work; see [Architecture](docs/reference/architecture/).
-The [API reference](docs/reference/api.md) covers the resources and the
+The [API Reference](docs/reference/api.md) covers the resources and the
 checkpoint/restore lifecycle.
 
-Once Snapshot is installed, follow the **[usage guides](docs/guides/README.md)**
+Once Snapshot is installed, follow the **[Usage Guides](docs/guides/README.md)**
 from a workload to a restored replica: pick an inference framework and model on
 one or eight GPUs, make the workload snapshot-ready, checkpoint it, and restore it.
 
@@ -162,35 +162,35 @@ operations, indexed below.
 
 **Get started**
 
-- [Usage guides](docs/guides/README.md) — make a workload snapshot-ready per inference framework, then checkpoint and restore.
+- [Usage Guides](docs/guides/README.md) — make a workload snapshot-ready per inference framework, then checkpoint and restore.
 
 **Reference**
 
 - [API](docs/reference/api.md) — `PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, and the `restore-from` annotation.
 - [Architecture](docs/reference/architecture/) — operator and node-agent design, the checkpoint/restore internals, and multi-GPU support.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
-- [Workload contract](docs/reference/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
-- [Restore Pod contract](docs/reference/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
-- [Compatibility](docs/reference/compatibility.md) — minimum GPU driver and other dependency versions, per feature.
+- [Workload Contract](docs/integrate/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
+- [Restore Pod Contract](docs/integrate/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
+- [Prerequisites](docs/get-started/prerequisites.md) — minimum GPU driver and other dependency versions, per feature.
 
 **Operations**
 
-- [Installation](docs/operations/install.md) — Helm install and uninstall.
-- [Storage](docs/operations/storage.md) — the shared checkpoint volume and how to configure it.
-- [Troubleshooting](docs/operations/troubleshooting.md) — common failures and where to look.
-- [Security](docs/operations/security.md) — the privileged agent, seccomp, and Pod Security.
+- [Installation](docs/get-started/installation.md) — Helm install and uninstall.
+- [Configure Storage](docs/operations/configure-storage.md) — the shared snapshot volume and how to configure it.
+- [Troubleshooting](docs/troubleshooting/reading-a-failure-message.md) — common failures and where to look.
+- [Allow the Privileged Node Agent](docs/get-started/installation.md#allow-the-privileged-node-agent) — the privileged agent, seccomp, and Pod Security.
 
 **Development**
 
-- [Building from source](docs/development/build-from-source.md) — build the images and install locally.
-- [Benchmarks](docs/development/benchmarks.md) — how startup performance is measured.
-- [Writing documentation](docs/development/writing-docs.md) — where a change goes and how to write it.
-- [Naming conventions](docs/development/naming.md) — terms and naming patterns for the API, chart, and docs.
+- [Building from Source](docs/development/build-from-source.md) — build the images and install locally.
+- [Benchmarks](docs/overview/performance.md) — how startup performance is measured.
+- [Writing Documentation](docs/development/writing-docs.md) — where a change goes and how to write it.
+- [Naming Conventions](docs/development/naming.md) — terms and naming patterns for the API, chart, and docs.
 
 **More**
 
 - [Limitations & known issues](docs/limitations.md) — current limitations and what's on the roadmap.
-- [Snapshot Enhancement Proposals](docs/proposals/README.md) — the design process for significant Snapshot changes.
+- [Snapshot Enhancement Proposals](docs/design/README.md) — the design process for significant Snapshot changes.
 
 ## Adopters
 

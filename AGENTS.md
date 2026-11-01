@@ -36,7 +36,7 @@ primitives, not orchestration.
 Repository agent skills live in `.agents/skills/` and are versioned with the
 checkout. Use the `snep` skill when drafting or revising a Snapshot Enhancement
 Proposal (SNEP); it guides the proposal section by section and follows the
-process in `docs/proposals/README.md`.
+process in `docs/design/README.md`.
 
 ## Repository layout
 
@@ -188,14 +188,14 @@ in an error message.** Snapshot's general minimum driver and GPU Operator
 version lives in the README's
 [Prerequisites](README.md#prerequisites). A feature that needs more than that
 floor must add a row to
-[docs/reference/compatibility.md](docs/reference/compatibility.md) in the same
+[docs/get-started/prerequisites.md](docs/get-started/prerequisites.md) in the same
 change — see
 [CONTRIBUTING.md](CONTRIBUTING.md#documenting-a-feature-specific-version-floor).
 A version requirement that only exists as a runtime failure string is
 invisible to anyone deciding whether to adopt the feature.
 
 ```go
-// Good — floor is documented in docs/reference/compatibility.md and enforced here
+// Good — floor is documented in docs/get-started/prerequisites.md and enforced here
 if !driverSupports(minLaunchJobDriverVersion) {
     return fmt.Errorf("cuda-checkpoint --launch-job requires NVIDIA driver %s or newer", minLaunchJobDriverVersion)
 }

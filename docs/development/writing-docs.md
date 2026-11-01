@@ -3,10 +3,10 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Writing documentation
+# Writing Documentation
 
 How to add or change Snapshot documentation, for people and for AI coding
-agents. Names and terms are in [Naming conventions](naming.md).
+agents. Names and terms are in [Naming Conventions](naming.md).
 
 A reader opens one page to answer one question, so each fact lives on one page.
 A documentation change is usually small: a few table rows and a few sentences.
@@ -17,21 +17,21 @@ These are defaults for the common case. When following one would make the docs
 worse for the reader, do what serves the reader and say why in the PR
 description.
 
-## Where facts live
+## Where Facts Live
 
 | The reader asks | Page |
 | --- | --- |
-| Which fields, annotations, labels, or conditions exist, and what are their defaults? | [API reference](../reference/api.md) |
-| Which Helm values exist? | [API reference](../reference/api.md#configuration) and the [chart README](../../charts/snapshot/README.md) |
-| Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Compatibility](../reference/compatibility.md) for the driver and CUDA versions, baseline and per feature, and the README [prerequisites](../../README.md#prerequisites) for the rest of the cluster requirements |
-| What must my workload or Pod do? | [Workload contract](../reference/workload-contract.md), [Restore Pod contract](../reference/restore-pod-contract.md) |
+| Which fields, annotations, labels, or conditions exist, and what are their defaults? | [API Reference](../reference/api.md) |
+| Which Helm values exist? | [Helm Chart Values](../reference/helm-values.md) and the [chart README](../../charts/snapshot/README.md) |
+| Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Compatibility](../get-started/prerequisites.md) for the driver and CUDA versions, baseline and per feature, and the README [Prerequisites](../../README.md#prerequisites) for the rest of the cluster requirements |
+| What must my workload or Pod do? | [Workload Contract](../integrate/workload-contract.md), [Restore Pod Contract](../integrate/restore-pod-contract.md) |
 | How do I install, configure, upgrade, or clean up? | [`docs/operations/`](../operations) |
-| How do I checkpoint a pod and restore it for the first time? | [Usage guides](../guides/README.md) |
-| It failed. Why, and what do I do? | [Troubleshooting](../operations/troubleshooting.md) |
+| How do I checkpoint a pod and restore it for the first time? | [Checkpoint and Restore](../guides/README.md) |
+| It failed. Why, and what do I do? | [Troubleshooting](../troubleshooting/reading-a-failure-message.md) |
 | What is not supported? | [Limitations](../limitations.md) |
 | How do the pieces fit together? | The [architecture overview](../reference/architecture/README.md) |
-| How does one subsystem or flow work inside? | A detailed page in [`docs/reference/architecture/`](../reference/architecture), such as [Multi-GPU](../reference/architecture/multi-gpu.md) |
-| Why was it designed this way? | A [SNEP](../proposals/README.md) |
+| How does one subsystem or flow work inside? | A detailed page in [`docs/design/`](../design), such as [Multi-GPU](../design/multi-gpu/README.md) |
+| Why was it designed this way? | A [SNEP](../design/README.md) |
 | What changed in this release? | [CHANGELOG.md](../../CHANGELOG.md) |
 
 Two sets of facts are listed twice, so a change updates both: Helm values (the
@@ -39,7 +39,7 @@ API reference and the chart README) and the baseline prerequisites (the README
 and the chart README). State every other fact once, and link to it from other
 pages.
 
-## What a change touches
+## What a Change Touches
 
 Change a page when the change alters the answer to the question that page
 answers. A new option or feature usually alters these:
@@ -47,11 +47,11 @@ answers. A new option or feature usually alters these:
 1. The API reference: its rows.
 2. A contract page: what it requires of a workload or Pod, if anything.
 3. One section in `docs/operations/`, if an operator must do something.
-4. [Compatibility](../reference/compatibility.md): one row, if the feature needs
+4. [Compatibility](../get-started/prerequisites.md): one row, if the feature needs
    a newer driver, CUDA, GPU Operator, kernel, or runtime than the baseline.
 5. Architecture: the overview, if the change adds or removes a component, a
    resource, or a step of the checkpoint or restore flow; a detailed page, if it
-   changes how a subsystem works. See [Architecture docs](#architecture-docs).
+   changes how a subsystem works. See [Architecture Docs](#architecture-docs).
 6. The CHANGELOG: one entry.
 
 It rarely alters the answer on these pages, so change them when it does and
@@ -66,7 +66,7 @@ leave them alone when it does not:
 
 Where the change matters on any other page, add one sentence with a link.
 
-## Entry shapes and sizes
+## Entry Shapes and Sizes
 
 The sizes are what a feature usually needs, not limits. Write what the reader
 needs. A much larger entry is a prompt to ask whether the content belongs on
@@ -85,7 +85,7 @@ this page.
 | Architecture overview | What shows the change: a table row, a diagram edge, or a numbered step | A line |
 | Detailed architecture page | One subsystem or flow: the mechanism, the failure behavior, and a code map | As long as the mechanism needs |
 
-## Architecture docs
+## Architecture Docs
 
 Architecture has two levels. Keep them apart, so the overview stays short and
 easy to read.
@@ -117,16 +117,16 @@ back to the overview, explains the mechanism and what happens on failure, and
 ends with a code map of the packages that implement it, taken from the code. If
 the subsystem has no page yet, add one. A mechanism is explained once, in its detailed page.
 
-## Version requirements
+## Version Requirements
 
 State a requirement as a minimum version ("580 or newer"). Say how to check it
 when that is not obvious, and what a node below it shows, such as a refusal that
 names a compatibility check or a CUDA error code. A feature that needs more than
-the baseline gets one row in [Compatibility](../reference/compatibility.md); see
+the baseline gets one row in [Compatibility](../get-started/prerequisites.md); see
 [CONTRIBUTING.md](../../CONTRIBUTING.md#documenting-a-feature-specific-version-floor).
 The feature's own page links to that row and does not repeat the number.
 
-## Before you write
+## Before You Write
 
 1. Search for the fact:
    `rg -n '<identifier or phrase>' README.md docs charts/snapshot/README.md CHANGELOG.md`.
@@ -136,12 +136,12 @@ The feature's own page links to that row and does not repeat the number.
    author. List it in your PR description and leave it out of the docs.
 3. Translate loose wording from the issue or PR, such as "dump", "helper", or
    "saved state", into the terms in
-   [Naming conventions](naming.md). Describe a feature by what it does for the
+   [Naming Conventions](naming.md). Describe a feature by what it does for the
    reader, not by the mechanism behind it.
 4. Edit a sentence when the change makes it false or incomplete. Leave the rest
    of the page alone.
 
-## What does not belong in the docs
+## What Does Not Belong in the Docs
 
 | Content | Put it in |
 | --- | --- |
@@ -180,7 +180,7 @@ The feature's own page links to that row and does not repeat the number.
   restating it.
 - Align the pipes of a table like the tables around it.
 
-## Before you push
+## Before You Push
 
 - [ ] Each page the change touches has a new answer to its question, and the
   change is no larger than the reader needs.
@@ -188,7 +188,7 @@ The feature's own page links to that row and does not repeat the number.
 - [ ] No fact is stated twice, and every table that lists the thing is updated.
 - [ ] The architecture overview shows the change in a line, and the mechanics are
   in a detailed page.
-- [ ] Names and terms match [Naming conventions](naming.md).
+- [ ] Names and terms match [Naming Conventions](naming.md).
 - [ ] A new page is linked from the index of its section: the
   [guides index](../guides/README.md) for a guide, one line in the architecture
   overview for a detailed architecture page, and the README "Documentation"

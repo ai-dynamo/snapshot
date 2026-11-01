@@ -3,10 +3,14 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Restore Pod contract
+# Restore Pod Contract
 
 A Pod requests restore by naming a ready `PodSnapshot` in its namespace. The
 Snapshot node agent restores only Pods that implement this contract.
+
+## Go Integrations
+
+### Build a Restore Pod
 
 Go integrations should use:
 
@@ -25,12 +29,6 @@ restored, err := podcontract.Build(
 )
 ```
 
-This release intentionally moves the Go Pod-contract API from
-`api/restorepod` and `api/v1alpha1` to `api/podcontract` without compatibility
-aliases. Consumers must update restore annotations, mappings, status reasons,
-`RestoreOutcome`, and `ClassifyRestoreOutcome` references to the new package.
-Custom-resource types remain in `api/v1alpha1`.
-
 `podcontract.Build` is a pure, atomic transformation: it returns a deep copy or
 an error and never mutates its input. Reapplying it with the same arguments is
 idempotent. It emits one canonical representation and validates that exact
@@ -40,6 +38,16 @@ startup gating and seccomp selection remains producer-owned. Conflicting
 annotations, volumes, mounts, environment, and requested security settings are
 rejected instead of overwritten.
 
+The producer supplies `SourceContainer` from the referenced `PodSnapshot`.
+Empty mappings restore that source into the same-named destination only. The
+builder validates one-source-to-many-destination consistency but deliberately
+performs no API read to discover the captured source.
+
+The package also owns the shared control-volume, environment, capture-sentinel,
+and CUDA job-file names used by Snapshot-managed source and restore Pods.
+
+### Check the Restore Outcome
+
 Consumers can interpret the agent-owned `nvidia.com/Restored` Pod condition
 without importing Snapshot's custom-resource API:
 
@@ -47,13 +55,15 @@ without importing Snapshot's custom-resource API:
 outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
 ```
 
-The package also owns the shared control-volume, environment, capture-sentinel,
-and CUDA job-file names used by Snapshot-managed source and restore Pods.
+### Package Move
 
-The producer supplies `SourceContainer` from the referenced `PodSnapshot`.
-Empty mappings restore that source into the same-named destination only. The
-builder validates one-source-to-many-destination consistency but deliberately
-performs no API read to discover the captured source.
+This release intentionally moves the Go Pod-contract API from
+`api/restorepod` and `api/v1alpha1` to `api/podcontract` without compatibility
+aliases. Consumers must update restore annotations, mappings, status reasons,
+`RestoreOutcome`, and `ClassifyRestoreOutcome` references to the new package.
+Custom-resource types remain in `api/v1alpha1`.
+
+## Declarative Form
 
 Non-Go producers can implement the declarative form directly. This fan-out
 example restores the captured `main` process into two destination containers:
@@ -125,6 +135,10 @@ tool can discover the control directory without hard-coding its location. The
 builder also injects the deprecated `DYN_SNAPSHOT_CONTROL_DIR` alias during
 the migration window; hand-authored Pods may omit the alias.
 
+## Options
+
+### Startup Gate
+
 The `restore-complete` startup probe shown above is optional workload lifecycle
 policy. Set `Options.EnableStartupGate` when Kubernetes must withhold readiness
 and liveness until restore completes. Because Kubernetes supports only one
@@ -135,6 +149,8 @@ failures; if restoration exceeds that budget, kubelet kills the container, and
 the restore is lost (see restart policy below). The node agent always writes
 the sentinel but does not require or inspect the optional probe.
 
+### Seccomp Profile
+
 `Options.SeccompProfile` controls the localhost profile on restore destination
 containers only. The standard Snapshot Helm installation deploys
 `DefaultSeccompLocalhostProfile` to block io_uring for CRIU. Applying it at
@@ -142,6 +158,10 @@ container scope preserves the Pod-level policy inherited by unrelated
 sidecars. An empty value leaves seccomp unmanaged for environments that provide
 the restriction elsewhere. A destination container must not override a
 requested profile with a conflicting profile.
+
+## Restore Pod Behavior
+
+### Restore Proxy
 
 Snapshot replaces the command of every destination container with its restore
 proxy, `/snapshot-control/snapshot-restore-proxy`. The Pod object is not
@@ -153,7 +173,7 @@ and exits with its exit code, so the container ends when the restored workload
 does. If the proxy is not PID 1, the agent fails the restore. Keep the source's
 command in restore Pods; it never runs. Other containers in the Pod, such as
 sidecars, are left alone. Nodes whose runtime cannot run the proxy restore
-without it; see [Nodes without the restore proxy](#nodes-without-the-restore-proxy).
+without it; see [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
 
 The plugin decides which containers get the proxy when each container is
 created. Without `restore-container-map`, it reads the PodSnapshot that
@@ -161,6 +181,8 @@ created. Without `restore-container-map`, it reads the PodSnapshot that
 after that PodSnapshot exists; it does not have to be Ready yet. Until it
 exists, container creation fails, and kubelet retries with a backoff of up to 5
 minutes.
+
+### Probes
 
 Probes belong to the workload. Kubernetes runs liveness and readiness probes
 from container start, while the restore is still running and nothing in the
@@ -170,11 +192,15 @@ which holds liveness and readiness back until `restore-complete` exists, or
 give liveness probes an `initialDelaySeconds` or `failureThreshold` that covers
 the longest restore you expect.
 
+### One Restore per Pod
+
 Restore Pods are expected to use `restartPolicy: Never`. A Pod gets one restore:
 a container that starts again in the same Pod finds that restore already used,
 and its proxy exits with code 112. With `restartPolicy: Always` or `OnFailure`,
 as in a Deployment, the container then ends in `CrashLoopBackOff` once the
 restored workload exits. Delete the Pod to restore again.
+
+### Exit Codes
 
 The proxy reserves two exit codes:
 
@@ -186,7 +212,7 @@ The proxy reserves two exit codes:
 Every other exit code is the restored workload's own, or 128 plus the number of
 the signal that ended it.
 
-## Nodes without the restore proxy
+## Nodes Without the Restore Proxy
 
 On a node whose container runtime has no NRI, or NRI older than v0.10
 (containerd older than 2.2, or NRI disabled), the agent restores without the

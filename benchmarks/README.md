@@ -7,7 +7,7 @@ the recorded attempts; speedup uses the mean restore time. Three restores run by
 default; `--restore-count` changes the count.
 
 See the [benchmark guide](../docs/development/benchmarks-guide.md) for setup and
-commands, and [Performance Benchmarks](../docs/development/benchmarks.md) for
+commands, and [Performance Benchmarks](../docs/overview/performance.md) for
 published results.
 
 ## Requirements
@@ -15,7 +15,7 @@ published results.
 - `uv`
 - `kubectl`
 - An installed Snapshot Helm release and its checkpoint PVC. Use `KUBECONFIG`
-  to connect to the cluster. See [Installation](../docs/operations/install.md).
+  to connect to the cluster. See [Installation](../docs/get-started/installation.md).
 - An engine image compatible with the selected [framework guide](../docs/guides/)
 - A model PVC with the model files, a writable work PVC and enough free GPUs
 
@@ -53,7 +53,7 @@ model and TP/EP configuration. SGLang runs enable checkpoint prefetch by default
 `--engine-args '{"weight_loader_prefetch_checkpoints":false}'` disables it.
 
 New runs save JSON and logs under `results/`. See [Performance
-Benchmarks](../docs/development/benchmarks.md) for the published tables.
+Benchmarks](../docs/overview/performance.md) for the published tables.
 
 Cold starts clear the node's page cache and verify weight-file residency before
 timing begins. This requires permission to create a privileged init container and
