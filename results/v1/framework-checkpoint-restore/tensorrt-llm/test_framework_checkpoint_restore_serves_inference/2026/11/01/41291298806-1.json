@@ -1,0 +1,43 @@
+{
+  "benchmarkVersion": 1,
+  "environment": {
+    "restoreGpuCollectionError": "test did not reach restore GPU discovery",
+    "restoreGpus": [],
+    "sourceGpuCollectionError": "test did not reach source GPU discovery",
+    "sourceGpus": [],
+    "storageCollectionError": "test did not reach storage discovery"
+  },
+  "error": {
+    "message": "pytest produced no benchmark result; step outcome=skipped",
+    "phase": "pytest"
+  },
+  "events": [],
+  "finishedAt": "2026-11-01T09:09:23.171Z",
+  "identity": {
+    "case": "tensorrt-llm",
+    "runAttempt": 1,
+    "runId": "41291298806",
+    "suite": "framework-checkpoint-restore",
+    "test": "test_framework_checkpoint_restore_serves_inference"
+  },
+  "measurements": [
+    {
+      "displayName": "Full E2E test",
+      "missingReason": "start event not reached",
+      "name": "test.total.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    }
+  ],
+  "outcome": "infrastructure_failed",
+  "schemaVersion": 1,
+  "source": {
+    "commit": "6a3b4f3c5aadb0d9d2024217e6ed09b9ebe80bfe",
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/41291298806",
+    "snapshotTag": "v0.0.0-g6a3b4f3c"
+  },
+  "startedAt": "2026-11-01T09:09:23.171Z"
+}
