@@ -9,16 +9,20 @@ See [NFS guidance](README.md).
 
 ## I/O mode
 
-Start with buffered I/O on EFS. Use `O_DIRECT` only if restore tests with your
-workload show better performance.
+Start with buffered CRIU image I/O on EFS. Set this Helm value:
+
+```yaml
+config:
+  criu:
+    imageIoMode: writeback
+```
+
+This selects buffered I/O for CRIU images. GPU payloads use a separate I/O path.
 
 [AWS's EFS performance guidance](https://docs.aws.amazon.com/efs/latest/ug/performance-tips.html)
 states that each request with `O_DIRECT` requires a round trip to EFS.
 `O_DIRECT` bypasses the client cache and read-ahead. This can reduce
 performance, especially with small reads or one read at a time.
-
-We recommend buffered I/O based on this AWS guidance. AWS does not prohibit
-`O_DIRECT`.
 
 ### Buffered I/O and read-ahead
 
@@ -49,20 +53,8 @@ workloads. See [EFS performance](https://docs.aws.amazon.com/efs/latest/ug/perfo
 
 Use 1 MiB read/write request sizes (`rsize=1048576`, `wsize=1048576`), as in
 [AWS's recommended mount settings](https://docs.aws.amazon.com/efs/latest/ug/mounting-fs-nfs-mount-settings.html).
-EFS does not support `nconnect`. Do not copy the VAST mount options to EFS.
-
-## Configuration example
-
-Use this Helm values fragment for buffered CRIU image I/O:
-
-```yaml
-config:
-  criu:
-    imageIoMode: writeback
-```
-
-This controls CRIU images, not GPU payload I/O. See the
-[configuration reference](../../../reference/api.md#agent-config-config).
+EFS does not support `nconnect`; use the mount helper and read-ahead settings
+above to tune buffered reads.
 
 ## Validation and limits
 

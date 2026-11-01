@@ -17,6 +17,7 @@ See [restore timing guidance](../storage.md#diagnose-slow-gpu-restores).
 Read the [NFS guidance](nfs/README.md), then the page for your backend:
 [VAST](nfs/vast.md) or [EFS](nfs/efs.md). For local storage, read
 [Local NVMe and RAID0](nvme.md).
+For object storage, check [S3 Region and instance bandwidth](s3.md).
 Check storage throughput limits and direct versus buffered I/O before tuning.
 
 ## 3. Check the restore node
@@ -30,6 +31,10 @@ uname -r
 nvidia-smi --query-gpu=name,driver_version --format=csv
 ```
 
+For GPU CustomStorage, also check the
+[loaded CUDA user-mode driver](../../reference/compatibility.md#check-the-customstorage-driver)
+in the workload and PageBroker. The host driver version alone is not enough.
+
 Select the node agent Pod on the restore node. Run `findmnt` in its container
 so path lookup uses the agent's mount namespace and root:
 
@@ -40,18 +45,8 @@ kubectl --context "<context>" --namespace "<snapshot-namespace>" \
   --output TARGET,SOURCE,FSTYPE,OPTIONS
 ```
 
-For VAST, check the loaded client version on the node:
-
-```bash
-cat /sys/module/sunrpc/parameters/nfs_bundle_version
-```
-
-If this file is missing, the VAST client might not be loaded. An installed
-package alone does not prove which client is running.
-See [VAST's version check](https://vastnfs.vastdata.com/docs/4.5/monitoring/version.html).
-Use the VAST client tools to inspect connections; some options, such as
-`remoteports`, might not appear in the mount output. See
-[VAST client diagnostics](https://vastnfs.vastdata.com/docs/4.5/usage/vastnfs-ctl.html).
+For VAST, follow the [client and network checks](nfs/vast.md). Check the running
+client, storage NICs, and connections before increasing transfer buffers.
 
 ## 4. Measure storage with fio
 
@@ -81,9 +76,9 @@ It does not allocate fresh destination pages for every file block.
 See the [fio 3.41 buffer setup](https://github.com/axboe/fio/blob/fio-3.41/backend.c#L1327-L1405)
 and [buffer reuse](https://github.com/axboe/fio/blob/fio-3.41/io_u.c#L812-L838).
 
-This is not a guarantee of exactly one fault per page. Memory pressure and
-other engines can change the result. File-cache misses are separate from
-destination-buffer faults; `direct=1` does not remove the latter.
+Memory pressure can evict buffer pages and cause more faults. File-cache
+misses are separate from destination-buffer faults; `direct=1` does not
+remove the latter.
 
 A restore must also populate the workload's memory and restore process and
 GPU state. Use fio to check the storage path; its bandwidth alone does not

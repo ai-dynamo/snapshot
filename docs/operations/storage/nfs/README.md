@@ -39,13 +39,9 @@ configuration.
 | `vers`, `proto` | NFS version and transport supported by the client and server |
 | `rsize`, `wsize` | Maximum NFS read/write request sizes; larger requests can reduce overhead |
 | `nconnect` | Number of transport connections; the supported range depends on the client |
-| `spread_reads`, `remoteports` | VAST client options; see the [VAST example](vast.md) |
 
 Inspect the mount in the node agent container, where the snapshot path is
 resolved. Follow the [restore-node checks](../slow-restore.md#3-check-the-restore-node).
-
-Check client/kernel support for the application's I/O method too. Support for
-`io_uring` alone does not show that the restore path uses it.
 
 ## Examples
 

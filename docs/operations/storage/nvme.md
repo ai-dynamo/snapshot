@@ -26,9 +26,22 @@ node agents, and restore Pods to that node. The chart creates RWX claims by
 default; creating a RAID0 array does not configure a PVC or Pod placement.
 
 RAID0 has no redundancy. Keep another copy of snapshots that must survive a
-drive failure. On EC2, instance-store data is also lost when the instance stops
-or terminates. See [Linux RAID arrays](https://docs.kernel.org/admin-guide/md.html)
-and [EC2 instance storage](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ssd-instance-store.html).
+drive failure. See [Linux RAID arrays](https://docs.kernel.org/admin-guide/md.html).
+
+### EC2 instance store versus EBS
+
+Both instance-store and EBS volumes can appear as `/dev/nvme*`. Check the
+device model before choosing disks:
+
+```bash
+lsblk --output NAME,MODEL,SERIAL,SIZE,MOUNTPOINTS
+```
+
+Instance-store data survives a reboot, but is erased when the instance stops,
+hibernates, or terminates. EBS volumes persist across stop/start; deletion on
+termination depends on the volume's `DeleteOnTermination` setting. See
+[instance-store lifetime](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-store-lifetime.html)
+and [EBS NVMe devices](https://docs.aws.amazon.com/ebs/latest/userguide/nvme-ebs-volumes.html).
 
 ## Check an existing array
 

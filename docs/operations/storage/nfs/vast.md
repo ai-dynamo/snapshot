@@ -3,22 +3,53 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# VAST NFS example
+# VAST NFS
 
-See [NFS guidance](README.md).
+## 1. Check the client
 
-## Prerequisites
+Install a compatible VAST NFS client on each node that checkpoints or restores.
+Check the running client on the node:
 
-Use a compatible VAST NFS client on each restore node. The options below apply
-to NFSv3 over TCP. `spread_reads` and `remoteports` require the VAST client;
-do not copy them to the EFS configuration.
+```bash
+vastnfs-ctl status
+```
 
-## Configuration example
+The VAST client provides `remoteports`, `localports`, and `spread_reads`.
 
-### Mount options
+## 2. Choose the NFS version
 
-Use this subset of the mount options in the
-[Snapshot benchmark setup](../../../development/benchmarks-guide.md#reference-setup):
+Start with NFSv3 for large snapshot files. It supports `spread_reads`, which
+lets reads from one file use connections to several VAST server addresses.
+
+NFSv4.1 also works, but without `spread_reads`: each file stays on one server
+address and can use multiple connections to that address. If your installation
+requires NFSv4.1, set `vers=4.1` and omit
+`spread_reads`. See [VAST's protocol comparison](https://kb.vastdata.com/docs/7-vast-client-nfs-multipathing).
+
+## 3. Select NICs and connections
+
+Count the NICs that connect the restore node to the VAST storage network.
+GPU-interconnect and other network interfaces do not add storage bandwidth.
+The VAST client uses one local interface by default. `nconnect` adds TCP
+connections; `localports` selects additional local interfaces.
+
+For TCP, VAST recommends starting with eight connections per 100 Gbit/s:
+
+| Storage network bandwidth | Starting `nconnect` |
+| --- | --- |
+| 100 Gbit/s | 8 |
+| 200 Gbit/s | 16 |
+| 400 Gbit/s | 32 |
+
+For NFSv3 with two storage NICs, add `localports=<nic0>~<nic1>` to the mount
+options. Use interfaces with IP addresses and routes to the selected VAST
+server addresses. Configure source-based routing and ARP as described in
+[VAST's client network setup](https://vastnfs.vastdata.com/docs/4.5/usage/mount-params.html).
+
+## 4. Set mount options
+
+This example uses NFSv3 over TCP on a 400 Gbit/s storage path. Put the options
+on your NFS PV or provisioning StorageClass:
 
 ```yaml
 mountOptions:
@@ -31,38 +62,38 @@ mountOptions:
   - remoteports=<first-vip>-<last-vip>
 ```
 
-Replace the address range with the VAST storage addresses for your installation.
-This is a mount-options fragment, not a complete StorageClass or PV.
+Replace the VIP range with the VAST server addresses assigned to your storage
+view. Adjust `nconnect` for the storage link and add `localports` for multiple
+NICs. The 1 MiB request sizes reduce overhead on large reads and writes.
 
-| Option | Purpose |
-| --- | --- |
-| `nconnect=32` | Use up to 32 transport connections |
-| `spread_reads` | Allow reads from one file to use multiple connections |
-| `remoteports` | Connect to multiple VAST server addresses |
-| `rsize=1048576`, `wsize=1048576` | Allow NFS requests up to 1 MiB |
+Keep normal cache sharing when several mounts access the same writable export.
+The [Snapshot benchmark setup](../../../development/benchmarks-guide.md#reference-setup)
+also used `nosharecache` and `nosharetransport` for mount isolation; those
+options are omitted here.
 
-The benchmark also used `nosharecache` and `nosharetransport` to isolate its
-cache and connections. This example keeps the default sharing behavior.
-`nosharecache` can leave cached copies of the same writable file inconsistent
-across mounts on one client. See the
-[NFS manual](https://man7.org/linux/man-pages/man5/nfs.5.html).
+## 5. Check the active path
 
-VAST documents connection and read-distribution options in its
-[benchmark guide](https://kb.vastdata.com/docs/how-to-guide-for-benchmarking-vast-data).
-`spread_reads` applies to NFSv3, not NFSv4. More connections are not always
-faster; select the count for your network and workload.
+Inspect the mount in the node agent container using the
+[restore-node checks](../slow-restore.md#3-check-the-restore-node).
+On the node, inspect the active VAST connections and storage NIC traffic:
 
-### I/O mode
+```bash
+vastnfs-ctl rpc-clients "<node-mount>"
+ip -s link show dev "<storage-nic>"
+```
 
-Compare direct and buffered I/O as described in the [NFS guide](README.md).
-VAST notes that `spread_reads` can hurt single-threaded direct reads with only
-one request in flight. Test the full restore path before you select a mode.
+Check traffic counters on each selected NIC before and after a restore. If
+only one NIC carries traffic, check `localports` and routing before adding
+connections. See [VAST client diagnostics](https://vastnfs.vastdata.com/docs/4.5/usage/vastnfs-ctl.html).
 
-## Validation and limits
+## 6. Select I/O mode and measure
 
-Check the mount options in use on the restore node. A PV declaration alone does
-not prove that the client uses those options.
+Start with `config.criu.imageIoMode: direct` for CRIU images. Compare with
+`writeback` if repeated restores on the same node can reuse the page cache.
+See [NFS I/O modes](README.md).
 
-The linked Snapshot benchmarks used 32 connections and four server addresses.
-They do not isolate the benefit of either option. This example does not claim
-that 32 connections are best for every installation.
+Run fio and a real restore through the configured mount. VAST notes that
+`spread_reads` can be slower for a single-threaded direct reader with one
+request in flight. Use the concurrency of the actual restore when comparing
+settings. See [VAST's benchmark guide](https://kb.vastdata.com/docs/how-to-benchmark-vast-data-with-fio)
+and [Why is my restore slow?](../slow-restore.md).
