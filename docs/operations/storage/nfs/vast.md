@@ -31,6 +31,8 @@ mountOptions:
   - nconnect=32
   - spread_reads
   - remoteports=<first-vip>-<last-vip>
+  - nosharecache
+  - nosharetransport
 ```
 
 Replace the address range with the VAST storage addresses for your installation.
@@ -42,6 +44,7 @@ This is a mount-options fragment, not a complete StorageClass or PV.
 | `spread_reads` | Allow reads from one file to use multiple connections |
 | `remoteports` | Connect to multiple VAST server addresses |
 | `rsize=1048576`, `wsize=1048576` | Allow NFS requests up to 1 MiB |
+| `nosharecache`, `nosharetransport` | Use separate cache and transports for this mount, as in the benchmark |
 
 VAST documents this combination in its
 [benchmark guide](https://kb.vastdata.com/docs/how-to-guide-for-benchmarking-vast-data).

@@ -77,10 +77,12 @@ the client cache) separately. Check that inference works after each restore.
 Record these settings and results:
 
 - I/O mode
-- Mount options in use
+- Mount options in use, including `rsize` and `wsize`
 - NFS client version
+- Linux kernel version
+- `amazon-efs-utils` version
 - EFS throughput mode
-- Read-ahead value
+- Effective `read_ahead_kb`
 - Restore times
 
 We have not tested Snapshot restore performance on EFS for this guide.
