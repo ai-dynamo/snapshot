@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# yaml-language-server: $schema=https://schema.buildwithfern.dev/docs-yml.json
+
+# This site is for reviewing the docs structure. The configuration is removed
+# before the pull request merges. The instance URL below is a placeholder.
+instances:
+  - url: nvidia-snapshot.docs.buildwithfern.com/snapshot
+
+title: NVIDIA Snapshot Documentation
+
+global-theme: nvidia
+
+logo:
+  right-text: Snapshot
+
+check:
+  rules:
+    broken-links: warn
+
+navbar-links:
+  - type: github
+    value: https://github.com/ai-dynamo/snapshot
+
+# Pages that are not written yet are empty placeholders.
+navigation:
+  - section: Overview
+    slug: overview
+    contents:
+      - page: README
+        path: ../README.md
+        slug: readme
+      - page: What is Snapshot?
+        path: ../docs/overview/what-is-snapshot.md
+        slug: what-is-snapshot
+      - page: Core Concepts
+        path: ../docs/overview/core-concepts.md
+        slug: core-concepts
+      - page: Architecture Overview
+        path: ../docs/reference/architecture/README.md
+        slug: architecture-overview
+      - page: Performance
+        path: ../docs/development/benchmarks.md
+        slug: performance
+      - page: Limitations
+        path: ../docs/limitations.md
+        slug: limitations
+  - section: Get Started
+    slug: get-started
+    contents:
+      - page: Prerequisites and Compatibility
+        path: ../docs/reference/compatibility.md
+        slug: prerequisites-and-compatibility
+      - page: Installation
+        path: ../docs/operations/install.md
+        slug: installation
+      - page: Quickstart - Checkpoint and Restore One Pod
+        path: ../docs/get-started/quickstart.md
+        slug: quickstart
+  - section: Checkpoint and Restore
+    slug: checkpoint-and-restore
+    contents:
+      - page: Overview
+        path: ../docs/guides/README.md
+        slug: overview
+      - page: vLLM
+        path: ../docs/guides/vllm.md
+        slug: vllm
+      - page: SGLang
+        path: ../docs/guides/sglang.md
+        slug: sglang
+      - page: TensorRT-LLM
+        path: ../docs/guides/tensorrt-llm.md
+        slug: tensorrt-llm
+      - page: Use Your Own Framework or Image
+        path: ../docs/guides/use-your-own-framework.md
+        slug: use-your-own-framework
+      - page: Checkpoint a Pod
+        path: ../docs/guides/checkpoint.md
+        slug: checkpoint-a-pod
+      - page: Restore a Pod
+        path: ../docs/guides/restore.md
+        slug: restore-a-pod
+  - section: Operate
+    slug: operate
+    contents:
+      - page: Configure Storage
+        path: ../docs/operations/storage.md
+        slug: configure-storage
+      - page: Secure the Node Agent
+        path: ../docs/operations/security.md
+        slug: secure-the-node-agent
+      - page: Upgrade Snapshot and the CRDs
+        path: ../docs/operations/upgrade.md
+        slug: upgrade
+  - section: Reference
+    slug: reference
+    contents:
+      - page: Reference Overview
+        path: ../docs/reference/overview.md
+        slug: reference-overview
+      - page: API
+        path: ../docs/reference/api.md
+        slug: api
+      - page: snapshotctl CLI
+        path: ../docs/reference/cli.md
+        slug: snapshotctl-cli
+      - page: Workload Contract
+        path: ../docs/reference/workload-contract.md
+        slug: workload-contract
+      - page: Restore Pod Contract
+        path: ../docs/reference/restore-pod-contract.md
+        slug: restore-pod-contract
+      - page: Helm Chart Values
+        path: ../docs/reference/helm-values.md
+        slug: helm-chart-values
+  - section: Troubleshooting
+    slug: troubleshooting
+    contents:
+      - page: Reading a Failure Message
+        path: ../docs/troubleshooting/reading-a-failure-message.md
+        slug: reading-a-failure-message
+      - page: Troubleshoot Checkpoints
+        path: ../docs/troubleshooting/checkpoints.md
+        slug: troubleshoot-checkpoints
+      - page: Troubleshoot Restores
+        path: ../docs/troubleshooting/restores.md
+        slug: troubleshoot-restores
+      - page: Troubleshoot the Agent
+        path: ../docs/troubleshooting/agent.md
+        slug: troubleshoot-the-agent
+  - section: Development
+    slug: development
+    contents:
+      - page: Build from Source
+        path: ../docs/development/build-from-source.md
+        slug: build-from-source
+      - page: Benchmarks Guide
+        path: ../docs/development/benchmarks-guide.md
+        slug: benchmarks-guide
+      - page: Writing Documentation
+        path: ../docs/development/writing-docs.md
+        slug: writing-documentation
+      - page: Naming Conventions
+        path: ../docs/development/naming.md
+        slug: naming-conventions
