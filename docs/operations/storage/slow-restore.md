@@ -14,15 +14,17 @@ See [restore timing guidance](../storage.md#diagnose-slow-gpu-restores).
 
 ## 2. Check the storage configuration
 
-Read the [NFS guidance](nfs/README.md), then the page for your backend:
+For NFS, read the [NFS guidance](nfs/README.md), then your backend page:
 [VAST](nfs/vast.md) or [EFS](nfs/efs.md). For local storage, read
 [Local NVMe and RAID0](nvme.md).
 For object storage, check [S3 Region and instance bandwidth](s3.md).
-Check storage throughput limits and direct versus buffered I/O before tuning.
+Check storage throughput limits before tuning. For filesystem storage, also
+compare direct and buffered I/O.
 
 ## 3. Check the restore node
 
-Record the Snapshot image versions, Linux kernel, GPU driver, and NFS client.
+Record the Snapshot image versions, Linux kernel, GPU driver, and, for NFS,
+the NFS client version.
 Compare them with the [compatibility requirements](../../reference/compatibility.md).
 Run these commands on the restore node:
 
@@ -35,8 +37,12 @@ For GPU CustomStorage, also check the
 [loaded CUDA user-mode driver](../../reference/compatibility.md#check-the-customstorage-driver)
 in the workload and PageBroker. The host driver version alone is not enough.
 
-Select the node agent Pod on the restore node. Run `findmnt` in its container
-so path lookup uses the agent's mount namespace and root:
+S3 has no snapshot filesystem mount; use the
+[S3 endpoint, reader, and network checks](s3.md).
+
+For filesystem storage, select the node agent Pod on the restore node. Run
+`findmnt` in its container so path lookup uses the agent's mount namespace
+and root:
 
 ```bash
 kubectl --context "<context>" --namespace "<snapshot-namespace>" \
@@ -54,7 +60,8 @@ client, storage NICs, and connections before increasing transfer buffers.
 requests and reports bandwidth, IOPS, and latency. Match the file, I/O mode,
 request size, and concurrency to the restore path.
 
-This example reads an existing file, with one buffered request at a time.
+For filesystem storage, this example reads an existing file with one buffered
+request at a time. For S3, use the [download measurements](s3.md#4-measure-from-a-restore-node).
 Run it through the same storage mount as the node agent:
 
 ```bash

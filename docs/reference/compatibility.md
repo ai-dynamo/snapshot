@@ -25,15 +25,17 @@ once a roadmap feature ships with its own version floor, it gets a row here.
 
 ## Check the CustomStorage driver
 
-Check the user-mode library loaded by the workload and PageBroker before
-checkpointing. `nvidia-smi` reports the host driver; a container can load a
-different `libcuda.so` through `LD_LIBRARY_PATH`.
+Check the user-mode library loaded by the workload and PageBroker on both
+the checkpoint and restore nodes. `nvidia-smi` reports the host driver; a
+container can load a different `libcuda.so` through `LD_LIBRARY_PATH`.
 
 On the node, inspect each process's loaded library:
 
 ```bash
-sudo awk '/libcuda\.so/ {print $NF}' /proc/<host-pid>/maps | sort -u
+sudo sed -n '/libcuda\.so/s/^[^/]*//p' /proc/<host-pid>/maps | sort -u
 ```
+
+The output retains ` (deleted)` if the loaded library's file was removed.
 
 Use matching user-mode driver libraries for the workload, node agent's CUDA
 helper, and PageBroker. On a compatible older kernel-mode driver, the

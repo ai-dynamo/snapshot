@@ -19,7 +19,8 @@ The VAST client provides `remoteports`, `localports`, and `spread_reads`.
 ## 2. Choose the NFS version
 
 Start with NFSv3 for large snapshot files. It supports `spread_reads`, which
-lets reads from one file use connections to several VAST server addresses.
+distributes reads from one file across existing connections. Combine it with
+`remoteports` to use several VAST server addresses.
 
 NFSv4.1 also works, but without `spread_reads`: each file stays on one server
 address and can use multiple connections to that address. If your installation
@@ -62,9 +63,10 @@ mountOptions:
   - remoteports=<first-vip>-<last-vip>
 ```
 
-Replace the VIP range with the VAST server addresses assigned to your storage
-view. Adjust `nconnect` for the storage link and add `localports` for multiple
-NICs. The 1 MiB request sizes reduce overhead on large reads and writes.
+Use the range form only for contiguous VIPs assigned to your storage view.
+For separate addresses, use `remoteports=<vip1>~<vip2>`. Adjust `nconnect` for
+the storage link and add `localports` for multiple NICs. The 1 MiB request
+sizes reduce overhead on large reads and writes.
 
 Keep normal cache sharing when several mounts access the same writable export.
 The [Snapshot benchmark setup](../../../development/benchmarks-guide.md#reference-setup)
