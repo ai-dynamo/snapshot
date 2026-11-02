@@ -13,8 +13,9 @@ This chart installs the snapshot infrastructure:
 - the seccomp profile CRIU needs
 
 Install one Snapshot release for the cluster. Every node agent mounts the same
-shared checkpoint PVC directly and watches checkpoint/restore pods in all
-namespaces. Workload pods never mount the snapshot store.
+shared snapshot volume directly and watches checkpoint and restore pods in all
+namespaces. Snapshot does not mount the store into workload pods; a non-target
+artifact writer mounts it itself.
 
 ## Prerequisites
 
@@ -25,7 +26,7 @@ namespaces. Workload pods never mount the snapshot store.
 - **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
 
-The checkpoint PVC must support `ReadWriteMany` because agents on multiple nodes
+The snapshot volume must support `ReadWriteMany` because agents on multiple nodes
 mount it concurrently. Chart-created claims always request `ReadWriteMany` and
 are retained when the Helm release is removed.
 
@@ -54,7 +55,7 @@ release that uses a private agent image, set the private registry pull secret in
 the same Helm upgrade so the new chart defaults do not remove the required image
 access.
 
-Create a checkpoint PVC through an RWX-capable StorageClass, such as an EFS
+Create a snapshot volume through an RWX-capable StorageClass, such as an EFS
 StorageClass:
 
 ```bash
@@ -102,7 +103,7 @@ inside the agent's mount namespace — it is not a relocatable prefix.
 
 ## Minimal install
 
-Create the checkpoint PVC and the agent:
+Create the snapshot volume and the agent:
 
 ```bash
 helm upgrade --install snapshot ./charts/snapshot \
@@ -195,7 +196,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `operator.tolerations` | Tolerations for the operator pod | `[]` |
 | `storage.type` | Snapshot-owned storage backend | `pvc` |
 | `storage.pvc.create` | Create `snapshot-pvc` instead of using an existing shared PVC | `true` |
-| `storage.pvc.name` | Shared RWX checkpoint PVC mounted by every agent | `snapshot-pvc` |
+| `storage.pvc.name` | Shared RWX snapshot volume mounted by every agent | `snapshot-pvc` |
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |

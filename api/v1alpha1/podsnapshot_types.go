@@ -72,9 +72,10 @@ type PodSnapshotSpec struct {
 // PodSnapshotSource identifies the workload a PodSnapshot was taken from.
 type PodSnapshotSource struct {
 	// PodRef references the pod, in the PodSnapshot's namespace, that is checkpointed.
-	// The operator prepares the pod (control volume, snapshot volume mount)
-	// before creating the PodSnapshot. The target container is carried on
-	// PodRef.Containers, not a pod annotation.
+	// The operator prepares the pod (the snapshot-control volume) before creating
+	// the PodSnapshot; the snapshot store is mounted by the node agent, not the
+	// pod. The target container is carried on PodRef.Containers, not a pod
+	// annotation.
 	// +kubebuilder:validation:Required
 	PodRef PodReference `json:"podRef"`
 }

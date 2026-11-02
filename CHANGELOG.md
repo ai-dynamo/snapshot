@@ -59,11 +59,12 @@ commit-level history for each release is on its
 - The agent timeout values lost their redundant prefixes:
   `config.checkpoint.checkpointTimeoutSeconds` is now
   `config.checkpoint.timeoutSeconds`, and `config.restore.restoreTimeoutSeconds`
-  is now `config.restore.timeoutSeconds`. Defaults are unchanged. A chart
-  upgrade moves both, because the ConfigMap and the DaemonSet roll together. An
-  installation that manages the agent ConfigMap itself must rename the keys in
-  it: left under the old names, the checkpoint timeout silently falls back to
-  `3600`, and the agent refuses to start at all without a restore timeout.
+  is now `config.restore.timeoutSeconds`. Defaults are unchanged. Move any value
+  you set under an old name: Helm would otherwise drop it silently and run on
+  the default, so the chart refuses to render while one is still set. The
+  rendered ConfigMap carries both spellings for this release, so a v0.2.0 agent
+  that restarts before the DaemonSet roll reaches its node still finds the key
+  it reads; the old pair goes away in v0.3.0+.
 - The user-facing documentation, the CRD field descriptions (`kubectl explain`)
   and the condition and failure messages follow the naming guide: the phase is
   a **checkpoint** (the verb) and what it writes is a **snapshot** (the noun).

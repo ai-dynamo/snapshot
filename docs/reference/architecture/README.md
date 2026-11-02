@@ -25,7 +25,7 @@ the restore proxy, which Snapshot injects.
 | **Operator** (`manager`) | Deployment, one per cluster | Reconciles the CRDs. Turns a `PodSnapshot` into a node-addressed work order, mirrors results back, cascades deletes, and runs the in-process maintenance queue that removes artifacts from storage. |
 | **CRD installer** | Init container of the operator | Applies the bundled CRDs on every rollout (`crdUpgrade.enabled`). |
 | **Node agent** | DaemonSet, privileged, GPU nodes | The node-local control loop. Watches this node's work orders and restore pods, and executes CRIU and CUDA checkpoint/restore against containers on the node. |
-| **PageBroker** | Container in the agent pod, privileged | Owns the movement of checkpoint data between the node and the checkpoint store, including the GPU engine that reads and writes GPU payloads. |
+| **PageBroker** | Container in the agent pod, privileged | Owns the movement of snapshot data between the node and the snapshot store, including the GPU engine that reads and writes GPU payloads. |
 | **Restore proxy** | PID 1 of each restore destination container | Injected by the agent's NRI plugin at container creation. Waits for the restore, then follows the restored process and exits with its status. |
 | **`nsrestore`** | Short-lived helper, exec'd by the agent | Performs the restore from *inside* the destination container's namespaces. |
 | **`snapshotctl`** | CLI | Lower-level checkpoint and restore from a pod manifest, without the CRDs. See [CLI](../cli.md). |
@@ -43,7 +43,7 @@ flowchart LR
     end
     wl["Workload container<br/>(source or destination)"]
   end
-  store[("Checkpoint store<br/>RWX PVC or S3")]
+  store[("Snapshot store<br/>RWX PVC or S3")]
 
   caller -->|"PodSnapshot · SnapshotJob<br/>restore-from annotation"| op
   op -->|"PodSnapshotContent<br/>(work order, node-labelled)"| agent
@@ -189,7 +189,7 @@ sequenceDiagram
     Note over A,D: CRIU restore
     A->>D: exec nsrestore
     D->>D: Apply rootfs diff, prepare GPU device mounts
-    P-->>D: Checkpoint images
+    P-->>D: CRIU images
     D->>D: CRIU restore rebuilds the process tree
     Note over A,D: CUDA restore
     D->>D: Remap captured PIDs onto the restored ones
@@ -229,7 +229,7 @@ changing how callers address a snapshot — see
 [SNEP-237: S3-compatible object storage](../../proposals/237-s3-storage/README.md).
 
 PageBroker adds a memory-backed staging volume shared with the agent. By default
-CRIU dumps into staging and PageBroker publishes to the checkpoint store on
+CRIU dumps into staging and PageBroker publishes to the snapshot store on
 success. With a PVC, restore reads the artifact directly
 (`pageBroker.restoreMode: direct`); with S3, restore always stages the
 artifact from the bucket first. Because
@@ -274,10 +274,11 @@ namespaces and driving CRIU requires it. That is the main boundary to be aware
 of when deciding where to install Snapshot — the namespace running the agent is
 as trusted as the node.
 
-Workloads stay unprivileged, and never mount checkpoint storage; the agent
-mediates every read and write. Checkpointed containers need a seccomp profile
+Workloads stay unprivileged, and the agent mediates every read and write of the
+snapshot store; only a non-target artifact writer mounts it, and only to write
+its own output. Checkpointed containers need a seccomp profile
 blocking `io_uring`, which CRIU cannot checkpoint, and the chart ships one.
-Checkpoint artifacts contain the workload's complete memory — protect the store
+A snapshot contains the workload's complete memory — protect the store
 accordingly. See [Security](../../operations/security.md).
 
 ## Multi-GPU

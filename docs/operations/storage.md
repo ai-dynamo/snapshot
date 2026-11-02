@@ -158,7 +158,7 @@ Because the staging volume is RAM, size the agent pod for it:
 | Value                                | Purpose                                                                                        | Default      |
 |---------------------------------------|--------------------------------------------------------------------------------------------------|--------------|
 | `pageBroker.staging.sizeLimit`       | Cap on the RAM-backed staging volume shared by checkpoint and staged restore; unbounded without it | `56Gi`       |
-| `daemonset.resources.limits.memory`  | Bounds the largest checkpoint image, since CRIU writes staging from the agent container         | `64Gi`       |
+| `daemonset.resources.limits.memory`  | Bounds the largest CRIU image, since CRIU writes staging from the agent container         | `64Gi`       |
 | `pageBroker.resources.limits.memory` | Bounds staged-restore prefetch, since PageBroker fills staging only in staged restore mode       | `256Gi`      |
 | `pageBroker.resources.requests`      | GPU transfer rings and process memory; added to the agent's requests when scheduling            | 8 CPU / 32Gi |
 
@@ -300,8 +300,8 @@ the volume.
 `pageBroker.restoreMode` selects the restore source for every restore:
 
 - `direct` (default) prepares a PageBroker transaction and mounts the original
-  checkpoint directory read-only for CRIU. It does not copy CPU images into staging.
-- `staged` copies checkpoint files into PageBroker staging before CRIU runs.
+  snapshot directory read-only for CRIU. It does not copy CPU images into staging.
+- `staged` copies snapshot files into PageBroker staging before CRIU runs.
 
 When testing a build, set `image.agent.tag` for both the agent and PageBroker,
 and verify the running containers' image digests. A separate

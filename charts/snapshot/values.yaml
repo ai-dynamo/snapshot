@@ -108,7 +108,7 @@ storage:
   pvc:
     # Create a new PVC (set to false if using existing PVC)
     create: true
-    # Checkpoint PVC name, in the Helm release namespace. Name and namespace
+    # Snapshot volume name, in the Helm release namespace. Name and namespace
     # identify the store; create/size/storageClass only control provisioning.
     name: snapshot-pvc
     # PVC size
@@ -162,12 +162,12 @@ storage:
   oci:
     uri: ""
 
-# PageBroker sidecar: stages checkpoint images in memory and publishes them to
-# the checkpoint PVC it shares with the agent. See docs/operations/storage.md.
+# PageBroker sidecar: stages CRIU images in memory and publishes them to
+# the snapshot volume it shares with the agent. See docs/operations/storage.md.
 pageBroker:
   # Requires a PageBroker image implementing the PVC artifact backend. Roll this out before binding new contents.
   artifactAddressing: false
-  # Restore directly from the checkpoint directory, or opt into a staged copy.
+  # Restore directly from the snapshot directory, or opt into a staged copy.
   restoreMode: direct
   maxConcurrentRequests: 16
   staging:
@@ -228,9 +228,9 @@ daemonset:
   # such RuntimeClass exists; the field is then left out of the pod spec.
   runtimeClassName: nvidia
 
-  # Resource limits and requests. CRIU writes the checkpoint image into the
+  # Resource limits and requests. CRIU writes its image into the
   # memory-backed PageBroker staging volume from this container, so
-  # limits.memory also bounds the largest checkpoint image.
+  # limits.memory also bounds the largest CRIU image.
   resources:
     limits:
       cpu: 4

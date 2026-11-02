@@ -21,7 +21,7 @@ See the [published results](benchmarks.md).
 - An engine image that supports the selected guide application's APIs.
 - A populated model PVC, mounted read-only at `/hf-cache`.
 - A writable work PVC for compiler caches.
-- A filesystem checkpoint PVC, passed with `--pvc-name`. Artifact inventory does
+- A filesystem snapshot volume, passed with `--pvc-name`. Artifact inventory does
   not support bound or remote stores.
 - The NVIDIA runtime class, `/dev/net/tun` and the node's
   `profiles/block-iouring.json` seccomp profile, as required by the guide templates.

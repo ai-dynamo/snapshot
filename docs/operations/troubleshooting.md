@@ -281,7 +281,7 @@ Likely causes: the staged checkpoint is not the one the agent validated,
 usually a storage mount that changed under it; an agent and nsrestore from
 different builds.
 
-Compare the checkpoint directory on the node with the artifact PageBroker
+Compare the snapshot directory on the node with the artifact PageBroker
 reports, and check that the agent and nsrestore come from the same image.
 
 ### preparing CRIU restore
