@@ -19,7 +19,8 @@ class NixlTransferEngine final : public TransferEngine {
   enum class Fault { DrainTimeout, RequestRelease, FileRelease, BufferRelease };
   // Optional per-instance control for exceptional-path tests. Normal callers omit it.
   using FaultInjector = std::function<bool(Fault)>;
-  NixlTransferEngine(std::span<void* const> buffers, size_t capacity, FaultInjector inject = {});
+  NixlTransferEngine(std::span<void* const> buffers, size_t capacity, FaultInjector inject = {},
+                     size_t queue_size = 0);
   ~NixlTransferEngine() override;
   IoEngine type() const override { return IoEngine::NIXL; }
 

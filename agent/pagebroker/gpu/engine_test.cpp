@@ -211,17 +211,17 @@ TEST_F(ArtifactTest, PreparesRestoreFilesBeforeParticipantsAndReleasesDescriptor
   };
   const auto before = descriptors();
   {
-    auto preparation = std::make_shared<posix::GpuRestorePreparation>(directory_.get(), 3);
+    auto preparation = std::make_shared<posix::GpuRestorePreparation>(directory_.get());
     // Preparation retains its source even if the caller closes its descriptor.
     auto source = FileDescriptor::Duplicate(directory_.get());
     directory_ = FileDescriptor(-1);
     ASSERT_NO_THROW(Artifact(source.get(), Direction::Restore, {1}, {kDevice}, {}, preparation));
-    EXPECT_GE(descriptors(), before + 4);
+    EXPECT_EQ(descriptors(), before + 1);
     // A pathname replacement cannot silently select the stale prepared inode.
     ASSERT_EQ(unlink(extent.c_str()), 0);
     FileDescriptor replacement(open(extent.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
     ASSERT_EQ(ftruncate(replacement.get(), 4096), 0);
-    EXPECT_THROW(Artifact(source.get(), Direction::Restore, {1}, {kDevice}, {}, preparation), std::invalid_argument);
+    EXPECT_THROW(Artifact(source.get(), Direction::Restore, {1}, {kDevice}, {}, preparation), std::runtime_error);
   }
   EXPECT_EQ(descriptors(), before - 1);
 }

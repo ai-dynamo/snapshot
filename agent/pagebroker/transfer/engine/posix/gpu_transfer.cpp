@@ -454,23 +454,110 @@ void TransferBuffers::Restore(int fd, CUdeviceptr device, size_t size, CUstream 
   impl_->Transfer(fd, device, size, stream, io::Operation::Read, cancellation);
 }
 
-TransferFile::TransferFile(int fd, size_t lanes) : file_(FileDescriptor::Duplicate(fd))
-{
-  const nvtx3::scoped_range range{"PageBroker pooled file open"};
-  const int flags = fcntl(fd, F_GETFL);
-  if (flags < 0) {
-    throw std::system_error(errno, std::generic_category(), "get pooled file flags");
-  }
-  // Reopen the held file, not its path.
-  const auto path = "/proc/self/fd/" + std::to_string(fd);
-  for (size_t index = 0; index < lanes; ++index) {
-    FileDescriptor lane(open(path.c_str(), O_CLOEXEC | (flags & (O_ACCMODE | O_DIRECT))));
-    if (lane.get() < 0) {
-      throw std::system_error(errno, std::generic_category(), "prepare pooled file");
+struct TransferPoolDevice::Impl {
+  CUcontext context;
+  CUdevice device;
+  int numa_node = -1;
+  TransferOptions options;
+  std::vector<std::unique_ptr<TransferSlot>> slots;
+  std::vector<std::unique_ptr<CudaEvent>> events;
+  std::vector<std::unique_ptr<CudaStream>> streams;
+
+  Impl(CUcontext context, TransferOptions options, size_t lanes) : context(context), options(options)
+  {
+    TransferMemoryBytes(options, 1, 0);
+    Validate(lanes > 0, "invalid transfer pool lane count");
+    gpu::CheckCuda(cuCtxSetCurrent(context), "select pooled transfer context");
+    gpu::CheckCuda(cuCtxGetDevice(&device), "get pooled transfer device");
+    gpu::CheckCuda(cuDeviceGetAttribute(&numa_node, CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, device),
+                   "get pooled allocation NUMA node");
+    for (size_t index = 0; index < lanes; ++index) {
+      auto event = std::make_unique<CudaEvent>();
+      gpu::CheckCuda(cuEventCreate(&event->handle, CU_EVENT_DISABLE_TIMING | CU_EVENT_BLOCKING_SYNC),
+                     "create pooled event");
+      events.push_back(std::move(event));
+      auto stream = std::make_unique<CudaStream>();
+      gpu::CheckCuda(cuStreamCreate(&stream->handle, CU_STREAM_NON_BLOCKING), "create pooled stream");
+      streams.push_back(std::move(stream));
     }
-    lanes_.push_back(std::move(lane));
+    for (size_t index = 0; index < options.buffer_count; ++index) {
+      auto slot = std::make_unique<TransferSlot>();
+      gpu::CheckCuda(slot->Allocate(options.chunk_bytes), "allocate pooled staging");
+      slots.push_back(std::move(slot));
+    }
+  }
+};
+
+TransferPoolDevice::TransferPoolDevice(CUcontext context, TransferOptions options, size_t lanes)
+    : impl_(std::make_unique<Impl>(context, options, lanes)) {}
+TransferPoolDevice::~TransferPoolDevice() = default;
+
+void TransferPoolDevice::AllowAccess(std::span<TransferPoolDevice* const> devices)
+{
+  gpu::CheckCuda(cuCtxSetCurrent(impl_->context), "select pooled access context");
+  for (const auto* device : devices) {
+    for (const auto& slot : device->impl_->slots) slot->AllowDevice(impl_->device);
   }
 }
+
+namespace {
+// Owns the POSIX/NIXL lifetime for one worker. Each active file has an
+// independent open description, avoiding NFS contention between workers.
+// Registration and descriptors live only as long as this lane's requests.
+class LaneStorage {
+ public:
+  LaneStorage(std::span<void* const> addresses, size_t capacity, size_t depth)
+      : storage_(addresses, capacity, {}, depth), requests_(addresses.size()) {}
+
+  void Submit(size_t slot, int source, size_t extent_size, io::Operation operation,
+              size_t offset, size_t size)
+  {
+    const Key key{source, extent_size};
+    auto found = files_.find(key);
+    if (found == files_.end()) {
+      const int flags = fcntl(source, F_GETFL);
+      if (flags < 0) throw std::system_error(errno, std::generic_category(), "get pooled file flags");
+      const auto path = "/proc/self/fd/" + std::to_string(source);
+      FileDescriptor descriptor(open(path.c_str(), O_CLOEXEC | (flags & (O_ACCMODE | O_DIRECT))));
+      if (descriptor.get() < 0) throw std::system_error(errno, std::generic_category(), "open pooled file");
+      found = files_.emplace(key, File{std::move(descriptor), 0}).first;
+      try {
+        storage_.RegisterFile(found->second.descriptor.get(), extent_size);
+      } catch (...) {
+        files_.erase(found);
+        throw;
+      }
+    }
+    ++found->second.active;
+    requests_.at(slot) = key;
+    // Wait also cleans up a request when Submit throws after creating it.
+    storage_.Submit(slot, found->second.descriptor.get(), operation, offset, size);
+  }
+
+  void Wait(size_t slot)
+  {
+    std::exception_ptr failure;
+    try { storage_.Wait(slot); } catch (...) { failure = std::current_exception(); }
+    const auto key = std::exchange(requests_.at(slot), std::nullopt);
+    if (key) {
+      auto found = files_.find(*key);
+      if (!--found->second.active) {
+        storage_.UnregisterFile(found->second.descriptor.get());
+        files_.erase(found);
+      }
+    }
+    if (failure) std::rethrow_exception(failure);
+  }
+
+ private:
+  using Key = std::pair<int, size_t>;
+  struct File { FileDescriptor descriptor; size_t active; };
+  // Destroy the NIXL engine before descriptors if exceptional cleanup is needed.
+  std::map<Key, File> files_;
+  NixlTransferEngine storage_;
+  std::vector<std::optional<Key>> requests_;
+};
+}  // namespace
 
 struct TransferPool::Impl {
   struct Job {
@@ -491,23 +578,19 @@ struct TransferPool::Impl {
     size_t offset;
     size_t size;
   };
-  struct RegisteredFile {
-    std::shared_ptr<Job> job;
-    FileDescriptor descriptor;
-  };
   struct Lane {
     size_t index;
-    std::vector<std::unique_ptr<TransferSlot>> slots;
-    std::map<CUcontext, std::unique_ptr<CudaEvent>> events;
-    std::map<CUcontext, std::unique_ptr<CudaStream>> streams;
-    // A private duplicate per registration lets several jobs share one
-    // TransferFile without colliding in NIXL.
-    std::map<const Job*, RegisteredFile> files;
-    std::unique_ptr<NixlTransferEngine> storage;
+    size_t depth;
+    std::unique_ptr<LaneStorage> storage;
     std::thread worker;
   };
+  struct Slot { TransferSlot* buffer; int numa_node; };
 
   TransferOptions options;
+  std::vector<std::unique_ptr<TransferPoolDevice>> devices;
+  std::map<CUcontext, TransferPoolDevice::Impl*> contexts;
+  std::vector<Slot> slots;
+  std::map<int, std::deque<size_t>> free;
   std::vector<std::unique_ptr<Lane>> lanes;
   std::mutex mutex;
   std::condition_variable changed;
@@ -515,59 +598,33 @@ struct TransferPool::Impl {
   bool stopping = false;
   uint64_t generation = 0;
 
-  Impl(std::span<const CUcontext> contexts, TransferOptions settings, size_t count) : options(settings)
+  explicit Impl(std::vector<std::unique_ptr<TransferPoolDevice>> prepared) : devices(std::move(prepared))
   {
-    TransferMemoryBytes(options, contexts.size(), 0);
-    const size_t slots = options.buffer_count * contexts.size();
-    Validate(!contexts.empty() && count && count <= slots, "invalid transfer pool lane count");
-    std::vector<CUdevice> devices;
-    std::map<int, std::vector<CUcontext>> numa_contexts;
-    for (const auto context : contexts) {
-      gpu::CheckCuda(cuCtxSetCurrent(context), "select pooled transfer context");
-      CUdevice device;
-      gpu::CheckCuda(cuCtxGetDevice(&device), "get pooled transfer device");
-      devices.push_back(device);
-      int node = -1;
-      gpu::CheckCuda(cuDeviceGetAttribute(&node, CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, device),
-                     "get pooled allocation NUMA node");
-      numa_contexts[node].push_back(context);
-    }
-    // Spread staging across host memory controllers even with fewer lanes
-    // than GPUs. Consecutive GPU ordinals often share the same NUMA node.
-    std::vector<CUcontext> allocation_contexts;
-    for (size_t offset = 0; allocation_contexts.size() < contexts.size(); ++offset) {
-      for (const auto& [node, local] : numa_contexts) {
-        (void)node;
-        if (offset < local.size()) allocation_contexts.push_back(local[offset]);
+    Validate(!devices.empty(), "transfer pool requires a device");
+    options = devices.front()->impl_->options;
+    const size_t requested = devices.front()->impl_->streams.size();
+    std::vector<void*> addresses;
+    for (const auto& device : devices) {
+      auto& state = *device->impl_;
+      Validate(state.options.buffer_count == options.buffer_count &&
+               state.options.chunk_bytes == options.chunk_bytes &&
+               state.options.direct_io == options.direct_io && state.streams.size() == requested,
+               "inconsistent transfer pool devices");
+      contexts.emplace(state.context, &state);
+      for (const auto& slot : state.slots) {
+        free[state.numa_node].push_back(slots.size());
+        slots.push_back({slot.get(), state.numa_node});
+        addresses.push_back(slot->data());
       }
     }
+    // A GPU skipped during setup reduces the slot budget. Keep the remaining
+    // GPUs available even when fewer slots than requested workers survive.
+    const size_t count = std::min(requested, slots.size());
     for (size_t index = 0; index < count; ++index) {
       auto lane = std::make_unique<Lane>();
       lane->index = index;
-      for (const auto context : contexts) {
-        gpu::CheckCuda(cuCtxSetCurrent(context), "select pooled event context");
-        auto event = std::make_unique<CudaEvent>();
-        gpu::CheckCuda(cuEventCreate(&event->handle, CU_EVENT_DISABLE_TIMING | CU_EVENT_BLOCKING_SYNC),
-                       "create pooled event");
-        lane->events.emplace(context, std::move(event));
-        auto stream = std::make_unique<CudaStream>();
-        gpu::CheckCuda(cuStreamCreate(&stream->handle, CU_STREAM_NON_BLOCKING), "create pooled stream");
-        lane->streams.emplace(context, std::move(stream));
-      }
-      const auto allocation_context = allocation_contexts[index % allocation_contexts.size()];
-      gpu::CheckCuda(cuCtxSetCurrent(allocation_context), "select pooled allocation context");
-      std::vector<void*> addresses;
-      const size_t width = slots / count + (index < slots % count);
-      for (size_t slot = 0; slot < width; ++slot) {
-        auto buffer = std::make_unique<TransferSlot>();
-        gpu::CheckCuda(buffer->Allocate(options.chunk_bytes), "allocate pooled staging");
-        for (const auto device : devices) {
-          buffer->AllowDevice(device);
-        }
-        addresses.push_back(buffer->data());
-        lane->slots.push_back(std::move(buffer));
-      }
-      lane->storage = std::make_unique<NixlTransferEngine>(addresses, options.chunk_bytes);
+      lane->depth = (slots.size() + count - 1) / count;
+      lane->storage = std::make_unique<LaneStorage>(addresses, options.chunk_bytes, lane->depth);
       lanes.push_back(std::move(lane));
     }
     try {
@@ -605,7 +662,7 @@ struct TransferPool::Impl {
     }
   }
 
-  std::optional<Work> Take(size_t slot)
+  std::optional<Work> Take()
   {
     std::lock_guard lock(mutex);
     // Assign the oldest unassigned bytes, without waiting for that extent's
@@ -622,6 +679,13 @@ struct TransferPool::Impl {
         changed.notify_all();
         continue;
       }
+      auto available = free.find(contexts.at(job->context)->numa_node);
+      if (available == free.end() || available->second.empty()) {
+        available = std::find_if(free.begin(), free.end(), [](const auto& item) { return !item.second.empty(); });
+      }
+      if (available == free.end()) return std::nullopt;
+      const auto slot = available->second.front();
+      available->second.pop_front();
       const size_t offset = job->next;
       const size_t size = std::min(options.chunk_bytes, job->size - offset);
       job->next += size;
@@ -639,6 +703,7 @@ struct TransferPool::Impl {
       job.failure = failure;
     }
     --job.active;
+    free.at(slots[work.slot].numa_node).push_back(work.slot);
     ++generation;
     changed.notify_all();
   }
@@ -647,9 +712,10 @@ struct TransferPool::Impl {
   {
     const auto& job = *work.job;
     gpu::CheckCuda(cuCtxSetCurrent(job.context), "select pooled copy context");
-    const auto event = lane.events.at(job.context)->handle;
-    const auto stream = lane.streams.at(job.context)->handle;
-    const auto host = lane.slots[work.slot]->data();
+    const auto& device = *contexts.at(job.context);
+    const auto event = device.events[lane.index]->handle;
+    const auto stream = device.streams[lane.index]->handle;
+    const auto host = slots[work.slot].buffer->data();
     try {
       gpu::CheckCuda(job.operation == io::Operation::Read
           ? cuMemcpyHtoDAsync(job.device + work.offset, host, work.size, stream)
@@ -663,63 +729,26 @@ struct TransferPool::Impl {
     }
   }
 
-  void ReleaseFiles(Lane& lane)
-  {
-    // Finished jobs no longer read their cancellation token, which may have
-    // been destroyed after the calling transfer returned.
-    for (auto it = lane.files.begin(); it != lane.files.end();) {
-      bool finished;
-      {
-        std::lock_guard lock(mutex);
-        finished = it->second.job->Finished();
-      }
-      if (finished) {
-        lane.storage->UnregisterFile(it->second.descriptor.get());
-        it = lane.files.erase(it);
-      } else {
-        ++it;
-      }
-    }
-  }
-
   void Run(Lane& lane)
   {
-    std::deque<size_t> free;
     std::deque<Work> pending;
-    for (size_t slot = 0; slot < lane.slots.size(); ++slot) {
-      free.push_back(slot);
-    }
     for (;;) {
       uint64_t observed;
       {
         std::lock_guard lock(mutex);
         observed = generation;
       }
-      ReleaseFiles(lane);
-      while (!free.empty()) {
-        auto work = Take(free.front());
+      while (pending.size() < lane.depth) {
+        auto work = Take();
         if (!work) {
           break;
         }
-        free.pop_front();
         try {
           const auto& job = *work->job;
-          auto registered = lane.files.find(&job);
-          if (registered == lane.files.end()) {
-            registered = lane.files.emplace(&job, RegisteredFile{
-                work->job, FileDescriptor::Duplicate(job.file->lane(lane.index))}).first;
-            try {
-              lane.storage->RegisterFile(registered->second.descriptor.get(), job.size);
-            } catch (...) {
-              lane.files.erase(registered);
-              throw;
-            }
-          }
-          const int fd = registered->second.descriptor.get();
           if (job.operation == io::Operation::Write) {
             Copy(lane, *work);
           }
-          lane.storage->Submit(work->slot, fd, job.operation, work->offset, work->size);
+          lane.storage->Submit(work->slot, job.file->fd(), job.size, job.operation, work->offset, work->size);
           pending.push_back(*work);
         } catch (...) {
           const auto failure = std::current_exception();
@@ -727,7 +756,6 @@ struct TransferPool::Impl {
           // its slot available or allowing the caller to close the file.
           try { lane.storage->Wait(work->slot); } catch (...) {}
           Complete(*work, failure);
-          free.push_back(work->slot);
         }
       }
       if (pending.empty()) {
@@ -746,17 +774,18 @@ struct TransferPool::Impl {
       try {
         lane.storage->Wait(work.slot);
         work.job->cancellation.ThrowIfCancelled();
-        if (work.job->operation == io::Operation::Read) {
+        {
+          std::lock_guard lock(mutex);
+          failure = work.job->failure;
+        }
+        if (!failure && work.job->operation == io::Operation::Read) {
           Copy(lane, work);
         }
       } catch (...) {
         failure = std::current_exception();
       }
       Complete(work, failure);
-      free.push_back(work.slot);
     }
-    lane.storage->Close();
-    lane.files.clear();
   }
 
   void Transfer(std::shared_ptr<const TransferFile> file, CUcontext context, CUdeviceptr device, size_t size,
@@ -765,8 +794,7 @@ struct TransferPool::Impl {
     cancellation.ThrowIfCancelled();
     Validate(!options.direct_io || size % kDirectIOAlignment == 0,
              "direct I/O requires a 4 KiB-aligned extent");
-    Validate(lanes.front()->events.contains(context), "unknown pooled transfer context");
-    Validate(file->lanes_.size() == lanes.size(), "pooled file lane count mismatch");
+    Validate(contexts.contains(context), "unknown pooled transfer context");
     if (!size) {
       return;
     }
@@ -802,8 +830,8 @@ struct TransferPool::Impl {
   }
 };
 
-TransferPool::TransferPool(std::span<const CUcontext> contexts, TransferOptions options, size_t lanes)
-    : impl_(std::make_unique<Impl>(contexts, options, lanes)) {}
+TransferPool::TransferPool(std::vector<std::unique_ptr<TransferPoolDevice>> devices)
+    : impl_(std::make_unique<Impl>(std::move(devices))) {}
 TransferPool::~TransferPool() = default;
 
 void TransferPool::Restore(std::shared_ptr<const TransferFile> file, CUcontext context, CUdeviceptr device,
@@ -816,14 +844,14 @@ void TransferPool::Restore(std::shared_ptr<const TransferFile> file, CUcontext c
 void TransferPool::Restore(int fd, CUcontext context, CUdeviceptr device, size_t size,
                            CUstream stream, const Cancellation& cancellation)
 {
-  Restore(std::make_shared<TransferFile>(fd, impl_->lanes.size()), context, device, size, stream, cancellation);
+  Restore(std::make_shared<TransferFile>(fd), context, device, size, stream, cancellation);
 }
 
 void TransferPool::Checkpoint(int fd, CUcontext context, CUdeviceptr device, size_t size,
                               CUstream stream, const Cancellation& cancellation)
 {
   const nvtx3::scoped_range range{"PageBroker pooled extent transfer"};
-  impl_->Transfer(std::make_shared<TransferFile>(fd, impl_->lanes.size()), context, device, size, stream,
+  impl_->Transfer(std::make_shared<TransferFile>(fd), context, device, size, stream,
                   io::Operation::Write, cancellation);
   const nvtx3::scoped_range sync{"PageBroker file sync"};
   if (fsync(fd)) {
@@ -855,14 +883,15 @@ struct GpuRestorePreparation::State {
   // Declared last so destruction joins before releasing the cancellation token.
   std::shared_future<Files> pending;
 
-  State(int directory_fd, size_t lanes)
+  explicit State(int directory_fd)
   {
     pending = std::async(std::launch::async,
-        [root = FileDescriptor::Duplicate(directory_fd), lanes, this] {
+        [root = FileDescriptor::Duplicate(directory_fd), this]() mutable {
+      auto source = std::move(root);
       const nvtx3::scoped_range range{"PageBroker restore file preparation"};
       Files files;
-      ValidateDirectory(root.get());
-      FileDescriptor gpu_root(openat(root.get(), gpu::kDataDirectory, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+      ValidateDirectory(source.get());
+      FileDescriptor gpu_root(openat(source.get(), gpu::kDataDirectory, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
       if (gpu_root.get() < 0 && errno == ENOENT) {
         return files;  // CPU-only checkpoint.
       }
@@ -895,7 +924,7 @@ struct GpuRestorePreparation::State {
             throw std::system_error(errno, std::generic_category(), "prepare GPU extent");
           }
           files.emplace(std::make_pair(pid, extent.filename),
-                        std::make_shared<TransferFile>(file.get(), lanes));
+                        std::make_shared<TransferFile>(file.get()));
         }
       }
       return files;
@@ -908,7 +937,7 @@ struct GpuRestorePreparation::State {
     const nvtx3::scoped_range range{"PageBroker restore preparation wait"};
     const auto file = pending.get().at({pid, extent.filename});
     struct stat held{}, current{};
-    Validate(fstat(file->fd(), &held) == 0 &&
+    Require(fstat(file->fd(), &held) == 0 &&
              fstatat(directory, extent.filename.c_str(), &current, AT_SYMLINK_NOFOLLOW) == 0 &&
              S_ISREG(held.st_mode) && held.st_dev == current.st_dev && held.st_ino == current.st_ino &&
              held.st_size >= 0 && static_cast<uint64_t>(held.st_size) == extent.size,
@@ -917,8 +946,8 @@ struct GpuRestorePreparation::State {
   }
 };
 
-GpuRestorePreparation::GpuRestorePreparation(int directory_fd, size_t lanes)
-    : state_(std::make_unique<State>(directory_fd, lanes)) {}
+GpuRestorePreparation::GpuRestorePreparation(int directory_fd)
+    : state_(std::make_unique<State>(directory_fd)) {}
 GpuRestorePreparation::~GpuRestorePreparation() = default;
 
 std::shared_ptr<TransferFile>
