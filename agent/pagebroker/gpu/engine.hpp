@@ -13,10 +13,6 @@
 #include "cancellation.hpp"
 #include "errors.hpp"
 
-namespace snapshot::pagebroker::posix {
-class GpuRestorePreparation;
-}
-
 namespace snapshot::pagebroker::gpu {
 // Serialize transfers for one GPU while honoring cancellation.
 std::unique_lock<std::timed_mutex> AcquireDevice(std::timed_mutex& mutex, const Cancellation& cancellation);
@@ -56,6 +52,19 @@ struct ParticipantResult {
   uint64_t bytes = 0;
 };
 
+// Optional preparation retained from staging through GPU restore. Only the GPU
+// artifact implementation interprets this state. Destruction cancels and joins
+// pending work before releasing its resources.
+class RestorePreparation {
+ public:
+  explicit RestorePreparation(int directory_fd);
+  ~RestorePreparation();
+ private:
+  friend class Artifact;
+  struct State;
+  std::unique_ptr<State> state_;
+};
+
 // Construct when GPU execution starts. Retains the artifact directory and
 // validates restore files. The broker keeps it until Commit or Abort finishes.
 class Artifact {
@@ -63,7 +72,7 @@ class Artifact {
   Artifact(int directory_fd, Direction direction,
            std::vector<uint32_t> captured_pids, std::vector<std::string> visible_devices,
            std::vector<DeviceMapping> device_map = {},
-           std::shared_ptr<posix::GpuRestorePreparation> preparation = {});
+           std::shared_ptr<RestorePreparation> preparation = {});
   ~Artifact();
   Artifact(const Artifact&) = delete;
   Artifact& operator=(const Artifact&) = delete;
@@ -83,7 +92,7 @@ class GpuEngine {
   explicit GpuEngine(EngineOptions options = {});
   ~GpuEngine();
   bool Available() const;
-  std::shared_ptr<posix::GpuRestorePreparation> PrepareRestore(int directory_fd);
+  std::shared_ptr<RestorePreparation> PrepareRestore(int directory_fd);
   std::vector<ParticipantResult> Checkpoint(Artifact&, const std::vector<Participant>&, Cancellation&);
   std::vector<ParticipantResult> Restore(Artifact&, const std::vector<Participant>&, Cancellation&);
 
