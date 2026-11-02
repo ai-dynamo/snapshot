@@ -26,10 +26,10 @@ tests:
       # reads this ConfigMap and dies at validation without the old restore key.
       - matchRegex:
           path: data["config.yaml"]
-          pattern: 'timeoutSeconds: 1200\n      checkpointTimeoutSeconds: 1200'
+          pattern: 'timeoutSeconds: 1200\n  checkpointTimeoutSeconds: 1200'
       - matchRegex:
           path: data["config.yaml"]
-          pattern: 'timeoutSeconds: 2400\n      restoreTimeoutSeconds: 2400'
+          pattern: 'timeoutSeconds: 2400\n  restoreTimeoutSeconds: 2400'
 
   - it: refuses a value still set under a pre-rename timeout key
     set:
