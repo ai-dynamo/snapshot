@@ -15,6 +15,8 @@ class FileDescriptor {
 
   int get() const;
   static FileDescriptor Duplicate(int value);
+  static FileDescriptor OpenDirectory(int parent, const char* name);
+  void RequireDirectory() const;
 
  private:
   int value_;
