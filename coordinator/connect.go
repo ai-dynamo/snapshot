@@ -100,14 +100,15 @@ func Connect(ctx context.Context, cfg Config) (Session, error) {
 		return nil, err
 	}
 	s := &client{
-		attempt:   cfg.Attempt,
-		member:    cfg.Member,
-		log:       cfg.Log.WithValues("attempt", cfg.Attempt, "member", cfg.Member),
-		connected: make(chan struct{}),
-		verify:    make(chan struct{}, 1),
-		closing:   make(chan struct{}),
-		done:      make(chan struct{}),
-		wake:      make(chan struct{}),
+		attempt:    cfg.Attempt,
+		member:     cfg.Member,
+		log:        cfg.Log.WithValues("attempt", cfg.Attempt, "member", cfg.Member),
+		connected:  make(chan struct{}),
+		verify:     make(chan struct{}, 1),
+		closing:    make(chan struct{}),
+		connClosed: make(chan struct{}),
+		done:       make(chan struct{}),
+		wake:       make(chan struct{}),
 	}
 	nc, err := nats.Connect(strings.Join(cfg.URLs, ","), s.options(cfg)...)
 	if err != nil {
@@ -162,6 +163,7 @@ func (s *client) options(cfg Config) []nats.Option {
 				s.log.Info("Lost the connection to the coordinator; reconnecting", "error", err.Error())
 			}
 		}),
+		nats.ClosedHandler(func(*nats.Conn) { close(s.connClosed) }),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
 			// A refused publish names its subject, which can hold a key, so its
 			// text is never logged.

@@ -365,3 +365,33 @@ func TestClose(t *testing.T) {
 	awaitDone(t, sessions[1])
 	require.ErrorIs(t, sessions[1].Err(), &session.AbortError{Reason: session.ReasonMemberFailed})
 }
+
+// TestCloseWhileWatching closes a member while its watches are still being
+// created: the one that follows the session's end, which Connect starts, and
+// a Barrier's. nats.go never closes the channel of a watch cancelled as it is
+// created, so a client that waited for that channel would never return from
+// Close or the Barrier. Each Close gives the race one chance, so the test
+// closes many members.
+func TestCloseWhileWatching(t *testing.T) {
+	h := newHarness(t)
+	for i := range 50 {
+		ctx := within(t)
+		s, err := coordinator.Connect(ctx, h.session(t, 2).config(0))
+		require.NoError(t, err)
+		wait := barrier(ctx, s, "never")
+		closed := make(chan error, 1)
+		go func() { closed <- s.Close() }()
+		select {
+		case err := <-closed:
+			require.NoError(t, err, "session %d", i)
+		case <-ctx.Done():
+			t.Fatalf("session %d: Close did not return", i)
+		}
+		select {
+		case err := <-wait:
+			require.ErrorIs(t, err, net.ErrClosed, "session %d", i)
+		case <-ctx.Done():
+			t.Fatalf("session %d: the Barrier did not return", i)
+		}
+	}
+}

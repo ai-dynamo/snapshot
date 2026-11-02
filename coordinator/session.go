@@ -103,9 +103,12 @@ type client struct {
 	// while one is pending coalesce.
 	verify  chan struct{}
 	closing chan struct{}
-	done    chan struct{}
-	end     sync.Once
-	err     error
+	// connClosed is closed once the connection is, by Close or as the session
+	// ends; nats.go then delivers nothing more to any watch.
+	connClosed chan struct{}
+	done       chan struct{}
+	end        sync.Once
+	err        error
 
 	mu sync.Mutex
 	// requested counts the requests to verify the session, and verified is the
@@ -355,9 +358,10 @@ func (s *client) watch(ctx context.Context, kv jetstream.KeyValue, keys []string
 			err = context.Cause(attempt)
 		}
 		if err != nil {
-			cancel()
 			if kw != nil {
-				drain(kw)
+				s.stop(watcher{KeyWatcher: kw, cancel: cancel})
+			} else {
+				cancel()
 			}
 			return err
 		}
@@ -420,9 +424,9 @@ func (s *client) await(ctx context.Context, kv jetstream.KeyValue, keys []string
 	}
 }
 
-// stop stops a watch without holding up its caller: stopping deletes the
-// watch's consumer, a round trip that waits out a broken connection. Close
-// waits for it.
+// stop stops a watch without holding up its caller, and drains it so nats.go
+// never blocks delivering to it. Close waits for the drains, which end by the
+// time the connection has closed.
 func (s *client) stop(w watcher) {
 	w.cancel()
 	s.mu.Lock()
@@ -432,18 +436,38 @@ func (s *client) stop(w watcher) {
 	}
 	s.mu.Unlock()
 	if closed {
-		drain(w)
+		s.drain(w)
 		return
 	}
 	go func() {
 		defer s.wg.Done()
-		drain(w)
+		s.drain(w)
 	}()
 }
 
-// drain waits until a cancelled watch has stopped. Its last entries may still
-// be on their way, and its channel closes once its subscription has.
-func drain(w jetstream.KeyWatcher) {
-	for range w.Updates() {
+// drain consumes a cancelled watch until its channel closes, which happens once
+// its subscription has, or until the connection has closed. nats.go may never
+// close the channel of a watch cancelled before WatchFiltered returned, so the
+// connection's close is what bounds the wait. nats.go delivers nothing after
+// it, so emptying the channel frees the one delivery that may be blocked on it.
+func (s *client) drain(w jetstream.KeyWatcher) {
+	for {
+		select {
+		case _, ok := <-w.Updates():
+			if !ok {
+				return
+			}
+		case <-s.connClosed:
+			for {
+				select {
+				case _, ok := <-w.Updates():
+					if !ok {
+						return
+					}
+				default:
+					return
+				}
+			}
+		}
 	}
 }
