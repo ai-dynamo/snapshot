@@ -7,6 +7,8 @@ name: E2E Framework Tests
 # TensorRT-LLM), one vCluster per framework. The cluster setup mirrors
 # e2e.yaml; the differences are the 64Gi checkpoint PVC (framework artifacts
 # are multi-GB), the framework image resolution, and the diagnostics upload.
+# A fourth job runs vLLM with Snapshot installed against an S3-compatible
+# store (snapshot_e2e.s3 deploy, a pod inside its vCluster) instead of the PVC.
 #
 # Pull requests are tested by manually dispatching this workflow on their
 # copy-pr-bot mirror branch (pull-request/<number>, see
@@ -38,11 +40,11 @@ on:
   workflow_dispatch:
     inputs:
       framework:
-        description: Framework to test (all, vllm, sglang, tensorrt-llm)
+        description: Framework to test (all, vllm, vllm-s3, sglang, tensorrt-llm)
         required: false
         default: all
         type: choice
-        options: [all, vllm, sglang, tensorrt-llm]
+        options: [all, vllm, vllm-s3, sglang, tensorrt-llm]
       snapshot_tag:
         description: >-
           Operator/agent image tag to install. pull-request/<number> mirror
@@ -118,7 +120,7 @@ jobs:
         run: python3 hack/datadog-gpu-monitoring.py disable --holder "${{ github.run_id }}-${{ github.run_attempt }}"
 
   e2e:
-    name: ${{ matrix.framework }}
+    name: ${{ matrix.case }}
     needs: [check, datadog-gate]
     runs-on: prod-deploy-tester-v1
     # Above the sum of this job's own step timeout-minutes (123, dominated by
@@ -129,21 +131,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, sglang, tensorrt-llm]
+        include:
+          - {framework: vllm, storage: pvc, case: vllm}
+          - {framework: sglang, storage: pvc, case: sglang}
+          - {framework: tensorrt-llm, storage: pvc, case: tensorrt-llm}
+          - {framework: vllm, storage: s3, case: vllm-s3, port: 19000, console_port: 19001}
     concurrency:
       # PR mirror branches get one group per branch, so a new push cancels
       # the stale run. Scheduled/dispatched runs share a fixed 'nightly'
       # group per framework so they queue instead of racing on this
       # GPU-scarce cluster -- cancel-in-progress stays false there so a
       # queued run executes instead of being dropped.
-      group: snapshot-e2e-frameworks-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref_name || 'nightly' }}-${{ matrix.framework }}
+      group: snapshot-e2e-frameworks-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref_name || 'nightly' }}-${{ matrix.case }}
       cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
     env:
-      HOST_NAMESPACE: snapshot-e2e-fw-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
-      VCLUSTER_NAME: snapshot-e2e-fw-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      HOST_NAMESPACE: snapshot-e2e-fw-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_NAME: snapshot-e2e-fw-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
       TEST_NAMESPACE: snapshot-e2e
-      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-fw-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
-      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-fw-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-fw-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-fw-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
       SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
       SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
       SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
@@ -161,6 +167,9 @@ jobs:
       SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
       SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
       SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
+      SNAPSHOT_E2E_STORAGE: ${{ matrix.storage }}
+      SNAPSHOT_E2E_S3_PORT: ${{ matrix.port }}
+      SNAPSHOT_E2E_S3_CONSOLE_PORT: ${{ matrix.console_port }}
       SNAPSHOT_E2E_BENCHMARK_DIR: ${{ github.workspace }}/.e2e-benchmark-results
       SNAPSHOT_E2E_DATADOG_GPU_MONITORING: ${{ needs.datadog-gate.outputs.mode }}
       # Shared CI model cache (HF cache layout on an NFS export): pods here
@@ -184,11 +193,11 @@ jobs:
           SELECTED: ${{ inputs.framework || 'all' }}
         run: |
           set -euo pipefail
-          if [[ "${SELECTED}" == "all" || "${SELECTED}" == "${{ matrix.framework }}" ]]; then
+          if [[ "${SELECTED}" == "all" || "${SELECTED}" == "${{ matrix.case }}" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping ${{ matrix.framework }}: dispatch selected ${SELECTED}"
+            echo "Skipping ${{ matrix.case }}: dispatch selected ${SELECTED}"
           fi
 
       - name: Capture host kubeconfig
@@ -309,6 +318,32 @@ jobs:
           uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase vcluster
 
+      - name: Deploy the S3 store in the vCluster
+        if: ${{ steps.selected.outputs.run == 'true' && matrix.storage == 's3' }}
+        timeout-minutes: 8
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          # A store on the node's network gets a login of its own for this run.
+          access_key="$(openssl rand -hex 8)"
+          secret_key="$(openssl rand -hex 16)"
+          echo "::add-mask::${access_key}"
+          echo "::add-mask::${secret_key}"
+          export SNAPSHOT_E2E_S3_ACCESS_KEY="${access_key}"
+          export SNAPSHOT_E2E_S3_SECRET_KEY="${secret_key}"
+          uv run --locked --project e2e python -m snapshot_e2e.s3 deploy
+          SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT="$(uv run --locked --project e2e python -m snapshot_e2e.s3 endpoint)"
+          export SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT
+          values="$(uv run --locked --project e2e python -m snapshot_e2e.s3 helm-set)"
+          values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.level=INFO"
+          values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.toStderr=true"
+          {
+            echo "SNAPSHOT_E2E_HELM_SET<<SNAPSHOT_E2E_HELM_SET_END"
+            echo "${values}"
+            echo "SNAPSHOT_E2E_HELM_SET_END"
+          } >> "${GITHUB_ENV}"
+
       - name: Install Snapshot in vCluster
         if: ${{ steps.selected.outputs.run == 'true' }}
         timeout-minutes: 8
@@ -373,7 +408,7 @@ jobs:
       # whole process group, so pytest raises KeyboardInterrupt, runs its
       # fixture finalizers (benchmark result, cluster cleanup), and exits
       # before the KILL backstop; GNU timeout still returns 124.
-      - name: Run ${{ matrix.framework }} checkpoint/restore test
+      - name: Run ${{ matrix.case }} checkpoint/restore test
         if: ${{ steps.selected.outputs.run == 'true' }}
         id: framework_test
         timeout-minutes: 56
@@ -385,7 +420,7 @@ jobs:
           if [[ "${status}" -eq 124 ]]; then
             PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
               --suite framework-checkpoint-restore \
-              --case "${{ matrix.framework }}" \
+              --case "${{ matrix.case }}" \
               --test test_framework_checkpoint_restore_serves_inference \
               --outcome timed_out \
               --message "pytest exceeded the 52 minute benchmark timeout"
@@ -400,7 +435,7 @@ jobs:
           set -euo pipefail
           PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
             --suite framework-checkpoint-restore \
-            --case "${{ matrix.framework }}" \
+            --case "${{ matrix.case }}" \
             --test test_framework_checkpoint_restore_serves_inference \
             --outcome infrastructure_failed \
             --message "pytest produced no benchmark result; step outcome=${TEST_STEP_OUTCOME}"
@@ -408,19 +443,19 @@ jobs:
       # Pytest can succeed with skipped cases. A selected backend only qualifies
       # when its own result passed in this run attempt; stale workspace files or
       # synthesized failure records must never stand in for restored inference.
-      - name: Require passing ${{ matrix.framework }} result
+      - name: Require passing ${{ matrix.case }} result
         if: ${{ always() && steps.selected.outputs.run == 'true' }}
         run: |
           set -euo pipefail
           PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history require-pass \
             --artifacts-dir "${SNAPSHOT_E2E_BENCHMARK_DIR}" \
-            --case "${{ matrix.framework }}"
+            --case "${{ matrix.case }}"
 
       - name: Upload benchmark result
         if: ${{ always() && steps.selected.outputs.run == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-framework-benchmark-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: e2e-framework-benchmark-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.SNAPSHOT_E2E_BENCHMARK_DIR }}/*.json
           if-no-files-found: error
           include-hidden-files: true
@@ -456,11 +491,22 @@ jobs:
           done
           echo "DIAGNOSTICS_DIR=${out}" >> "$GITHUB_ENV"
 
+      - name: Collect S3 store diagnostics
+        if: ${{ failure() && steps.selected.outputs.run == 'true' && matrix.storage == 's3' }}
+        timeout-minutes: 5
+        run: |
+          set +e
+          out="${DIAGNOSTICS_DIR:-${RUNNER_TEMP}/diagnostics}"
+          mkdir -p "${out}"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/name=snapshot-s3 \
+            --all-containers --tail=-1 --prefix > "${out}/s3-store.log"
+          echo "DIAGNOSTICS_DIR=${out}" >> "$GITHUB_ENV"
+
       - name: Upload diagnostics
         if: ${{ failure() && steps.selected.outputs.run == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-frameworks-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: e2e-frameworks-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.DIAGNOSTICS_DIR }}
           if-no-files-found: ignore
           retention-days: 7
@@ -544,7 +590,7 @@ jobs:
           set -euo pipefail
           cases=()
           if [[ "${SELECTED_FRAMEWORK}" == "all" ]]; then
-            cases=(vllm sglang tensorrt-llm)
+            cases=(vllm sglang tensorrt-llm vllm-s3)
           else
             cases=("${SELECTED_FRAMEWORK}")
           fi
@@ -622,6 +668,7 @@ jobs:
             --expected-case vllm \
             --expected-case sglang \
             --expected-case tensorrt-llm \
+            --expected-case vllm-s3 \
             --publish
 
       - name: Commit and push benchmark history

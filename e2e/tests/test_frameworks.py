@@ -111,7 +111,7 @@ def test_framework_checkpoint_restore_serves_inference(
 ) -> None:
     result = benchmark.start(
         suite="framework-checkpoint-restore",
-        case=framework.case_name,
+        case=f"{framework.case_name}-s3" if over_s3() else framework.case_name,
         environment={
             "namespace": config.namespace,
             "model": framework.model,
