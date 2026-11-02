@@ -212,7 +212,7 @@ CreateGpuArtifact(const Transaction& transaction, const GpuRequest& request)
       throw std::invalid_argument("GPU restore requires a restore transaction");
     }
     return std::make_unique<gpu::Artifact>(restore->source_fd(), request.direction,
-        request.captured_pids, request.visible_devices, request.device_map, restore->preparation());
+        request.captured_pids, request.visible_devices, request.device_map);
   }
   const auto* checkpoint = std::get_if<CheckpointTransactionDescriptor>(&transaction.descriptor());
   if (!checkpoint) {
@@ -616,9 +616,7 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     if (staging_reserved)
       ReleaseStaging(bytes);
     staging_reserved = false;
-    auto preparation = direct && gpu_engine_ ? gpu_engine_->PrepareRestore(access.source.get()) : nullptr;
-    transaction->set_descriptor(RestoreTransactionDescriptor(access.staging_directory, std::move(access.source),
-                                                            std::move(preparation)));
+    transaction->set_descriptor(RestoreTransactionDescriptor(access.staging_directory, std::move(access.source)));
     transaction->set_state(Transaction::State::STAGED);
   }
   catch (const std::exception& error) {

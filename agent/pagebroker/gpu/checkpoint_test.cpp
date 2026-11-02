@@ -611,8 +611,6 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
     engine = std::make_shared<gpu::GpuEngine>(options);
   }
   ASSERT_TRUE(engine->Available());
-  // Optional pre-opening must not make a usable engine fail a restore.
-  EXPECT_EQ(engine->PrepareRestore(-1), nullptr);
   {
     BrokerGpuTest broker(root, visible_device, engine);
     ASSERT_NO_FATAL_FAILURE(broker.InterruptedRestore(
