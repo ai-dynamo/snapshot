@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "file_descriptor.hpp"
-#include "transfer.hpp"
+#include "transfer/engine/posix/gpu_transfer.hpp"
 
 #include <gtest/gtest.h>
 #include <fcntl.h>
@@ -16,7 +16,7 @@
 #include <array>
 
 namespace {
-namespace transfer = snapshot::pagebroker::cuda;
+namespace transfer = snapshot::pagebroker::posix;
 using snapshot::pagebroker::Cancellation;
 constexpr size_t chunk_bytes = 65536;
 constexpr size_t data_bytes = 17 * chunk_bytes + 13;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "engine.hpp"
+#include "transfer/engine/posix/gpu_transfer.hpp"
 #include "storage_manifest.hpp"
 #include "file_descriptor.hpp"
 #include "fatal_cleanup.hpp"
@@ -210,7 +211,7 @@ TEST_F(ArtifactTest, PreparesRestoreFilesBeforeParticipantsAndReleasesDescriptor
   };
   const auto before = descriptors();
   {
-    auto preparation = std::make_shared<RestorePreparation>(directory_.get(), 3);
+    auto preparation = std::make_shared<posix::GpuRestorePreparation>(directory_.get(), 3);
     // Preparation retains its source even if the caller closes its descriptor.
     auto source = FileDescriptor::Duplicate(directory_.get());
     directory_ = FileDescriptor(-1);
