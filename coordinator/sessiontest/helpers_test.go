@@ -88,7 +88,7 @@ func (h *harness) start() {
 	h.srv = srv
 }
 
-// restart replaces the coordinator, as a crash and a new leader would: the new
+// restart replaces the coordinator, as a restart of its host would: the new
 // coordinator recreates the sessions of specs, with new epochs, before it
 // admits anyone, and every member's connection breaks and reconnects to it.
 // The old coordinator shuts down only once no member reaches it, so no member

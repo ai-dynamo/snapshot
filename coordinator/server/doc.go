@@ -8,8 +8,8 @@
 // (github.com/ai-dynamo/snapshot/coordinator/session) with the session client:
 // the bucket names and key layout, the default limits, the user name a member
 // connects under, the subjects its connection is permitted, Meta, and the
-// errors. The reconciler that follows the set resources, the TokenReview
-// Authorizer, and the binary sit above this package.
+// errors. The host, whatever process embeds the server, sits above this
+// package: it ensures and removes sessions, and provides the Authorizer.
 //
 // # The embedded server
 //
@@ -45,7 +45,7 @@
 //
 // # Sessions
 //
-// The reconciler drives sessions, level-triggered: Ensure while an attempt's
+// The host drives sessions, level-triggered: Ensure while an attempt's
 // set resource is unfinished, and Remove once it is deleted, or once it is
 // final and its session has ended. A session ends exactly once, through the
 // ended key, which is only ever created: by a member's Fail; by the
@@ -65,11 +65,10 @@
 //
 // # Restarts and the epoch
 //
-// A coordinator restart loses every session. The reconciler ensures them again
-// with new epochs before the host calls MarkReady, and a member that
-// reconnects presents the epoch it read: a different one makes the coordinator
-// fail the recreated session with session.ReasonCoordinatorLost before
-// admitting the member, so the member never writes to a session it did not
-// join. The member itself then reads meta, finds the other epoch, and reports
-// session.ErrCoordinatorLost.
+// A coordinator restart loses every session. The host ensures them again with
+// new epochs before it calls MarkReady, and a member that reconnects presents
+// the epoch it read: a different one makes the coordinator fail the recreated
+// session with session.ReasonCoordinatorLost before admitting the member, so
+// the member never writes to a session it did not join. The member itself then
+// reads meta, finds the other epoch, and reports session.ErrCoordinatorLost.
 package server

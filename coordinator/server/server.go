@@ -196,13 +196,13 @@ func setDefault[T comparable](v *T, def T) {
 // layout, the limits, and the permissions a member's connection gets.
 //
 // The server starts refusing every client, and admits them only once the host
-// calls MarkReady, which it does after its reconciler's first pass has ensured
-// the session of every unfinished attempt. A coordinator restart loses every
-// session, so until then a member reconnecting with the epoch it read from the
-// session it joined would find nothing, fail nothing, and leave the members
-// that had not connected yet to join the recreated session and wait for its
-// deadline. Once ready, such a member finds the recreated session's other
-// epoch, which fails it with session.ReasonCoordinatorLost at once.
+// calls MarkReady, which it does once it has ensured the session of every
+// unfinished attempt. A coordinator restart loses every session, so until then
+// a member reconnecting with the epoch it read from the session it joined would
+// find nothing, fail nothing, and leave the members that had not connected yet
+// to join the recreated session and wait for its deadline. Once ready, such a
+// member finds the recreated session's other epoch, which fails it with
+// session.ReasonCoordinatorLost at once.
 //
 // A Server is safe for concurrent use.
 type Server struct {
@@ -330,8 +330,8 @@ func (s *Server) connect(user string) (*nats.Conn, error) {
 	return nc, nil
 }
 
-// MarkReady starts admitting clients. The host calls it once its reconciler's
-// first pass has ensured the session of every unfinished attempt; see Server.
+// MarkReady starts admitting clients. The host calls it once it has ensured
+// the session of every unfinished attempt; see Server.
 func (s *Server) MarkReady() {
 	if !s.ready.Swap(true) {
 		s.log.Info("Coordinator ready; admitting clients")
@@ -341,13 +341,13 @@ func (s *Server) MarkReady() {
 // Addr returns the address the client listener listens on.
 func (s *Server) Addr() net.Addr { return s.ns.Addr() }
 
-// Shutdown ends the coordinator, for losing its Lease or for stopping: it
-// fails every open session with session.ReasonCoordinatorLost, waits briefly,
-// within ctx, for the members to learn it and close their connections, then
-// shuts the embedded server down, which closes every connection left. A
-// member that missed the failure learns the same from the next coordinator,
-// through the epoch. Ensure and Remove fail afterwards, and shutting down
-// again does nothing.
+// Shutdown ends the coordinator, when its host stops serving: it fails every
+// open session with session.ReasonCoordinatorLost, waits briefly, within ctx,
+// for the members to learn it and close their connections, then shuts the
+// embedded server down, which closes every connection left. A member that
+// missed the failure learns the same from the next coordinator, through the
+// epoch. Ensure and Remove fail afterwards, and shutting down again does
+// nothing.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.control.Lock()
 	defer s.control.Unlock()

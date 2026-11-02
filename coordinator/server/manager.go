@@ -125,11 +125,11 @@ func (a *attempt) has(member string) bool {
 // failed with session.ReasonDeadlineExceeded, so a member that connects learns
 // why at once.
 //
-// The reconciler ensures an attempt only while its set resource is unfinished.
+// The host ensures an attempt only while its set resource is unfinished.
 // It never ensures one whose resource is final, which would open a session for
 // an attempt that is over, and so never one it has removed either, since a UID
-// names one attempt. Nothing here enforces that; it is the reconciler's half
-// of the rule Remove states.
+// names one attempt. Nothing here enforces that; it is the host's half of
+// the rule Remove states.
 func (s *Server) Ensure(ctx context.Context, spec Spec) error {
 	if err := spec.validate(); err != nil {
 		return fmt.Errorf("attempt %s: %w", spec.UID, err)
@@ -332,7 +332,7 @@ func (s *Server) closeSession(ctx context.Context, a *attempt) {
 	}
 }
 
-// Remove discards the session of an attempt the reconciler is done with: it
+// Remove discards the session of an attempt the host is done with: it
 // fails the session first with session.ReasonCancelled if it is still open,
 // recording the end when the memory cap allows, then deletes both buckets and
 // forgets the session. A member that has not received the end by then learns

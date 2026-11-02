@@ -5,8 +5,8 @@
 // Snapshot coordinator, and everything the two share: the layout of a session's
 // buckets, the limits the coordinator applies, the user name and permissions
 // of a member's connection, the Meta a member reads, and the errors either side
-// reports. It imports no NATS package. The client is package coordinator in
-// this module, and the coordinator lives in the operator module.
+// reports. It imports no NATS package. The client is package coordinator, at
+// this module's root, and the coordinator is package server.
 //
 // A session is one attempt of a set capture or restore, identified by the set
 // resource's UID. The coordinator keeps it in two key-value buckets of the NATS

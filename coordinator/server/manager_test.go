@@ -269,7 +269,7 @@ func TestShutdown(t *testing.T) {
 }
 
 // TestRestart covers a coordinator that restarts under a session: the next
-// one refuses members until its reconciler has recreated the session, then
+// one refuses members until its host has recreated the session, then
 // fails it as soon as a member that joined the lost one reconnects with the
 // epoch it read, so the members that had not connected yet learn it too.
 func TestRestart(t *testing.T) {

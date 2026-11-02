@@ -176,7 +176,7 @@ func TestEpochFence(t *testing.T) {
 	ctx := within(t)
 	spec := h.ensure(2)
 	old := h.srv.lookup(spec.UID).epoch
-	// The reconciler never recreates an attempt it removed; a test may, to
+	// The host never recreates an attempt it removed; a test may, to
 	// give it another epoch, as a restart would.
 	require.NoError(t, h.srv.Remove(ctx, spec.UID))
 	spec2 := spec
