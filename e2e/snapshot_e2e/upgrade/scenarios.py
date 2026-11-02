@@ -116,7 +116,8 @@ def restore_succeeded(namespace: str, pod_name: str, *, checkpointed_by: str) ->
     It returns False only for the expected lsm-labels refusal described above.
     Any other refusal or failure fails the test.
     """
-    if has_feature(checkpointed_by, LSM_LABELS_RELEASE):
+    # A dev build may come from a main commit older than the check.
+    if not checkpointed_by.startswith("v0.0.0-") and has_feature(checkpointed_by, LSM_LABELS_RELEASE):
         lifecycle.wait_for_restored_condition(namespace, pod_name, "True", "RestoreSucceeded")
         return True
 
