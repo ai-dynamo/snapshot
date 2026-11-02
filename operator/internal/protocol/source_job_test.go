@@ -128,7 +128,7 @@ func TestNewSourceJobKeepsTheReadinessProbeWithACheckpointReadinessProbe(t *test
 	}}}}
 	opts := SourceJobOptions{Namespace: "test-ns", Name: "test-job", TargetContainer: "main"}
 
-	opts.CheckpointReadinessProbe = true
+	opts.HasCheckpointReadinessProbe = true
 	job, err := NewSourceJob(template, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestNewSourceJobKeepsTheReadinessProbeWithACheckpointReadinessProbe(t *test
 		t.Fatalf("expected the control volume mounted as usual, got %#v", main.VolumeMounts)
 	}
 
-	opts.CheckpointReadinessProbe = false
+	opts.HasCheckpointReadinessProbe = false
 	job, err = NewSourceJob(template, opts)
 	if err != nil {
 		t.Fatal(err)

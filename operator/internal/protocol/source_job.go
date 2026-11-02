@@ -23,11 +23,11 @@ type SourceJobOptions struct {
 	ActiveDeadlineSeconds *int64
 	TTLSecondsAfterFinish *int32
 	WrapLaunchJob         bool
-	// CheckpointReadinessProbe says the target has its own checkpoint
+	// HasCheckpointReadinessProbe says the target has its own checkpoint
 	// readiness probe, which decides when to checkpoint instead of Ready. The
 	// caller's readiness probe is then kept, so Ready means what the workload
 	// says, such as ready to serve.
-	CheckpointReadinessProbe bool
+	HasCheckpointReadinessProbe bool
 }
 
 func NewSourceJob(podTemplate *corev1.PodTemplateSpec, opts SourceJobOptions) (*batchv1.Job, error) {
@@ -80,7 +80,7 @@ func NewSourceJob(podTemplate *corev1.PodTemplateSpec, opts SourceJobOptions) (*
 	// liveness/startup probes are cleared — a source job runs to a
 	// quiesce-and-sit state, not a long-lived serving state.
 	EnsureControlVolume(&podTemplate.Spec, targetContainer)
-	if !opts.CheckpointReadinessProbe {
+	if !opts.HasCheckpointReadinessProbe {
 		targetContainer.ReadinessProbe = &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				Exec: &corev1.ExecAction{

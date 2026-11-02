@@ -64,7 +64,7 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 		TTLSecondsAfterFinish: nil,
 		WrapLaunchJob:         false,
 
-		CheckpointReadinessProbe: hasCheckpointReadinessProbe(sj.Spec.PodSnapshotTemplate.Containers, targetContainer),
+		HasCheckpointReadinessProbe: hasCheckpointReadinessProbe(sj.Spec.PodSnapshotTemplate.Containers, targetContainer),
 	})
 }
 
