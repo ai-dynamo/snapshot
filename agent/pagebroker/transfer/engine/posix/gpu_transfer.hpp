@@ -9,7 +9,6 @@
 #include <memory>
 #include <span>
 #include <vector>
-#include "file_descriptor.hpp"
 
 // GPU transfers through CPU staging buffers and NIXL's POSIX backend.
 // Ring and pooled lanes are policies of this path, not requirements on other
@@ -49,15 +48,6 @@ class TransferBuffers {
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
-// Holds one validated extent open while restore prepares CUDA mappings.
-// Workers reopen it only while transferring, with independent filesystem state.
-class TransferFile {
- public:
-  explicit TransferFile(int fd) : file_(FileDescriptor::Duplicate(fd)) {}
-  int fd() const { return file_.get(); }
- private:
-  FileDescriptor file_;
-};
 // Prepare each GPU independently before starting workers. Access setup is a
 // separate pass so a GPU that cannot access the shared buffers can be dropped
 // without discarding the healthy GPUs' allocations. CUDA contexts outlive this.
@@ -79,15 +69,13 @@ class TransferPoolDevice {
 // only after their storage requests and DMA have drained. Lanes use private
 // streams after synchronizing the caller stream. Contexts and the pool must
 // outlive all calls. Stream and token ownership stays with the caller. The pool
-// may keep a TransferFile open briefly after a call returns, and the int
-// overloads open their own descriptions of fd. Checkpoint includes fsync, as
-// with TransferBuffers.
+// duplicates fd for each job and may keep it open briefly after a call returns.
+// Workers reopen it with independent filesystem state. Checkpoint includes
+// fsync, as with TransferBuffers.
 class TransferPool {
  public:
   explicit TransferPool(std::vector<std::unique_ptr<TransferPoolDevice>> devices);
   ~TransferPool();
-  void Restore(std::shared_ptr<const TransferFile> file, CUcontext context, CUdeviceptr device,
-               size_t size, CUstream stream, const Cancellation& cancellation);
   void Restore(int fd, CUcontext context, CUdeviceptr device, size_t size,
                CUstream stream, const Cancellation& cancellation);
   void Checkpoint(int fd, CUcontext context, CUdeviceptr device, size_t size,

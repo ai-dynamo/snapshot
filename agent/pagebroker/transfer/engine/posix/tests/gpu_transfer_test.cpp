@@ -185,12 +185,10 @@ TEST_F(CudaTransfer, PoolRoundTripConcurrentFilesAndRecovery)
     ASSERT_NO_THROW(write.get());
     ASSERT_EQ(cuMemsetD8(gpu_.memory, 0, data_bytes), CUDA_SUCCESS);
     ASSERT_EQ(cuMemsetD8(other.memory, 0, data_bytes), CUDA_SUCCESS);
-    auto prepared_first = std::make_shared<transfer::TransferFile>(first.get());
-    auto prepared_second = std::make_shared<transfer::TransferFile>(second.get());
     auto read = std::async(std::launch::async, [&] {
-      pool.Restore(prepared_first, gpu_.context, gpu_.memory, data_bytes, gpu_.stream, cancellation);
+      pool.Restore(first.get(), gpu_.context, gpu_.memory, data_bytes, gpu_.stream, cancellation);
     });
-    ASSERT_NO_THROW(pool.Restore(prepared_second, other.context, other.memory, data_bytes, other.stream, cancellation));
+    ASSERT_NO_THROW(pool.Restore(second.get(), other.context, other.memory, data_bytes, other.stream, cancellation));
     ASSERT_NO_THROW(read.get());
     std::vector<unsigned char> restored(data_bytes);
     ASSERT_EQ(cuMemcpyDtoH(restored.data(), gpu_.memory, data_bytes), CUDA_SUCCESS);

@@ -159,7 +159,7 @@ struct PreparedParticipant {
   uint32_t captured_pid;
   FileDescriptor directory;
   std::vector<storage::GpuDataFile> manifest;
-  std::vector<std::shared_ptr<transfer::TransferFile>> files;
+  std::vector<std::shared_ptr<FileDescriptor>> files;
 };
 } // namespace
 
@@ -191,7 +191,7 @@ RestoreSetupOrder(std::span<const size_t> extent_counts)
 }
 
 struct RestorePreparation::State {
-  using Files = std::map<std::pair<uint32_t, std::string>, std::shared_ptr<transfer::TransferFile>>;
+  using Files = std::map<std::pair<uint32_t, std::string>, std::shared_ptr<FileDescriptor>>;
   std::atomic<bool> cancelled = false;
   // Declared last so destruction joins before releasing the cancellation token.
   std::shared_future<Files> pending;
@@ -257,11 +257,11 @@ struct RestorePreparation::State {
       if (file.get() < 0) {
         throw std::system_error(errno, std::generic_category(), "prepare GPU extent");
       }
-      files.emplace(std::make_pair(pid, extent.filename), std::make_shared<transfer::TransferFile>(file.get()));
+      files.emplace(std::make_pair(pid, extent.filename), std::make_shared<FileDescriptor>(std::move(file)));
     }
   }
 
-  std::shared_ptr<transfer::TransferFile> Get(uint32_t pid, const gpu::storage::GpuDataFile& extent, int directory)
+  std::shared_ptr<FileDescriptor> Get(uint32_t pid, const gpu::storage::GpuDataFile& extent, int directory)
   {
     const nvtx3::scoped_range range{"PageBroker restore preparation wait"};
     // Artifact construction holds the transaction mutex while waiting here.
@@ -272,7 +272,7 @@ struct RestorePreparation::State {
     if (found == files.end()) return {};  // Open normally when optional preparation failed.
     const auto& file = found->second;
     struct stat held{}, current{};
-    Require(fstat(file->fd(), &held) == 0 &&
+    Require(fstat(file->get(), &held) == 0 &&
              fstatat(directory, extent.filename.c_str(), &current, AT_SYMLINK_NOFOLLOW) == 0 &&
              S_ISREG(held.st_mode) && held.st_dev == current.st_dev && held.st_ino == current.st_ino &&
              held.st_size >= 0 && static_cast<uint64_t>(held.st_size) == extent.size,
@@ -615,21 +615,23 @@ class GpuEngine::Batch {
         auto transfer = PrepareTransfer(job);
         const auto& data = transfer.data;
         const auto& name = transfer.name;
+        FileDescriptor opened(-1);
+        int fd;
         if (engine_.pool && !prepared_.files.empty() && prepared_.files.at(job.extent_index)) {
-          engine_.pool->Restore(prepared_.files.at(job.extent_index), transfer.device.context.handle,
-                                data.devPtr, data.size, data.stream, cancellation_);
-          result_.bytes += data.size;
-          continue;
-        }
-        FileDescriptor file(openat(prepared_.directory.get(), name.c_str(), O_CLOEXEC | O_NOFOLLOW | O_DIRECT | O_RDONLY));
-        if (file.get() < 0) {
-          throw std::system_error(errno, std::generic_category(), "open GPU data file");
+          fd = prepared_.files.at(job.extent_index)->get();
+        } else {
+          opened = FileDescriptor(openat(prepared_.directory.get(), name.c_str(),
+                                         O_CLOEXEC | O_NOFOLLOW | O_DIRECT | O_RDONLY));
+          if (opened.get() < 0) {
+            throw std::system_error(errno, std::generic_category(), "open GPU data file");
+          }
+          fd = opened.get();
         }
         if (engine_.pool) {
-          engine_.pool->Restore(file.get(), transfer.device.context.handle, data.devPtr,
-                                 data.size, data.stream, cancellation_);
+          engine_.pool->Restore(fd, transfer.device.context.handle, data.devPtr,
+                               data.size, data.stream, cancellation_);
         } else {
-          transfer.device.buffers.Restore(file.get(), data.devPtr, data.size, data.stream, cancellation_);
+          transfer.device.buffers.Restore(fd, data.devPtr, data.size, data.stream, cancellation_);
         }
         result_.bytes += data.size;
       }
