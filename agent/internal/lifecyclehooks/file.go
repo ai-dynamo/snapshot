@@ -24,31 +24,45 @@ type Execer interface {
 	ExecSync(ctx context.Context, containerID string, cmd []string, timeout time.Duration) (stdout, stderr []byte, err error)
 }
 
+// The scripts report what they found with these exit codes. They are above
+// the codes shells use for their own errors (1 and 2, 126 and 127, and 128
+// plus a signal), so a failure of the shell itself, such as a redirect that
+// can't create the file, is never read as one of these answers.
+const (
+	exitMissing        = 10
+	exitNotRegular     = 11
+	exitExists         = 12
+	exitNoParent       = 13
+	exitParentReadOnly = 14
+)
+
 // The scripts take the path as $1, never as part of the script, so no path
 // needs quoting. They follow symlinks: the command runs as the container, so
 // a link can only lead where the application itself could go.
-const (
+var (
 	// fileExistsScript exits 0 for a regular file, exitMissing when nothing
 	// is at the path, and exitNotRegular for anything else.
-	fileExistsScript = `[ -f "$1" ] && exit 0; [ -e "$1" ] && exit 2; exit 1`
+	fileExistsScript = fmt.Sprintf(`[ -f "$1" ] && exit 0; [ -e "$1" ] && exit %d; exit %d`,
+		exitNotRegular, exitMissing)
+	// existingScript is the start of the two marker scripts: it exits
+	// exitExists when a regular file is at the path, and exitNotRegular for
+	// anything else there.
+	existingScript = fmt.Sprintf(`if [ -e "$1" ]; then [ -f "$1" ] && exit %d; exit %d; fi; `,
+		exitExists, exitNotRegular)
 	// createMarkerScript creates an empty file, never its parents. set -C
 	// (noclobber) makes the shell create it with O_EXCL, so a file that
-	// appears in between is not overwritten. It exits exitExists when a
-	// regular file is already there, and exitNotRegular for anything else.
-	createMarkerScript = `if [ -e "$1" ]; then [ -f "$1" ] && exit 3; exit 2; fi; set -C; : > "$1"`
-	// checkMarkerTargetScript changes nothing. It exits like
-	// createMarkerScript for something already at the path, exitNoParent when
-	// the parent is not a directory, and exitParentReadOnly when the user may
-	// not write it: [ -w ] asks the kernel as the user, so a read-only mount
+	// appears in between is not overwritten.
+	createMarkerScript = existingScript + `set -C; : > "$1"`
+	// checkMarkerTargetScript changes nothing. It exits exitNoParent when the
+	// parent is not a directory, and exitParentReadOnly when the user may not
+	// write it: [ -w ] asks the kernel as the user, so a read-only mount
 	// counts too.
-	checkMarkerTargetScript = `if [ -e "$1" ]; then [ -f "$1" ] && exit 3; exit 2; fi; d="${1%/*}"; [ -n "$d" ] || d=/; [ -d "$d" ] || exit 4; [ -w "$d" ] || exit 5`
+	checkMarkerTargetScript = existingScript + fmt.Sprintf(
+		`d="${1%%/*}"; [ -n "$d" ] || d=/; [ -d "$d" ] || exit %d; [ -w "$d" ] || exit %d`,
+		exitNoParent, exitParentReadOnly)
+)
 
-	exitMissing        = 1
-	exitNotRegular     = 2
-	exitExists         = 3
-	exitNoParent       = 4
-	exitParentReadOnly = 5
-
+const (
 	// maxOutput bounds the command output kept for an error, as kubelet bounds
 	// an exec probe's.
 	maxOutput = 10 << 10
