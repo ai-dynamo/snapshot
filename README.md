@@ -86,7 +86,7 @@ Before installing Snapshot, make sure the following are in place:
 - containerd or CRI-O as the container runtime
 - [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with MIG disabled
 - NVIDIA kernel-mode driver 580 or newer
-- Shared checkpoint storage: an RWX storage class or an S3 bucket — see [Storage](docs/operations/storage.md)
+- A shared snapshot store: an RWX storage class or an S3 bucket — see [Storage](docs/operations/storage.md)
 - The [Helm](https://helm.sh/docs/intro/install) CLI
 - A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
 
