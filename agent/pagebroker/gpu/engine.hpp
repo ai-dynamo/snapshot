@@ -13,6 +13,10 @@
 #include "cancellation.hpp"
 #include "errors.hpp"
 
+namespace snapshot::pagebroker::posix {
+class GpuRestorePreparation;
+}
+
 namespace snapshot::pagebroker::gpu {
 // Wait for exclusive access to a device ring while honoring cancellation.
 std::unique_lock<std::timed_mutex> AcquireDevice(std::timed_mutex& mutex, const Cancellation& cancellation);
@@ -40,6 +44,7 @@ void ValidateParticipants(std::span<const uint32_t> captured_pids, std::span<con
 // data. Each group keeps its input order.
 std::vector<size_t> RestoreSetupOrder(std::span<const size_t> extent_counts);
 
+// Tuning for the current CPU-staged POSIX GPU transfer path.
 struct EngineOptions {
   size_t buffer_count = 32;
   size_t chunk_bytes = 128ULL * 1024 * 1024;
@@ -51,18 +56,6 @@ struct ParticipantResult {
   uint64_t bytes = 0;
 };
 
-// Begins checkpoint-specific file preparation without waiting for CRIU. No CUDA
-// state is needed. Destruction joins preparation and releases its descriptors.
-class RestorePreparation {
- public:
-  RestorePreparation(int directory_fd, size_t lanes);
-  ~RestorePreparation();
- private:
-  friend class Artifact;
-  struct State;
-  std::unique_ptr<State> state_;
-};
-
 // Construct when GPU execution starts. Retains the artifact directory and
 // validates restore files. The broker keeps it until Commit or Abort finishes.
 class Artifact {
@@ -70,7 +63,7 @@ class Artifact {
   Artifact(int directory_fd, Direction direction,
            std::vector<uint32_t> captured_pids, std::vector<std::string> visible_devices,
            std::vector<DeviceMapping> device_map = {},
-           std::shared_ptr<RestorePreparation> preparation = {});
+           std::shared_ptr<posix::GpuRestorePreparation> preparation = {});
   ~Artifact();
   Artifact(const Artifact&) = delete;
   Artifact& operator=(const Artifact&) = delete;
@@ -90,7 +83,7 @@ class GpuEngine {
   explicit GpuEngine(EngineOptions options = {});
   ~GpuEngine();
   bool Available() const;
-  std::shared_ptr<RestorePreparation> PrepareRestore(int directory_fd);
+  std::shared_ptr<posix::GpuRestorePreparation> PrepareRestore(int directory_fd);
   std::vector<ParticipantResult> Checkpoint(Artifact&, const std::vector<Participant>&, Cancellation&);
   std::vector<ParticipantResult> Restore(Artifact&, const std::vector<Participant>&, Cancellation&);
 

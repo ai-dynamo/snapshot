@@ -4,13 +4,21 @@
 #pragma once
 
 #include <cuda.h>
+#include <cstdint>
 #include "cancellation.hpp"
 #include <memory>
 #include <span>
 #include <vector>
 #include "file_descriptor.hpp"
 
-namespace snapshot::pagebroker::cuda {
+namespace snapshot::pagebroker::gpu::storage {
+struct GpuDataFile;
+}
+
+// GPU transfers through CPU staging buffers and NIXL's POSIX backend.
+// Ring and pooled lanes are policies of this path, not requirements on other
+// GPU transfer engines such as direct storage-to-device I/O.
+namespace snapshot::pagebroker::posix {
 struct TransferOptions {
   size_t buffer_count = 32;
   size_t chunk_bytes = 128 * 1024 * 1024;
@@ -82,4 +90,15 @@ class TransferPool {
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
-}  // namespace snapshot::pagebroker::cuda
+// Pre-opens local GPU extents and their lane descriptors during CRIU restore.
+// Destruction cancels and joins preparation before releasing its descriptors.
+class GpuRestorePreparation {
+ public:
+  GpuRestorePreparation(int directory_fd, size_t lanes);
+  ~GpuRestorePreparation();
+  std::shared_ptr<TransferFile> Get(uint32_t pid, const gpu::storage::GpuDataFile& extent, int directory);
+ private:
+  struct State;
+  std::unique_ptr<State> state_;
+};
+}  // namespace snapshot::pagebroker::posix

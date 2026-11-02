@@ -5,13 +5,17 @@
 
 #include "transfer/engine/transfer_engine.hpp"
 #include "file_descriptor.hpp"
-#include "gpu/engine.hpp"
+#include <memory>
+
+namespace snapshot::pagebroker::posix {
+class GpuRestorePreparation;
+}
 
 namespace snapshot::pagebroker {
 class RestoreTransactionDescriptor {
  public:
   explicit RestoreTransactionDescriptor(Path staging_directory, FileDescriptor source = FileDescriptor(-1),
-                                        std::shared_ptr<gpu::RestorePreparation> preparation = {});
+                                        std::shared_ptr<posix::GpuRestorePreparation> preparation = {});
 
   const Path& staging_directory() const;
   const auto& preparation() const { return preparation_; }
@@ -21,7 +25,7 @@ class RestoreTransactionDescriptor {
   }
 
  private:
-  std::shared_ptr<gpu::RestorePreparation> preparation_;
+  std::shared_ptr<posix::GpuRestorePreparation> preparation_;
   Path staging_directory_;
   FileDescriptor source_;
 };
