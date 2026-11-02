@@ -9,10 +9,10 @@ Check whether CPU restore, CUDA restore, or staging takes the most time. Follow
 [Why is my restore slow?](storage/slow-restore.md) for the next check and
 backend-specific tuning.
 
-## A checkpoint never becomes Ready
+## A snapshot never becomes Ready
 
 A `PodSnapshot` becomes Ready only after the `snapshot-agent` confirms the
-checkpoint contents — writing the checkpoint is not enough on its own. Check the
+snapshot contents — writing the snapshot is not enough on its own. Check the
 status and the agent logs:
 
 ```bash
@@ -124,13 +124,13 @@ lines of CRIU's `restore.log` in the agent log.
 
 ### resolving checkpoint artifact
 
-The agent locates the checkpoint directory for the referenced `PodSnapshot` on
-this node's checkpoint storage mount and refuses a path that passes through a
+The agent locates the snapshot directory for the referenced `PodSnapshot` on
+this node's snapshot store mount and refuses a path that passes through a
 symlink.
 
-Likely causes: checkpoint storage is not mounted on this node's agent; the
+Likely causes: the snapshot store is not mounted on this node's agent; the
 `PodSnapshot` is not Ready yet or its content was deleted; the storage backing
-the checkpoint is not reachable from this node.
+the snapshot is not reachable from this node.
 
 ```bash
 kubectl get podsnapshot <name> -n <ns>
@@ -204,7 +204,7 @@ Check `NVIDIA_VISIBLE_DEVICES` and the GPU resource request on the restore pod.
 A checkpoint reports the same step when the agent builds the context from the
 source container's CUDA processes and GPUs. Check that the source pod still
 holds its GPU allocation and that its CUDA processes are running; a process
-that exited between the capture request and the dump leaves nothing to map.
+that exited between the checkpoint request and the dump leaves nothing to map.
 
 ### mounting agent bundle into placeholder
 
@@ -260,7 +260,7 @@ ended from outside:
 - `nsrestore was killed (signal: killed)`: nsrestore ended by signal before it
   could report. The agent log holds its last lines.
 - `...; the restore timeout expired`: the restore ran past
-  `config.restore.restoreTimeoutSeconds`. The cause before the semicolon is
+  `config.restore.timeoutSeconds`. The cause before the semicolon is
   what was running when time ran out, and it may carry one of the steps
   below. Raise the timeout, or find what stalled in the agent log.
 - `...; the restore was cancelled`: the restore was withdrawn or the agent
@@ -296,7 +296,7 @@ Compare the restore pod's volumes with the source pod's.
 
 ### applying rootfs diff
 
-nsrestore extracts the rootfs diff captured at checkpoint over the
+nsrestore extracts the rootfs diff saved at checkpoint over the
 placeholder's root filesystem, so files the workload wrote or changed are back
 before CRIU recreates the process. The cause carries tar's first message.
 
@@ -382,7 +382,7 @@ because something it had open at checkpoint is not there now: a file, a
 listening port, a peer, or GPU state.
 
 The agent log carries the process diagnostics and the `restore.log` lines
-captured at the failure. The workload's own output is in the restore pod's
+recorded at the failure. The workload's own output is in the restore pod's
 container logs.
 
 ## Checkpoint fails at a step
@@ -415,7 +415,7 @@ The agent asks PageBroker to open a transaction and provide the staging or
 destination directory. The cause carries PageBroker's failure code, such as
 `INSUFFICIENT_STORAGE` or `STORAGE_ERROR`, or a connection error.
 
-Likely causes: the `pagebroker` container is not ready; the checkpoint volume
+Likely causes: the `pagebroker` container is not ready; the snapshot volume
 is full or unavailable.
 
 ```bash
@@ -427,7 +427,7 @@ kubectl get pvc -n <snapshot-ns>
 
 When the workload opted into the cuinterpose shim, every CUDA process must have
 loaded it, its delivery mount must be read-only, and the coordinator must
-answer before capture becomes destructive.
+answer before the checkpoint becomes destructive.
 
 Likely causes: a CUDA process started without the shim; the delivery mount is
 writable; the coordinator is not running.
@@ -484,7 +484,7 @@ re-taking the checkpoint from a fresh replica.
 
 Likely causes: the dump's image files cannot be read back from the staging
 directory; a file the dump references is missing from the upper directory, for
-example one deleted or replaced between the dump and the capture.
+example one deleted or replaced between the dump and the diff.
 
 ```bash
 kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'rootfs diff'

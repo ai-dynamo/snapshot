@@ -19,7 +19,7 @@ Each resource's `spec` is immutable after creation.
 
 ### PodSnapshot
 
-The namespaced binding for a captured container checkpoint; consumed by restore.
+The namespaced binding for one container's snapshot; consumed by restore.
 
 `spec`:
 
@@ -34,11 +34,11 @@ The namespaced binding for a captured container checkpoint; consumed by restore.
 | Field                      | Type        | Description                                                                                                              |
 |----------------------------|-------------|--------------------------------------------------------------------------------------------------------------------------|
 | `boundSnapshotContentName` | string      | Name of the bound cluster-scoped `PodSnapshotContent`; unset until the agent binds it.                                   |
-| `conditions`               | []Condition | `Ready` (capture and binding complete, artifact usable for restore) and `Failed` (capture or binding failed terminally). |
+| `conditions`               | []Condition | `Ready` (checkpoint and binding complete, snapshot usable for restore) and `Failed` (checkpoint or binding failed terminally). |
 
 ### PodSnapshotContent
 
-The cluster-scoped artifact-of-record for a checkpoint. The operator creates it
+The cluster-scoped record of one container's snapshot. The operator creates it
 when it binds a `PodSnapshot`; callers never create it.
 
 `spec`:
@@ -56,35 +56,35 @@ when it binds a `PodSnapshot`; callers never create it.
 
 | Field                                           | Type                         | Description                                                                                                                                                                                                                                |
 |-------------------------------------------------|------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `conditions`                                    | []Condition                  | `Ready` (artifact captured and usable for restore) and `Failed` (capture failed terminally).                                                                                                                                               |
-| `source`                                        | CheckpointSource             | What the checkpoint was captured on, written with `Ready`. Informational only: the restore compatibility gates compare the artifact's manifest, not this block. Every field below is optional and absent when the value could not be read. |
+| `conditions`                                    | []Condition                  | `Ready` (snapshot taken and usable for restore) and `Failed` (checkpoint failed terminally).                                                                                                                                               |
+| `source`                                        | CheckpointSource             | Where the snapshot was taken, written with `Ready`. Informational only: the restore compatibility gates compare the snapshot's manifest, not this block. Every field below is optional and absent when the value could not be read. |
 | `source.node.name`                              | string                       | Node the source pod ran on.                                                                                                                                                                                                                |
 | `source.node.architecture`                      | string                       | Node CPU architecture, as `GOARCH` spells it.                                                                                                                                                                                              |
 | `source.node.kernelVersion`                     | string                       | Node kernel release.                                                                                                                                                                                                                       |
 | `source.node.cpuFeatures`                       | []string                     | Instruction-set flags from the node's `/proc/cpuinfo` that every processor reported, such as `avx512f` on x86_64 or `sve2` on arm64, sorted.                                                                                               |
-| `source.pod.image`                              | string                       | Container image reference the capture ran.                                                                                                                                                                                                 |
+| `source.pod.image`                              | string                       | Container image reference the checkpoint ran.                                                                                                                                                                                                 |
 | `source.pod.imageDigest`                        | string                       | Identifies which build of the image ran, which a mutable tag does not.                                                                                                                                                                     |
 | `source.pod.memory`                             | string                       | Container memory limit; absent if it had none.                                                                                                                                                                                             |
 | `source.pod.cpu`                                | string                       | Container CPU limit; absent if it had none.                                                                                                                                                                                                |
-| `source.devices.nvidia.driverVersion`           | string                       | NVIDIA driver the capture ran against.                                                                                                                                                                                                     |
-| `source.devices.nvidia.instances[].productName` | string                       | GPU model as `nvidia-smi` reports it, one entry per GPU the captured container could see.                                                                                                                                                  |
-| `storage.artifacts`                             | []PublishedContainerArtifact | Optional confirmed publications, keyed by `containerName`. Requires `spec.storage`; container names must be captured targets. Does not replace Ready/Failed conditions.                                                                    |
+| `source.devices.nvidia.driverVersion`           | string                       | NVIDIA driver the checkpoint ran against.                                                                                                                                                                                                     |
+| `source.devices.nvidia.instances[].productName` | string                       | GPU model as `nvidia-smi` reports it, one entry per GPU the checkpointed container could see.                                                                                                                                                  |
+| `storage.artifacts`                             | []PublishedContainerArtifact | Optional confirmed publications, keyed by `containerName`. Requires `spec.storage`; container names must be checkpointed containers. Does not replace Ready/Failed conditions.                                                                    |
 | `storage.artifacts[].containerName`             | string                       | Required container name; entries must be unique.                                                                                                                                                                                           |
 | `storage.artifacts[].artifactHandle`            | string                       | Required opaque publication locator within the bound store, up to 4096 characters. Callers must not interpret it as a filesystem path.                                                                                                     |
 
 ### SnapshotJob
 
-Runs a checkpoint-ready workload pod and captures it into a `PodSnapshot` in one
-declarative object.
+Runs a checkpoint-ready workload pod and checkpoints it into a `PodSnapshot` in
+one declarative object.
 
 `spec`:
 
 | Field                                  | Type            | Required | Default    | Description                                                                                                                                                                             |
 |----------------------------------------|-----------------|----------|------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `podTemplate`                          | PodTemplateSpec | yes      | —          | The workload to run and capture. The controller injects the snapshot contract (control volume, readiness probe, seccomp); image, command, GPU resources, and sidecars are the caller's. |
+| `podTemplate`                          | PodTemplateSpec | yes      | —          | The workload to run and checkpoint. The controller injects the snapshot contract (control volume, readiness probe, seccomp); image, command, GPU resources, and sidecars are the caller's. |
 | `podSnapshotTemplate.targetContainers` | []string        | no       | `["main"]` | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must name a container present in `podTemplate`.                                                                             |
 | `activeDeadlineSeconds`                | int64           | no       | `3600`     | Total time allowed for scheduling, quiesce, and dump; applied to the batch/v1 Job.                                                                                                      |
-| `nonTargetArtifacts.containers`        | []string        | no       | —          | Non-target containers that write artifacts to the shared checkpoint PVC. Must be nonempty if `nonTargetArtifacts` is set.                                                               |
+| `nonTargetArtifacts.containers`        | []string        | no       | —          | Non-target containers that write artifacts to the snapshot volume. Must be nonempty if `nonTargetArtifacts` is set.                                                               |
 | `nonTargetArtifacts.onFailure`         | string          | no       | `Retain`   | `Retain` keeps a failed attempt's artifacts. `Cleanup` lets the operator delete them once all writers have stopped.                                                                     |
 
 `podSnapshotTemplate` itself is required; its only field, `targetContainers`,
@@ -108,7 +108,7 @@ as a label value).
 |-------------|---------------------------------------------------------------------------------|
 | `Running`   | The source pod is running and ready.                                            |
 | `Captured`  | The CRIU dump of the target container is complete (the `PodSnapshot` is Ready). |
-| `Completed` | The checkpoint is durable and the source Job has finished.                      |
+| `Completed` | The snapshot is durable and the source Job has finished.                      |
 | `Failed`    | A terminal failure occurred.                                                    |
 
 ## Restore
@@ -118,8 +118,8 @@ The caller sets these annotations on the new pod to trigger a restore:
 | Annotation                              | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 |-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `nvidia.com/restore-from`               | Names the `PodSnapshot`, in the pod's namespace, to restore into the pod.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `nvidia.com/restore-container-map`      | Optional. Comma-separated `source=destination` pairs mapping the single captured container to one or more restore containers. When absent, the captured container name is the destination.                                                                                                                                                                                                                                                                                                                                                                       |
-| `nvidia.com/snapshot-skip-compat-check` | Optional. Set to `"true"` to attempt the restore without the compatibility checks, which otherwise refuse a checkpoint this node cannot run. The value must parse as a boolean, so any other spelling, including `"yes"`, leaves the checks in place. Treat it as a debugging escape hatch: a restore that should have been refused instead fails somewhere inside CRIU. Adding it to a pod whose restore was already refused reopens that restore in place, so this is the one case that needs no new pod — a restore that was attempted and failed still does. |
+| `nvidia.com/restore-container-map`      | Optional. Comma-separated `source=destination` pairs mapping the single checkpointed container to one or more restore containers. When absent, the checkpointed container name is the destination.                                                                                                                                                                                                                                                                                                                                                                       |
+| `nvidia.com/snapshot-skip-compat-check` | Optional. Set to `"true"` to attempt the restore without the compatibility checks, which otherwise refuse a snapshot this node cannot run. The value must parse as a boolean, so any other spelling, including `"yes"`, leaves the checks in place. Treat it as a debugging escape hatch: a restore that should have been refused instead fails somewhere inside CRIU. Adding it to a pod whose restore was already refused reopens that restore in place, so this is the one case that needs no new pod — a restore that was attempted and failed still does. |
 
 Snapshot then reports restore progress with a pod status condition — written by
 the node agent, not set by the caller:
@@ -130,11 +130,11 @@ the node agent, not set by the caller:
 
 ## Advanced: non-target artifacts
 
-A non-target container can write output to the shared checkpoint PVC. Declare it in `spec.nonTargetArtifacts.containers` (regular containers only, excluding capture targets). Do not combine this field with the legacy `nvidia.com/snapshot-non-target-artifact-containers` annotation.
+A non-target container can write output to the snapshot volume. Declare it in `spec.nonTargetArtifacts.containers` (regular containers only, excluding target containers). Do not combine this field with the legacy `nvidia.com/snapshot-non-target-artifact-containers` annotation.
 
 Snapshot injects `SNAPSHOT_JOB_UID` and `SNAPSHOT_NON_TARGET_ARTIFACT_SUBDIR` (`non-target-artifacts/<SnapshotJob UID>`, relative to the PVC root). Supply the PVC mount, write beneath that directory, and finish before the container exits. It must be writable by the container and removable by the operator. Restore consumers find the attempt through the `PodSnapshot`'s `nvidia.com/snapshot-job-uid` label.
 
-On failure, `Retain` (the default) keeps the output. `Cleanup` deletes it only when the `SnapshotJob` is `Failed` and all source Pod containers are confirmed stopped. If proof cannot arrive, such as after Pod removal, Snapshot retains the directory and emits a `NonTargetArtifactsRetained` warning once per attempt per operator process. Verify writer exit before manual removal. Successful output is caller-managed. This applies only to the shared PVC, not S3 or capture artifacts.
+On failure, `Retain` (the default) keeps the output. `Cleanup` deletes it only when the `SnapshotJob` is `Failed` and all source Pod containers are confirmed stopped. If proof cannot arrive, such as after Pod removal, Snapshot retains the directory and emits a `NonTargetArtifactsRetained` warning once per attempt per operator process. Verify writer exit before manual removal. Successful output is caller-managed. This applies only to the shared PVC, not S3 or snapshots.
 
 ## Labels
 
@@ -143,7 +143,7 @@ listed for selection and debugging.
 
 | Label                                  | Applied to                      | Purpose                                                                                                        |
 |----------------------------------------|---------------------------------|----------------------------------------------------------------------------------------------------------------|
-| `nvidia.com/snapshot-capture-eligible` | Source pod                      | Added by the agent's pre-bind gate after the source pod passes validation; the capture informer selects on it. |
+| `nvidia.com/snapshot-capture-eligible` | Source pod                      | Added by the agent's pre-bind gate after the source pod passes validation; the node agent's source-pod informer selects on it. |
 | `nvidia.com/snapshot-node`             | `PodSnapshotContent`            | Mirrors `spec.source.nodeName` so each node agent can select its own work.                                     |
 | `nvidia.com/snapshot-job`              | `PodSnapshot`                   | Maps a produced `PodSnapshot` back to the `SnapshotJob` that created it.                                       |
 | `nvidia.com/snapshot-job-uid`          | `SnapshotJob`-created resources | Binds them to one `SnapshotJob` incarnation, since names can be reused.                                        |
@@ -196,7 +196,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | Value                                     | Default        | Description                                                                                                                                                                                               |
 |-------------------------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `pageBroker.restoreMode`                  | `direct`       | PageBroker restore source: `staged` copies CPU images into staging, `direct` reads the original artifact.                                                                                                 |
-| `storage.type`                            | `pvc`          | Checkpoint store backend: `pvc` or `s3`.                                                                                                                                                                  |
+| `storage.type`                            | `pvc`          | Snapshot store backend: `pvc` or `s3`.                                                                                                                                                                  |
 | `storage.pvc.create`                      | `true`         | Create the PVC; set `false` to use an existing one.                                                                                                                                                       |
 | `storage.pvc.name`                        | `snapshot-pvc` | Shared PVC name.                                                                                                                                                                                          |
 | `storage.pvc.size`                        | `1Ti`          | Requested size.                                                                                                                                                                                           |
@@ -204,7 +204,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `storage.pvc.basePath`                    | `/checkpoints` | Fixed agent mount path; cannot be changed.                                                                                                                                                                |
 | `storage.s3.endpoint`                     | `""`           | Required with `storage.type: s3`. S3-compatible endpoint, an absolute http(s) URL.                                                                                                                        |
 | `storage.s3.region`                       | `""`           | Required with `storage.type: s3`. Bucket region.                                                                                                                                                          |
-| `storage.s3.bucket`                       | `""`           | Required with `storage.type: s3`. Bucket holding the checkpoints.                                                                                                                                         |
+| `storage.s3.bucket`                       | `""`           | Required with `storage.type: s3`. Bucket holding the snapshots.                                                                                                                                         |
 | `storage.s3.prefix`                       | `""`           | Key prefix inside the bucket; empty is the bucket root.                                                                                                                                                   |
 | `storage.s3.credentialsSecretRef`         | `""`           | Required with `storage.type: s3`. Secret holding a shared-credentials file, mounted into PageBroker and the operator.                                                                                     |
 | `storage.s3.credentialsSecretKey`         | `credentials`  | Key in that Secret holding the credentials file.                                                                                                                                                          |
@@ -213,7 +213,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `storage.s3.caBundleConfigMapRef`         | `""`           | ConfigMap holding the CA bundle for the endpoint's TLS certificate, mounted into PageBroker and the operator.                                                                                             |
 | `storage.s3.caBundleConfigMapKey`         | `ca.crt`       | Key in that ConfigMap holding the bundle.                                                                                                                                                                 |
 | `pageBroker.artifactAddressing`           | `false`        | Pass store configuration to a compatible PageBroker artifact backend. Deploy this before enabling `operator.bindNewContents`.                                                                             |
-| `operator.bindNewContents`                | `false`        | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../operations/storage.md#enable-artifact-addressing). Required for `storage.type: s3`. |
+| `operator.bindNewContents`                | `false`        | Bind new snapshots to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../operations/storage.md#enable-artifact-addressing). Required for `storage.type: s3`. |
 | `pageBroker.s3.limits`                    | `{}`           | PageBroker's S3 transfer and transaction limits; see [S3 transfer limits](#s3-transfer-limits) for the keys and bounds.                                                                                |
 | `pageBroker.transferEngine.modelStreamer` | `{}`           | Tuning for the engine that reads S3 restores, written as given; keys are in [Model Streamer configuration](../../agent/pagebroker/MODEL_STREAMER.md).                                                |
 
@@ -239,11 +239,11 @@ rejects a key PageBroker does not know, an `activeTransactions` at or above
 ### PageBroker GPU engine
 
 PageBroker runs in a persistent container in the agent DaemonSet. Its GPU engine
-uses CustomStorage for capture when the driver supports it; otherwise capture
-uses the driver-managed format. The agent runs CRIU. GPU payloads are read
-directly from the original checkpoint.
+uses CustomStorage for checkpoints when the driver supports it; otherwise a
+checkpoint uses the driver-managed format. The agent runs CRIU. GPU payloads
+are read directly from the original snapshot.
 `pageBroker.restoreMode` selects whether CRIU reads CPU images directly (the
-default) or from tmpfs staging. Restore uses the format recorded in the artifact.
+default) or from tmpfs staging. Restore uses the format recorded in the snapshot.
 
 | Value                              | Default                                    | Description                                       |
 |------------------------------------|--------------------------------------------|---------------------------------------------------|
@@ -263,8 +263,8 @@ payload checksums.
 | Value                          | Default                                 | Description                                                                                                                               |
 |--------------------------------|-----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
 | `daemonset.snapshotLogLevel`   | `info`                                  | Agent log level (`trace`/`debug`/`info`/`warn`/`error`).                                                                                  |
-| `daemonset.resources` | 2 CPU / 1Gi request, 4 CPU / 64Gi limit | Agent resource requests and limits. The memory limit also bounds the largest checkpoint image, which CRIU writes into PageBroker staging. GPU CustomStorage capture writes directly to the PVC instead and is not bound by this. |
-| `pageBroker.staging.sizeLimit` | `64Gi` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for checkpoint (except GPU CustomStorage capture) and staged restore. |
+| `daemonset.resources` | 2 CPU / 1Gi request, 4 CPU / 64Gi limit | Agent resource requests and limits. The memory limit also bounds the largest CRIU image, which CRIU writes into PageBroker staging. A GPU CustomStorage checkpoint writes directly to the PVC instead and is not bound by this. |
+| `pageBroker.staging.sizeLimit` | `64Gi` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for a checkpoint (except GPU CustomStorage) and a staged restore. |
 | `daemonset.nodeSelector`       | `nvidia.com/gpu.present: "true"`        | Targets GPU nodes.                                                                                                                        |
 | `daemonset.tolerations`        | GPU + `dedicated`                       | Node tolerations.                                                                                                                         |
 | `daemonset.runtimeClassName`   | `nvidia`                                | RuntimeClass for the agent pod; `""` omits it, for nodes where the NVIDIA runtime is containerd's default.                                |
@@ -278,8 +278,8 @@ payload checksums.
 `config.*` renders into the agent ConfigMap.
 
 - `config.overlay.exclusions` — rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
-- `config.checkpoint.checkpointTimeoutSeconds` — maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
-- `config.restore.restoreTimeoutSeconds` — maximum seconds for a restore before the agent marks it failed. Default `7200`.
+- `config.checkpoint.timeoutSeconds` — maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
+- `config.restore.timeoutSeconds` — maximum seconds for a restore before the agent marks it failed. Default `7200`.
 
 `config.criu.*` — CRIU options:
 

@@ -196,7 +196,7 @@ func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Conte
 	if apierrors.IsNotFound(podErr) {
 		key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
 		return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
-			fmt.Errorf("source pod %q disappeared before capture success or failure was recorded", key.String()))
+			fmt.Errorf("source pod %q disappeared before checkpoint success or failure was recorded", key.String()))
 	}
 
 	reason, cause := pendingCaptureSourceFailure(snap, content, pod)
@@ -278,16 +278,16 @@ func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *sn
 	}
 	if wantUID != "" && pod.UID != wantUID {
 		return "StalePodReference",
-			fmt.Errorf("source pod %q UID %q does not match capture UID %q", key.String(), pod.UID, wantUID)
+			fmt.Errorf("source pod %q UID %q does not match the checkpointed pod UID %q", key.String(), pod.UID, wantUID)
 	}
 
 	switch {
 	case pod.Status.Phase == corev1.PodSucceeded:
 		return snapshotv1alpha1.ReasonSourceCompletedWithoutCapture,
-			fmt.Errorf("source pod %q completed before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
+			fmt.Errorf("source pod %q completed before PodSnapshotContent %q reported checkpoint success or failure", key.String(), content.Name)
 	case pod.Status.Phase == corev1.PodFailed || pod.DeletionTimestamp != nil:
 		return podSnapshotReasonSourcePodGone,
-			fmt.Errorf("source pod %q became unavailable before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
+			fmt.Errorf("source pod %q became unavailable before PodSnapshotContent %q reported checkpoint success or failure", key.String(), content.Name)
 	default:
 		return "", nil
 	}
@@ -323,7 +323,7 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 			return ctrl.Result{RequeueAfter: testCaptureFailureReadyRequeue}, nil
 		}
 		return sr.failPodSnapshot(ctx, snap, "TestCaptureFailure",
-			fmt.Errorf("test-only capture failure requested by source pod annotation %q", annotation))
+			fmt.Errorf("test-only checkpoint failure requested by source pod annotation %q", annotation))
 	}
 	content, err := sr.ensurePodSnapshotContent(ctx, snap, podSnapshotContentName(snap), pod)
 	if err != nil {
@@ -462,7 +462,7 @@ func (sr *PodSnapshotReconciler) propagateStatus(ctx context.Context, snap *snap
 		cond := meta.FindStatusCondition(content.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 		changed = sr.markFailed(snap, cond.Reason, cond.Message)
 	default:
-		changed = sr.markPending(snap, "Pending", "Waiting for node agent to capture the checkpoint")
+		changed = sr.markPending(snap, "Pending", "Waiting for the node agent to take the snapshot")
 	}
 
 	if !changed {

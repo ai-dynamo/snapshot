@@ -14,7 +14,7 @@ This chart installs the snapshot infrastructure:
 
 Install one Snapshot release for the cluster. Every node agent mounts the same
 shared checkpoint PVC directly and watches checkpoint/restore pods in all
-namespaces. Workload pods never mount checkpoint storage.
+namespaces. Workload pods never mount the snapshot store.
 
 ## Prerequisites
 
@@ -189,7 +189,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
 | `daemonset.runtimeClassName` | RuntimeClass for the agent pod. Set `""` to omit it when the NVIDIA runtime is containerd's default and no `nvidia` RuntimeClass exists | `nvidia` |
 | `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 256Mi limit |
-| `operator.bindNewContents` | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../../docs/operations/storage.md#enable-artifact-addressing). Required for `storage.type: s3` | `false` |
+| `operator.bindNewContents` | Bind new snapshots to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../../docs/operations/storage.md#enable-artifact-addressing). Required for `storage.type: s3` | `false` |
 | `operator.nodeSelector` | Node selector for the operator pod | `{}` |
 | `operator.affinity` | Affinity rules for the operator pod | `{}` |
 | `operator.tolerations` | Tolerations for the operator pod | `[]` |
@@ -209,13 +209,13 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.s3.allowHttp` | Accept a plain-http endpoint | `false` |
 | `storage.s3.caBundleConfigMapRef` | ConfigMap holding the CA bundle for the endpoint's TLS certificate, mounted into PageBroker and the operator | `""` |
 | `storage.s3.caBundleConfigMapKey` | Key in that ConfigMap holding the bundle | `ca.crt` |
-| `pageBroker.staging.sizeLimit` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for checkpoint (except GPU CustomStorage capture) and staged restore. The chart lowers a value that leaves the writing container no headroom; see [How the cap is chosen](../../docs/operations/storage.md#how-the-cap-is-chosen) | `56Gi` |
+| `pageBroker.staging.sizeLimit` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for a checkpoint (except GPU CustomStorage) and a staged restore. The chart lowers a value that leaves the writing container no headroom; see [How the cap is chosen](../../docs/operations/storage.md#how-the-cap-is-chosen) | `56Gi` |
 | `pageBroker.maxConcurrentRequests` | Concurrent control-socket requests the daemon serves | `16` |
 | `pageBroker.artifactAddressing` | Pass store configuration to a compatible PVC artifact backend. Deploy this before enabling `operator.bindNewContents` | `false` |
 | `pageBroker.s3.limits` | PageBroker's S3 transfer and transaction limits, passed through as its `limits` object; `stagingBytes` defaults to the staging cap | `{}` |
 | `pageBroker.transferEngine.modelStreamer` | Model Streamer reader tuning for S3 restores, passed through as the file behind `--model-streamer-config` | `{}` |
 | `pageBroker.resources` | CPU and memory requests/limits for the PageBroker sidecar. The memory limit bounds restore prefetch into staging | 8 CPU / 32Gi request, 32 CPU / 256Gi limit |
-| `daemonset.resources` | CPU and memory requests/limits for the agent. The agent's memory limit also bounds the largest checkpoint image, because CRIU writes it into memory-backed PageBroker staging (direct GPU CustomStorage capture writes to the PVC instead, and is not bound by this) | 2 CPU / 1Gi request, 4 CPU / 64Gi limit |
+| `daemonset.resources` | CPU and memory requests/limits for the agent. The agent's memory limit also bounds the largest CRIU image, because CRIU writes it into memory-backed PageBroker staging (a direct GPU CustomStorage checkpoint writes to the PVC instead, and is not bound by this) | 2 CPU / 1Gi request, 4 CPU / 64Gi limit |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
@@ -232,9 +232,9 @@ PageBroker reads.
 
 Filesystem checkpoint and restore use POSIX.
 
-PageBroker handles every capture and restore. GPU capture uses CustomStorage
-when the driver supports it, otherwise it uses the driver-managed format.
-Restore follows the saved artifact format.
+PageBroker handles every checkpoint and restore. A GPU checkpoint uses
+CustomStorage when the driver supports it, otherwise it uses the
+driver-managed format. Restore follows the saved snapshot format.
 
 PageBroker adds an 8 CPU and 32 GiB memory request to each agent pod. A node
 must have this capacity plus the agent's own request, or the pod stays Pending.

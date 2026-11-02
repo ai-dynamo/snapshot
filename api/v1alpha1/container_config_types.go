@@ -7,7 +7,7 @@ import "k8s.io/apimachinery/pkg/util/intstr"
 
 // ContainerSnapshotConfig holds the settings for one checkpointed container,
 // matched to it by name. Snapshot copies them into the PodSnapshotContent at
-// checkpoint time, and every restore of that checkpoint uses that copy.
+// checkpoint time, and every restore of that snapshot uses that copy.
 //
 // Not enabled yet: the operator rejects a checkpointReadinessProbe or a
 // lifecycle until support is complete.

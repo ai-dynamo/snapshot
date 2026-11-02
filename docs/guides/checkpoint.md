@@ -1,6 +1,6 @@
 # Checkpoint a replica
 
-Checkpointing saves an initialized replica's state as a checkpoint artifact. There
+Checkpointing saves an initialized replica's state as a snapshot. There
 are two ways to do it, depending on the use case:
 
 | Method | Choose it when… | Implication |
@@ -117,7 +117,7 @@ The `PodSnapshot` has the same name as its `SnapshotJob`.
 
 **Eight-GPU recipes.** The `SnapshotJob` carries the
 `nvidia.com/snapshot-multi-gpu: enabled` annotation on `spec.podTemplate`, and the
-controller prepares the source Pod for multi-GPU capture. Add the annotation to
+controller prepares the source Pod for multi-GPU checkpoints. Add the annotation to
 your own `SnapshotJob` the same way:
 
 ```yaml
@@ -133,8 +133,8 @@ The first run downloads the model, so allow `--timeout=120m`.
 Because the source replica is deleted, every serving replica — including the
 first — is brought up via [restore](restore.md).
 
-If a checkpoint does not become Ready, see
-[Troubleshooting](../operations/troubleshooting.md#a-checkpoint-never-becomes-ready).
+If a snapshot does not become Ready, see
+[Troubleshooting](../operations/troubleshooting.md#a-snapshot-never-becomes-ready).
 
 ## Next steps
 

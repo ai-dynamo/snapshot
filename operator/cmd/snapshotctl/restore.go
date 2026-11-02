@@ -39,7 +39,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	}
 	containers := snapshot.Spec.Source.PodRef.Containers
 	if len(containers) != 1 || strings.TrimSpace(containers[0]) == "" {
-		return nil, fmt.Errorf("PodSnapshot %s/%s must capture exactly one container", namespace, snapshotName)
+		return nil, fmt.Errorf("PodSnapshot %s/%s must checkpoint exactly one container", namespace, snapshotName)
 	}
 	mappings, err := podcontract.ContainerMappingsFromAnnotations(pod.Annotations, containers[0])
 	if err != nil {

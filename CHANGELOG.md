@@ -37,15 +37,15 @@ commit-level history for each release is on its
 - `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
   and opt into cleanup after failure; omission or `Retain` preserves output.
   CRD change: deploy the matching CRD and operator together.
-- `PodSnapshotContent.status.source` records what a checkpoint was captured on:
+- `PodSnapshotContent.status.source` records where a snapshot was taken:
   the source node's name, architecture, kernel version and the instruction
-  sets its CPU offers, the captured container's image, image digest and CPU
-  and memory limits, and the NVIDIA driver version and GPU models the capture
+  sets its CPU offers, the checkpointed container's image, image digest and CPU
+  and memory limits, and the NVIDIA driver version and GPU models the checkpoint
   could see. Informational only —
-  restore compatibility still compares the artifact's manifest. CRD change;
-  populated for captures that reach `Ready` after the upgrade, so a content
+  restore compatibility still compares the snapshot's manifest. CRD change;
+  populated for snapshots that reach `Ready` after the upgrade, so a content
   already `Ready` before it is not backfilled.
-- `config.checkpoint.checkpointTimeoutSeconds` (default `3600`) fails a
+- `config.checkpoint.timeoutSeconds` (default `3600`) fails a
   checkpoint that outruns it.
 - S3 connection and transfer settings for `storage.type: s3`:
   `storage.s3.addressing`, `storage.s3.allowHttp`, a CA bundle
@@ -56,6 +56,19 @@ commit-level history for each release is on its
 
 ### Changed
 
+- The agent timeout values lost their redundant prefixes:
+  `config.checkpoint.checkpointTimeoutSeconds` is now
+  `config.checkpoint.timeoutSeconds`, and `config.restore.restoreTimeoutSeconds`
+  is now `config.restore.timeoutSeconds`. Defaults are unchanged. A chart
+  upgrade moves both, because the ConfigMap and the DaemonSet roll together. An
+  installation that manages the agent ConfigMap itself must rename the keys in
+  it: left under the old names, the checkpoint timeout silently falls back to
+  `3600`, and the agent refuses to start at all without a restore timeout.
+- The user-facing documentation, the CRD field descriptions (`kubectl explain`)
+  and the condition and failure messages follow the naming guide: the phase is
+  a **checkpoint** (the verb) and what it writes is a **snapshot** (the noun).
+  No condition type, reason or label changed, so nothing that matches on those
+  strings needs updating; only the two values above were renamed.
 - Checkpoint and restore failure messages open with the step they came from,
   as `while <step>: <cause>`, on the pod's `nvidia.com/Restored` condition, the
   `PodSnapshotContent` `Failed` condition, the restore events and the agent
@@ -64,7 +77,7 @@ commit-level history for each release is on its
   troubleshooting guide has one entry per step, including the steps inside
   nsrestore.
 - Restoring into a container that has an AppArmor profile or SELinux label now
-  requires a checkpoint that saved the processes' labels. Capture records
+  requires a snapshot that saved the processes' labels. The checkpoint records
   whether it did in the manifest, and a restore without that record is refused
   up front under the new `lsm-labels` check, which the compatibility bypass does
   not waive. Checkpoints taken by earlier agent versions don't have the record
@@ -72,7 +85,7 @@ commit-level history for each release is on its
 - A restore onto a node whose CPU lacks an instruction set Snapshot knows the
   source CPU offered, such as AVX-512 on x86_64 or SVE2 on arm64, is refused up
   front under the new `cpu-features` check rather than restoring a process that
-  dies with `SIGILL`. A checkpoint captured before the upgrade recorded no CPU
+  dies with `SIGILL`. A snapshot taken before the upgrade recorded no CPU
   flags and is not checked. See
   [Runtime compatibility](docs/reference/workload-contract.md#runtime-compatibility).
 - The agent drives checkpoints from a workqueue rather than per-checkpoint

@@ -16,7 +16,7 @@ kind: ConfigMap
 {{- fail "storage.s3.credentialsSecretRef is required when storage.type=s3" }}
 {{- end }}
 {{- if and (eq .Values.storage.type "s3") (not .Values.operator.bindNewContents) }}
-{{- fail "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path capture mode" }}
+{{- fail "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path checkpoint mode" }}
 {{- end }}
 {{- include "snapshot.validateS3Settings" . }}
 metadata:
@@ -83,11 +83,11 @@ data:
       stagingPath: {{ include "snapshot.pageBrokerStagingPath" . | quote }}
 
     checkpoint:
-      checkpointTimeoutSeconds: {{ .Values.config.checkpoint.checkpointTimeoutSeconds }}
+      timeoutSeconds: {{ .Values.config.checkpoint.timeoutSeconds }}
       retryLimit: {{ .Values.config.checkpoint.retryLimit | default 0 }}
 
     restore:
-      restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
+      timeoutSeconds: {{ .Values.config.restore.timeoutSeconds }}
       skipCompatCheck: {{ .Values.config.restore.skipCompatCheck }}
 
     criu:

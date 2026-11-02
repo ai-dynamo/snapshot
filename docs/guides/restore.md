@@ -25,7 +25,7 @@ source's GPU count:
 | TensorRT-LLM | [1-gpu.yaml](tensorrt-llm/restore/1-gpu.yaml) | [8-gpu.yaml](tensorrt-llm/restore/8-gpu.yaml) |
 
 A profile works for every model of its framework and GPU count, because the
-model configuration comes from the checkpoint. It also works for captures made
+model configuration comes from the snapshot. It also works for snapshots taken
 with or without `SnapshotJob`. Keep the container `image` the same as the
 source's.
 

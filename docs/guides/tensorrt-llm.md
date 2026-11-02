@@ -34,7 +34,7 @@ KV manager V1 and disabled block reuse avoid retaining prefix-cache entries
 across this release. These settings are enforced by `app.py`.
 
 `TORCHINDUCTOR_COMPILE_THREADS=1` disables forked asynchronous compiler workers,
-which can inherit CUDA device mappings that prevent CRIU capture.
+which can inherit CUDA device mappings that prevent a CRIU dump.
 
 After restore, the process recreates KV cache, calls `LLM.generate()` again,
 and starts an API on port 8000. It writes `trtllm-restore-ready` only after

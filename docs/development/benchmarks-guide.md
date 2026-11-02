@@ -1,8 +1,8 @@
 # Reproducing the benchmarks
 
 Run cold-start, checkpoint and restore measurements for vLLM, SGLang or TensorRT-LLM
-with the tool in [`benchmarks/`](../../benchmarks). Each run uses one node, captures
-a checkpoint and restores it three times by default. Set `--restore-count` to change
+with the tool in [`benchmarks/`](../../benchmarks). Each run uses one node, takes
+a snapshot and restores it three times by default. Set `--restore-count` to change
 the count. The runner uses the engine guide workloads
 and saves JSON results and logs. Use the `report` command to build the tables.
 See the [published results](benchmarks.md).
@@ -143,9 +143,9 @@ keys in `--engine-args`. For example, add these arguments for vLLM Qwen3-14B:
 --tp 2 --engine-args '{"max_model_len":2048,"gpu_memory_utilization":0.85}'
 ```
 
-Multi-GPU captures use the guide's launcher installer and the agent image from the
+Multi-GPU checkpoints use the guide's launcher installer and the agent image from the
 selected node. Dry-run manifests keep the `${SNAPSHOT_AGENT_IMAGE}` placeholder. The
-runner replaces it before it creates a pod. Before capture, the runner saves the
+runner replaces it before it creates a pod. Before the checkpoint, the runner saves the
 admitted command and checks for `cuinterpose-launch`. It also requires per-process
 `gpu/<pid>/manifest.txt` files to confirm use of PageBroker CustomStorage.
 
@@ -200,10 +200,10 @@ Total startup and restore timings are always collected. Use `--detailed-timing` 
 collect the cold-start breakdown. This patches engine functions and traces imports.
 
 Timing logs use a 2 GiB memory volume. The runner copies them to the local results
-before capture. Trace transfer uses gzip to handle large multi-GPU logs. Restore pods
+before the checkpoint. Trace transfer uses gzip to handle large multi-GPU logs. Restore pods
 start with `sleep infinity` so a second engine does not start before checkpoint injection.
 
-Before capture, the application pauses requests and asks the engine to release KV
+Before the checkpoint, the application pauses requests and asks the engine to release KV
 memory. Weights remain on the GPU. SGLang requests KV-only release without a CPU
 weight backup. TRT-LLM uses its KV sleep/wakeup RPC.
 

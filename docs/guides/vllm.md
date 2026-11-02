@@ -22,7 +22,7 @@ This is stage 1 of the [usage guides](README.md). Complete
 The program loads the model selected in the capture manifest, runs one
 generation to initialize vLLM, and then calls `pause_generation()` and
 `release_kv_cache_memory()`. This discards the KV cache and keeps weights on
-the GPU for capture, without a CPU copy of the weights. It writes
+the GPU for the checkpoint, without a CPU copy of the weights. It writes
 `ready-for-snapshot` only when the process is safe to checkpoint. In a restore
 container, Snapshot runs its restore proxy in place of the program and restores
 the checkpointed process. That process calls `wake_up()` and `resume_generation()`, runs another
