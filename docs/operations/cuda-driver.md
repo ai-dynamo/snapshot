@@ -19,6 +19,7 @@ sudo sed -n '/libcuda\.so/s/^[^/]*//p' /proc/<host-pid>/maps | sort -u
 
 Use matching user-mode driver libraries for the workload, node agent's CUDA
 helper, and PageBroker. On a compatible older kernel-mode driver, the
-`cuda-compat-13-4` package provides the newer libraries. Select them explicitly
-with `LD_LIBRARY_PATH` in those containers; installing the package alone does
-not select it. See [NVIDIA's forward-compatibility guide](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html).
+`cuda-compat-13-4` package provides the newer libraries. Prepend its directory
+to each container's existing `LD_LIBRARY_PATH`. For PageBroker, keep
+`/usr/local/lib` in that path. Installing the package alone does not select
+it. See [NVIDIA's forward-compatibility guide](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html).
