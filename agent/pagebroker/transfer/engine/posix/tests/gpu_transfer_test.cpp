@@ -14,6 +14,7 @@
 #include <vector>
 #include <future>
 #include <array>
+#include <barrier>
 
 namespace {
 namespace transfer = snapshot::pagebroker::posix;
@@ -33,6 +34,19 @@ FileDescriptor CreateFile()
     throw std::runtime_error("size transfer test file");
   }
   return file;
+}
+
+std::unique_ptr<transfer::TransferPool> MakePool(std::span<const CUcontext> contexts,
+                                                 transfer::TransferOptions options, size_t lanes)
+{
+  std::vector<std::unique_ptr<transfer::TransferPoolDevice>> devices;
+  std::vector<transfer::TransferPoolDevice*> allocations;
+  for (const auto context : contexts) {
+    devices.push_back(std::make_unique<transfer::TransferPoolDevice>(context, options, lanes));
+    allocations.push_back(devices.back().get());
+  }
+  for (auto& device : devices) device->AllowAccess(allocations);
+  return std::make_unique<transfer::TransferPool>(std::move(devices));
 }
 
 class CudaTransfer : public testing::Test {
@@ -144,7 +158,8 @@ TEST_F(CudaTransfer, CancelledRequestDoesNotPreventLaterTransfers)
 TEST_F(CudaTransfer, PoolRoundTripConcurrentFilesAndRecovery)
 {
   const std::array contexts{context_};
-  transfer::TransferPool pool(contexts, {4, chunk_bytes}, 2);
+  auto owner = MakePool(contexts, {4, chunk_bytes}, 2);
+  auto& pool = *owner;
   auto first = CreateFile();
   auto second = CreateFile();
   CUdeviceptr other = 0;
@@ -164,8 +179,8 @@ TEST_F(CudaTransfer, PoolRoundTripConcurrentFilesAndRecovery)
     ASSERT_NO_THROW(write.get());
     ASSERT_EQ(cuMemsetD8(data_, 0, data_bytes), CUDA_SUCCESS);
     ASSERT_EQ(cuMemsetD8(other, 0, data_bytes), CUDA_SUCCESS);
-    auto prepared_first = std::make_shared<transfer::TransferFile>(first.get(), 2);
-    auto prepared_second = std::make_shared<transfer::TransferFile>(second.get(), 2);
+    auto prepared_first = std::make_shared<transfer::TransferFile>(first.get());
+    auto prepared_second = std::make_shared<transfer::TransferFile>(second.get());
     auto read = std::async(std::launch::async, [&] {
       pool.Restore(prepared_first, context_, data_, data_bytes, stream_, cancellation);
     });
@@ -230,15 +245,29 @@ TEST(PooledTransfer, RoutesConcurrentExtentsAcrossAllDevices)
     contexts.push_back(device->context);
     devices.push_back(std::move(device));
   }
-  // Uneven slot distribution also exercises arbitrary lane counts.
-  transfer::TransferPool pool(contexts, {4, chunk_bytes}, count + 1);
+  // Uneven per-lane request depths also exercise arbitrary lane counts.
+  auto owner = MakePool(contexts, {4, chunk_bytes}, count + 1);
+  auto& pool = *owner;
   Cancellation cancellation;
   for (int iteration = 0; iteration < 3; ++iteration) {
     std::vector<std::future<void>> futures;
+    std::barrier start(count);
     for (const auto& device : devices) {
       ASSERT_EQ(cuCtxSetCurrent(device->context), CUDA_SUCCESS);
-      ASSERT_EQ(cuMemsetD8(device->memory, 0, data_bytes), CUDA_SUCCESS);
-      futures.push_back(std::async(std::launch::async, [&, p = device.get()] {
+      const bool checkpoint = iteration == 1 && device->id % 2 == 0;
+      if (checkpoint) {
+        ASSERT_EQ(cuMemcpyHtoD(device->memory, device->expected.data(), data_bytes), CUDA_SUCCESS);
+        ASSERT_EQ(ftruncate(device->file.get(), 0), 0);
+        ASSERT_EQ(ftruncate(device->file.get(), data_bytes), 0);
+      } else {
+        ASSERT_EQ(cuMemsetD8(device->memory, 0, data_bytes), CUDA_SUCCESS);
+      }
+      futures.push_back(std::async(std::launch::async, [&, p = device.get(), checkpoint] {
+        start.arrive_and_wait();
+        if (checkpoint) {
+          pool.Checkpoint(p->file.get(), p->context, p->memory, data_bytes, p->stream, cancellation);
+          return;
+        }
         pool.Restore(p->file.get(), p->context, p->memory, data_bytes, p->stream, cancellation);
       }));
     }
@@ -247,6 +276,8 @@ TEST(PooledTransfer, RoutesConcurrentExtentsAcrossAllDevices)
       ASSERT_EQ(cuCtxSetCurrent(device->context), CUDA_SUCCESS);
       std::vector<unsigned char> actual(data_bytes);
       ASSERT_EQ(cuMemcpyDtoH(actual.data(), device->memory, data_bytes), CUDA_SUCCESS);
+      EXPECT_EQ(actual, device->expected);
+      ASSERT_EQ(pread(device->file.get(), actual.data(), data_bytes, 0), static_cast<ssize_t>(data_bytes));
       EXPECT_EQ(actual, device->expected);
     }
   }

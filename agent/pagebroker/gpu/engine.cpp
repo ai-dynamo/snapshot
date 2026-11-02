@@ -130,6 +130,7 @@ struct Device {
   std::string uuid;
   std::timed_mutex mutex;
   transfer::TransferBuffers buffers;
+  std::unique_ptr<transfer::TransferPoolDevice> pooled;
   size_t ring_bytes = 0;
 };
 
@@ -344,7 +345,7 @@ Artifact::Artifact(int directory_fd, Direction direction, std::vector<uint32_t> 
 Artifact::~Artifact() = default;
 
 struct GpuEngine::GpuEngineState {
-  explicit GpuEngineState(const EngineOptions& options) : pooled_lanes(options.pooled_lanes)
+  explicit GpuEngineState(const EngineOptions& options)
   {
     Require(!std::getenv("CUDA_CHECKPOINT_JOB_FILE"), "CUDA_CHECKPOINT_JOB_FILE must be unset");
     if (!checkpoint.SupportsCustomStorage()) {
@@ -357,6 +358,7 @@ struct GpuEngine::GpuEngineState {
     }
     const transfer::TransferOptions settings{options.buffer_count, options.chunk_bytes, true};
     transfer::TransferMemoryBytes(settings, count, options.max_pinned_bytes);
+    Validate(options.pooled_lanes <= settings.buffer_count * count, "invalid transfer pool lane count");
     std::map<CUdevice, std::string> labels;
     for (int index = 0; index < count; ++index) {
       CUdevice id;
@@ -380,19 +382,39 @@ struct GpuEngine::GpuEngineState {
       Require(!options.max_pinned_bytes || total_bytes <= options.max_pinned_bytes,
               "total pinned allocation exceeds max-pinned-bytes");
     }
+    for (auto it = devices.begin(); it != devices.end();) {
+      auto& device = *it->second;
+      const bool ready = SetUpOrSkip(labels[it->first], [&] {
+        if (options.pooled_lanes) {
+          device.pooled = std::make_unique<transfer::TransferPoolDevice>(
+              device.context.handle, settings, options.pooled_lanes);
+        } else {
+          device.buffers.Initialize(device.context.handle);
+        }
+      });
+      it = ready ? std::next(it) : devices.erase(it);
+    }
     if (options.pooled_lanes && !devices.empty()) {
-      std::vector<CUcontext> contexts;
+      std::vector<transfer::TransferPoolDevice*> allocations;
       for (const auto& [id, device] : devices) {
         (void)id;
-        contexts.push_back(device->context.handle);
+        allocations.push_back(device->pooled.get());
       }
-      pool = std::make_unique<transfer::TransferPool>(contexts, settings, options.pooled_lanes);
-    } else {
-      for (auto it = devices.begin(); it != devices.end();) {
-        auto& device = *it->second;
-        const bool ready = SetUpOrSkip(labels[it->first], [&] { device.buffers.Initialize(device.context.handle); });
-        it = ready ? std::next(it) : devices.erase(it);
+      // Keep all allocations alive until access checks finish. A failed target
+      // GPU is then removed before any lane starts using its resources.
+      std::vector<CUdevice> failed;
+      for (const auto& [id, device] : devices) {
+        if (!SetUpOrSkip(labels[id], [&] { device->pooled->AllowAccess(allocations); })) {
+          failed.push_back(id);
+        }
       }
+      for (const auto id : failed) devices.erase(id);
+      std::vector<std::unique_ptr<transfer::TransferPoolDevice>> prepared;
+      for (auto& [id, device] : devices) {
+        (void)id;
+        prepared.push_back(std::move(device->pooled));
+      }
+      if (!prepared.empty()) pool = std::make_unique<transfer::TransferPool>(std::move(prepared));
     }
     available = !devices.empty();
   }
@@ -420,7 +442,6 @@ struct GpuEngine::GpuEngineState {
   driver::CheckpointAPI checkpoint;
   std::map<CUdevice, std::unique_ptr<Device>> devices;
   std::unique_ptr<transfer::TransferPool> pool;
-  size_t pooled_lanes;
   bool available = false;
   std::mutex targets_mutex;
   std::set<int> active_targets;
@@ -840,7 +861,7 @@ std::shared_ptr<posix::GpuRestorePreparation>
 GpuEngine::PrepareRestore(int directory_fd)
 {
   if (!state_->available || !state_->pool) return {};
-  return std::make_shared<posix::GpuRestorePreparation>(directory_fd, state_->pooled_lanes);
+  return std::make_shared<posix::GpuRestorePreparation>(directory_fd);
 }
 
 std::vector<ParticipantResult>
