@@ -420,6 +420,8 @@ mkdir -p {STATE_DIR}
 # process tree, so a test also shows that its listening socket survives
 # restore at a new Pod IP. It is Perl because the workload image has Perl but
 # no Python, nc or socat; a missing perl fails the test instead of skipping it.
+# The source waits for the server to listen, so a server that can't bind its
+# port fails the source at once instead of the probe timing out.
 # SNAPSHOT_E2E_HOOKS_PORT lets the cluster-free test pick a free port.
 HOOKS_SERVER = f"""command -v perl >/dev/null || {{ echo "[source] perl is missing; the lifecycle hooks server needs it" >&2; exit 1; }}
 cat > /tmp/hooks-server.pl <<'PERL_EOF'
@@ -432,6 +434,8 @@ my $server = IO::Socket::INET->new(LocalAddr => "0.0.0.0", LocalPort => $port, L
 $SIG{{PIPE}} = "IGNORE";
 $| = 1;
 print "[hooks] listening on $port\\n";
+open(my $ready, ">", "/tmp/hooks-server.ready") or die "[hooks] ready file: $!\\n";
+close $ready;
 while (my $conn = $server->accept) {{
   my $request = <$conn> // "";
   while (my $header = <$conn>) {{ last if $header =~ /^\\r?\\n$/; }}
@@ -444,7 +448,15 @@ while (my $conn = $server->accept) {{
   close $conn;
 }}
 PERL_EOF
+rm -f /tmp/hooks-server.ready
 perl /tmp/hooks-server.pl &
+hooks_pid=$!
+for _ in $(seq 50); do
+  [ -e /tmp/hooks-server.ready ] && break
+  kill -0 "$hooks_pid" 2>/dev/null || {{ echo "[source] the lifecycle hooks server failed to start" >&2; exit 1; }}
+  sleep 0.1
+done
+[ -e /tmp/hooks-server.ready ] || {{ echo "[source] the lifecycle hooks server did not listen within 5 s" >&2; exit 1; }}
 """
 
 

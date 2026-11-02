@@ -142,7 +142,7 @@ def test_hooks_server_reports_checkpoint_readiness(tmp_path: Path) -> None:
         workloads.source_command("test-image", gpu=False, hooks_server=True)
         .replace(workloads.CONTROL_DIR, str(control_dir))
         .replace(workloads.STATE_DIR, str(state_dir))
-        .replace("/tmp/hooks-server.pl", str(tmp_path / "hooks-server.pl"))
+        .replace("/tmp/hooks-server", str(tmp_path / "hooks-server"))
     )
     port = free_port()
     proc = subprocess.Popen(
