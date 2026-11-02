@@ -169,7 +169,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return fmt.Errorf("mark source pod %s capture-eligible: %w", podKey.String(), err)
 	}
 
-	if ready, err := w.sourceReadyForCheckpoint(ctx, content, pod, containerName); !ready {
+	if ready, err := w.isSourceReadyForCheckpoint(ctx, content, pod, containerName); !ready {
 		return err
 	}
 

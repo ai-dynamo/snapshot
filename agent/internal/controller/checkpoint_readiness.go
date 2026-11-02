@@ -17,31 +17,28 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-const (
-	// reasonInvalidCheckpointReadinessProbe fails a work order whose probe can
-	// never run, such as an HTTP probe on a port name the container doesn't
-	// have.
-	reasonInvalidCheckpointReadinessProbe = "InvalidCheckpointReadinessProbe"
-
-	// reasonWaitingForCheckpointReadiness is the Event on the source Pod when
-	// the agent starts waiting for its checkpoint readiness probe.
-	reasonWaitingForCheckpointReadiness = "WaitingForCheckpointReadiness"
-)
-
 // checkpointProbeState counts one work order's probe results. Only the
 // goroutine holding the work order's queue key touches it.
-//
-// It lives in memory only: an agent restart starts the count again, which
-// delays the checkpoint but never takes one early.
 type checkpointProbeState struct {
-	containerID  string
-	restartCount int32
-	successes    int32
-	nextCheck    time.Time
-	announced    bool
+	containerID string
+	successes   int32
+	nextCheck   time.Time
+	announced   bool
 }
 
-// sourceReadyForCheckpoint decides whether the source container may be
+// track starts the count again for a new source container: on the first
+// check, and after a restart, which always gives the container a new ID. The
+// first check waits initialDelay from the container's start.
+func (s *checkpointProbeState) track(status *corev1.ContainerStatus, initialDelay time.Duration) {
+	if s.containerID == status.ContainerID {
+		return
+	}
+	s.containerID = status.ContainerID
+	s.successes = 0
+	s.nextCheck = status.State.Running.StartedAt.Add(initialDelay)
+}
+
+// isSourceReadyForCheckpoint decides whether the source container may be
 // checkpointed now. Without a checkpointReadinessProbe that is the container's
 // Ready condition, as before. With one, the probe decides and Ready is not
 // needed: the probe runs every periodSeconds, after initialDelaySeconds from
@@ -49,14 +46,14 @@ type checkpointProbeState struct {
 //
 // When it returns false, the caller returns err. err is nil unless a terminal
 // status could not be written: a refused probe fails the work order here.
-func (w *NodeController) sourceReadyForCheckpoint(
+func (w *NodeController) isSourceReadyForCheckpoint(
 	ctx context.Context,
 	content *snapshotv1alpha1.PodSnapshotContent,
 	pod *corev1.Pod,
 	containerName string,
 ) (bool, error) {
 	logger := logr.FromContextOrDiscard(ctx)
-	probe := checkpointReadinessProbe(content, containerName)
+	probe := findCheckpointReadinessProbe(content, containerName)
 	if probe == nil {
 		if !isContainerReady(pod, containerName) {
 			logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName)
@@ -71,8 +68,10 @@ func (w *NodeController) sourceReadyForCheckpoint(
 	}
 	if err != nil {
 		w.checkpointProbes.Delete(content.Name)
-		return false, w.setSnapshotContentFailed(ctx, content, reasonInvalidCheckpointReadinessProbe,
-			fmt.Errorf("checkpoint readiness probe: %w", err))
+		err = fmt.Errorf("checkpoint readiness probe of container %q: %w", containerName, err)
+		emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning,
+			reasonInvalidCheckpointReadinessProbe, err.Error())
+		return false, w.setSnapshotContentFailed(ctx, content, reasonInvalidCheckpointReadinessProbe, err)
 	}
 
 	status := containerStatus(pod, containerName)
@@ -82,27 +81,20 @@ func (w *NodeController) sourceReadyForCheckpoint(
 		return false, nil
 	}
 	state := w.checkpointProbeState(content.Name)
-	if state.containerID != status.ContainerID || state.restartCount != status.RestartCount {
-		*state = checkpointProbeState{
-			containerID:  status.ContainerID,
-			restartCount: status.RestartCount,
-			nextCheck:    status.State.Running.StartedAt.Add(time.Duration(probe.InitialDelaySeconds) * time.Second),
-			announced:    state.announced,
-		}
+	state.track(status, time.Duration(probe.InitialDelaySeconds)*time.Second)
+	if !state.announced {
+		emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeNormal,
+			waitingForCheckpointReadinessReason,
+			fmt.Sprintf("Waiting for the checkpoint readiness probe of container %q", containerName))
+		state.announced = true
 	}
 
 	// Pod events wake the work order more often than the period, so checks
 	// are paced by nextCheck, not by how often reconcile runs.
-	now := w.now()
+	now := w.nowFn()
 	if now.Before(state.nextCheck) {
-		w.requeueCapture(content.Name, state.nextCheck.Sub(now))
+		w.requeueCaptureFn(content.Name, state.nextCheck.Sub(now))
 		return false, nil
-	}
-	if !state.announced {
-		emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeNormal,
-			reasonWaitingForCheckpointReadiness,
-			fmt.Sprintf("Waiting for the checkpoint readiness probe of container %q", containerName))
-		state.announced = true
 	}
 
 	period := time.Duration(probe.PeriodSeconds) * time.Second
@@ -118,13 +110,13 @@ func (w *NodeController) sourceReadyForCheckpoint(
 		logger.Info("Checkpoint readiness probe passed", "pod", pod.Name, "container", containerName)
 		return true, nil
 	}
-	w.requeueCapture(content.Name, period)
+	w.requeueCaptureFn(content.Name, period)
 	return false, nil
 }
 
-// checkpointReadinessProbe returns the probe the work order saved for the
+// findCheckpointReadinessProbe returns the probe the work order saved for the
 // container, or nil.
-func checkpointReadinessProbe(content *snapshotv1alpha1.PodSnapshotContent, containerName string) *snapshotv1alpha1.CheckpointReadinessProbe {
+func findCheckpointReadinessProbe(content *snapshotv1alpha1.PodSnapshotContent, containerName string) *snapshotv1alpha1.CheckpointReadinessProbe {
 	for i := range content.Spec.Containers {
 		if content.Spec.Containers[i].Name == containerName {
 			return content.Spec.Containers[i].CheckpointReadinessProbe
@@ -212,19 +204,4 @@ func containerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 		}
 	}
 	return nil
-}
-
-func (w *NodeController) now() time.Time {
-	if w.nowFn != nil {
-		return w.nowFn()
-	}
-	return time.Now()
-}
-
-func (w *NodeController) requeueCapture(name string, after time.Duration) {
-	if w.requeueCaptureFn != nil {
-		w.requeueCaptureFn(name, after)
-		return
-	}
-	w.captureQueue.AddAfter(name, after)
 }

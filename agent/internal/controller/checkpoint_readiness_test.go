@@ -210,6 +210,7 @@ func TestCheckpointProbe_WaitsForTheInitialDelay(t *testing.T) {
 	h.reconcile()
 	assert.Equal(t, 0, h.checkCount())
 	assert.Equal(t, 7*time.Second, h.lastRequeue(), "the delay counts from the container's start")
+	assert.Equal(t, 1, h.events(waitingForCheckpointReadinessReason), "the wait is announced before the delay ends")
 
 	h.advance(7 * time.Second)
 	h.reconcile()
@@ -223,8 +224,8 @@ func TestCheckpointProbe_AContainerRestartResetsTheCount(t *testing.T) {
 	require.Equal(t, 1, h.checkCount())
 
 	restartedAt := probeStart.Add(20 * time.Second)
+	// A restart gives the container a new ID; that alone resets the count.
 	h.updatePodStatus(func(pod *corev1.Pod) {
-		pod.Status.ContainerStatuses[0].RestartCount = 1
 		pod.Status.ContainerStatuses[0].ContainerID = "containerd://def456"
 		pod.Status.ContainerStatuses[0].State.Running.StartedAt = metav1.NewTime(restartedAt)
 	})
@@ -277,6 +278,20 @@ func TestCheckpointProbe_HTTPGoesToThePodIP(t *testing.T) {
 	}
 }
 
+// events counts the source Pod's Events with reason.
+func (h *probeHarness) events(reason string) int {
+	h.t.Helper()
+	events, err := h.w.clientset.CoreV1().Events("inference").List(context.Background(), metav1.ListOptions{})
+	require.NoError(h.t, err)
+	var n int
+	for _, e := range events.Items {
+		if e.Reason == reason {
+			n++
+		}
+	}
+	return n
+}
+
 func TestCheckpointProbe_AnnouncesTheWaitOnce(t *testing.T) {
 	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 1, 3, 0), nil)
 
@@ -284,15 +299,7 @@ func TestCheckpointProbe_AnnouncesTheWaitOnce(t *testing.T) {
 		h.reconcile()
 		h.advance(time.Second)
 	}
-	events, err := h.w.clientset.CoreV1().Events("inference").List(context.Background(), metav1.ListOptions{})
-	require.NoError(t, err)
-	var waiting int
-	for _, e := range events.Items {
-		if e.Reason == reasonWaitingForCheckpointReadiness {
-			waiting++
-		}
-	}
-	assert.Equal(t, 1, waiting)
+	assert.Equal(t, 1, h.events(waitingForCheckpointReadinessReason))
 }
 
 func TestCheckpointProbe_RefusedTargetsFailTheWorkOrder(t *testing.T) {
@@ -322,6 +329,7 @@ func TestCheckpointProbe_RefusedTargetsFailTheWorkOrder(t *testing.T) {
 			failed := meta.FindStatusCondition(getContent(t, h.w, h.content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 			require.NotNil(t, failed)
 			assert.Equal(t, reasonInvalidCheckpointReadinessProbe, failed.Reason)
+			assert.Equal(t, 1, h.events(reasonInvalidCheckpointReadinessProbe), "the source Pod gets a Warning")
 		})
 	}
 }
