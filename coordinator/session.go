@@ -447,9 +447,10 @@ func (s *client) stop(w watcher) {
 
 // drain consumes a cancelled watch until its channel closes, which happens once
 // its subscription has, or until the connection has closed. nats.go may never
-// close the channel of a watch cancelled before WatchFiltered returned, so the
-// connection's close is what bounds the wait. nats.go delivers nothing after
-// it, so emptying the channel frees the one delivery that may be blocked on it.
+// close the channel of a watch cancelled before WatchFiltered returned
+// (nats-io/nats.go#2223), so the connection's close is what bounds the wait.
+// nats.go delivers nothing after it, so emptying the channel frees the one
+// delivery that may be blocked on it.
 func (s *client) drain(w jetstream.KeyWatcher) {
 	for {
 		select {
