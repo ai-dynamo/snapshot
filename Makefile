@@ -56,6 +56,7 @@ test-integration:
 	$(MAKE) -C operator test-integration
 
 build:
+	$(MAKE) -C coordinator build
 	$(MAKE) -C agent build
 	$(MAKE) -C operator build
 

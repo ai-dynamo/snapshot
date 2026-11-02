@@ -6,7 +6,12 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .DEFAULT_GOAL := test
 
-.PHONY: fmt lint tidy test
+.PHONY: build fmt lint tidy test
+
+# The module has no binary; make build compiles it so CodeQL, which analyzes
+# only what the build compiles, covers it.
+build:
+	go build ./...
 
 fmt:
 	gofmt -w .

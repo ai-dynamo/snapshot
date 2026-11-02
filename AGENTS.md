@@ -64,7 +64,7 @@ the workflows, and they must agree.
 ```bash
 make check        # default goal: the full local gate (see below)
 make test         # unit tests across api, coordinator, agent, operator
-make build        # build agent and operator binaries
+make build        # build agent and operator binaries, compile coordinator
 make lint         # golangci-lint across all four modules
 make fmt          # format
 make generate     # regenerate CRDs from api/ types
