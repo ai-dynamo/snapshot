@@ -17,18 +17,22 @@ import (
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
-// recoveryController wires the GPU seams and counts kills, so a test can say
-// what became of the source without a GPU or a live process tree.
-func recoveryController(t *testing.T, gpuPIDs []int, reviveErr error) (*NodeController, *int) {
-	t.Helper()
+// recoveryController counts kills and records what revival was asked to do, so
+// a test can say what became of the source without a GPU.
+func recoveryController(reviveErr error) (*NodeController, *int, *[]int) {
 	kills := 0
+	var revived []int
 	w := &NodeController{
-		log:    logr.Discard(),
-		config: &snapshottypes.AgentConfig{},
-		filterCUDAProcessesFn: func(context.Context, []int, logr.Logger) []int {
-			return gpuPIDs
-		},
-		reviveGPUProcessesFn: func(context.Context, []int, string, logr.Logger) error {
+		log:          logr.Discard(),
+		config:       &snapshottypes.AgentConfig{},
+		hostProcPath: "/proc",
+		reviveGPUProcessesFn: func(ctx context.Context, pids []int, _ string, _ logr.Logger) error {
+			// The real one execs the checkpoint helper with this context, so a
+			// dead one reaches the helper as a failure rather than a revival.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			revived = append(revived, pids...)
 			return reviveErr
 		},
 		sendSignalFn: func(logr.Logger, int, syscall.Signal, string) error {
@@ -36,7 +40,7 @@ func recoveryController(t *testing.T, gpuPIDs []int, reviveErr error) (*NodeCont
 			return nil
 		},
 	}
-	return w, &kills
+	return w, &kills, &revived
 }
 
 // A failed dump leaves the workload suspended but intact. Killing it destroys a
@@ -44,18 +48,23 @@ func recoveryController(t *testing.T, gpuPIDs []int, reviveErr error) (*NodeCont
 // put back.
 func TestReviveSourceRefusesWhatItCannotPutBack(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		gpuPIDs   []int
-		reviveErr error
+		name         string
+		containerPID int
+		gpuPIDs      []int
+		reviveErr    error
 	}{
-		{"the GPU state cannot be recovered", []int{4242}, errors.New("process is failed")},
-		{"there are no GPUs to hand back, and no tree either", nil, nil},
+		{name: "the process tree is gone", containerPID: 0, gpuPIDs: []int{4242}},
+		{
+			name:         "the GPU state cannot be recovered",
+			containerPID: os.Getpid(),
+			gpuPIDs:      []int{4242},
+			reviveErr:    errors.New("process is failed"),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w, _ := recoveryController(t, tc.gpuPIDs, tc.reviveErr)
+			w, _, _ := recoveryController(tc.reviveErr)
 
-			// PID 0 has no process tree, so the tree lookup finds nothing.
-			reason, ok := w.reviveSource(context.Background(), logr.Discard(), 0)
+			reason, ok := w.reviveSource(context.Background(), logr.Discard(), tc.containerPID, tc.gpuPIDs)
 
 			assert.False(t, ok)
 			assert.NotEmpty(t, reason, "a source that cannot be revived must say why")
@@ -63,36 +72,48 @@ func TestReviveSourceRefusesWhatItCannotPutBack(t *testing.T) {
 	}
 }
 
+// This process is running and untraced, so it stands in for a tree CRIU
+// released: the GPUs go back and nothing is killed.
+func TestReviveSourceLeavesAReleasedTreeRunning(t *testing.T) {
+	w, kills, revived := recoveryController(nil)
+
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(), []int{4242})
+
+	assert.Equal(t, 0, *kills, "a workload that was put back must not be killed")
+	assert.Equal(t, []int{4242}, *revived, "the capture's own GPU processes must be handed back")
+}
+
 // The kill is the fallback, not the default: it fires exactly when revival
 // could not put the workload back.
 func TestRecoverSourceKillsOnlyWhatCannotBeRevived(t *testing.T) {
-	w, kills := recoveryController(t, []int{4242}, errors.New("process is failed"))
+	w, kills, _ := recoveryController(errors.New("process is failed"))
 
-	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), 0)
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(), []int{4242})
 
 	assert.Equal(t, 1, *kills, "a source that cannot be revived must not be left hanging")
 }
 
-// The GPUs are handed back before CRIU's release is checked: a checkpointed
-// process cannot run without them, so the order is load-bearing.
-func TestReviveSourceHandsBackTheGPUsFirst(t *testing.T) {
-	var order []string
-	w := &NodeController{
-		log:    logr.Discard(),
-		config: &snapshottypes.AgentConfig{},
-		filterCUDAProcessesFn: func(context.Context, []int, logr.Logger) []int {
-			order = append(order, "filter")
-			return []int{4242}
-		},
-		reviveGPUProcessesFn: func(context.Context, []int, string, logr.Logger) error {
-			order = append(order, "revive")
-			return errors.New("stop here")
-		},
-		sendSignalFn: func(logr.Logger, int, syscall.Signal, string) error { return nil },
-	}
+// A CPU-only capture has no GPUs to hand back, and must still be left running
+// rather than killed.
+func TestReviveSourceWithoutGPUsLeavesTheTreeRunning(t *testing.T) {
+	w, kills, revived := recoveryController(errors.New("must not be called"))
 
-	_, ok := w.reviveSource(context.Background(), logr.Discard(), os.Getpid())
+	reason, ok := w.reviveSource(context.Background(), logr.Discard(), os.Getpid(), nil)
 
-	require.False(t, ok)
-	assert.Equal(t, []string{"filter", "revive"}, order)
+	require.True(t, ok, "a released CPU-only tree needs no revival: %s", reason)
+	assert.Empty(t, *revived)
+	assert.Equal(t, 0, *kills)
+}
+
+// Recovery must outlive the capture: a dump that failed on its deadline leaves
+// that context dead, and the GPUs still have to go back.
+func TestRecoverSourceSurvivesACancelledCapture(t *testing.T) {
+	w, kills, revived := recoveryController(nil)
+	captureCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	w.recoverSourceAfterFailedDump(captureCtx, logr.Discard(), os.Getpid(), []int{4242})
+
+	assert.Equal(t, []int{4242}, *revived, "a dead capture context must not skip the revival")
+	assert.Equal(t, 0, *kills)
 }

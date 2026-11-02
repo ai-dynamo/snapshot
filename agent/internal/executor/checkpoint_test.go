@@ -319,7 +319,8 @@ func TestCheckpointPreparationFailure(t *testing.T) {
 					assert.ErrorContains(t, err, fmt.Sprintf("abort PageBroker checkpoint %q: read PageBroker response: EOF", transactionID))
 					assert.ErrorIs(t, err, io.EOF)
 				}
-				assert.False(t, SourceNeedsRecovery(err))
+				_, needsRecovery := SuspendedGPUProcesses(err)
+				assert.False(t, needsRecovery)
 				for _, path := range []string{workingDirectory, cfg.Storage.BasePath} {
 					entries, err := os.ReadDir(path)
 					require.NoError(t, err)
@@ -429,7 +430,8 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	require.ErrorContains(t, err, "while preparing PageBroker checkpoint")
 	assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
 	assert.Less(t, time.Since(start), 3*time.Second)
-	assert.False(t, SourceNeedsRecovery(err))
+	_, needsRecovery := SuspendedGPUProcesses(err)
+	assert.False(t, needsRecovery)
 	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts"))
 }
 
@@ -510,9 +512,20 @@ func TestCheckpointBoundSendsArtifactTarget(t *testing.T) {
 	waitPageBrokerTest(t, server)
 }
 
-func TestSourceNeedsRecovery(t *testing.T) {
-	assert.True(t, SourceNeedsRecovery(sourceNeedsRecovery(errors.New("capture failed"))))
-	assert.False(t, SourceNeedsRecovery(errors.New("prepare failed")))
+// Recovery hands back exactly the GPU processes the capture found, so the
+// failure has to carry them: a probe cannot tell "not a CUDA process" from a
+// helper that failed, and an empty list would strand a suspended workload.
+func TestSuspendedGPUProcesses(t *testing.T) {
+	gpuPIDs, needsRecovery := SuspendedGPUProcesses(sourceNeedsRecovery(errors.New("capture failed"), []int{41, 42}))
+	assert.True(t, needsRecovery)
+	assert.Equal(t, []int{41, 42}, gpuPIDs)
+
+	_, needsRecovery = SuspendedGPUProcesses(errors.New("prepare failed"))
+	assert.False(t, needsRecovery, "a failure before the source was touched needs no recovery")
+
+	cpuOnly, needsRecovery := SuspendedGPUProcesses(sourceNeedsRecovery(errors.New("capture failed"), nil))
+	assert.True(t, needsRecovery)
+	assert.Empty(t, cpuOnly, "a CPU-only capture still needs recovery, with no GPUs to hand back")
 }
 
 // TestCheckpointCommitFailureReleasesOnlySettledFailures drives a completed dump

@@ -54,19 +54,31 @@ func IsCleanupFailure(err error) bool {
 
 // sourceNeedsRecoveryError reports a failure after CUDA or CRIU had already touched the source,
 // which leaves it suspended rather than running. What becomes of it is the caller's decision.
-type sourceNeedsRecoveryError struct{ cause error }
+//
+// It carries the GPU processes the capture found, so recovery hands back exactly those rather
+// than probing for them again: the probe cannot tell "not a CUDA process" from a helper that
+// failed, and reading an empty list as "nothing to revive" would strand a suspended workload.
+type sourceNeedsRecoveryError struct {
+	cause        error
+	cudaHostPIDs []int
+}
 
 func (e *sourceNeedsRecoveryError) Error() string { return e.cause.Error() }
 
 func (e *sourceNeedsRecoveryError) Unwrap() error { return e.cause }
 
-func sourceNeedsRecovery(err error) error { return &sourceNeedsRecoveryError{cause: err} }
+func sourceNeedsRecovery(err error, cudaHostPIDs []int) error {
+	return &sourceNeedsRecoveryError{cause: err, cudaHostPIDs: slices.Clone(cudaHostPIDs)}
+}
 
-// SourceNeedsRecovery reports whether a failed checkpoint left the source suspended, and so in a
-// state nothing will resolve on its own.
-func SourceNeedsRecovery(err error) bool {
-	var checkpointError *sourceNeedsRecoveryError
-	return errors.As(err, &checkpointError)
+// SuspendedGPUProcesses returns the GPU processes a failed capture left suspended, and whether
+// the failure is one that left the source needing recovery at all.
+func SuspendedGPUProcesses(err error) ([]int, bool) {
+	var recoverable *sourceNeedsRecoveryError
+	if !errors.As(err, &recoverable) {
+		return nil, false
+	}
+	return recoverable.cudaHostPIDs, true
 }
 
 // CheckpointRequest holds the content-owned inputs for a checkpoint operation.
@@ -203,7 +215,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
 	if err != nil {
-		return nil, sourceNeedsRecovery(err)
+		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs)
 	}
 
 	dumpComplete = true

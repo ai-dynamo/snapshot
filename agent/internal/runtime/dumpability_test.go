@@ -8,14 +8,29 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
 // writeProcStatus lays down one /proc/<pid>/status entry with the three fields
 // the probe reads, plus neighbours so field matching has to be exact.
+// writeProcStatus lays down a process and its thread-group leader task, as a
+// real procfs has both.
 func writeProcStatus(t *testing.T, procRoot string, pid, tracerPID, threads int, state string) {
 	t.Helper()
-	dir := filepath.Join(procRoot, strconv.Itoa(pid))
+	writeStatusFile(t, filepath.Join(procRoot, strconv.Itoa(pid)), pid, tracerPID, threads, state)
+	writeTaskStatus(t, procRoot, pid, pid, tracerPID, threads, state)
+}
+
+// writeTaskStatus lays down one task of a process.
+func writeTaskStatus(t *testing.T, procRoot string, pid, tid, tracerPID, threads int, state string) {
+	t.Helper()
+	writeStatusFile(t, filepath.Join(procRoot, strconv.Itoa(pid), "task", strconv.Itoa(tid)),
+		tid, tracerPID, threads, state)
+}
+
+func writeStatusFile(t *testing.T, dir string, pid, tracerPID, threads int, state string) {
+	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -171,5 +186,45 @@ func TestReleasedIgnoresThreadCount(t *testing.T) {
 	}
 	if dumpable, _ := Dumpable(procRoot, TreeSnapshot{42: 4}); dumpable {
 		t.Error("Dumpable() = true, want false for a changed tree")
+	}
+}
+
+// CRIU seizes tasks, not processes. A non-leader thread left traced or stopped
+// keeps the tree from resuming even when its leader reads perfectly clean, so
+// checking only the leader would call that tree released and leave it hung.
+func TestReleasedChecksEveryTask(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		tracerPID int
+		state     string
+	}{
+		{name: "a non-leader task is still traced", tracerPID: 99, state: "S"},
+		{name: "a non-leader task is stopped", state: "T"},
+		{name: "a non-leader task is in uninterruptible sleep", state: "D"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			procRoot := t.TempDir()
+			writeProcStatus(t, procRoot, 42, 0, 2, "S")
+			writeTaskStatus(t, procRoot, 42, 43, tc.tracerPID, 2, tc.state)
+
+			released, reason := Released(procRoot, []int{42})
+
+			if released {
+				t.Error("a tree with a seized thread was reported released")
+			}
+			if !strings.Contains(reason, "43") {
+				t.Errorf("reason = %q, want it to name task 43", reason)
+			}
+		})
+	}
+}
+
+func TestReleasedAcceptsATreeWhoseTasksAreAllClean(t *testing.T) {
+	procRoot := t.TempDir()
+	writeProcStatus(t, procRoot, 42, 0, 2, "S")
+	writeTaskStatus(t, procRoot, 42, 43, 0, 2, "R")
+
+	if released, reason := Released(procRoot, []int{42}); !released {
+		t.Errorf("Released() = false (%s), want true", reason)
 	}
 }

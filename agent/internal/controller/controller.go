@@ -71,14 +71,15 @@ type NodeController struct {
 	writePodControlSentinelFn func(string, string, string, []byte) error
 	controlSentinelExistsFn   func(int, string) (bool, error)
 	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
-	stagingCapacityFn         func(string) (int64, error)
-	minimumImageSizeFn        func(string, []int) (int64, error)
-	filterCUDAProcessesFn     func(context.Context, []int, logr.Logger) []int
-	reviveGPUProcessesFn      func(context.Context, []int, string, logr.Logger) error
-	restoreQueue              workqueue.TypedDelayingInterface[client.ObjectKey]
-	restorePodLister          corev1listers.PodLister
-	compareFn                 func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
-	withoutProxy              bool
+	// hostProcPath is where the agent reads the node's processes; tests point it elsewhere.
+	hostProcPath         string
+	stagingCapacityFn    func(string) (int64, error)
+	minimumImageSizeFn   func(string, []int) (int64, error)
+	reviveGPUProcessesFn func(context.Context, []int, string, logr.Logger) error
+	restoreQueue         workqueue.TypedDelayingInterface[client.ObjectKey]
+	restorePodLister     corev1listers.PodLister
+	compareFn            func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
+	withoutProxy         bool
 
 	// captureQueue holds PodSnapshotContent names. Its per-key exclusion is the capture path's only
 	// lock, which is enough because exactly one agent runs per node.
@@ -250,9 +251,9 @@ func newDefaultController(
 		writePodControlSentinelFn: snapshotruntime.WritePodControlSentinel,
 		controlSentinelExistsFn:   snapshotruntime.ControlSentinelExists,
 		sendSignalFn:              snapshotruntime.SendSignalToPID,
+		hostProcPath:              snapshotruntime.HostProcPath,
 		stagingCapacityFn:         snapshotruntime.StagingCapacity,
 		minimumImageSizeFn:        snapshotruntime.MinimumImageSize,
-		filterCUDAProcessesFn:     cuda.FilterProcesses,
 		reviveGPUProcessesFn:      cuda.ReviveProcessTree,
 		compareFn:                 compat.Compare,
 	}

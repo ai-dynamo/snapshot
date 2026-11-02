@@ -25,12 +25,22 @@ type TaskProbe struct {
 // probe can tell whether anything exited or forked since.
 type TreeSnapshot map[int]int
 
-// ProbeTask reads the three fields that decide whether CRIU can seize a task.
+// ProbeTask reads the three fields that decide whether CRIU can seize a task,
+// for a process's thread-group leader.
 func ProbeTask(procRoot string, pid int) (TaskProbe, error) {
+	return probeStatus(procRoot, pid, filepath.Join(procRoot, strconv.Itoa(pid), "status"))
+}
+
+// probeTaskOf reads those fields for one task of a process.
+func probeTaskOf(procRoot string, pid, tid int) (TaskProbe, error) {
+	return probeStatus(procRoot, tid,
+		filepath.Join(procRoot, strconv.Itoa(pid), "task", strconv.Itoa(tid), "status"))
+}
+
+func probeStatus(procRoot string, pid int, statusPath string) (TaskProbe, error) {
 	if pid <= 0 {
 		return TaskProbe{}, fmt.Errorf("invalid PID %d", pid)
 	}
-	statusPath := filepath.Join(procRoot, strconv.Itoa(pid), "status")
 	statusBytes, err := os.ReadFile(statusPath)
 	if err != nil {
 		return TaskProbe{}, fmt.Errorf("read %s: %w", statusPath, err)
@@ -83,20 +93,50 @@ func SnapshotTree(procRoot string, pids []int) (TreeSnapshot, error) {
 // resume on its own.
 func Released(procRoot string, pids []int) (bool, string) {
 	for _, pid := range pids {
-		probe, err := ProbeTask(procRoot, pid)
+		tids, err := taskIDs(procRoot, pid)
 		if err != nil {
 			return false, fmt.Sprintf("process %d is gone or unreadable: %v", pid, err)
 		}
-		switch {
-		case probe.TracerPID != 0:
-			return false, fmt.Sprintf("process %d is still traced by %d", pid, probe.TracerPID)
-		case probe.State == "T" || probe.State == "t":
-			return false, fmt.Sprintf("process %d is stopped", pid)
-		case probe.State == "D":
-			return false, fmt.Sprintf("process %d is in uninterruptible sleep", pid)
+		for _, tid := range tids {
+			probe, err := probeTaskOf(procRoot, pid, tid)
+			if err != nil {
+				return false, fmt.Sprintf("task %d of process %d is gone or unreadable: %v", tid, pid, err)
+			}
+			switch {
+			case probe.TracerPID != 0:
+				return false, fmt.Sprintf("task %d of process %d is still traced by %d", tid, pid, probe.TracerPID)
+			case probe.State == "T" || probe.State == "t":
+				return false, fmt.Sprintf("task %d of process %d is stopped", tid, pid)
+			case probe.State == "D":
+				return false, fmt.Sprintf("task %d of process %d is in uninterruptible sleep", tid, pid)
+			}
 		}
 	}
 	return true, ""
+}
+
+// taskIDs lists every task in a process. CRIU seizes tasks, not processes, so a
+// non-leader thread left traced or stopped keeps the tree from resuming even
+// when its leader reads clean.
+func taskIDs(procRoot string, pid int) ([]int, error) {
+	taskDir := filepath.Join(procRoot, strconv.Itoa(pid), "task")
+	entries, err := os.ReadDir(taskDir)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", taskDir, err)
+	}
+	tids := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		tid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		tids = append(tids, tid)
+	}
+	if len(tids) == 0 {
+		return nil, fmt.Errorf("process %d has no tasks", pid)
+	}
+	sort.Ints(tids)
+	return tids, nil
 }
 
 // Dumpable reports whether CRIU can dump the recorded tree as it stands, and
