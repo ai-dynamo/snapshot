@@ -61,16 +61,15 @@ dump, and a `SnapshotJob` is bounded by its `activeDeadlineSeconds`.
 
 `runRestore` runs the action for each destination container:
 
-1. **Before CRIU.** The agent checks that the action can run: for a file, a
-   path that is not one of Snapshot's own control files, with no file there
-   yet; for HTTP, a port the destination container has. A failed check fails
-   the restore before any CRIU work.
+1. **Before CRIU.** The agent checks the action's settings against the Pod
+   spec: for a file, a path that is not one of Snapshot's own control files;
+   for HTTP, a port the destination container has. A failed check fails the
+   restore before any CRIU work.
 2. **After CRIU.** Before it writes `restore-complete`, the agent checks the
-   file again: it must still be absent, and its directory must exist and be
-   writable by the container's user. The rootfs diff can bring the file back
-   from the source, for example when the source was itself restored and
-   notified, and it can also bring the directory, which is why the directory
-   is checked only now. A failed check stops the restore before the restored
+   file: it must not exist yet, and its directory must exist and be writable
+   by the container's user. The file is checked only now because the restored
+   files can bring it, or its directory: the source may itself have been
+   restored and notified. A failed check stops the restore before the restored
    process is released.
 3. **After `restore-complete`.** The agent creates the file, or sends the POST,
    every `periodSeconds`, with `timeoutSeconds` per attempt, until it succeeds.
