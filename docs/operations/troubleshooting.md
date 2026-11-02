@@ -46,6 +46,9 @@ because it can never pass: the container has no port with the probe's port
 name. The source pod also gets a Warning event with this reason.
 
 The `PodSnapshot`'s spec can't change, so create a new one with a fixed probe.
+If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
+in `podSnapshotTemplate.containers` instead: the `SnapshotJob` copies its
+template into the `PodSnapshot` it creates.
 
 ## The agent or a restore pod will not start
 
