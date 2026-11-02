@@ -7,9 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 
 For version requirements, see [Compatibility](../reference/compatibility.md).
 
-Check the user-mode library loaded by the workload and PageBroker on both
-the checkpoint and restore nodes. `nvidia-smi` reports the host driver. A
-container can load a different `libcuda.so` through `LD_LIBRARY_PATH`.
+Check the user-mode library loaded by the workload, the node agent's CUDA
+helper, and PageBroker on both the checkpoint and restore nodes.
+`nvidia-smi` reports the kernel-mode driver. A container can load a different
+`libcuda.so` through `LD_LIBRARY_PATH`.
 
 On the node, inspect each process's loaded library:
 
