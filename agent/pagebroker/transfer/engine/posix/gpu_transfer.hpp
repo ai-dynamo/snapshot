@@ -11,10 +11,6 @@
 #include <vector>
 #include "file_descriptor.hpp"
 
-namespace snapshot::pagebroker::gpu::storage {
-struct GpuDataFile;
-}
-
 // GPU transfers through CPU staging buffers and NIXL's POSIX backend.
 // Ring and pooled lanes are policies of this path, not requirements on other
 // GPU transfer engines such as direct storage-to-device I/O.
@@ -99,18 +95,5 @@ class TransferPool {
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
-};
-// Pre-opens one descriptor per local GPU extent during CRIU restore.
-// Destruction cancels and joins preparation before releasing its descriptors.
-class GpuRestorePreparation {
- public:
-  explicit GpuRestorePreparation(int directory_fd);
-  ~GpuRestorePreparation();
-  // Returns null when preparation could not open this extent. The caller still
-  // validates requested participants and opens missing files during transfer.
-  std::shared_ptr<TransferFile> Get(uint32_t pid, const gpu::storage::GpuDataFile& extent, int directory);
- private:
-  struct State;
-  std::unique_ptr<State> state_;
 };
 }  // namespace snapshot::pagebroker::posix
