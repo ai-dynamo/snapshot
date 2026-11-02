@@ -337,11 +337,11 @@ func TestCheckpointProbe_RefusedTargetsFailTheWorkOrder(t *testing.T) {
 func TestCheckpointProbe_StateIsDroppedWithTheWorkOrder(t *testing.T) {
 	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 1, 3, 0), nil)
 	h.reconcile()
-	_, tracked := h.w.checkpointProbes.Load(h.content.Name)
+	_, tracked := h.w.checkpointProbeStates.Load(h.content.Name)
 	require.True(t, tracked)
 
 	require.NoError(t, h.w.contentIndexer.Delete(h.content))
 	h.reconcile()
-	_, tracked = h.w.checkpointProbes.Load(h.content.Name)
+	_, tracked = h.w.checkpointProbeStates.Load(h.content.Name)
 	assert.False(t, tracked)
 }

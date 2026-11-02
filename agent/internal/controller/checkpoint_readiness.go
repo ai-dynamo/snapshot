@@ -67,7 +67,7 @@ func (w *NodeController) isSourceReadyForCheckpoint(
 		err = handler.check(pod, containerName)
 	}
 	if err != nil {
-		w.checkpointProbes.Delete(content.Name)
+		w.checkpointProbeStates.Delete(content.Name)
 		err = fmt.Errorf("checkpoint readiness probe of container %q: %w", containerName, err)
 		emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning,
 			reasonInvalidCheckpointReadinessProbe, err.Error())
@@ -106,7 +106,7 @@ func (w *NodeController) isSourceReadyForCheckpoint(
 		state.successes++
 	}
 	if state.successes >= max(probe.SuccessThreshold, 1) {
-		w.checkpointProbes.Delete(content.Name)
+		w.checkpointProbeStates.Delete(content.Name)
 		logger.Info("Checkpoint readiness probe passed", "pod", pod.Name, "container", containerName)
 		return true, nil
 	}
@@ -193,7 +193,7 @@ func (p *httpProbe) probe(ctx context.Context, pod *corev1.Pod, status *corev1.C
 }
 
 func (w *NodeController) checkpointProbeState(name string) *checkpointProbeState {
-	state, _ := w.checkpointProbes.LoadOrStore(name, &checkpointProbeState{})
+	state, _ := w.checkpointProbeStates.LoadOrStore(name, &checkpointProbeState{})
 	return state.(*checkpointProbeState)
 }
 

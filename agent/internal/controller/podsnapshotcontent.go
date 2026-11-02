@@ -83,7 +83,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	}
 	if content == nil || content.Spec.Source.NodeName != w.config.NodeName ||
 		!content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
-		w.checkpointProbes.Delete(name)
+		w.checkpointProbeStates.Delete(name)
 		return nil
 	}
 
