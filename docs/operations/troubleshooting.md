@@ -396,11 +396,17 @@ Likely causes:
   was there before the restore or came back with the restored files. An
   existing file would be taken for the notification, so the application would
   never get one. Use a path that only Snapshot writes, such as one on an
-  emptyDir that the restore Pod mounts for this purpose.
-- **The path is refused.** A file must be on the container's own filesystem or
-  on an emptyDir volume, must not go through a symlink, and must not be one of
-  Snapshot's own files in the snapshot-control volume.
-- **The Pod uses the host network.** An HTTP action needs the Pod's own IP.
+  emptyDir that the restore Pod mounts for this purpose. A file on a volume
+  that outlives the Pod, such as a PersistentVolumeClaim, stays there from an
+  earlier restore until the application removes it.
+- **The file can't be created.** Its directory does not exist in the restore
+  container, or the container's user can't write it, for example on a
+  read-only mount or with `readOnlyRootFilesystem`. File actions run as the
+  container's user.
+- **The image has no `/bin/sh`.** File actions run a shell command in the
+  container, so the image needs a shell.
+- **The path is one of Snapshot's own files** in the snapshot-control volume.
+- **The port name is not one of the destination container's ports.**
 
 ### running the post-restore action
 
@@ -409,10 +415,10 @@ it creates the file, or sends the HTTP POST, every `periodSeconds` until it
 succeeds or the restore deadline (`restoreTimeoutSeconds`) passes. The restore
 fails, and the restored container is stopped, when no attempt succeeded.
 
-Likely causes: the file's parent directory does not exist in the restore
-container; the application does not listen on the port at the restore Pod's IP,
-for example because it bound only to the source Pod's IP; the endpoint returns
-something other than `200` or `204`; a NetworkPolicy blocks the agent.
+Likely causes: the application does not listen on the port at the restore
+Pod's IP, for example because it bound only to the source Pod's IP; the
+endpoint returns a status other than 2xx, including a redirect, which the agent
+does not follow; a NetworkPolicy blocks the agent.
 
 The message carries the last attempt's error. The agent log shows every attempt
 at debug level.
