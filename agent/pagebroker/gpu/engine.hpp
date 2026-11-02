@@ -18,7 +18,7 @@ class GpuRestorePreparation;
 }
 
 namespace snapshot::pagebroker::gpu {
-// Wait for exclusive access to a device ring while honoring cancellation.
+// Serialize transfers for one GPU while honoring cancellation.
 std::unique_lock<std::timed_mutex> AcquireDevice(std::timed_mutex& mutex, const Cancellation& cancellation);
 
 enum class Direction { Checkpoint, Restore };

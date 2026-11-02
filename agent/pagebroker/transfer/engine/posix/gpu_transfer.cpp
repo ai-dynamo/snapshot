@@ -54,7 +54,7 @@ struct TransferChunks {
 CUresult HostAllocationProperties(CUdevice* device, CUmemAllocationProp* properties,
                                   size_t* granularity)
 {
-  // Place the persistent staging ring near the GPU that consumes it.
+  // Pin host memory on the NUMA node of the current context's GPU.
   auto status = cuCtxGetDevice(device);
   if (status != CUDA_SUCCESS) {
     return status;
@@ -137,7 +137,7 @@ struct CudaStream {
   }
 };
 
-class TransferSlot {
+class TransferBuffer {
  public:
   CUresult Allocate(size_t size)
   {
@@ -176,7 +176,7 @@ class TransferSlot {
     if (status != CUDA_SUCCESS) {
       return status;
     }
-    return cuEventCreate(&event_.handle, CU_EVENT_DISABLE_TIMING);
+    return CUDA_SUCCESS;
   }
 
   void AllowDevice(CUdevice device)
@@ -189,6 +189,34 @@ class TransferSlot {
                    "allow pooled staging access");
   }
 
+  void* data() const { return reinterpret_cast<void*>(mapping_.address); }
+
+ private:
+  CudaAllocation allocation_;
+  CudaMapping mapping_;
+};
+
+void RecordCopy(CUresult status, CUevent event, CUstream stream)
+{
+  if (status == CUDA_SUCCESS) status = cuEventRecord(event, stream);
+  gpu::CheckCuda(status, "CUDA asynchronous copy");
+}
+
+void WaitForCopy(CUevent event)
+{
+  const nvtx3::scoped_range range{"PageBroker CUDA wait"};
+  gpu::CheckCuda(cuEventSynchronize(event), "CUDA event synchronization");
+}
+
+class TransferSlot {
+ public:
+  CUresult Allocate(size_t size)
+  {
+    const auto status = buffer_.Allocate(size);
+    if (status != CUDA_SUCCESS) return status;
+    return cuEventCreate(&event_.handle, CU_EVENT_DISABLE_TIMING);
+  }
+
   void Wait()
   {
     if (!pending_) {
@@ -198,41 +226,27 @@ class TransferSlot {
     // completion, while this slot keeps the copy's buffer alive. An ordinary
     // Abort or shutdown must wait. The fatal-cleanup watchdog can terminate the
     // process without freeing the buffer if another operation reports a fatal error.
-    const nvtx3::scoped_range range{"PageBroker CUDA wait"};
-    const auto status = cuEventSynchronize(event_.handle);
-    if (status != CUDA_SUCCESS) {
-      throw std::runtime_error(gpu::CudaErrorMessage(status, "CUDA event synchronization"));
-    }
+    WaitForCopy(event_.handle);
     Complete();
   }
 
   void CopyFromDevice(CUdeviceptr device, size_t size, CUstream stream)
   {
-    RecordCopy(cuMemcpyDtoHAsync(data(), device, size, stream), stream);
+    RecordCopy(cuMemcpyDtoHAsync(data(), device, size, stream), event_.handle, stream);
+    pending_ = true;
   }
 
   void CopyToDevice(CUdeviceptr device, size_t size, CUstream stream)
   {
-    RecordCopy(cuMemcpyHtoDAsync(device, data(), size, stream), stream);
-  }
-
-  void Complete() { pending_ = false; }
-  void* data() const { return reinterpret_cast<void*>(mapping_.address); }
-
- private:
-  void RecordCopy(CUresult status, CUstream stream)
-  {
-    if (status == CUDA_SUCCESS) {
-      status = cuEventRecord(event_.handle, stream);
-    }
-    if (status != CUDA_SUCCESS) {
-      throw std::runtime_error(gpu::CudaErrorMessage(status, "CUDA asynchronous copy"));
-    }
+    RecordCopy(cuMemcpyHtoDAsync(device, data(), size, stream), event_.handle, stream);
     pending_ = true;
   }
 
-  CudaAllocation allocation_;
-  CudaMapping mapping_;
+  void Complete() { pending_ = false; }
+  void* data() const { return buffer_.data(); }
+
+ private:
+  TransferBuffer buffer_;
   CudaEvent event_;
   bool pending_ = false;
 };
@@ -459,7 +473,7 @@ struct TransferPoolDevice::Impl {
   CUdevice device;
   int numa_node = -1;
   TransferOptions options;
-  std::vector<std::unique_ptr<TransferSlot>> slots;
+  std::vector<std::unique_ptr<TransferBuffer>> slots;
   std::vector<std::unique_ptr<CudaEvent>> events;
   std::vector<std::unique_ptr<CudaStream>> streams;
 
@@ -481,7 +495,7 @@ struct TransferPoolDevice::Impl {
       streams.push_back(std::move(stream));
     }
     for (size_t index = 0; index < options.buffer_count; ++index) {
-      auto slot = std::make_unique<TransferSlot>();
+      auto slot = std::make_unique<TransferBuffer>();
       gpu::CheckCuda(slot->Allocate(options.chunk_bytes), "allocate pooled staging");
       slots.push_back(std::move(slot));
     }
@@ -584,7 +598,7 @@ struct TransferPool::Impl {
     std::unique_ptr<LaneStorage> storage;
     std::thread worker;
   };
-  struct Slot { TransferSlot* buffer; int numa_node; };
+  struct Slot { TransferBuffer* buffer; int numa_node; };
 
   TransferOptions options;
   std::vector<std::unique_ptr<TransferPoolDevice>> devices;
@@ -717,12 +731,10 @@ struct TransferPool::Impl {
     const auto stream = device.streams[lane.index]->handle;
     const auto host = slots[work.slot].buffer->data();
     try {
-      gpu::CheckCuda(job.operation == io::Operation::Read
+      RecordCopy(job.operation == io::Operation::Read
           ? cuMemcpyHtoDAsync(job.device + work.offset, host, work.size, stream)
-          : cuMemcpyDtoHAsync(host, job.device + work.offset, work.size, stream), "pooled CUDA copy");
-      gpu::CheckCuda(cuEventRecord(event, stream), "record pooled CUDA copy");
-      const nvtx3::scoped_range wait{"PageBroker CUDA wait"};
-      gpu::CheckCuda(cuEventSynchronize(event), "wait pooled CUDA copy");
+          : cuMemcpyDtoHAsync(host, job.device + work.offset, work.size, stream), event, stream);
+      WaitForCopy(event);
     } catch (...) {
       CheckCleanup(cuStreamSynchronize(stream), "drain pooled CUDA stream");
       throw;
@@ -752,8 +764,8 @@ struct TransferPool::Impl {
           pending.push_back(*work);
         } catch (...) {
           const auto failure = std::current_exception();
-          // Submit can throw after creating a request. Drain it before making
-          // its slot available or allowing the caller to close the file.
+          // Submit can leave a request behind. Drain it before reusing the
+          // slot or unregistering the file.
           try { lane.storage->Wait(work->slot); } catch (...) {}
           Complete(*work, failure);
         }
@@ -860,24 +872,6 @@ void TransferPool::Checkpoint(int fd, CUcontext context, CUdeviceptr device, siz
   cancellation.ThrowIfCancelled();
 }
 struct GpuRestorePreparation::State {
-  static void ValidateDirectory(int fd)
-  {
-    struct stat info{};
-    if (fstat(fd, &info)) {
-      throw std::system_error(errno, std::generic_category(), "stat GPU preparation directory");
-    }
-    Validate(S_ISDIR(info.st_mode), "GPU preparation path must be a directory");
-  }
-
-  static FileDescriptor OpenDirectory(int parent, const char* name)
-  {
-    FileDescriptor directory(openat(parent, name, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-    if (directory.get() < 0) {
-      throw std::system_error(errno, std::generic_category(), "open GPU preparation directory");
-    }
-    return directory;
-  }
-
   using Files = std::map<std::pair<uint32_t, std::string>, std::shared_ptr<TransferFile>>;
   std::atomic<bool> cancelled = false;
   // Declared last so destruction joins before releasing the cancellation token.
@@ -889,53 +883,75 @@ struct GpuRestorePreparation::State {
         [root = FileDescriptor::Duplicate(directory_fd), this]() mutable {
       auto source = std::move(root);
       const nvtx3::scoped_range range{"PageBroker restore file preparation"};
-      Files files;
-      ValidateDirectory(source.get());
-      FileDescriptor gpu_root(openat(source.get(), gpu::kDataDirectory, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-      if (gpu_root.get() < 0 && errno == ENOENT) {
-        return files;  // CPU-only checkpoint.
+      try {
+        return Scan(source);
+      } catch (...) {
+        LogException("GPU restore file preparation unavailable", std::current_exception());
+        return Files{};
       }
-      if (gpu_root.get() < 0) {
-        throw std::system_error(errno, std::generic_category(), "open GPU preparation directory");
-      }
-      ValidateDirectory(gpu_root.get());
-      const auto path = "/proc/self/fd/" + std::to_string(gpu_root.get());
-      for (const auto& entry : std::filesystem::directory_iterator(path)) {
-        if (cancelled.load()) return Files{};
-        const auto name = entry.path().filename().string();
-        uint32_t pid = 0;
-        const auto [end, error] = std::from_chars(name.data(), name.data() + name.size(), pid);
-        Validate(error == std::errc{} && end == name.data() + name.size() && pid > 0 &&
-                 pid <= INT_MAX && name == std::to_string(pid), "invalid GPU participant directory");
-        auto directory = OpenDirectory(gpu_root.get(), name.c_str());
-        ValidateDirectory(directory.get());
-        std::vector<gpu::storage::GpuDataFile> manifest;
-        std::string message;
-        const auto participant_path = "/proc/self/fd/" + std::to_string(directory.get());
-        if (!gpu::storage::ReadManifest(participant_path, &manifest, &message) ||
-            !gpu::storage::ValidateExtentFiles(participant_path, manifest, &message)) {
-          throw std::runtime_error(message);
-        }
-        for (const auto& extent : manifest) {
-          if (cancelled.load()) return Files{};
-          FileDescriptor file(openat(directory.get(), extent.filename.c_str(),
-                                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECT));
-          if (file.get() < 0) {
-            throw std::system_error(errno, std::generic_category(), "prepare GPU extent");
-          }
-          files.emplace(std::make_pair(pid, extent.filename),
-                        std::make_shared<TransferFile>(file.get()));
-        }
-      }
-      return files;
     });
   }
   ~State() { cancelled.store(true); }
 
+  Files Scan(const FileDescriptor& source)
+  {
+    Files files;
+    source.RequireDirectory();
+    FileDescriptor gpu_root(openat(source.get(), gpu::kDataDirectory, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (gpu_root.get() < 0 && errno == ENOENT) return files;  // CPU-only checkpoint.
+    if (gpu_root.get() < 0) {
+      throw std::system_error(errno, std::generic_category(), "open GPU preparation directory");
+    }
+    const auto path = "/proc/self/fd/" + std::to_string(gpu_root.get());
+    for (const auto& entry : std::filesystem::directory_iterator(path)) {
+      if (cancelled.load()) return Files{};
+      const auto name = entry.path().filename().string();
+      uint32_t pid = 0;
+      const auto [end, error] = std::from_chars(name.data(), name.data() + name.size(), pid);
+      if (error != std::errc{} || end != name.data() + name.size() || !pid ||
+          pid > INT_MAX || name != std::to_string(pid)) continue;
+      try {
+        PrepareParticipant(files, gpu_root.get(), pid, name);
+      } catch (...) {
+        // The request's captured PID list is not available yet. Its participants
+        // are validated again when the GPU request constructs the artifact.
+        LogException("skip GPU restore preparation participant", std::current_exception());
+      }
+    }
+    return files;
+  }
+
+  void PrepareParticipant(Files& files, int parent, uint32_t pid, const std::string& name)
+  {
+    auto directory = FileDescriptor::OpenDirectory(parent, name.c_str());
+    std::vector<gpu::storage::GpuDataFile> manifest;
+    std::string message;
+    const auto path = "/proc/self/fd/" + std::to_string(directory.get());
+    if (!gpu::storage::ReadManifest(path, &manifest, &message) ||
+        !gpu::storage::ValidateExtentFiles(path, manifest, &message)) {
+      throw std::runtime_error(message);
+    }
+    for (const auto& extent : manifest) {
+      if (cancelled.load()) return;
+      FileDescriptor file(openat(directory.get(), extent.filename.c_str(),
+                                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECT));
+      if (file.get() < 0) {
+        throw std::system_error(errno, std::generic_category(), "prepare GPU extent");
+      }
+      files.emplace(std::make_pair(pid, extent.filename), std::make_shared<TransferFile>(file.get()));
+    }
+  }
+
   std::shared_ptr<TransferFile> Get(uint32_t pid, const gpu::storage::GpuDataFile& extent, int directory)
   {
     const nvtx3::scoped_range range{"PageBroker restore preparation wait"};
-    const auto file = pending.get().at({pid, extent.filename});
+    // Artifact construction holds the transaction mutex while waiting here.
+    // Destruction cancels the scan between entries, but transaction cancellation
+    // cannot interrupt this wait or an in-progress filesystem call.
+    const auto& files = pending.get();
+    const auto found = files.find({pid, extent.filename});
+    if (found == files.end()) return {};  // Open normally when optional preparation failed.
+    const auto& file = found->second;
     struct stat held{}, current{};
     Require(fstat(file->fd(), &held) == 0 &&
              fstatat(directory, extent.filename.c_str(), &current, AT_SYMLINK_NOFOLLOW) == 0 &&

@@ -106,6 +106,8 @@ class GpuRestorePreparation {
  public:
   explicit GpuRestorePreparation(int directory_fd);
   ~GpuRestorePreparation();
+  // Returns null when preparation could not open this extent. The caller still
+  // validates requested participants and opens missing files during transfer.
   std::shared_ptr<TransferFile> Get(uint32_t pid, const gpu::storage::GpuDataFile& extent, int directory);
  private:
   struct State;
