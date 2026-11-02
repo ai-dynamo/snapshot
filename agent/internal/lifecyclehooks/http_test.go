@@ -90,37 +90,27 @@ func TestHTTPSendsKubeletStyleHeaders(t *testing.T) {
 	}
 }
 
-func TestHTTPFollowsRedirectsOnlyToTheSameHost(t *testing.T) {
-	t.Run("same host", func(t *testing.T) {
-		u := serve(t, "/old", func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/old" {
-				http.Redirect(w, r, "/new", http.StatusFound)
-				return
-			}
-			w.WriteHeader(http.StatusServiceUnavailable)
-		})
-		// The redirect was followed: the result is the target's 503.
-		if err := HTTPGet(t.Context(), NewHTTPClient(), u, time.Second); err == nil || !strings.Contains(err.Error(), "503") {
-			t.Fatalf("HTTPGet = %v, want the redirect target's 503", err)
+func TestHTTPFollowsNoRedirects(t *testing.T) {
+	for _, location := range []string{"/other", "http://other.invalid/"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			t.Run(method+" to "+location, func(t *testing.T) {
+				u := serve(t, "/", func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/" {
+						t.Errorf("the redirect to %s was followed", r.URL.Path)
+					}
+					http.Redirect(w, r, location, http.StatusFound)
+				})
+				send := HTTPGet
+				if method == http.MethodPost {
+					send = HTTPPost
+				}
+				// Not followed: the 302 itself is the result, and it fails.
+				if err := send(t.Context(), NewHTTPClient(), u, time.Second); err == nil || !strings.Contains(err.Error(), "302") {
+					t.Fatalf("%s = %v, want the 302 to fail", method, err)
+				}
+			})
 		}
-	})
-	t.Run("another host", func(t *testing.T) {
-		u := serve(t, "/", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "http://other.invalid/", http.StatusFound)
-		})
-		// Not followed: the 302 itself is the result, and it fails.
-		if err := HTTPGet(t.Context(), NewHTTPClient(), u, time.Second); err == nil || !strings.Contains(err.Error(), "302") {
-			t.Fatalf("HTTPGet = %v, want the 302 to fail", err)
-		}
-	})
-	t.Run("loop", func(t *testing.T) {
-		u := serve(t, "/", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/", http.StatusFound)
-		})
-		if err := HTTPGet(t.Context(), NewHTTPClient(), u, time.Second); err == nil || !strings.Contains(err.Error(), "redirects") {
-			t.Fatalf("HTTPGet = %v, want it to stop after %d redirects", err, maxRedirects)
-		}
-	})
+	}
 }
 
 func TestHTTPClientIgnoresTheProxyEnvironment(t *testing.T) {
@@ -137,8 +127,10 @@ func TestHTTPClientIgnoresTheProxyEnvironment(t *testing.T) {
 
 func TestHTTPTimeout(t *testing.T) {
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
 	u := serve(t, "/", func(http.ResponseWriter, *http.Request) { <-release })
+	// Cleanups run last-registered first: release the handler before serve's
+	// server.Close, which waits for it.
+	t.Cleanup(func() { close(release) })
 	start := time.Now()
 	if err := HTTPGet(t.Context(), NewHTTPClient(), u, 100*time.Millisecond); err == nil {
 		t.Fatal("HTTPGet = nil, want a timeout")
@@ -165,7 +157,7 @@ func TestHTTPConnectionRefused(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
 	err = HTTPGet(t.Context(), NewHTTPClient(), RequestURL("127.0.0.1", port, "/"), time.Second)
-	if err == nil || !strings.Contains(err.Error(), "HTTP GET failed") {
+	if err == nil || !strings.Contains(err.Error(), "failed to send HTTP GET") {
 		t.Fatalf("HTTPGet = %v, want a connection error", err)
 	}
 }

@@ -36,10 +36,18 @@ const (
 	// appears in between is not overwritten. It exits exitExists when a
 	// regular file is already there, and exitNotRegular for anything else.
 	createMarkerScript = `if [ -e "$1" ]; then [ -f "$1" ] && exit 3; exit 2; fi; set -C; : > "$1"`
+	// checkMarkerTargetScript changes nothing. It exits like
+	// createMarkerScript for something already at the path, exitNoParent when
+	// the parent is not a directory, and exitParentReadOnly when the user may
+	// not write it: [ -w ] asks the kernel as the user, so a read-only mount
+	// counts too.
+	checkMarkerTargetScript = `if [ -e "$1" ]; then [ -f "$1" ] && exit 3; exit 2; fi; d="${1%/*}"; [ -n "$d" ] || d=/; [ -d "$d" ] || exit 4; [ -w "$d" ] || exit 5`
 
-	exitMissing    = 1
-	exitNotRegular = 2
-	exitExists     = 3
+	exitMissing        = 1
+	exitNotRegular     = 2
+	exitExists         = 3
+	exitNoParent       = 4
+	exitParentReadOnly = 5
 
 	// maxOutput bounds the command output kept for an error, as kubelet bounds
 	// an exec probe's.
@@ -84,6 +92,35 @@ func CreateMarker(ctx context.Context, e Execer, containerID, filePath string, t
 		return fmt.Errorf("%s in container %s exists and is not a regular file", filePath, containerID)
 	default:
 		return fmt.Errorf("failed to create %s in container %s: %s", filePath, containerID, output)
+	}
+}
+
+// CheckMarkerTarget reports whether CreateMarker could create filePath in the
+// container now, without creating it: nothing is at the path, and its parent
+// is a directory the container's user may write. A regular file already there
+// matches fs.ErrExist, as with CreateMarker.
+//
+// A restore runs it before CRIU, so a path the marker can't be written to,
+// such as one on a read-only mount, fails the restore before the work is done
+// rather than after.
+func CheckMarkerTarget(ctx context.Context, e Execer, containerID, filePath string, timeout time.Duration) error {
+	code, output, err := runScript(ctx, e, containerID, checkMarkerTargetScript, filePath, timeout)
+	if err != nil {
+		return err
+	}
+	switch code {
+	case 0:
+		return nil
+	case exitExists:
+		return fmt.Errorf("%s in container %s: %w", filePath, containerID, fs.ErrExist)
+	case exitNotRegular:
+		return fmt.Errorf("%s in container %s exists and is not a regular file", filePath, containerID)
+	case exitNoParent:
+		return fmt.Errorf("the directory of %s does not exist in container %s", filePath, containerID)
+	case exitParentReadOnly:
+		return fmt.Errorf("the container's user can't write the directory of %s in container %s", filePath, containerID)
+	default:
+		return fmt.Errorf("failed to check %s in container %s: exit code %d: %s", filePath, containerID, code, output)
 	}
 }
 

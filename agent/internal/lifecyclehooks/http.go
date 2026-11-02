@@ -24,16 +24,20 @@ const (
 	// maxResponseBody bounds how much of a response is read. The body is
 	// never used or logged.
 	maxResponseBody = 10 << 10
-	// maxRedirects is how many same-host redirects a request follows.
-	maxRedirects = 10
 	// userAgent names the agent the way kubelet's kube-probe names kubelet.
 	userAgent = "snapshot-agent"
 )
 
 // NewHTTPClient returns the client hook requests go through. Like kubelet's
 // prober, it ignores the agent's proxy environment, which would send Pod
-// traffic elsewhere; it opens a new connection for every request and asks for
-// no compression; and it follows redirects only to the same host.
+// traffic elsewhere, and it opens a new connection for every request and asks
+// for no compression.
+//
+// Unlike kubelet, which follows redirects to the same host, it follows none:
+// the 3xx response is the result, and it fails. A redirect could otherwise
+// send the agent somewhere the Pod chose, and Go would turn a redirected POST
+// into a GET, so a notification could pass without the application getting
+// it. The path in the spec must be the final one.
 func NewHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -41,22 +45,8 @@ func NewHTTPClient() *http.Client {
 			DisableKeepAlives:  true,
 			DisableCompression: true,
 		},
-		CheckRedirect: sameHostRedirects,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-}
-
-// sameHostRedirects follows a redirect to the same host, at most maxRedirects
-// times. A redirect to another host isn't followed, and its 3xx response is
-// the result, as with kubelet's RedirectChecker. Unlike kubelet, which passes
-// that response, send fails it.
-func sameHostRedirects(req *http.Request, via []*http.Request) error {
-	if req.URL.Hostname() != via[0].URL.Hostname() {
-		return http.ErrUseLastResponse
-	}
-	if len(via) >= maxRedirects {
-		return fmt.Errorf("stopped after %d redirects", maxRedirects)
-	}
-	return nil
 }
 
 // HTTPTarget returns the address hook requests go to: the Pod IP. A Pod on
@@ -144,13 +134,12 @@ func send(ctx context.Context, client *http.Client, method string, u *url.URL, t
 	req.Header.Set("Accept", "*/*")
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("HTTP %s failed: %w", method, err)
+		return fmt.Errorf("failed to send HTTP %s: %w", method, err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
-	// Kubelet passes 200 to 399. A 3xx left at this point is a redirect to
-	// another host, which wasn't followed, so the application never answered;
-	// only a 2xx passes.
+	// Kubelet passes 200 to 399. Here a 3xx is a redirect that wasn't
+	// followed, so only a 2xx passes.
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		return nil
 	}

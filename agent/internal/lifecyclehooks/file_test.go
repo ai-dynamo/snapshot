@@ -141,3 +141,43 @@ func TestFileActionsReportARuntimeThatCouldNotRunThem(t *testing.T) {
 		t.Fatalf("CreateMarker = %v, want a hint about the missing shell", err)
 	}
 }
+
+func TestCheckMarkerTarget(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "existing")
+	if err := os.WriteFile(existing, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	readOnly := filepath.Join(dir, "read-only")
+	if err := os.Mkdir(readOnly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		path    string
+		wantErr string
+	}{
+		{"can be created", filepath.Join(dir, "released"), ""},
+		{"regular file already there", existing, "file already exists"},
+		{"directory already there", dir, "not a regular file"},
+		{"missing parent", filepath.Join(dir, "no", "released"), "does not exist"},
+		{"parent the user can't write", filepath.Join(readOnly, "released"), "can't write"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "parent the user can't write" && os.Geteuid() == 0 {
+				t.Skip("root may write any directory")
+			}
+			err := CheckMarkerTarget(t.Context(), &localShell{}, "ctr", tc.path, 5*time.Second)
+			if (err == nil) != (tc.wantErr == "") || (err != nil && !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("CheckMarkerTarget = %v, want an error with %q", err, tc.wantErr)
+			}
+			if tc.wantErr == "file already exists" && !errors.Is(err, fs.ErrExist) {
+				t.Fatalf("CheckMarkerTarget = %v, want fs.ErrExist", err)
+			}
+		})
+	}
+	// It only checks: nothing was created.
+	if _, err := os.Stat(filepath.Join(dir, "released")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("CheckMarkerTarget created the file")
+	}
+}
