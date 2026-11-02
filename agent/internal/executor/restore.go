@@ -630,7 +630,7 @@ func inspectRestore(
 		}
 		discoverStart := time.Now()
 		// One nvidia-smi answers both the MIG check and GPU discovery.
-		visible := cuda.ListVisibleGPUs(ctx, snapshotruntime.HostProcPath, placeholderPID)
+		visible := cuda.ListVisibleGPUs(ctx, snapshotruntime.HostProcPath, placeholderPID, ociSpec)
 		if err := refuseMIGRestore(log, placeholderPID, visible, req.SkipCompatCheck); err != nil {
 			return nil, 0, err
 		}

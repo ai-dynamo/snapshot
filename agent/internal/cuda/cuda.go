@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/client-go/kubernetes"
@@ -130,9 +131,9 @@ type VisibleGPULister func() (VisibleGPUs, error)
 // Under DRA this is the only path that reports GPUs at all, because the
 // kubelet publishes no nvidia.com/gpu devices when the NVIDIA DRA driver
 // allocates them instead of the device plugin.
-func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int) VisibleGPULister {
+func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int, spec *specs.Spec) VisibleGPULister {
 	return sync.OnceValues(func() (VisibleGPUs, error) {
-		if visible, ok := listProcfsGPUs(hostProcPath, pid); ok {
+		if visible, ok := listProcfsGPUs(hostProcPath, pid, spec); ok {
 			return visible, nil
 		}
 		ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
@@ -151,13 +152,19 @@ func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int) VisibleG
 }
 
 // listProcfsGPUs reads the cards a container can open from the driver's procfs:
-// the cards under its /proc/driver/nvidia/gpus whose /dev/nvidia<minor> it has,
-// in PCI bus order, which is the order nvidia-smi -L lists them in. It avoids
-// NVML, which brings up every GPU it can open and takes seconds when other
-// processes on the node, such as a GMS sidecar, start CUDA at the same time.
-// It reports !ok whenever it cannot answer exactly, including when the
-// container has MIG capability nodes, because procfs does not list slices.
-func listProcfsGPUs(hostProcPath string, pid int) (VisibleGPUs, bool) {
+// the cards under its /proc/driver/nvidia/gpus whose /dev/nvidia<minor> it has
+// and its device cgroup lets it open, in PCI bus order, which is the order
+// nvidia-smi -L lists them in. It avoids NVML, which brings up every GPU it can
+// open and takes seconds when other processes on the node, such as a GMS
+// sidecar, start CUDA at the same time. It reports !ok whenever it cannot
+// answer exactly: when the container's spec has no device cgroup rules, and
+// when the container has MIG capability nodes, because procfs does not list
+// slices.
+func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs, bool) {
+	if spec == nil || spec.Linux == nil || spec.Linux.Resources == nil || len(spec.Linux.Resources.Devices) == 0 {
+		return VisibleGPUs{}, false
+	}
+	rules := spec.Linux.Resources.Devices
 	root := filepath.Join(hostProcPath, strconv.Itoa(pid), "root")
 	if caps, err := os.ReadDir(filepath.Join(root, "dev", "nvidia-caps")); err == nil && len(caps) > 0 {
 		return VisibleGPUs{}, false
@@ -182,6 +189,12 @@ func listProcfsGPUs(hostProcPath string, pid int) (VisibleGPUs, bool) {
 		if _, err := os.Stat(filepath.Join(root, "dev", "nvidia"+minor)); err != nil {
 			continue
 		}
+		// A node can exist in the container's /dev while its device cgroup
+		// denies opening it. GPU Memory Service does not count such a GPU.
+		number, err := strconv.ParseInt(minor, 10, 64)
+		if err != nil || !deviceRulesAllowReadWrite(rules, nvidiaMajor, number) {
+			continue
+		}
 		busID := strings.ToLower(entry.Name())
 		busIDs = append(busIDs, busID)
 		devices[busID] = compat.GPUDevice{UUID: uuid, ProductName: fields["Model"]}
@@ -196,6 +209,34 @@ func listProcfsGPUs(hostProcPath string, pid int) (VisibleGPUs, bool) {
 	}
 	visible.GPUs.DriverVersion = readDriverVersion(hostProcPath)
 	return visible, true
+}
+
+// nvidiaMajor is the character device major of /dev/nvidia<minor>.
+const nvidiaMajor = 195
+
+// deviceRulesAllowReadWrite evaluates a container's OCI device cgroup rules
+// the way runc and crun enforce them: for each access, the last rule that
+// matches the device decides, and a device no rule matches is denied.
+func deviceRulesAllowReadWrite(rules []specs.LinuxDeviceCgroup, major, minor int64) bool {
+	for _, access := range "rw" {
+		allowed := false
+		for _, rule := range rules {
+			if rule.Type != "" && rule.Type != "a" && rule.Type != "c" {
+				continue
+			}
+			if (rule.Major != nil && *rule.Major != major) || (rule.Minor != nil && *rule.Minor != minor) {
+				continue
+			}
+			if rule.Access != "" && !strings.ContainsRune(rule.Access, access) {
+				continue
+			}
+			allowed = rule.Allow
+		}
+		if !allowed {
+			return false
+		}
+	}
+	return true
 }
 
 // parseProcfsGPUInformation reads a card's information file, lines of
@@ -339,7 +380,7 @@ func nvidiaSmiValue(value string) string {
 
 // DiscoverGPUUUIDs resolves GPU UUIDs in the container's runtime ordinal order.
 func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
-	env, err := DiscoverGPUs(ctx, clientset, podName, podNamespace, containerName, nil, ListVisibleGPUs(ctx, hostProcPath, pid), log)
+	env, err := DiscoverGPUs(ctx, clientset, podName, podNamespace, containerName, nil, ListVisibleGPUs(ctx, hostProcPath, pid, nil), log)
 	if err != nil {
 		return nil, err
 	}

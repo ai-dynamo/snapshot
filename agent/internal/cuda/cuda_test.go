@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -58,7 +59,7 @@ func TestDisabledLegacySelectionUsesOnlyContainerVisibility(t *testing.T) {
 				// No Kubernetes or PodResources client: an allocation fallback
 				// would fail instead of returning the container's actual view.
 				got, err := DiscoverGPUs(context.Background(), nil, "", "", "",
-					[]string{"NVIDIA_VISIBLE_DEVICES=" + value}, ListVisibleGPUs(context.Background(), "/host/proc", 42), logr.Discard())
+					[]string{"NVIDIA_VISIBLE_DEVICES=" + value}, ListVisibleGPUs(context.Background(), "/host/proc", 42, nil), logr.Discard())
 				if err != nil || !reflect.DeepEqual(got, parseNvidiaSmiList(visible).GPUs) {
 					t.Fatalf("container discovery = %#v, %v", got, err)
 				}
@@ -305,7 +306,7 @@ printf '%%s\n' 'GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-
 printf '%%s\n' '  MIG 1g.5gb      Device  0: (UUID: MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f)'
 `, calls, hostProc, hostProc))
 
-	visible := ListVisibleGPUs(context.Background(), hostProc+"/", 42)
+	visible := ListVisibleGPUs(context.Background(), hostProc+"/", 42, nil)
 	want := VisibleGPUs{
 		GPUs: compat.GPUInfo{
 			DriverVersion: "615.71.09",
@@ -334,7 +335,7 @@ printf '%%s\n' '  MIG 1g.5gb      Device  0: (UUID: MIG-c6d4f1ef-42e4-5de3-91c7-
 func TestListVisibleGPUsReturnsCommandFailure(t *testing.T) {
 	installFakeNSenter(t, "exit 17\n")
 
-	if _, err := ListVisibleGPUs(context.Background(), "/host/proc", 42)(); err == nil || !strings.Contains(err.Error(), "pid 42") {
+	if _, err := ListVisibleGPUs(context.Background(), "/host/proc", 42, nil)(); err == nil || !strings.Contains(err.Error(), "pid 42") {
 		t.Fatalf("ListVisibleGPUs error = %v, want the nsenter failure for pid 42", err)
 	}
 }
@@ -344,7 +345,7 @@ func TestListVisibleGPUsReturnsCommandFailure(t *testing.T) {
 func TestListVisibleGPUsWithoutDriverVersion(t *testing.T) {
 	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)'\n")
 
-	got, err := ListVisibleGPUs(context.Background(), t.TempDir(), 42)()
+	got, err := ListVisibleGPUs(context.Background(), t.TempDir(), 42, nil)()
 	want := VisibleGPUs{GPUs: compat.GPUInfo{Devices: []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA L4"}}}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("ListVisibleGPUs() = %#v, %v, want %#v", got, err, want)
@@ -690,7 +691,7 @@ func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
 		"test-pod",
 		"default",
 		"main",
-		"/proc",
+		t.TempDir(),
 		123,
 		logr.Discard(),
 	)
@@ -755,7 +756,7 @@ func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testin
 		"test-pod",
 		"default",
 		"main",
-		"/proc",
+		t.TempDir(),
 		123,
 		logr.Discard(),
 	)
@@ -992,7 +993,7 @@ func TestDiscoverGPUsUseVisibleGPUDescriptions(t *testing.T) {
 	hostProc := fakeHostProc(t, "580.65.06")
 
 	got, err := DiscoverGPUs(
-		context.Background(), nil, "test-pod", "default", "main", nil, ListVisibleGPUs(context.Background(), hostProc, 42), logr.Discard(),
+		context.Background(), nil, "test-pod", "default", "main", nil, ListVisibleGPUs(context.Background(), hostProc, 42, nil), logr.Discard(),
 	)
 	if err != nil {
 		t.Fatalf("DiscoverGPUs: %v", err)
@@ -1111,7 +1112,7 @@ func TestDiscoverGPUsListSelectedGPUsInBusOrder(t *testing.T) {
 
 	got, err := DiscoverGPUs(context.Background(), nil, "", "", "",
 		[]string{"NVIDIA_VISIBLE_DEVICES=2,0"},
-		ListVisibleGPUs(context.Background(), fakeHostProc(t, "595.58.03"), 42), logr.Discard())
+		ListVisibleGPUs(context.Background(), fakeHostProc(t, "595.58.03"), 42, nil), logr.Discard())
 	if err != nil {
 		t.Fatalf("DiscoverGPUs: %v", err)
 	}
@@ -1220,7 +1221,7 @@ func TestListProcfsGPUs(t *testing.T) {
 
 	t.Run("cards the container can open, in bus order", func(t *testing.T) {
 		hostProc, _ := setup(t)
-		visible, ok := listProcfsGPUs(hostProc, 42)
+		visible, ok := listProcfsGPUs(hostProc, 42, gpuRulesSpec(0, 3, 6))
 		if !ok {
 			t.Fatal("expected a procfs answer")
 		}
@@ -1244,14 +1245,76 @@ func TestListProcfsGPUs(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, "dev", "nvidia-caps", "nvidia-cap1"), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := listProcfsGPUs(hostProc, 42); ok {
+		if _, ok := listProcfsGPUs(hostProc, 42, gpuRulesSpec(0, 3, 6)); ok {
 			t.Fatal("expected no procfs answer with MIG capability nodes")
 		}
 	})
 
 	t.Run("no readable procfs defers to nvidia-smi", func(t *testing.T) {
-		if _, ok := listProcfsGPUs(t.TempDir(), 42); ok {
+		if _, ok := listProcfsGPUs(t.TempDir(), 42, gpuRulesSpec(0, 3, 6)); ok {
 			t.Fatal("expected no procfs answer")
 		}
 	})
+
+	t.Run("a node the device cgroup denies is not listed", func(t *testing.T) {
+		hostProc, _ := setup(t)
+		visible, ok := listProcfsGPUs(hostProc, 42, gpuRulesSpec(0))
+		if !ok {
+			t.Fatal("expected a procfs answer")
+		}
+		if len(visible.GPUs.Devices) != 1 || visible.GPUs.Devices[0].UUID != "GPU-b" {
+			t.Fatalf("devices = %#v, want only GPU-b", visible.GPUs.Devices)
+		}
+	})
+
+	t.Run("no device cgroup rules defers to nvidia-smi", func(t *testing.T) {
+		hostProc, _ := setup(t)
+		if _, ok := listProcfsGPUs(hostProc, 42, &specs.Spec{}); ok {
+			t.Fatal("expected no procfs answer without device cgroup rules")
+		}
+		if _, ok := listProcfsGPUs(hostProc, 42, nil); ok {
+			t.Fatal("expected no procfs answer without a spec")
+		}
+	})
+}
+
+// gpuRulesSpec returns an OCI spec whose device cgroup, as containerd writes
+// it, denies every device and then allows /dev/nvidia<minor> for each minor.
+func gpuRulesSpec(minors ...int64) *specs.Spec {
+	rules := []specs.LinuxDeviceCgroup{{Allow: false, Access: "rwm"}}
+	for _, minor := range minors {
+		rules = append(rules, specs.LinuxDeviceCgroup{
+			Allow: true, Type: "c", Major: int64Ptr(nvidiaMajor), Minor: int64Ptr(minor), Access: "rwm",
+		})
+	}
+	return &specs.Spec{Linux: &specs.Linux{Resources: &specs.LinuxResources{Devices: rules}}}
+}
+
+func int64Ptr(value int64) *int64 { return &value }
+
+func TestDeviceRulesAllowReadWrite(t *testing.T) {
+	gpu := func(minor int64, allow bool, access string) specs.LinuxDeviceCgroup {
+		return specs.LinuxDeviceCgroup{Allow: allow, Type: "c", Major: int64Ptr(nvidiaMajor), Minor: int64Ptr(minor), Access: access}
+	}
+	denyAll := specs.LinuxDeviceCgroup{Allow: false, Access: "rwm"}
+	tests := []struct {
+		name  string
+		rules []specs.LinuxDeviceCgroup
+		want  bool
+	}{
+		{"allowed after deny all", []specs.LinuxDeviceCgroup{denyAll, gpu(2, true, "rwm")}, true},
+		{"another minor only", []specs.LinuxDeviceCgroup{denyAll, gpu(3, true, "rwm")}, false},
+		{"read only", []specs.LinuxDeviceCgroup{denyAll, gpu(2, true, "r")}, false},
+		{"privileged", []specs.LinuxDeviceCgroup{{Allow: true, Access: "rwm"}}, true},
+		{"later deny wins", []specs.LinuxDeviceCgroup{{Allow: true, Access: "rwm"}, gpu(2, false, "w")}, false},
+		{"block device rule does not match", []specs.LinuxDeviceCgroup{denyAll, {Allow: true, Type: "b", Access: "rwm"}}, false},
+		{"no rules", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deviceRulesAllowReadWrite(tc.rules, nvidiaMajor, 2); got != tc.want {
+				t.Fatalf("deviceRulesAllowReadWrite() = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

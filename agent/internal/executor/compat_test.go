@@ -56,7 +56,7 @@ func TestRefuseMIGCapture(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeMIGListing(t, tc.listing)
-			err := refuseMIGCapture(logr.Discard(), 42, cuda.ListVisibleGPUs(context.Background(), "/host/proc", 42))
+			err := refuseMIGCapture(logr.Discard(), 42, cuda.ListVisibleGPUs(context.Background(), "/host/proc", 42, nil))
 			if tc.want == "" {
 				require.NoError(t, err)
 				return
@@ -85,7 +85,7 @@ func TestRefuseMIGRestore(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeMIGListing(t, tc.listing)
-			err := refuseMIGRestore(testr.New(t), 42, cuda.ListVisibleGPUs(context.Background(), "/host/proc", 42), tc.skip)
+			err := refuseMIGRestore(testr.New(t), 42, cuda.ListVisibleGPUs(context.Background(), "/host/proc", 42, nil), tc.skip)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("refuseMIGRestore() = %v, want nil", err)
