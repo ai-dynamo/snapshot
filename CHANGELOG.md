@@ -34,6 +34,11 @@ commit-level history for each release is on its
 
 ### Added
 
+- S3 restore tuning accepts
+  `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` to control batch
+  and shared admission bytes. The default remains 10 GB; restart PageBroker
+  after changing it.
+
 - The Python benchmark tool supports S3-backed Snapshot releases with
   `--storage-type s3`, records the store and checks checkpoint publication.
   It measures model directory and checkpoint payload sizes and reports effective

@@ -17,6 +17,7 @@ namespace snapshot::pagebroker::model_streamer::settings {
 namespace {
 using Json = nlohmann::json;
 constexpr char kReadChunkBytesKey[] = "readChunkBytes";
+constexpr char kRestoreBatchBytesKey[] = "restoreBatchBytes";
 constexpr char kProcessGroupSizeKey[] = "processGroupSize";
 constexpr char kS3ReaderKey[] = "s3Reader";
 constexpr char kConcurrencyKey[] = "concurrency";
@@ -144,6 +145,8 @@ IsWithinBounds(const std::optional<std::uint64_t>& value, const NumericSetting& 
 void
 Options::Validate() const
 {
+  if (restore_batch_bytes == 0)
+    Invalid(kRestoreBatchBytesKey);
   for (const auto& setting : kNumbers) {
     const auto& value = this->*setting.member;
     if (!IsWithinBounds(value, setting))
@@ -190,13 +193,22 @@ ParseConfig(std::string_view text)
   catch (const std::exception&) {
     Invalid("JSON");
   }
-  ValidateFields(value, "", {kS3ReaderKey, kLoggingKey});
+  ValidateFields(value, "", {kRestoreBatchBytesKey, kS3ReaderKey, kLoggingKey});
   if (value.contains(kS3ReaderKey))
     ValidateFields(value.at(kS3ReaderKey), kS3ReaderKey, {});
   if (value.contains(kLoggingKey))
     ValidateFields(value.at(kLoggingKey), kLoggingKey, {kLevelKey, kToStderrKey});
 
   Options options;
+  if (value.contains(kRestoreBatchBytesKey)) {
+    try {
+      options.restore_batch_bytes = utils::Unsigned(
+          value.at(kRestoreBatchBytesKey), std::numeric_limits<std::uint64_t>::max(), 1);
+    }
+    catch (const std::exception&) {
+      Invalid(kRestoreBatchBytesKey);
+    }
+  }
   for (const auto& setting : kNumbers) {
     const Json* group = &value;
     if (*setting.group) {

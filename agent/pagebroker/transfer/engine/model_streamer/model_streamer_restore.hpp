@@ -24,6 +24,9 @@
 namespace snapshot::pagebroker {
 // Limit elapsed time per native submission; an earlier transaction deadline wins.
 inline constexpr std::chrono::minutes kDefaultModelStreamerSubmissionTimeout{20};
+// Target bytes per batch and shared native admission budget. A file exceeding
+// the budget runs alone. This does not bound total checkpoint staging memory.
+inline constexpr std::uint64_t kDefaultRestoreBatchBytes = 10'000'000'000;
 
 // Explicit values are fixed for one native session. Empty credentials select
 // the native AWS provider chain. Addressing, TLS/CA and worker configuration use
@@ -48,7 +51,8 @@ class ModelStreamerRestore {
   explicit ModelStreamerRestore(std::chrono::milliseconds submission_timeout = kDefaultModelStreamerSubmissionTimeout);
   explicit ModelStreamerRestore(
       ModelStreamerSessionOptions options,
-      std::chrono::milliseconds submission_timeout = kDefaultModelStreamerSubmissionTimeout);
+      std::chrono::milliseconds submission_timeout = kDefaultModelStreamerSubmissionTimeout,
+      std::uint64_t restore_batch_bytes = kDefaultRestoreBatchBytes);
   // Stops and joins the worker. Callers must finish using this object first.
   ~ModelStreamerRestore() noexcept;
   // Prevents copying ownership of the worker and native streamer handle.
@@ -79,7 +83,7 @@ class ModelStreamerRestore {
     void ReleaseMappings() noexcept;
     // Adds a nonempty file, or returns false when it belongs in the next batch.
     // On exception, discard the entry; its arrays may be partially populated.
-    bool TryAddFile(const CheckpointFile& file, const Path& destination);
+    bool TryAddFile(const CheckpointFile& file, const Path& destination, uintmax_t batch_bytes);
 
     // Collects the parallel argument arrays passed to the Model Streamer API.
     struct Request {
@@ -175,6 +179,7 @@ class ModelStreamerRestore {
   std::once_flag start_once_;
   void* streamer_handle_ = nullptr;
   const std::chrono::milliseconds submission_timeout_;
+  const uintmax_t restore_batch_bytes_;
   const ModelStreamerSessionOptions options_;
   const std::exception_ptr stopped_error_;
   std::thread worker_;

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Model Streamer configuration
 
 PageBroker accepts an optional `--model-streamer-config /path/streamer.json`
-startup argument for native S3 reader tuning alongside
+startup argument for S3 restore batching and native reader tuning alongside
 `--storage-config /path/s3.json`. Filesystem storage uses POSIX and does not use
 Model Streamer. The former `filesystem` tuning group is rejected.
 Both optional arguments may appear in either order. Existing invocations work
@@ -35,6 +35,7 @@ This example illustrates the schema, not recommended performance settings:
 
 ```json
 {
+  "restoreBatchBytes": 10000000000,
   "readChunkBytes": 8388608,
   "processGroupSize": 1,
   "s3Reader": {
@@ -55,6 +56,7 @@ Native variable names below omit the common `RUNAI_STREAMER_` prefix.
 
 | JSON field | Native setting | Accepted values |
 | --- | --- | --- |
+| `restoreBatchBytes` | PageBroker batch/admission budget; no native variable | Positive unsigned 64-bit integer in bytes; default 10000000000 (10 GB) |
 | `readChunkBytes` | `CHUNK_BYTESIZE` | Integer, 2 MiB–1 GiB; native S3 reads floor it to 5 MiB |
 | `processGroupSize` | `PROCESS_GROUP_SIZE` | Positive unsigned 32-bit integer |
 | `s3Reader.concurrency` | `OBJ_CONCURRENCY` | Integer, 1–1024 |
@@ -74,7 +76,8 @@ are not accepted by this contract; omit a field/variable to use its fallback.
 
 ## Precedence and compatibility
 
-For each tuning field: JSON overrides its native environment variable, then
+`restoreBatchBytes` is a PageBroker setting with no environment fallback.
+For each native tuning field: JSON overrides its native environment variable, then
 PageBroker's existing S3 fallback applies where defined, otherwise the library
 uses its default. The legacy `RUNAI_STREAMER_CONCURRENCY` supplies object-storage
 concurrency only when its specific setting is absent. Explicit values are checked before any native environment mutation.
@@ -95,6 +98,21 @@ versions, recognized native environment overrides also take precedence over
 these S3 fallbacks. Shared S3 endpoint, region, credentials, addressing and CA
 settings still come from the existing storage configuration/provider resolution.
 Reader tuning does not change SDK upload limits.
+
+## Restore batching
+
+`restoreBatchBytes` bounds each submission and the total bytes admitted to the
+shared native session. A file larger than the budget runs alone; files are not
+split at batch boundaries. Each restore prepares and completes one batch before
+starting the next. Larger batches can reduce submission barriers and let small
+files share workers with larger files, but prepare more staging data before the
+first download. The budget does not cap staging memory: the staging volume must
+hold the entire checkpoint. Worker count and per-client inflight windows still
+control download concurrency. Changing this value requires a PageBroker restart.
+
+Set it through `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` in
+Helm values, or the tuning JSON shown above. For example, `200000000000` is
+200 decimal GB. Keep reader settings fixed when comparing batch budgets.
 
 ## Native behavior
 
