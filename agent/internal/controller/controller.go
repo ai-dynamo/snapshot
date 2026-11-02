@@ -1097,8 +1097,9 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //     this file, exits quiescence, and resumes the engine. On failure, write
 //     restore-failed and kill the placeholder instead.
 //  3. With a lifecycle.postRestore action, notify the application within the
-//     same deadline. Its file is checked absent before step 1 and again before
-//     step 2; a failure here also fails the restore and kills the container.
+//     same deadline. Its file is checked before step 2, once the restored
+//     files are in place; a failure here also fails the restore and kills the
+//     container.
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) (retErr error) {
 	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
 	// Without this the placeholder keeps waiting for a restore that panicked.
@@ -1115,8 +1116,8 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		}
 	}
 
-	// Checked before any CRIU work, so a restore that could not notify its
-	// application never restores anything.
+	// The Pod spec is checked before any CRIU work, so an action that can
+	// never run restores nothing.
 	if err := op.postRestore.check(ctx, op); err != nil {
 		return op.failRestore(ctx, err)
 	}

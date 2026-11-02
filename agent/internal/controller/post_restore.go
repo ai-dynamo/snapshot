@@ -36,10 +36,12 @@ func postRestoreAction(content *snapshotv1alpha1.PodSnapshotContent, sourceConta
 // restore plan holds one; without an action it is noPostRestore, so the
 // restore needs no checks for a missing action.
 type postRestoreHandler interface {
-	// check runs before any CRIU work, so a restore that can't notify its
-	// application fails without restoring anything.
+	// check runs before any CRIU work, so an action that can never run
+	// restores nothing. It reads the Pod spec only: the container's files
+	// aren't restored yet.
 	check(ctx context.Context, op *restoreOperation) error
-	// recheck runs after CRIU and before restore-complete.
+	// recheck runs once the restored files are in place, before
+	// restore-complete releases the restored process.
 	recheck(ctx context.Context, op *restoreOperation) error
 	// notify tells the application, after restore-complete, every
 	// periodSeconds until it succeeds or ctx ends at the restore deadline.
@@ -91,38 +93,27 @@ type filePostRestore struct {
 	path string
 }
 
-// check refuses one of Snapshot's own control files, and a file that already
-// exists: an existing file would be taken for the notification, so the
-// application would never get one. Its directory may not exist yet, since the
-// restored files can bring it; recheck tests it.
-func (h *filePostRestore) check(ctx context.Context, op *restoreOperation) error {
+// check refuses one of Snapshot's own control files.
+func (h *filePostRestore) check(_ context.Context, op *restoreOperation) error {
 	if err := lifecyclehooks.CheckWritePath(op.pod, op.destination, h.path); err != nil {
 		return postRestoreStepError(executor.StepCheckPostRestore, err)
 	}
-	return h.requireMarkerAbsent(ctx, op)
-}
-
-func (h *filePostRestore) requireMarkerAbsent(ctx context.Context, op *restoreOperation) error {
-	exists, err := lifecyclehooks.FileExists(ctx, h.exec, op.containerID, h.path, h.timeout)
-	if err != nil {
-		return postRestoreStepError(executor.StepCheckPostRestore, err)
-	}
-	if exists {
-		return h.alreadyExists(op, "before restore")
-	}
 	return nil
 }
 
-// recheck runs once the restored files are in place, before the restored
-// process is released. The file must still be absent, since the rootfs diff
-// can bring it back from the source, for example when the source was itself
-// restored and notified. And it must be possible to create: its directory
-// exists and the container's user may write it, so a read-only mount fails the
-// restore here rather than after the application was released.
+// recheck tests the file only once the restored files are in place, since
+// they can bring the file or its directory. The file must not exist yet: an
+// existing file would be taken for the notification, so the application
+// would never get one. And it must be possible to create: its directory
+// exists and the container's user may write it, so a read-only mount fails
+// the restore here rather than after the application was released.
 func (h *filePostRestore) recheck(ctx context.Context, op *restoreOperation) error {
 	err := lifecyclehooks.CheckMarkerTarget(ctx, h.exec, op.containerID, h.path, h.timeout)
 	if errors.Is(err, fs.ErrExist) {
-		return h.alreadyExists(op, "after the restored files were applied")
+		return postRestoreStepError(executor.StepCheckPostRestore, fmt.Errorf(
+			"%s already exists in container %s once the restored files are in place; "+
+				"the post-restore file must not exist before Snapshot creates it",
+			h.path, op.destination))
 	}
 	if err != nil {
 		return postRestoreStepError(executor.StepCheckPostRestore, err)
@@ -130,15 +121,9 @@ func (h *filePostRestore) recheck(ctx context.Context, op *restoreOperation) err
 	return nil
 }
 
-func (h *filePostRestore) alreadyExists(op *restoreOperation, when string) error {
-	return postRestoreStepError(executor.StepCheckPostRestore, fmt.Errorf(
-		"%s already exists in container %s %s; the post-restore file must not exist before Snapshot creates it",
-		h.path, op.destination, when))
-}
-
-// notify counts an existing file as its own. The file was checked absent
-// before and after CRIU, and only this step creates it, so finding it here
-// means an earlier run created it and the agent restarted before recording
+// notify counts an existing file as its own. recheck found no file before
+// restore-complete, and only this step creates it, so finding it here means
+// an earlier run created it and the agent restarted before recording
 // success.
 func (h *filePostRestore) notify(ctx context.Context, op *restoreOperation) error {
 	return h.retry(ctx, op, func(ctx context.Context) error {

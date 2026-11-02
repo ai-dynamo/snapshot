@@ -540,7 +540,8 @@ def test_post_restore_file_that_already_exists_fails_the_restore(
     run: snap.TestRun,
 ) -> None:
     # A marker already in place would be taken for the notification, so the
-    # application would never get one. The agent refuses it before restoring.
+    # application would never get one. The agent refuses it once the restored
+    # files are in place, before it releases the restored process.
     try:
         source_node, _ = checkpoint_with_post_restore(config, run, "file")
 
@@ -559,8 +560,7 @@ def test_post_restore_file_that_already_exists_fails_the_restore(
         )
         assert "checking the post-restore action" in condition.message, condition.message
         assert "already exists" in condition.message, condition.message
-        # Found before CRIU, not after the restored files were applied.
-        assert "before restore" in condition.message, condition.message
+        assert "once the restored files are in place" in condition.message, condition.message
     except Exception:
         snap.debug_dump(config, run)
         raise

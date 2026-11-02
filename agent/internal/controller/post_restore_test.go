@@ -226,7 +226,7 @@ func TestPostRestoreFileIsCreatedAfterRestoreComplete(t *testing.T) {
 	assert.True(t, h.hasFile(postRestoreMarker))
 }
 
-func TestPostRestoreFileThatExistsBeforeRestoreFailsWithoutCRIU(t *testing.T) {
+func TestPostRestoreFileThatExistsBeforeRestoreFailsBeforeRelease(t *testing.T) {
 	h := newPostRestoreHarness(t, filePostRestoreSpec(postRestoreMarker))
 	h.addFile(postRestoreMarker)
 
@@ -235,8 +235,9 @@ func TestPostRestoreFileThatExistsBeforeRestoreFailsWithoutCRIU(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, executor.StepCheckPostRestore, executor.StepOf(err))
 	assert.Contains(t, err.Error(), "already exists")
-	assert.Equal(t, 0, h.restores, "no CRIU work for a restore that can't notify its application")
-	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, h.recordedEvents())
+	assert.Equal(t, 1, h.restores, "the file is checked once the restored files are in place")
+	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, h.recordedEvents(),
+		"the restored process must not be released")
 }
 
 func TestPostRestoreFileThatTheRestoreBringsBackFails(t *testing.T) {

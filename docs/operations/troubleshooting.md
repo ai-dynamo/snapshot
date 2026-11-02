@@ -388,14 +388,15 @@ container logs.
 ### checking the post-restore action
 
 When the checkpoint's container has a `lifecycle.postRestore` action, the agent
-checks it before restoring anything, and checks a file action again once the
-restored files are in place, before it releases the restored process.
+checks its settings before restoring anything. It checks a file action's file
+once the restored files are in place, before it releases the restored process,
+since the restored files can bring the file or its directory.
 
 Likely causes:
-- **The file already exists.** The message names the path and says whether it
-  was there before the restore or came back with the restored files. An
-  existing file would be taken for the notification, so the application would
-  never get one. Use a path that only Snapshot writes, such as one on an
+- **The file already exists.** The message names the path. The file was in the
+  restore container already, or came back with the restored files. An existing
+  file would be taken for the notification, so the application would never get
+  one. Use a path that only Snapshot writes, such as one on an
   emptyDir that the restore Pod mounts for this purpose. A file on a volume
   that outlives the Pod, such as a PersistentVolumeClaim, stays there from an
   earlier restore until the application removes it.
