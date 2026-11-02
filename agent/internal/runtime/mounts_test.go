@@ -196,6 +196,16 @@ func TestBuildMountPolicy(t *testing.T) {
 			wantExt: map[string]string{"/proc/acpi": "/proc/acpi"},
 		},
 		{
+			name: "procfs and its read-only binds are left to CRIU",
+			mounts: []types.MountInfo{
+				{MountPoint: "/proc", FSType: "proc", IsOCIManaged: true},
+				{MountPoint: "/proc/sys", FSType: "proc", IsOCIManaged: true, ReadOnly: true},
+				{MountPoint: "/proc/acpi", FSType: "tmpfs", IsOCIManaged: true, ReadOnly: true},
+			},
+			wantExt:      map[string]string{"/proc/acpi": "/proc/acpi"},
+			wantNotInExt: []string{"/proc", "/proc/sys"},
+		},
+		{
 			name: "/dev/shm tmpfs is not externalized",
 			mounts: []types.MountInfo{
 				{MountPoint: "/dev/shm", FSType: "tmpfs"},

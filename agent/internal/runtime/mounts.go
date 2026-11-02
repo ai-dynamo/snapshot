@@ -82,9 +82,10 @@ func ClassifyMounts(mounts []types.MountInfo, ociSpec *specs.Spec, rootFS string
 // Policy (evaluated top to bottom):
 //  1. Skip: non-OCI /proc/*, /sys/*, /run/* submounts (virtual/runtime, not in placeholder)
 //     and NVIDIA device plugin allocation markers (named after the source's GPUs)
-//  2. Native: /dev/shm tmpfs (CRIU saves and restores content)
-//  3. Masked: OCI masked non-directory paths that exist under rootFS → /dev/null
-//  4. Externalize: everything else (OCI mounts the runtime recreates in placeholder)
+//  2. Native: procfs, /proc and its read-only binds (CRIU mounts procfs for the restored PID namespace)
+//  3. Native: /dev/shm tmpfs (CRIU saves and restores content)
+//  4. Masked: OCI masked non-directory paths that exist under rootFS → /dev/null
+//  5. Externalize: everything else (OCI mounts the runtime recreates in placeholder)
 func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []string) (map[string]string, []string) {
 	extMap := make(map[string]string, len(mounts))
 	var skipped []string
@@ -103,6 +104,16 @@ func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []str
 		// Skip device plugin allocation markers — the placeholder has its own
 		if isDeviceListMarker(m.MountPoint) {
 			skipped = append(skipped, m.MountPoint)
+			continue
+		}
+
+		// Let CRIU mount procfs natively. The restored tree runs in a new PID
+		// namespace nested in the placeholder's, so the placeholder's procfs
+		// numbers its processes differently: /proc/self resolves, but
+		// /proc/<getpid()> does not exist or names another process. CRIU mounts
+		// a procfs owned by the restored PID namespace and recreates the
+		// read-only binds of it (/proc/sys and the like) from that mount.
+		if m.FSType == "proc" {
 			continue
 		}
 
