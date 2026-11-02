@@ -206,6 +206,14 @@ TEST_F(ArtifactTest, PreparesRestoreFilesBeforeParticipantsAndReleasesDescriptor
   ASSERT_EQ(ftruncate(file.get(), 4096), 0);
   std::string error;
   ASSERT_TRUE(storage::WriteManifest(participant, {{kDevice, 4096, storage::DeviceFilename(0)}}, &error)) << error;
+  {
+    FileDescriptor probe(open(extent.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT));
+    if (probe.get() < 0 && errno == EINVAL) GTEST_SKIP() << "test filesystem does not support O_DIRECT";
+    ASSERT_GE(probe.get(), 0);
+  }
+  // Extra artifact entries do not belong to the requested captured PID set.
+  fs::create_directory(root_ / kDataDirectory / "unrelated");
+  fs::create_directory(root_ / kDataDirectory / "2");  // No manifest.
   const auto descriptors = [] {
     return std::distance(fs::directory_iterator("/proc/self/fd"), fs::directory_iterator{});
   };
@@ -224,6 +232,26 @@ TEST_F(ArtifactTest, PreparesRestoreFilesBeforeParticipantsAndReleasesDescriptor
     EXPECT_THROW(Artifact(source.get(), Direction::Restore, {1}, {kDevice}, {}, preparation), std::runtime_error);
   }
   EXPECT_EQ(descriptors(), before - 1);
+}
+
+
+TEST_F(ArtifactTest, MissingPreparedExtentFallsBackToValidatedArtifact)
+{
+  auto preparation = std::make_shared<posix::GpuRestorePreparation>(directory_.get());
+  const storage::GpuDataFile extent{kDevice, 4096, storage::DeviceFilename(0)};
+  // Finish preparation before any GPU files exist, making its optional cache empty.
+  EXPECT_EQ(preparation->Get(1, extent, directory_.get()), nullptr);
+  Artifact checkpoint(directory_.get(), Direction::Checkpoint, {1}, {kDevice});
+  const auto participant = root_ / kDataDirectory / "1";
+  FileDescriptor file(open((participant / extent.filename).c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
+  ASSERT_GE(file.get(), 0);
+  ASSERT_EQ(ftruncate(file.get(), extent.size), 0);
+  std::string error;
+  ASSERT_TRUE(storage::WriteManifest(participant, {extent}, &error)) << error;
+  EXPECT_NO_THROW(Artifact(directory_.get(), Direction::Restore, {1}, {kDevice}, {}, preparation));
+  // Missing preparation never bypasses validation of a requested participant.
+  ASSERT_EQ(ftruncate(file.get(), 0), 0);
+  EXPECT_THROW(Artifact(directory_.get(), Direction::Restore, {1}, {kDevice}, {}, preparation), std::runtime_error);
 }
 
 } // namespace

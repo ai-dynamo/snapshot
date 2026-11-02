@@ -172,9 +172,9 @@ pageBroker:
   # Allocate and register the full ring before accepting GPU work.
   # Defaults reserve 4 GiB per visible GPU, or 32 GiB on an eight-GPU node.
   transferBufferCount: 32
-  # Shared CPU staging lanes for POSIX GPU transfers. Zero keeps per-device rings
-  # at the same memory budget. Must not exceed transferBufferCount * visible GPUs.
-  # Lanes share free slots, preferring the target GPU's NUMA node.
+  # Tuning. Share GPU transfer capacity so ready GPUs can use idle staging slots.
+  # Zero gives each GPU its own buffers. Keep the same total memory budget.
+  # Must not exceed transferBufferCount * visible GPUs.
   transferPooledLanes: 0
   # 128 MiB per slot. Must be a positive multiple of 4096 bytes.
   transferChunkBytes: 134217728

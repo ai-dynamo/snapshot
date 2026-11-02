@@ -36,26 +36,6 @@ namespace {
 namespace transfer = snapshot::pagebroker::posix;
 constexpr auto kGpuWaitInterval = std::chrono::milliseconds{100};
 
-FileDescriptor
-OpenDirectory(int parent, const char* name)
-{
-  FileDescriptor directory(openat(parent, name, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-  if (directory.get() < 0) {
-    throw std::system_error(errno, std::generic_category(), "open GPU directory");
-  }
-  return directory;
-}
-
-void
-ValidateDirectory(int fd)
-{
-  struct stat info{};
-  if (fstat(fd, &info)) {
-    throw std::system_error(errno, std::generic_category(), "stat GPU directory");
-  }
-  Validate(S_ISDIR(info.st_mode), "GPU artifact path must be a directory");
-}
-
 struct PrimaryContext {
   explicit PrimaryContext(CUdevice device) : device(device)
   {
@@ -211,7 +191,7 @@ struct Artifact::ArtifactState {
   ArtifactState(int directory_fd, Direction direction)
       : root(FileDescriptor::Duplicate(directory_fd)), direction(direction)
   {
-    ValidateDirectory(root.get());
+    root.RequireDirectory();
   }
 
   void CreateCheckpointDirectories(const std::vector<uint32_t>& captured_pids)
@@ -231,15 +211,15 @@ struct Artifact::ArtifactState {
       } else if (errno != EEXIST) {
         throw std::system_error(errno, std::generic_category(), "create GPU root directory");
       }
-      gpu_root = OpenDirectory(root.get(), kDataDirectory);
-      ValidateDirectory(gpu_root.get());
+      gpu_root = FileDescriptor::OpenDirectory(root.get(), kDataDirectory);
+      gpu_root.RequireDirectory();
       for (size_t index = 0; index < names.size(); ++index) {
         if (mkdirat(gpu_root.get(), names[index].c_str(), S_IRWXU)) {
           throw std::system_error(errno, std::generic_category(), "create GPU participant directory");
         }
         ++created;
-        auto directory = OpenDirectory(gpu_root.get(), names[index].c_str());
-        ValidateDirectory(directory.get());
+        auto directory = FileDescriptor::OpenDirectory(gpu_root.get(), names[index].c_str());
+        directory.RequireDirectory();
         participants.push_back({captured_pids[index], std::move(directory), {}, {}});
       }
     } catch (...) {
@@ -257,11 +237,11 @@ struct Artifact::ArtifactState {
 
   void OpenRestoreDirectories(const std::vector<uint32_t>& captured_pids)
   {
-    auto gpu_root = OpenDirectory(root.get(), kDataDirectory);
-    ValidateDirectory(gpu_root.get());
+    auto gpu_root = FileDescriptor::OpenDirectory(root.get(), kDataDirectory);
+    gpu_root.RequireDirectory();
     for (const auto pid : captured_pids) {
-      auto directory = OpenDirectory(gpu_root.get(), std::to_string(pid).c_str());
-      ValidateDirectory(directory.get());
+      auto directory = FileDescriptor::OpenDirectory(gpu_root.get(), std::to_string(pid).c_str());
+      directory.RequireDirectory();
       PreparedParticipant participant{pid, std::move(directory), {}, {}};
       const auto path = "/proc/self/fd/" + std::to_string(participant.directory.get());
       std::string error;
@@ -536,7 +516,7 @@ class GpuEngine::Batch {
         auto transfer = PrepareTransfer(job);
         const auto& data = transfer.data;
         const auto& name = transfer.name;
-        if (engine_.pool && !prepared_.files.empty()) {
+        if (engine_.pool && !prepared_.files.empty() && prepared_.files.at(job.extent_index)) {
           engine_.pool->Restore(prepared_.files.at(job.extent_index), transfer.device.context.handle,
                                 data.devPtr, data.size, data.stream, cancellation_);
           result_.bytes += data.size;
@@ -861,7 +841,12 @@ std::shared_ptr<posix::GpuRestorePreparation>
 GpuEngine::PrepareRestore(int directory_fd)
 {
   if (!state_->available || !state_->pool) return {};
-  return std::make_shared<posix::GpuRestorePreparation>(directory_fd);
+  try {
+    return std::make_shared<posix::GpuRestorePreparation>(directory_fd);
+  } catch (...) {
+    LogException("GPU restore preparation unavailable", std::current_exception());
+    return {};
+  }
 }
 
 std::vector<ParticipantResult>
