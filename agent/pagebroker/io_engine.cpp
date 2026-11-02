@@ -61,7 +61,8 @@ struct NixlTransferEngine::Impl {
   int descriptor = -1;
 };
 
-NixlTransferEngine::NixlTransferEngine(std::span<void* const> buffers, size_t capacity, FaultInjector inject)
+NixlTransferEngine::NixlTransferEngine(std::span<void* const> buffers, size_t capacity, FaultInjector inject,
+                                       size_t queue_size)
     : impl_(std::make_unique<Impl>(std::move(inject)))
 {
   auto& impl = *impl_;
@@ -72,10 +73,10 @@ NixlTransferEngine::NixlTransferEngine(std::span<void* const> buffers, size_t ca
   impl.agent = std::make_unique<nixlAgent>(impl.name, config);
   nixl_b_params_t parameters;
   parameters["use_aio"] = "true";
-  // Each staging slot has at most one single-descriptor I/O request. Reserve
-  // that concurrency instead of the backend's default queue for every lane.
-  // The backend rounds small queues up to its supported minimum.
-  parameters["kernel_queue_size"] = std::to_string(buffers.size());
+  // Leave ring mode unchanged. The pinned NIXL POSIX backend rounds an
+  // omitted queue size to 16. Pools reserve their per-worker concurrency,
+  // which can be smaller than the number of registered shared buffers.
+  if (queue_size) parameters["kernel_queue_size"] = std::to_string(queue_size);
   nixlBackendH* backend = nullptr;
   CheckNixl(impl.agent->createBackend("POSIX", parameters, backend), "create POSIX backend");
   impl.addresses.assign(buffers.begin(), buffers.end());

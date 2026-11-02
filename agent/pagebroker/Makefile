@@ -99,7 +99,7 @@ test-gpu: build/gpu-checkpoint-test build/gpu-transfer-test
 build/gpu-checkpoint-test: generate $(GPU_TEST_SOURCES) gpu/checkpoint_test.cpp io_engine.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(GPU_TEST_SOURCES) \
 		gpu/checkpoint_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) $(TRANSFER_FLAGS) \
-		-Wl,--wrap=cuMemcpyHtoDAsync_v2,--wrap=cuCheckpointProcessUnlock -L$(CUDA_LIBRARY_DIR) -lcuda -ldl -o $@
+		-Wl,--wrap=cuMemcpyHtoDAsync_v2,--wrap=cuCheckpointProcessUnlock,--wrap=cuStreamCreate,--wrap=cuMemCreate,--wrap=cuMemSetAccess -L$(CUDA_LIBRARY_DIR) -lcuda -ldl -o $@
 
 build/gpu-transfer-test: generate transfer/engine/transfer_engine.cpp transfer/engine/posix/gpu_transfer.cpp transfer/engine/posix/gpu_transfer.hpp transfer/engine/posix/tests/gpu_transfer_test.cpp gpu/storage_manifest.cpp gpu/storage_manifest.hpp cancellation.hpp $(COMMON_SOURCES) $(IO_SOURCES) file_descriptor.hpp io_engine.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) transfer/engine/posix/gpu_transfer.cpp transfer/engine/posix/tests/gpu_transfer_test.cpp gpu/storage_manifest.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer/engine/transfer_engine.cpp v1/pagebroker.pb.cc \
