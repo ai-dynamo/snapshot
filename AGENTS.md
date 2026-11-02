@@ -43,6 +43,7 @@ process in `docs/proposals/README.md`.
 | Path | Go module | What lives there |
 | --- | --- | --- |
 | `api/` | yes | CRD types (`PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`) and generated CRD YAML in `api/v1alpha1/crds` |
+| `coordinator/` | yes | Coordination sessions: the session contract, its client, and the server that holds them over embedded NATS |
 | `agent/` | yes | Node-level daemon that drives CRIU and CUDA checkpointing. **Linux only (amd64, arm64)** |
 | `operator/` | yes | Cluster controller that reconciles the CRDs |
 | `charts/snapshot/` | — | Helm chart; `charts/snapshot/crds` is a generated copy of the CRDs |
@@ -50,20 +51,21 @@ process in `docs/proposals/README.md`.
 | `docs/` | — | User and developer documentation |
 | `hack/` | — | Build tooling, license boilerplate, base-package capture |
 
-Three separate Go modules — `api`, `agent`, and `operator` — each with its own
-`go.mod` and its own `Makefile`. The root `Makefile` fans out to all three.
+Four separate Go modules — `api`, `coordinator`, `agent`, and `operator` — each
+with its own `go.mod` and its own `Makefile`. The root `Makefile` fans out to
+all four.
 
 ## Build and test
 
 Run everything from the repository root. Go 1.27.3 — the version is pinned in
-`hack/tools.mk`, `go.work`, all three `go.mod` files, `agent/Dockerfile`, and
+`hack/tools.mk`, `go.work`, all four `go.mod` files, `agent/Dockerfile`, and
 the workflows, and they must agree.
 
 ```bash
 make check        # default goal: the full local gate (see below)
-make test         # unit tests across api, agent, operator
+make test         # unit tests across api, coordinator, agent, operator
 make build        # build agent and operator binaries
-make lint         # golangci-lint across all three modules
+make lint         # golangci-lint across all four modules
 make fmt          # format
 make generate     # regenerate CRDs from api/ types
 ```

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	client "github.com/ai-dynamo/snapshot/agent/pkg/coordinator"
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
-	"github.com/ai-dynamo/snapshot/operator/internal/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/server"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,7 +21,7 @@ import (
 const pending = 200 * time.Millisecond
 
 // barrier runs Barrier in the background, and returns its outcome on a channel.
-func barrier(ctx context.Context, s client.Session, name string) <-chan error {
+func barrier(ctx context.Context, s coordinator.Session, name string) <-chan error {
 	out := make(chan error, 1)
 	go func() { out <- s.Barrier(ctx, name) }()
 	return out
@@ -283,7 +283,7 @@ func TestConnect(t *testing.T) {
 		defer h.auth.refuse.Store(false)
 		connected := make(chan error, 1)
 		go func() {
-			s, err := client.Connect(within(t), ses.config(0))
+			s, err := coordinator.Connect(within(t), ses.config(0))
 			if err == nil {
 				defer func() { _ = s.Close() }()
 			}
@@ -300,7 +300,7 @@ func TestConnect(t *testing.T) {
 		defer h.auth.refuse.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_, err := client.Connect(ctx, ses.config(0))
+		_, err := coordinator.Connect(ctx, ses.config(0))
 		require.ErrorIs(t, err, session.ErrForbidden)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	})
@@ -310,7 +310,7 @@ func TestConnect(t *testing.T) {
 		cfg.Member = "stranger"
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_, err := client.Connect(ctx, cfg)
+		_, err := coordinator.Connect(ctx, cfg)
 		require.ErrorIs(t, err, session.ErrForbidden)
 	})
 
@@ -318,25 +318,25 @@ func TestConnect(t *testing.T) {
 		ses := h.session(t, 1)
 		cfg := ses.config(0)
 		cfg.URLs = []string{"tls://127.0.0.1:1", cfg.URLs[0]}
-		s, err := client.Connect(within(t), cfg)
+		s, err := coordinator.Connect(within(t), cfg)
 		require.NoError(t, err)
 		require.NoError(t, s.Close())
 	})
 
 	for _, tt := range []struct {
 		name   string
-		modify func(*client.Config)
+		modify func(*coordinator.Config)
 	}{
-		{"no URL", func(c *client.Config) { c.URLs = nil }},
-		{"no CA pool", func(c *client.Config) { c.RootCAs = nil }},
-		{"no token source", func(c *client.Config) { c.Token = nil }},
-		{"an attempt that is not a name", func(c *client.Config) { c.Attempt = "a.b" }},
-		{"a member that is not a name", func(c *client.Config) { c.Member = "a/b" }},
+		{"no URL", func(c *coordinator.Config) { c.URLs = nil }},
+		{"no CA pool", func(c *coordinator.Config) { c.RootCAs = nil }},
+		{"no token source", func(c *coordinator.Config) { c.Token = nil }},
+		{"an attempt that is not a name", func(c *coordinator.Config) { c.Attempt = "a.b" }},
+		{"a member that is not a name", func(c *coordinator.Config) { c.Member = "a/b" }},
 	} {
 		t.Run("refuses a config with "+tt.name, func(t *testing.T) {
 			cfg := h.session(t, 1).config(0)
 			tt.modify(&cfg)
-			_, err := client.Connect(within(t), cfg)
+			_, err := coordinator.Connect(within(t), cfg)
 			require.ErrorIs(t, err, session.ErrInvalid)
 		})
 	}
@@ -345,7 +345,7 @@ func TestConnect(t *testing.T) {
 // TestClose covers Close: it closes the connection and nothing else, so the
 // coordinator fails the session once the member's grace period runs out.
 func TestClose(t *testing.T) {
-	h := newHarness(t, func(cfg *coordinator.Config) { cfg.Grace = 2 * time.Second })
+	h := newHarness(t, func(cfg *server.Config) { cfg.Grace = 2 * time.Second })
 	ctx := within(t)
 	ses := h.session(t, 2)
 	sessions := ses.connectAll(t)

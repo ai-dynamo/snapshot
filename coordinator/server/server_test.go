@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package coordinator
+package server
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -227,7 +227,7 @@ func slicesContain(lines []string, s string) bool {
 	return false
 }
 
-// TestConfig covers the configurations NewServer refuses, and a replica count
+// TestConfig covers the configurations New refuses, and a replica count
 // the embedded server cannot honor.
 func TestConfig(t *testing.T) {
 	_, cert := testCertificates(t)
@@ -247,7 +247,7 @@ func TestConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := valid
 			tt.modify(&cfg)
-			_, err := NewServer(cfg)
+			_, err := New(cfg)
 			require.ErrorIs(t, err, ErrInvalid)
 		})
 	}

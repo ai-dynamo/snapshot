@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package coordinator
+package server
 
 import (
 	"encoding/json"
 	"fmt"
 	"strings"
 
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
-	"github.com/nats-io/nats-server/v2/server"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/clock"
@@ -35,12 +35,12 @@ func (s *Server) followConnections() error {
 func (s *Server) event(m *nats.Msg) {
 	switch {
 	case strings.HasSuffix(m.Subject, ".CONNECT"):
-		var ev server.ConnectEventMsg
+		var ev natsserver.ConnectEventMsg
 		if err := json.Unmarshal(m.Data, &ev); err == nil {
 			s.connected(ev.Client)
 		}
 	case strings.HasSuffix(m.Subject, ".DISCONNECT"):
-		var ev server.DisconnectEventMsg
+		var ev natsserver.DisconnectEventMsg
 		if err := json.Unmarshal(m.Data, &ev); err == nil {
 			s.disconnected(ev.Client)
 		}
@@ -49,7 +49,7 @@ func (s *Server) event(m *nats.Msg) {
 
 // member returns the session and member of a client, and false for a client
 // that is not a member of an open session. The caller holds Server.mu.
-func (s *Server) member(c server.ClientInfo) (*attempt, string, bool) {
+func (s *Server) member(c natsserver.ClientInfo) (*attempt, string, bool) {
 	uid, member, ok := session.ParseUserName(c.User)
 	if !ok {
 		return nil, "", false
@@ -62,7 +62,7 @@ func (s *Server) member(c server.ClientInfo) (*attempt, string, bool) {
 }
 
 // connected records a member's connection, which ends its grace period.
-func (s *Server) connected(c server.ClientInfo) {
+func (s *Server) connected(c natsserver.ClientInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a, member, ok := s.member(c)
@@ -84,7 +84,7 @@ func (s *Server) connected(c server.ClientInfo) {
 // its grace period once it has none left. A member that has left still gets
 // one: its relay and its libraries may still use the connection, and losing it
 // fails the attempt.
-func (s *Server) disconnected(c server.ClientInfo) {
+func (s *Server) disconnected(c natsserver.ClientInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a, member, ok := s.member(c)

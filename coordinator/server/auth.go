@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package coordinator
+package server
 
 import (
 	"context"
@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
-	"github.com/nats-io/nats-server/v2/server"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -65,12 +65,12 @@ const AuthorizeTimeout = 3 * time.Second
 // authenticator is the embedded server's client authentication.
 type authenticator struct{ s *Server }
 
-// Check implements server.Authentication. It admits the coordinator's own
+// Check implements natsserver.Authentication. It admits the coordinator's own
 // in-process connections, and a member's connection once the Authorizer admits
 // it, the coordinator is ready, and the attempt has a session with that
 // member, granting it session.MemberPermissions. It refuses every other
 // client.
-func (a authenticator) Check(c server.ClientAuthentication) bool {
+func (a authenticator) Check(c natsserver.ClientAuthentication) bool {
 	s := a.s
 	opts := c.GetOpts()
 	if user, ok := s.internal(c, opts); ok {
@@ -98,12 +98,12 @@ func (a authenticator) Check(c server.ClientAuthentication) bool {
 		return false
 	}
 	p := session.MemberPermissions(attempt, member)
-	c.RegisterUser(&server.User{
+	c.RegisterUser(&natsserver.User{
 		Username: opts.Username,
 		Account:  s.account,
-		Permissions: &server.Permissions{
-			Publish:   &server.SubjectPermission{Allow: p.Publish},
-			Subscribe: &server.SubjectPermission{Allow: p.Subscribe},
+		Permissions: &natsserver.Permissions{
+			Publish:   &natsserver.SubjectPermission{Allow: p.Publish},
+			Subscribe: &natsserver.SubjectPermission{Allow: p.Subscribe},
 		},
 	})
 	return true
@@ -111,7 +111,7 @@ func (a authenticator) Check(c server.ClientAuthentication) bool {
 
 // internal returns the user of one of the coordinator's in-process connections,
 // which present the coordinator's token over an in-process pipe.
-func (s *Server) internal(c server.ClientAuthentication, opts *server.ClientOpts) (*server.User, bool) {
+func (s *Server) internal(c natsserver.ClientAuthentication, opts *natsserver.ClientOpts) (*natsserver.User, bool) {
 	if subtle.ConstantTimeCompare([]byte(opts.Token), []byte(s.token)) != 1 {
 		return nil, false
 	}
@@ -120,9 +120,9 @@ func (s *Server) internal(c server.ClientAuthentication, opts *server.ClientOpts
 	}
 	switch opts.Username {
 	case coordinatorUser:
-		return &server.User{Username: coordinatorUser, Account: s.account}, true
+		return &natsserver.User{Username: coordinatorUser, Account: s.account}, true
 	case eventsUser:
-		return &server.User{Username: eventsUser, Account: s.ns.SystemAccount()}, true
+		return &natsserver.User{Username: eventsUser, Account: s.ns.SystemAccount()}, true
 	}
 	return nil, false
 }

@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package coordinator is SNEP-324's Snapshot coordinator: it serves each
+// Package server is SNEP-324's Snapshot coordinator: it serves each
 // attempt's coordination session from a NATS server with JetStream embedded in
 // the process. It owns the server, the sessions, and authentication, and
 // nothing else. It shares only package session
-// (github.com/ai-dynamo/snapshot/agent/pkg/session) with the session client:
+// (github.com/ai-dynamo/snapshot/coordinator/session) with the session client:
 // the bucket names and key layout, the default limits, the user name a member
 // connects under, the subjects its connection is permitted, Meta, and the
 // errors. The reconciler that follows the set resources, the TokenReview
@@ -72,4 +72,4 @@
 // admitting the member, so the member never writes to a session it did not
 // join. The member itself then reads meta, finds the other epoch, and reports
 // session.ErrCoordinatorLost.
-package coordinator
+package server

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	client "github.com/ai-dynamo/snapshot/agent/pkg/coordinator"
-	"github.com/ai-dynamo/snapshot/operator/internal/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -20,11 +20,11 @@ import (
 // a connection within AuthorizeTimeout, before the client gives up on it and
 // connects again.
 func TestConnectionBudget(t *testing.T) {
-	detection := client.ClientPingInterval * time.Duration(client.ClientMaxPingsOut+1)
-	assert.Less(t, detection+client.ClientConnectTimeout, coordinator.DefaultGrace,
+	detection := coordinator.ClientPingInterval * time.Duration(coordinator.ClientMaxPingsOut+1)
+	assert.Less(t, detection+coordinator.ClientConnectTimeout, server.DefaultGrace,
 		"the client notices a dead connection after %s and connects again within %s, within a %s grace period",
-		detection, client.ClientConnectTimeout, coordinator.DefaultGrace)
-	assert.Less(t, coordinator.AuthorizeTimeout, client.ClientConnectTimeout,
+		detection, coordinator.ClientConnectTimeout, server.DefaultGrace)
+	assert.Less(t, server.AuthorizeTimeout, coordinator.ClientConnectTimeout,
 		"the coordinator authenticates a connection within %s, before the client gives up after %s",
-		coordinator.AuthorizeTimeout, client.ClientConnectTimeout)
+		server.AuthorizeTimeout, coordinator.ClientConnectTimeout)
 }

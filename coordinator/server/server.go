@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package coordinator
+package server
 
 import (
 	"context"
@@ -18,9 +18,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
-	"github.com/nats-io/nats-server/v2/server"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"k8s.io/apimachinery/pkg/types"
@@ -97,7 +97,7 @@ const (
 // required.
 type Config struct {
 	// Host and Port are where the client listener listens. Port defaults to
-	// 4222, and server.RANDOM_PORT picks a free one.
+	// 4222, and natsserver.RANDOM_PORT picks a free one.
 	Host string
 	Port int
 
@@ -208,12 +208,12 @@ func setDefault[T comparable](v *T, def T) {
 type Server struct {
 	cfg      Config
 	log      logr.Logger
-	ns       *server.Server
+	ns       *natsserver.Server
 	storeDir string
 	// token authenticates the coordinator's in-process connections. It is
 	// drawn at random at startup and never leaves the process's memory.
 	token   string
-	account *server.Account
+	account *natsserver.Account
 	conn    *nats.Conn
 	js      jetstream.JetStream
 	events  *nats.Conn
@@ -230,9 +230,9 @@ type Server struct {
 	wg       sync.WaitGroup
 }
 
-// NewServer starts the embedded server, listening for clients and refusing
+// New starts the embedded server, listening for clients and refusing
 // them until MarkReady.
-func NewServer(cfg Config) (*Server, error) {
+func New(cfg Config) (*Server, error) {
 	cfg, err := cfg.withDefaults()
 	if err != nil {
 		return nil, err
@@ -265,7 +265,7 @@ func NewServer(cfg Config) (*Server, error) {
 // start starts the embedded server and the coordinator's own connections.
 func (s *Server) start() error {
 	maxPayload := int32(s.cfg.MaxValue + payloadHeadroom)
-	opts := &server.Options{
+	opts := &natsserver.Options{
 		ServerName: "snapshot-coordinator",
 		Host:       s.cfg.Host,
 		Port:       s.cfg.Port,
@@ -282,15 +282,17 @@ func (s *Server) start() error {
 		JetStream:     true,
 		// Buckets live in memory only: a store of one byte refuses every
 		// file-backed stream.
-		JetStreamMaxMemory:         s.cfg.MaxBytes,
-		JetStreamMaxStore:          1,
-		StoreDir:                   s.storeDir,
-		DisableJetStreamBanner:     true,
-		Accounts:                   []*server.Account{server.NewAccount(appAccount), server.NewAccount(systemAccount)},
+		JetStreamMaxMemory:     s.cfg.MaxBytes,
+		JetStreamMaxStore:      1,
+		StoreDir:               s.storeDir,
+		DisableJetStreamBanner: true,
+		Accounts: []*natsserver.Account{
+			natsserver.NewAccount(appAccount), natsserver.NewAccount(systemAccount),
+		},
 		SystemAccount:              systemAccount,
 		CustomClientAuthentication: authenticator{s},
 	}
-	ns, err := server.NewServer(opts)
+	ns, err := natsserver.NewServer(opts)
 	if err != nil {
 		return fmt.Errorf("configure the embedded server: %w", err)
 	}

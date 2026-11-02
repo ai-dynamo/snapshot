@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package coordinator
+package server
 
 import (
 	"crypto/tls"
@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
-	"github.com/nats-io/nats-server/v2/server"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -161,7 +161,7 @@ func TestInternalToken(t *testing.T) {
 		{"another user", "admin", h.srv.token, pipeAddr{}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &fakeClient{opts: server.ClientOpts{Username: tt.user, Token: tt.token}, remote: tt.remote}
+			c := &fakeClient{opts: natsserver.ClientOpts{Username: tt.user, Token: tt.token}, remote: tt.remote}
 			_, ok := h.srv.internal(c, &c.opts)
 			assert.Equal(t, tt.want, ok)
 		})
@@ -204,14 +204,14 @@ func (pipeAddr) String() string  { return "pipe" }
 
 // fakeClient is a client as the authentication hook sees it.
 type fakeClient struct {
-	opts   server.ClientOpts
+	opts   natsserver.ClientOpts
 	remote net.Addr
 }
 
-func (c *fakeClient) GetOpts() *server.ClientOpts                 { return &c.opts }
+func (c *fakeClient) GetOpts() *natsserver.ClientOpts             { return &c.opts }
 func (c *fakeClient) GetTLSConnectionState() *tls.ConnectionState { return nil }
-func (c *fakeClient) RegisterUser(*server.User)                   {}
+func (c *fakeClient) RegisterUser(*natsserver.User)               {}
 func (c *fakeClient) RemoteAddress() net.Addr                     { return c.remote }
 func (c *fakeClient) GetNonce() []byte                            { return nil }
-func (c *fakeClient) Kind() int                                   { return server.CLIENT }
+func (c *fakeClient) Kind() int                                   { return natsserver.CLIENT }
 func (c *fakeClient) GetID() uint64                               { return 1 }

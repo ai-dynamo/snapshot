@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package coordinator
+package server
 
 import (
 	"context"
@@ -22,10 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
-	"github.com/nats-io/nats-server/v2/server"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -74,7 +74,7 @@ func startHarness(t *testing.T, modify ...func(*Config)) *harness {
 	}
 	h.cfg = Config{
 		Host:       "127.0.0.1",
-		Port:       server.RANDOM_PORT,
+		Port:       natsserver.RANDOM_PORT,
 		TLS:        &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		Authorizer: h.auth,
 		Clock:      h.clock,
@@ -84,7 +84,7 @@ func startHarness(t *testing.T, modify ...func(*Config)) *harness {
 	for _, m := range modify {
 		m(&h.cfg)
 	}
-	srv, err := NewServer(h.cfg)
+	srv, err := New(h.cfg)
 	require.NoError(t, err)
 	h.srv = srv
 	t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.Background())) })
@@ -278,7 +278,7 @@ func (h *harness) raw(spec Spec, member int) (*nats.Conn, <-chan error) {
 // network would.
 func (h *harness) kick(spec Spec, member int) {
 	h.t.Helper()
-	connz, err := h.srv.ns.Connz(&server.ConnzOptions{
+	connz, err := h.srv.ns.Connz(&natsserver.ConnzOptions{
 		User: session.UserName(string(spec.UID), spec.Members[member].ID),
 	})
 	require.NoError(h.t, err)

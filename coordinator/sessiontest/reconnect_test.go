@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
-	"github.com/ai-dynamo/snapshot/operator/internal/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/server"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -168,7 +168,7 @@ func TestRemoved(t *testing.T) {
 	})
 
 	t.Run("with no room left to record its end", func(t *testing.T) {
-		h := newHarness(t, func(cfg *coordinator.Config) { cfg.MaxBytes, cfg.MaxValue = 1<<20, 64<<10 })
+		h := newHarness(t, func(cfg *server.Config) { cfg.MaxBytes, cfg.MaxValue = 1<<20, 64<<10 })
 		ctx := within(t)
 		ses := h.session(t, 2)
 		sessions := ses.connectAll(t)

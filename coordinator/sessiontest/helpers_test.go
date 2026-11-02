@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package sessiontest holds only tests: those of the session client, package
-// coordinator of the agent module, against the real coordinator, and the test
-// that ties the client's connection settings to the coordinator's. It is the
-// only package that imports both. Each member reaches the coordinator through
+// coordinator, against the real coordinator, package server, and the test that
+// ties the client's connection settings to the coordinator's. It is the only
+// package that imports both. Each member reaches the coordinator through
 // a TCP proxy of its own, which a test cuts to break the member's connection,
 // and points at a new coordinator to restart it.
 package sessiontest
@@ -27,9 +27,9 @@ import (
 	"testing"
 	"time"
 
-	client "github.com/ai-dynamo/snapshot/agent/pkg/coordinator"
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
-	"github.com/ai-dynamo/snapshot/operator/internal/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/server"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -44,8 +44,8 @@ const memberToken = "member-token"
 // and the proxies its members connect through.
 type harness struct {
 	t    *testing.T
-	cfg  coordinator.Config
-	srv  *coordinator.Server
+	cfg  server.Config
+	srv  *server.Server
 	ca   *x509.CertPool
 	auth *authorizer
 	// observer records what the current coordinator sees of sessions.
@@ -55,15 +55,15 @@ type harness struct {
 
 // newHarness starts a ready coordinator, configured by modify, and checks
 // that the test leaves no goroutine behind.
-func newHarness(t *testing.T, modify ...func(*coordinator.Config)) *harness {
+func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 	t.Helper()
 	ignore := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, ignore) })
 	ca, cert := testCertificates(t)
 	h := &harness{t: t, ca: ca, auth: &authorizer{}}
-	h.cfg = coordinator.Config{
+	h.cfg = server.Config{
 		Host: "127.0.0.1",
-		// Any free port, as server.RANDOM_PORT picks.
+		// Any free port, as nats-server's RANDOM_PORT picks.
 		Port:       -1,
 		TLS:        &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		Authorizer: h.auth,
@@ -82,7 +82,7 @@ func (h *harness) start() {
 	h.t.Helper()
 	h.observer = &recorder{}
 	h.cfg.Observer = h.observer
-	srv, err := coordinator.NewServer(h.cfg)
+	srv, err := server.New(h.cfg)
 	require.NoError(h.t, err)
 	h.t.Cleanup(func() { require.NoError(h.t, srv.Shutdown(context.Background())) })
 	h.srv = srv
@@ -93,7 +93,7 @@ func (h *harness) start() {
 // admits anyone, and every member's connection breaks and reconnects to it.
 // The old coordinator shuts down only once no member reaches it, so no member
 // learns from it that it went away.
-func (h *harness) restart(specs ...coordinator.Spec) {
+func (h *harness) restart(specs ...server.Spec) {
 	h.t.Helper()
 	old := h.srv
 	h.start()
@@ -112,7 +112,7 @@ func (h *harness) restart(specs ...coordinator.Spec) {
 // to member-<n-1>.
 type testSession struct {
 	h    *harness
-	spec coordinator.Spec
+	spec server.Spec
 	// proxies holds each member's proxy.
 	proxies []*proxy
 }
@@ -121,7 +121,7 @@ type testSession struct {
 // proxies stop when t ends.
 func (h *harness) session(t *testing.T, n int) *testSession {
 	t.Helper()
-	ses := &testSession{h: h, spec: coordinator.Spec{
+	ses := &testSession{h: h, spec: server.Spec{
 		UID:      types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())),
 		Deadline: time.Now().Add(time.Hour),
 	}}
@@ -137,8 +137,8 @@ func (h *harness) session(t *testing.T, n int) *testSession {
 
 // config returns the Config of one member, which reaches the coordinator
 // through the member's proxy.
-func (ses *testSession) config(member int) client.Config {
-	return client.Config{
+func (ses *testSession) config(member int) coordinator.Config {
+	return coordinator.Config{
 		URLs:       []string{"tls://" + ses.proxies[member].addr()},
 		RootCAs:    ses.h.ca,
 		ServerName: "localhost",
@@ -149,18 +149,18 @@ func (ses *testSession) config(member int) client.Config {
 }
 
 // connect connects one member, and closes its session when the test t ends.
-func (ses *testSession) connect(t *testing.T, member int) client.Session {
+func (ses *testSession) connect(t *testing.T, member int) coordinator.Session {
 	t.Helper()
-	s, err := client.Connect(within(t), ses.config(member))
+	s, err := coordinator.Connect(within(t), ses.config(member))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	return s
 }
 
 // connectAll connects every member for the test t.
-func (ses *testSession) connectAll(t *testing.T) []client.Session {
+func (ses *testSession) connectAll(t *testing.T) []coordinator.Session {
 	t.Helper()
-	sessions := make([]client.Session, len(ses.spec.Members))
+	sessions := make([]coordinator.Session, len(ses.spec.Members))
 	for i := range ses.spec.Members {
 		sessions[i] = ses.connect(t, i)
 	}
@@ -241,7 +241,7 @@ func within(t *testing.T) context.Context {
 
 // awaitDone waits until a member's session has ended, and fails the test if it
 // does not within the test's bound.
-func awaitDone(t *testing.T, s client.Session) {
+func awaitDone(t *testing.T, s coordinator.Session) {
 	t.Helper()
 	select {
 	case <-s.Done():
@@ -253,13 +253,13 @@ func awaitDone(t *testing.T, s client.Session) {
 // authorizer admits memberToken, unless refuse is set, and refuses any other.
 type authorizer struct{ refuse atomic.Bool }
 
-// Authorize implements coordinator.Authorizer.
+// Authorize implements server.Authorizer.
 func (a *authorizer) Authorize(_ context.Context, _ types.UID, _, token string) error {
 	switch {
 	case a.refuse.Load():
-		return coordinator.ErrUnavailable
+		return server.ErrUnavailable
 	case token != memberToken:
-		return coordinator.ErrUnauthenticated
+		return server.ErrUnauthenticated
 	}
 	return nil
 }
@@ -279,13 +279,13 @@ func (r *recorder) record(uid types.UID, event string) {
 	r.events[uid] = append(r.events[uid], event)
 }
 
-// SessionOpened implements coordinator.Observer.
+// SessionOpened implements server.Observer.
 func (r *recorder) SessionOpened(uid types.UID) { r.record(uid, "opened") }
 
-// SessionClosed implements coordinator.Observer.
+// SessionClosed implements server.Observer.
 func (r *recorder) SessionClosed(uid types.UID) { r.record(uid, "closed") }
 
-// SessionFailed implements coordinator.Observer.
+// SessionFailed implements server.Observer.
 func (r *recorder) SessionFailed(uid types.UID, reason string) { r.record(uid, "failed "+reason) }
 
 // of returns what the recorder saw of one attempt.

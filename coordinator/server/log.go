@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package coordinator
+package server
 
 import (
 	"fmt"
@@ -23,24 +23,24 @@ func (l natsLogger) message(format string, v []any) string {
 	return kvSubjectRE.ReplaceAllString(fmt.Sprintf(format, v...), "$$KV.[redacted]")
 }
 
-// Noticef implements server.Logger.
+// Noticef implements natsserver.Logger.
 func (l natsLogger) Noticef(format string, v ...any) { l.log.Info(l.message(format, v)) }
 
-// Warnf implements server.Logger.
+// Warnf implements natsserver.Logger.
 func (l natsLogger) Warnf(format string, v ...any) {
 	l.log.Info(l.message(format, v), "level", "warning")
 }
 
-// Errorf implements server.Logger.
+// Errorf implements natsserver.Logger.
 func (l natsLogger) Errorf(format string, v ...any) { l.log.Error(nil, l.message(format, v)) }
 
-// Fatalf implements server.Logger.
+// Fatalf implements natsserver.Logger.
 func (l natsLogger) Fatalf(format string, v ...any) {
 	l.log.Error(nil, l.message(format, v), "level", "fatal")
 }
 
-// Debugf implements server.Logger.
+// Debugf implements natsserver.Logger.
 func (l natsLogger) Debugf(format string, v ...any) { l.log.V(1).Info(l.message(format, v)) }
 
-// Tracef implements server.Logger.
+// Tracef implements natsserver.Logger.
 func (l natsLogger) Tracef(format string, v ...any) { l.log.V(2).Info(l.message(format, v)) }

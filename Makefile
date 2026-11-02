@@ -38,6 +38,7 @@ LINUX_GO_IMAGE ?= golang:$(GO_VERSION)
 
 tidy:
 	$(MAKE) -C api tidy
+	$(MAKE) -C coordinator tidy
 	$(MAKE) -C agent tidy
 	$(MAKE) -C operator tidy
 
@@ -46,6 +47,7 @@ generate: $(CONTROLLER_GEN)
 
 test:
 	$(MAKE) -C api test
+	$(MAKE) -C coordinator test
 	$(MAKE) -C agent test
 	$(MAKE) -C operator test
 
@@ -59,11 +61,13 @@ build:
 
 lint: $(GOLANGCI_LINT)
 	$(MAKE) -C api lint
+	$(MAKE) -C coordinator lint
 	$(MAKE) -C agent lint
 	$(MAKE) -C operator lint
 
 fmt:
 	$(MAKE) -C api fmt
+	$(MAKE) -C coordinator fmt
 	$(MAKE) -C agent fmt
 	$(MAKE) -C operator fmt
 
@@ -110,7 +114,7 @@ verify-generate: verify-crds generate
 	  (echo "ERROR: generated files out of date — run 'make generate' and commit"; git status --porcelain; git diff; exit 1)
 
 govulncheck: $(GOVULNCHECK)
-	for m in api agent operator; do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
+	for m in api coordinator agent operator; do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
 
 helm-lint: $(HELM)
 	$(HELM) lint charts/snapshot/

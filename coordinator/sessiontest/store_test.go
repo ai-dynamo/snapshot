@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	client "github.com/ai-dynamo/snapshot/agent/pkg/coordinator"
-	"github.com/ai-dynamo/snapshot/agent/pkg/session"
-	"github.com/ai-dynamo/snapshot/operator/internal/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/server"
+	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -122,12 +122,13 @@ func TestKeys(t *testing.T) {
 		{name: "a wildcard", ns: session.NamespaceCuInterpose, key: "a.*", wantErr: session.ErrInvalid},
 		{name: "an empty token", ns: session.NamespaceSnapshot, key: "a..b", wantErr: session.ErrInvalid},
 		{name: "a trailing dot", ns: session.NamespaceSnapshot, key: "a.", wantErr: session.ErrInvalid},
-		{name: "a key over the limit", ns: session.NamespaceSnapshot, key: strings.Repeat("k", client.MaxKeyLength+1),
+		{name: "a key over the limit", ns: session.NamespaceSnapshot, key: strings.Repeat("k", coordinator.MaxKeyLength+1),
 			wantErr: session.ErrTooLarge},
-		{name: "a library key over the limit", ns: session.NamespaceLibrary, key: strings.Repeat("k", client.MaxKeyLength+1),
-			wantErr: session.ErrTooLarge},
-		{name: "the longest library key", ns: session.NamespaceLibrary, key: strings.Repeat("\xff", client.MaxKeyLength)},
-		{name: "the longest key", ns: session.NamespaceSnapshot, key: strings.Repeat("k", client.MaxKeyLength)},
+		{name: "a library key over the limit", ns: session.NamespaceLibrary,
+			key: strings.Repeat("k", coordinator.MaxKeyLength+1), wantErr: session.ErrTooLarge},
+		{name: "the longest library key", ns: session.NamespaceLibrary,
+			key: strings.Repeat("\xff", coordinator.MaxKeyLength)},
+		{name: "the longest key", ns: session.NamespaceSnapshot, key: strings.Repeat("k", coordinator.MaxKeyLength)},
 		{name: "an unknown namespace", ns: session.Namespace("barrier"), key: "a", wantErr: session.ErrInvalid},
 	}
 	for _, tt := range tests {
@@ -157,7 +158,7 @@ func TestGet(t *testing.T) {
 		wait time.Duration
 		// before runs before the Get, and during while it waits. The Get is
 		// the first member's.
-		before, during func(t *testing.T, sessions []client.Session)
+		before, during func(t *testing.T, sessions []coordinator.Session)
 		// cancel cancels the Get's context while it waits.
 		cancel  bool
 		want    string
@@ -176,20 +177,20 @@ func TestGet(t *testing.T) {
 			during: insert(session.NamespaceLibrary, "late"), want: "late"},
 		{name: "a key deleted, then inserted again, during the wait", ns: session.NamespaceCuInterpose, wait: time.Minute,
 			before: insert(session.NamespaceCuInterpose, "old"),
-			during: func(t *testing.T, sessions []client.Session) {
+			during: func(t *testing.T, sessions []coordinator.Session) {
 				require.NoError(t, sessions[1].Namespace(session.NamespaceCuInterpose).Delete(within(t), "k"))
 				insert(session.NamespaceCuInterpose, "new")(t, sessions)
 			}, want: "old"},
 		{name: "the session fails during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
-			during: func(t *testing.T, sessions []client.Session) {
+			during: func(t *testing.T, sessions []coordinator.Session) {
 				require.NoError(t, sessions[1].Fail(within(t), "PeerFailed"))
 			}, wantErr: &session.AbortError{Reason: "PeerFailed"}},
 		{name: "the session fails during a library wait", ns: session.NamespaceLibrary, wait: time.Minute,
-			during: func(t *testing.T, sessions []client.Session) {
+			during: func(t *testing.T, sessions []coordinator.Session) {
 				require.NoError(t, sessions[1].Fail(within(t), "PeerFailed"))
 			}, wantErr: &session.AbortError{Reason: "PeerFailed"}},
 		{name: "the session closes during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
-			during: func(t *testing.T, sessions []client.Session) {
+			during: func(t *testing.T, sessions []coordinator.Session) {
 				for _, s := range sessions {
 					require.NoError(t, s.Leave(within(t)))
 				}
@@ -237,8 +238,8 @@ func TestGet(t *testing.T) {
 
 // insert returns a step that inserts value under k in ns from the second
 // member.
-func insert(ns session.Namespace, value string) func(*testing.T, []client.Session) {
-	return func(t *testing.T, sessions []client.Session) {
+func insert(ns session.Namespace, value string) func(*testing.T, []coordinator.Session) {
+	return func(t *testing.T, sessions []coordinator.Session) {
 		require.NoError(t, sessions[1].Namespace(ns).Insert(within(t), "k", []byte(value)))
 	}
 }
@@ -249,7 +250,8 @@ func TestDelete(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
 	s := h.session(t, 1).connect(t, 0)
-	for _, ns := range []session.Namespace{session.NamespaceSnapshot, session.NamespaceCuInterpose, session.NamespaceLibrary} {
+	namespaces := []session.Namespace{session.NamespaceSnapshot, session.NamespaceCuInterpose, session.NamespaceLibrary}
+	for _, ns := range namespaces {
 		store := s.Namespace(ns)
 		require.NoError(t, store.Delete(ctx, "never-inserted"), "deleting an absent key")
 		require.NoError(t, store.Insert(ctx, "k", []byte("first")))
@@ -266,11 +268,11 @@ func TestDelete(t *testing.T) {
 
 // TestStoreLimits covers the errors a write maps the coordinator's limits onto.
 func TestStoreLimits(t *testing.T) {
-	small := func(cfg *coordinator.Config) { cfg.MaxValue, cfg.MaxLibraryValue, cfg.MaxLibraryKeys = 4<<10, 1<<10, 8 }
-	defaults := func(*coordinator.Config) {}
+	small := func(cfg *server.Config) { cfg.MaxValue, cfg.MaxLibraryValue, cfg.MaxLibraryKeys = 4<<10, 1<<10, 8 }
+	defaults := func(*server.Config) {}
 	tests := []struct {
 		name    string
-		limits  func(*coordinator.Config)
+		limits  func(*server.Config)
 		ns      session.Namespace
 		value   int
 		repeat  bool
