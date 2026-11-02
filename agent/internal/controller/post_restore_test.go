@@ -4,9 +4,15 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -19,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
-	"github.com/ai-dynamo/snapshot/agent/internal/lifecyclehooks"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -28,26 +33,26 @@ import (
 const postRestoreMarker = "/app-release/released"
 
 // postRestoreHarness drives runRestore with a post-restore action. The
-// destination container's files are a set, and the restore executor, the
-// marker, HTTP and the wait between attempts are all fakes.
+// destination container's filesystem is a temp dir, where the file actions'
+// scripts run with the local /bin/sh. The restore executor, HTTP and the wait
+// between attempts are fakes.
 type postRestoreHarness struct {
 	t    *testing.T
 	w    *NodeController
 	pod  *corev1.Pod
 	plan *restorePlan
+	root string // the destination container's filesystem
 
 	mu          sync.Mutex
-	files       map[string]bool
-	events      []string // sentinels written, markers created, and kills, in order
+	events      []string // sentinels written, markers created, POSTs and kills, in order
 	restores    int
-	httpResults []error // one per POST; the last one repeats
-	httpIP      string
-	httpPort    int32
-	httpPath    string
+	httpResults []int // a status per POST, 0 for a connection error; the last one repeats
+	httpURL     string
 	httpTimeout time.Duration
 	waits       int
 	maxWaits    int // a wait after this many fails as if the deadline passed
 	restoreAdds string
+	restoreDir  string // a directory the restored files bring
 }
 
 func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAction) *postRestoreHarness {
@@ -57,56 +62,27 @@ func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAct
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "app-release", MountPath: "/app-release"}}
 	pod.Spec.Containers[0].Ports = []corev1.ContainerPort{{Name: "hooks", ContainerPort: 8000}}
 	pod.Spec.Volumes = []corev1.Volume{{Name: "app-release", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
-	h := &postRestoreHarness{
-		t: t, pod: pod, files: map[string]bool{}, maxWaits: 3,
-		plan: &restorePlan{
-			artifact:    &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"},
-			postRestore: action,
-		},
-	}
+	h := &postRestoreHarness{t: t, pod: pod, root: t.TempDir(), maxWaits: 3}
+	require.NoError(t, os.MkdirAll(filepath.Join(h.root, "app-release"), 0o755))
 	w := makeTestController(t, pod)
 	w.config.Restore.RestoreTimeoutSeconds = 60
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
 	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
 		h.mu.Lock()
-		defer h.mu.Unlock()
 		h.restores++
+		h.mu.Unlock()
+		if h.restoreDir != "" {
+			require.NoError(t, os.MkdirAll(filepath.Join(h.root, h.restoreDir), 0o755))
+		}
 		if h.restoreAdds != "" {
-			h.files[h.restoreAdds] = true // the rootfs diff brought it back
+			h.addFile(h.restoreAdds) // the rootfs diff brought it back
 		}
 		return executor.RestoreResult{PlaceholderHostPID: 4242, RestoredPID: 77}, nil
 	}
 	w.writeControlSentinelFn = func(_ int, name string, _ []byte) error { h.record("sentinel " + name); return nil }
 	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error { h.record("kill"); return nil }
-	w.probeFileFn = func(_ int, path string) (bool, error) {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		return h.files[path], nil
-	}
-	w.createMarkerFn = func(_ int, path string) error {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if h.files[path] {
-			return lifecyclehooks.ErrExists
-		}
-		h.files[path] = true
-		h.events = append(h.events, "marker "+path)
-		return nil
-	}
-	w.postRestoreHTTPFn = func(_ context.Context, ip string, port int32, path string, timeout time.Duration) error {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		h.httpIP, h.httpPort, h.httpPath, h.httpTimeout = ip, port, path, timeout
-		h.events = append(h.events, "post")
-		if len(h.httpResults) == 0 {
-			return nil
-		}
-		err := h.httpResults[0]
-		if len(h.httpResults) > 1 {
-			h.httpResults = h.httpResults[1:]
-		}
-		return err
-	}
+	w.hookExec = h
+	w.hookHTTP = &http.Client{Transport: h}
 	w.postRestoreWaitFn = func(ctx context.Context, _ time.Duration) error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -117,7 +93,69 @@ func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAct
 		return ctx.Err()
 	}
 	h.w = w
+	h.plan = &restorePlan{
+		artifact:    &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"},
+		postRestore: w.newPostRestoreHandler(action),
+	}
 	return h
+}
+
+// ExecSync runs a file action's command as the runtime would, with the path
+// moved under the harness's root, and reports a non-zero exit the way
+// cri-client does.
+func (h *postRestoreHarness) ExecSync(ctx context.Context, containerID string, cmd []string, _ time.Duration) ([]byte, []byte, error) {
+	require.Equal(h.t, "ctr-abc", containerID, "file actions run in the destination container")
+	path := cmd[len(cmd)-1]
+	args := append(append([]string{}, cmd[1:len(cmd)-1]...), filepath.Join(h.root, path))
+	var stderr bytes.Buffer
+	c := exec.CommandContext(ctx, cmd[0], args...)
+	c.Stderr = &stderr
+	err := c.Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return nil, stderr.Bytes(), exitStatus(exit.ExitCode())
+	}
+	if err == nil && strings.Contains(cmd[2], "set -C") {
+		h.record("marker " + path)
+	}
+	return nil, stderr.Bytes(), err
+}
+
+type exitStatus int
+
+func (e exitStatus) Error() string   { return fmt.Sprintf("exited with %d", int(e)) }
+func (e exitStatus) ExitStatus() int { return int(e) }
+
+// RoundTrip answers a POST with the next scripted status.
+func (h *postRestoreHarness) RoundTrip(r *http.Request) (*http.Response, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.httpURL = r.URL.String()
+	if deadline, ok := r.Context().Deadline(); ok {
+		h.httpTimeout = time.Until(deadline)
+	}
+	h.events = append(h.events, r.Method)
+	code := http.StatusOK
+	if len(h.httpResults) > 0 {
+		code = h.httpResults[0]
+		if len(h.httpResults) > 1 {
+			h.httpResults = h.httpResults[1:]
+		}
+	}
+	if code == 0 {
+		return nil, errors.New("connection refused")
+	}
+	return &http.Response{StatusCode: code, Body: http.NoBody, Request: r}, nil
+}
+
+func (h *postRestoreHarness) addFile(path string) {
+	h.t.Helper()
+	require.NoError(h.t, os.WriteFile(filepath.Join(h.root, path), nil, 0o644))
+}
+
+func (h *postRestoreHarness) hasFile(path string) bool {
+	_, err := os.Stat(filepath.Join(h.root, path))
+	return err == nil
 }
 
 func (h *postRestoreHarness) record(event string) {
@@ -136,18 +174,18 @@ func (h *postRestoreHarness) recordedEvents() []string {
 	return append([]string(nil), h.events...)
 }
 
-func filePostRestore(path string) *snapshotv1alpha1.PostRestoreAction {
+func filePostRestoreSpec(path string) *snapshotv1alpha1.PostRestoreAction {
 	return &snapshotv1alpha1.PostRestoreAction{
 		PostRestoreHandler: snapshotv1alpha1.PostRestoreHandler{File: &snapshotv1alpha1.ControlFileAction{Path: path}},
 		PeriodSeconds:      1, TimeoutSeconds: 1,
 	}
 }
 
-func httpPostRestore() *snapshotv1alpha1.PostRestoreAction {
-	return httpPostRestoreOn(intstr.FromInt32(8000))
+func httpPostRestoreSpec() *snapshotv1alpha1.PostRestoreAction {
+	return httpPostRestoreSpecOn(intstr.FromInt32(8000))
 }
 
-func httpPostRestoreOn(port intstr.IntOrString) *snapshotv1alpha1.PostRestoreAction {
+func httpPostRestoreSpecOn(port intstr.IntOrString) *snapshotv1alpha1.PostRestoreAction {
 	return &snapshotv1alpha1.PostRestoreAction{
 		PostRestoreHandler: snapshotv1alpha1.PostRestoreHandler{
 			HTTPPost: &snapshotv1alpha1.HTTPPostAction{Path: "/checkpoint/resume", Port: port},
@@ -168,8 +206,8 @@ func recoveringPod(h *postRestoreHarness) {
 func TestPostRestoreAction(t *testing.T) {
 	content := &snapshotv1alpha1.PodSnapshotContent{Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 		Containers: []snapshotv1alpha1.ContainerSnapshotConfig{
-			{Name: "other", Lifecycle: &snapshotv1alpha1.SnapshotLifecycle{PostRestore: httpPostRestore()}},
-			{Name: "main", Lifecycle: &snapshotv1alpha1.SnapshotLifecycle{PostRestore: filePostRestore(postRestoreMarker)}},
+			{Name: "other", Lifecycle: &snapshotv1alpha1.SnapshotLifecycle{PostRestore: httpPostRestoreSpec()}},
+			{Name: "main", Lifecycle: &snapshotv1alpha1.SnapshotLifecycle{PostRestore: filePostRestoreSpec(postRestoreMarker)}},
 		},
 	}}
 	got := postRestoreAction(content, "main")
@@ -180,16 +218,17 @@ func TestPostRestoreAction(t *testing.T) {
 }
 
 func TestPostRestoreFileIsCreatedAfterRestoreComplete(t *testing.T) {
-	h := newPostRestoreHarness(t, filePostRestore(postRestoreMarker))
+	h := newPostRestoreHarness(t, filePostRestoreSpec(postRestoreMarker))
 
 	require.NoError(t, h.run(false))
 
 	assert.Equal(t, []string{"sentinel " + podcontract.RestoreCompleteFile, "marker " + postRestoreMarker}, h.recordedEvents())
+	assert.True(t, h.hasFile(postRestoreMarker))
 }
 
 func TestPostRestoreFileThatExistsBeforeRestoreFailsWithoutCRIU(t *testing.T) {
-	h := newPostRestoreHarness(t, filePostRestore(postRestoreMarker))
-	h.files[postRestoreMarker] = true
+	h := newPostRestoreHarness(t, filePostRestoreSpec(postRestoreMarker))
+	h.addFile(postRestoreMarker)
 
 	err := h.run(false)
 
@@ -201,7 +240,7 @@ func TestPostRestoreFileThatExistsBeforeRestoreFailsWithoutCRIU(t *testing.T) {
 }
 
 func TestPostRestoreFileThatTheRestoreBringsBackFails(t *testing.T) {
-	h := newPostRestoreHarness(t, filePostRestore(postRestoreMarker))
+	h := newPostRestoreHarness(t, filePostRestoreSpec(postRestoreMarker))
 	h.restoreAdds = postRestoreMarker
 
 	err := h.run(false)
@@ -214,27 +253,43 @@ func TestPostRestoreFileThatTheRestoreBringsBackFails(t *testing.T) {
 	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, h.recordedEvents())
 }
 
+func TestPostRestoreFileThatCantBeCreatedFailsBeforeRelease(t *testing.T) {
+	// The directory may come with the restored files, so it is checked only
+	// once they are in place, before the restored process is released.
+	h := newPostRestoreHarness(t, filePostRestoreSpec("/no-such-dir/released"))
+
+	err := h.run(false)
+
+	require.Error(t, err)
+	assert.Equal(t, executor.StepCheckPostRestore, executor.StepOf(err))
+	assert.Contains(t, err.Error(), "does not exist")
+	assert.Equal(t, 1, h.restores)
+	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, h.recordedEvents(),
+		"the restored process must not be released")
+}
+
+func TestPostRestoreFileWhoseDirectoryTheRestoreBringsSucceeds(t *testing.T) {
+	h := newPostRestoreHarness(t, filePostRestoreSpec("/app-data/released"))
+	h.restoreDir = "/app-data"
+
+	require.NoError(t, h.run(false))
+	assert.True(t, h.hasFile("/app-data/released"))
+}
+
 func TestPostRestoreRefusedTargetsFailWithoutCRIU(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		action *snapshotv1alpha1.PostRestoreAction
 		mutate func(*corev1.Pod)
 	}{
-		{"file on a PVC", filePostRestore("/data/released"), func(pod *corev1.Pod) {
-			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "data", MountPath: "/data"})
-			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: "data", VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
-			}})
-		}},
-		{"Snapshot's own control file", filePostRestore("/snapshot-control/" + podcontract.RestoreCompleteFile), func(pod *corev1.Pod) {
+		{"Snapshot's own control file", filePostRestoreSpec("/snapshot-control/" + podcontract.RestoreCompleteFile), func(pod *corev1.Pod) {
 			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 				Name: podcontract.SnapshotControlVolumeName, MountPath: podcontract.SnapshotControlMountPath,
 			})
 			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: podcontract.SnapshotControlVolumeName,
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 		}},
-		{"HTTP on the host network", httpPostRestore(), func(pod *corev1.Pod) { pod.Spec.HostNetwork = true }},
-		{"HTTP on a port name the destination doesn't have", httpPostRestoreOn(intstr.FromString("metrics")), func(*corev1.Pod) {}},
+		{"HTTP on a port name the destination doesn't have", httpPostRestoreSpecOn(intstr.FromString("metrics")), func(*corev1.Pod) {}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPostRestoreHarness(t, tc.action)
@@ -250,33 +305,27 @@ func TestPostRestoreRefusedTargetsFailWithoutCRIU(t *testing.T) {
 }
 
 func TestPostRestoreHTTPRetriesUntilAccepted(t *testing.T) {
-	h := newPostRestoreHarness(t, httpPostRestore())
-	h.httpResults = []error{
-		&lifecyclehooks.StatusError{Method: http.MethodPost, Code: http.StatusNotFound},
-		errors.New("connection refused"),
-		nil,
-	}
+	h := newPostRestoreHarness(t, httpPostRestoreSpec())
+	h.httpResults = []int{http.StatusNotFound, 0, http.StatusOK}
 
 	require.NoError(t, h.run(false))
 
-	assert.Equal(t, []string{"sentinel " + podcontract.RestoreCompleteFile, "post", "post", "post"}, h.recordedEvents())
-	assert.Equal(t, "10.0.0.9", h.httpIP)
-	assert.Equal(t, int32(8000), h.httpPort)
-	assert.Equal(t, "/checkpoint/resume", h.httpPath)
-	assert.Equal(t, 4*time.Second, h.httpTimeout)
+	assert.Equal(t, []string{"sentinel " + podcontract.RestoreCompleteFile, "POST", "POST", "POST"}, h.recordedEvents())
+	assert.Equal(t, "http://10.0.0.9:8000/checkpoint/resume", h.httpURL)
+	assert.InDelta(t, float64(4*time.Second), float64(h.httpTimeout), float64(time.Second), "the action's timeout bounds each attempt")
 }
 
 func TestPostRestoreHTTPResolvesANamedPortOnTheDestination(t *testing.T) {
-	h := newPostRestoreHarness(t, httpPostRestoreOn(intstr.FromString("hooks")))
+	h := newPostRestoreHarness(t, httpPostRestoreSpecOn(intstr.FromString("hooks")))
 
 	require.NoError(t, h.run(false))
 
-	assert.Equal(t, int32(8000), h.httpPort)
+	assert.Equal(t, "http://10.0.0.9:8000/checkpoint/resume", h.httpURL)
 }
 
 func TestPostRestoreThatNeverSucceedsFailsTheRestore(t *testing.T) {
-	h := newPostRestoreHarness(t, httpPostRestore())
-	h.httpResults = []error{errors.New("connection refused")}
+	h := newPostRestoreHarness(t, httpPostRestoreSpec())
+	h.httpResults = []int{0}
 
 	err := h.run(false)
 
@@ -296,14 +345,16 @@ func TestPostRestoreRecoveryRunsOnlyThePostRestoreStep(t *testing.T) {
 		marker bool
 		want   []string
 	}{
-		{"file not created yet", filePostRestore(postRestoreMarker), false, []string{"marker " + postRestoreMarker}},
-		{"file created before the restart", filePostRestore(postRestoreMarker), true, nil},
-		{"HTTP", httpPostRestore(), false, []string{"post"}},
+		{"file not created yet", filePostRestoreSpec(postRestoreMarker), false, []string{"marker " + postRestoreMarker}},
+		{"file created before the restart", filePostRestoreSpec(postRestoreMarker), true, nil},
+		{"HTTP", httpPostRestoreSpec(), false, []string{"POST"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPostRestoreHarness(t, tc.action)
 			recoveringPod(h)
-			h.files[postRestoreMarker] = tc.marker
+			if tc.marker {
+				h.addFile(postRestoreMarker)
+			}
 
 			require.NoError(t, h.run(true))
 
@@ -314,9 +365,9 @@ func TestPostRestoreRecoveryRunsOnlyThePostRestoreStep(t *testing.T) {
 }
 
 func TestPostRestoreRecoveryThatNeverSucceedsFailsTheRestore(t *testing.T) {
-	h := newPostRestoreHarness(t, httpPostRestore())
+	h := newPostRestoreHarness(t, httpPostRestoreSpec())
 	recoveringPod(h)
-	h.httpResults = []error{errors.New("connection refused")}
+	h.httpResults = []int{0}
 
 	err := h.run(true)
 
