@@ -254,6 +254,13 @@ default) or from tmpfs staging. Restore uses the format recorded in the artifact
 | `pageBroker.maxPinnedBytes`        | `0`                                        | Total pinned memory limit. Zero sets no limit.    |
 | `pageBroker.resources`             | 8 CPU / 32Gi request, 32 CPU / 256Gi limit | Resources for the broker and embedded GPU engine. |
 
+Pooling shares the existing CPU staging slots across ready GPU transfers,
+preferring memory on the target GPU's NUMA node. To tune it, start with a lane
+count equal to the visible GPU count and compare complete restore time while
+holding the slot budget and CPU limit fixed. Increase lanes only when restore
+time improves. More workers also add completion polling and can consume more
+CPU without making restore faster.
+
 The default rings reserve 4 GiB per GPU, or 32 GiB for eight GPUs, plus overhead.
 PageBroker checks the memory budget before it reports GPU readiness. It checks
 manifest structure and exact extent lengths. It does not generate or verify GPU

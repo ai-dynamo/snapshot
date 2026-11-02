@@ -14,7 +14,6 @@
 #include <vector>
 #include <future>
 #include <array>
-#include <barrier>
 
 namespace {
 namespace transfer = snapshot::pagebroker::posix;
@@ -250,8 +249,6 @@ TEST(PooledTransfer, RoutesConcurrentExtentsAcrossAllDevices)
   auto& pool = *owner;
   Cancellation cancellation;
   for (int iteration = 0; iteration < 3; ++iteration) {
-    std::vector<std::future<void>> futures;
-    std::barrier start(count);
     for (const auto& device : devices) {
       ASSERT_EQ(cuCtxSetCurrent(device->context), CUDA_SUCCESS);
       const bool checkpoint = iteration == 1 && device->id % 2 == 0;
@@ -262,8 +259,17 @@ TEST(PooledTransfer, RoutesConcurrentExtentsAcrossAllDevices)
       } else {
         ASSERT_EQ(cuMemsetD8(device->memory, 0, data_bytes), CUDA_SUCCESS);
       }
-      futures.push_back(std::async(std::launch::async, [&, p = device.get(), checkpoint] {
-        start.arrive_and_wait();
+    }
+    std::vector<std::future<void>> futures;
+    futures.reserve(devices.size());
+    // Destroy the promise before joining futures if thread creation throws.
+    // The broken promise releases workers that already reached the start gate.
+    std::promise<void> start;
+    const auto ready = start.get_future().share();
+    for (const auto& device : devices) {
+      const bool checkpoint = iteration == 1 && device->id % 2 == 0;
+      futures.push_back(std::async(std::launch::async, [&, p = device.get(), checkpoint, ready] {
+        ready.get();
         if (checkpoint) {
           pool.Checkpoint(p->file.get(), p->context, p->memory, data_bytes, p->stream, cancellation);
           return;
@@ -271,6 +277,7 @@ TEST(PooledTransfer, RoutesConcurrentExtentsAcrossAllDevices)
         pool.Restore(p->file.get(), p->context, p->memory, data_bytes, p->stream, cancellation);
       }));
     }
+    start.set_value();
     for (auto& future : futures) { ASSERT_NO_THROW(future.get()); }
     for (const auto& device : devices) {
       ASSERT_EQ(cuCtxSetCurrent(device->context), CUDA_SUCCESS);
