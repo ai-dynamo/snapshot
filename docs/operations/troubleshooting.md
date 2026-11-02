@@ -34,10 +34,12 @@ replica needs to start.
 
 When the container has a `checkpointReadinessProbe`, the agent waits for that
 probe, not for Ready, and the source pod has a `WaitingForCheckpointReadiness`
-event. The agent logs each failed check at debug level. Check the probe's file
-or endpoint from inside the source container. The wait has no deadline of its
-own, so a probe that never passes waits until you delete the `PodSnapshot`, or
-until a `SnapshotJob`'s `activeDeadlineSeconds`.
+event. The agent logs each failed check at debug level. Check a file probe from
+inside the source container. Check an HTTP probe against the pod's IP and port
+from another pod or the node, not against `localhost` inside the container: the
+agent sends the request from the node to the pod's IP. The wait has no deadline
+of its own, so a probe that never passes waits until you delete the
+`PodSnapshot`, or until a `SnapshotJob`'s `activeDeadlineSeconds`.
 
 ## A checkpoint fails with `InvalidCheckpointReadinessProbe`
 
