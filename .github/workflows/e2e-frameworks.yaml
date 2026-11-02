@@ -139,7 +139,7 @@ jobs:
           - {framework: vllm, storage: pvc, case: vllm}
           - {framework: sglang, storage: pvc, case: sglang}
           - {framework: tensorrt-llm, storage: pvc, case: tensorrt-llm}
-          - {framework: vllm, storage: s3, case: vllm-s3, port: 19000, console_port: 19001}
+          - {framework: vllm, storage: s3, case: vllm-s3}
     concurrency:
       # PR mirror branches get one group per branch, so a new push cancels
       # the stale run. Scheduled/dispatched runs share a fixed 'nightly'
@@ -172,8 +172,6 @@ jobs:
       SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
       SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
       SNAPSHOT_E2E_STORAGE: ${{ matrix.storage }}
-      SNAPSHOT_E2E_S3_PORT: ${{ matrix.port }}
-      SNAPSHOT_E2E_S3_CONSOLE_PORT: ${{ matrix.console_port }}
       SNAPSHOT_E2E_BENCHMARK_DIR: ${{ github.workspace }}/.e2e-benchmark-results
       SNAPSHOT_E2E_DATADOG_GPU_MONITORING: ${{ needs.datadog-gate.outputs.mode }}
       # Shared CI model cache (HF cache layout on an NFS export): pods here
@@ -334,6 +332,10 @@ jobs:
           secret_key="$(openssl rand -hex 16)"
           echo "::add-mask::${access_key}"
           echo "::add-mask::${secret_key}"
+          # The store is on the node's network, so each run takes its own ports.
+          port=$((10000 + (GITHUB_RUN_ID % 10000) * 2))
+          export SNAPSHOT_E2E_S3_PORT="${port}"
+          export SNAPSHOT_E2E_S3_CONSOLE_PORT="$((port + 1))"
           export SNAPSHOT_E2E_S3_ACCESS_KEY="${access_key}"
           export SNAPSHOT_E2E_S3_SECRET_KEY="${secret_key}"
           uv run --locked --project e2e python -m snapshot_e2e.s3 deploy
@@ -347,6 +349,8 @@ jobs:
             echo "${values}"
             echo "SNAPSHOT_E2E_HELM_SET_END"
           } >> "${GITHUB_ENV}"
+          echo "SNAPSHOT_E2E_S3_PORT=${SNAPSHOT_E2E_S3_PORT}" >> "${GITHUB_ENV}"
+          echo "SNAPSHOT_E2E_S3_CONSOLE_PORT=${SNAPSHOT_E2E_S3_CONSOLE_PORT}" >> "${GITHUB_ENV}"
 
       - name: Install Snapshot in vCluster
         if: ${{ steps.selected.outputs.run == 'true' }}
@@ -498,6 +502,8 @@ jobs:
       - name: Collect S3 store diagnostics
         if: ${{ failure() && steps.selected.outputs.run == 'true' && matrix.storage == 's3' }}
         timeout-minutes: 5
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
         run: |
           set +e
           out="${DIAGNOSTICS_DIR:-${RUNNER_TEMP}/diagnostics}"

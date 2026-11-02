@@ -142,8 +142,8 @@ it with the credentials Secret and a default bucket. It needs `SNAPSHOT_E2E_S3_A
 default login; the workflow generates both per job. `python -m snapshot_e2e.s3
 endpoint` prints the node address the chart is given. The store runs on the host
 network because the agent pod, which hosts PageBroker, does too and cannot resolve
-cluster service names. The job sets `SNAPSHOT_E2E_S3_PORT` and
-`SNAPSHOT_E2E_S3_CONSOLE_PORT` from its matrix entry. In S3 mode
+cluster service names. The job derives `SNAPSHOT_E2E_S3_PORT` and
+`SNAPSHOT_E2E_S3_CONSOLE_PORT` from the run id, so two runs on one node do not collide. In S3 mode
 the test needs no S3 client of its own: it checks the descriptor in the
 PodSnapshotContent status and that nothing was written to the checkpoint volume.
 
