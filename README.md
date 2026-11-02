@@ -142,8 +142,8 @@ and `cuda-checkpoint` work; see [Architecture](docs/overview/architecture-overvi
 The [API Reference](docs/reference/api.md) covers the resources and the
 checkpoint/restore lifecycle.
 
-Once Snapshot is installed, follow the **[Usage Guides](docs/guides/README.md)**
-from a workload to a restored replica: pick an inference framework and model on
+Once Snapshot is installed, follow **[Using Snapshot](docs/using-snapshot/README.md)**
+to go from a workload to a restored replica: pick an inference framework and model on
 one or eight GPUs, make the workload snapshot-ready, checkpoint it, and restore it.
 
 ## Limitations
@@ -162,15 +162,15 @@ operations, indexed below.
 
 **Get started**
 
-- [Usage Guides](docs/guides/README.md) — make a workload snapshot-ready per inference framework, then checkpoint and restore.
+- [Using Snapshot](docs/using-snapshot/README.md) — make a workload snapshot-ready per inference framework, then checkpoint and restore.
 
 **Reference**
 
 - [API](docs/reference/api.md) — `PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, and the `restore-from` annotation.
 - [Architecture](docs/overview/architecture-overview.md) — operator and node-agent design, the checkpoint/restore internals, and multi-GPU support.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
-- [Workload Contract](docs/integrate/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
-- [Restore Pod Contract](docs/integrate/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
+- [Workload Contract](docs/reference/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
+- [Restore Pod Contract](docs/reference/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
 - [Prerequisites](docs/get-started/prerequisites.md) — minimum GPU driver and other dependency versions, per feature.
 
 **Operations**

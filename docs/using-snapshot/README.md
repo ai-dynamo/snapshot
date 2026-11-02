@@ -1,4 +1,4 @@
-# Checkpoint and Restore
+# Using Snapshot
 
 Snapshot checkpoints a running inference replica, so a new replica restores from
 the snapshot in seconds instead of loading the model from scratch. This section
@@ -37,13 +37,13 @@ TensorRT-LLM) and every recipe. Every later command uses the recipe you choose h
 1. **Install Snapshot.** Follow [Prerequisites](../get-started/prerequisites.md)
    and [Installation](../get-started/installation.md).
 2. **Download the example files.** This section uses ready-made Kubernetes
-   manifests and small entrypoint programs. They all live in the `docs/guides`
+   manifests and small entrypoint programs. They all live in the `docs/using-snapshot`
    folder of the Snapshot repository. Clone it and open that folder: every
    command in this section is written to run from there.
 
    ```bash
    git clone https://github.com/ai-dynamo/snapshot.git
-   cd snapshot/docs/guides
+   cd snapshot/docs/using-snapshot
    ```
 
    The folder holds these files for each recipe:
@@ -169,7 +169,7 @@ Start with stage 1 for your framework: [vLLM](supported-frameworks/vllm.md),
 [SGLang](supported-frameworks/sglang.md) or
 [TensorRT-LLM](supported-frameworks/tensorrt-llm.md).
 
-See the [Workload Contract](../integrate/workload-contract.md) for what a workload
+See the [Workload Contract](../reference/workload-contract.md) for what a workload
 must do to be checkpointed, and the
-[Restore Pod Contract](../integrate/restore-pod-contract.md) to generate restore
+[Restore Pod Contract](../reference/restore-pod-contract.md) to generate restore
 pods from a controller, operator or serving platform.

@@ -455,7 +455,7 @@ A shared reference can be considered separately if reuse is needed.
 
 ### References
 
-- [Workload contract](../../integrate/workload-contract.md)
-- [Restore Pod contract](../../integrate/restore-pod-contract.md)
+- [Workload contract](../../reference/workload-contract.md)
+- [Restore Pod contract](../../reference/restore-pod-contract.md)
 - [Kubernetes probes](https://kubernetes.io/docs/concepts/workloads/pods/probes/)
 - [Kubernetes lifecycle hooks](https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/)

@@ -24,7 +24,7 @@ reading the DaemonSet picks an arbitrary pod. [Reading a failure
 message](reading-a-failure-message.md) explains the lookup.
 
 A common cause is a replica manifest that does not follow the [framework
-guides](../guides/README.md) -- missing the control volume, seccomp profile,
+guides](../using-snapshot/README.md) -- missing the control volume, seccomp profile,
 or readiness gate Snapshot relies on -- or that omits mounts or secrets the
 replica needs to start.
 
@@ -115,7 +115,7 @@ peer outside the container, or an open file on a volume the checkpoint did not
 record; missing ptrace permission.
 
 The agent log carries the CRIU error. Check the source pod against the
-[supported frameworks](../guides/README.md).
+[supported frameworks](../using-snapshot/README.md).
 
 ### capturing rootfs diff
 

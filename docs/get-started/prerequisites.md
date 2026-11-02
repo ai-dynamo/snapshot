@@ -48,7 +48,7 @@ for example through NCCL NVLS. The restore fails with
 `CUDA_ERROR_INVALID_DEVICE`. To use a 615 or newer user-mode driver with an
 older kernel-mode driver, point `LD_LIBRARY_PATH` at the directory that contains
 its `libcuda.so` in both the workload and PageBroker. See
-[Multi-GPU Workloads](../integrate/workload-contract.md#multi-gpu-workloads).
+[Multi-GPU Workloads](../reference/workload-contract.md#multi-gpu-workloads).
 
 ### Restore Proxy
 
@@ -58,4 +58,4 @@ newer.
 On a node without NRI, or with an older runtime, the agent restores without the
 proxy. Restore pods then need an inert command, and the container does not
 follow the restored workload. See
-[Nodes Without the Restore Proxy](../integrate/restore-pod-contract.md#nodes-without-the-restore-proxy).
+[Nodes Without the Restore Proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).

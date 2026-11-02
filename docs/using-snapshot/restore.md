@@ -5,7 +5,7 @@ restored pods carry the `nvidia.com/restore-from` annotation, naming the
 `PodSnapshot` to restore from; the node agent restores the checkpointed state into
 the container during pod startup.
 
-This is stage 3 of [Checkpoint and Restore](README.md): restore a new pod
+This is stage 3 of [Using Snapshot](README.md): restore a new pod
 from the snapshot. It starts from the ready
 `PodSnapshot` that [checkpoint](checkpoint.md) produced:
 
@@ -18,7 +18,8 @@ the same terminal. The commands on this page use the values they set.
 
 ## How the Restore Works
 
-Snapshot replaces the container's command with its restore proxy, so the
+Snapshot replaces the container's command with its restore proxy, as the
+[restore Pod contract](../reference/restore-pod-contract.md) describes, so the
 application does not start from scratch. The proxy waits for the restore, then
 follows the restored process: the container ends when the restored process
 does. Readiness waits on the framework's post-restore sentinel —
@@ -63,7 +64,7 @@ On nodes without NRI v0.10 or newer, there is no restore proxy. Before applying
 the profile, edit it to change the container's command to
 `["sleep", "infinity"]`, remove its `args`, and add a liveness probe on the
 framework's API. See
-[Nodes Without the Restore Proxy](../integrate/restore-pod-contract.md#nodes-without-the-restore-proxy).
+[Nodes Without the Restore Proxy](../reference/restore-pod-contract.md#nodes-without-the-restore-proxy).
 
 ## Restore
 
@@ -93,6 +94,13 @@ kubectl get pods --namespace "$WORKLOAD_NAMESPACE" \
 
 It prints `True`. If the restore does not complete, see
 [Troubleshoot Restores](../troubleshooting/restores.md).
+
+In practice, higher-level systems create these restored Deployments rather than
+applying them by hand. To generate restore pods programmatically — from a
+controller, operator, or serving platform — implement the
+[restore Pod contract](../reference/restore-pod-contract.md), which specifies the
+required annotations, control volume, and `SNAPSHOT_CONTROL_DIR`, plus the
+optional startup gate and seccomp profile a restored pod may carry.
 
 ## One Restore per Pod
 

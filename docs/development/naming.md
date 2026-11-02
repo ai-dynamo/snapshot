@@ -95,7 +95,7 @@ These patterns are for user-facing names. An internal name follows its package.
 | Helm value | lowerCamelCase. A setting that changes what Snapshot does is nested under its capability (`config.restore`, `storage`). A setting that shapes how a component is deployed is nested under the component (`operator`, `daemonset`). Name it like its siblings: `operator.*` durations are duration strings, `config.*` durations are `…Seconds`, sizes are `…Bytes` or a Kubernetes quantity | `config.restore.restoreTimeoutSeconds`, `config.restore.skipCompatCheck`, `operator.artifactCleanup.scanInterval: 10m`, `storage.pvc.size` |
 | CLI flag | Kebab-case long option, named for the feature it turns on and not for the command it runs | `--manifest`, `--snapshot` |
 | Object, volume, or file that Snapshot creates | Kebab-case | `snapshot-agent`, `snapshot-control`, `ready-for-snapshot` |
-| Docs file | Kebab-case `.md`, except `README.md`, which indexes a directory or holds a SNEP. A framework guide is `docs/guides/<framework>.md`, with its manifests in `docs/guides/<framework>/` | `tensorrt-llm.md` |
+| Docs file | Kebab-case `.md`, except `README.md`, which indexes a directory or holds a SNEP. A framework guide is `docs/using-snapshot/<framework>.md`, with its manifests in `docs/using-snapshot/<framework>/` | `tensorrt-llm.md` |
 
 ## Before You Add a Name
 

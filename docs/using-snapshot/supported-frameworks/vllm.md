@@ -2,7 +2,7 @@
 
 This guide makes a vLLM workload snapshot-ready by mounting an entrypoint into a
 vLLM runtime image, implementing Snapshot's [workload
-contract](../../integrate/workload-contract.md).
+contract](../../reference/workload-contract.md).
 
 The example runs the official vLLM image that includes vLLM and its runtime
 dependencies, unmodified. The capture manifests pin the exact upstream image,
@@ -10,10 +10,10 @@ and one program, `app.py`, is mounted into it from a ConfigMap to prepare vLLM
 for checkpoint and resume it after restore. The Snapshot agent injects the
 restore tooling at runtime.
 
-This is stage 1 of [Checkpoint and Restore](../README.md): prepare the workload. Complete
+This is stage 1 of [Using Snapshot](../README.md): prepare the workload. Complete
 [Before You Start](../README.md#before-you-start) and
 [pick a recipe](../README.md#choose-your-recipe) first. The commands run from
-`docs/guides`.
+`docs/using-snapshot`.
 
 > [!NOTE]
 > This example is validated on vLLM 0.31.0 (the pinned
@@ -62,7 +62,7 @@ Snapshot control volume, which the source and restore pods mount at
 `/snapshot-control`. Snapshot and the pod's readiness check read those files to
 know when the process is safe to checkpoint and when the restore is complete. The
 recipe manifests already mount it. If you write your own manifest, see
-[Pod Requirements](../../integrate/workload-contract.md#pod-requirements).
+[Pod Requirements](../../reference/workload-contract.md#pod-requirements).
 
 ## Create the app.py ConfigMap
 

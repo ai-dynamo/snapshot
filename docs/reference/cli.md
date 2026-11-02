@@ -2,7 +2,7 @@
 
 `snapshotctl` is a lower-level utility for checkpointing and restoring a pod
 directly from a pod manifest. It is not the primary path — most users drive
-Snapshot through the [Kubernetes resources](../guides/README.md) — but it is handy
+Snapshot through the [Kubernetes resources](../using-snapshot/README.md) — but it is handy
 for validation and debugging, and it is a quick way to try checkpoint/restore by
 hand.
 
@@ -46,7 +46,7 @@ That pod manifest must:
 - match the runtime-relevant worker settings you care about preserving
 
 `snapshotctl restore` applies Snapshot's generic
-[Restore Pod Contract](../integrate/restore-pod-contract.md), including the
+[Restore Pod Contract](../reference/restore-pod-contract.md), including the
 annotations, control volume, environment, startup gate, and seccomp profile. It
 keeps the container commands: the node agent replaces each restore
 destination's command with its restore proxy when the container is created.
@@ -68,7 +68,7 @@ snapshotctl checkpoint \
 ```
 
 The manifest must be a `Pod` (not a Deployment or Job) using a
-[snapshot-ready workload](../guides/README.md) — `snapshotctl` rejects any
+[snapshot-ready workload](../using-snapshot/README.md) — `snapshotctl` rejects any
 other `kind`. The supported frameworks ship capture Deployments. Wrap the selected manifest's
 `spec.template.spec` in a Pod manifest to use it here:
 
@@ -132,6 +132,3 @@ annotations are preserved.
 - partial and failed outcomes are terminal; retry them with a new restore Pod
 - `snapshotctl` is useful for debugging and lower-level validation, but it does
   not replace the operator-managed checkpoint flow
-
-The source README for the tool lives at
-[`operator/cmd/snapshotctl/README.md`](../../operator/cmd/snapshotctl/README.md).

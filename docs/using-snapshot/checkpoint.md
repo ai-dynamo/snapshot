@@ -11,7 +11,7 @@ are two ways to do it, depending on the use case:
 When you finish, you have a Ready `PodSnapshot` with a name. You use that name in
 [Restore a Pod](restore.md) to start a new pod from the snapshot.
 
-This is stage 2 of [Checkpoint and Restore](README.md): checkpoint a running
+This is stage 2 of [Using Snapshot](README.md): checkpoint a running
 pod. It continues from stage 1, the framework page you used
 ([vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md), or
 [TensorRT-LLM](supported-frameworks/tensorrt-llm.md)): a `PodSnapshot` needs the
@@ -23,7 +23,12 @@ the same terminal. The commands on this page use the values they set.
 
 ## Option 1 — `PodSnapshot` (Checkpoint a Running Pod)
 
-Point at the source replica that is already up and ready.
+Point at the source replica that is already up and ready. Snapshot does not
+create this pod, so its spec must carry everything the
+[workload contract](../reference/workload-contract.md#pod-requirements) requires:
+the `/snapshot-control` volume mount, the seccomp profile that checkpointing
+requires, and a readiness gate on `/snapshot-control/ready-for-snapshot`. The
+source Deployment of every recipe does.
 
 1. Save a `PodSnapshot` naming the pod and the container to checkpoint as
    `vllm-qwen3-0-6b-snapshot.yaml`. Give it the name of your recipe's
@@ -64,7 +69,7 @@ serving.
 
 **Eight-GPU recipes.** The `PodSnapshot` is the same. The source Deployment
 already carries the multi-GPU annotation, init container, and launcher that
-[Multi-GPU Workloads](../integrate/workload-contract.md#multi-gpu-workloads)
+[Multi-GPU Workloads](../reference/workload-contract.md#multi-gpu-workloads)
 describes.
 
 ## Option 2 — `SnapshotJob` (Checkpoint a Throwaway Pod)
@@ -72,6 +77,33 @@ describes.
 `SnapshotJob` runs a replica from a pod template, checkpoints it once ready, and
 completes from the resulting `PodSnapshot` — removing the source replica. There is
 no long-running replica to manage, which fits pipeline use cases.
+
+`spec.podTemplate` only needs the workload's own container spec — image,
+command, resources, and any volumes it mounts. The controller injects the
+`/snapshot-control` volume and mount, `SNAPSHOT_CONTROL_DIR`, the
+`ready-for-snapshot` readiness probe, and the seccomp profile before creating the
+source pod. The framework recipes do not need `/dev/net/tun`. CRIU can log a
+nonfatal TUN capability-probe error when the device is absent. See
+[TUN probe errors](../troubleshooting/agent.md#criu-reports-unable-to-create-tun).
+
+Each recipe ships a ready-to-apply `SnapshotJob`. Its shape is:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: SnapshotJob
+metadata:
+  name: vllm-qwen3-0-6b-snapshot
+spec:
+  podSnapshotTemplate:
+    targetContainers:
+      - main
+  podTemplate:
+    spec:
+      containers:
+        - name: main
+          # The workload's own container spec: image, command, args,
+          # resources, and the volumes it mounts, such as the app.py ConfigMap.
+```
 
 Apply the `SnapshotJob` of your recipe and wait for it to complete:
 
@@ -97,10 +129,16 @@ via [restore](restore.md).
 
 **Eight-GPU recipes.** The `SnapshotJob` carries the
 `nvidia.com/snapshot-multi-gpu: enabled` annotation on `spec.podTemplate`, and the
-controller prepares the source Pod for multi-GPU capture.
+controller prepares the source Pod for multi-GPU capture. Add the annotation to
+your own `SnapshotJob` the same way:
 
-To write your own `SnapshotJob`, see
-[Write Your Own `SnapshotJob`](../integrate/write-your-own-snapshotjob.md).
+```yaml
+spec:
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/snapshot-multi-gpu: enabled
+```
 
 ## Next Steps
 

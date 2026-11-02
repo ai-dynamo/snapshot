@@ -25,7 +25,7 @@ loading and warm-up.
 
 Snapshot does not checkpoint an arbitrary pod. The workload must cooperate: it
 reaches a state that is safe to checkpoint, signals when it does, and resumes
-correctly after a restore. The [Workload Contract](../integrate/workload-contract.md)
+correctly after a restore. The [Workload Contract](../reference/workload-contract.md)
 defines this. The workload and Snapshot signal each other through files in a
 shared folder, such as `ready-for-snapshot` and `restore-complete`.
 
@@ -41,7 +41,7 @@ You work with Snapshot through Kubernetes resources:
 
 Restore has no resource of its own. You restore by annotating a new pod with
 `nvidia.com/restore-from`, set to the name of a `PodSnapshot` in the same
-namespace. The [Restore Pod Contract](../integrate/restore-pod-contract.md)
+namespace. The [Restore Pod Contract](../reference/restore-pod-contract.md)
 lists what else the restore pod needs. See the
 [API Reference](../reference/api.md) for the fields of each resource.
 
@@ -51,7 +51,7 @@ You checkpoint a pod in one of two ways. With a `PodSnapshot`, you run the sourc
 pod yourself, wait until it is ready, and ask Snapshot to checkpoint it. With a
 `SnapshotJob`, Snapshot runs the source pod from a template, checkpoints it once
 it is ready, and deletes it, so every replica, including the first, starts by
-restoring. See [Checkpoint a Pod](../guides/checkpoint.md).
+restoring. See [Checkpoint a Pod](../using-snapshot/checkpoint.md).
 
 ## The Snapshot Store
 
@@ -74,18 +74,17 @@ refuses the restore and names the check that failed. See
 A workload can use several GPUs on one node. Multi-GPU support is opt-in: you set
 the `nvidia.com/snapshot-multi-gpu: enabled` annotation on the source pod.
 Multi-node workloads are not supported. See
-[Workload Contract](../integrate/workload-contract.md#multi-gpu-workloads).
+[Workload Contract](../reference/workload-contract.md#multi-gpu-workloads).
 
 ## One Restore per Pod
 
 A pod gets one restore. If the restored process exits, the pod does not restore
 again; create a new pod to restore again. This is why restore pods use
 `restartPolicy: Never`. See
-[Restore Pod Contract](../integrate/restore-pod-contract.md#one-restore-per-pod).
+[Restore Pod Contract](../reference/restore-pod-contract.md).
 
 ## Primitives, Not Orchestration
 
 Snapshot provides the checkpoint and restore primitives for GPU pods.
 Orchestration — which pods to checkpoint, when, and how the checkpoints are
-restored — is left to the systems that integrate it. See
-[Integrate](../integrate/overview.md).
+restored — is left to the systems that integrate it.

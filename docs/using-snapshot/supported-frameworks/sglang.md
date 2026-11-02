@@ -2,7 +2,7 @@
 
 This guide makes an SGLang workload snapshot-ready by mounting an entrypoint
 into an SGLang runtime image, implementing Snapshot's [workload
-contract](../../integrate/workload-contract.md).
+contract](../../reference/workload-contract.md).
 
 The example runs an SGLang image that includes SGLang, CUDA, and
 `torch_memory_saver`, unmodified. The capture manifests pin the exact upstream
@@ -10,10 +10,10 @@ image, and one program, `app.py`, is mounted into it from a ConfigMap to prepare
 SGLang for checkpoint and resume it after restore. The Snapshot agent injects
 the restore tooling at runtime.
 
-This is stage 1 of [Checkpoint and Restore](../README.md): prepare the workload. Complete
+This is stage 1 of [Using Snapshot](../README.md): prepare the workload. Complete
 [Before You Start](../README.md#before-you-start) and
 [pick a recipe](../README.md#choose-your-recipe) first. The commands run from
-`docs/guides`.
+`docs/using-snapshot`.
 
 ## How the Example Works
 
@@ -61,7 +61,7 @@ The program writes `ready-for-snapshot` and `sglang-restore-ready` into the cont
 volume. Snapshot and the pod's readiness check read those files to know when the
 process is safe to checkpoint and when the restore is complete. The recipe
 manifests already mount it. If you write your own manifest, see
-[Pod Requirements](../../integrate/workload-contract.md#pod-requirements).
+[Pod Requirements](../../reference/workload-contract.md#pod-requirements).
 
 ## Create the app.py ConfigMap
 

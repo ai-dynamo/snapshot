@@ -13,7 +13,7 @@ detail and what to search for. The sections below are organised by step.
 
 Several steps name the placeholder: the restore pod's container, which waits
 with no workload of its own until the agent puts the checkpointed process into
-it. The [Restore Pod Contract](../integrate/restore-pod-contract.md) describes
+it. The [Restore Pod Contract](../reference/restore-pod-contract.md) describes
 how it is set up.
 
 For a restore, the message is on the pod's `nvidia.com/Restored` condition and

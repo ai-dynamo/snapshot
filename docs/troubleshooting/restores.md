@@ -224,7 +224,7 @@ profile CRIU cannot apply.
 
 Look past CRIU's nonfatal probes, such as the TUN message above, to the final
 errors in the agent log. Check the restore pod against the
-[supported frameworks](../guides/README.md).
+[supported frameworks](../using-snapshot/README.md).
 
 ### restoring CUDA state
 

@@ -88,12 +88,12 @@ branch are squashed away, so their subjects matter less than the title.
 Most extension work is adding support for a new inference framework. Stages 2
 and 3 of the flow — checkpoint and restore — are framework-agnostic; only the
 image and deployment in stage 1 differ, so a new framework is additive and does
-not touch the operator or the agent. See the
-[usage guides](docs/guides/README.md) for the shape of the flow.
+not touch the operator or the agent. See
+[Using Snapshot](docs/using-snapshot/README.md) for the shape of the flow.
 
 To add one, follow an existing framework end to end —
-[vLLM](docs/guides/supported-frameworks/vllm.md) is the smallest — and provide the same three pieces
-under `docs/guides/<framework>/`:
+[vLLM](docs/using-snapshot/supported-frameworks/vllm.md) is the smallest — and provide the same three pieces
+under `docs/using-snapshot/<framework>/`:
 
 | File | What it does |
 | --- | --- |
@@ -101,14 +101,14 @@ under `docs/guides/<framework>/`:
 | `capture/<model>.yaml` | Deploys the replica that gets checkpointed |
 | `restore/1-gpu.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
 
-Plus `docs/guides/<framework>.md` walking through it, and an entry in the
-[guides index](docs/guides/README.md) with a row in its recipe table for each
+Plus `docs/using-snapshot/<framework>.md` walking through it, and an entry in the
+[Using Snapshot overview](docs/using-snapshot/README.md) with a row in its recipe table for each
 model you add.
 
 The contract your entrypoint has to honor — the control volume, the startup
 gate, the `SNAPSHOT_CONTROL_DIR` environment variable, and the seccomp profile
 — is specified in the
-[Restore Pod contract](docs/integrate/restore-pod-contract.md). Read that
+[Restore Pod contract](docs/reference/restore-pod-contract.md). Read that
 before writing `app.py`; everything a framework must do to be checkpointable is
 there.
 

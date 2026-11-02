@@ -55,48 +55,33 @@ navigation:
       - page: Quickstart - Checkpoint and Restore One Pod
         path: ../docs/get-started/quickstart.md
         slug: quickstart
-  - section: Checkpoint and Restore
-    slug: checkpoint-and-restore
+  - section: Using Snapshot
+    slug: using-snapshot
     contents:
       - page: Overview
-        path: ../docs/guides/README.md
+        path: ../docs/using-snapshot/README.md
         slug: overview
       - section: Supported Frameworks
         slug: supported-frameworks
         contents:
           - page: vLLM
-            path: ../docs/guides/supported-frameworks/vllm.md
+            path: ../docs/using-snapshot/supported-frameworks/vllm.md
             slug: vllm
           - page: SGLang
-            path: ../docs/guides/supported-frameworks/sglang.md
+            path: ../docs/using-snapshot/supported-frameworks/sglang.md
             slug: sglang
           - page: TensorRT-LLM
-            path: ../docs/guides/supported-frameworks/tensorrt-llm.md
+            path: ../docs/using-snapshot/supported-frameworks/tensorrt-llm.md
             slug: tensorrt-llm
+          - page: Use Your Own Engine or Image
+            path: ../docs/using-snapshot/supported-frameworks/use-your-own-engine-or-image.md
+            slug: use-your-own-engine-or-image
       - page: Checkpoint a Pod
-        path: ../docs/guides/checkpoint.md
+        path: ../docs/using-snapshot/checkpoint.md
         slug: checkpoint-a-pod
       - page: Restore a Pod
-        path: ../docs/guides/restore.md
+        path: ../docs/using-snapshot/restore.md
         slug: restore-a-pod
-  - section: Integrate
-    slug: integrate
-    contents:
-      - page: Overview
-        path: ../docs/integrate/overview.md
-        slug: overview
-      - page: Use Your Own Framework or Image
-        path: ../docs/integrate/use-your-own-framework.md
-        slug: use-your-own-framework
-      - page: Workload Contract
-        path: ../docs/integrate/workload-contract.md
-        slug: workload-contract
-      - page: Write Your Own SnapshotJob
-        path: ../docs/integrate/write-your-own-snapshotjob.md
-        slug: write-your-own-snapshotjob
-      - page: Restore Pod Contract
-        path: ../docs/integrate/restore-pod-contract.md
-        slug: restore-pod-contract
   - section: Operate
     slug: operate
     contents:
@@ -118,6 +103,12 @@ navigation:
       - page: Helm Chart Values
         path: ../docs/reference/helm-values.md
         slug: helm-chart-values
+      - page: Workload Contract
+        path: ../docs/reference/workload-contract.md
+        slug: workload-contract
+      - page: Restore Pod Contract
+        path: ../docs/reference/restore-pod-contract.md
+        slug: restore-pod-contract
   - section: Troubleshooting
     slug: troubleshooting
     contents:

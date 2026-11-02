@@ -2,7 +2,7 @@
 
 This guide makes a TensorRT-LLM workload snapshot-ready by mounting an
 entrypoint into a TensorRT-LLM runtime image, implementing Snapshot's [Workload
-Contract](../../integrate/workload-contract.md).
+Contract](../../reference/workload-contract.md).
 
 The example runs the TensorRT-LLM image that includes TensorRT-LLM and its
 runtime dependencies, unmodified. The capture manifests pin the exact upstream
@@ -10,10 +10,10 @@ image, and one program, `app.py`, is mounted into it from a ConfigMap to prepare
 TensorRT-LLM for checkpoint and validate it after restore. The Snapshot agent
 injects the restore tooling at runtime.
 
-This is stage 1 of [Checkpoint and Restore](../README.md): prepare the workload. Complete
+This is stage 1 of [Using Snapshot](../README.md): prepare the workload. Complete
 [Before You Start](../README.md#before-you-start) and
 [pick a recipe](../README.md#choose-your-recipe) first. The commands run from
-`docs/guides`.
+`docs/using-snapshot`.
 
 > [!NOTE]
 > TensorRT-LLM support is experimental.
@@ -75,7 +75,7 @@ The program writes `ready-for-snapshot` and `trtllm-restore-ready` into the cont
 volume. Snapshot and the pod's readiness check read those files to know when the
 process is safe to checkpoint and when the restore is complete. The recipe
 manifests already mount it. If you write your own manifest, see
-[Pod Requirements](../../integrate/workload-contract.md#pod-requirements).
+[Pod Requirements](../../reference/workload-contract.md#pod-requirements).
 
 ## Create the app.py ConfigMap
 

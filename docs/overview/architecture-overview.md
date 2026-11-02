@@ -11,7 +11,7 @@ exist, which Kubernetes resources drive them, and what the checkpoint and
 restore paths do. It is for integrators building a control loop on top of
 Snapshot, and for contributors who need to place a change.
 
-To *use* Snapshot, start with the [Checkpoint and Restore](../guides/README.md); for
+To *use* Snapshot, start with [Using Snapshot](../using-snapshot/README.md); for
 field-level detail, see the [API Reference](../reference/api.md).
 
 ## Components
@@ -77,7 +77,7 @@ result onto the snapshot.
 
 Restore has no resource of its own. A pod requests one with the
 `nvidia.com/restore-from` annotation naming a `PodSnapshot` in its namespace,
-plus the rest of the [Restore Pod Contract](../integrate/restore-pod-contract.md). The
+plus the rest of the [Restore Pod Contract](../reference/restore-pod-contract.md). The
 agent reports progress on the `nvidia.com/Restored` pod condition.
 
 ## Checkpoint Flow
@@ -97,7 +97,7 @@ From a ready pod to a stored artifact:
 4. **Quiesce.** The agent waits for the target container to report Ready. That
    readiness probe gates on `ready-for-snapshot`, which the workload writes only
    once no GPU work is in flight — see the
-   [Workload Contract](../integrate/workload-contract.md).
+   [Workload Contract](../reference/workload-contract.md).
 5. **Capture**, in this order, into a PageBroker transaction:
    GPU state first (PageBroker's GPU engine, or `cuda-checkpoint`), then the
    CRIU dump, then the overlay rootfs diff. The dump always terminates the
@@ -305,7 +305,7 @@ survive. CuInterpose, the opt-in component that provides this, is described in
 ## See Also
 
 - [API Reference](../reference/api.md) — fields, conditions, annotations, Helm values.
-- [Workload Contract](../integrate/workload-contract.md) — what a workload must do to be captured and restored.
-- [Restore Pod Contract](../integrate/restore-pod-contract.md) — the pod shape a restore requires.
+- [Workload Contract](../reference/workload-contract.md) — what a workload must do to be captured and restored.
+- [Restore Pod Contract](../reference/restore-pod-contract.md) — the pod shape a restore requires.
 - [Configure Storage](../operate/configure-storage.md) and [Allow the Privileged Node Agent](../get-started/installation.md#allow-the-privileged-node-agent).
 - [Benchmarks](performance.md) — where restore time actually goes.

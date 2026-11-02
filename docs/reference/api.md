@@ -5,7 +5,7 @@ labels, and pod conditions that drive them. All custom
 resources are in API group `nvidia.com`, version `v1alpha1`.
 
 For how these fit together, see [How to Use It](../../README.md#how-to-use-it)
-and the [Checkpoint and Restore](../guides/README.md).
+and [Using Snapshot](../using-snapshot/README.md).
 For the Helm configuration, see [Helm Chart Values](helm-values.md).
 
 ## Custom Resources

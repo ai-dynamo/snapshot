@@ -24,9 +24,9 @@ description.
 | Which fields, annotations, labels, or conditions exist, and what are their defaults? | [API Reference](../reference/api.md) |
 | Which Helm values exist? | [Helm Chart Values](../reference/helm-values.md) and the [chart README](../../charts/snapshot/README.md) |
 | Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Compatibility](../get-started/prerequisites.md) for the driver and CUDA versions, baseline and per feature, and the README [Prerequisites](../../README.md#prerequisites) for the rest of the cluster requirements |
-| What must my workload or Pod do? | [Workload Contract](../integrate/workload-contract.md), [Restore Pod Contract](../integrate/restore-pod-contract.md) |
+| What must my workload or Pod do? | [Workload Contract](../reference/workload-contract.md), [Restore Pod Contract](../reference/restore-pod-contract.md) |
 | How do I install, configure, upgrade, or clean up? | [`docs/operate/`](../operate) |
-| How do I checkpoint a pod and restore it for the first time? | [Checkpoint and Restore](../guides/README.md) |
+| How do I checkpoint a pod and restore it for the first time? | [Using Snapshot](../using-snapshot/README.md) |
 | It failed. Why, and what do I do? | [Troubleshooting](../troubleshooting/reading-a-failure-message.md) |
 | What is not supported? | [Limitations](../overview/limitations.md) |
 | How do the pieces fit together? | The [architecture overview](../overview/architecture-overview.md) |
@@ -59,7 +59,7 @@ leave them alone when it does not:
 
 | Page | Changes when |
 | --- | --- |
-| Guides | The default first-run path for checkpoint and restore changes |
+| Using Snapshot | The default first-run path for checkpoint and restore changes |
 | Troubleshooting | An issue, a support case, or the request reports a failure that users hit |
 | Limitations | The change adds or removes an unsupported case |
 | README | A page is added or removed |
@@ -190,7 +190,7 @@ The feature's own page links to that row and does not repeat the number.
   in a detailed page.
 - [ ] Names and terms match [Naming Conventions](naming.md).
 - [ ] A new page is linked from the index of its section: the
-  [guides index](../guides/README.md) for a guide, one line in the architecture
+  [Using Snapshot overview](../using-snapshot/README.md) for a guide, one line in the architecture
   overview for a detailed architecture page, and the README "Documentation"
   index for any other page.
 - [ ] A version requirement beyond the baseline has a row in Compatibility.

@@ -9,20 +9,20 @@ This quickstart checkpoints a vLLM replica that serves Qwen3 0.6B on one GPU,
 then starts a new replica from the snapshot. The replica runs the stock vLLM
 image, plus a small program, `app.py`, mounted from a ConfigMap. The program
 prepares vLLM for the checkpoint and resumes it after the restore. It uses the
-smallest recipe from [Choose Your Recipe](../guides/README.md#choose-your-recipe):
+smallest recipe from [Choose Your Recipe](../using-snapshot/README.md#choose-your-recipe):
 vLLM, Qwen3 0.6B, 1 GPU.
 
 Before you start, install Snapshot. See [Installation](installation.md).
 
 ## 1. Set Up
 
-Download the example files. They live in the `docs/guides` folder of the
+Download the example files. They live in the `docs/using-snapshot` folder of the
 Snapshot repository. Clone it and open that folder: every command in this
 quickstart runs from there.
 
 ```bash
 git clone https://github.com/ai-dynamo/snapshot.git
-cd snapshot/docs/guides
+cd snapshot/docs/using-snapshot
 ```
 
 Pick the namespace for the workload, and create it if it does not exist:
@@ -89,6 +89,4 @@ kubectl get pods --namespace "$WORKLOAD_NAMESPACE" \
 
 ## Next Steps
 
-- Try other models and frameworks in [Checkpoint and Restore](../guides/README.md).
-- Use your own framework or image: see
-  [Use Your Own Framework or Image](../integrate/use-your-own-framework.md).
+- Try other models and frameworks in [Using Snapshot](../using-snapshot/README.md).
