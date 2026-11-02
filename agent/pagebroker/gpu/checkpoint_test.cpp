@@ -294,7 +294,10 @@ class BrokerGpuTest {
     EXPECT_EQ(poll(&target_state, 1, 0), 0) << "target exited before CUDA drained";
     const auto rejected = broker_.HandleRequest(finish);
     ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
-    EXPECT_EQ(rejected.failure().message(), "transaction is aborting");
+    EXPECT_EQ(rejected.failure().code(), interruption == Interruption::Expiry
+        ? Failure::TRANSACTION_EXPIRED : Failure::TRANSACTION_CONFLICT);
+    EXPECT_EQ(rejected.failure().message(), interruption == Interruption::Expiry
+        ? "transaction expired" : "transaction is aborting");
 
     copy_pause.Release();
     ASSERT_EQ(work.wait_for(kGpuTestWait), std::future_status::ready);
@@ -333,7 +336,8 @@ class BrokerGpuTest {
     commit.mutable_commit();
     const auto rejected = broker_.HandleRequest(commit);
     ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
-    EXPECT_EQ(rejected.failure().message(), "transaction is aborting");
+    EXPECT_EQ(rejected.failure().code(), Failure::TRANSACTION_EXPIRED);
+    EXPECT_EQ(rejected.failure().message(), "transaction expired");
     EXPECT_TRUE(fs::exists(restore.staging / "image"));
     broker_.ReapExpiredTransactions(std::chrono::steady_clock::now() + kExpiryAdvance);
     EXPECT_FALSE(fs::exists(restore.staging));
