@@ -28,9 +28,8 @@ roadmap.
   namespace. An installation with it empty acts on every restore Pod on its
   nodes.
 - [Lifecycle hooks](reference/workload-contract.md#lifecycle-hooks) support a
-  file or plain HTTP, without authentication. HTTP hooks don't work in
-  host-network Pods, and hook files must be on the container's own filesystem or
-  an `emptyDir`.
+  file or plain HTTP, without authentication or redirects. File hooks need
+  `/bin/sh` in the image.
 
 ## GPU device selection and restore paths
 

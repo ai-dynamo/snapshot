@@ -26,13 +26,13 @@ checkpoint was taken with. The agent reads them only from the content.
 The probe replaces the Ready check at the agent's readiness gate in
 `reconcileCapture`. For a `SnapshotJob`, the operator then keeps the target
 container's own readiness probe instead of injecting the `ready-for-snapshot`
-one (`SourceJobOptions.CheckpointReadinessProbe`), so Ready can mean what the
-workload says.
+one (`SourceJobOptions.HasCheckpointReadinessProbe`), so Ready can mean what
+the workload says.
 
 - **What a check is.** A file check passes when a regular file exists at the
-  path, resolved inside the source container. An HTTP check passes when a GET to
-  the Pod IP returns `200`. A named port is resolved against the source
-  container's ports.
+  path in the source container. An HTTP check passes when a GET to the Pod IP
+  returns a 2xx status. A named port is resolved against the source container's
+  ports.
 - **Pacing.** The first check runs `initialDelaySeconds` after the container's
   `startedAt`. After each check the agent requeues the work order for
   `periodSeconds` later. Pod events and the content resync also reconcile the
@@ -40,16 +40,19 @@ workload says.
 - **Counting.** The agent checkpoints after `successThreshold` checks in a row
   pass. A failed check resets the count, and the agent keeps waiting; there is
   no failure threshold, and the container is never restarted. A new container
-  ID or restart count also resets it, initial delay included.
+  ID, which a restart gives the container, also resets it, initial delay
+  included.
 - **State.** The count lives in the agent's memory, per work order, and is
   dropped when the work order ends. An agent restart starts the count over,
   which delays a checkpoint but never takes one early.
-- **Refused probes.** A file that is not on the container's filesystem or an
-  `emptyDir`, an HTTP probe on a host-network Pod, or a port name the container
-  doesn't have can never pass. The agent fails the work order with
-  `InvalidCheckpointReadinessProbe` before the first check.
+- **Refused probes.** An HTTP probe on a port name the container doesn't have
+  can never pass. The agent fails the work order with
+  `InvalidCheckpointReadinessProbe` before the first check, and posts a
+  Warning event with that reason on the source Pod.
 - **Reporting.** The agent posts a `WaitingForCheckpointReadiness` event on the
-  source Pod once, and logs failed checks at debug level.
+  source Pod when the wait starts, and logs failed checks at debug level. The
+  event is posted once per work order; after an agent restart it can come
+  again.
 
 The wait has no deadline of its own: `checkpointTimeoutSeconds` bounds only the
 dump, and a `SnapshotJob` is bounded by its `activeDeadlineSeconds`.
@@ -58,14 +61,17 @@ dump, and a `SnapshotJob` is bounded by its `activeDeadlineSeconds`.
 
 `runRestore` runs the action for each destination container:
 
-1. **Before CRIU.** The agent checks that the action can run: for a file, a path
-   on the container's filesystem or an `emptyDir` that is not one of Snapshot's
-   own control files, with no file there yet; for HTTP, a Pod off the host
-   network and a port the destination container has. A failed check fails the
-   restore before any CRIU work.
-2. **After CRIU.** Before it writes `restore-complete`, the agent checks for the
-   file again. The rootfs diff can bring it back from the source, for example
-   when the source was itself restored and notified.
+1. **Before CRIU.** The agent checks that the action can run: for a file, a
+   path that is not one of Snapshot's own control files, with no file there
+   yet; for HTTP, a port the destination container has. A failed check fails
+   the restore before any CRIU work.
+2. **After CRIU.** Before it writes `restore-complete`, the agent checks the
+   file again: it must still be absent, and its directory must exist and be
+   writable by the container's user. The rootfs diff can bring the file back
+   from the source, for example when the source was itself restored and
+   notified, and it can also bring the directory, which is why the directory
+   is checked only now. A failed check stops the restore before the restored
+   process is released.
 3. **After `restore-complete`.** The agent creates the file, or sends the POST,
    every `periodSeconds`, with `timeoutSeconds` per attempt, until it succeeds.
    It retries every failure, since a `404` or a missing directory may be an
@@ -93,18 +99,20 @@ again, never CRIU or the checks:
 
 ## Safety of the actions
 
-The agent acts as root, so each action is limited to its own container and Pod:
+Each action can do only what the application itself could:
 
-- **Files** are opened through `/host/proc/<pid>/root` with `openat2` and
-  `RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS`, so a path cannot leave the container
-  or pass through a symlink. Only the container's own filesystem and `emptyDir`
-  volumes are allowed, from the Pod spec. A marker is created with `O_EXCL` in a
-  parent opened by handle, never overwrites a file, and never creates
-  directories.
-- **HTTP** requests go only to the Pod IP and the resolved port. The URL is
-  built like kubelet's probe URL, so a path cannot name another host. The agent
-  does not follow redirects or use proxies from its environment, and drops
-  response bodies after 4 KiB without logging them.
+- **Files** are checked and created by a short `/bin/sh` script that the agent
+  runs in the container through CRI `ExecSync`, the way kubelet runs an `exec`
+  probe. The script runs as the container's user, with its capabilities,
+  seccomp and LSM profile, inside its mounts, so the kernel decides what it may
+  read or write. The path is passed as an argument, never as part of the
+  script. A marker is created with `set -C`, so it never overwrites a file, and
+  its directory is never created. The image needs `/bin/sh`.
+- **HTTP** requests go only to the Pod IP and the resolved port, as kubelet's
+  `httpGet` probes do; a host-network Pod's IP is the node's. The URL is built
+  like kubelet's probe URL, so a path cannot name another host. The agent does
+  not follow redirects, so a redirect fails, does not use proxies from its
+  environment, and reads at most 10 KiB of a response without logging it.
 
 ## Code map
 
@@ -112,7 +120,8 @@ The agent acts as root, so each action is limited to its own container and Pod:
 |---|---|
 | `api/v1alpha1/container_config_types.go` | The settings types and their validation. |
 | `operator/internal/controller` | Copying the settings: `snapshotjob_podsnapshot.go`, `podsnapshot_reconciler.go`, `container_settings.go`. |
-| `agent/internal/lifecyclehooks` | The actions: `FileExists`, `CreateMarker`, `CheckPath`, `ResolvePort`, `HTTPGet`, `HTTPPost`. |
-| `agent/internal/controller/checkpoint_readiness.go` | The probe at the readiness gate. |
-| `agent/internal/controller/post_restore.go` | The post-restore checks, the action, and recovery. |
+| `agent/internal/lifecyclehooks` | The actions: `FileExists`, `CreateMarker`, `CheckMarkerTarget`, `CheckWritePath`, `ResolvePort`, `HTTPGet`, `HTTPPost`. |
+| `agent/internal/runtime` | `ExecSync`, which runs a file action's command in the container through CRI. |
+| `agent/internal/controller/checkpoint_readiness.go` | The probe at the readiness gate: `fileProbe` and `httpProbe`. |
+| `agent/internal/controller/post_restore.go` | The post-restore action: `filePostRestore` and `httpPostRestore`, their checks, and recovery. |
 | `api/podcontract` | `IsReservedControlFile`, Snapshot's own control files. |

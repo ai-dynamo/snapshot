@@ -163,9 +163,10 @@ restore time into:
 4. **Wake / remap** — temporary mounts are released, the PageBroker transaction
    is committed, and the restored process is validated. The agent then writes
    `restore-complete` into the control volume, which is what the restored
-   workload is blocked on; it leaves quiescence and resumes serving. A container
-   with a `lifecycle.postRestore` action is notified next, and the restore
-   succeeds only once that succeeds; see [Lifecycle hooks](lifecycle-hooks.md).
+   workload is blocked on; it leaves quiescence and resumes serving. A workload
+   with a `lifecycle.postRestore` action waits for that action instead, which
+   the agent runs next, and the restore succeeds only once it succeeds; see
+   [Lifecycle hooks](lifecycle-hooks.md).
    The agent sets `nvidia.com/Restored=True`, and the proxy follows the restored
    process from there, forwarding signals and exiting with its code.
 

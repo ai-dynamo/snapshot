@@ -42,13 +42,8 @@ until a `SnapshotJob`'s `activeDeadlineSeconds`.
 ## A checkpoint fails with `InvalidCheckpointReadinessProbe`
 
 The agent refused the container's `checkpointReadinessProbe` before running it,
-because it can never pass. The message says why:
-
-- The file is on a volume other than an `emptyDir`, such as a `hostPath` or a
-  `PersistentVolumeClaim`. Use a path on the container's own filesystem or an
-  `emptyDir`.
-- The source pod uses the host network. HTTP probes need the pod's own IP.
-- The container has no port with the probe's port name.
+because it can never pass: the container has no port with the probe's port
+name. The source pod also gets a Warning event with this reason.
 
 The `PodSnapshot`'s spec can't change, so create a new one with a fixed probe.
 

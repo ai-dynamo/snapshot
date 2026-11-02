@@ -125,7 +125,7 @@ must do for each hook is in the
 |------------------------------------------------|---------------|---------|----------------------------------------------------------------------------------------------|
 | `name`                                         | string        | —       | Required. A container in `source.podRef.containers` (`targetContainers` in a `SnapshotJob`). |
 | `checkpointReadinessProbe.file.path`           | string        | —       | Checkpoint once a regular file exists at this path in the container.                         |
-| `checkpointReadinessProbe.httpGet.path`        | string        | `/`     | Checkpoint once a GET to this path on the Pod IP returns `200`.                              |
+| `checkpointReadinessProbe.httpGet.path`        | string        | `/`     | Checkpoint once a GET to this path on the Pod IP returns a 2xx status.                       |
 | `checkpointReadinessProbe.httpGet.port`        | int or string | —       | Required with `httpGet`. A port number, or the name of one of the container's ports.         |
 | `checkpointReadinessProbe.initialDelaySeconds` | int32         | `0`     | Seconds after the container starts before the first check.                                   |
 | `checkpointReadinessProbe.periodSeconds`       | int32         | `1`     | Seconds between checks.                                                                      |
