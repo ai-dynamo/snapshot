@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <string>
 #include <system_error>
 #include <sys/stat.h>
 
@@ -53,7 +54,8 @@ FileDescriptor::OpenDirectory(int parent, const char* name)
 {
   FileDescriptor directory(openat(parent, name, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
   if (directory.get() < 0) {
-    throw std::system_error(errno, std::generic_category(), "open directory");
+    const auto error = errno;
+    throw std::system_error(error, std::generic_category(), std::string("open directory ") + name);
   }
   return directory;
 }
