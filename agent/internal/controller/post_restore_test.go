@@ -379,6 +379,32 @@ func TestPostRestoreRecoveryThatNeverSucceedsFailsTheRestore(t *testing.T) {
 	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, events[len(events)-2:])
 }
 
+func TestPostRestoreLeftForTheNextAgentWhenTheAgentStops(t *testing.T) {
+	for _, recovering := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovering=%v", recovering), func(t *testing.T) {
+			h := newPostRestoreHarness(t, httpPostRestoreSpec())
+			if recovering {
+				recoveringPod(h)
+			}
+			h.httpResults = []int{0}
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			// The agent shuts down while the action waits to retry.
+			h.w.postRestoreWaitFn = func(waitCtx context.Context, _ time.Duration) error {
+				stop()
+				return waitCtx.Err()
+			}
+
+			err := h.w.runRestore(ctx, h.pod, h.plan, "main", "ctr-abc", time.Now(), recovering)
+
+			require.ErrorIs(t, err, errRestoreInterrupted)
+			events := h.recordedEvents()
+			assert.NotContains(t, events, "sentinel "+podcontract.RestoreFailedFile, "the next agent must be able to resume")
+			assert.NotContains(t, events, "kill", "the restored process keeps running")
+		})
+	}
+}
+
 func TestNoPostRestoreLeavesRecoveryAsBefore(t *testing.T) {
 	h := newPostRestoreHarness(t, nil)
 	recoveringPod(h)

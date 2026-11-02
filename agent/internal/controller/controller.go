@@ -1015,6 +1015,10 @@ func (w *NodeController) restoreDestination(
 	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", artifact.SnapshotName, destination))
 
 	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, recovering); err != nil {
+		if errors.Is(err, errRestoreInterrupted) {
+			// Not an outcome: the next agent resumes the post-restore action.
+			return result
+		}
 		var incompatible *compat.IncompatibleError
 		if errors.As(err, &incompatible) {
 			result.state = restoreResultIncompatible
@@ -1153,7 +1157,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		return err
 	}
 	if err := op.postRestore.notify(restoreCtx, op); err != nil {
-		return op.failRestore(ctx, err)
+		return op.failPostRestore(ctx, err)
 	}
 	return nil
 }
@@ -1172,7 +1176,7 @@ func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 		defer cancel()
 	}
 	if err := op.postRestore.notify(postCtx, op); err != nil {
-		return op.failRestore(ctx, err)
+		return op.failPostRestore(ctx, err)
 	}
 	return nil
 }

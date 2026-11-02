@@ -189,6 +189,24 @@ func (r postRestoreRetry) retry(ctx context.Context, op *restoreOperation, attem
 	}
 }
 
+// errRestoreInterrupted is a restore whose post-restore action the agent
+// stopped before it finished. The restore stays in progress, so the next
+// agent resumes the action from restore-complete; it is not an outcome.
+var errRestoreInterrupted = errors.New("the agent stopped before the post-restore action finished")
+
+// failPostRestore fails the restore after its post-restore action failed,
+// unless ctx ended: the agent is shutting down, and writing restore-failed or
+// killing the container would keep the next agent from resuming the action.
+// The restore deadline is a context of its own under ctx, so a missed
+// deadline still fails the restore.
+func (op *restoreOperation) failPostRestore(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		op.log.Info("Agent stopping; the next agent resumes the post-restore action", "error", err.Error())
+		return errRestoreInterrupted
+	}
+	return op.failRestore(ctx, err)
+}
+
 func postRestoreStepError(step executor.Step, err error) error {
 	return &executor.StepError{Step: step, Err: err}
 }
