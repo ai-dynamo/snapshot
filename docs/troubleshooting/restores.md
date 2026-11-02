@@ -5,6 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Troubleshoot Restores
 
+## A Restore Is Slower Than Expected
+
+Read the `Restore timing summary` from the node agent on the restore Pod's node.
+Check whether CPU restore, CUDA restore, or staging takes the most time. Follow
+[Troubleshoot Slow Restores](slow-restores.md) for the next check and
+backend-specific tuning.
+
 ## Restore Fails at a Step
 
 ### resolving checkpoint artifact

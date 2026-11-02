@@ -88,6 +88,26 @@ navigation:
       - page: Configure Storage
         path: ../docs/operate/configure-storage.md
         slug: configure-storage
+      - section: Tune Storage
+        slug: tune-storage
+        path: ../docs/operate/tune-storage/README.md
+        contents:
+          - section: NFS
+            slug: nfs
+            path: ../docs/operate/tune-storage/nfs/README.md
+            contents:
+              - page: VAST NFS
+                path: ../docs/operate/tune-storage/nfs/vast-nfs.md
+                slug: vast-nfs
+              - page: Amazon EFS
+                path: ../docs/operate/tune-storage/nfs/amazon-efs.md
+                slug: amazon-efs
+          - page: Local NVMe and RAID0
+            path: ../docs/operate/tune-storage/local-nvme-raid0.md
+            slug: local-nvme-and-raid0
+          - page: Amazon S3
+            path: ../docs/operate/tune-storage/amazon-s3.md
+            slug: amazon-s3
       - page: Upgrade Snapshot and the CRDs
         path: ../docs/operate/upgrade.md
         slug: upgrade
@@ -121,6 +141,9 @@ navigation:
       - page: Troubleshoot Restores
         path: ../docs/troubleshooting/restores.md
         slug: troubleshoot-restores
+      - page: Troubleshoot Slow Restores
+        path: ../docs/troubleshooting/slow-restores.md
+        slug: troubleshoot-slow-restores
       - page: Troubleshoot the Agent
         path: ../docs/troubleshooting/agent.md
         slug: troubleshoot-the-agent

@@ -177,6 +177,8 @@ operations, indexed below.
 
 - [Installation](docs/get-started/installation.md) — Helm install and uninstall.
 - [Configure Storage](docs/operate/configure-storage.md) — the shared snapshot volume and how to configure it.
+- [Tune Storage](docs/operate/tune-storage/README.md) — backend tuning and examples.
+- [Troubleshoot Slow Restores](docs/troubleshooting/slow-restores.md) — check timings, NFS clients, mount options, and fio results.
 - [Troubleshooting](docs/troubleshooting/reading-a-failure-message.md) — common failures and where to look.
 - [Allow the Privileged Node Agent](docs/get-started/installation.md#allow-the-privileged-node-agent) — the privileged agent, seccomp, and Pod Security.
 
