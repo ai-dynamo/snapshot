@@ -46,8 +46,9 @@ var (
 		exitNotRegular, exitMissing)
 	// existingScript is the start of the two marker scripts: it exits
 	// exitExists when a regular file is at the path, and exitNotRegular for
-	// anything else there.
-	existingScript = fmt.Sprintf(`if [ -e "$1" ]; then [ -f "$1" ] && exit %d; exit %d; fi; `,
+	// anything else there, a dangling symlink included: [ -e ] doesn't see
+	// one, but the create would fail on it.
+	existingScript = fmt.Sprintf(`if [ -e "$1" ] || [ -L "$1" ]; then [ -f "$1" ] && exit %d; exit %d; fi; `,
 		exitExists, exitNotRegular)
 	// createMarkerScript creates an empty file, never its parents. set -C
 	// (noclobber) makes the shell create it with O_EXCL, so a file that
@@ -55,10 +56,10 @@ var (
 	createMarkerScript = existingScript + `set -C; : > "$1"`
 	// checkMarkerTargetScript changes nothing. It exits exitNoParent when the
 	// parent is not a directory, and exitParentReadOnly when the user may not
-	// write it: [ -w ] asks the kernel as the user, so a read-only mount
-	// counts too.
+	// create a file in it, which takes write and search permission: [ -w ]
+	// and [ -x ] ask the kernel as the user, so a read-only mount counts too.
 	checkMarkerTargetScript = existingScript + fmt.Sprintf(
-		`d="${1%%/*}"; [ -n "$d" ] || d=/; [ -d "$d" ] || exit %d; [ -w "$d" ] || exit %d`,
+		`d="${1%%/*}"; [ -n "$d" ] || d=/; [ -d "$d" ] || exit %d; [ -w "$d" ] && [ -x "$d" ] || exit %d`,
 		exitNoParent, exitParentReadOnly)
 )
 
@@ -132,7 +133,7 @@ func CheckMarkerTarget(ctx context.Context, e Execer, containerID, filePath stri
 	case exitNoParent:
 		return fmt.Errorf("the directory of %s does not exist in container %s", filePath, containerID)
 	case exitParentReadOnly:
-		return fmt.Errorf("the container's user can't write the directory of %s in container %s", filePath, containerID)
+		return fmt.Errorf("the container's user can't create files in the directory of %s in container %s", filePath, containerID)
 	default:
 		return fmt.Errorf("failed to check %s in container %s: exit code %d: %s", filePath, containerID, code, output)
 	}

@@ -152,6 +152,14 @@ func TestCheckMarkerTarget(t *testing.T) {
 	if err := os.Mkdir(readOnly, 0o555); err != nil {
 		t.Fatal(err)
 	}
+	noSearch := filepath.Join(dir, "no-search")
+	if err := os.Mkdir(noSearch, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), dangling); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name    string
 		path    string
@@ -161,11 +169,13 @@ func TestCheckMarkerTarget(t *testing.T) {
 		{"regular file already there", existing, "file already exists"},
 		{"directory already there", dir, "not a regular file"},
 		{"missing parent", filepath.Join(dir, "no", "released"), "does not exist"},
-		{"parent the user can't write", filepath.Join(readOnly, "released"), "can't write"},
+		{"dangling symlink already there", dangling, "not a regular file"},
+		{"parent the user can't write", filepath.Join(readOnly, "released"), "can't create"},
+		{"parent the user can't search", filepath.Join(noSearch, "released"), "can't create"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.name == "parent the user can't write" && os.Geteuid() == 0 {
-				t.Skip("root may write any directory")
+			if strings.HasPrefix(tc.name, "parent the user can't") && os.Geteuid() == 0 {
+				t.Skip("root may write and search any directory")
 			}
 			err := CheckMarkerTarget(t.Context(), &localShell{}, "ctr", tc.path, 5*time.Second)
 			if (err == nil) != (tc.wantErr == "") || (err != nil && !strings.Contains(err.Error(), tc.wantErr)) {
