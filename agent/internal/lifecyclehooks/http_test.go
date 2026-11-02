@@ -225,8 +225,9 @@ func TestHTTPTarget(t *testing.T) {
 	if ip, err := HTTPTarget(pod(false, "10.0.0.5")); err != nil || ip != "10.0.0.5" {
 		t.Fatalf("HTTPTarget = %q, %v; want the Pod IP", ip, err)
 	}
-	if _, err := HTTPTarget(pod(true, "10.0.0.5")); err == nil {
-		t.Fatal("HTTPTarget accepted a host-network Pod")
+	// As with kubelet's probes, a host-network Pod's IP is the node's IP.
+	if ip, err := HTTPTarget(pod(true, "192.168.1.7")); err != nil || ip != "192.168.1.7" {
+		t.Fatalf("HTTPTarget = %q, %v; want the host-network Pod's IP", ip, err)
 	}
 	if _, err := HTTPTarget(pod(false, "")); err == nil {
 		t.Fatal("HTTPTarget accepted a Pod with no IP")

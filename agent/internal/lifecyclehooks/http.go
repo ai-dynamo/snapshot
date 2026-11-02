@@ -49,13 +49,11 @@ func NewHTTPClient() *http.Client {
 	}
 }
 
-// HTTPTarget returns the address hook requests go to: the Pod IP. A Pod on
-// the host network has the node's IP, so a request would reach the node, not
-// the Pod; those Pods are refused.
+// HTTPTarget returns the address hook requests go to: the Pod IP. Like
+// kubelet's probes, it takes the Pod IP of a Pod on the host network too,
+// which is the node's IP: creating such a Pod already takes the privilege to
+// listen there.
 func HTTPTarget(pod *corev1.Pod) (string, error) {
-	if pod.Spec.HostNetwork {
-		return "", fmt.Errorf("Pod %s/%s uses the host network; HTTP actions need the Pod's own IP", pod.Namespace, pod.Name)
-	}
 	if pod.Status.PodIP == "" {
 		return "", fmt.Errorf("Pod %s/%s has no IP yet", pod.Namespace, pod.Name)
 	}

@@ -118,8 +118,7 @@ spec:
                         httpGet:
                           description: |-
                             HTTPGet succeeds when a GET to the Pod IP returns a 2xx status.
-                            Snapshot does not follow redirects, so a 3xx fails, and it does not
-                            support Pods on the host network.
+                            Snapshot does not follow redirects, so a 3xx fails.
                           properties:
                             path:
                               description: Path of the request. Empty means "/".
@@ -214,8 +213,7 @@ spec:
                               description: |-
                                 HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
                                 means the application accepted the notification. Snapshot does not
-                                follow redirects, so a 3xx fails, and it does not support Pods on the
-                                host network.
+                                follow redirects, so a 3xx fails.
                               properties:
                                 path:
                                   description: Path of the request. Empty means "/".

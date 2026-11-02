@@ -76,8 +76,7 @@ type CheckpointReadinessProbeHandler struct {
 	File *ControlFileAction `json:"file,omitempty"`
 
 	// HTTPGet succeeds when a GET to the Pod IP returns a 2xx status.
-	// Snapshot does not follow redirects, so a 3xx fails, and it does not
-	// support Pods on the host network.
+	// Snapshot does not follow redirects, so a 3xx fails.
 	// +optional
 	HTTPGet *HTTPGetAction `json:"httpGet,omitempty"`
 }
@@ -124,8 +123,7 @@ type PostRestoreHandler struct {
 
 	// HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
 	// means the application accepted the notification. Snapshot does not
-	// follow redirects, so a 3xx fails, and it does not support Pods on the
-	// host network.
+	// follow redirects, so a 3xx fails.
 	// +optional
 	HTTPPost *HTTPPostAction `json:"httpPost,omitempty"`
 }
@@ -148,7 +146,8 @@ type ControlFileAction struct {
 
 // HTTPGetAction is a GET to a port on the Pod IP. Like Kubernetes' own
 // httpGet, it has a path and a port. Snapshot does not follow redirects, so a
-// 3xx fails, and it does not support Pods on the host network.
+// 3xx fails. As with a Kubernetes probe, the Pod IP of a Pod on the host
+// network is the node's IP.
 type HTTPGetAction struct {
 	// Path of the request. Empty means "/".
 	// +optional
@@ -164,9 +163,9 @@ type HTTPGetAction struct {
 
 // HTTPPostAction is a POST with an empty body to a port on the Pod IP. Like
 // Kubernetes' own httpGet, it has a path and a port. Snapshot does not follow
-// redirects, so a 3xx fails, and it does not support Pods on the host
-// network. It is a separate type from HTTPGetAction so either can grow fields
-// of its own.
+// redirects, so a 3xx fails. As with a Kubernetes probe, the Pod IP of a Pod
+// on the host network is the node's IP. It is a separate type from
+// HTTPGetAction so either can grow fields of its own.
 type HTTPPostAction struct {
 	// Path of the request. Empty means "/".
 	// +optional
