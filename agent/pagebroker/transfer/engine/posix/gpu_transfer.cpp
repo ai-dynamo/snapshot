@@ -1,12 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-#include "transfer.hpp"
+#include "gpu_transfer.hpp"
+#include "gpu/errors.hpp"
 #include "errors.hpp"
-#include "../errors.hpp"
-#include "../io_engine.hpp"
-#include "../fatal_cleanup.hpp"
-#include "../file_descriptor.hpp"
+#include "io_engine.hpp"
+#include "fatal_cleanup.hpp"
+#include "file_descriptor.hpp"
+#include "gpu/storage_manifest.hpp"
+#include <atomic>
+#include <charconv>
+#include <climits>
+#include <filesystem>
+#include <future>
+#include <sys/stat.h>
 #include <cerrno>
 #include <stdexcept>
 #include <system_error>
@@ -29,7 +36,7 @@
 #include <thread>
 #include <pthread.h>
 
-namespace snapshot::pagebroker::cuda {
+namespace snapshot::pagebroker::posix {
 namespace {
 // GPU O_DIRECT transfers use 4 KiB-aligned chunk sizes and file offsets.
 // This I/O alignment is independent of the host page size.
@@ -824,4 +831,100 @@ void TransferPool::Checkpoint(int fd, CUcontext context, CUdeviceptr device, siz
   }
   cancellation.ThrowIfCancelled();
 }
-}  // namespace snapshot::pagebroker::cuda
+struct GpuRestorePreparation::State {
+  static void ValidateDirectory(int fd)
+  {
+    struct stat info{};
+    if (fstat(fd, &info)) {
+      throw std::system_error(errno, std::generic_category(), "stat GPU preparation directory");
+    }
+    Validate(S_ISDIR(info.st_mode), "GPU preparation path must be a directory");
+  }
+
+  static FileDescriptor OpenDirectory(int parent, const char* name)
+  {
+    FileDescriptor directory(openat(parent, name, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (directory.get() < 0) {
+      throw std::system_error(errno, std::generic_category(), "open GPU preparation directory");
+    }
+    return directory;
+  }
+
+  using Files = std::map<std::pair<uint32_t, std::string>, std::shared_ptr<TransferFile>>;
+  std::atomic<bool> cancelled = false;
+  // Declared last so destruction joins before releasing the cancellation token.
+  std::shared_future<Files> pending;
+
+  State(int directory_fd, size_t lanes)
+  {
+    pending = std::async(std::launch::async,
+        [root = FileDescriptor::Duplicate(directory_fd), lanes, this] {
+      const nvtx3::scoped_range range{"PageBroker restore file preparation"};
+      Files files;
+      ValidateDirectory(root.get());
+      FileDescriptor gpu_root(openat(root.get(), gpu::kDataDirectory, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+      if (gpu_root.get() < 0 && errno == ENOENT) {
+        return files;  // CPU-only checkpoint.
+      }
+      if (gpu_root.get() < 0) {
+        throw std::system_error(errno, std::generic_category(), "open GPU preparation directory");
+      }
+      ValidateDirectory(gpu_root.get());
+      const auto path = "/proc/self/fd/" + std::to_string(gpu_root.get());
+      for (const auto& entry : std::filesystem::directory_iterator(path)) {
+        if (cancelled.load()) return Files{};
+        const auto name = entry.path().filename().string();
+        uint32_t pid = 0;
+        const auto [end, error] = std::from_chars(name.data(), name.data() + name.size(), pid);
+        Validate(error == std::errc{} && end == name.data() + name.size() && pid > 0 &&
+                 pid <= INT_MAX && name == std::to_string(pid), "invalid GPU participant directory");
+        auto directory = OpenDirectory(gpu_root.get(), name.c_str());
+        ValidateDirectory(directory.get());
+        std::vector<gpu::storage::GpuDataFile> manifest;
+        std::string message;
+        const auto participant_path = "/proc/self/fd/" + std::to_string(directory.get());
+        if (!gpu::storage::ReadManifest(participant_path, &manifest, &message) ||
+            !gpu::storage::ValidateExtentFiles(participant_path, manifest, &message)) {
+          throw std::runtime_error(message);
+        }
+        for (const auto& extent : manifest) {
+          if (cancelled.load()) return Files{};
+          FileDescriptor file(openat(directory.get(), extent.filename.c_str(),
+                                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECT));
+          if (file.get() < 0) {
+            throw std::system_error(errno, std::generic_category(), "prepare GPU extent");
+          }
+          files.emplace(std::make_pair(pid, extent.filename),
+                        std::make_shared<TransferFile>(file.get(), lanes));
+        }
+      }
+      return files;
+    });
+  }
+  ~State() { cancelled.store(true); }
+
+  std::shared_ptr<TransferFile> Get(uint32_t pid, const gpu::storage::GpuDataFile& extent, int directory)
+  {
+    const nvtx3::scoped_range range{"PageBroker restore preparation wait"};
+    const auto file = pending.get().at({pid, extent.filename});
+    struct stat held{}, current{};
+    Validate(fstat(file->fd(), &held) == 0 &&
+             fstatat(directory, extent.filename.c_str(), &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+             S_ISREG(held.st_mode) && held.st_dev == current.st_dev && held.st_ino == current.st_ino &&
+             held.st_size >= 0 && static_cast<uint64_t>(held.st_size) == extent.size,
+             "GPU extent changed after preparation");
+    return file;
+  }
+};
+
+GpuRestorePreparation::GpuRestorePreparation(int directory_fd, size_t lanes)
+    : state_(std::make_unique<State>(directory_fd, lanes)) {}
+GpuRestorePreparation::~GpuRestorePreparation() = default;
+
+std::shared_ptr<TransferFile>
+GpuRestorePreparation::Get(uint32_t pid, const gpu::storage::GpuDataFile& extent, int directory)
+{
+  return state_->Get(pid, extent, directory);
+}
+
+}  // namespace snapshot::pagebroker::posix
