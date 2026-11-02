@@ -5,21 +5,22 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/lifecyclehooks"
-	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 const (
 	// reasonInvalidCheckpointReadinessProbe fails a work order whose probe can
-	// never be run safely: a file the agent must not read, or an HTTP probe on
-	// a host-network Pod.
+	// never run, such as an HTTP probe on a port name the container doesn't
+	// have.
 	reasonInvalidCheckpointReadinessProbe = "InvalidCheckpointReadinessProbe"
 
 	// reasonWaitingForCheckpointReadiness is the Event on the source Pod when
@@ -64,9 +65,14 @@ func (w *NodeController) sourceReadyForCheckpoint(
 		return true, nil
 	}
 
-	if err := checkProbeTarget(pod, containerName, probe); err != nil {
+	handler, err := w.newCheckpointProbeHandler(probe)
+	if err == nil {
+		err = handler.check(pod, containerName)
+	}
+	if err != nil {
 		w.checkpointProbes.Delete(content.Name)
-		return false, w.setSnapshotContentFailed(ctx, content, reasonInvalidCheckpointReadinessProbe, err)
+		return false, w.setSnapshotContentFailed(ctx, content, reasonInvalidCheckpointReadinessProbe,
+			fmt.Errorf("checkpoint readiness probe: %w", err))
 	}
 
 	status := containerStatus(pod, containerName)
@@ -101,7 +107,7 @@ func (w *NodeController) sourceReadyForCheckpoint(
 
 	period := time.Duration(probe.PeriodSeconds) * time.Second
 	state.nextCheck = now.Add(period)
-	if err := w.runCheckpointProbe(ctx, pod, status, probe); err != nil {
+	if err := handler.probe(ctx, pod, status, time.Duration(probe.TimeoutSeconds)*time.Second); err != nil {
 		logger.V(1).Info("Checkpoint readiness probe failed", "pod", pod.Name, "container", containerName, "error", err.Error())
 		state.successes = 0
 	} else {
@@ -127,58 +133,71 @@ func checkpointReadinessProbe(content *snapshotv1alpha1.PodSnapshotContent, cont
 	return nil
 }
 
-// checkProbeTarget refuses a probe that can never be run safely. These come
-// from the Pod spec, so waiting would not change them.
-func checkProbeTarget(pod *corev1.Pod, containerName string, probe *snapshotv1alpha1.CheckpointReadinessProbe) error {
+// checkpointProbeHandler is one kind of checkpoint readiness probe.
+type checkpointProbeHandler interface {
+	// check refuses a probe that can never run. It reads the Pod spec only,
+	// so waiting would not change its answer.
+	check(pod *corev1.Pod, containerName string) error
+	// probe runs one check. Any error is a failed check.
+	probe(ctx context.Context, pod *corev1.Pod, status *corev1.ContainerStatus, timeout time.Duration) error
+}
+
+// newCheckpointProbeHandler returns the handler for the probe's kind. It is
+// the only place that tells the kinds apart.
+func (w *NodeController) newCheckpointProbeHandler(probe *snapshotv1alpha1.CheckpointReadinessProbe) (checkpointProbeHandler, error) {
 	switch {
 	case probe.File != nil:
-		if err := lifecyclehooks.CheckPath(pod, containerName, probe.File.Path, false); err != nil {
-			return fmt.Errorf("checkpoint readiness probe: %w", err)
-		}
+		return &fileProbe{exec: w.hookExec, path: probe.File.Path}, nil
 	case probe.HTTPGet != nil:
-		if pod.Spec.HostNetwork {
-			return fmt.Errorf("checkpoint readiness probe: Pod %s/%s uses the host network; HTTP probes need the Pod's own IP", pod.Namespace, pod.Name)
-		}
-		if _, err := lifecyclehooks.ResolvePort(pod, containerName, probe.HTTPGet.Port); err != nil {
-			return fmt.Errorf("checkpoint readiness probe: %w", err)
-		}
+		return &httpProbe{client: w.hookHTTP, action: probe.HTTPGet}, nil
 	default:
-		return fmt.Errorf("checkpoint readiness probe for container %q has no file or httpGet", containerName)
+		return nil, errors.New("it has neither file nor httpGet")
+	}
+}
+
+// fileProbe succeeds when a regular file exists at path in the source
+// container. It reads as the container's user, so any path is allowed.
+type fileProbe struct {
+	exec lifecyclehooks.Execer
+	path string
+}
+
+func (p *fileProbe) check(*corev1.Pod, string) error { return nil }
+
+func (p *fileProbe) probe(ctx context.Context, _ *corev1.Pod, status *corev1.ContainerStatus, timeout time.Duration) error {
+	exists, err := lifecyclehooks.FileExists(ctx, p.exec, status.ContainerID, p.path, timeout)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%s does not exist", p.path)
 	}
 	return nil
 }
 
-// runCheckpointProbe runs one check. Any error is a failed check.
-func (w *NodeController) runCheckpointProbe(
-	ctx context.Context,
-	pod *corev1.Pod,
-	status *corev1.ContainerStatus,
-	probe *snapshotv1alpha1.CheckpointReadinessProbe,
-) error {
-	if probe.File != nil {
-		pid, _, err := w.runtime.ResolveContainer(ctx, snapshotruntime.StripCRIScheme(status.ContainerID))
-		if err != nil {
-			return fmt.Errorf("resolve container: %w", err)
-		}
-		exists, err := w.probeFileFn(pid, probe.File.Path)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return fmt.Errorf("%s does not exist", probe.File.Path)
-		}
-		return nil
-	}
+// httpProbe succeeds when a GET to the source Pod's IP returns a 2xx status.
+type httpProbe struct {
+	client *http.Client
+	action *snapshotv1alpha1.HTTPGetAction
+}
+
+// check refuses a named port the container doesn't have.
+func (p *httpProbe) check(pod *corev1.Pod, containerName string) error {
+	_, err := lifecyclehooks.ResolvePort(pod, containerName, p.action.Port)
+	return err
+}
+
+func (p *httpProbe) probe(ctx context.Context, pod *corev1.Pod, status *corev1.ContainerStatus, timeout time.Duration) error {
 	podIP, err := lifecyclehooks.HTTPTarget(pod)
 	if err != nil {
 		return err
 	}
-	// checkProbeTarget already resolved it, so this only fails if the Pod changed.
-	port, err := lifecyclehooks.ResolvePort(pod, status.Name, probe.HTTPGet.Port)
+	// check already resolved it, so this only fails if the Pod changed.
+	port, err := lifecyclehooks.ResolvePort(pod, status.Name, p.action.Port)
 	if err != nil {
 		return err
 	}
-	return w.probeHTTPFn(ctx, podIP, port, probe.HTTPGet.Path, time.Duration(probe.TimeoutSeconds)*time.Second)
+	return lifecyclehooks.HTTPGet(ctx, p.client, lifecyclehooks.RequestURL(podIP, port, p.action.Path), timeout)
 }
 
 func (w *NodeController) checkpointProbeState(name string) *checkpointProbeState {

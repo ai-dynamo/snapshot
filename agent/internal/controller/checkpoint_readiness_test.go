@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -30,18 +31,41 @@ type probeHarness struct {
 	fc      *fakeCheckpointer
 	content *snapshotv1alpha1.PodSnapshotContent
 
-	mu        sync.Mutex
-	now       time.Time
-	results   []error // one per check; the last one repeats
-	checks    int
-	requeues  []time.Duration
-	filePID   int
-	filePath  string
-	httpIP    string
-	httpPort  int32
-	httpPath  string
-	httpTO    time.Duration
-	httpCalls int
+	mu            sync.Mutex
+	now           time.Time
+	results       []error // one per check; the last one repeats
+	checks        int
+	requeues      []time.Duration
+	fileContainer string
+	filePath      string
+	fileTO        time.Duration
+	httpURL       string
+	httpTO        time.Duration
+}
+
+// ExecSync stands for the runtime running a file probe in the container: a
+// scripted error fails the check, and nil is a file that exists.
+func (h *probeHarness) ExecSync(_ context.Context, containerID string, cmd []string, timeout time.Duration) ([]byte, []byte, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.fileContainer, h.filePath, h.fileTO = containerID, cmd[len(cmd)-1], timeout
+	return nil, nil, h.next()
+}
+
+// RoundTrip stands for the application answering an HTTP probe: a scripted
+// error is a 503, and nil is a 200.
+func (h *probeHarness) RoundTrip(r *http.Request) (*http.Response, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.httpURL = r.URL.String()
+	if deadline, ok := r.Context().Deadline(); ok {
+		h.httpTO = time.Until(deadline)
+	}
+	code := http.StatusOK
+	if h.next() != nil {
+		code = http.StatusServiceUnavailable
+	}
+	return &http.Response{StatusCode: code, Body: http.NoBody, Request: r}, nil
 }
 
 func newProbeHarness(t *testing.T, probe snapshotv1alpha1.CheckpointReadinessProbe, mutatePod func(*corev1.Pod)) *probeHarness {
@@ -58,7 +82,8 @@ func newProbeHarness(t *testing.T, probe snapshotv1alpha1.CheckpointReadinessPro
 	}
 	h := &probeHarness{t: t, fc: &fakeCheckpointer{}, content: content, now: probeStart}
 	h.w = makeNodeController(t, h.fc, content, pod)
-	h.w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	h.w.hookExec = h
+	h.w.hookHTTP = &http.Client{Transport: h}
 	h.w.nowFn = func() time.Time {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -68,20 +93,6 @@ func newProbeHarness(t *testing.T, probe snapshotv1alpha1.CheckpointReadinessPro
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.requeues = append(h.requeues, after)
-	}
-	h.w.probeFileFn = func(pid int, path string) (bool, error) {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		h.filePID, h.filePath = pid, path
-		err := h.next()
-		return err == nil, nil
-	}
-	h.w.probeHTTPFn = func(_ context.Context, ip string, port int32, path string, timeout time.Duration) error {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		h.httpIP, h.httpPort, h.httpPath, h.httpTO = ip, port, path, timeout
-		h.httpCalls++
-		return h.next()
 	}
 	return h
 }
@@ -131,7 +142,7 @@ func (h *probeHarness) updatePodStatus(mutate func(*corev1.Pod)) {
 	require.NoError(h.t, h.w.client.Status().Update(context.Background(), pod))
 }
 
-func fileProbe(path string, period, threshold, delay int32) snapshotv1alpha1.CheckpointReadinessProbe {
+func fileProbeSpec(path string, period, threshold, delay int32) snapshotv1alpha1.CheckpointReadinessProbe {
 	return snapshotv1alpha1.CheckpointReadinessProbe{
 		CheckpointReadinessProbeHandler: snapshotv1alpha1.CheckpointReadinessProbeHandler{
 			File: &snapshotv1alpha1.ControlFileAction{Path: path},
@@ -143,17 +154,19 @@ func fileProbe(path string, period, threshold, delay int32) snapshotv1alpha1.Che
 var errNotYet = errors.New("not yet")
 
 func TestCheckpointProbe_DecidesInsteadOfReady(t *testing.T) {
-	h := newProbeHarness(t, fileProbe("/tmp/ready", 1, 1, 0), nil)
+	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 1, 1, 0), nil)
 
 	h.reconcile()
 
 	require.True(t, h.fc.wasCalled(), "a passing probe checkpoints a container that is not Ready")
-	assert.Equal(t, 7, h.filePID, "the file is read in the source container")
+	source := getPod(t, h.w, "inference", "worker-0").Status.ContainerStatuses[0].ContainerID
+	assert.Equal(t, source, h.fileContainer, "the file is read in the source container")
 	assert.Equal(t, "/tmp/ready", h.filePath)
+	assert.Equal(t, time.Second, h.fileTO)
 }
 
 func TestCheckpointProbe_WaitsForTheThreshold(t *testing.T) {
-	h := newProbeHarness(t, fileProbe("/tmp/ready", 2, 3, 0), nil)
+	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 2, 3, 0), nil)
 
 	for i := range 2 {
 		h.reconcile()
@@ -166,7 +179,7 @@ func TestCheckpointProbe_WaitsForTheThreshold(t *testing.T) {
 }
 
 func TestCheckpointProbe_AFailureResetsTheCount(t *testing.T) {
-	h := newProbeHarness(t, fileProbe("/tmp/ready", 1, 2, 0), nil)
+	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 1, 2, 0), nil)
 	h.results = []error{nil, errNotYet, nil, nil}
 
 	for range 3 {
@@ -180,7 +193,7 @@ func TestCheckpointProbe_AFailureResetsTheCount(t *testing.T) {
 }
 
 func TestCheckpointProbe_IsPacedByThePeriod(t *testing.T) {
-	h := newProbeHarness(t, fileProbe("/tmp/ready", 5, 2, 0), nil)
+	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 5, 2, 0), nil)
 
 	h.reconcile()
 	h.advance(time.Second)
@@ -191,7 +204,7 @@ func TestCheckpointProbe_IsPacedByThePeriod(t *testing.T) {
 }
 
 func TestCheckpointProbe_WaitsForTheInitialDelay(t *testing.T) {
-	h := newProbeHarness(t, fileProbe("/tmp/ready", 1, 1, 10), nil)
+	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 1, 1, 10), nil)
 	h.advance(3 * time.Second)
 
 	h.reconcile()
@@ -204,7 +217,7 @@ func TestCheckpointProbe_WaitsForTheInitialDelay(t *testing.T) {
 }
 
 func TestCheckpointProbe_AContainerRestartResetsTheCount(t *testing.T) {
-	h := newProbeHarness(t, fileProbe("/tmp/ready", 1, 2, 5), nil)
+	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 1, 2, 5), nil)
 	h.advance(5 * time.Second)
 	h.reconcile()
 	require.Equal(t, 1, h.checkCount())
@@ -229,7 +242,7 @@ func TestCheckpointProbe_AContainerRestartResetsTheCount(t *testing.T) {
 }
 
 func TestCheckpointProbe_WaitsForARunningContainer(t *testing.T) {
-	h := newProbeHarness(t, fileProbe("/tmp/ready", 1, 1, 0), func(pod *corev1.Pod) {
+	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 1, 1, 0), func(pod *corev1.Pod) {
 		pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}
 	})
 
@@ -258,16 +271,14 @@ func TestCheckpointProbe_HTTPGoesToThePodIP(t *testing.T) {
 
 			h.reconcile()
 			assert.True(t, h.fc.wasCalled())
-			assert.Equal(t, "10.0.0.5", h.httpIP)
-			assert.Equal(t, int32(8000), h.httpPort)
-			assert.Equal(t, "/checkpoint/status", h.httpPath)
-			assert.Equal(t, 3*time.Second, h.httpTO)
+			assert.Equal(t, "http://10.0.0.5:8000/checkpoint/status", h.httpURL)
+			assert.InDelta(t, float64(3*time.Second), float64(h.httpTO), float64(time.Second), "the probe's timeout bounds the request")
 		})
 	}
 }
 
 func TestCheckpointProbe_AnnouncesTheWaitOnce(t *testing.T) {
-	h := newProbeHarness(t, fileProbe("/tmp/ready", 1, 3, 0), nil)
+	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 1, 3, 0), nil)
 
 	for range 2 {
 		h.reconcile()
@@ -285,27 +296,21 @@ func TestCheckpointProbe_AnnouncesTheWaitOnce(t *testing.T) {
 }
 
 func TestCheckpointProbe_RefusedTargetsFailTheWorkOrder(t *testing.T) {
-	httpProbe := snapshotv1alpha1.CheckpointReadinessProbe{
+	httpSpec := snapshotv1alpha1.CheckpointReadinessProbe{
 		CheckpointReadinessProbeHandler: snapshotv1alpha1.CheckpointReadinessProbeHandler{
 			HTTPGet: &snapshotv1alpha1.HTTPGetAction{Path: "/status", Port: intstr.FromInt32(8000)},
 		},
 		PeriodSeconds: 1, TimeoutSeconds: 1, SuccessThreshold: 1,
 	}
-	unknownPort := *httpProbe.DeepCopy()
+	unknownPort := *httpSpec.DeepCopy()
 	unknownPort.HTTPGet.Port = intstr.FromString("metrics")
 	for _, tc := range []struct {
 		name      string
 		probe     snapshotv1alpha1.CheckpointReadinessProbe
 		mutatePod func(*corev1.Pod)
 	}{
-		{"file on a PVC", fileProbe("/data/ready", 1, 1, 0), func(pod *corev1.Pod) {
-			pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/data"}}
-			pod.Spec.Volumes = []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
-			}}}
-		}},
-		{"HTTP on the host network", httpProbe, func(pod *corev1.Pod) { pod.Spec.HostNetwork = true }},
 		{"HTTP on a port name the container doesn't have", unknownPort, nil},
+		{"neither file nor httpGet", snapshotv1alpha1.CheckpointReadinessProbe{PeriodSeconds: 1, TimeoutSeconds: 1, SuccessThreshold: 1}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newProbeHarness(t, tc.probe, tc.mutatePod)
@@ -322,7 +327,7 @@ func TestCheckpointProbe_RefusedTargetsFailTheWorkOrder(t *testing.T) {
 }
 
 func TestCheckpointProbe_StateIsDroppedWithTheWorkOrder(t *testing.T) {
-	h := newProbeHarness(t, fileProbe("/tmp/ready", 1, 3, 0), nil)
+	h := newProbeHarness(t, fileProbeSpec("/tmp/ready", 1, 3, 0), nil)
 	h.reconcile()
 	_, tracked := h.w.checkpointProbes.Load(h.content.Name)
 	require.True(t, tracked)

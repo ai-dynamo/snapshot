@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -89,8 +90,10 @@ type NodeController struct {
 	// checkpointProbes holds a *checkpointProbeState per work order whose container has a
 	// checkpoint readiness probe, while the agent waits for it.
 	checkpointProbes sync.Map
-	probeFileFn      func(hostPID int, path string) (bool, error)
-	probeHTTPFn      func(ctx context.Context, podIP string, port int32, path string, timeout time.Duration) error
+	// hookExec runs a lifecycle hook's file action in its container, and
+	// hookHTTP sends its HTTP requests. Tests replace them.
+	hookExec lifecyclehooks.Execer
+	hookHTTP *http.Client
 	// nowFn and requeueCaptureFn default to time.Now and captureQueue.AddAfter when nil.
 	nowFn            func() time.Time
 	requeueCaptureFn func(name string, after time.Duration)
@@ -266,8 +269,8 @@ func newDefaultController(
 		minimumImageSizeFn:        snapshotruntime.MinimumImageSize,
 		reviveGPUProcessesFn:      cuda.ReviveProcessTree,
 		compareFn:                 compat.Compare,
-		probeFileFn:               lifecyclehooks.FileExists,
-		probeHTTPFn:               lifecyclehooks.HTTPGet,
+		hookExec:                  rt,
+		hookHTTP:                  lifecyclehooks.NewHTTPClient(),
 	}
 	w.checkpointFn = w.executorCheckpoint
 	w.fetchManifestFn = func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
