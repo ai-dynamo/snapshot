@@ -16,6 +16,8 @@ namespace snapshot::pagebroker::model_streamer::settings {
 // Optional values distinguish omission (inherit the startup environment or
 // defaults) from an explicit zero. Native tuning is fixed for the process.
 struct Options {
+  // PageBroker-owned batch/admission budget; not a native environment setting.
+  std::optional<std::uint64_t> restore_batch_bytes;
   std::optional<std::uint64_t> read_chunk_bytes;
   std::optional<std::uint64_t> process_group_size;
   std::optional<std::uint64_t> s3_concurrency;

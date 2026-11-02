@@ -191,9 +191,11 @@ pageBroker:
   s3:
     limits: {}
   transferEngine:
-    # Model Streamer reader tuning for S3 restores, written as given to the JSON
+    # S3 restore batching and reader tuning, written as given to the JSON
     # file PageBroker reads with --model-streamer-config. Empty passes no file.
     # Used with storage.type=s3 only.
+    # restoreBatchBytes defaults to 10000000000 (10 GB); an oversized file
+    # runs alone. This is not a limit on total checkpoint staging memory.
     modelStreamer: {}
   # Requires 32 GiB of free allocatable memory, plus the agent request.
   # Override for each node profile. Budget 4 GiB per GPU plus process and staging

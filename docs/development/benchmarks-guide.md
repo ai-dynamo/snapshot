@@ -21,8 +21,8 @@ See the [published results](benchmarks.md).
 - An engine image that supports the selected guide application's APIs.
 - A populated model PVC, mounted read-only at `/hf-cache`.
 - A writable work PVC for compiler caches.
-- A filesystem checkpoint PVC, passed with `--pvc-name`. Artifact inventory does
-  not support bound or remote stores.
+- A filesystem checkpoint PVC, passed with `--pvc-name`, or a release configured
+  for [S3 checkpoints](#s3-checkpoints).
 - The NVIDIA runtime class, `/dev/net/tun` and the node's
   `profiles/block-iouring.json` seccomp profile, as required by the guide templates.
 
@@ -122,6 +122,63 @@ uv run --project benchmarks python -m snapshot_benchmarks report \
   --results-dir benchmarks/results/<invocation> --out tables.md
 ```
 
+## S3 checkpoints
+
+For a release already configured with [S3 storage](../operations/storage.md#other-backends),
+replace `--pvc-name "$CHECKPOINT_PVC"` with `--storage-type s3` in the commands
+above. The same flag works for `sweep`. Model and work PVCs are still required.
+
+The flag describes the installed release; it does not change its storage settings.
+The agent and PageBroker use the release's credentials. The benchmark needs
+Kubernetes access to its ConfigMaps, but no AWS credentials or Python S3 client.
+It records the store ID, bucket, region, endpoint and prefix, and verifies the
+checkpoint's store binding and published artifacts before restoring.
+
+S3 runs keep the same engine, multi-GPU, repeated-restore and inference checks.
+After publication, the runner executes the bundled `rclone size --json` in the
+PageBroker container for each published artifact's `data/` prefix. It compares
+object count and bytes with the pre-upload file inventory in `index.json`.
+A mismatch or failed measurement fails the run. Matching totals do not verify
+individual file contents. The mounted credentials need permission to list these
+prefixes as well as read their objects. Credentials stay inside the container.
+
+Checkpoint payload size excludes `index.json`; the report lists its bytes and the
+stored total separately. Measurements run after the agent's checkpoint timer and
+before restore or cleanup. Cleanup waits for content deletion without inspecting
+a local checkpoint directory. The default storage type remains `pvc`.
+
+### Size and throughput definitions
+
+| Measurement | Meaning |
+| --- | --- |
+| Model weights | Logical size of the selected cached weight files, measured before engine startup. Older schema-1 results retain their reported estimates. |
+| Model directory before checkpoint | Linux `find` sums regular-file sizes in the resolved model directory after source readiness, before requesting capture. Excludes symlinks and directory metadata; Hugging Face snapshot links can therefore make this smaller than weight size. |
+| Local payload (pre-upload inventory) | Sum of checkpoint file sizes recorded by PageBroker before S3 upload, read from the published index. This is not a second live directory scan. |
+| Published payload | Filesystem regular-file inventory, or independent S3 payload object count and byte total. Includes captured CPU/GPU state and the root filesystem archive. |
+| Effective publication GB/s | S3 payload bytes divided by the agent's checkpoint commit duration, divided by 10^9. Includes inventory, upload, publication and cleanup overhead. |
+| Effective S3 → staging GB/s | S3 payload bytes divided by the PageBroker staging phase duration for each restore, divided by 10^9. Includes staging preparation overhead. |
+
+Rates are effective operation throughput, not network-only bandwidth. The report
+averages individual restore rates and shows their sample standard deviation.
+Missing or nonpositive durations produce unavailable rates with warnings, never
+substitute weight-size estimates. Old results without these measurements remain
+readable and show unavailable values.
+
+The restore breakdown separates staging from other agent setup/cleanup, CRIU,
+CUDA and application wake/handoff. Total restore starts at agent external-restore
+entry and ends at application wake/resume completion; it excludes pod scheduling,
+container startup and inference verification. The report records S3 checkpoint GPU
+mode from the saved manifest (`custom-storage`, `file-based`, or `unknown`), rather
+than assuming it from the driver version.
+
+Raw measurements are saved in `model-directory.json`, `artifacts.json`,
+`checkpoint-timing.json`, and each restore attempt's `timing.json` and `metrics.json`.
+Directory scans and S3 measurements have a five-minute client deadline.
+Rclone uses separate connection and idle-I/O timeouts. Closing a timed-out exec
+stream does not guarantee immediate termination of the remote process.
+S3 measurements execute PageBroker's bundled rclone directly; its image does not
+need a shell. The mounted default credentials profile supplies authentication.
+
 ## Workload options
 
 | Flag | Meaning |
@@ -187,9 +244,12 @@ See [Measurement boundaries](benchmarks.md#measurement-boundaries) for the timin
 endpoints and stage definitions. Inference checks are outside the measured
 cold-start and restore intervals.
 
-Every restore must keep the source process token and answer three factual prompts. The
-run fails if wake events are missing. Timing ends at wake/resume completion, before the
-inference checks. Each run saves the restore totals, phase timings and inference results.
+Before capture, the benchmark records nonempty answers to three prompts. Every
+restore must keep the source process token and reproduce those answers with the
+same deterministic generation settings. This checks inference consistency rather
+than factual knowledge. The run fails if wake events are missing. Timing ends at
+wake/resume completion, before the inference checks. Each run saves the restore
+totals, phase timings and inference results.
 
 Each source uses fresh compiler-cache directories. The checkpoint includes TRT-LLM's
 FlashInfer workspace in the container rootfs. FlashInfer can load extension files and

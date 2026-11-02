@@ -130,10 +130,25 @@ TEST_F(ModelStreamerConfigTest, AppliesAllNativeSettingsAndSharedConnection)
   EXPECT_THROW(options.ValidateEnvironment(), std::invalid_argument);
 }
 
+TEST_F(ModelStreamerConfigTest, RestoreBatchBudgetIsLocalAndPreservedDuringResolution)
+{
+  EXPECT_FALSE(ParseConfig("{}").restore_batch_bytes);
+  const auto options = ResolveOptions(ParseConfig(R"({"restoreBatchBytes":200000000000})"));
+  EXPECT_EQ(options.restore_batch_bytes, 200'000'000'000ULL);
+  EXPECT_TRUE(options.NativeEnvironment().empty());
+  EXPECT_NO_THROW(options.ValidateEnvironment());
+  auto invalid = options;
+  invalid.restore_batch_bytes = 0;
+  EXPECT_THROW(invalid.Validate(), std::invalid_argument);
+}
+
 TEST_F(ModelStreamerConfigTest, RejectsMalformedConfigurationWithoutEchoingValues)
 {
   for (const auto* text : {
       "[]", "null", "{", R"({"unknown-secret":"do-not-print"})", R"({"readChunkBytes":1,"readChunkBytes":2})",
+      R"({"restoreBatchBytes":0})", R"({"restoreBatchBytes":-1})", R"({"restoreBatchBytes":1.5})",
+      R"({"restoreBatchBytes":"64GB"})", R"({"restoreBatchBytes":null})", R"({"restoreBatchBytes":true})",
+      R"({"restoreBatchBytes":18446744073709551616})", R"({"restoreBatchBytes":1,"restoreBatchBytes":2})",
       R"({"filesystem":{}})", R"({"filesystem":{"strategies":["sync_buffered"]}})",
       R"({"s3Reader":{"concurrency":-1}})", R"({"s3Reader":{"concurrency":1.0}})",
       R"({"s3Reader":{"concurrency":"2"}})", R"({"s3Reader":{"concurrency":1025}})",

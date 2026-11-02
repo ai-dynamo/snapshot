@@ -1,10 +1,11 @@
 # Snapshot Benchmarks
 
 Measure cold start, checkpoint time and restores for vLLM, SGLang or
-TensorRT-LLM. Each run saves timings, checkpoint size, environment metadata and
+TensorRT-LLM. Each run saves timings, model directory and checkpoint sizes, environment metadata and
 logs under `results/`. Reports show restore mean ± sample standard deviation across
 the recorded attempts; speedup uses the mean restore time. Three restores run by
-default; `--restore-count` changes the count.
+default; `--restore-count` changes the count. S3 reports also include effective
+publication and staging throughput in GB/s, with a separate restore phase breakdown.
 
 See the [benchmark guide](../docs/development/benchmarks-guide.md) for setup and
 commands, and [Performance Benchmarks](../docs/development/benchmarks.md) for
@@ -14,7 +15,7 @@ published results.
 
 - `uv`
 - `kubectl`
-- An installed Snapshot Helm release and its checkpoint PVC. Use `KUBECONFIG`
+- An installed Snapshot Helm release configured for PVC or S3 checkpoints. Use `KUBECONFIG`
   to connect to the cluster. See [Installation](../docs/operations/install.md).
 - An engine image compatible with the selected [framework guide](../docs/guides/)
 - A model PVC with the model files, a writable work PVC and enough free GPUs
@@ -63,10 +64,10 @@ cache policy and saves the probe results.
 ## Local checks
 
 ```bash
-uv run --project benchmarks python -m unittest discover -s benchmarks/tests
+PYTHONPATH=benchmarks uv run --locked --project e2e pytest benchmarks/tests -vv
 ```
 
-These checks test guide manifests, simulated lifecycle calls, timing calculations and
+These checks also run in the `e2e-static` CI job. They test guide manifests, simulated lifecycle calls, timing calculations and
 reports. They do not start GPU workloads.
 
 Use `--detailed-timing` to collect cold-start phase breakdowns. Normal runs do not

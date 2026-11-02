@@ -4,11 +4,48 @@
 """Cluster-free checks for Kubernetes E2E helpers."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+import urllib3
 
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
+
+
+def test_pod_logs_decodes_raw_bytes_and_preserves_lines(monkeypatch):
+    payload = b'COLD_BENCH {"stage":"process_start"}\nCOLD_BENCH {"stage":"engine_init_end"}\n'
+    response = urllib3.HTTPResponse(body=payload, status=200, headers={"Content-Type": "text/plain"})
+    release = Mock(wraps=response.release_conn)
+    monkeypatch.setattr(response, "release_conn", release)
+    api = k8s.client.CoreV1Api()
+    request = Mock(return_value=response)
+    monkeypatch.setattr(api.api_client.rest_client, "GET", request)
+    monkeypatch.setattr(k8s.client, "CoreV1Api", lambda: api)
+
+    text = k8s.pod_logs("workloads", "source", tail_lines=None, container="main")
+
+    assert text == payload.decode("utf-8")
+    assert len(text.splitlines()) == 2
+    assert request.call_args.kwargs["_preload_content"] is False
+    release.assert_called_once()
+
+
+def test_pod_logs_releases_connection_when_read_fails(monkeypatch):
+    class Response:
+        release_conn = Mock()
+
+        @property
+        def data(self):
+            raise OSError("interrupted log read")
+
+    response = Response()
+    api = Mock()
+    api.read_namespaced_pod_log.return_value = response
+    monkeypatch.setattr(k8s.client, "CoreV1Api", lambda: api)
+    with pytest.raises(OSError, match="interrupted log read"):
+        k8s.pod_logs("workloads", "source")
+    response.release_conn.assert_called_once()
 
 
 def test_restart_operator_waits_for_terminating_previous_pod(monkeypatch) -> None:

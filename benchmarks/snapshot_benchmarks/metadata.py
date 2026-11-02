@@ -8,11 +8,13 @@ product/driver via `nvidia-smi` exec'd into the running pod, storage class and
 its provisioner via the PVC/StorageClass objects, and node placement via the
 pods' own `spec.node_name`. There is no size field on `PodSnapshot` or
 `PodSnapshotContent` status (checked in api/v1alpha1/podsnapshotcontent_types.go),
-so checkpoint size is measured by a regular-file inventory on the node — see
-`measurement.py`.
+so PVC checkpoint size is measured by a regular-file inventory on the node,
+and S3 checkpoint size by PageBroker's bundled rclone. See `measurement.py`.
 """
 
 from __future__ import annotations
+
+import json
 
 from kubernetes import client
 from kubernetes.client import ApiException
@@ -119,10 +121,33 @@ def collect_gpu_identity(
     )
 
 
+def s3_settings(namespace: str, release: str) -> dict[str, str]:
+    maps = client.CoreV1Api().list_namespaced_config_map(
+        namespace, label_selector=f"app.kubernetes.io/instance={release}"
+    )
+    configs = [
+        json.loads(cm.data["pagebroker-s3-config.json"])
+        for cm in maps.items if "pagebroker-s3-config.json" in (cm.data or {})
+    ]
+    if len(configs) != 1:
+        raise RuntimeError("expected one release-scoped PageBroker S3 configuration")
+    config = configs[0]
+    keys = ("storeId", "bucket", "region", "endpoint", "prefix")
+    if not isinstance(config, dict) or any(
+        not isinstance(config.get(key), str) or not config[key].strip()
+        for key in keys[:-1]
+    ) or not isinstance(config.get("prefix", ""), str):
+        raise RuntimeError("incomplete PageBroker S3 configuration")
+    # Record connection metadata only, never credential or TLS configuration.
+    return {key: config.get(key, "") for key in keys}
+
+
 def collect_environment(
     *,
     pvc_namespace: str,
     pvc_name: str,
+    storage_type: str = "pvc",
+    release: str = "snapshot",
     capture_node: str | None = None,
     restore_node: str | None = None,
 ) -> BenchmarkEnvironment:
@@ -136,8 +161,13 @@ def collect_environment(
     Snapshot release's own namespace, which a hand-installed cluster commonly
     keeps separate from the workload namespace (e.g. `snapshot` vs.
     `default`) -- see `BenchmarkConfig`'s docstring in `run.py`."""
-    storage_class, provisioner = storage_backend(pvc_namespace, pvc_name)
+    if storage_type not in ("pvc", "s3"):
+        raise ValueError(f"unsupported checkpoint storage type: {storage_type!r}")
+    s3 = s3_settings(pvc_namespace, release) if storage_type == "s3" else None
+    storage_class, provisioner = (None, None) if s3 is not None else storage_backend(pvc_namespace, pvc_name)
     return BenchmarkEnvironment(
+        storage_type=storage_type,
+        s3=s3,
         storage_class=storage_class,
         storage_provisioner=provisioner,
         k8s_version=k8s_server_version(),

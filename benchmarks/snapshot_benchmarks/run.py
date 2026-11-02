@@ -70,6 +70,7 @@ class BenchmarkConfig:
     drop_page_cache: bool = True
     detailed_timing: bool = False
     restore_count: int = 3
+    storage_type: str = "pvc"
 
     def __post_init__(self):
         if type(self.restore_count) is not int or self.restore_count < 1:
@@ -161,6 +162,19 @@ def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> str:
     raise RuntimeError("No snapshot-agent on selected node: " + cfg.node)
 
 
+def _validate_s3_publication(content: dict, settings: dict[str, str]) -> None:
+    if content.get("spec", {}).get("storage", {}).get("storeID") != settings["storeId"]:
+        raise RuntimeError("checkpoint is not bound to the configured S3 store")
+    expected = set(content["spec"]["source"]["podRef"]["containers"])
+    artifacts = content.get("status", {}).get("storage", {}).get("artifacts", [])
+    if (
+        not expected or len(artifacts) != len(expected)
+        or {item.get("containerName") for item in artifacts} != expected
+        or any(not item.get("artifactHandle", "").strip() for item in artifacts)
+    ):
+        raise RuntimeError("checkpoint is missing confirmed S3 container publications")
+
+
 def run_benchmark(
     cfg: BenchmarkConfig,
     engine: Engine,
@@ -211,6 +225,10 @@ def run_benchmark(
     if mode == "both" or model.tp > 1:
         agent_image = _validate_snapshot_agent_present(cfg)
 
+    environment = metadata.collect_environment(
+        pvc_namespace=cfg.snapshot_namespace, pvc_name=cfg.pvc_name,
+        storage_type=cfg.storage_type, release=cfg.release,
+    )
     source_name = f"bench-source-{run_id}"
 
     result = RunResult(
@@ -218,7 +236,7 @@ def run_benchmark(
         run_id=run_id,
         timestamp_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         mode=mode,
-        environment=metadata.BenchmarkEnvironment(),
+        environment=environment,
         engine=BenchmarkEngine(name=engine.name, image=image),
         model=ModelInfo(
             label=model.label,
@@ -283,6 +301,7 @@ def run_benchmark(
             cfg, source_pod, folder
         )
         result.model.reported_weights_bytes = cold_measurement["weights_bytes"]
+        result.model.model_directory_bytes = cold_measurement.get("model_directory_bytes")
         result.cold_start = ColdStartTiming(
             pod_created_at=source_pod.metadata.creation_timestamp,
             container_started_at=_container_started_at(
@@ -293,11 +312,7 @@ def run_benchmark(
         )
 
         capture_node = source_pod.spec.node_name
-        result.environment = metadata.collect_environment(
-            pvc_namespace=cfg.snapshot_namespace,
-            pvc_name=cfg.pvc_name,
-            capture_node=capture_node,
-        )
+        result.environment.capture_node = capture_node
         result.environment.capture = metadata.collect_gpu_identity(
             cfg.workload_namespace, source_name, engine.container_name, capture_node
         )
@@ -331,15 +346,22 @@ def run_benchmark(
             content_uid = content["metadata"]["uid"]
             measurement.save(folder / "snapshot.json", snap)
             measurement.save(folder / "content.json", content)
-            checkpoint_bytes, checkpoint_seconds = measurement.checkpoint_measurement(
+            if cfg.storage_type == "s3":
+                _validate_s3_publication(content, result.environment.s3)
+            checkpoint_bytes, checkpoint_seconds, checkpoint_measurement = measurement.checkpoint_measurement(
                 cfg,
                 capture_node,
                 content_uid,
                 content_name,
                 folder,
+                content=content,
+                settings=result.environment.s3,
             )
             result.model.checkpoint_artifact_bytes = checkpoint_bytes
             result.checkpoint.agent_seconds = checkpoint_seconds
+            result.checkpoint.measurement = checkpoint_measurement
+            if cfg.storage_type == "s3" and checkpoint_measurement.get("publication_gbps") is None:
+                result.warnings.append("S3 publication throughput unavailable: missing or nonpositive duration.")
 
             progress(f"[{run_id}] deleting source pod {source_name} to free the GPU")
             k8s.delete_pod(cfg.workload_namespace, source_name)
@@ -396,7 +418,13 @@ def run_benchmark(
                     snapshot_name,
                     source_token,
                     restore_folder,
+                    source_checks=cold_measurement["inference_checks"],
                 )
+                if cfg.storage_type == "s3":
+                    metrics["staging_gbps"] = measurement.throughput(checkpoint_bytes, metrics.get("staging_s"))
+                    measurement.save(restore_folder / "metrics.json", metrics)
+                    if metrics["staging_gbps"] is None:
+                        result.warnings.append(f"Restore {repeat}: staging throughput unavailable; missing or nonpositive duration.")
                 timing.measurement = metrics
                 if repeat == 1:
                     # Keep the first raw record for compatibility; reports use all attempts.
@@ -525,7 +553,7 @@ def run_benchmark(
                         plural=lifecycle.PODSNAPSHOTCONTENTS,
                     )
                 )
-                if capture_node and content_uid:
+                if cfg.storage_type == "pvc" and capture_node and content_uid:
                     cleanup(
                         lambda: lifecycle.wait_for_artifact_root_absent(
                             cfg.snapshot_e2e_config(),
@@ -624,7 +652,7 @@ def _collect_agent_log_phases(
     snapshot_cfg = cfg.snapshot_e2e_config()
     try:
         agent_pod = lifecycle.checkpoint_agent_pod(snapshot_cfg, restore_node)
-        log_text = k8s.pod_logs(cfg.snapshot_namespace, agent_pod, tail_lines=2000)
+        log_text = k8s.pod_logs(cfg.snapshot_namespace, agent_pod, tail_lines=2000, container="agent")
         restore_pod_key = f"{cfg.workload_namespace}/{restore_name}"
         return logs.parse_agent_log_phases(
             log_text,

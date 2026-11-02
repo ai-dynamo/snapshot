@@ -331,6 +331,22 @@ TEST_F(ModelStreamerTransferEngineTest, S3RestoreReturnsOwnedLocalAccess)
   EXPECT_TRUE(fs::exists(destination / "payload"));
 }
 
+TEST_F(ModelStreamerTransferEngineTest, ConfiguredBatchBudgetSurvivesCoordinatorReplacement)
+{
+  fake_s3_root = root_.path();
+  std::ofstream(root_.path() / "data") << "123456789";
+  std::ofstream(root_.path() / "other") << "x";
+  const auto tuning = model_streamer::settings::ParseConfig(R"({"restoreBatchBytes":9})");
+  ModelStreamerTransferEngine engine(Config(), tuning);
+  EXPECT_THROW(engine.StageRestore(Prepared(), root_.path() / "failed"), TransferError);
+  const auto before = next_submission_id.load();
+  auto prepared = Prepared();
+  prepared.inventory.files.push_back({"s3://local-test-bucket/other", "other", 1});
+  EXPECT_NO_THROW(engine.StageRestore(std::move(prepared), root_.path() / "replaced"));
+  EXPECT_EQ(next_submission_id.load() - before, 2U);
+  EXPECT_EQ(starts, 2U);
+}
+
 TEST_F(ModelStreamerTransferEngineTest, S3DirectModeIsRejectedThroughGenericInterface)
 {
   S3Config config;

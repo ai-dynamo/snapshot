@@ -5,6 +5,7 @@
 
 import datetime
 import json
+import math
 import re
 from pathlib import Path
 
@@ -15,6 +16,13 @@ def seconds(value):
     if not pieces or "".join(a + b for a, b in pieces) != value:
         raise ValueError(f"Invalid agent duration: {value!r}")
     return sum(float(a) * units[b] for a, b in pieces)
+
+
+def throughput(payload_bytes, duration):
+    """Effective decimal GB/s, not wire bytes or network-only transfer speed."""
+    if payload_bytes is None or duration is None or duration <= 0 or not math.isfinite(duration):
+        return None
+    return payload_bytes / duration / 1e9
 
 
 def restore_start_ns(log, pod, namespace):
@@ -87,7 +95,14 @@ def restore_metrics(directory):
     total = (end - start) / 1e9
     if total < agent or agent < criu + cuda:
         raise ValueError("Inconsistent clocks or agent phase accounting")
+    staging = timing["phases"].get("pagebroker_stage")
+    staging = seconds(staging) if staging is not None else None
+    setup = agent - criu - cuda
+    if staging is not None and staging > setup:
+        raise ValueError("Staging exceeds agent setup time")
     return dict(
+        staging_s=staging,
+        other_setup_s=setup - staging if staging is not None else None,
         total_s=total,
         agent_s=agent,
         setup_s=agent - criu - cuda,
