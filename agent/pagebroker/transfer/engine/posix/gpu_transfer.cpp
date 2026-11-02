@@ -568,7 +568,7 @@ class LaneStorage {
 
 struct TransferPool::Impl {
   struct Job {
-    std::shared_ptr<const TransferFile> file;
+    FileDescriptor file;
     CUcontext context;
     CUdeviceptr device;
     size_t size;
@@ -753,7 +753,7 @@ struct TransferPool::Impl {
           if (job.operation == io::Operation::Write) {
             Copy(lane, *work);
           }
-          lane.storage->Submit(work->slot, job.file->fd(), job.size, job.operation, work->offset, work->size);
+          lane.storage->Submit(work->slot, job.file.get(), job.size, job.operation, work->offset, work->size);
           pending.push_back(*work);
         } catch (...) {
           const auto failure = std::current_exception();
@@ -793,7 +793,7 @@ struct TransferPool::Impl {
     }
   }
 
-  void Transfer(std::shared_ptr<const TransferFile> file, CUcontext context, CUdeviceptr device, size_t size,
+  void Transfer(FileDescriptor file, CUcontext context, CUdeviceptr device, size_t size,
                 CUstream stream, io::Operation operation, const Cancellation& cancellation)
   {
     cancellation.ThrowIfCancelled();
@@ -839,24 +839,18 @@ TransferPool::TransferPool(std::vector<std::unique_ptr<TransferPoolDevice>> devi
     : impl_(std::make_unique<Impl>(std::move(devices))) {}
 TransferPool::~TransferPool() = default;
 
-void TransferPool::Restore(std::shared_ptr<const TransferFile> file, CUcontext context, CUdeviceptr device,
-                           size_t size, CUstream stream, const Cancellation& cancellation)
-{
-  const nvtx3::scoped_range range{"PageBroker pooled extent transfer"};
-  impl_->Transfer(std::move(file), context, device, size, stream, io::Operation::Read, cancellation);
-}
-
 void TransferPool::Restore(int fd, CUcontext context, CUdeviceptr device, size_t size,
                            CUstream stream, const Cancellation& cancellation)
 {
-  Restore(std::make_shared<TransferFile>(fd), context, device, size, stream, cancellation);
+  const nvtx3::scoped_range range{"PageBroker pooled extent transfer"};
+  impl_->Transfer(FileDescriptor::Duplicate(fd), context, device, size, stream, io::Operation::Read, cancellation);
 }
 
 void TransferPool::Checkpoint(int fd, CUcontext context, CUdeviceptr device, size_t size,
                               CUstream stream, const Cancellation& cancellation)
 {
   const nvtx3::scoped_range range{"PageBroker pooled extent transfer"};
-  impl_->Transfer(std::make_shared<TransferFile>(fd), context, device, size, stream,
+  impl_->Transfer(FileDescriptor::Duplicate(fd), context, device, size, stream,
                   io::Operation::Write, cancellation);
   const nvtx3::scoped_range sync{"PageBroker file sync"};
   if (fsync(fd)) {
