@@ -35,9 +35,6 @@ constexpr char kAccessKeyIdKey[] = "access_key_id";
 constexpr char kSecretAccessKeyKey[] = "secret_access_key";
 constexpr char kSessionTokenKey[] = "session_token";
 
-// Bound each batch and the bytes admitted concurrently. This 10 GB target
-// avoids submitting a whole large checkpoint at once; a larger file runs alone.
-constexpr uintmax_t kSubmissionByteBudget = 10'000'000'000;
 constexpr unsigned kResponsePollTimeoutMs = 25;
 constexpr auto kCancellationPollInterval = std::chrono::milliseconds(25);
 // Bound outstanding submissions while reusing the native session across restores.
@@ -135,10 +132,10 @@ ModelStreamerRestore::StreamerEntry::~StreamerEntry() noexcept
 }
 
 bool
-ModelStreamerRestore::StreamerEntry::TryAddFile(const CheckpointFile& file, const Path& destination)
+ModelStreamerRestore::StreamerEntry::TryAddFile(const CheckpointFile& file, const Path& destination, uintmax_t batch_bytes)
 {
   if (!request.paths.empty() &&
-      (bytes >= kSubmissionByteBudget || file.size_bytes > kSubmissionByteBudget - bytes))
+      (bytes >= batch_bytes || file.size_bytes > batch_bytes - bytes))
     return false;
   if (request.paths.size() == std::numeric_limits<unsigned>::max())
     throw std::runtime_error("too many files in one Model Streamer submission");
@@ -188,10 +185,13 @@ ModelStreamerRestore::ModelStreamerRestore(std::chrono::milliseconds submission_
 
 ModelStreamerRestore::ModelStreamerRestore(
     ModelStreamerSessionOptions options,
-    std::chrono::milliseconds submission_timeout)
-    : submission_timeout_(submission_timeout), options_(std::move(options)),
+    std::chrono::milliseconds submission_timeout,
+    std::uint64_t restore_batch_bytes)
+    : submission_timeout_(submission_timeout), restore_batch_bytes_(restore_batch_bytes), options_(std::move(options)),
       stopped_error_(std::make_exception_ptr(std::runtime_error("Model Streamer restore stopped")))
 {
+  if (restore_batch_bytes_ == 0)
+    throw std::invalid_argument("restore batch bytes must be positive");
   if (submission_timeout_ <= std::chrono::milliseconds::zero())
     throw std::invalid_argument("Model Streamer submission timeout must be positive");
   if (!HasCompleteCredentials(options_))
@@ -384,9 +384,9 @@ ModelStreamerRestore::CanAdmit(const StreamerEntry& entry) const
   // An oversized file may run by itself.
   if (active_.empty())
     return true;
-  if (active_bytes_ >= kSubmissionByteBudget)
+  if (active_bytes_ >= restore_batch_bytes_)
     return false;
-  return entry.bytes <= kSubmissionByteBudget - active_bytes_;
+  return entry.bytes <= restore_batch_bytes_ - active_bytes_;
 }
 
 void
@@ -647,7 +647,7 @@ ModelStreamerRestore::RestoreFiles(const CheckpointInventory& inventory, const P
           continue;
         }
 
-        if (!entry->TryAddFile(*file, staged))
+        if (!entry->TryAddFile(*file, staged, restore_batch_bytes_))
           break;
         ++file;
       }

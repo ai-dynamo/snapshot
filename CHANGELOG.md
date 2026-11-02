@@ -44,6 +44,11 @@ commit-level history for each release is on its
   node agent together. See
   [Lifecycle hooks](docs/reference/workload-contract.md#lifecycle-hooks).
 
+- S3 restore tuning accepts
+  `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` to control batch
+  and shared admission bytes. The default remains 10 GB; restart PageBroker
+  after changing it.
+
 - `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
   and opt into cleanup after failure; omission or `Retain` preserves output.
   CRD change: deploy the matching CRD and operator together.

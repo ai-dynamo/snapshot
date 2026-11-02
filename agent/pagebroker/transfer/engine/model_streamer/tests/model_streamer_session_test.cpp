@@ -786,6 +786,27 @@ TEST_F(ModelStreamerSessionTest, SplitsOneInventoryAtByteBudgetWithEmptyFiles)
   }
 }
 
+TEST_F(ModelStreamerSessionTest, ConfiguredBudgetChangesBatchBoundaries)
+{
+  auto inventory = Inventory(5);
+  const std::vector<uintmax_t> sizes{0, 4, 6, 1, 0};
+  for (size_t i = 0; i < sizes.size(); ++i)
+    inventory.files[i].size_bytes = sizes[i];
+  {
+    ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 10);
+    ASSERT_NO_THROW(restore.Stage(inventory, root_ / "small-budget"));
+    EXPECT_EQ(state.submission_bytes, (std::vector<uintmax_t>{10, 1}));
+  }
+  state.submission_bytes.clear();
+  {
+    ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 11);
+    ASSERT_NO_THROW(restore.Stage(inventory, root_ / "large-budget"));
+    EXPECT_EQ(state.submission_bytes, (std::vector<uintmax_t>{11}));
+  }
+  EXPECT_FALSE(HasMapping(root_));
+  EXPECT_THROW((ModelStreamerRestore{{}, kDefaultModelStreamerSubmissionTimeout, 0}), std::invalid_argument);
+}
+
 TEST_F(ModelStreamerSessionTest, SubmitsOversizedFileAloneAndContinuesInventory)
 {
   state.sparse_allocations = true;
@@ -811,9 +832,9 @@ TEST_F(ModelStreamerSessionTest, OversizedSubmissionExcludesOtherReadsUntilCompl
   state.sparse_allocations = true;
   state.allow_responses = false;
   state.pause_after_completion = true;
-  ModelStreamerRestore restore;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 64);
   auto inventory = Inventory();
-  inventory.files.front().size_bytes = 10'000'000'001;
+  inventory.files.front().size_bytes = 65;
   auto large = std::async(std::launch::async, [&] { restore.Stage(inventory, root_ / "large"); });
   EXPECT_TRUE(WaitForSubmissions(1));
   auto small = std::async(std::launch::async, [&] { restore.Stage(Inventory(), root_ / "small"); });

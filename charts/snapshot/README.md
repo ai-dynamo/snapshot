@@ -216,6 +216,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `pageBroker.artifactAddressing` | Pass store configuration to a compatible PVC artifact backend. Deploy this before enabling `operator.bindNewContents` | `false` |
 | `pageBroker.s3.limits` | PageBroker's S3 transfer and transaction limits, passed through as its `limits` object; `stagingBytes` defaults to the staging cap | `{}` |
 | `pageBroker.transferEngine.modelStreamer` | Model Streamer reader tuning for S3 restores, passed through as the file behind `--model-streamer-config` | `{}` |
+| `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` | S3 restore batch and shared admission budget in bytes; an oversized file runs alone. Does not cap total staging memory | `10000000000` |
 | `pageBroker.resources` | CPU and memory requests/limits for the PageBroker sidecar. The memory limit bounds restore prefetch into staging | 8 CPU / 32Gi request, 32 CPU / 256Gi limit |
 | `daemonset.resources` | CPU and memory requests/limits for the agent. The agent's memory limit also bounds the largest CRIU image, because CRIU writes it into memory-backed PageBroker staging (a direct GPU CustomStorage checkpoint writes to the PVC instead, and is not bound by this) | 2 CPU / 1Gi request, 4 CPU / 64Gi limit |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
