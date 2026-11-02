@@ -101,6 +101,10 @@ holding the slot budget and CPU limit fixed. Increase lanes only when restore
 time improves. More workers also add completion polling and can consume more
 CPU without making restore faster.
 
+Lane-count measurements cover GLM-5.3-NVFP4 on eight B200 GPUs with VAST NFS.
+Other storage systems (including S3), GPU counts, models, and concurrent restores
+need separate measurement.
+
 The default rings reserve 4 GiB per GPU, or 32 GiB for eight GPUs, plus overhead.
 PageBroker checks the memory budget before it reports GPU readiness. It checks
 manifest structure and exact extent lengths. It does not generate or verify GPU
