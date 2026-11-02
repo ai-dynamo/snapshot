@@ -90,6 +90,11 @@ type PageBrokerSpec struct {
 	// RestoreMode selects the restore source. Empty defaults to direct.
 	RestoreMode       string `yaml:"restoreMode"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
+
+	// StagingPath is the memory-backed volume CRIU writes the image into. The
+	// agent measures it to reject a capture that provably cannot fit; empty
+	// turns that check off, which is what a config predating the field does.
+	StagingPath string `yaml:"stagingPath"`
 }
 
 // DefaultCheckpointTimeoutSeconds bounds a dump for a config written before the field existed.

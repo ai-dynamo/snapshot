@@ -70,6 +70,8 @@ type NodeController struct {
 	writePodControlSentinelFn func(string, string, string, []byte) error
 	controlSentinelExistsFn   func(int, string) (bool, error)
 	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
+	stagingCapacityFn         func(string) (int64, error)
+	minimumImageSizeFn        func(string, []int) (int64, error)
 	restoreQueue              workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister          corev1listers.PodLister
 	compareFn                 func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
@@ -245,6 +247,8 @@ func newDefaultController(
 		writePodControlSentinelFn: snapshotruntime.WritePodControlSentinel,
 		controlSentinelExistsFn:   snapshotruntime.ControlSentinelExists,
 		sendSignalFn:              snapshotruntime.SendSignalToPID,
+		stagingCapacityFn:         snapshotruntime.StagingCapacity,
+		minimumImageSizeFn:        snapshotruntime.MinimumImageSize,
 		compareFn:                 compat.Compare,
 	}
 	w.checkpointFn = w.executorCheckpoint

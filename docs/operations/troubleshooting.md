@@ -2,6 +2,13 @@
 
 Common issues when running Snapshot, and where to look.
 
+## A restore is slower than expected
+
+Read the `Restore timing summary` from the node agent on the restore Pod's node.
+Check whether CPU restore, CUDA restore, or staging takes the most time. Follow
+[Why is my restore slow?](storage/slow-restore.md) for the next check and
+backend-specific tuning.
+
 ## A checkpoint never becomes Ready
 
 A `PodSnapshot` becomes Ready only after the `snapshot-agent` confirms the
