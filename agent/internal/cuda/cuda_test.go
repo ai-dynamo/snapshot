@@ -56,10 +56,12 @@ func TestDisabledLegacySelectionUsesOnlyContainerVisibility(t *testing.T) {
 		for _, visible := range []string{"", "GPU 0: NVIDIA B200 (UUID: GPU-cdi)"} {
 			t.Run(value+"/"+visible, func(t *testing.T) {
 				installFakeNSenter(t, fmt.Sprintf("printf '%%s\\n' '%s'\n", visible))
+				hostProc := t.TempDir()
+				writeHostGPUs(t, hostProc, "GPU-cdi")
 				// No Kubernetes or PodResources client: an allocation fallback
 				// would fail instead of returning the container's actual view.
 				got, err := DiscoverGPUs(context.Background(), nil, "", "", "",
-					[]string{"NVIDIA_VISIBLE_DEVICES=" + value}, ListVisibleGPUs(context.Background(), "/host/proc", 42, nil), logr.Discard())
+					[]string{"NVIDIA_VISIBLE_DEVICES=" + value}, ListVisibleGPUs(context.Background(), hostProc, 42, nil), logr.Discard())
 				if err != nil || !reflect.DeepEqual(got, parseNvidiaSmiList(visible).GPUs) {
 					t.Fatalf("container discovery = %#v, %v", got, err)
 				}
@@ -274,6 +276,21 @@ func TestNsenterNvidiaSMIReturnsCommandFailure(t *testing.T) {
 	}
 }
 
+// writeHostGPUs lists cards in a host procfs's driver directory, the first in
+// the lowest PCI bus slot.
+func writeHostGPUs(t *testing.T, hostProc string, uuids ...string) {
+	t.Helper()
+	for i, uuid := range uuids {
+		dir := filepath.Join(hostProc, "driver", "nvidia", "gpus", fmt.Sprintf("0000:%02x:00.0", 0x10*(i+1)))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "information"), []byte("GPU UUID: \t "+uuid+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // fakeHostProc returns a host procfs holding only the NVIDIA kernel module's
 // version file.
 func fakeHostProc(t *testing.T, driverVersion string) string {
@@ -293,6 +310,7 @@ func fakeHostProc(t *testing.T, driverVersion string) string {
 
 func TestListVisibleGPUs(t *testing.T) {
 	hostProc := fakeHostProc(t, "615.71.09")
+	writeHostGPUs(t, hostProc, "GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f")
 	calls := filepath.Join(t.TempDir(), "calls")
 	installFakeNSenter(t, fmt.Sprintf(`
 echo call >> %s
@@ -344,8 +362,10 @@ func TestListVisibleGPUsReturnsCommandFailure(t *testing.T) {
 // driver version is unknown.
 func TestListVisibleGPUsWithoutDriverVersion(t *testing.T) {
 	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)'\n")
+	hostProc := t.TempDir()
+	writeHostGPUs(t, hostProc, "GPU-a")
 
-	got, err := ListVisibleGPUs(context.Background(), t.TempDir(), 42, nil)()
+	got, err := ListVisibleGPUs(context.Background(), hostProc, 42, nil)()
 	want := VisibleGPUs{GPUs: compat.GPUInfo{Devices: []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA L4"}}}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("ListVisibleGPUs() = %#v, %v, want %#v", got, err, want)
@@ -682,6 +702,8 @@ func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
 	})
 
 	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)' 'GPU 1: NVIDIA L4 (UUID: GPU-b)'\n")
+	hostProc := t.TempDir()
+	writeHostGPUs(t, hostProc, "GPU-a", "GPU-b")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -691,7 +713,7 @@ func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
 		"test-pod",
 		"default",
 		"main",
-		t.TempDir(),
+		hostProc,
 		123,
 		logr.Discard(),
 	)
@@ -747,6 +769,8 @@ func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testin
 	})
 
 	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)'\n")
+	hostProc := t.TempDir()
+	writeHostGPUs(t, hostProc, "GPU-a")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -756,7 +780,7 @@ func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testin
 		"test-pod",
 		"default",
 		"main",
-		t.TempDir(),
+		hostProc,
 		123,
 		logr.Discard(),
 	)
@@ -991,6 +1015,7 @@ func TestDiscoverGPUsUseVisibleGPUDescriptions(t *testing.T) {
 	})
 	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)'\n")
 	hostProc := fakeHostProc(t, "580.65.06")
+	writeHostGPUs(t, hostProc, "GPU-a")
 
 	got, err := DiscoverGPUs(
 		context.Background(), nil, "test-pod", "default", "main", nil, ListVisibleGPUs(context.Background(), hostProc, 42, nil), logr.Discard(),
@@ -1108,16 +1133,37 @@ func TestDiscoverGPUsListSelectedGPUsInBusOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA B200 (UUID: "+a+")' 'GPU 1: NVIDIA B200 (UUID: "+b+")'\n")
+	// nvidia-smi does not promise bus order, so the listing is sorted by the
+	// host's bus IDs.
+	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA B200 (UUID: "+b+")' 'GPU 1: NVIDIA B200 (UUID: "+a+")'\n")
+	hostProc := fakeHostProc(t, "595.58.03")
+	writeHostGPUs(t, hostProc, a, b)
 
 	got, err := DiscoverGPUs(context.Background(), nil, "", "", "",
 		[]string{"NVIDIA_VISIBLE_DEVICES=2,0"},
-		ListVisibleGPUs(context.Background(), fakeHostProc(t, "595.58.03"), 42, nil), logr.Discard())
+		ListVisibleGPUs(context.Background(), hostProc, 42, nil), logr.Discard())
 	if err != nil {
 		t.Fatalf("DiscoverGPUs: %v", err)
 	}
 	if uuids := GPUUUIDs(got); !reflect.DeepEqual(uuids, []string{a, b}) {
 		t.Fatalf("UUIDs = %v, want bus order [%s %s]", uuids, a, b)
+	}
+}
+
+// A listing that cannot be put in bus order still answers the MIG check, but
+// discovery, which pairs GPUs by bus position, refuses it.
+func TestDiscoverGPUsRefusesGPUsOutsideTheHostBusListing(t *testing.T) {
+	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)' 'GPU 1: NVIDIA L4 (UUID: GPU-b)'\n")
+	hostProc := t.TempDir()
+	writeHostGPUs(t, hostProc, "GPU-a")
+	visible := ListVisibleGPUs(context.Background(), hostProc, 42, nil)
+
+	if _, err := visible(); err != nil {
+		t.Fatalf("ListVisibleGPUs: %v", err)
+	}
+	_, err := DiscoverGPUs(context.Background(), nil, "", "", "", []string{"NVIDIA_VISIBLE_DEVICES=none"}, visible, logr.Discard())
+	if err == nil || !strings.Contains(err.Error(), "PCI bus order") {
+		t.Fatalf("DiscoverGPUs error = %v, want a bus order refusal", err)
 	}
 }
 

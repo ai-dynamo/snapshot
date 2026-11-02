@@ -1752,6 +1752,17 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(tools, "nsenter"), []byte("#!/bin/sh\necho 'GPU 0: Test GPU (UUID: "+gpuUUID+")'\n"), 0700); err != nil {
 					t.Fatal(err)
 				}
+				hostProc := t.TempDir()
+				card := filepath.Join(hostProc, "driver", "nvidia", "gpus", "0000:10:00.0")
+				if err := os.MkdirAll(card, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(card, "information"), []byte("GPU UUID: \t "+gpuUUID+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				originalHostProc := hostProcPath
+				t.Cleanup(func() { hostProcPath = originalHostProc })
+				hostProcPath = hostProc
 				t.Setenv("PATH", tools)
 			}
 			if err := types.WriteManifest(directory, manifest); err != nil {

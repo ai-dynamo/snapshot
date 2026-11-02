@@ -101,13 +101,16 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 
 // VisibleGPUs is what a container sees of the node's GPUs.
 type VisibleGPUs struct {
-	// GPUs are the cards in the container's ordinal order, described by
-	// model and driver version. A card carved into MIG slices is listed as
+	// GPUs are the cards in PCI bus order, described by model and driver
+	// version. A card carved into MIG slices is listed as
 	// the card.
 	GPUs compat.GPUInfo
 	// MIGSlices are the slices listed under those cards. No DiscoverGPUs path
 	// can stand in for them: DRA drops a slice's MIG- UUID.
 	MIGSlices []string
+	// unordered is set when the cards could not be put in PCI bus order.
+	// Discovery pairs GPUs by bus position, so it refuses such a listing.
+	unordered bool
 }
 
 // VisibleGPULister answers what one container sees of the node's GPUs.
@@ -115,8 +118,10 @@ type VisibleGPULister func() (VisibleGPUs, error)
 
 // ListVisibleGPUs returns a lister for the container whose host PID is pid. On
 // its first call it reads the container's cards from the driver's procfs, or,
-// when that cannot answer exactly (MIG), runs nvidia-smi -L inside the
-// container's mount and PID namespaces; every later call gets the same answer.
+// when that cannot answer exactly (MIG, or no device cgroup rules), runs
+// nvidia-smi -L inside the container's mount and PID namespaces and sorts its
+// cards by the bus IDs in the host's driver procfs. Every later call gets the
+// same answer.
 // nvidia-smi spends most of its time initializing NVML, 0.1 to 0.2 s on an idle
 // eight-GPU node and seconds while other processes start CUDA, so a capture or
 // restore lists once for both its MIG check and GPU discovery.
@@ -147,6 +152,8 @@ func ListVisibleGPUs(ctx context.Context, hostProcPath string, pid int, spec *sp
 		if len(visible.GPUs.Devices) > 0 {
 			visible.GPUs.DriverVersion = readDriverVersion(hostProcPath)
 		}
+		// NVML, and so nvidia-smi, does not promise to list cards in bus order.
+		visible.unordered = !sortByHostBusID(hostProcPath, visible.GPUs.Devices)
 		return visible, nil
 	})
 }
@@ -209,6 +216,47 @@ func listProcfsGPUs(hostProcPath string, pid int, spec *specs.Spec) (VisibleGPUs
 	}
 	visible.GPUs.DriverVersion = readDriverVersion(hostProcPath)
 	return visible, true
+}
+
+// sortByHostBusID puts cards in PCI bus order using the bus IDs in the host's
+// driver procfs. It reports false, leaving the cards as they were, when that
+// listing cannot be read or lacks one of them.
+func sortByHostBusID(hostProcPath string, devices []compat.GPUDevice) bool {
+	gpusDir := filepath.Join(hostProcPath, "driver", "nvidia", "gpus")
+	entries, err := os.ReadDir(gpusDir)
+	if err != nil {
+		return false
+	}
+	busIDs := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		information, err := os.ReadFile(filepath.Join(gpusDir, entry.Name(), "information"))
+		if err != nil {
+			return false
+		}
+		busIDs[parseProcfsGPUInformation(string(information))["GPU UUID"]] = strings.ToLower(entry.Name())
+	}
+	for _, device := range devices {
+		if _, ok := busIDs[device.UUID]; !ok {
+			return false
+		}
+	}
+	sort.SliceStable(devices, func(i, j int) bool {
+		return busIDs[devices[i].UUID] < busIDs[devices[j].UUID]
+	})
+	return true
+}
+
+// listInBusOrder returns the container's cards in PCI bus order, the order a
+// checkpoint and its restore pair GPU positions in.
+func listInBusOrder(visible VisibleGPULister) (compat.GPUInfo, error) {
+	listed, err := visible()
+	if err != nil {
+		return compat.GPUInfo{}, err
+	}
+	if listed.unordered {
+		return compat.GPUInfo{}, errors.New("cannot put the container's GPUs in PCI bus order: the host's driver procfs does not list them all")
+	}
+	return listed.GPUs, nil
 }
 
 // nvidiaMajor is the character device major of /dev/nvidia<minor>.
@@ -399,19 +447,18 @@ func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, 
 		if *value == "" || *value == "none" || *value == "void" {
 			// These disable legacy injection, not CDI. Inspect only actual
 			// container visibility; never substitute host/allocation UUIDs.
-			listed, err := visible()
-			return listed.GPUs, err
+			return listInBusOrder(visible)
 		}
 		selected, err := resolveSelectedGPUs(ctx, *value)
 		if err != nil {
 			return selected, err
 		}
 		// The variable may name its GPUs in any order; the container lists them in bus order.
-		listed, err := visible()
+		listed, err := listInBusOrder(visible)
 		if err != nil {
 			return compat.GPUInfo{}, fmt.Errorf("list selected GPUs in bus order: %w", err)
 		}
-		return describeGPUs(GPUUUIDs(selected), listed.GPUs)
+		return describeGPUs(GPUUUIDs(selected), listed)
 	}
 	return discoverGPUs(ctx, clientset, podName, podNamespace, containerName, visible, log)
 }
@@ -445,14 +492,14 @@ func discoverGPUs(
 				"DRA GPU allocation has no resolvable UUIDs",
 			)
 		}
-		listed, err := visible()
+		listed, err := listInBusOrder(visible)
 		if err != nil {
 			return compat.GPUInfo{}, fmt.Errorf(
 				"discover DRA GPUs in container ordinal order: %w",
 				err,
 			)
 		}
-		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, GPUUUIDs(listed.GPUs))
+		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, GPUUUIDs(listed))
 		if err != nil {
 			return compat.GPUInfo{}, err
 		}
@@ -460,7 +507,7 @@ func discoverGPUs(
 			"resolved DRA GPU UUIDs in container ordinal order",
 			"uuids", orderedUUIDs,
 		)
-		return describeGPUs(orderedUUIDs, listed.GPUs)
+		return describeGPUs(orderedUUIDs, listed)
 	}
 
 	gpuUUIDs, err = GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
@@ -470,20 +517,20 @@ func discoverGPUs(
 	if len(gpuUUIDs) > 0 {
 		// kubelet lists the GPUs in allocation order; only the container's
 		// listing gives their bus order.
-		listed, err := visible()
+		listed, err := listInBusOrder(visible)
 		if err != nil {
 			return compat.GPUInfo{}, fmt.Errorf("list PodResources GPUs in bus order: %w", err)
 		}
-		return describeGPUs(gpuUUIDs, listed.GPUs)
+		return describeGPUs(gpuUUIDs, listed)
 	}
 
 	log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi")
-	listed, err := visible()
+	listed, err := listInBusOrder(visible)
 	if err != nil {
 		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 	}
-	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", GPUUUIDs(listed.GPUs))
-	return listed.GPUs, nil
+	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", GPUUUIDs(listed))
+	return listed, nil
 }
 
 // describeGPUs puts the allocated GPUs in the order the container lists them,

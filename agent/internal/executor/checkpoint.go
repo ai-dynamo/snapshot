@@ -317,7 +317,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if len(cudaHostPIDs) > 0 {
 		gpuStart := time.Now()
 		// One nvidia-smi answers both the MIG check and GPU discovery.
-		visible := cuda.ListVisibleGPUs(ctx, snapshotruntime.HostProcPath, pid, ociSpec)
+		visible := cuda.ListVisibleGPUs(ctx, hostProcPath, pid, ociSpec)
 		if err := refuseMIGCapture(log, pid, visible); err != nil {
 			return nil, 0, err
 		}

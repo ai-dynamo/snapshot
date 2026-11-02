@@ -41,6 +41,10 @@ var execNSRestoreFunc = execNSRestore
 // stats the restored process through /host/proc, which only exists on a real node.
 var validateRestoredProcessFunc = validateRestoredProcess
 
+// hostProcPath is overridden in tests: GPU listing reads the host's driver
+// procfs, which only exists on a real node.
+var hostProcPath = snapshotruntime.HostProcPath
+
 // RestoreMounter installs the fixed binary bundle, the cuinterpose libraries and one
 // validated checkpoint artifact inside a placeholder container's mount namespace.
 type RestoreMounter interface {
@@ -630,7 +634,7 @@ func inspectRestore(
 		}
 		discoverStart := time.Now()
 		// One nvidia-smi answers both the MIG check and GPU discovery.
-		visible := cuda.ListVisibleGPUs(ctx, snapshotruntime.HostProcPath, placeholderPID, ociSpec)
+		visible := cuda.ListVisibleGPUs(ctx, hostProcPath, placeholderPID, ociSpec)
 		if err := refuseMIGRestore(log, placeholderPID, visible, req.SkipCompatCheck); err != nil {
 			return nil, 0, err
 		}
