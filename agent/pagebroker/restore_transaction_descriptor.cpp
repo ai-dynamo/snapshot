@@ -7,7 +7,7 @@
 
 namespace snapshot::pagebroker {
 RestoreTransactionDescriptor::RestoreTransactionDescriptor(Path staging_directory, FileDescriptor source,
-                                                             std::shared_ptr<posix::GpuRestorePreparation> preparation)
+                                                             std::shared_ptr<gpu::RestorePreparation> preparation)
     : preparation_(std::move(preparation)), staging_directory_(std::move(staging_directory)), source_(std::move(source))
 {
 }

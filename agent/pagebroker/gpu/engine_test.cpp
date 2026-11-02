@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "engine.hpp"
-#include "transfer/engine/posix/gpu_transfer.hpp"
 #include "storage_manifest.hpp"
 #include "file_descriptor.hpp"
 #include "fatal_cleanup.hpp"
@@ -219,7 +218,7 @@ TEST_F(ArtifactTest, PreparesRestoreFilesBeforeParticipantsAndReleasesDescriptor
   };
   const auto before = descriptors();
   {
-    auto preparation = std::make_shared<posix::GpuRestorePreparation>(directory_.get());
+    auto preparation = std::make_shared<RestorePreparation>(directory_.get());
     // Preparation retains its source even if the caller closes its descriptor.
     auto source = FileDescriptor::Duplicate(directory_.get());
     directory_ = FileDescriptor(-1);
@@ -237,10 +236,11 @@ TEST_F(ArtifactTest, PreparesRestoreFilesBeforeParticipantsAndReleasesDescriptor
 
 TEST_F(ArtifactTest, MissingPreparedExtentFallsBackToValidatedArtifact)
 {
-  auto preparation = std::make_shared<posix::GpuRestorePreparation>(directory_.get());
+  // An empty source keeps preparation empty regardless of scan timing.
+  fs::create_directory(root_ / "empty");
+  auto empty = FileDescriptor::OpenDirectory(directory_.get(), "empty");
+  auto preparation = std::make_shared<RestorePreparation>(empty.get());
   const storage::GpuDataFile extent{kDevice, 4096, storage::DeviceFilename(0)};
-  // Finish preparation before any GPU files exist, making its optional cache empty.
-  EXPECT_EQ(preparation->Get(1, extent, directory_.get()), nullptr);
   Artifact checkpoint(directory_.get(), Direction::Checkpoint, {1}, {kDevice});
   const auto participant = root_ / kDataDirectory / "1";
   FileDescriptor file(open((participant / extent.filename).c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
