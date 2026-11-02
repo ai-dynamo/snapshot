@@ -82,6 +82,8 @@ func newProbeHarness(t *testing.T, probe snapshotv1alpha1.CheckpointReadinessPro
 	}
 	h := &probeHarness{t: t, fc: &fakeCheckpointer{}, content: content, now: probeStart}
 	h.w = makeNodeController(t, h.fc, content, pod)
+	// The dump that follows a passing probe resolves the source container.
+	h.w.runtime = &fakeRuntime{resolveContainerPID: 7}
 	h.w.hookExec = h
 	h.w.hookHTTP = &http.Client{Transport: h}
 	h.w.nowFn = func() time.Time {
