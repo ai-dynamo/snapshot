@@ -422,12 +422,13 @@ def test_checkpoint_waits_for_the_checkpoint_readiness_probe(
 
 @pytest.mark.cpu
 @pytest.mark.snapshot_failure
-def test_checkpoint_readiness_probe_on_a_shared_volume_fails(
+def test_checkpoint_readiness_probe_that_can_never_run_fails(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    # The agent reads probe files as root, so it refuses one on a volume that
-    # other Pods or the node may share; the source's checkpoint PVC is one.
+    # A probe that can never run fails the work order at once instead of
+    # holding the checkpoint forever: here an HTTP probe on a port name the
+    # source container doesn't have.
     try:
         source, _ = create_ready_source(config, run, gpu=False)
         snap.create_podsnapshot(
@@ -439,7 +440,7 @@ def test_checkpoint_readiness_probe_on_a_shared_volume_fails(
                 {
                     "name": snap.CONTAINER,
                     "checkpointReadinessProbe": {
-                        "file": {"path": f"{snap.CHECKPOINT_DIR}/ready"}
+                        "httpGet": {"path": "/ready", "port": "no-such-port"}
                     },
                 }
             ],
@@ -450,7 +451,7 @@ def test_checkpoint_readiness_probe_on_a_shared_volume_fails(
         assert content is not None
         failed = snap.condition(content, "Failed")
         assert failed and failed.get("reason") == "InvalidCheckpointReadinessProbe", failed
-        assert "emptyDir" in failed.get("message", ""), failed
+        assert "no-such-port" in failed.get("message", ""), failed
         assert k8s.read_pod(config.namespace, run.source_pod).status.phase == "Running", (
             "a refused probe must not touch the source"
         )
