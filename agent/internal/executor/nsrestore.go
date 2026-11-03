@@ -314,6 +314,7 @@ func executeRestore(
 			}
 		}
 		if m.CUDA.CustomStorage {
+			// Kept serial: running the CustomStorage restores in parallel slows them.
 			err = restoreCustomStorage(ctx, opts, m.CUDA.PIDs, restorePIDs, log)
 		} else {
 			concurrency := len(restorePIDs)
