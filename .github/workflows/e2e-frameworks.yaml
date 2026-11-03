@@ -54,14 +54,6 @@ on:
           published images.
         required: false
         type: string
-      datadog_gpu_monitoring:
-        description: >-
-          Datadog GPU monitoring on the host cluster during the run. "disable"
-          turns it off before the tests and back on afterwards if it was on.
-        required: false
-        default: disable
-        type: choice
-        options: [disable, leave]
 
 permissions:
   contents: read
@@ -84,44 +76,9 @@ jobs:
             go.work.sum
       - run: make check
 
-  # Datadog's GPU monitoring (system-probe + NVML) is a suspected interferer
-  # for CRIU/CUDA checkpoint and restore. Switch it off for the whole run in
-  # one gate, restore it in a separate always-run job -- a per-job toggle
-  # would re-enable it under a sibling still restoring (see
-  # hack/datadog-gpu-monitoring.py, which tracks state on the resources so
-  # overlapping runs hand off correctly).
-  datadog-gate:
-    name: datadog gpu monitoring off
-    needs: check
-    runs-on: prod-deploy-tester-v1
-    timeout-minutes: 5
-    concurrency:
-      group: snapshot-e2e-frameworks-datadog-gate
-      cancel-in-progress: false
-    outputs:
-      mode: ${{ steps.mode.outputs.mode }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Resolve mode
-        id: mode
-        env:
-          MODE: ${{ inputs.datadog_gpu_monitoring || 'disable' }}
-        run: echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
-
-      - name: Report Datadog GPU monitoring state
-        run: python3 hack/datadog-gpu-monitoring.py status
-
-      - name: Disable Datadog GPU monitoring for this run
-        if: ${{ steps.mode.outputs.mode == 'disable' }}
-        run: python3 hack/datadog-gpu-monitoring.py disable --holder "${{ github.run_id }}-${{ github.run_attempt }}"
-
   e2e:
     name: ${{ matrix.case }}
-    needs: [check, datadog-gate]
+    needs: check
     runs-on: prod-deploy-tester-v1
     # Above the sum of this job's own step timeout-minutes (123, dominated by
     # the 56-min test step) plus margin: a job-level timeout kills the whole
@@ -169,7 +126,6 @@ jobs:
       SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
       SNAPSHOT_E2E_STORAGE: ${{ matrix.storage }}
       SNAPSHOT_E2E_BENCHMARK_DIR: ${{ github.workspace }}/.e2e-benchmark-results
-      SNAPSHOT_E2E_DATADOG_GPU_MONITORING: ${{ needs.datadog-gate.outputs.mode }}
       # Shared CI model cache (HF cache layout on an NFS export): pods here
       # can't resolve huggingface.co, and per-run downloads cost minutes
       # anyway. Repository variables override the literals below, which are
@@ -524,26 +480,6 @@ jobs:
             vcluster delete "${VCLUSTER_NAME}" --namespace "${HOST_NAMESPACE}"
           fi
           kubectl delete namespace "${HOST_NAMESPACE}" --ignore-not-found --wait=false
-
-  datadog-restore:
-    name: datadog gpu monitoring back on
-    needs: [datadog-gate, e2e]
-    # Run whether the tests passed, failed, or were cancelled; only skip when
-    # the gate never ran (then nothing was disabled and nothing is held).
-    if: ${{ always() && needs.datadog-gate.result == 'success' && needs.datadog-gate.outputs.mode == 'disable' }}
-    runs-on: prod-deploy-tester-v1
-    timeout-minutes: 5
-    concurrency:
-      group: snapshot-e2e-frameworks-datadog-gate
-      cancel-in-progress: false
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Restore Datadog GPU monitoring
-        run: python3 hack/datadog-gpu-monitoring.py restore --holder "${{ github.run_id }}-${{ github.run_attempt }}"
 
   # PR mirrors and ordinary dispatches compare against history with a
   # read-only token. Keep this separate from the scheduled publisher: mirror
