@@ -210,7 +210,7 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
 			Source: snapshotv1alpha1.PodSnapshotSource{
-				PodRef: snapshotv1alpha1.PodReference{
+				PodRef: &snapshotv1alpha1.PodReference{
 					Name:       pod.Name,
 					UID:        pod.UID,
 					Containers: slices.Clone(targetContainers),
@@ -310,6 +310,10 @@ func validatePodSnapshotOwnership(sj *snapshotv1alpha1.SnapshotJob, snap *snapsh
 func podSnapshotHasExpectedIdentity(actual, desired *snapshotv1alpha1.PodSnapshot) bool {
 	actualSource := actual.Spec.Source.PodRef
 	desiredSource := desired.Spec.Source.PodRef
+	// A SnapshotJob only ever captures, so a PodSnapshot of its name without a pod is not its own.
+	if actualSource == nil || desiredSource == nil {
+		return false
+	}
 	if actualSource.Name != desiredSource.Name || actualSource.UID != desiredSource.UID ||
 		len(actualSource.Containers) != len(desiredSource.Containers) {
 		return false

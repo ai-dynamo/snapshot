@@ -273,6 +273,9 @@ applying them by hand. See the
 [restore Pod contract](../reference/restore-pod-contract.md) to generate restore
 pods from a controller, operator or serving platform.
 
+To restore a checkpoint taken in another cluster, see
+[Restore in another cluster](restore.md#restore-in-another-cluster).
+
 ## Use your own engine or image
 
 The recipes above show three engines, but Snapshot works with any inference

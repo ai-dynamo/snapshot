@@ -57,7 +57,8 @@ func (w *NodeController) failCaptureAfterPanic(ctx context.Context, name string,
 			w.log.Error(err, "Failed to read work order after recovered panic", "content", name)
 			return
 		}
-		if isContentTerminal(content) {
+		// An import has nothing to checkpoint, so no checkpoint of it can have failed.
+		if isContentTerminal(content) || content.IsImported() {
 			return
 		}
 		if w.recoverCommittedCaptureAfterPanic(ctx, content, name) {
@@ -79,7 +80,7 @@ func (w *NodeController) failCaptureAfterPanic(ctx context.Context, name string,
 // and is left to the recovery the store itself provides.
 func (w *NodeController) recoverCommittedCaptureAfterPanic(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, name string) bool {
 	contentUID := string(content.UID)
-	containerName, err := singleTargetContainer(content.Spec.Source.PodRef.Containers)
+	containerName, err := singleTargetContainer(content.TargetContainers())
 	if contentUID == "" || err != nil {
 		return false
 	}

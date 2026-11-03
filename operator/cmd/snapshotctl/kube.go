@@ -149,7 +149,7 @@ func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, s
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
 			Source: snapshotv1alpha1.PodSnapshotSource{
-				PodRef: snapshotv1alpha1.PodReference{
+				PodRef: &snapshotv1alpha1.PodReference{
 					Name:       podName,
 					UID:        podUID,
 					Containers: containers,

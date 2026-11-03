@@ -483,3 +483,22 @@ func fixedHex() string {
 	}
 	return string(out)
 }
+
+func TestProcessSweepProtectsTheArtifactAnImportNames(t *testing.T) {
+	// The artifact was captured in another cluster, so its directory is named after a UID no
+	// content here has; only the importing content's label says it is in use.
+	const imported = "6b1e9f0c-2d4a-4c8e-9f3b-7a5d1e2c4b6a"
+	base, root := prepareTestArtifactRoot(t, imported)
+	reader := &metadataReader{list: func(list *metav1.PartialObjectMetadataList, _ *client.ListOptions) error {
+		emptyMetadataPage(list, "30", "")
+		list.Items = []metav1.PartialObjectMetadata{{ObjectMeta: metav1.ObjectMeta{
+			Name: "podsnapshotcontent-import", UID: types.UID("local-content-uid"),
+			Labels: map[string]string{snapshotv1alpha1.ArtifactUIDLabel: imported},
+		}}}
+		return nil
+	}}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
+	require.NoError(t, q.processSweep(context.Background(), log.Log))
+	_, err := os.Lstat(root)
+	require.NoError(t, err, "an imported artifact still named by a content is not an orphan")
+}

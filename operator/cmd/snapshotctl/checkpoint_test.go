@@ -77,7 +77,7 @@ func TestPodSnapshotAlreadyExists(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "my-snap", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
 			Source: nvidiacomv1alpha1.PodSnapshotSource{
-				PodRef: nvidiacomv1alpha1.PodReference{Name: "other-pod"},
+				PodRef: &nvidiacomv1alpha1.PodReference{Name: "other-pod"},
 			},
 		},
 	}
@@ -98,7 +98,7 @@ func TestWaitForPodSnapshotReady(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-1", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
 			Source: nvidiacomv1alpha1.PodSnapshotSource{
-				PodRef: nvidiacomv1alpha1.PodReference{Name: "pod-1"},
+				PodRef: &nvidiacomv1alpha1.PodReference{Name: "pod-1"},
 			},
 		},
 		Status: nvidiacomv1alpha1.PodSnapshotStatus{
@@ -137,7 +137,7 @@ func TestWaitForPodSnapshotFailed(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-fail", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
 			Source: nvidiacomv1alpha1.PodSnapshotSource{
-				PodRef: nvidiacomv1alpha1.PodReference{Name: "pod-1"},
+				PodRef: &nvidiacomv1alpha1.PodReference{Name: "pod-1"},
 			},
 		},
 		Status: nvidiacomv1alpha1.PodSnapshotStatus{
@@ -218,7 +218,7 @@ func TestWaitForPodSnapshotContextDeadline(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-pending", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
 			Source: nvidiacomv1alpha1.PodSnapshotSource{
-				PodRef: nvidiacomv1alpha1.PodReference{Name: "pod-1"},
+				PodRef: &nvidiacomv1alpha1.PodReference{Name: "pod-1"},
 			},
 		},
 	}

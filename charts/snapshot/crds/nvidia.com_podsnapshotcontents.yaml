@@ -295,9 +295,41 @@ spec:
                 - namespace
                 type: object
               source:
-                description: 'Source describes what to checkpoint: the source pod
-                  and the node it runs on.'
+                description: |-
+                  Source describes what to checkpoint — the source pod and the node it runs
+                  on — or, for an import, the existing artifact the content stands for.
                 properties:
+                  artifact:
+                    description: |-
+                      Artifact is the existing artifact an imported content stands for, copied
+                      from its PodSnapshot. No agent checkpoints for it: it has no node.
+                    properties:
+                      containers:
+                        description: |-
+                          Containers names the checkpointed container, as for PodReference.Containers.
+                          v1alpha1 supports exactly one.
+                        items:
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        maxItems: 1
+                        minItems: 1
+                        type: array
+                      uid:
+                        description: |-
+                          UID is the UID of the PodSnapshotContent the artifact was checkpointed
+                          for, in whatever cluster that was. It names the artifact's directory in
+                          the snapshot store and is recorded in the artifact's manifest, which
+                          restore checks it against, so it is the original UID and never the
+                          importing content's own.
+                        maxLength: 36
+                        pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                        type: string
+                    required:
+                    - containers
+                    - uid
+                    type: object
                   nodeName:
                     description: |-
                       NodeName is the node the source pod runs on, denormalized from the live
@@ -337,10 +369,12 @@ spec:
                     - containers
                     - name
                     type: object
-                required:
-                - nodeName
-                - podRef
                 type: object
+                x-kubernetes-validations:
+                - message: a checkpoint needs podRef and nodeName; an import needs
+                    artifact and neither
+                  rule: 'has(self.artifact) ? !has(self.podRef) && !has(self.nodeName)
+                    : has(self.podRef) && has(self.nodeName)'
               storage:
                 description: |-
                   Storage binds this content to one configured store. Omitted on legacy
@@ -364,7 +398,9 @@ spec:
             - message: spec is immutable
               rule: self == oldSelf
             - message: containers must name containers in source.podRef.containers
-              rule: '!has(self.containers) || self.containers.all(c, c.name in self.source.podRef.containers)'
+                or source.artifact.containers
+              rule: '!has(self.containers) || self.containers.all(c, c.name in (has(self.source.artifact)
+                ? self.source.artifact.containers : self.source.podRef.containers))'
           status:
             description: PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
             properties:
@@ -559,7 +595,8 @@ spec:
           rule: '!has(self.status) || !has(self.status.storage) || has(self.spec.storage)'
         - message: publication descriptors must name checkpointed containers
           rule: '!has(self.status) || !has(self.status.storage) || self.status.storage.artifacts.all(a,
-            self.spec.source.podRef.containers.exists(c, c == a.containerName))'
+            (has(self.spec.source.artifact) ? self.spec.source.artifact.containers
+            : self.spec.source.podRef.containers).exists(c, c == a.containerName))'
     served: true
     storage: true
     subresources:

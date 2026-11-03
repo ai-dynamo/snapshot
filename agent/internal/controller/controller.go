@@ -109,7 +109,9 @@ type restoreArtifact struct {
 }
 
 type restoreTarget struct {
-	SnapshotName        string
+	SnapshotName string
+	// ContentUID is the artifact's UID (PodSnapshotContent.ArtifactUID), which for an import is
+	// not the bound content's own.
 	ContentUID          string
 	SourceContainerName string
 }
@@ -691,7 +693,7 @@ func (w *NodeController) RestoreDestinations(ctx context.Context, pod *corev1.Po
 		if err != nil {
 			return nil, err
 		}
-		if source, err = singleTargetContainer(snapshot.Spec.Source.PodRef.Containers); err != nil {
+		if source, err = singleTargetContainer(snapshot.Spec.Source.TargetContainers()); err != nil {
 			return nil, err
 		}
 	}
@@ -709,7 +711,7 @@ func (w *NodeController) RestoreDestinations(ctx context.Context, pod *corev1.Po
 // validateRestoreTarget resolves the captured source and validates every
 // requested destination against the restore Pod.
 func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent) (*restoreTarget, []podcontract.ContainerMapping, error) {
-	containerName, err := singleTargetContainer(content.Spec.Source.PodRef.Containers)
+	containerName, err := singleTargetContainer(content.TargetContainers())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -724,7 +726,9 @@ func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapsh
 	}); err != nil {
 		return nil, nil, err
 	}
-	return &restoreTarget{SnapshotName: snapshot.Name, ContentUID: string(content.UID), SourceContainerName: containerName}, mappings, nil
+	// The artifact's UID, not metadata.uid: an imported content stands for an artifact captured
+	// under another content's UID, which names its directory and is what its manifest records.
+	return &restoreTarget{SnapshotName: snapshot.Name, ContentUID: string(content.ArtifactUID()), SourceContainerName: containerName}, mappings, nil
 }
 
 // resolveRestoreArtifact resolves the validated restore target to its physical

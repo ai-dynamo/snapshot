@@ -70,8 +70,9 @@ spec:
               containers:
                 description: |-
                   Containers holds settings for the checkpointed containers, matched by
-                  name to source.podRef.containers. It is a separate list so settings stay
-                  the same when other kinds of source are added.
+                  name to source.podRef.containers, or for an import to
+                  source.artifact.containers. It is a separate list so settings stay the
+                  same when other kinds of source are added.
                 items:
                   description: |-
                     ContainerSnapshotConfig holds the settings for one checkpointed container,
@@ -280,6 +281,42 @@ spec:
                   Source identifies the checkpointed workload. It is a struct (rather than an
                   inlined reference) so future source variants can be added additively.
                 properties:
+                  artifact:
+                    description: |-
+                      Artifact imports a checkpoint taken elsewhere — in another cluster, or in
+                      this one before its objects were lost — instead of checkpointing a pod.
+                      The operator binds the PodSnapshot to a PodSnapshotContent that names the
+                      artifact and marks both Ready without a checkpoint: Ready means the
+                      reference is accepted, not that the artifact's bytes are anywhere. They
+                      reach a node's snapshot store by other means, and a restore on a node
+                      that does not hold them yet waits for them.
+                    properties:
+                      containers:
+                        description: |-
+                          Containers names the checkpointed container, as for PodReference.Containers.
+                          v1alpha1 supports exactly one.
+                        items:
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        maxItems: 1
+                        minItems: 1
+                        type: array
+                      uid:
+                        description: |-
+                          UID is the UID of the PodSnapshotContent the artifact was checkpointed
+                          for, in whatever cluster that was. It names the artifact's directory in
+                          the snapshot store and is recorded in the artifact's manifest, which
+                          restore checks it against, so it is the original UID and never the
+                          importing content's own.
+                        maxLength: 36
+                        pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                        type: string
+                    required:
+                    - containers
+                    - uid
+                    type: object
                   podRef:
                     description: |-
                       PodRef references the pod, in the PodSnapshot's namespace, that is checkpointed.
@@ -315,9 +352,10 @@ spec:
                     - containers
                     - name
                     type: object
-                required:
-                - podRef
                 type: object
+                x-kubernetes-validations:
+                - message: exactly one of podRef or artifact is required
+                  rule: has(self.podRef) != has(self.artifact)
             required:
             - source
             type: object
@@ -325,7 +363,9 @@ spec:
             - message: spec is immutable
               rule: self == oldSelf
             - message: containers must name containers in source.podRef.containers
-              rule: '!has(self.containers) || self.containers.all(c, c.name in self.source.podRef.containers)'
+                or source.artifact.containers
+              rule: '!has(self.containers) || self.containers.all(c, c.name in (has(self.source.artifact)
+                ? self.source.artifact.containers : self.source.podRef.containers))'
           status:
             description: PodSnapshotStatus defines the observed state of PodSnapshot.
             properties:
