@@ -156,7 +156,8 @@ A workload that uses them:
   container's user, so the file can be anywhere that user can reach, volumes
   included.
 - **MUST NOT** have the `postRestore` file in place before the restore, not even
-  in the checkpointed filesystem: the restore fails if it exists. A path on an
+  in the checkpointed filesystem: Snapshot takes an existing file as the
+  notification, so the application is never notified. A path on an
   `emptyDir` that only the restore Pod mounts avoids this. A file on a volume
   that outlives the Pod, such as a `PersistentVolumeClaim`, stays there for the
   next restore unless the workload removes it. In a restore Pod with several

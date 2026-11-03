@@ -68,34 +68,38 @@ The agent runs the action for each destination container:
    as other preflight failures do, before any CRIU work: the Pod's
    `nvidia.com/Restored` condition becomes `False` with reason
    `RestoreFailed`, and the destination container is left as it is.
-2. **After CRIU.** Before it writes `restore-complete`, the agent checks the
-   file: it must not exist yet, and its directory must exist and be writable
-   by the container's user. The file is checked only now because the restored
-   files can bring it, or its directory: the source may itself have been
-   restored and notified. A failed check stops the restore before the restored
-   process is released.
-3. **After `restore-complete`.** The agent creates the file, or sends the POST,
+2. **After `restore-complete`.** The agent creates the file, or sends the POST,
    every `periodSeconds`, with `timeoutSeconds` per attempt, until it succeeds.
    It retries every failure, since a `404` or a missing directory may be an
    application that is still starting.
 
+Nothing checks the file between CRIU and `restore-complete`, so the release of
+the restored process is not delayed. Two cases follow:
+
+- **A file that is already there counts as the notification**, as one an
+  earlier attempt created does. The restore succeeds, but the application gets
+  no notification. The workload contract forbids such a file. It can come from
+  the restore container, or with the restored files when the source was itself
+  restored and notified.
+- **A file that can't be created** fails each attempt with the reason, such as
+  a missing directory or a read-only mount, until the deadline.
+
 One deadline, `config.restore.timeoutSeconds`, covers the restore and the
-action. When no attempt succeeds by then, or the check after CRIU fails, the
-restore fails as any restore does: the agent writes `restore-failed` and kills
-the destination container, even though the restored process may already have
-been released.
-The steps in the failure are `checking the post-restore action` and `running
-the post-restore action`.
+action. When no attempt succeeds by then, the restore fails as any restore
+does: the agent writes `restore-failed` and kills the destination container,
+even though the restored process was already released. The steps in the
+failure are `checking the post-restore action` and `running the post-restore
+action`.
 
 ### Recovery after an agent restart
 
 The `nvidia.com/Restored` condition becomes `True` only after the action
 succeeds, so a restart in between leaves it `RestoreInProgress`. On recovery,
 `restore-complete` shows that CRIU finished, and the agent runs only the action
-again, never CRIU or the checks:
+again, never CRIU:
 
-- An existing file counts as the agent's own: it was checked absent before
-  `restore-complete`, and only the agent creates it afterwards.
+- An existing file counts as the notification, as in any attempt: usually
+  the interrupted run created it.
 - An HTTP action is sent again. Applications must handle a repeated
   notification.
 - The action gets a full `config.restore.timeoutSeconds` again, so a restart
@@ -131,6 +135,6 @@ Each action can do only what the application itself could:
 | `agent/internal/lifecyclehooks` | The actions: `FileExists`, `CreateMarker`, `CheckMarkerTarget`, `CheckWritePath`, `ResolvePort`, `HTTPGet`, `HTTPPost`. The checkpoint probes: `ReadyCondition`, `FileProbe`, `HTTPProbe`. |
 | `agent/internal/runtime` | `ExecSync`, which runs a file action's command in the container through CRI. |
 | `agent/internal/controller/checkpoint_readiness.go` | The readiness gate: `checkpointGate`, which paces the probe's checks and counts the results. |
-| `agent/internal/lifecyclehooks/postrestore.go` | The post-restore actions: `FilePostRestore` and `HTTPPostRestore`, with `Check`, `Recheck` and one `Notify` attempt. |
+| `agent/internal/lifecyclehooks/postrestore.go` | The post-restore actions: `FilePostRestore` and `HTTPPostRestore`, with `Check` and one `Notify` attempt. |
 | `agent/internal/controller/post_restore.go` | Running the post-restore action: the check in the restore preflight, the retries, and recovery. |
 | `api/podcontract` | `IsReservedControlFile`, Snapshot's own control files. |
