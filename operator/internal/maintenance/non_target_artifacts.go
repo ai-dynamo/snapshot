@@ -317,6 +317,7 @@ func (q *Queue) nonTargetArtifactWritersStopped(ctx context.Context, sj *snapsho
 	if snap.UID != sj.Status.PodSnapshotUID ||
 		snap.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] != sj.Name ||
 		snap.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] != string(sj.UID) ||
+		snap.Spec.Source.PodRef == nil ||
 		snap.Spec.Source.PodRef.Name != pods.Items[0].Name || snap.Spec.Source.PodRef.UID != pods.Items[0].UID {
 		return false, sourcePodIdentityReason, nil
 	}

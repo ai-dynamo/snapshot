@@ -261,6 +261,13 @@ together after upgrading, or pass all three explicitly.
 Chart-created PVCs are retained when the Helm release is removed, so checkpoints
 survive an uninstall.
 
+An [imported](../guides/restore.md#restore-in-another-cluster) artifact is not
+owned by the `PodSnapshotContent` that imports it: other imports may name the
+same artifact, and so may the cluster that took it. Deleting the import
+deletes no files. The orphan sweep reclaims the artifact once no content names
+it, either by UID or, for an import, by its `nvidia.com/snapshot-artifact-uid`
+label.
+
 ## Other backends
 
 `storage.type` supports `pvc` and `s3`. `oci` is reserved in the chart for

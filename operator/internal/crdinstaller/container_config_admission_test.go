@@ -249,7 +249,7 @@ func newSettingsSnapshot(name string, settings snapshotv1.ContainerSnapshotConfi
 	return &snapshotv1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "workload", Name: name},
 		Spec: snapshotv1.PodSnapshotSpec{
-			Source:     snapshotv1.PodSnapshotSource{PodRef: snapshotv1.PodReference{Name: "source", Containers: []string{"main"}}},
+			Source:     snapshotv1.PodSnapshotSource{PodRef: &snapshotv1.PodReference{Name: "source", Containers: []string{"main"}}},
 			Containers: []snapshotv1.ContainerSnapshotConfig{settings},
 		},
 	}

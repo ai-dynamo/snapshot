@@ -988,7 +988,7 @@ func TestSnapshotJobReconcilePodSnapshotNameConflict(t *testing.T) {
 	foreign := &snapshotv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: sj.Name, Namespace: sj.Namespace}, // no owner label
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "other-pod", Containers: []string{"main"}}},
+			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: &snapshotv1alpha1.PodReference{Name: "other-pod", Containers: []string{"main"}}},
 		},
 	}
 

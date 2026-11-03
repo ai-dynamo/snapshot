@@ -67,7 +67,7 @@ func makeSnapshotForReconcile() *snapshotv1alpha1.PodSnapshot {
 			Finalizers: []string{podSnapshotFinalizer},
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0"}},
+			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0"}},
 		},
 	}
 }
@@ -88,7 +88,7 @@ func pendingBoundSnapshotContent() (*snapshotv1alpha1.PodSnapshot, *snapshotv1al
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
 			Source: snapshotv1alpha1.PodSnapshotContentSource{
-				PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a",
+				PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a",
 			},
 		},
 	}
@@ -317,7 +317,7 @@ func TestSnapshotReconciler_ReadySnapReMirrorsViaBoundContent(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
-			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
+			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
 		},
 		Status: snapshotv1alpha1.PodSnapshotContentStatus{
 			Conditions: []metav1.Condition{{Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Agent", Message: "done"}},
@@ -345,7 +345,7 @@ func TestSnapshotReconciler_ReadySnapRevertsToPendingWhenContentPending(t *testi
 		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
-			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
+			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
 		},
 	}
 	r := makeSnapshotReconciler(s, snap, content, scheduledPod())
@@ -637,7 +637,7 @@ func TestSnapshotReconciler_ContentConflictFails(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "other-snap-uid"},
-			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
+			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
 		},
 	}
 	r := makeSnapshotReconciler(s, snap, content, scheduledPod())
@@ -661,7 +661,7 @@ func TestSnapshotReconciler_AdoptsExistingContentAndMirrors(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
-			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
+			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
 		},
 		Status: snapshotv1alpha1.PodSnapshotContentStatus{
 			Conditions: []metav1.Condition{{Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Agent", Message: "done"}},
@@ -706,7 +706,7 @@ func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 				Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 					PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
 					Source: snapshotv1alpha1.PodSnapshotContentSource{
-						PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a",
+						PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a",
 					},
 				},
 				Status: snapshotv1alpha1.PodSnapshotContentStatus{
@@ -782,7 +782,7 @@ func TestSnapshotReconciler_CascadeDelete(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name},
-			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a"},
+			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a"},
 		},
 	}
 	r := makeSnapshotReconciler(s, snap, content)
@@ -837,7 +837,7 @@ func TestSnapshotReconciler_EnsureFinalizerAddsThenProceeds(t *testing.T) {
 	snap := &snapshotv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshot-abc123", Namespace: "inference", UID: types.UID("snap-uid")},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0"}},
+			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0"}},
 		},
 	}
 	r := makeSnapshotReconciler(s, snap, scheduledPod())

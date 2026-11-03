@@ -47,7 +47,7 @@ func TestSnapshotDeepCopyIsIndependent(t *testing.T) {
 	original := &PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", Namespace: "inference"},
 		Spec: PodSnapshotSpec{
-			Source: PodSnapshotSource{PodRef: PodReference{Name: "worker-0", Containers: []string{"main"}}},
+			Source: PodSnapshotSource{PodRef: &PodReference{Name: "worker-0", Containers: []string{"main"}}},
 		},
 		Status: PodSnapshotStatus{
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Captured"}},
@@ -81,7 +81,7 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 		Spec: PodSnapshotContentSpec{
 			PodSnapshotRef: PodSnapshotReference{Namespace: "inference", Name: "snap-a", UID: types.UID("uid-1")},
 			Source: PodSnapshotContentSource{
-				PodRef:   PodReference{Name: "worker-0", UID: types.UID("pod-uid-1"), Containers: []string{"main"}},
+				PodRef:   &PodReference{Name: "worker-0", UID: types.UID("pod-uid-1"), Containers: []string{"main"}},
 				NodeName: "node-a",
 			},
 			Containers: []ContainerSnapshotConfig{{
@@ -145,5 +145,55 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	}
 	if got := original.Spec.Containers[0].Lifecycle.PostRestore.HTTPPost.Port; got != intstr.FromInt32(8000) {
 		t.Errorf("mutating clone post-restore action changed original: got %s", got.String())
+	}
+}
+
+// TestArtifactUIDIsTheCapturedIdentity pins the one rule every artifact reader depends on: a
+// capture's artifact is stored under the content's own UID, an import's under the UID it was
+// captured with elsewhere, which is the one its manifest records.
+func TestArtifactUIDIsTheCapturedIdentity(t *testing.T) {
+	captured := &PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("local-uid")},
+		Spec: PodSnapshotContentSpec{Source: PodSnapshotContentSource{
+			PodRef: &PodReference{Name: "worker-0", Containers: []string{"main"}}, NodeName: "node-a",
+		}},
+	}
+	if captured.IsImported() || captured.ArtifactUID() != "local-uid" {
+		t.Errorf("capture: imported=%v artifact uid %q, want false and local-uid", captured.IsImported(), captured.ArtifactUID())
+	}
+	if got := captured.TargetContainers(); !reflect.DeepEqual(got, []string{"main"}) {
+		t.Errorf("capture containers = %v", got)
+	}
+
+	imported := &PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("local-uid")},
+		Spec: PodSnapshotContentSpec{Source: PodSnapshotContentSource{
+			Artifact: &ArtifactReference{UID: "6b1e9f0c-2d4a-4c8e-9f3b-7a5d1e2c4b6a", Containers: []string{"engine"}},
+		}},
+	}
+	if !imported.IsImported() || imported.ArtifactUID() != "6b1e9f0c-2d4a-4c8e-9f3b-7a5d1e2c4b6a" {
+		t.Errorf("import: imported=%v artifact uid %q, want true and the captured uid", imported.IsImported(), imported.ArtifactUID())
+	}
+	if got := imported.TargetContainers(); !reflect.DeepEqual(got, []string{"engine"}) {
+		t.Errorf("import containers = %v", got)
+	}
+
+	if got := (&PodSnapshotContent{}).TargetContainers(); got != nil {
+		t.Errorf("no source: containers = %v, want nil", got)
+	}
+}
+
+func TestPodSnapshotSourceTargetContainers(t *testing.T) {
+	for name, tc := range map[string]struct {
+		source PodSnapshotSource
+		want   []string
+	}{
+		"pod":      {PodSnapshotSource{PodRef: &PodReference{Name: "w", Containers: []string{"main"}}}, []string{"main"}},
+		"artifact": {PodSnapshotSource{Artifact: &ArtifactReference{UID: "u", Containers: []string{"engine"}}}, []string{"engine"}},
+		"neither":  {PodSnapshotSource{}, nil},
+	} {
+		if got := tc.source.TargetContainers(); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: TargetContainers() = %v, want %v", name, got, tc.want)
+		}
 	}
 }

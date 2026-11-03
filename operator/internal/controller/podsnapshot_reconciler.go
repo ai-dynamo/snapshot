@@ -117,7 +117,15 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if boundName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, ""); boundName != "" {
 		return sr.mirrorBoundContent(ctx, snap, boundName)
 	}
-	return sr.captureFromSourcePod(ctx, snap)
+	switch {
+	case snap.Spec.Source.Artifact != nil:
+		return sr.importArtifact(ctx, snap)
+	case snap.Spec.Source.PodRef != nil:
+		return sr.captureFromSourcePod(ctx, snap)
+	default:
+		// The CRD admits exactly one source; this is an object that predates that rule or bypassed it.
+		return sr.failPodSnapshot(ctx, snap, "InvalidSource", errors.New("spec.source names neither a pod nor an artifact"))
+	}
 }
 
 // isPodSnapshotTerminal reports whether the snapshot has reached a terminal, sticky state. Only Failed
@@ -156,6 +164,14 @@ func (sr *PodSnapshotReconciler) mirrorBoundContent(ctx context.Context, snap *s
 		return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
 	}
 	if snapshotv1alpha1.IsPodSnapshotContentSucceeded(content) || snapshotv1alpha1.IsPodSnapshotContentFailed(content) {
+		return sr.propagateStatus(ctx, snap, content)
+	}
+	// An import has no source pod to watch and no agent to finish it: the operator itself is what
+	// marks it Ready, so a pending one is that write not having landed yet, never a checkpoint in flight.
+	if content.IsImported() {
+		if err := sr.markImportedContentReady(ctx, content); err != nil {
+			return ctrl.Result{}, err
+		}
 		return sr.propagateStatus(ctx, snap, content)
 	}
 	return sr.resolvePendingBoundContent(ctx, snap, content)
@@ -198,7 +214,7 @@ func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Conte
 	}
 
 	if apierrors.IsNotFound(podErr) {
-		key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
+		key := client.ObjectKey{Namespace: snap.Namespace, Name: sourcePodName(snap)}
 		return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
 			fmt.Errorf("source pod %q disappeared before checkpoint success or failure was recorded", key.String()))
 	}
@@ -264,7 +280,7 @@ func (sr *PodSnapshotReconciler) readAuthoritativeBoundContent(ctx context.Conte
 
 func (sr *PodSnapshotReconciler) readAuthoritativeSourcePod(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (*corev1.Pod, error) {
 	pod := &corev1.Pod{}
-	key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
+	key := client.ObjectKey{Namespace: snap.Namespace, Name: sourcePodName(snap)}
 	if err := sr.NonCacheReadClient.Get(ctx, key, pod); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, err
@@ -276,9 +292,12 @@ func (sr *PodSnapshotReconciler) readAuthoritativeSourcePod(ctx context.Context,
 
 func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (string, error) {
 	key := client.ObjectKeyFromObject(pod)
-	wantUID := snap.Spec.Source.PodRef.UID
-	if wantUID == "" {
-		wantUID = content.Spec.Source.PodRef.UID
+	var wantUID types.UID
+	if ref := snap.Spec.Source.PodRef; ref != nil {
+		wantUID = ref.UID
+	}
+	if ref := content.Spec.Source.PodRef; wantUID == "" && ref != nil {
+		wantUID = ref.UID
 	}
 	if wantUID != "" && pod.UID != wantUID {
 		return "StalePodReference",
@@ -308,7 +327,7 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
-				fmt.Errorf("source pod %q no longer exists", snap.Spec.Source.PodRef.Name))
+				fmt.Errorf("source pod %q no longer exists", sourcePodName(snap)))
 		}
 		return ctrl.Result{}, err
 	}
@@ -361,10 +380,18 @@ func verifyContentBacklink(snap *snapshotv1alpha1.PodSnapshot, content *snapshot
 	return nil
 }
 
+// sourcePodName is the pod a checkpointing PodSnapshot names, or "" for an import, which names none.
+func sourcePodName(snap *snapshotv1alpha1.PodSnapshot) string {
+	if ref := snap.Spec.Source.PodRef; ref != nil {
+		return ref.Name
+	}
+	return ""
+}
+
 // getSourcePod loads the source pod referenced by the PodSnapshot.
 func (sr *PodSnapshotReconciler) getSourcePod(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (*corev1.Pod, error) {
 	pod := &corev1.Pod{}
-	key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
+	key := client.ObjectKey{Namespace: snap.Namespace, Name: sourcePodName(snap)}
 	if err := sr.Get(ctx, key, pod); err != nil {
 		return nil, err
 	}
@@ -390,7 +417,14 @@ func validateSourcePod(snap *snapshotv1alpha1.PodSnapshot, pod *corev1.Pod) erro
 // already exist is a prior reconcile that created it but crashed before the status write, surfaced as
 // AlreadyExists; only then do we re-fetch, confirm it is ours (the spec is immutable), and adopt it.
 func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, contentName string, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshotContent, error) {
-	content := sr.buildPodSnapshotContent(snap, contentName, pod)
+	return sr.createOrAdoptContent(ctx, snap, sr.buildPodSnapshotContent(snap, contentName, pod))
+}
+
+// createOrAdoptContent creates the desired content, or adopts an existing one of the same name once
+// its backlink proves it was created for this PodSnapshot — whose spec, like the content's, cannot
+// have changed since.
+func (sr *PodSnapshotReconciler) createOrAdoptContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent) (*snapshotv1alpha1.PodSnapshotContent, error) {
+	contentName := content.Name
 	if err := sr.Create(ctx, content); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			existing := &snapshotv1alpha1.PodSnapshotContent{}
@@ -436,13 +470,93 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 				UID:       snap.UID,
 			},
 			Source: snapshotv1alpha1.PodSnapshotContentSource{
-				PodRef:   snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: snap.Spec.Source.PodRef.Containers},
+				PodRef:   &snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: snap.Spec.Source.PodRef.Containers},
 				NodeName: pod.Spec.NodeName,
 			},
 			Storage:    storage,
 			Containers: copyContainerSettings(snap.Spec.Containers),
 		},
 	}
+}
+
+// importArtifact is the no-content path for a PodSnapshot naming an existing artifact. There is no
+// pod to checkpoint and no agent to report a result, so the operator creates the content, marks it
+// Ready itself and records the binding. Each step is idempotent, and a reconcile that dies between
+// two of them finishes on the next pass: the content name is derived from the PodSnapshot's UID, so
+// the retry adopts what the first pass created.
+func (sr *PodSnapshotReconciler) importArtifact(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (ctrl.Result, error) {
+	// The same gate a checkpoint has: the settings are copied onto the content, and its restores
+	// run their post-restore actions.
+	if !sr.EnableLifecycleHooks && usesLifecycleHooks(snap.Spec.Containers) {
+		return sr.failPodSnapshot(ctx, snap, podSnapshotReasonLifecycleHooksDisabled, errLifecycleHooksDisabled)
+	}
+	content, err := sr.createOrAdoptContent(ctx, snap, buildImportedPodSnapshotContent(snap, podSnapshotContentName(snap)))
+	if err != nil {
+		if errors.Is(err, errContentConflict) {
+			return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
+		}
+		return ctrl.Result{}, err
+	}
+	// Ready before the binding, so the bound path normally finds it done; if this write is lost the
+	// bound path repeats it (mirrorBoundContent).
+	if err := sr.markImportedContentReady(ctx, content); err != nil {
+		return ctrl.Result{}, err
+	}
+	return sr.bindContent(ctx, snap, content.Name)
+}
+
+// buildImportedPodSnapshotContent constructs the content an import binds to. Unlike a checkpoint's,
+// it carries no node label, so no agent's checkpoint informer ever sees it, and no artifact-cleanup
+// finalizer: an import does not own its artifact. Other imports may name the same one, and so may
+// the cluster it was taken in; the orphan sweep reclaims it once no content names it.
+//
+// It is never bound to the configured store, even when new contents are: a binding promises a
+// publication descriptor that PageBroker recorded here, and an imported artifact was published
+// nowhere. It is read by path, artifacts/<uid>/, which a PVC store serves bound or not.
+func buildImportedPodSnapshotContent(snap *snapshotv1alpha1.PodSnapshot, contentName string) *snapshotv1alpha1.PodSnapshotContent {
+	artifact := snap.Spec.Source.Artifact.DeepCopy()
+	return &snapshotv1alpha1.PodSnapshotContent{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: snapshotv1alpha1.GroupVersion.String(),
+			Kind:       snapshotv1alpha1.KindPodSnapshotContent,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: contentName,
+			Labels: map[string]string{
+				snapshotv1alpha1.ArtifactUIDLabel: string(artifact.UID),
+			},
+		},
+		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{
+				Namespace: snap.Namespace,
+				Name:      snap.Name,
+				UID:       snap.UID,
+			},
+			Source:     snapshotv1alpha1.PodSnapshotContentSource{Artifact: artifact},
+			Containers: copyContainerSettings(snap.Spec.Containers),
+		},
+	}
+}
+
+// markImportedContentReady records an import as Ready: accepted as a reference to its artifact. It
+// says nothing about where the artifact's bytes are, which the operator cannot know — with a
+// node-local snapshot store the answer differs per node. A restore on a node without them waits
+// for them (ArtifactPending), the same as for a checkpoint whose store is slow to show it.
+func (sr *PodSnapshotReconciler) markImportedContentReady(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) error {
+	if snapshotv1alpha1.IsPodSnapshotContentSucceeded(content) {
+		return nil
+	}
+	patch := client.MergeFromWithOptions(content.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
+		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  snapshotv1alpha1.ReasonArtifactImported,
+		Message: fmt.Sprintf("Imported artifact %s; a restore waits on its node until the artifact is in the snapshot store there", content.ArtifactUID()),
+	})
+	if err := sr.Status().Patch(ctx, content, patch); err != nil {
+		return fmt.Errorf("mark imported PodSnapshotContent %q Ready: %w", content.Name, err)
+	}
+	return nil
 }
 
 // bindContent records the one-time binding of the created/adopted PodSnapshotContent. Mirroring the
@@ -611,10 +725,10 @@ func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func podSnapshotSourcePodIndexValues(obj client.Object) []string {
 	snap, ok := obj.(*snapshotv1alpha1.PodSnapshot)
-	if !ok || snap.Spec.Source.PodRef.Name == "" {
+	if !ok || sourcePodName(snap) == "" {
 		return nil
 	}
-	return []string{snap.Spec.Source.PodRef.Name}
+	return []string{sourcePodName(snap)}
 }
 
 // sourcePodToPodSnapshots maps a pod event to PodSnapshots in the same namespace that pin that

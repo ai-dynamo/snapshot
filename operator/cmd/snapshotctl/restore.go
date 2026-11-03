@@ -37,7 +37,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	if err := crClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, snapshot); err != nil {
 		return nil, fmt.Errorf("get PodSnapshot %s/%s: %w", namespace, snapshotName, err)
 	}
-	containers := snapshot.Spec.Source.PodRef.Containers
+	containers := snapshot.Spec.Source.TargetContainers()
 	if len(containers) != 1 || strings.TrimSpace(containers[0]) == "" {
 		return nil, fmt.Errorf("PodSnapshot %s/%s must checkpoint exactly one container", namespace, snapshotName)
 	}
