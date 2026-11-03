@@ -1372,16 +1372,16 @@ func TestRestoreAndUnlockProcessTreeConcurrency(t *testing.T) {
 
 	for _, tc := range []struct {
 		name        string
-		gpuCount    int
+		concurrency int
 		maxDuration time.Duration
 	}{
-		{name: "one rank per GPU", gpuCount: 4, maxDuration: 2 * sleep},
+		{name: "four concurrent processes", concurrency: 4, maxDuration: 2 * sleep},
 		// errgroup blocks forever on a limit of zero.
-		{name: "unknown GPU count still completes", gpuCount: 0},
+		{name: "zero limit still completes", concurrency: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			started := time.Now()
-			if _, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", cudaCheckpointHelperBinary, tc.gpuCount, logr.Discard()); err != nil {
+			if _, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", cudaCheckpointHelperBinary, tc.concurrency, logr.Discard()); err != nil {
 				t.Fatalf("RestoreAndUnlockProcessTree() error = %v", err)
 			}
 			if duration := time.Since(started); tc.maxDuration > 0 && duration > tc.maxDuration {

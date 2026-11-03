@@ -316,7 +316,12 @@ func executeRestore(
 		if m.CUDA.CustomStorage {
 			err = restoreCustomStorage(ctx, opts, m.CUDA.PIDs, restorePIDs, log)
 		} else {
-			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, len(m.CUDA.SourceGPUUUIDs), log)
+			concurrency := len(restorePIDs)
+			if cudaJobFile != "" {
+				// The launch-job file is not thread safe.
+				concurrency = 1
+			}
+			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, concurrency, log)
 		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
