@@ -59,26 +59,40 @@ func IsCleanupFailure(err error) bool {
 // than probing for them again: the probe cannot tell "not a CUDA process" from a helper that
 // failed, and reading an empty list as "nothing to revive" would strand a suspended workload.
 type sourceNeedsRecoveryError struct {
-	cause        error
-	cudaHostPIDs []int
+	cause     error
+	suspended SuspendedSource
 }
 
 func (e *sourceNeedsRecoveryError) Error() string { return e.cause.Error() }
 
 func (e *sourceNeedsRecoveryError) Unwrap() error { return e.cause }
 
-func sourceNeedsRecovery(err error, cudaHostPIDs []int) error {
-	return &sourceNeedsRecoveryError{cause: err, cudaHostPIDs: slices.Clone(cudaHostPIDs)}
+func sourceNeedsRecovery(err error, cudaHostPIDs []int, cuInterposePrepared bool) error {
+	return &sourceNeedsRecoveryError{cause: err, suspended: SuspendedSource{
+		GPUPIDs:             slices.Clone(cudaHostPIDs),
+		CuInterposePrepared: cuInterposePrepared,
+	}}
 }
 
-// SuspendedGPUProcesses returns the GPU processes a failed capture left suspended, and whether
-// the failure is one that left the source needing recovery at all.
-func SuspendedGPUProcesses(err error) ([]int, bool) {
+// SuspendedSource describes what a failed capture left behind, so the caller can decide
+// whether the workload can be put back.
+type SuspendedSource struct {
+	// GPUPIDs are the GPU processes the capture found, to be handed their GPUs back.
+	GPUPIDs []int
+
+	// CuInterposePrepared reports that the capture removed the tree's shared GPU mappings.
+	// Nothing puts them back, so a source in that state can only be terminated.
+	CuInterposePrepared bool
+}
+
+// SuspendedSourceOf returns what a failed capture left behind, and whether the failure left
+// the source needing recovery at all.
+func SuspendedSourceOf(err error) (SuspendedSource, bool) {
 	var recoverable *sourceNeedsRecoveryError
 	if !errors.As(err, &recoverable) {
-		return nil, false
+		return SuspendedSource{}, false
 	}
-	return recoverable.cudaHostPIDs, true
+	return recoverable.suspended, true
 }
 
 // CheckpointRequest holds the content-owned inputs for a checkpoint operation.
@@ -215,7 +229,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
 	if err != nil {
-		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs)
+		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator())
 	}
 
 	dumpComplete = true

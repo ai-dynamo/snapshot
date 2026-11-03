@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
@@ -64,7 +65,7 @@ func TestReviveSourceRefusesWhatItCannotPutBack(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			w, _, _ := recoveryController(tc.reviveErr)
 
-			reason, ok := w.reviveSource(context.Background(), logr.Discard(), tc.containerPID, tc.gpuPIDs)
+			reason, ok := w.reviveSource(context.Background(), logr.Discard(), tc.containerPID, executor.SuspendedSource{GPUPIDs: tc.gpuPIDs})
 
 			assert.False(t, ok)
 			assert.NotEmpty(t, reason, "a source that cannot be revived must say why")
@@ -77,7 +78,7 @@ func TestReviveSourceRefusesWhatItCannotPutBack(t *testing.T) {
 func TestReviveSourceLeavesAReleasedTreeRunning(t *testing.T) {
 	w, kills, revived := recoveryController(nil)
 
-	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(), []int{4242})
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(), executor.SuspendedSource{GPUPIDs: []int{4242}})
 
 	assert.Equal(t, 0, *kills, "a workload that was put back must not be killed")
 	assert.Equal(t, []int{4242}, *revived, "the capture's own GPU processes must be handed back")
@@ -88,7 +89,7 @@ func TestReviveSourceLeavesAReleasedTreeRunning(t *testing.T) {
 func TestRecoverSourceKillsOnlyWhatCannotBeRevived(t *testing.T) {
 	w, kills, _ := recoveryController(errors.New("process is failed"))
 
-	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(), []int{4242})
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(), executor.SuspendedSource{GPUPIDs: []int{4242}})
 
 	assert.Equal(t, 1, *kills, "a source that cannot be revived must not be left hanging")
 }
@@ -98,7 +99,7 @@ func TestRecoverSourceKillsOnlyWhatCannotBeRevived(t *testing.T) {
 func TestReviveSourceWithoutGPUsLeavesTheTreeRunning(t *testing.T) {
 	w, kills, revived := recoveryController(errors.New("must not be called"))
 
-	reason, ok := w.reviveSource(context.Background(), logr.Discard(), os.Getpid(), nil)
+	reason, ok := w.reviveSource(context.Background(), logr.Discard(), os.Getpid(), executor.SuspendedSource{})
 
 	require.True(t, ok, "a released CPU-only tree needs no revival: %s", reason)
 	assert.Empty(t, *revived)
@@ -112,8 +113,21 @@ func TestRecoverSourceSurvivesACancelledCapture(t *testing.T) {
 	captureCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	w.recoverSourceAfterFailedDump(captureCtx, logr.Discard(), os.Getpid(), []int{4242})
+	w.recoverSourceAfterFailedDump(captureCtx, logr.Discard(), os.Getpid(), executor.SuspendedSource{GPUPIDs: []int{4242}})
 
 	assert.Equal(t, []int{4242}, *revived, "a dead capture context must not skip the revival")
 	assert.Equal(t, 0, *kills)
+}
+
+// Preparing a multi-GPU capture removes the tree's shared mappings, and nothing
+// puts them back. Leaving such a tree running would leave it running broken, so
+// it is killed even though its GPU state could have been handed back.
+func TestReviveSourceRefusesATreeWhoseMappingsWereRemoved(t *testing.T) {
+	w, kills, revived := recoveryController(nil)
+
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(),
+		executor.SuspendedSource{GPUPIDs: []int{4242}, CuInterposePrepared: true})
+
+	assert.Equal(t, 1, *kills, "a tree with removed mappings must not be left running")
+	assert.Empty(t, *revived, "reviving its GPUs would only make it look healthy")
 }

@@ -624,8 +624,8 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	}
 	artifact, err := executor.Checkpoint(ctx, w.runtime, log, req, w.config)
 	if err != nil {
-		if gpuPIDs, needsRecovery := executor.SuspendedGPUProcesses(err); needsRecovery {
-			w.recoverSourceAfterFailedDump(ctx, log, params.ContainerPID, gpuPIDs)
+		if suspended, needsRecovery := executor.SuspendedSourceOf(err); needsRecovery {
+			w.recoverSourceAfterFailedDump(ctx, log, params.ContainerPID, suspended)
 		}
 		return nil, fmt.Errorf("checkpoint: %w", err)
 	}
