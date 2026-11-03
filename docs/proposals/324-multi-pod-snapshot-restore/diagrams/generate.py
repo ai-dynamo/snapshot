@@ -302,8 +302,8 @@ CHECKPOINT = (
      ("C", "Coordinator", "session", "p"), ("L", "Leader", "lowest relay rank", "t"),
      ("R", "Relays", "other ranks", "t"), ("W", "Workload", "processes, shims", "g")],
     [
-        ("m", "O", "A", "member PodSnapshotContent, owned through its PodSnapshot by the set"),
-        ("s", "A", "read rank, size, and UID from the parent PodSetSnapshot"),
+        ("m", "O", "A", "member PodSnapshotContent, owned through its PodSnapshot by the group"),
+        ("s", "A", "read rank, size, and UID from the parent PodGroupSnapshot"),
         ("s", "W", "quiesce: no new work on shared memory, communicators, or peers; until CUDA Checkpoint drives NCCL, "
                    "the app also calls NCCL Checkpoint's prepare"),
         ("m", "W", "A", "ready-for-snapshot (readiness probe)"),
@@ -360,7 +360,7 @@ CHECKPOINT = (
         ("m", "A", "W", "CRIU dump: locks the Pod's network at the freeze, member table in the manifest, the source ends"),
         ("m", "A", "O", "member Captured on its PodSnapshotContent"),
         ("m", "A", "C", "Leave(captured)"),
-        ("s", "O", "every member Captured: PodSetSnapshot Ready"),
+        ("s", "O", "every member Captured: PodGroupSnapshot Ready"),
         ("x",),
     ],
 )
@@ -371,7 +371,7 @@ RESTORE = (
      ("L", "Leader", "lowest relay rank", "t"), ("R", "Relays", "other ranks", "t"),
      ("W", "Workload", "restored", "g")],
     [
-        ("m", "O", "A", "restore Pods with restore-set, PodSetRestore mapping member IDs to Pods"),
+        ("m", "O", "A", "restore Pods with restore-group, PodGroupRestore mapping member IDs to Pods"),
         ("s", "A", "preflight: artifact, compatibility, GPU map, probe budget"),
         ("m", "A", "C", "connect for (session UID, member ID) with a Pod-bound token"),
         ("m", "C", "A", "read meta {members, ranks, deadline, epoch}", 1),
@@ -489,8 +489,8 @@ FAILURES = (
 
 def architecture():
     b = []
-    b += box(40, 40, 180, 56, "g", "Kubernetes API", "PodSet CRDs, status")
-    b += box(245, 40, 180, 56, "g", "Snapshot operator", "set controllers")
+    b += box(40, 40, 180, 56, "g", "Kubernetes API", "PodGroup CRDs, status")
+    b += box(245, 40, 180, 56, "g", "Snapshot operator", "group controllers")
     b += box(450, 40, 190, 56, "p", "Snapshot coordinator", "sessions in embedded NATS")
     b.append(line(223, 68, 242, 68, both=True))
     for x, label in ((40, "Node A"), (350, "Node B")):

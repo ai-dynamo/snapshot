@@ -41,10 +41,10 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <rect class="bg" x="0.5" y="0.5" width="679" height="579" rx="10"/>
 <rect class="k-g" x="40.0" y="40.0" width="180.0" height="56.0" rx="8" stroke-width="0.8"/>
 <text x="130.0" y="59.0" class="k-g-t" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Kubernetes API</text>
-<text x="130.0" y="78.0" class="k-g-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">PodSet CRDs, status</text>
+<text x="130.0" y="78.0" class="k-g-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">PodGroup CRDs, status</text>
 <rect class="k-g" x="245.0" y="40.0" width="180.0" height="56.0" rx="8" stroke-width="0.8"/>
 <text x="335.0" y="59.0" class="k-g-t" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Snapshot operator</text>
-<text x="335.0" y="78.0" class="k-g-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">set controllers</text>
+<text x="335.0" y="78.0" class="k-g-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">group controllers</text>
 <rect class="k-p" x="450.0" y="40.0" width="190.0" height="56.0" rx="8" stroke-width="0.8"/>
 <text x="545.0" y="59.0" class="k-p-t" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Snapshot coordinator</text>
 <text x="545.0" y="78.0" class="k-p-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">sessions in embedded NATS</text>

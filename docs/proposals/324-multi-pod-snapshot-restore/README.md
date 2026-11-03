@@ -48,16 +48,16 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Summary
 
-Distributed inference and training workloads often run as a set of Pods whose
+Distributed inference and training workloads often run as a group of Pods whose
 processes depend on one another: they hold communicators that span the Pods,
 keep long-lived control-plane connections between them, and, on GPU fabrics
 that span nodes, may even share GPU memory across nodes. Because Snapshot
 checkpoints and restores each Pod in isolation, none of this cross-Pod state
-survives today. This SNEP introduces `PodSetSnapshot` and `PodSetRestore`, which
-let a user checkpoint such a set as one unit and restore it on the same or
+survives today. This SNEP introduces `PodGroupSnapshot` and `PodGroupRestore`, which
+let a user checkpoint such a group as one unit and restore it on the same or
 different nodes, with members that keep their identity and rank, an admission
 step that refuses unsafe attempts before anything irreversible happens, and a
-single outcome for the whole set. A short-lived coordination session, hosted by
+single outcome for the whole group. A short-lived coordination session, hosted by
 a new Snapshot coordinator and reachable only through each node's agent,
 synchronizes the members of every attempt and serves as the restore-time
 rendezvous for cuInterpose and for communication libraries such as NCCL, so that
@@ -81,7 +81,7 @@ allocations and multicast teams escape
 [SNEP-295](https://github.com/ai-dynamo/snapshot/issues/295)'s cuInterpose,
 whose coordinator only sees the processes of one Pod. Even where each Pod could
 be handled on its own, a snapshot in which one member succeeded and another
-failed cannot be restored, so the set also needs a single outcome.
+failed cannot be restored, so the group also needs a single outcome.
 
 All of these gaps reduce to one missing capability, namely a place where the
 members of a checkpoint or restore attempt can find each other, exchange small
@@ -96,10 +96,10 @@ models, by a single session that follows the attempt it serves.
 
 ### Goals
 
-- Capture a set of Pods and restore it on the same or different nodes as one
+- Capture a group of Pods and restore it on the same or different nodes as one
   unit, with members that keep their identity and rank from checkpoint to
   restore and one outcome per attempt.
-- Refuse an attempt before any irreversible step whenever the set cannot be
+- Refuse an attempt before any irreversible step whenever the group cannot be
   captured or restored safely, so that a refusal leaves every workload as
   Snapshot found it.
 - Provide one coordination session per attempt that Snapshot's agents,
@@ -109,9 +109,11 @@ models, by a single session that follows the attempt it serves.
 - Preserve GPU memory that processes share across Pods, through cuInterpose,
   wherever the platform supports cross-node sharing, without moving allocation
   bytes between nodes, while letting members that share no GPU memory, such as
-  CPU-only control-plane Pods, take part in the same set.
-- Preserve TCP connections between members of the set across relocation.
+  CPU-only control-plane Pods, take part in the same group.
+- Preserve TCP connections between members of the group across relocation.
 - Tolerate agent restarts without ever replaying CRIU into a restored container.
+- Configure each member as a standalone `PodSnapshot` is configured, so that
+  members with different parts in the workload keep their own signals.
 - Keep single-Pod checkpoint and restore, and the existing resources, unchanged.
 
 ### Non-Goals
@@ -121,23 +123,24 @@ models, by a single session that follows the attempt it serves.
   operator together with a gang scheduler, places the Pods, and Snapshot only
   verifies that the placement can work.
 - Rolling back after the point of no return, retrying a failed member in place,
-  or changing the size of a set between checkpoint and restore.
+  or changing the size of a group between checkpoint and restore.
 - Keeping an attempt alive across a coordinator restart in alpha, which this
   SNEP treats as a failure of that attempt, although its protocol lets a later
   version do so without changing any client.
 - Assigning ranks or identities to library processes, which remains the
   libraries' concern, and judging application health, which remains the owner's.
 - Moving shared GPU memory between fabric domains, and preserving connections
-  to peers outside the set, which are reset as they are today.
+  to peers outside the group, which are reset as they are today.
 
 ## Proposal
 
 A workload owner checkpoints a multi-Pod workload by listing its Pods in a
-`PodSetSnapshot`, giving each one a member ID, and restores it by creating
+`PodGroupSnapshot`, giving each one a member ID and, if it needs them, the
+settings of its `PodSnapshot`, and restores it by creating
 restore Pods, as it already does for a single Pod, together with a
-`PodSetRestore` that maps each member ID to one of them. Snapshot does the rest:
-the operator expands the set into per-member work that reuses the existing
-per-Pod pipeline, the agents carry that work out in lockstep, and the set
+`PodGroupRestore` that maps each member ID to one of them. Snapshot does the rest:
+the operator expands the group into per-member work that reuses the existing
+per-Pod pipeline, the agents carry that work out in lockstep, and the group
 resource reports progress per member and one outcome for the attempt.
 
 Every attempt moves through the same stages, and those stages define what a user
@@ -159,12 +162,12 @@ is healthy, so owners keep gating traffic on their own readiness checks.
 
 The boundaries are equally explicit. Snapshot's workload contract does not
 change, since a workload still reports `ready-for-snapshot` once quiescent and
-stays parked until `restore-complete`, although for a set that second rule
+stays parked until `restore-complete`, although for a group that second rule
 becomes load-bearing: it is what keeps a restored member from acting before its
 peers are reconstructed, so a workload that cannot honor it is not supported,
 and [Workload contract](#workload-contract) defines which threads it covers.
-The owner must not delete or replace a source until the set's capture has
-ended, Ready or Failed, and set restore Pods must carry the existing restore startup probe. Placement stays
+The owner must not delete or replace a source until the group's capture has
+ended, Ready or Failed, and group restore Pods must carry the existing restore startup probe. Placement stays
 with the owner, but Snapshot refuses a restore that cannot work, for example one
 whose members share GPU memory across nodes but were placed in different fabric
 domains, because such a restore would otherwise fail only after its destructive
@@ -179,9 +182,9 @@ coordinator, so existing users are unaffected.
 A platform team serves a model with an inference engine at tensor parallelism 8
 across two Pods with four GPUs each, on nodes connected by a multi-node NVLink
 fabric. To scale out without repeating model loading and warm-up, the serving
-platform's operator checkpoints a warmed-up pair of workers once with a `PodSetSnapshot`, and for
+platform's operator checkpoints a warmed-up pair of workers once with a `PodGroupSnapshot`, and for
 every new replica it creates two restore Pods on other nodes of the same fabric
-together with a `PodSetRestore`. The restored workers resume with their shared
+together with a `PodGroupRestore`. The restored workers resume with their shared
 GPU buffers at the same virtual addresses, NCCL rebuilds its communicators
 through the session, and the MPI connections between the two Pods continue on
 the new IPs, so the replica serves its first request without initialization.
@@ -200,8 +203,8 @@ Redis-compatible server.
 
 | Risk or limitation | Mitigation or decision |
 | --- | --- |
-| Every restore keeps the original set size and GPU count per member, and a set whose members share GPU memory across nodes must restore within one fabric domain. | The owner places the Pods, and admission verifies these constraints before CRIU runs, so a misplaced restore is refused without side effects. |
-| Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member that has started. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, every member records when it started, and member results report partial outcomes truthfully, so the owner can retire the set and retry with a new attempt. |
+| Every restore keeps the original group size and GPU count per member, and a group whose members share GPU memory across nodes must restore within one fabric domain. | The owner places the Pods, and admission verifies these constraints before CRIU runs, so a misplaced restore is refused without side effects. |
+| Capture is not atomic: each source ends at its own dump, and a failure after the commit terminates every member that has started. Release is not atomic either, since a member can fail before its release while its peers are already released. | Admission catches every condition that can be checked without side effects, every member records when it started, and member results report partial outcomes truthfully, so the owner can retire the group and retry with a new attempt. |
 | Snapshot does not freeze restored processes until release, because CUDA, cuInterpose, and library threads do the reconstruction inside them, so an application thread that runs early could observe a half-rebuilt state. | Release relies on the existing workload contract, which this SNEP extends to every thread that could touch shared memory, communicators, or preserved connections; workloads launched through a wrapper that gates on the contract's signals satisfy it, and an enforced hold is left to future work. |
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
 | CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
@@ -223,9 +226,9 @@ Redis-compatible server.
 
 The architecture separates three kinds of state because their lifetimes and
 failure modes differ. Durable intent and outcome live in the Kubernetes API,
-where the operator owns the set resources and each agent reports on the members
+where the operator owns the group resources and each agent reports on the members
 it hosts, so status survives any process restart. Coordination state lives only
-for one attempt and only in the coordinator's memory: a session is a small set
+for one attempt and only in the coordinator's memory: a session is a small group
 of in-memory key-value buckets in a NATS server that the coordinator embeds,
 through which members synchronize, and it disappears with the attempt, which
 keeps fabric handles and bootstrap identifiers out of etcd and gives every
@@ -256,8 +259,8 @@ coordinator stays small, and new participants integrate without changing it.
 
 | Component | Runs as | Responsibility |
 | --- | --- | --- |
-| Set controllers | Snapshot operator | Validate sets, pin identities, create member `PodSnapshot`s, enforce the deadline, and aggregate member results into one outcome. |
-| Snapshot coordinator | Deployment with one active replica, elected through a Lease, and a standby | Embed a NATS server with in-memory JetStream, create one set of buckets per attempt, authenticate every connection and scope it to its attempt, enforce the deadline and the grace period, and fail every member when one fails. |
+| Group controllers | Snapshot operator | Validate groups, pin identities, create member `PodSnapshot`s, enforce the deadline, and aggregate member results into one outcome. |
+| Snapshot coordinator | Deployment with one active replica, elected through a Lease, and a standby | Embed a NATS server with in-memory JetStream, create two buckets per attempt, authenticate every connection and scope it to its attempt, enforce the deadline and the grace period, and fail every member when one fails. |
 | Group executor | Snapshot agent | Run each member's capture or restore as session phases around the existing CUDA and CRIU steps, and record its intent before destructive work. |
 | Session proxy | Snapshot agent | Hold one NATS connection per hosted member, serve the relay's socket and the Pod's endpoint, and confine each to its namespace. |
 | cuInterpose relay | Short-lived process in each Pod that uses cuInterpose | Fan commands out to the Pod's processes as in SNEP-295 and, in the lowest rank that runs one, also lead the group. |
@@ -266,9 +269,9 @@ coordinator stays small, and new participants integrate without changing it.
 ### The coordination session
 
 A session corresponds to exactly one attempt, that is, one capture of a
-`PodSetSnapshot` or one `PodSetRestore`, and it is identified by that resource's
+`PodGroupSnapshot` or one `PodGroupRestore`, and it is identified by that resource's
 UID, because each resource is exactly one attempt. The coordinator follows the
-set resources through a read-only watch and creates the session of every
+group resources through a read-only watch and creates the session of every
 unfinished attempt, so sessions need no creation API and the resource remains
 the single source of truth; when the attempt has ended and its resource is final
 or deleted, the coordinator removes the session and all of its keys.
@@ -312,7 +315,7 @@ the only component that knows which local client sent a request, while the
 coordinator confines every connection to its own attempt's buckets
 ([Security](#security)). Every member takes part in the agents' barriers,
 including members that run no relay, and an agent that hosts several members of
-the same set connects once per member and drives them concurrently, because
+the same group connects once per member and drives them concurrently, because
 handling them one after the other would deadlock the first barrier.
 
 ![Coordination session and member records](diagrams/session-lifecycle.svg)
@@ -402,16 +405,24 @@ command to the replies it collects.
 ### Workload contract
 
 Snapshot and the workload hand control to each other at exactly two points, and
-a set depends on every member honoring both, because the work between them is
+a group depends on every member honoring both, because the work between them is
 collective. The handshake is the one that single-Pod Snapshot already uses, so a
-set asks for no new application signal; what it changes is how much of the
+group asks for no new application signal; what it changes is how much of the
 restore happens while the workload waits, and therefore how strictly waiting
 must be read.
 
-| Signal | Written by | What it promises for a set |
+| Signal | Written by | What it promises for a group |
 | --- | --- | --- |
 | `ready-for-snapshot` | The workload, through its readiness probe | The member has drained its GPU work and starts no new work on memory shared across Pods, on communicators, or on connections to peers. Until CUDA Checkpoint's library interface drives NCCL, the application must also have called NCCL Checkpoint's prepare itself. Capture admission waits for this signal from every member. |
 | `restore-complete` | The agent, after the `release` barrier | Every member is reconstructed: shared GPU memory is back at its original addresses, preserved connections are open on the new IPs, and libraries that restore in CUDA's resume phase have reconnected. The file names the attempt. |
+
+A member's settings ([API](#api)) can also carry either signal through
+[SNEP-411](https://github.com/ai-dynamo/snapshot/issues/411)'s application
+contracts: a `checkpointReadinessProbe` reports what
+`ready-for-snapshot` reports, and a `lifecycle.postRestore` notification
+follows `restore-complete`. Both keep their place relative to the barriers, so
+each promise above holds whichever signals a member uses, and the members of
+one group may use different ones.
 
 Between CRIU restore and `restore-complete`, a restored member passes through two
 windows that differ in what its threads may do.
@@ -421,7 +432,7 @@ windows that differ in what its threads may do.
 | From CRIU restore to CUDA unlock | Locked, so a CUDA call blocks until the unlock | Restores and unlocks CUDA inside the Pod without any coordination, exactly as for a single Pod | Nothing; a thread that calls CUDA simply blocks |
 | From CUDA unlock to release | Usable | Rebuilds shared memory through the cuInterpose rounds, lifts the TCP hold, and runs CUDA's resume phase, in which libraries reconnect | Wait: no access to memory shared across Pods, no use of a communicator, and no traffic on a preserved connection |
 
-The second window is the one that a set lengthens, since it now spans cross-node
+The second window is the one that a group lengthens, since it now spans cross-node
 rounds and two barriers, and it is also the one in which a running thread could
 observe a half-rebuilt state, such as an imported allocation that does not yet
 map its creator's memory or a communicator whose peers are still reconnecting.
@@ -432,23 +443,24 @@ does not drive yet, such as NCCL until CUDA Checkpoint's library interface
 ships, restores only when the application calls it, so the application calls
 NCCL Checkpoint's restore after release and before it uses any communicator.
 Snapshot cannot verify any of this from outside
-the process, so the SNEP makes it a requirement of set membership: integrations
+the process, so the SNEP makes it a requirement of group membership: integrations
 that launch the workload through a wrapper gating on both signals, as some
-serving platforms already do, satisfy it without application changes, while an explicit
-application interface for both transitions and an enforced hold remain open in
-[Appendix A](#a-open-questions). Figures 5 and 6 show both signals and the
+serving platforms already do, satisfy it without application changes, an
+application can receive both signals directly through SNEP-411's contracts,
+and an enforced hold remains open in [Appendix A](#a-open-questions). Figures 5 and 6 show both signals and the
 waiting period on the workload's lifeline.
 
 ### Group checkpoint
 
 Capture starts once the operator has created a member `PodSnapshot` for every
-Pod in the set, each owned by the set and labeled with its member ID, so that
+Pod in the group, each owned by the group and labeled with its member ID, so that
 the agent receiving the member's `PodSnapshotContent` follows the owner
-reference to the `PodSetSnapshot` and reads the member's rank, the set's size,
-and the set's UID, which names the session, without any change to the existing
+reference to the `PodGroupSnapshot` and reads the member's rank, the group's size,
+and the group's UID, which names the session, without any change to the existing
 resources. Each agent
-waits until its workload reports `ready-for-snapshot`, connects to the session,
-and contributes its Pod IP, its fabric domain when the Pod shares GPU memory
+waits until its member is safe to capture, which the member's settings define
+as for any `PodSnapshot`: `ready-for-snapshot` by default, or the member's own
+`checkpointReadinessProbe`. It then connects to the session and contributes its Pod IP, its fabric domain when the Pod shares GPU memory
 across nodes, its component versions, and whether the Pod has opted into
 cuInterpose as SNEP-295 defines, to the admission exchange, while the
 relays run a first round that inspects every process and gathers the records to
@@ -463,7 +475,7 @@ with every source as Snapshot found it.
 Once the attempt commits, each agent sets the `Started` condition on its
 member's `PodSnapshotContent`, which is the object it already reconciles and the
 only one whose status it may write, so the record needs no new permission and
-the operator copies it to the set as it already copies Ready and Failed to the
+the operator copies it to the group as it already copies Ready and Failed to the
 `PodSnapshot`. Each agent then, where CUDA Checkpoint supports it, invokes its
 prepare phase on every CUDA process of every Pod at once, so that communication
 libraries tear down their connections while CUDA is still usable and while their
@@ -479,7 +491,7 @@ barrier guarantees that no member's network is frozen while a peer still has a
 step that needs it; after the barrier, each member locks and dumps at its own
 pace, and dumps that finish at different times reset no other member's sockets,
 as [Cross-Pod TCP connections](#cross-pod-tcp-connections) explains. Every
-artifact records the capture ID, which is the `PodSetSnapshot`'s UID, its own member ID, and the ordered table of all
+artifact records the capture ID, which is the `PodGroupSnapshot`'s UID, its own member ID, and the ordered table of all
 members with their Pod UIDs, containers, and Pod IPs, which is what a restore
 later uses to check that all members come from the same capture and to build
 the IP map.
@@ -488,12 +500,12 @@ the IP map.
 
 *Figure 5. Group checkpoint. Each shaded band is a round as in Figure 3, with every relay message passing through its agent.*
 
-The operator marks the `PodSetSnapshot` Ready only when every member is
+The operator marks the `PodGroupSnapshot` Ready only when every member is
 Captured, and otherwise records which member failed and why, together with each
 member's `startedAt`, copied from its `Started` condition. A member with that
 time has lost its source, since every source that started ends at its own dump
 or is terminated by the failure, whereas a member without it was never touched
-by Snapshot, and the set reports `Refused` only when no member started. Ready also describes
+by Snapshot, and the group reports `Refused` only when no member started. Ready also describes
 availability rather than history: if a member's content later disappears, the
 operator withdraws Ready with `ArtifactUnavailable` and refuses new restores,
 without ever recapturing.
@@ -501,17 +513,17 @@ without ever recapturing.
 ### Group restore
 
 Restore starts from Pods that the owner has already placed. Each restore Pod
-carries `nvidia.com/restore-set`, which tells the NRI plugin and the agent to
-take the container mapping from the `PodSetRestore` and to wait for the set
+carries `nvidia.com/restore-group`, which tells the NRI plugin and the agent to
+take the container mapping from the `PodGroupRestore` and to wait for the group
 rather than restore the Pod on its own. The annotation is the Pod's side of the
 binding, and it wins: a target is admitted only if its annotation names this
-`PodSetRestore`, and it fails with `TargetInUse` if the annotation names another
+`PodGroupRestore`, and it fails with `TargetInUse` if the annotation names another
 unfinished attempt or if another unfinished attempt has already pinned the
 Pod's UID, so a Pod can be the target of only one unfinished attempt. A target
-whose annotation names a `PodSetRestore` that has finished or no longer exists
+whose annotation names a `PodGroupRestore` that has finished or no longer exists
 is not in use but not bound to this attempt either, so it is refused with
 `Refused`. Because a refusal leaves a Pod as Snapshot found it, the owner reuses the Pod for a new
-attempt by pointing its annotation at the new `PodSetRestore`. Admission again
+attempt by pointing its annotation at the new `PodGroupRestore`. Admission again
 comes first and again changes nothing: each
 agent resolves its member's artifact, runs the existing compatibility checks,
 verifies that the restore Pod's remaining startup-probe time covers the
@@ -545,12 +557,17 @@ reconnect on top of memory that is already back at its original addresses.
 
 A final `release` barrier guarantees that no workload resumes before every
 member has been reconstructed, after which each agent writes `restore-complete`
-with the `PodSetRestore`'s UID as an `attempt` key next to the existing `pid`
+with the `PodGroupRestore`'s UID as an `attempt` key next to the existing `pid`
 key. That file is both the
 release point and the proof of release that a restarted agent checks first, and
 since each agent writes its own, a member can still fail before its release
-while its peers are already released, in which case the set reports both
-results as they are.
+while its peers are already released, in which case the group reports both
+results as they are. A member whose settings define a `lifecycle.postRestore`
+notification then receives it as a single Pod does: its agent retries it until
+the deadline, and the member becomes Released only once it succeeds. The
+notification needs no session, so once `restore-complete` exists the attempt's
+outcome no longer affects the member, and only its own notification can still
+fail it.
 
 ![Group restore up to release](diagrams/restore.svg)
 
@@ -586,7 +603,7 @@ the leader knows itself and its gathers wait only for those ranks. Ranks are
 fixed and a restore takes the flag from the capture's artifacts, so the same
 member leads at capture and at restore, and when no member uses cuInterpose,
 there are no relays and no rounds, and the `admitted` barrier waits for no
-leader's verdict. A Pod that is not part of a set keeps today's behavior and
+leader's verdict. A Pod that is not part of a group keeps today's behavior and
 never opens a session.
 
 Each phase then runs as a round of Figure 3 through one generic envelope: the
@@ -658,7 +675,7 @@ rebuilt before the workload resumes.
 
 ### Cross-Pod TCP connections
 
-Connections between members of a set must survive relocation, because control
+Connections between members of a group must survive relocation, because control
 planes such as MPI cache their peers' addresses and cannot reconnect, yet today
 they come back closed for three independent reasons. The restore-image rewriter
 disconnects every established socket whose peer lives in another image, the
@@ -666,7 +683,7 @@ address remap rewrites only the Pod's own IP, and once CRIU releases a socket
 from repair mode, the kernel may send probes or data that a peer Pod, whose
 sockets do not exist yet, answers with a reset.
 
-The set closes all three gaps with information that admission already provides.
+The group closes all three gaps with information that admission already provides.
 The agent passes CRIU's address-rewrite hook the mapping from every member's old
 IP to its new one, together with the peers whose connections must be kept
 exactly as dumped rather than disconnected. Before CRIU runs, the agent drops,
@@ -689,7 +706,7 @@ its own pace, and because a dumped member's lock stays in place while its Pod
 exists, its peers' packets are dropped rather than answered with a reset,
 whichever member finishes first. The one case the lock cannot cover is a source
 Pod that is deleted, and whose IP a new Pod reuses and then resets a peer that
-has not dumped yet, which owners rule out by keeping sources until the set's
+has not dumped yet, which owners rule out by keeping sources until the group's
 capture has ended.
 
 CRIU's lock covers all of a member's IP traffic from its freeze onwards, but
@@ -709,9 +726,9 @@ restored, and a long interruption can still break a preserved connection
 hold as late and lifting it as early as possible shortens that window but does
 not remove it, which is why qualification measures the whole interruption,
 including staggered dumps, and documents the supported limits. Connections
-through Service virtual IPs and to peers outside the set are still reset, and
+through Service virtual IPs and to peers outside the group are still reset, and
 the mechanism is limited to IPv4 and to the 256 address mappings that the CRIU
-plugin holds, which is also why a set has at most 256 members.
+plugin holds, which is also why a group has at most 256 members.
 
 ### Failure handling and recovery
 
@@ -734,7 +751,7 @@ either window of the [workload contract](#workload-contract).
 | Agent connection broken while the agent and the coordinator keep running | The agent reconnects within a grace period, resumes its waits, and sends again what it had not seen answered, and the attempt continues | Same | Same |
 | Agent connection not restored within the grace period, agent restart, or coordinator restart | Left as found | Fails with `MemberFailed` or `CoordinatorLost` | Keeps running; the rendezvous ends |
 | Deadline expires | Left as found; the attempt ends with `DeadlineExceeded` | Fails with `DeadlineExceeded` | Keeps running; the session closes |
-| Set resource deleted | If no member has a record, the attempt ends with `Cancelled` | Otherwise a finalizer waits for the attempt to end | The session closes |
+| Group resource deleted | If no member has a record, the attempt ends with `Cancelled` | Otherwise a finalizer waits for the attempt to end | The session closes |
 
 ![Failure paths](diagrams/failure-paths.svg)
 
@@ -751,7 +768,8 @@ communicate, which the `Refused` message states.
 Restore is not idempotent, so an agent that restarts during a restore relies on
 two durable facts rather than on its memory. It first looks for
 `restore-complete` with the attempt's ID: if the file exists, the member was
-released and stays Released, whatever happens to the attempt afterwards. If it
+released and keeps running, whatever happens to the attempt afterwards, and the
+agent at most finishes its `lifecycle.postRestore` notification. If it
 does not exist, the record decides: a restore Pod with the
 `nvidia.com/RestoreStarted` condition may already have been through CRIU, so the
 agent never starts it again and fails the member, which fails the attempt. The
@@ -852,13 +870,13 @@ best-effort ownership, and losing leadership must stop the client listener and
 close existing connections. Epoch checks detect a recreated session; they do
 not fence an earlier instance. The contract extends by version and by
 namespace: bucket names and the key layout carry a version, agents advertise
-the set protocol versions they support, which the set controllers check before
+the group protocol versions they support, which the group controllers check before
 creating any member work, and a new kind of participant receives a namespace of
 its own.
 
 ### Deadlines
 
-Each set resource carries a single `deadlineSeconds`, counted from its creation,
+Each group resource carries a single `deadlineSeconds`, counted from its creation,
 which bounds the whole attempt; the coordinator fails the session and the
 operator fails the resource when it expires, while finished captures and
 released members are unaffected.
@@ -877,7 +895,7 @@ types as usual, and changes no existing resource schema.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
-kind: PodSetSnapshot
+kind: PodGroupSnapshot
 metadata:
   name: llm-tp8
   namespace: serving
@@ -887,7 +905,12 @@ spec:                                   # immutable
   - id: worker-0
     source:                             # PodSnapshotSource, unchanged; the UID is required here
       podRef: {name: llm-worker-0, uid: <uid>, containers: [main]}
-  - id: worker-1
+    podSnapshotTemplate:                # optional settings for this member's PodSnapshot
+      containers:                       # SNEP-411's ContainerSnapshotConfig
+      - name: main
+        checkpointReadinessProbe: {httpGet: {path: /ready, port: 8000}}
+        lifecycle: {postRestore: {httpPost: {path: /resume, port: 8000}}}
+  - id: worker-1                        # no template: default settings
     source:
       podRef: {name: llm-worker-1, uid: <uid>, containers: [main]}
 status:                                 # the resource UID names the coordination session
@@ -897,7 +920,7 @@ status:                                 # the resource UID names the coordinatio
   conditions: []                        # Admitted, Ready, Failed
 ---
 apiVersion: nvidia.com/v1alpha1
-kind: PodSetRestore
+kind: PodGroupRestore
 metadata:
   name: llm-tp8-r1
   namespace: serving
@@ -935,18 +958,18 @@ the same name, as a standalone restore does. A
 single deadline bounds each attempt, and the limit of 256 members is the
 capacity of the address-remap plugin rather than a qualified scale.
 
-The `PodSetSnapshot` controller creates one owned `PodSnapshot` per member, so
-artifacts, storage, and cleanup reuse the per-Pod pipeline, and deleting the set
+The `PodGroupSnapshot` controller creates one owned `PodSnapshot` per member, so
+artifacts, storage, and cleanup reuse the per-Pod pipeline, and deleting the group
 deletes its members, but not under a restore that reads them: a finalizer keeps
-the `PodSetSnapshot` and its members while any unfinished `PodSetRestore`
+the `PodGroupSnapshot` and its members while any unfinished `PodGroupRestore`
 references its UID, and once its deletion has started, new restores of it are
-refused. A `PodSetSnapshot` can be restored many times, and each
-`PodSetRestore` is one attempt with its own session, so every restore starts
+refused. A `PodGroupSnapshot` can be restored many times, and each
+`PodGroupRestore` is one attempt with its own session, so every restore starts
 from an empty rendezvous store. Agents keep reporting where they
 report today, on each member's `PodSnapshotContent` and on each restore Pod's
 `nvidia.com/Restored` condition, which keeps its public reasons so that
-`ClassifyRestoreOutcome` reads a set restore exactly like a single one, and the
-operator alone aggregates those results into the set's status. Member phases
+`ClassifyRestoreOutcome` reads a group restore exactly like a single one, and the
+operator alone aggregates those results into the group's status. Member phases
 progress through `Pending`, `Admitted`, `Capturing`, and `Captured` during
 capture, and through `Pending`, `Admitted`, `Restoring`, and `Released` during
 restore, with `Failed` and a reason otherwise; a restore is Ready only when every
@@ -954,18 +977,38 @@ member is Released. Each member's write-once `startedAt` is the
 `lastTransitionTime` of its agent's record, the `Started` condition at capture or
 the `nvidia.com/RestoreStarted` condition at restore, both of which are set once
 and never removed, so the operator cannot miss them however fast a member fails
-afterwards. It tells the owner which workloads Snapshot changed, and the set
+afterwards. It tells the owner which workloads Snapshot changed, and the group
 reports `Refused` only when no member has it.
+
+Members need not be configured alike. Each member may carry a
+`podSnapshotTemplate` with the settings that its `PodSnapshot` receives: labels
+and annotations, and SNEP-411's container settings, which say when the member is
+safe to capture and how its application learns that it may resume. A head that
+serves HTTP and workers that only use control-volume files can thus each keep
+their own signals, and a member without a template gets the defaults of a
+`PodSnapshot` without settings. Capture copies the container settings into the
+member's `PodSnapshotContent`, as for any `PodSnapshot`, so every restore uses
+them and a `PodGroupRestore` carries none. The controller sets everything else
+on the member's `PodSnapshot`: its name, owner reference, and group labels, its
+source from the member, and a `checkpointRetryLimit` of 0, since retrying a
+member in place is a non-goal. The template is therefore a type of its own
+rather than SnapshotJob's `PodSnapshotTemplate`, which also names the target
+containers and a retry limit, and a test fails whenever SNEP-411's settings
+gain a field, so that a new one, such as a hook before capture, reaches groups
+only once its place relative to the barriers is defined. Settings never change
+a member's rank or its part in the protocol, so cuInterpose's leader still
+follows rank, and settings shared by several members, such as named roles,
+remain a compatible addition.
 
 | Resource or contract | Change | Purpose |
 | --- | --- | --- |
-| `PodSnapshot` and `PodSnapshotContent` | No schema change; set-owned children carry an owner reference and a member-ID label, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent reads group parameters from the parent set, and the operator learns which sources Snapshot changed |
-| Artifact manifest | Adds an optional `podSet` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs, plus each process's rendezvous file path | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
-| Restore Pod contract | New annotation `nvidia.com/restore-set: <PodSetRestore>`, used instead of `restore-from` and `restore-container-map`, which decides the attempt a Pod belongs to; set targets must carry the restore startup probe, and the NRI plugin never runs the original command while the set context is missing | One source of truth, and no race with standalone restore |
-| `restore-complete` file | Adds an `attempt` key holding the `PodSetRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
-| Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before CRIU under a field manager of its own and never removed; `nvidia.com/Restored` keeps its public reasons and gains only `SetPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety and an exact `startedAt`, with `ClassifyRestoreOutcome` unchanged |
+| `PodSnapshot` and `PodSnapshotContent` | No schema change; group-owned children carry an owner reference and a member-ID label, take their settings from the member's template with no retry in place, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent reads group parameters from the parent group, each member keeps its own settings, and the operator learns which sources Snapshot changed |
+| Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs, plus each process's rendezvous file path | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
+| Restore Pod contract | New annotation `nvidia.com/restore-group: <PodGroupRestore>`, used instead of `restore-from` and `restore-container-map`, which decides the attempt a Pod belongs to; group targets must carry the restore startup probe, and the NRI plugin never runs the original command while the group context is missing | One source of truth, and no race with standalone restore |
+| `restore-complete` file | Adds an `attempt` key holding the `PodGroupRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
+| Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before CRIU under a field manager of its own and never removed; `nvidia.com/Restored` keeps its public reasons and gains only `GroupPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety and an exact `startedAt`, with `ClassifyRestoreOutcome` unchanged |
 | Control volume | Reserves `coordination/` for rendezvous endpoints | Gives every Pod a private and stable endpoint path |
-| Agent DaemonSet | The chart annotates the agent's Pod template with the set protocol versions it supports | Set controllers create member work only on nodes whose agent Pod is Ready and set-capable |
+| Agent DaemonSet | The chart annotates the agent's Pod template with the group protocol versions it supports | Group controllers create member work only on nodes whose agent Pod is Ready and group-capable |
 | `SnapshotJob` and single-Pod restore | Unchanged | Not applicable |
 
 [Appendix D](#d-api-definitions) gives the complete Go types with their
@@ -1030,27 +1073,27 @@ their loopback interface is shared with the node.
 ### Configuration
 
 Multi-Pod support is enabled the way Snapshot enables its other features: by
-installing the `PodSetSnapshot` and `PodSetRestore` CRDs and setting one chart
+installing the `PodGroupSnapshot` and `PodGroupRestore` CRDs and setting one chart
 value, off by default in alpha, that deploys the coordinator and turns on the
-set controllers. The chart gains the coordinator's TLS, resource, and replica
+group controllers. The chart gains the coordinator's TLS, resource, and replica
 settings, together with the limits of its embedded NATS server, namely total
 memory, maximum message size, the value limits of each session's buckets, and
 the key limit of its library bucket, while the agent gains a switch for the
 library endpoint. No NATS deployment is needed, since the server runs inside the
 coordinator, and a plain `PodSnapshot` needs no configuration change.
 
-Sets also need agents that understand them, because an older agent would treat
+Groups also need agents that understand them, because an older agent would treat
 a member's `PodSnapshotContent` as an ordinary capture and dump its source
 before group admission. Alpha therefore requires an upgraded agent on every
-node that a set uses, and enforces it. The chart annotates the agent DaemonSet's
-Pod template with the set protocol versions it supports, so every agent Pod
+node that a group uses, and enforces it. The chart annotates the agent DaemonSet's
+Pod template with the group protocol versions it supports, so every agent Pod
 created from it carries them, and before creating a member's work, or admitting
-a restore target, the set controllers check that the agent Pod on that member's
+a restore target, the group controllers check that the agent Pod on that member's
 node is Ready and lists a compatible version. Otherwise they keep the attempt
 pending, with a condition that names the node, until that agent is upgraded or
-the deadline expires. The check is scoped to the nodes a set uses, so an
-unavailable agent elsewhere, or a routine agent rollout, holds no other set.
-Downgrading the agents to a version without sets requires turning sets off
+the deadline expires. The check is scoped to the nodes a group uses, so an
+unavailable agent elsewhere, or a routine agent rollout, holds no other group.
+Downgrading the agents to a version without groups requires turning groups off
 first.
 
 ### Performance and Scalability
@@ -1070,11 +1113,11 @@ request per key per node, which comfortably supports at least 100
 concurrent library clients per session with per-operation latency well under 100
 milliseconds. Because sessions are independent, one coordinator replica serves
 many concurrent attempts and can later be sharded by attempt; alpha qualifies
-sets of 2 to 16 Pods, and larger sets are measured before beta.
+groups of 2 to 16 Pods, and larger groups are measured before beta.
 
 ### Monitoring
 
-`PodSetSnapshot` and `PodSetRestore` report `Admitted`, `Released`, `Ready`,
+`PodGroupSnapshot` and `PodGroupRestore` report `Admitted`, `Released`, `Ready`,
 and `Failed` conditions, with reasons that distinguish `Refused`,
 `DeadlineExceeded`, `GateBudgetTooShort`, `PodIPChanged`,
 `TargetInUse`, `ArtifactUnavailable`, `MemberFailed`, `CoordinatorLost`, and
@@ -1100,8 +1143,10 @@ and slow-consumer statistics.
   CUDA Checkpoint's resume phase.
 - The NATS server, with JetStream, embedded in the coordinator as a Go library,
   so no separate deployment is needed.
-- Optionally, [SNEP-411](https://github.com/ai-dynamo/snapshot/issues/411)
-  application contracts, for signals beyond control-volume files.
+- [SNEP-411](https://github.com/ai-dynamo/snapshot/issues/411)'s container
+  settings, which a member's template passes on to its `PodSnapshot`; groups
+  accept them exactly when a standalone `PodSnapshot` does, and members use the
+  control-volume signals meanwhile.
 
 ### Test Plan
 
@@ -1109,8 +1154,11 @@ Unit tests cover the session patterns against
 [Session semantics](#session-semantics), including waiting reads, members that
 arrive at a barrier twice or cancel their wait, abort fan-out, reconnection with
 resumed waits and resent patterns, namespace isolation, authentication by node,
-and permissions that refuse another attempt's buckets; the set
-controllers' validation, identity pinning, target binding and `TargetInUse`,
+and permissions that refuse another attempt's buckets; the group
+controllers' validation, including member templates that set a reserved label
+or name a container outside their source, the copy of each member's settings
+to its `PodSnapshot`, a check that fails when SNEP-411's settings gain a field,
+identity pinning, target binding and `TargetInUse`,
 aggregation, including a restore that fails before the operator ever sees it in
 progress, artifact withdrawal, cancellation, and the finalizer that keeps a
 snapshot while a restore reads it; the agents' phase sequencing, including concurrent members on one
@@ -1121,20 +1169,23 @@ of multi-rank topologies with teams that span Pods, importers resolved by
 handle, missing ranks, duplicated creators, and a leader other than rank 0.
 
 Integration tests extend the existing end-to-end suite on CPU-only nodes. A
-two-Pod set with TCP and ZeroMQ connections is captured and restored onto
-swapped nodes, the same set without the group IP map serves as a negative
-control, a member whose node runs an older or unready agent must keep the set
+two-Pod group with TCP and ZeroMQ connections is captured and restored onto
+swapped nodes, the same group without the group IP map serves as a negative
+control, a member whose node runs an older or unready agent must keep the group
 pending without creating member work, a refusal during admission and a short probe budget must leave both
 Pods as they were with no `startedAt`, and a failure injected after the commit
 must terminate every member that started,
 whereas a dropped agent connection that reconnects must not fail the attempt and a
-coordinator restart must fail it with `CoordinatorLost`. The
+coordinator restart must fail it with `CoordinatorLost`. Members with different
+settings, one using SNEP-411's HTTP probe and notification and the other the
+control-volume files, must each be captured only after their own signal and
+notified only after `release`. The
 same harness delays one member's dump and restore to measure how long preserved
 connections survive the hold. NCCL Checkpoint's Redis client exercises the
 library endpoint.
 
 End-to-end tests run on GPU nodes, including a multi-node NVLink system for
-cross-node sharing. They restore, in place and relocated, a two-node set that
+cross-node sharing. They restore, in place and relocated, a two-node group that
 uses shared GPU memory and a multicast team spanning both nodes; they restore
 TensorRT-LLM at tensor parallelism 8 across two Pods, using NCCL Checkpoint and
 MPI, onto other nodes and require identical outputs for fixed prompts; and they
@@ -1147,7 +1198,7 @@ process is left blocked.
 ### Graduation Criteria
 
 **Alpha** requires two-Pod capture and restore, both in place and relocated,
-for NCCL Checkpoint, in-set TCP connections, and GPU memory shared across nodes
+for NCCL Checkpoint, in-group TCP connections, and GPU memory shared across nodes
 including multicast, with admission refusals and fail-stop behavior tested;
 evidence that a restarted agent never replays CRIU and never kills a released
 member; measured limits for how long preserved connections survive a hold;
@@ -1190,8 +1241,8 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 | A Session custom resource, or Secrets that persist each session from alpha | It would let an attempt survive a coordinator restart, but every operation would become an API write, fabric handles and bootstrap identifiers would sit in etcd, and a takeover helps only if it beats the hold, probe, and library timeouts; because every session pattern is safe to repeat, replicating sessions stays open as a change to the coordinator alone. |
 | cuInterpose as a CUDA Checkpoint client | CUDA does not order callbacks across clients, whereas cuInterpose must rebuild memory before libraries run, and it needs lockstep rounds at checkpoint as well as at restore. |
 | Every member validates all cuInterpose records, with no leader | It treats every rank alike, but every member then receives every other member's records, up to 32 MiB each, and every coordinator must reach the same verdict; a single validator in the leader is simpler to reason about and already proven by the prototype. |
-| A commit operation, a committed session state, and a set-wide `committedAt` | They duplicate the per-member records that restart safety and truthful reporting need anyway, require a component to call the commit, which a set without cuInterpose lacks, and report one time for members that cross their point of no return at different moments; the `admitted` barrier and the per-member records give the same guarantee with one mechanism. |
-| Agents write member reports into the set's status | It gives one place to read, but it adds a status with many writers, whereas agents already report on `PodSnapshotContent` and the restore Pod and the operator can aggregate those. |
+| A commit operation, a committed session state, and a group-wide `committedAt` | They duplicate the per-member records that restart safety and truthful reporting need anyway, require a component to call the commit, which a group without cuInterpose lacks, and report one time for members that cross their point of no return at different moments; the `admitted` barrier and the per-member records give the same guarantee with one mechanism. |
+| Agents write member reports into the group's status | It gives one place to read, but it adds a status with many writers, whereas agents already report on `PodSnapshotContent` and the restore Pod and the operator can aggregate those. |
 | An "Unknown" member outcome for uncertain release | The attempt ID in `restore-complete` makes release provable, so uncertainty no longer needs its own outcome. |
 | Peer IP annotations on restore Pods, as prototyped | They require the owner to know old Pod IPs and add API polling to the critical path, whereas the member table in every artifact provides the same mapping at no cost. |
 
@@ -1204,18 +1255,17 @@ review that settles the open questions in [Appendix A](#a-open-questions).
    per-library results from the prepare and resume phases.
 2. **NCCL Checkpoint.** Would it accept a Unix-socket endpoint, and does every
    key receive exactly one `SET` per restore?
-3. **Execution hold.** Should applications acknowledge both transitions of the
-   [workload contract](#workload-contract) through an explicit interface, such
-   as SNEP-411's application contracts, and should a later version enforce the
-   hold before release, given that CUDA, cuInterpose, and library threads need
+3. **Execution hold.** Members can already signal both transitions of the
+   [workload contract](#workload-contract) through SNEP-411's application
+   contracts, but nothing enforces the wait between them. Should a later
+   version enforce the hold before release, given that CUDA, cuInterpose, and library threads need
    the restored processes running?
-4. **Source lifetime.** Beyond the owner keeping every source until the set's
+4. **Source lifetime.** Beyond the owner keeping every source until the group's
    capture has ended, must anything else of a source that has finished its dump
    survive while its peers are still capturing?
-5. **Naming.** Should the kinds be called `PodSet` or `PodGroup`?
-6. **Cross-namespace restore.** Would restoring a set into another namespace
-   justify a cluster-scoped, set-level content resource?
-7. **Availability.** Which evidence, such as the observed rate of
+5. **Cross-namespace restore.** Would restoring a group into another namespace
+   justify a cluster-scoped, group-level content resource?
+6. **Availability.** Which evidence, such as the observed rate of
    `CoordinatorLost` and the measured takeover time against the hold and probe
    budgets, would justify keeping attempts alive across a coordinator restart,
    by running the coordinator's embedded server as a small cluster with
@@ -1244,8 +1294,9 @@ that list followed by `python3 diagrams/generate.py`.
 ### D. API definitions
 
 The Go definitions below cover every new public type. They reuse
-`PodSnapshotSource` unchanged, so a set member is described exactly like a
-standalone capture, and their validation markers express the structural,
+`PodSnapshotSource`, SNEP-411's `ContainerSnapshotConfig`, and SnapshotJob's
+`PodSnapshotTemplateMetadata` unchanged, so a group member is described and
+configured exactly like a standalone capture, and their validation markers express the structural,
 immutability, and write-once rules that the API server enforces without a
 webhook. Cross-object and live checks, such as whether a target Pod exists or
 whether its startup probe has enough time left, stay with the controllers and
@@ -1259,37 +1310,37 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// Condition types. Released applies to PodSetRestore only.
+// Condition types. Released applies to PodGroupRestore only.
 const (
-	PodSetConditionAdmitted = "Admitted"
-	PodSetConditionReleased = "Released"
-	PodSetConditionReady    = "Ready"
-	PodSetConditionFailed   = "Failed"
+	PodGroupConditionAdmitted = "Admitted"
+	PodGroupConditionReleased = "Released"
+	PodGroupConditionReady    = "Ready"
+	PodGroupConditionFailed   = "Failed"
 )
 
-// PodSnapshotConditionStarted is set by the agent on a set member's
+// PodSnapshotConditionStarted is set by the agent on a group member's
 // PodSnapshotContent before the member's first irreversible step and is never
 // removed; it sits next to the existing Ready and Failed condition types.
 const PodSnapshotConditionStarted = "Started"
 
 // Reasons used on conditions and on member results. TargetInUse means that the
-// target's restore-set annotation names another unfinished PodSetRestore, or
+// target's restore-group annotation names another unfinished PodGroupRestore, or
 // that another one has already pinned the target's UID.
 const (
-	PodSetReasonRefused             = "Refused"
-	PodSetReasonDeadlineExceeded    = "DeadlineExceeded"
-	PodSetReasonGateBudgetTooShort  = "GateBudgetTooShort"
-	PodSetReasonPodIPChanged        = "PodIPChanged"
-	PodSetReasonTargetInUse         = "TargetInUse"
-	PodSetReasonArtifactUnavailable = "ArtifactUnavailable"
-	PodSetReasonMemberFailed        = "MemberFailed"
-	PodSetReasonCoordinatorLost     = "CoordinatorLost"
-	PodSetReasonCancelled           = "Cancelled"
+	PodGroupReasonRefused             = "Refused"
+	PodGroupReasonDeadlineExceeded    = "DeadlineExceeded"
+	PodGroupReasonGateBudgetTooShort  = "GateBudgetTooShort"
+	PodGroupReasonPodIPChanged        = "PodIPChanged"
+	PodGroupReasonTargetInUse         = "TargetInUse"
+	PodGroupReasonArtifactUnavailable = "ArtifactUnavailable"
+	PodGroupReasonMemberFailed        = "MemberFailed"
+	PodGroupReasonCoordinatorLost     = "CoordinatorLost"
+	PodGroupReasonCancelled           = "Cancelled"
 )
 
-// PodSetSnapshotInUseFinalizer keeps a PodSetSnapshot, and the artifacts of its
-// members, while any unfinished PodSetRestore references its UID.
-const PodSetSnapshotInUseFinalizer = "nvidia.com/podset-snapshot-in-use"
+// PodGroupSnapshotInUseFinalizer keeps a PodGroupSnapshot, and the artifacts of its
+// members, while any unfinished PodGroupRestore references its UID.
+const PodGroupSnapshotInUseFinalizer = "nvidia.com/snapshot-podgroup-in-use"
 
 // ObjectIdentity names an exact object, in the operation's namespace or at
 // cluster scope.
@@ -1316,21 +1367,47 @@ type TargetPodReference struct {
 
 // ---------------------------------------------------------------- capture
 
-type PodSetSnapshotMember struct {
+// PodGroupMemberTemplate holds the settings that a member's PodSnapshot
+// receives, and only those whose meaning in a group is defined. The
+// controller sets the rest: the PodSnapshot's name, owner reference, and group
+// labels, spec.source from the member, and spec.checkpointRetryLimit to 0.
+// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup"
+// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup-member' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup-member"
+type PodGroupMemberTemplate struct {
+	// Metadata holds labels and annotations copied to the member's PodSnapshot.
+	// +optional
+	Metadata *PodSnapshotTemplateMetadata `json:"metadata,omitempty"`
+	// Containers is copied to the member's PodSnapshot: SNEP-411's settings
+	// for the checkpointed containers, matched by name to the member's
+	// source.podRef.containers.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=1
+	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="!has(self.podSnapshotTemplate) || !has(self.podSnapshotTemplate.containers) || self.podSnapshotTemplate.containers.all(c, c.name in self.source.podRef.containers)",message="podSnapshotTemplate.containers must name containers in source.podRef.containers"
+type PodGroupSnapshotMember struct {
 	// ID names the member from capture to restore. Its position in the list
 	// is its rank.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	ID string `json:"id"`
-	// Source is the standalone capture source; a set source must name its UID.
-	// +kubebuilder:validation:XValidation:rule="has(self.podRef.uid) && size(self.podRef.uid) > 0",message="set sources require a Pod UID"
+	// Source is the standalone capture source; a group source must name its UID.
+	// +kubebuilder:validation:XValidation:rule="has(self.podRef.uid) && size(self.podRef.uid) > 0",message="group sources require a Pod UID"
 	Source PodSnapshotSource `json:"source"`
+	// PodSnapshotTemplate holds the settings that this member's PodSnapshot
+	// receives; omitted, it gets default settings. Settings never change the
+	// member's rank or its part in the protocol.
+	// +optional
+	PodSnapshotTemplate *PodGroupMemberTemplate `json:"podSnapshotTemplate,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.exists_one(n, n.id == m.id))",message="member IDs must be unique"
 // +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.filter(n, n.source.podRef.name == m.source.podRef.name).size() == 1)",message="source Pods must be distinct"
-type PodSetSnapshotSpec struct {
+type PodGroupSnapshotSpec struct {
 	// DeadlineSeconds bounds the capture, counted from creation.
 	// +kubebuilder:validation:Minimum=1
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
@@ -1341,7 +1418,7 @@ type PodSetSnapshotSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=256
 	// +listType=atomic
-	Members []PodSetSnapshotMember `json:"members"`
+	Members []PodGroupSnapshotMember `json:"members"`
 }
 
 // +kubebuilder:validation:Enum=Pending;Admitted;Capturing;Captured;Failed
@@ -1359,7 +1436,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.startedAt) || (has(self.startedAt) && self.startedAt == oldSelf.startedAt)",message="startedAt is write-once"
 // +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Captured', 'Failed']) || self.phase == oldSelf.phase",message="final phases are immutable"
-type PodSetSnapshotMemberStatus struct {
+type PodGroupSnapshotMemberStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	ID string `json:"id"`
@@ -1367,7 +1444,7 @@ type PodSetSnapshotMemberStatus struct {
 	Rank int32 `json:"rank"`
 	// +optional
 	NodeName string `json:"nodeName,omitempty"`
-	// PodSnapshot is the child that the set owns for this member.
+	// PodSnapshot is the child that the group owns for this member.
 	// +optional
 	PodSnapshot *ObjectIdentity `json:"podSnapshot,omitempty"`
 	// Content is the member's PodSnapshotContent, pinned once captured.
@@ -1386,13 +1463,13 @@ type PodSetSnapshotMemberStatus struct {
 	Message string `json:"message,omitempty"`
 }
 
-type PodSetSnapshotStatus struct {
+type PodGroupSnapshotStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=256
 	// +kubebuilder:validation:XValidation:rule="oldSelf.all(o, self.exists(n, n.id == o.id))",message="member entries cannot be removed"
 	// +listType=map
 	// +listMapKey=id
-	Members []PodSetSnapshotMemberStatus `json:"members,omitempty"`
+	Members []PodGroupSnapshotMemberStatus `json:"members,omitempty"`
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -1402,25 +1479,25 @@ type PodSetSnapshotStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=podsetsnap
+// +kubebuilder:resource:scope=Namespaced,shortName=podgroupsnap
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Failed")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, self.spec.members.exists(s, s.id == m.id))",message="status must refer to declared members"
-type PodSetSnapshot struct {
+type PodGroupSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
-	Spec PodSetSnapshotSpec `json:"spec"`
+	Spec PodGroupSnapshotSpec `json:"spec"`
 	// +optional
-	Status PodSetSnapshotStatus `json:"status,omitempty"`
+	Status PodGroupSnapshotStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-type PodSetSnapshotList struct {
+type PodGroupSnapshotList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []PodSetSnapshot `json:"items"`
+	Items           []PodGroupSnapshot `json:"items"`
 }
 
 // ---------------------------------------------------------------- restore
@@ -1436,8 +1513,8 @@ type ContainerMapping struct {
 	Destination string `json:"destination"`
 }
 
-type PodSetRestoreTarget struct {
-	// ID must match exactly one member of the referenced PodSetSnapshot.
+type PodGroupRestoreTarget struct {
+	// ID must match exactly one member of the referenced PodGroupSnapshot.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -1456,7 +1533,7 @@ type PodSetRestoreTarget struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="self.targets.all(t, self.targets.filter(n, n.podRef.name == t.podRef.name).size() == 1)",message="target Pods must be distinct"
-type PodSetRestoreSpec struct {
+type PodGroupRestoreSpec struct {
 	SnapshotRef ObjectIdentity `json:"snapshotRef"`
 	// DeadlineSeconds bounds the restore, counted from creation. Admission
 	// refuses targets whose startup probe cannot cover what remains of it.
@@ -1468,7 +1545,7 @@ type PodSetRestoreSpec struct {
 	// +kubebuilder:validation:MaxItems=256
 	// +listType=map
 	// +listMapKey=id
-	Targets []PodSetRestoreTarget `json:"targets"`
+	Targets []PodGroupRestoreTarget `json:"targets"`
 }
 
 // +kubebuilder:validation:Enum=Pending;Admitted;Restoring;Released;Failed
@@ -1488,7 +1565,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.targetPodIP) || (has(self.targetPodIP) && self.targetPodIP == oldSelf.targetPodIP)",message="target Pod IP is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.startedAt) || (has(self.startedAt) && self.startedAt == oldSelf.startedAt)",message="startedAt is write-once"
 // +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Released', 'Failed']) || self.phase == oldSelf.phase",message="final phases are immutable"
-type PodSetRestoreMemberStatus struct {
+type PodGroupRestoreMemberStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	ID string `json:"id"`
@@ -1504,7 +1581,7 @@ type PodSetRestoreMemberStatus struct {
 	// +kubebuilder:validation:MaxItems=1
 	// +listType=map
 	// +listMapKey=name
-	Containers []PodSetRestoreContainerStatus `json:"containers,omitempty"`
+	Containers []PodGroupRestoreContainerStatus `json:"containers,omitempty"`
 	// +optional
 	// +kubebuilder:validation:Format=ipv4
 	TargetPodIP string `json:"targetPodIP,omitempty"`
@@ -1522,8 +1599,8 @@ type PodSetRestoreMemberStatus struct {
 	Message string `json:"message,omitempty"`
 }
 
-// PodSetRestoreContainerStatus pins one destination container of a restore Pod.
-type PodSetRestoreContainerStatus struct {
+// PodGroupRestoreContainerStatus pins one destination container of a restore Pod.
+type PodGroupRestoreContainerStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
@@ -1532,13 +1609,13 @@ type PodSetRestoreContainerStatus struct {
 	ContainerID string `json:"containerID"`
 }
 
-type PodSetRestoreStatus struct {
+type PodGroupRestoreStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=256
 	// +kubebuilder:validation:XValidation:rule="oldSelf.all(o, self.exists(n, n.id == o.id))",message="member entries cannot be removed"
 	// +listType=map
 	// +listMapKey=id
-	Members []PodSetRestoreMemberStatus `json:"members,omitempty"`
+	Members []PodGroupRestoreMemberStatus `json:"members,omitempty"`
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -1548,25 +1625,25 @@ type PodSetRestoreStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=podsetrestore
+// +kubebuilder:resource:scope=Namespaced,shortName=podgrouprestore
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Failed")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, self.spec.targets.exists(t, t.id == m.id))",message="status must refer to declared targets"
-type PodSetRestore struct {
+type PodGroupRestore struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
-	Spec PodSetRestoreSpec `json:"spec"`
+	Spec PodGroupRestoreSpec `json:"spec"`
 	// +optional
-	Status PodSetRestoreStatus `json:"status,omitempty"`
+	Status PodGroupRestoreStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-type PodSetRestoreList struct {
+type PodGroupRestoreList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []PodSetRestore `json:"items"`
+	Items           []PodGroupRestore `json:"items"`
 }
 ```
 
@@ -1579,24 +1656,24 @@ package types
 
 // CheckpointManifest gains:
 //
-//	PodSet *PodSetManifest `yaml:"podSet,omitempty"`
+//	PodGroup *PodGroupManifest `yaml:"podGroup,omitempty"`
 
-const PodSetManifestVersion = 1
+const PodGroupManifestVersion = 1
 
-type PodSetManifest struct {
+type PodGroupManifest struct {
 	Version int `yaml:"version"`
-	// CaptureUID is the PodSetSnapshot's UID; every member must restore the same one.
+	// CaptureUID is the PodGroupSnapshot's UID; every member must restore the same one.
 	CaptureUID string `yaml:"captureUID"`
 	// MemberID identifies this artifact's own member.
 	MemberID string `yaml:"memberID"`
 	// Members is the ordered member table, so its index is the rank.
-	Members []PodSetManifestMember `yaml:"members"`
+	Members []PodGroupManifestMember `yaml:"members"`
 	// RendezvousFiles are the endpoint files that this member's processes read
 	// at restore, such as NCCL_CHECKPOINT_KVS_PATH, all inside the control volume.
 	RendezvousFiles []string `yaml:"rendezvousFiles,omitempty"`
 }
 
-type PodSetManifestMember struct {
+type PodGroupManifestMember struct {
 	ID     string `yaml:"id"`
 	PodUID string `yaml:"podUID"`
 	// Containers are the member's captured containers: one today, as in
@@ -1613,36 +1690,36 @@ Finally, the Pod contract gains a few constants and one key in the
 package podcontract
 
 const (
-	// RestoreSetAnnotation marks a restore Pod as a target of a PodSetRestore.
-	// On set targets it replaces the restore-from and restore-container-map
+	// RestoreGroupAnnotation marks a restore Pod as a target of a PodGroupRestore.
+	// On group targets it replaces the restore-from and restore-container-map
 	// annotations, and it requires the restore startup probe.
-	RestoreSetAnnotation = "nvidia.com/restore-set"
+	RestoreGroupAnnotation = "nvidia.com/restore-group"
 
-	// Labels on the PodSnapshots that a PodSetSnapshot owns.
-	PodSetLabel       = "nvidia.com/podset"
-	PodSetMemberLabel = "nvidia.com/podset-member"
+	// Labels on the PodSnapshots that a PodGroupSnapshot owns.
+	PodGroupLabel       = "nvidia.com/snapshot-podgroup"
+	PodGroupMemberLabel = "nvidia.com/snapshot-podgroup-member"
 
-	// RestoreStartedCondition is set to True on a set restore Pod before CRIU
+	// RestoreStartedCondition is set to True on a group restore Pod before CRIU
 	// starts, under a field manager of its own, and never removed; from then
 	// on the agent never replays CRIU into the Pod. Its lastTransitionTime is
 	// the member's startedAt.
 	RestoreStartedCondition = "nvidia.com/RestoreStarted"
 
-	// RestoreSetPending is an agent-internal wait reason on nvidia.com/Restored
-	// while a set restore Pod waits for its PodSetRestore, like SnapshotPending.
-	RestoreSetPending = "SetPending"
+	// RestoreGroupPending is an agent-internal wait reason on nvidia.com/Restored
+	// while a group restore Pod waits for its PodGroupRestore, like SnapshotPending.
+	RestoreGroupPending = "GroupPending"
 
 	// CoordinationDir is reserved in the control volume for rendezvous endpoints.
 	CoordinationDir = "coordination"
 
-	// PodSetProtocolsAnnotation on the agent DaemonSet's Pod template, and so
-	// on every agent Pod created from it, lists the set protocol versions that
+	// PodGroupProtocolsAnnotation on the agent DaemonSet's Pod template, and so
+	// on every agent Pod created from it, lists the group protocol versions that
 	// the agent supports, for example "v1".
-	PodSetProtocolsAnnotation = "nvidia.com/podset-protocols"
+	PodGroupProtocolsAnnotation = "nvidia.com/snapshot-podgroup-protocols"
 )
 
-// restore-complete on a set restore Pod:
+// restore-complete on a group restore Pod:
 //
 //	pid=4242
-//	attempt=<PodSetRestore UID>
+//	attempt=<PodGroupRestore UID>
 ```
