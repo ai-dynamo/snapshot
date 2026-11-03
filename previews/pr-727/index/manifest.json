@@ -2,7 +2,7 @@
   "chunks": [
     {
       "firstStartedAt": "2026-11-01T09:09:22.858Z",
-      "lastStartedAt": "2026-11-02T14:29:51.599Z",
+      "lastStartedAt": "2026-11-03T06:28:11.874Z",
       "month": "2026-11",
       "path": "index/v1/2026-11.ndjson",
       "recordCount": 10,
@@ -33,7 +33,7 @@
   ],
   "historyFormatVersion": 1,
   "manifestVersion": 1,
-  "newestResultAt": "2026-11-02T14:29:51.599Z",
+  "newestResultAt": "2026-11-03T06:28:11.874Z",
   "recordCount": 145,
   "supportedSchemaVersions": [
     1
