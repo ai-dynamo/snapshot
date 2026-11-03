@@ -33,7 +33,10 @@ func reconcileSnapshotContent(ctx context.Context, kubeClient client.Client, que
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if content.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(content, maintenance.PodSnapshotContentArtifactCleanupFinalizer) {
+		// An import does not own its artifact, so deleting it deletes nothing: other imports may
+		// name the same artifact, and so may the cluster that captured it. The sweep reclaims the
+		// artifact once no content names it (see ArtifactUIDLabel).
+		if content.IsImported() || controllerutil.ContainsFinalizer(content, maintenance.PodSnapshotContentArtifactCleanupFinalizer) {
 			return ctrl.Result{}, nil
 		}
 		before := content.DeepCopy()

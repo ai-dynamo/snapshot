@@ -22,14 +22,15 @@ func IsPodSnapshotContentFailed(c *PodSnapshotContent) bool {
 // PodSnapshotContentSpec defines the desired state of PodSnapshotContent. It is
 // populated by the PodSnapshotReconciler (operator) at creation time and is
 // immutable thereafter.
-// +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.source.podRef.containers)",message="containers must name containers in source.podRef.containers"
+// +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in (has(self.source.artifact) ? self.source.artifact.containers : self.source.podRef.containers))",message="containers must name containers in source.podRef.containers or source.artifact.containers"
 type PodSnapshotContentSpec struct {
 	// PodSnapshotRef is the back-pointer to the bound PodSnapshot. It may span
 	// namespaces because PodSnapshotContent is cluster-scoped.
 	// +kubebuilder:validation:Required
 	PodSnapshotRef PodSnapshotReference `json:"snapshotRef"`
 
-	// Source describes what to checkpoint: the source pod and the node it runs on.
+	// Source describes what to checkpoint — the source pod and the node it runs
+	// on — or, for an import, the existing artifact the content stands for.
 	// +kubebuilder:validation:Required
 	Source PodSnapshotContentSource `json:"source"`
 
@@ -66,20 +67,55 @@ type PodSnapshotReference struct {
 	UID types.UID `json:"uid,omitempty"`
 }
 
-// PodSnapshotContentSource is the immutable source descriptor: what to dump
-// (PodRef) and where it runs (NodeName).
+// PodSnapshotContentSource is the immutable source descriptor: a checkpoint —
+// what to dump (PodRef) and where it runs (NodeName) — or an imported Artifact.
+// +kubebuilder:validation:XValidation:rule="has(self.artifact) ? !has(self.podRef) && !has(self.nodeName) : has(self.podRef) && has(self.nodeName)",message="a checkpoint needs podRef and nodeName; an import needs artifact and neither"
 type PodSnapshotContentSource struct {
 	// PodRef identifies the pod to dump. Its UID guards against dumping a
 	// same-named recreation of the pod.
-	// +kubebuilder:validation:Required
-	PodRef PodReference `json:"podRef"`
+	// +optional
+	PodRef *PodReference `json:"podRef,omitempty"`
 
 	// NodeName is the node the source pod runs on, denormalized from the live
 	// pod so it travels with PodRef as one immutable unit and selects the node
 	// agent that performs the dump.
-	// +kubebuilder:validation:Required
+	// +optional
 	// +kubebuilder:validation:MinLength=1
-	NodeName string `json:"nodeName"`
+	NodeName string `json:"nodeName,omitempty"`
+
+	// Artifact is the existing artifact an imported content stands for, copied
+	// from its PodSnapshot. No agent checkpoints for it: it has no node.
+	// +optional
+	Artifact *ArtifactReference `json:"artifact,omitempty"`
+}
+
+// IsImported reports whether the content stands for an existing artifact
+// rather than a checkpoint it asks for.
+func (c *PodSnapshotContent) IsImported() bool {
+	return c.Spec.Source.Artifact != nil
+}
+
+// ArtifactUID is the identity the content's artifact is stored and recorded
+// under: the content's own UID for a checkpoint taken here, and for an import
+// the UID it was taken under elsewhere. Readers derive the artifact's location and check
+// its manifest with this, never with metadata.uid directly.
+func (c *PodSnapshotContent) ArtifactUID() types.UID {
+	if c.Spec.Source.Artifact != nil {
+		return c.Spec.Source.Artifact.UID
+	}
+	return c.UID
+}
+
+// TargetContainers returns the checkpointed container names, whichever source is set.
+func (c *PodSnapshotContent) TargetContainers() []string {
+	switch {
+	case c.Spec.Source.Artifact != nil:
+		return c.Spec.Source.Artifact.Containers
+	case c.Spec.Source.PodRef != nil:
+		return c.Spec.Source.PodRef.Containers
+	default:
+		return nil
+	}
 }
 
 // PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
@@ -104,7 +140,7 @@ type PodSnapshotContentStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=podsnapcontent
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.storage) || has(self.spec.storage)",message="publication descriptors require a storage binding"
-// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.storage) || self.status.storage.artifacts.all(a, self.spec.source.podRef.containers.exists(c, c == a.containerName))",message="publication descriptors must name checkpointed containers"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.storage) || self.status.storage.artifacts.all(a, (has(self.spec.source.artifact) ? self.spec.source.artifact.containers : self.spec.source.podRef.containers).exists(c, c == a.containerName))",message="publication descriptors must name checkpointed containers"
 // +kubebuilder:printcolumn:name="PodSnapshot",type="string",JSONPath=".spec.snapshotRef.name",description="Bound PodSnapshot"
 // +kubebuilder:printcolumn:name="Namespace",type="string",JSONPath=".spec.snapshotRef.namespace",description="PodSnapshot namespace"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready condition"

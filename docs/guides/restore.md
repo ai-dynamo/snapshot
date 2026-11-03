@@ -95,3 +95,67 @@ controller, operator, or serving platform — implement the
 [restore Pod contract](../reference/restore-pod-contract.md), which specifies the
 required annotations, control volume, and `SNAPSHOT_CONTROL_DIR`, plus the
 optional startup gate and seccomp profile a restored pod may carry.
+
+## Restore in another cluster
+
+A checkpoint is files, and the files restore wherever the
+[compatibility checks](../reference/api.md#restore) pass. What ties a checkpoint
+to the cluster that took it is its identity: the agent finds an artifact at
+`artifacts/<uid>/containers/<container>/` under the `PodSnapshotContent` UID that
+checkpointed it, and refuses a manifest recording any other UID. A new cluster never
+has a content with that UID, so instead of checkpointing, it imports: a `PodSnapshot`
+whose source names the artifact rather than a pod.
+
+1. **Keep the artifact.** Copy the content root out of the snapshot store as it
+   is, for example to object storage:
+
+   ```bash
+   s5cmd sync '/checkpoints/artifacts/<uid>/*' s3://<bucket>/<prefix>/<uid>/
+   ```
+
+   Everything a restore needs is in it. The directory names are the two values
+   the import takes: `<uid>`, and the container under `containers/`. Leave out
+   `.tmp/` if a checkpoint was still running.
+
+2. **Put it where the target cluster's agents restore from**, under the same
+   `<uid>`: `artifacts/<uid>/` in that cluster's snapshot store. With a
+   shared PVC that is one copy. With node-local storage it is one copy per node
+   a restore may land on, put there by whatever pre-warms the nodes.
+
+3. **Import it:**
+
+   ```yaml
+   apiVersion: nvidia.com/v1alpha1
+   kind: PodSnapshot
+   metadata:
+     name: <name>
+     namespace: <namespace>
+   spec:
+     source:
+       artifact:
+         uid: <uid>           # the directory name, never this cluster's own UID
+         containers: [main]   # the directory under containers/
+   ```
+
+   The operator binds it to a `PodSnapshotContent` that names the artifact and
+   marks both `Ready` with reason `ArtifactImported`. That means the reference is
+   accepted. It does not mean the bytes are anywhere. The operator cannot check
+   node-local storage, and a restore on a node that does not hold the artifact
+   yet waits for it (`ArtifactPending`), as it does for any artifact.
+
+4. **Restore** with `nvidia.com/restore-from: <name>`, as above.
+
+The target cluster needs a PVC [snapshot store](../operations/storage.md): an
+import is read by path, `artifacts/<uid>/`, and is never bound to the configured
+store, because PageBroker never published it there. A store with
+`storage.type: s3` has no such path and cannot restore an import yet.
+
+The [compatibility checks](../reference/api.md#restore) run as for a local
+checkpoint, against the artifact's manifest. The target node needs the checkpoint
+node's CPU architecture, kernel version, NVIDIA driver version, GPU model and
+count. The restore pod needs the same image digest, at least the same memory
+and CPU limits, and every path the checkpoint mounted.
+
+Deleting the `PodSnapshot` deletes its content but never the artifact, which an
+import does not own: other imports, or the cluster that took it, may name
+the same one. The orphan sweep reclaims the artifact once nothing names it.

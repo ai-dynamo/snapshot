@@ -374,7 +374,7 @@ func readySnapshotObjects() (*snapshotv1alpha1.PodSnapshot, *snapshotv1alpha1.Po
 		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-a", Namespace: "inference", UID: ktypes.UID("snapshot-uid")},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
 			Source: snapshotv1alpha1.PodSnapshotSource{
-				PodRef: snapshotv1alpha1.PodReference{Name: "source", Containers: []string{"main"}},
+				PodRef: &snapshotv1alpha1.PodReference{Name: "source", Containers: []string{"main"}},
 			},
 		},
 		Status: snapshotv1alpha1.PodSnapshotStatus{
@@ -389,7 +389,7 @@ func readySnapshotObjects() (*snapshotv1alpha1.PodSnapshot, *snapshotv1alpha1.Po
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: "snapshot-a", UID: snapshot.UID},
 			Source: snapshotv1alpha1.PodSnapshotContentSource{
-				PodRef:   snapshotv1alpha1.PodReference{Name: "source", Containers: []string{"main"}},
+				PodRef:   &snapshotv1alpha1.PodReference{Name: "source", Containers: []string{"main"}},
 				NodeName: "source-node",
 			},
 		},
@@ -2038,4 +2038,73 @@ func TestRestoreArtifactReady(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, []byte("x"), 0o600))
 	_, err = w.restoreArtifactReady(testr.New(t), "inference/restore-worker", file)
 	require.Error(t, err)
+}
+
+// importedSnapshotObjects is readySnapshotObjects for a PodSnapshot that imported an artifact
+// captured under importedArtifactUID somewhere else: the content has a UID of its own, no pod and
+// no node.
+const importedArtifactUID = "6b1e9f0c-2d4a-4c8e-9f3b-7a5d1e2c4b6a"
+
+func importedSnapshotObjects() (*snapshotv1alpha1.PodSnapshot, *snapshotv1alpha1.PodSnapshotContent) {
+	snapshot, content := readySnapshotObjects()
+	artifact := &snapshotv1alpha1.ArtifactReference{UID: importedArtifactUID, Containers: []string{"main"}}
+	snapshot.Spec.Source = snapshotv1alpha1.PodSnapshotSource{Artifact: artifact}
+	content.Spec.Source = snapshotv1alpha1.PodSnapshotContentSource{Artifact: artifact.DeepCopy()}
+	return snapshot, content
+}
+
+func TestPreflightRestoreOfAnImportFindsTheArtifactUnderItsCapturedUID(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := importedSnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+
+	// Nothing yet under the captured UID: the restore waits, as for any artifact not there yet,
+	// and does not look under the importing content's own UID instead.
+	own, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(own, 0o700))
+	_, err = w.preflightRestore(context.Background(), pod)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), importedArtifactUID)
+
+	// The artifact as it was captured, and as a stager or a copy from S3 lays it down: its
+	// directory and its manifest both carry the captured UID.
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, importedArtifactUID, "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(path, 0o700))
+	require.NoError(t, types.WriteManifest(path, &types.CheckpointManifest{
+		Artifact: types.ArtifactManifest{ContentUID: importedArtifactUID, ContainerName: "main"},
+	}))
+
+	plan, err := w.preflightRestore(context.Background(), pod)
+	require.NoError(t, err)
+	assert.Equal(t, importedArtifactUID, plan.artifact.ContentUID,
+		"the executor checks the manifest against this, so it must be the captured UID")
+	assert.Equal(t, "main", plan.artifact.SourceContainerName)
+	assert.Equal(t, path, plan.artifact.Path)
+}
+
+func TestRestoreDestinationsOfAnImportIsTheArtifactsContainer(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := importedSnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+
+	got, err := w.RestoreDestinations(context.Background(), pod)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"main"}, got)
+}
+
+func TestReconcileCaptureLeavesAnImportAlone(t *testing.T) {
+	_, content := importedSnapshotObjects()
+	content.Status = snapshotv1alpha1.PodSnapshotContentStatus{}
+	w := makeTestController(t, nil, content)
+	// reconcileCapture reads the work order from the content informer's cache.
+	w.contentIndexer = seedIndex(t, content)
+
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, w.client.Get(context.Background(), client.ObjectKey{Name: content.Name}, current))
+	assert.Empty(t, current.Status.Conditions, "nothing to capture, so nothing to fail")
 }

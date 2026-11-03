@@ -15,5 +15,15 @@ const (
 	// object so the per-node agent's cache can label-select work for its node.
 	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
+	// ArtifactUIDLabel mirrors an imported PodSnapshotContent's
+	// spec.source.artifact.uid onto the object. Maintenance lists content
+	// metadata only, and it is what keeps the artifact an import stands for out
+	// of the orphan sweep.
+	ArtifactUIDLabel = "nvidia.com/snapshot-artifact-uid"
+
+	// ReasonArtifactImported is the Ready reason of an imported content, and so
+	// of its PodSnapshot: accepted as a reference, not checkpointed.
+	ReasonArtifactImported = "ArtifactImported"
+
 	CheckpointVolumeName = "checkpoint-storage"
 )

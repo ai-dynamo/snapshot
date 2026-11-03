@@ -64,6 +64,11 @@ func collectContentScanResultOnce(ctx context.Context, apiReader client.Reader) 
 				return nil, fmt.Errorf("PodSnapshotContent %q returned without UID", content.Name)
 			}
 			scanResult.ExistingUIDs[content.UID] = struct{}{}
+			// An import's artifact is stored under the UID it was captured with, not the importing
+			// content's own; the label is that UID in the metadata this scan reads.
+			if artifactUID := content.Labels[snapshotv1alpha1.ArtifactUIDLabel]; artifactUID != "" {
+				scanResult.ExistingUIDs[types.UID(artifactUID)] = struct{}{}
+			}
 			if !content.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(content, PodSnapshotContentArtifactCleanupFinalizer) {
 				scanResult.PendingDeletes = append(scanResult.PendingDeletes, newDeleteContentKey(content.Name, content.UID))
 			}

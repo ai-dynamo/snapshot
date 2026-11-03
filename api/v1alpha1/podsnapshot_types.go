@@ -44,7 +44,7 @@ func IsPodSnapshotFailed(s *PodSnapshot) bool {
 }
 
 // PodSnapshotSpec defines the desired state of PodSnapshot.
-// +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in self.source.podRef.containers)",message="containers must name containers in source.podRef.containers"
+// +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, c.name in (has(self.source.artifact) ? self.source.artifact.containers : self.source.podRef.containers))",message="containers must name containers in source.podRef.containers or source.artifact.containers"
 type PodSnapshotSpec struct {
 	// Source identifies the checkpointed workload. It is a struct (rather than an
 	// inlined reference) so future source variants can be added additively.
@@ -60,8 +60,9 @@ type PodSnapshotSpec struct {
 	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
 
 	// Containers holds settings for the checkpointed containers, matched by
-	// name to source.podRef.containers. It is a separate list so settings stay
-	// the same when other kinds of source are added.
+	// name to source.podRef.containers, or for an import to
+	// source.artifact.containers. It is a separate list so settings stay the
+	// same when other kinds of source are added.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -69,15 +70,65 @@ type PodSnapshotSpec struct {
 	Containers []ContainerSnapshotConfig `json:"containers,omitempty"`
 }
 
-// PodSnapshotSource identifies the workload a PodSnapshot was taken from.
+// PodSnapshotSource identifies where a PodSnapshot's checkpoint comes from: a
+// pod to checkpoint, or an artifact that already exists. Exactly one is set.
+// +kubebuilder:validation:XValidation:rule="has(self.podRef) != has(self.artifact)",message="exactly one of podRef or artifact is required"
 type PodSnapshotSource struct {
 	// PodRef references the pod, in the PodSnapshot's namespace, that is checkpointed.
 	// The operator prepares the pod (the snapshot-control volume) before creating
 	// the PodSnapshot; the snapshot store is mounted by the node agent, not the
 	// pod. The target container is carried on PodRef.Containers, not a pod
 	// annotation.
+	// +optional
+	PodRef *PodReference `json:"podRef,omitempty"`
+
+	// Artifact imports a checkpoint taken elsewhere — in another cluster, or in
+	// this one before its objects were lost — instead of checkpointing a pod.
+	// The operator binds the PodSnapshot to a PodSnapshotContent that names the
+	// artifact and marks both Ready without a checkpoint: Ready means the
+	// reference is accepted, not that the artifact's bytes are anywhere. They
+	// reach a node's snapshot store by other means, and a restore on a node
+	// that does not hold them yet waits for them.
+	// +optional
+	Artifact *ArtifactReference `json:"artifact,omitempty"`
+}
+
+// TargetContainers returns the checkpointed container names, whichever source is set.
+func (s *PodSnapshotSource) TargetContainers() []string {
+	switch {
+	case s.Artifact != nil:
+		return s.Artifact.Containers
+	case s.PodRef != nil:
+		return s.PodRef.Containers
+	default:
+		return nil
+	}
+}
+
+// ArtifactReference names an existing checkpoint artifact by the identity it
+// was taken under. Nothing in it is chosen at import: both fields are read off
+// the artifact, artifacts/<uid>/containers/<container>/.
+type ArtifactReference struct {
+	// UID is the UID of the PodSnapshotContent the artifact was checkpointed
+	// for, in whatever cluster that was. It names the artifact's directory in
+	// the snapshot store and is recorded in the artifact's manifest, which
+	// restore checks it against, so it is the original UID and never the
+	// importing content's own.
 	// +kubebuilder:validation:Required
-	PodRef PodReference `json:"podRef"`
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=36
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+	UID types.UID `json:"uid"`
+
+	// Containers names the checkpointed container, as for PodReference.Containers.
+	// v1alpha1 supports exactly one.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Containers []string `json:"containers"`
 }
 
 // PodReference names a pod in the same namespace as the referencing PodSnapshot.

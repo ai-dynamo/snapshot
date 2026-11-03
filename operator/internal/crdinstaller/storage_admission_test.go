@@ -125,7 +125,7 @@ func newStorageContent(name string, bound bool, storeID string) *snapshotv1.PodS
 			PodSnapshotRef: snapshotv1.PodSnapshotReference{Namespace: "workload", Name: "snapshot"},
 			Source: snapshotv1.PodSnapshotContentSource{
 				NodeName: "node-a",
-				PodRef:   snapshotv1.PodReference{Name: "source", Containers: []string{"main"}},
+				PodRef:   &snapshotv1.PodReference{Name: "source", Containers: []string{"main"}},
 			},
 		},
 	}

@@ -71,7 +71,7 @@ func sourcePodSnapshotForAttempt(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.P
 				snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(sj.UID),
 			}},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{Source: snapshotv1alpha1.PodSnapshotSource{
-			PodRef: snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: []string{"worker"}},
+			PodRef: &snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: []string{"worker"}},
 		}},
 	}
 }

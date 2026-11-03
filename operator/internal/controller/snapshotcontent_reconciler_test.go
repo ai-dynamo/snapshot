@@ -107,3 +107,23 @@ func TestSnapshotContentReconcilerIgnoresMissingContent(t *testing.T) {
 	assert.Empty(t, enqueuer.calls)
 	require.False(t, apierrors.IsNotFound(err)) // IgnoreNotFound already applied
 }
+
+func TestSnapshotContentReconcilerLeavesAnImportWithoutTheCleanupFinalizer(t *testing.T) {
+	// An import does not own its artifact: another import, or the cluster that captured it, may
+	// name the same one. Deleting the content must not delete the bytes.
+	content := &snapshotv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "content", UID: types.UID("uid-import"), ResourceVersion: "1"},
+		Spec: snapshotv1alpha1.PodSnapshotContentSpec{Source: snapshotv1alpha1.PodSnapshotContentSource{
+			Artifact: &snapshotv1alpha1.ArtifactReference{UID: "6b1e9f0c-2d4a-4c8e-9f3b-7a5d1e2c4b6a", Containers: []string{"main"}},
+		}},
+	}
+	kubeClient := ctrlfake.NewClientBuilder().WithScheme(snapshotContentTestScheme(t)).WithObjects(content).Build()
+	enqueuer := &fakeEnqueuer{}
+	_, err := reconcileSnapshotContent(context.Background(), kubeClient, enqueuer, ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
+	require.NoError(t, err)
+
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: content.Name}, current))
+	assert.Empty(t, current.Finalizers)
+	assert.Empty(t, enqueuer.calls)
+}

@@ -195,7 +195,7 @@ func makeWorkOrder(name, node, suffix string) *snapshotv1alpha1.PodSnapshotConte
 		},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: "podsnapshot-" + suffix},
-			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid"), Containers: []string{"main"}}, NodeName: node},
+			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid"), Containers: []string{"main"}}, NodeName: node},
 		},
 	}
 }
@@ -912,7 +912,7 @@ func contentForWorker0(name string, created metav1.Time, terminal string) *snaps
 		ObjectMeta: metav1.ObjectMeta{Name: name, CreationTimestamp: created},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: "snapshot-" + name},
-			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid")}, NodeName: "node-a"},
+			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: &snapshotv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid")}, NodeName: "node-a"},
 		},
 	}
 	if terminal != "" {
