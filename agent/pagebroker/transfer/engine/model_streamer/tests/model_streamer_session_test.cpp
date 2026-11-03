@@ -17,6 +17,7 @@
 #include <future>
 #include <map>
 #include <mutex>
+#include <new>
 #include <string>
 #include <system_error>
 #include <sys/stat.h>
@@ -31,6 +32,22 @@
 using namespace snapshot::pagebroker;
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
+
+namespace {
+// The session binary alone injects allocation failure; dependencies stay intact.
+thread_local bool fail_next_allocation = false;
+thread_local ModelStreamerRestore* producer_restore = nullptr;
+}
+
+extern "C" void* __real__Znwm(std::size_t size);
+extern "C" void* __wrap__Znwm(std::size_t size)
+{
+  if (fail_next_allocation) {
+    fail_next_allocation = false;
+    throw std::bad_alloc();
+  }
+  return __real__Znwm(size);
+}
 
 namespace snapshot::pagebroker {
 class ModelStreamerRestoreTestPeer {
@@ -53,6 +70,57 @@ class ModelStreamerRestoreTestPeer {
 
   static bool HasWorker(const ModelStreamerRestore& restore) { return restore.worker_.joinable(); }
   static void RequestStop(ModelStreamerRestore& restore) { restore.RequestStop(); }
+  // Called after a terminal native failure reached end(); establishes that all
+  // failure promises have been fulfilled before resuming a held producer.
+  static void JoinFailedWorker(ModelStreamerRestore& restore) { restore.worker_.join(); }
+  static std::future<void> QueueCancelledBarrier(ModelStreamerRestore& restore)
+  {
+    auto entry = std::make_shared<ModelStreamerRestore::StreamerEntry>();
+    entry->cancellation.Cancel();
+    auto completion = entry->completion.get_future();
+    restore.QueueSubmission(entry);
+    return completion;
+  }
+  static std::size_t PendingCount(ModelStreamerRestore& restore)
+  {
+    std::lock_guard lock(restore.pending_mutex_);
+    return restore.pending_.size();
+  }
+  static bool HasOnlyUnclaimedPending(ModelStreamerRestore& restore)
+  {
+    std::lock_guard lock(restore.pending_mutex_);
+    return restore.pending_.size() == 1 &&
+        restore.pending_.front()->admission.load() == ModelStreamerRestore::Admission::Pending;
+  }
+  static bool AllPendingWithdrawn(ModelStreamerRestore& restore)
+  {
+    std::lock_guard lock(restore.pending_mutex_);
+    return !restore.pending_.empty() && std::all_of(restore.pending_.begin(), restore.pending_.end(),
+        [](const auto& entry) { return entry->admission.load() == ModelStreamerRestore::Admission::Cancelled; });
+  }
+  static void ExpectQueueAllocationFailure(ModelStreamerRestore& restore, bool retain = false)
+  {
+    // Fill the real deque until push_back must allocate. The worker must be
+    // absent or held in a native request throughout this test-only operation.
+    bool failed = false;
+    for (unsigned i = 0; i < 256 && !failed; ++i) {
+      auto entry = std::make_shared<ModelStreamerRestore::StreamerEntry>();
+      entry->admission = ModelStreamerRestore::Admission::Cancelled;
+      auto completion = entry->completion.get_future();
+      const auto before = restore.pending_.size();
+      fail_next_allocation = true;
+      restore.QueueSubmission(entry);
+      fail_next_allocation = false;
+      if (completion.wait_for(0ms) == std::future_status::ready) {
+        EXPECT_THROW(completion.get(), std::bad_alloc);
+        EXPECT_EQ(restore.pending_.size(), before);
+        failed = true;
+      }
+    }
+    EXPECT_TRUE(failed);
+    if (!retain)
+      restore.pending_.clear();
+  }
 };
 }  // namespace snapshot::pagebroker
 
@@ -66,6 +134,11 @@ struct Response {
 struct Session {
   struct Submission {
     std::vector<char*> destinations;
+    // Native readers borrow the actual ABI arrays and inventory strings.
+    std::vector<const char* const*> paths;
+    std::vector<const std::size_t*> sizes;
+    std::vector<void* const*> destination_slots;
+    std::vector<std::string> sources;
     bool failed = false;
     uintmax_t bytes = 0;
   };
@@ -84,6 +157,16 @@ struct FakeState {
   bool pause_after_completion = false;
   bool pause_after_response = false;
   unsigned completed_submissions = 0;
+  unsigned allocation_calls = 0;
+  unsigned hold_allocation = 0;
+  unsigned allocation_entered = 0;
+  unsigned fail_allocation = 0;
+  unsigned fail_mapping = 0;
+  bool hold_producer = false;
+  bool producer_at_window = false;
+  bool arm_queue_failure = false;
+  bool arm_slot_failure = false;
+  bool fail_registration = false;
   int allocation_error = 0;
   Cancellation preparation_cancellation;
   Path cancel_after_directory;
@@ -159,6 +242,11 @@ class ModelStreamerSessionTest : public ::testing::Test {
     state.pause_after_completion = false;
     state.pause_after_response = false;
     state.completed_submissions = 0;
+    state.allocation_calls = state.hold_allocation = state.allocation_entered = 0;
+    state.fail_allocation = state.fail_mapping = 0;
+    state.hold_producer = state.producer_at_window = false;
+    state.arm_queue_failure = false;
+    state.arm_slot_failure = state.fail_registration = false;
     state.allocation_error = 0;
     state.preparation_cancellation = Cancellation{};
     state.cancel_after_directory.clear();
@@ -234,10 +322,41 @@ class ModelStreamerSessionTest : public ::testing::Test {
 }  // namespace
 
 extern "C" int __real_posix_fallocate(int descriptor, off_t offset, off_t length);
+extern "C" Cancellation::Clock::time_point __real__ZNSt6chrono3_V212steady_clock3nowEv();
 extern "C" void* __real_mmap(void* address, size_t length, int protection, int flags, int descriptor, off_t offset);
 extern "C" bool __real__ZNSt10filesystem16create_directoryERKNS_7__cxx114pathE(const Path& path);
 extern "C" void __real__ZNSt10filesystem11permissionsERKNS_7__cxx114pathENS_5permsENS_12perm_optionsE(
     const Path& path, fs::perms permissions, fs::perm_options options);
+
+extern "C" Cancellation::Clock::time_point __wrap__ZNSt6chrono3_V212steady_clock3nowEv()
+{
+  if (auto* restore = producer_restore) {
+    // Disable recursion from condition-variable deadline calculations.
+    producer_restore = nullptr;
+    {
+      std::unique_lock lock(state.mutex);
+      if (state.arm_slot_failure && state.mappings == 1 &&
+          (state.submitted == 1 || ModelStreamerRestoreTestPeer::PendingCount(*restore) != 0)) {
+        state.changed.wait(lock, [] { return state.submitted == 1; });
+        state.arm_slot_failure = false;
+        fail_next_allocation = true;
+      }
+      if (state.arm_queue_failure && state.mappings == 2) {
+        state.arm_queue_failure = false;
+        fail_next_allocation = true;
+        state.changed.notify_all();
+      }
+      if (state.hold_producer && state.submitted == 1 && state.mappings == 2 &&
+          ModelStreamerRestoreTestPeer::HasOnlyUnclaimedPending(*restore)) {
+        state.producer_at_window = true;
+        state.changed.notify_all();
+        state.changed.wait(lock, [] { return !state.hold_producer; });
+      }
+    }
+    producer_restore = restore;
+  }
+  return __real__ZNSt6chrono3_V212steady_clock3nowEv();
+}
 
 // Wrap the filesystem entry points called by the restore code, since their
 // underlying mkdir/chmod calls live inside the shared C++ standard library.
@@ -270,6 +389,10 @@ extern "C" void* __wrap_mmap(void* address, size_t length, int protection, int f
   {
     std::lock_guard lock(state.mutex);
     ++state.mappings;
+    if (state.mappings == state.fail_mapping) {
+      errno = ENOMEM;
+      return MAP_FAILED;
+    }
   }
   return __real_mmap(address, length, protection, flags, descriptor, offset);
 }
@@ -277,7 +400,15 @@ extern "C" void* __wrap_mmap(void* address, size_t length, int protection, int f
 extern "C" int __wrap_posix_fallocate(int descriptor, off_t offset, off_t length)
 {
   {
-    std::lock_guard lock(state.mutex);
+    std::unique_lock lock(state.mutex);
+    const auto call = ++state.allocation_calls;
+    if (call == state.hold_allocation) {
+      state.allocation_entered = call;
+      state.changed.notify_all();
+      state.changed.wait(lock, [call] { return state.hold_allocation != call; });
+    }
+    if (call == state.fail_allocation)
+      return ENOSPC;
     if (state.allocation_error != 0) {
       errno = EIO; // posix_fallocate returns its error directly, independently of errno.
       return state.allocation_error;
@@ -334,9 +465,14 @@ extern "C" void runai_file_streamer_end(void* value)
     });
     // Only wholly successful submissions release their pointers early. Failed
     // and unfinished entries can still be written during native teardown.
-    for (auto& [id, entry] : session->entries)
-      for (auto* destination : entry.destinations)
-        *destination = 'e';
+    for (auto& [id, entry] : session->entries) {
+      for (std::size_t i = 0; i < entry.destinations.size(); ++i) {
+        EXPECT_EQ(std::string(*entry.paths[i]), entry.sources[i]);
+        EXPECT_GT(*entry.sizes[i], 0U);
+        EXPECT_EQ(*entry.destination_slots[i], entry.destinations[i]);
+        *entry.destinations[i] = 'e';
+      }
+    }
     ++state.ends;
     state.changed.notify_all();
   }
@@ -376,6 +512,10 @@ extern "C" int runai_file_streamer_request(
     auto* destination = static_cast<char*>(destinations[file]);
     *destination = 'd';
     session.entries[native_id].destinations.push_back(destination);
+    session.entries[native_id].paths.push_back(&paths[file]);
+    session.entries[native_id].sizes.push_back(&sizes[file]);
+    session.entries[native_id].destination_slots.push_back(&destinations[file]);
+    session.entries[native_id].sources.emplace_back(paths[file]);
     session.entries[native_id].bytes += sizes[file];
     session.responses.push_back(Response{native_id, file, file + 1 == files ? 1 : 0});
   }
@@ -385,6 +525,10 @@ extern "C" int runai_file_streamer_request(
     active_bytes += entry.bytes;
   state.max_active_bytes = std::max(state.max_active_bytes, active_bytes);
   state.changed.notify_all();
+  if (state.fail_registration) {
+    state.fail_registration = false;
+    fail_next_allocation = true;
+  }
   return state.request_status;
 }
 
@@ -864,7 +1008,8 @@ TEST_F(ModelStreamerSessionTest, LaterBatchFailureReleasesMappingsAndStopsInvent
   state.storage_failure_submission = 2;
   state.hold_end = true;
   state.hold_end_after_submission = 2;
-  auto inventory = Inventory(3);
+  state.hold_allocation = 3;
+  auto inventory = Inventory(4);
   for (auto& file : inventory.files)
     file.size_bytes = 6'000'000'000;
   ModelStreamerRestore restore;
@@ -876,9 +1021,19 @@ TEST_F(ModelStreamerSessionTest, LaterBatchFailureReleasesMappingsAndStopsInvent
   EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
   EXPECT_FALSE(HasMapping(root_ / "partial/0"));
   EXPECT_TRUE(HasMapping(root_ / "partial/1"));
-  EXPECT_FALSE(fs::exists(root_ / "partial/2"));
+  // C may already be preparing; hold it until B's failed native session ends.
+  EXPECT_FALSE(fs::exists(root_ / "partial/3"));
+  auto worker_progress = ModelStreamerRestoreTestPeer::QueueCancelledBarrier(restore);
   ReleaseEnd();
+  EXPECT_EQ(worker_progress.wait_for(5s), std::future_status::ready);
+  EXPECT_THROW(worker_progress.get(), CancellationError);
+  {
+    std::lock_guard lock(state.mutex);
+    state.hold_allocation = 0;
+    state.changed.notify_all();
+  }
   EXPECT_THROW(result.get(), std::runtime_error);
+  EXPECT_FALSE(fs::exists(root_ / "partial/3"));
   EXPECT_EQ(state.submission_sources, (std::vector<std::vector<std::string>>{
       {inventory.files[0].source_locator}, {inventory.files[1].source_locator}}));
   EXPECT_FALSE(HasMapping(root_ / "partial"));
@@ -1582,4 +1737,428 @@ TEST_F(ModelStreamerSessionTest, CancellationDuringNativeRequestWaitsForTeardown
   std::ifstream(root_ / "restore" / "0").get(data);
   EXPECT_EQ(data, 'e');
   EXPECT_TRUE(restore.Failed());
+}
+
+struct PipelineBudget {
+  std::uint64_t budget;
+  uintmax_t file_bytes;
+  const char* name;
+};
+class PipelineWindowTest : public ModelStreamerSessionTest,
+                           public ::testing::WithParamInterface<PipelineBudget> {};
+
+TEST_P(PipelineWindowTest, QueuesTwoSlotsAndWorkerAdvancesWithoutProducer)
+{
+  const auto settings = GetParam();
+  state.sparse_allocations = true;
+  state.allow_responses = false;
+  state.pause_after_completion = true;
+  state.hold_producer = true;
+  state.hold_allocation = 3;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, settings.budget);
+  auto inventory = Inventory(4);
+  for (auto& file : inventory.files)
+    file.size_bytes = settings.file_bytes;
+  auto result = std::async(std::launch::async, [&] {
+    producer_restore = &restore;
+    restore.Stage(inventory, root_ / "pipeline");
+    producer_restore = nullptr;
+  });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.producer_at_window; }));
+    EXPECT_EQ(state.submitted, 1U);
+    EXPECT_EQ(state.allocation_calls, 2U);
+    EXPECT_EQ(state.mappings, 2U);
+    EXPECT_EQ(ModelStreamerRestoreTestPeer::PendingCount(restore), 1U);
+    EXPECT_FALSE(fs::exists(root_ / "pipeline/2"));
+    EXPECT_TRUE(HasMapping(root_ / "pipeline/0"));
+    EXPECT_TRUE(HasMapping(root_ / "pipeline/1"));
+    state.allow_responses = true;
+    state.changed.notify_all();
+    // The calling thread is still held with B already queued.
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted == 2; }));
+    EXPECT_EQ(state.allocation_calls, 2U);
+    EXPECT_EQ(state.max_active_submissions, 1U);
+    EXPECT_EQ(state.max_active_bytes, settings.file_bytes);
+    state.hold_producer = false;
+    state.changed.notify_all();
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.allocation_entered == 3; }));
+    EXPECT_FALSE(HasMapping(root_ / "pipeline/0"));
+    EXPECT_TRUE(HasMapping(root_ / "pipeline/1"));
+    EXPECT_FALSE(HasMapping(root_ / "pipeline/2"));
+    state.hold_allocation = 0;
+    state.allow_responses = true;
+    state.changed.notify_all();
+  }
+  EXPECT_NO_THROW(result.get());
+  EXPECT_EQ(state.submission_bytes, std::vector<uintmax_t>(4, settings.file_bytes));
+  EXPECT_FALSE(HasMapping(root_ / "pipeline"));
+  EXPECT_EQ(state.starts, 1U);
+  EXPECT_EQ(state.ends, 0U);
+}
+
+INSTANTIATE_TEST_SUITE_P(Budgets, PipelineWindowTest,
+    ::testing::Values(PipelineBudget{10, 10, "TenBytes"},
+                      PipelineBudget{11, 11, "ElevenBytes"},
+                      PipelineBudget{kDefaultRestoreBatchBytes, 20'890'000'000, "Oversized"}),
+    [](const ::testing::TestParamInfo<PipelineBudget>& info) { return info.param.name; });
+
+enum class PreparationFault { Allocation, Mapping, Permissions };
+class PipelinePreparationFailureTest : public ModelStreamerSessionTest,
+                                      public ::testing::WithParamInterface<PreparationFault> {};
+
+TEST_P(PipelinePreparationFailureTest, DrainsBorrowedPointersAndPreservesPrimaryError)
+{
+  state.allow_responses = false;
+  state.hold_allocation = 2;
+  state.hold_end = true;
+  if (GetParam() == PreparationFault::Allocation)
+    state.fail_allocation = 2;
+  else if (GetParam() == PreparationFault::Mapping)
+    state.fail_mapping = 2;
+  else
+    state.fail_permission_call = 2;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  Cancellation parent;
+  auto sibling = Cancellation::ChildOf(parent);
+  auto result = std::async(std::launch::async, [&] {
+    // Stage's borrowed paths die as this owning preparation unwinds.
+    PreparedRestore preparation;
+    preparation.inventory = Inventory(4);
+    for (auto& file : preparation.inventory.files) {
+      file.source_locator += std::string(80, 'x');
+      file.permissions = fs::perms::owner_read;
+    }
+    restore.Stage(preparation.inventory, root_ / "failure", parent);
+  });
+  EXPECT_TRUE(WaitForSubmissions(1));
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.allocation_entered == 2; }));
+    state.hold_allocation = 0;
+    state.changed.notify_all();
+  }
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_FALSE(parent.IsCancelled());
+  EXPECT_FALSE(sibling.IsCancelled());
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "failure/0"));
+  EXPECT_FALSE(fs::exists(root_ / "failure/2"));
+  // A later parent stop during drain must not replace the preparation error.
+  parent.Cancel();
+  ReleaseEnd();
+  try {
+    result.get();
+    ADD_FAILURE() << "preparation failure was lost";
+  }
+  catch (const std::system_error& error) {
+    const auto expected = GetParam() == PreparationFault::Allocation ? std::errc::no_space_on_device :
+                          GetParam() == PreparationFault::Mapping ? std::errc::not_enough_memory :
+                          std::errc::permission_denied;
+    EXPECT_EQ(error.code(), expected);
+  }
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_FALSE(HasMapping(root_ / "failure"));
+}
+
+INSTANTIATE_TEST_SUITE_P(Faults, PipelinePreparationFailureTest,
+    ::testing::Values(PreparationFault::Allocation, PreparationFault::Mapping, PreparationFault::Permissions),
+    [](const ::testing::TestParamInfo<PreparationFault>& info) {
+      switch (info.param) {
+        case PreparationFault::Allocation: return "Allocation";
+        case PreparationFault::Mapping: return "Mapping";
+        case PreparationFault::Permissions: return "Permissions";
+      }
+      return "Unknown";
+    });
+
+TEST_F(ModelStreamerSessionTest, PipelineQueueAllocationFailureCompletesUnpublishedPromise)
+{
+  ModelStreamerRestore restore;
+  ModelStreamerRestoreTestPeer::ExpectQueueAllocationFailure(restore);
+  EXPECT_NO_THROW(restore.Stage(Inventory(), root_ / "retry"));
+}
+
+TEST_F(ModelStreamerSessionTest, PipelineQueueFailureDrainsEarlierClaimedSubmission)
+{
+  state.allow_responses = false;
+  state.hold_request = true;
+  state.hold_allocation = 2;
+  state.hold_end = true;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  auto result = std::async(std::launch::async, [&] {
+    producer_restore = &restore;
+    restore.Stage(Inventory(4), root_ / "queue-failure");
+  });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] {
+      return state.requests_entered == 1 && state.allocation_entered == 2;
+    }));
+  }
+  // The worker is held in A's request. Force the next real queue push to grow.
+  ModelStreamerRestoreTestPeer::ExpectQueueAllocationFailure(restore, true);
+  {
+    std::lock_guard lock(state.mutex);
+    state.arm_queue_failure = true;
+    state.hold_allocation = 0;
+    state.changed.notify_all();
+  }
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return !state.arm_queue_failure; }));
+    state.hold_request = false;
+    state.changed.notify_all();
+  }
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "queue-failure/0"));
+  ReleaseEnd();
+  EXPECT_THROW(result.get(), std::bad_alloc);
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_FALSE(fs::exists(root_ / "queue-failure/2"));
+  EXPECT_FALSE(HasMapping(root_ / "queue-failure"));
+}
+
+TEST_F(ModelStreamerSessionTest, PipelineWithdrawsAllPendingSiblingsBeforeActiveDrain)
+{
+  state.allow_responses = false;
+  state.hold_producer = true;
+  state.hold_end = true;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  Cancellation stop;
+  auto result = std::async(std::launch::async, [&] {
+    producer_restore = &restore;
+    restore.Stage(Inventory(4), root_ / "withdraw", stop);
+  });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.producer_at_window; }));
+  }
+  stop.Cancel();
+  EXPECT_TRUE(WaitForEnd());
+  {
+    std::lock_guard lock(state.mutex);
+    state.hold_producer = false;
+    state.changed.notify_all();
+  }
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (!ModelStreamerRestoreTestPeer::AllPendingWithdrawn(restore) &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_TRUE(ModelStreamerRestoreTestPeer::AllPendingWithdrawn(restore));
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "withdraw/0"));
+  ReleaseEnd();
+  ExpectCancellation(result, CancellationError::Reason::CANCELLED);
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_FALSE(HasMapping(root_ / "withdraw"));
+}
+
+class PipelineCancellationTest : public ModelStreamerSessionTest,
+                                 public ::testing::WithParamInterface<bool> {};
+TEST_P(PipelineCancellationTest, BlockedPreparationStillDrainsClaimedWork)
+{
+  state.allow_responses = false;
+  state.hold_allocation = 2;
+  state.hold_end = true;
+  Cancellation stop;
+  const auto deadline = Cancellation::Clock::now() + 200ms;
+  const auto cancellation = GetParam() ? stop.WithDeadline(deadline) : stop;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  auto result = std::async(std::launch::async, [&] {
+    restore.Stage(Inventory(4), root_ / "cancel-prepare", cancellation);
+  });
+  EXPECT_TRUE(WaitForSubmissions(1));
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.allocation_entered == 2; }));
+  }
+  if (!GetParam())
+    stop.Cancel();
+  EXPECT_TRUE(WaitForEnd());
+  {
+    std::lock_guard lock(state.mutex);
+    state.hold_allocation = 0;
+    state.changed.notify_all();
+  }
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "cancel-prepare/0"));
+  ReleaseEnd();
+  ExpectCancellation(result, GetParam() ? CancellationError::Reason::DEADLINE_EXCEEDED :
+                                        CancellationError::Reason::CANCELLED);
+  EXPECT_EQ(state.mappings, 1U);
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_FALSE(fs::exists(root_ / "cancel-prepare/2"));
+  EXPECT_FALSE(HasMapping(root_ / "cancel-prepare"));
+}
+INSTANTIATE_TEST_SUITE_P(CancellationCauses, PipelineCancellationTest, ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "Deadline" : "ExplicitStop"; });
+
+TEST_F(ModelStreamerSessionTest, PipelineKnownFailureStopsPartiallyPreparedBatch)
+{
+  state.hold_allocation = 2;
+  state.allow_responses = false;
+  state.hold_end = true;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  auto result = std::async(std::launch::async, [&] {
+    restore.Stage(Inventory(4), root_ / "known-failure");
+  });
+  EXPECT_TRUE(WaitForSubmissions(1));
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.allocation_entered == 2; }));
+    state.fault = Fault::UNKNOWN;
+    state.allow_responses = true;
+    state.changed.notify_all();
+  }
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  ReleaseEnd();
+  ModelStreamerRestoreTestPeer::JoinFailedWorker(restore);
+  {
+    std::lock_guard lock(state.mutex);
+    state.hold_allocation = 0;
+    state.changed.notify_all();
+  }
+  try {
+    result.get();
+    ADD_FAILURE() << "native failure was lost";
+  }
+  catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::string(error.what()), "Model Streamer session failed: injected native status");
+  }
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_FALSE(fs::exists(root_ / "known-failure/2"));
+  EXPECT_FALSE(HasMapping(root_ / "known-failure"));
+}
+
+class PipelineReadyFailureTest : public ModelStreamerSessionTest,
+                                public ::testing::WithParamInterface<bool> {};
+TEST_P(PipelineReadyFailureTest, RetiresTwoFailedFuturesWithObservedErrorPrecedence)
+{
+  state.hold_producer = true;
+  state.allow_responses = false;
+  state.hold_end = true;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  Cancellation parent;
+  auto result = std::async(std::launch::async, [&] {
+    producer_restore = &restore;
+    restore.Stage(Inventory(4), root_ / "two-failures", parent);
+  });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.producer_at_window; }));
+    state.fault = Fault::UNKNOWN;
+    state.allow_responses = true;
+    state.changed.notify_all();
+  }
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  ReleaseEnd();
+  ModelStreamerRestoreTestPeer::JoinFailedWorker(restore);
+  // The producer is inside Reason(), after its last readiness probes. A stop
+  // observed here wins; otherwise its next probe selects the older native error.
+  if (GetParam())
+    parent.Cancel();
+  {
+    std::lock_guard lock(state.mutex);
+    state.hold_producer = false;
+    state.changed.notify_all();
+  }
+  try {
+    result.get();
+    ADD_FAILURE() << "native failure was lost";
+  }
+  catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::string(error.what()), GetParam() ? "operation cancelled" :
+        "Model Streamer session failed: injected native status");
+  }
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_FALSE(fs::exists(root_ / "two-failures/2"));
+  EXPECT_FALSE(HasMapping(root_ / "two-failures"));
+}
+INSTANTIATE_TEST_SUITE_P(ObservationOrder, PipelineReadyFailureTest, ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "StopFirst" : "NativeFirst"; });
+
+TEST_F(ModelStreamerSessionTest, PipelinePreparationFailureDoesNotCancelLivePeerScope)
+{
+  state.hold_allocation = 2;
+  state.fail_allocation = 2;
+  state.allow_responses = false;
+  state.hold_end = true;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 2);
+  auto inventory = Inventory(3);
+  inventory.files[1].size_bytes = 2;
+  Cancellation first_stop, peer_stop;
+  auto first = std::async(std::launch::async, [&] {
+    restore.Stage(inventory, root_ / "failed-stage", first_stop);
+  });
+  EXPECT_TRUE(WaitForSubmissions(1));
+  auto peer = std::async(std::launch::async, [&] {
+    restore.Stage(Inventory(), root_ / "peer", peer_stop);
+  });
+  EXPECT_TRUE(WaitForSubmissions(2));
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.allocation_entered == 2; }));
+    state.hold_allocation = 0;
+    state.changed.notify_all();
+  }
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_FALSE(first_stop.IsCancelled());
+  EXPECT_FALSE(peer_stop.IsCancelled());
+  EXPECT_EQ(peer.wait_for(0ms), std::future_status::timeout);
+  ReleaseEnd();
+  EXPECT_THROW(first.get(), std::system_error);
+  try {
+    peer.get();
+    ADD_FAILURE() << "peer completed despite shared native teardown";
+  }
+  catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::string(error.what()),
+        "Model Streamer session interrupted by another submission's cancellation");
+  }
+  EXPECT_FALSE(HasMapping(root_ / "failed-stage"));
+  EXPECT_FALSE(HasMapping(root_ / "peer"));
+}
+
+TEST_F(ModelStreamerSessionTest, PipelineSlotAllocationFailureStillDrainsEarlierSubmission)
+{
+  state.allow_responses = false;
+  state.hold_end = true;
+  state.arm_slot_failure = true;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  Cancellation parent;
+  auto result = std::async(std::launch::async, [&] {
+    producer_restore = &restore;
+    restore.Stage(Inventory(4), root_ / "slot-failure", parent);
+  });
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "slot-failure/0"));
+  EXPECT_FALSE(fs::exists(root_ / "slot-failure/1"));
+  EXPECT_FALSE(parent.IsCancelled());
+  ReleaseEnd();
+  EXPECT_THROW(result.get(), std::bad_alloc);
+  EXPECT_FALSE(HasMapping(root_ / "slot-failure"));
+}
+
+TEST_F(ModelStreamerSessionTest, PipelineRegistrationAllocationFailureDrainsAcceptedNativePointers)
+{
+  state.fail_registration = true;
+  state.hold_end = true;
+  ModelStreamerRestore restore;
+  auto result = std::async(std::launch::async, [&] {
+    restore.Stage(Inventory(), root_ / "registration-failure");
+  });
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(HasMapping(root_ / "registration-failure/0"));
+  ReleaseEnd();
+  EXPECT_THROW(result.get(), std::bad_alloc);
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_TRUE(restore.Failed());
+  EXPECT_FALSE(HasMapping(root_ / "registration-failure"));
 }

@@ -610,8 +610,9 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
   std::ofstream(root_.path() / "source") << "a";
   CheckpointInventory inventory;
   inventory.files.push_back({"s3://local-test-bucket/source", "data", 1, fs::perms::owner_read});
+  inventory.files.push_back({"s3://local-test-bucket/source", "next", 1, fs::perms::owner_read});
   options_.restore_timeout = std::chrono::hours(1);
-  ModelStreamerTransferEngine engine(Config());
+  ModelStreamerTransferEngine engine(Config(), model_streamer::settings::ParseConfig(R"({"restoreBatchBytes":1})"));
   const auto prepare = [&] {
     PreparedRestore prepared;
     prepared.inventory = inventory;

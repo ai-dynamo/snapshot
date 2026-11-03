@@ -103,12 +103,19 @@ Reader tuning does not change SDK upload limits.
 
 `restoreBatchBytes` bounds each submission and the total bytes admitted to the
 shared native session. A file larger than the budget runs alone; files are not
-split at batch boundaries. Each restore prepares and completes one batch before
-starting the next. Larger batches can reduce submission barriers and let small
-files share workers with larger files, but prepare more staging data before the
-first download. The budget does not cap staging memory: the staging volume must
-hold the entire checkpoint. Worker count and per-client inflight windows still
-control download concurrency. Changing this value requires a PageBroker restart.
+split at batch boundaries. Each restore retains at most two batches, preparing
+the next while earlier reads run. Native admission still uses the shared byte
+and submission limits. Larger batches can reduce submission barriers and let
+small files share workers with larger files, but prepare more staging data
+before the first download.
+
+The two retained batches can exceed twice the budget when files are oversized.
+This per-restore mapping bound does not cap total staging memory: unmapping
+leaves the files' backing storage allocated, and the staging volume must hold
+the entire snapshot. Concurrent restores retain the existing transaction and
+staging limits. Preparation ahead can change peak memory and contention.
+Worker count and per-client inflight windows still control download concurrency.
+Changing the budget requires a PageBroker restart.
 
 Set it through `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` in
 Helm values, or the tuning JSON shown above. For example, `200000000000` is

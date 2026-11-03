@@ -66,6 +66,10 @@ commit-level history for each release is on its
 
 ### Changed
 
+- S3 restores prepare one batch ahead of downloads, retaining at most two
+  batches per restore. Configured batch and shared native admission limits
+  remain unchanged; oversized files still run alone.
+
 - Checkpoint and restore failure messages open with the step they came from,
   as `while <step>: <cause>`, on the pod's `nvidia.com/Restored` condition, the
   `PodSnapshotContent` `Failed` condition, the restore events and the agent
