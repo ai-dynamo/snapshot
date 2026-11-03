@@ -428,3 +428,54 @@ def test_surviving_pod_requires_progress_after_the_upgrade(
     else:
         with pytest.raises(lifecycle.LifecycleTimeoutError, match="observations for source token"):
             scenario.post_upgrade(ctx, state)
+
+
+def _snapshot_pod() -> SimpleNamespace:
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name="agent-pod"),
+        status=SimpleNamespace(
+            container_statuses=[SimpleNamespace(name="agent", restart_count=0)]
+        ),
+    )
+
+
+def test_the_panic_check_reads_logs_strictly(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+
+    def pod_logs(namespace, name, **kwargs):
+        seen.append(kwargs)
+        return "all quiet"
+
+    monkeypatch.setattr(checks, "snapshot_pods", lambda ctx, component: [_snapshot_pod()])
+    monkeypatch.setattr(k8s, "pod_logs", pod_logs)
+
+    checks.assert_no_restarts_or_panics(SimpleNamespace(config=SimpleNamespace(namespace="ns")))
+
+    assert seen and all(call["strict"] is True for call in seen)
+
+
+def test_the_panic_check_reports_unreadable_logs_with_the_restart_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def pod_logs(namespace, name, **kwargs):
+        raise k8s.ApiException(status=400, reason="container is waiting to start")
+
+    pod = _snapshot_pod()
+    pod.status.container_statuses[0].restart_count = 3
+    monkeypatch.setattr(checks, "snapshot_pods", lambda ctx, component: [pod])
+    monkeypatch.setattr(k8s, "pod_logs", pod_logs)
+
+    with pytest.raises(AssertionError, match="restarted 3x.*logs unreadable: 400"):
+        checks.assert_no_restarts_or_panics(
+            SimpleNamespace(config=SimpleNamespace(namespace="ns"))
+        )
+
+
+def test_the_panic_check_still_reports_a_panic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(checks, "snapshot_pods", lambda ctx, component: [_snapshot_pod()])
+    monkeypatch.setattr(k8s, "pod_logs", lambda *args, **kwargs: "panic: boom")
+
+    with pytest.raises(AssertionError, match="logged a panic"):
+        checks.assert_no_restarts_or_panics(
+            SimpleNamespace(config=SimpleNamespace(namespace="ns"))
+        )

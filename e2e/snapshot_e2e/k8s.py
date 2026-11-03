@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
+import urllib3
 from kubernetes import client
 from kubernetes import watch
 from kubernetes.client import ApiException
@@ -304,23 +305,43 @@ def watch_pod(
         return
 
 
+# The raw log body is read outside the client's own retry loop.
+POD_LOG_ATTEMPTS = 2
+
+
 def pod_logs(
     namespace: str,
     name: str,
     *,
     tail_lines: int | None = 120,
     container: str | None = None,
+    previous: bool = False,
+    strict: bool = False,
 ) -> str:
-    try:
-        return client.CoreV1Api().read_namespaced_pod_log(
-            name=name,
-            namespace=namespace,
-            tail_lines=tail_lines,
-            container=container,
-            _preload_content=True,
-        )
-    except ApiException as exc:
-        return f"<logs unavailable: {api_error_detail(exc)}>"
+    for attempt in range(POD_LOG_ATTEMPTS):
+        try:
+            response = client.CoreV1Api().read_namespaced_pod_log(
+                name=name,
+                namespace=namespace,
+                tail_lines=tail_lines,
+                container=container,
+                previous=previous,
+                _preload_content=False,
+            )
+            try:
+                return response.data.decode("utf-8", errors="replace")
+            finally:
+                response.release_conn()
+        except ApiException as exc:
+            if strict:
+                raise
+            return f"<logs unavailable: {api_error_detail(exc)}>"
+        except urllib3.exceptions.HTTPError as exc:
+            if attempt == POD_LOG_ATTEMPTS - 1:
+                if strict:
+                    raise
+                return f"<logs unavailable: {type(exc).__name__}: {exc}>"
+    raise AssertionError("unreachable")
 
 
 def exec_command(
