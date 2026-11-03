@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 	"time"
 
@@ -197,28 +196,16 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 	if err != nil {
 		return nil, err
 	}
-	return &snapshotv1alpha1.PodSnapshot{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: snapshotv1alpha1.GroupVersion.String(),
-			Kind:       snapshotv1alpha1.KindPodSnapshot,
-		},
-		ObjectMeta: metav1.ObjectMeta{
+	return newPodSnapshot(
+		metav1.ObjectMeta{
 			Name:        sj.Name,
 			Namespace:   sj.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
 		},
-		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{
-				PodRef: snapshotv1alpha1.PodReference{
-					Name:       pod.Name,
-					UID:        pod.UID,
-					Containers: slices.Clone(targetContainers),
-				},
-			},
-			Containers: copyContainerSettings(sj.Spec.PodSnapshotTemplate.Containers),
-		},
-	}, nil
+		snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: targetContainers},
+		sj.Spec.PodSnapshotTemplate.Containers,
+	), nil
 }
 
 func podSnapshotTemplateMetadata(sj *snapshotv1alpha1.SnapshotJob) (map[string]string, map[string]string, error) {
