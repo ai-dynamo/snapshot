@@ -13,6 +13,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
@@ -157,4 +158,22 @@ func TestReviveSourceRefusesACustomStorageCapture(t *testing.T) {
 
 	assert.Equal(t, 1, *kills)
 	assert.Empty(t, *revived)
+}
+
+// A kill that failed leaves the workload suspended. Saying it was terminated
+// would make the only thing its owner can see contradict the node.
+func TestRecoverSourceDoesNotClaimATerminationThatFailed(t *testing.T) {
+	w, _, _ := recoveryController(nil)
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		return errors.New("operation not permitted")
+	}
+	pod := makeSourcePod()
+	w.clientset = k8sfake.NewClientset()
+
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), pod, os.Getpid(),
+		executor.SuspendedSource{GPUPIDs: []int{4242}}, false)
+
+	assert.True(t, sawEventReason(w.clientset.(*k8sfake.Clientset), reasonSourceTerminationFailed),
+		"a failed kill must not be reported as a termination")
+	assert.False(t, sawEventReason(w.clientset.(*k8sfake.Clientset), reasonSourceTerminated))
 }

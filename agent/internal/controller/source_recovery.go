@@ -22,8 +22,9 @@ const sourceRecoveryTimeout = 2 * time.Minute
 
 // Event reasons for what became of a workload whose capture failed.
 const (
-	reasonSourceRevived    = "SourceRevived"
-	reasonSourceTerminated = "SourceTerminated"
+	reasonSourceRevived           = "SourceRevived"
+	reasonSourceTerminated        = "SourceTerminated"
+	reasonSourceTerminationFailed = "SourceTerminationFailed"
 )
 
 // recoverSourceAfterFailedDump decides what becomes of a workload whose dump
@@ -60,10 +61,15 @@ func (w *NodeController) recoverSourceAfterFailedDump(
 	if !revived {
 		log.Info("Killing the source after a failed dump", "reason", reason)
 		if err := w.killCheckpointProcess(log, containerPID, "checkpoint failed"); err != nil {
+			// Saying it was terminated would leave the workload suspended while
+			// the only thing an owner can see says it is gone.
 			log.Error(err, "Failed to kill target after checkpoint failure")
+			w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourceTerminationFailed,
+				fmt.Sprintf("Could not end the source after a failed capture, so it may still be suspended: %v", err))
+			return
 		}
 		w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourceTerminated,
-			fmt.Sprintf("Terminated the source after a failed capture: %s", reason))
+			fmt.Sprintf("Ended the source after a failed capture: %s", reason))
 		return
 	}
 	log.Info("Source left running after a failed dump", "pid", containerPID)
