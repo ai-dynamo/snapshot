@@ -161,6 +161,9 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 		log:          logr.Discard(),
 		captureQueue: newTestCaptureQueue(t),
 	}
+	// Set the clock and requeue as newDefaultController does.
+	w.nowFn = time.Now
+	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
 	for _, o := range objs {
 		if _, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {
@@ -214,7 +217,9 @@ func makeSourcePod() *corev1.Pod {
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{
-				{Name: "main", Ready: true, ContainerID: "containerd://abc123"},
+				// Kubelet reports a container Ready only while it runs.
+				{Name: "main", Ready: true, ContainerID: "containerd://abc123",
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
 			},
 		},
 	}

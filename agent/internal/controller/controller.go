@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -44,6 +45,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
+	"github.com/ai-dynamo/snapshot/agent/internal/lifecyclehooks"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -84,6 +86,18 @@ type NodeController struct {
 	// captureQueue holds PodSnapshotContent names. Its per-key exclusion is the capture path's only
 	// lock, which is enough because exactly one agent runs per node.
 	captureQueue workqueue.TypedRateLimitingInterface[string]
+
+	// checkpointGates holds a *checkpointGate per work order, while the agent waits for its
+	// source container to be ready for the checkpoint.
+	checkpointGates sync.Map
+	// hookExec runs a lifecycle hook's file action in its container, and
+	// hookHTTP sends its HTTP requests. Tests replace them.
+	hookExec lifecyclehooks.Execer
+	hookHTTP *http.Client
+	// nowFn and requeueCaptureFn are time.Now and captureQueue.AddAfter. Tests
+	// replace them.
+	nowFn            func() time.Time
+	requeueCaptureFn func(name string, after time.Duration)
 
 	handledRestores sync.Map
 
@@ -177,6 +191,10 @@ const (
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
+
+	// waitingForCheckpointReadinessReason is the Event on the source Pod when
+	// the agent starts waiting for its checkpoint readiness probe.
+	waitingForCheckpointReadinessReason = "WaitingForCheckpointReadiness"
 )
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
@@ -256,7 +274,11 @@ func newDefaultController(
 		minimumImageSizeFn:        snapshotruntime.MinimumImageSize,
 		reviveGPUProcessesFn:      cuda.ReviveProcessTree,
 		compareFn:                 compat.Compare,
+		hookExec:                  rt,
+		hookHTTP:                  lifecyclehooks.NewHTTPClient(),
+		nowFn:                     time.Now,
 	}
+	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.checkpointFn = w.executorCheckpoint
 	w.fetchManifestFn = func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error) {
 		return executor.FetchArtifactManifest(ctx, cfg.PageBroker.ControlSocketPath, artifact)

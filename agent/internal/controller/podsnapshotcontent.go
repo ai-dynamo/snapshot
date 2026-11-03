@@ -81,17 +81,9 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if err != nil {
 		return err
 	}
-	if content == nil {
-		return nil
-	}
-
-	if content.Spec.Source.NodeName != w.config.NodeName {
-		return nil
-	}
-	if !content.DeletionTimestamp.IsZero() {
-		return nil
-	}
-	if isContentTerminal(content) {
+	if content == nil || content.Spec.Source.NodeName != w.config.NodeName ||
+		!content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
+		w.checkpointGates.Delete(name)
 		return nil
 	}
 
@@ -177,10 +169,22 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return fmt.Errorf("mark source pod %s capture-eligible: %w", podKey.String(), err)
 	}
 
-	if !isContainerReady(pod, containerName) {
-		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName)
+	gate, err := w.getCheckpointGate(ctx, content, pod, containerName)
+	if gate == nil {
+		return err
+	}
+	now := w.nowFn()
+	ready, next := gate.runProbeIfDue(ctx, pod, containerStatus(pod, containerName), now)
+	if !ready {
+		// Pod events wake the work order more often than the period, so the
+		// gate paces the checks and says when the next one is due.
+		if !next.IsZero() {
+			w.requeueCaptureFn(name, next.Sub(now))
+		}
 		return nil
 	}
+	w.checkpointGates.Delete(name)
+	logger.Info("Source container is ready for checkpoint", "pod", pod.Name, "container", containerName)
 
 	containerID := containerIDForName(pod, containerName)
 	if containerID == "" {

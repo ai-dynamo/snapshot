@@ -192,6 +192,9 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		captureQueue:              newTestCaptureQueue(t),
 		stopCh:                    make(chan struct{}),
 	}
+	// Set the clock and requeue as newDefaultController does.
+	w.nowFn = time.Now
+	w.requeueCaptureFn = w.captureQueue.AddAfter
 	t.Cleanup(w.restoreQueue.ShutDown)
 	return w
 }
