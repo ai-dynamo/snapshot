@@ -106,8 +106,9 @@ spec:
                               - message: 'path must be absolute and clean: no empty,
                                   . or .. parts and no trailing slash'
                                 rule: self.startsWith('/') && !self.endsWith('/')
-                                  && !self.contains('//') && self.split('/').all(p,
-                                  p != '.' && p != '..')
+                                  && !self.contains('//') && !self.contains('/./')
+                                  && !self.endsWith('/.') && !self.contains('/../')
+                                  && !self.endsWith('/..')
                           required:
                           - path
                           type: object
@@ -126,6 +127,7 @@ spec:
                               description: |-
                                 Port on the Pod IP: a number from 1 to 65535, or the name of a port of
                                 the container, resolved when the request is sent.
+                              maxLength: 15
                               x-kubernetes-int-or-string: true
                               x-kubernetes-validations:
                               - message: port must be 1-65535 or a valid port name
@@ -200,8 +202,9 @@ spec:
                                   - message: 'path must be absolute and clean: no
                                       empty, . or .. parts and no trailing slash'
                                     rule: self.startsWith('/') && !self.endsWith('/')
-                                      && !self.contains('//') && self.split('/').all(p,
-                                      p != '.' && p != '..')
+                                      && !self.contains('//') && !self.contains('/./')
+                                      && !self.endsWith('/.') && !self.contains('/../')
+                                      && !self.endsWith('/..')
                               required:
                               - path
                               type: object
@@ -221,6 +224,7 @@ spec:
                                   description: |-
                                     Port on the Pod IP: a number from 1 to 65535, or the name of a port of
                                     the container, resolved when the request is sent.
+                                  maxLength: 15
                                   x-kubernetes-int-or-string: true
                                   x-kubernetes-validations:
                                   - message: port must be 1-65535 or a valid port

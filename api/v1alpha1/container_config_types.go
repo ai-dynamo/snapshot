@@ -127,6 +127,10 @@ type PostRestoreHandler struct {
 
 // ControlFileAction names a file inside the container's filesystem.
 type ControlFileAction struct {
+	// The path rule finds "." and ".." parts with contains rather than split.
+	// It accepts the same paths, at a cost that the API server can bound
+	// tightly enough for settings repeated per member of a PodGroupSnapshot.
+
 	// Path is an absolute, clean path inside the container: no empty, "." or
 	// ".." parts and no trailing slash, so two paths name the same file only
 	// if they are equal. Any path the container's user can reach works,
@@ -137,7 +141,7 @@ type ControlFileAction struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=2
 	// +kubebuilder:validation:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.endsWith('/') && !self.contains('//') && self.split('/').all(p, p != '.' && p != '..')",message="path must be absolute and clean: no empty, . or .. parts and no trailing slash"
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.endsWith('/') && !self.contains('//') && !self.contains('/./') && !self.endsWith('/.') && !self.contains('/../') && !self.endsWith('/..')",message="path must be absolute and clean: no empty, . or .. parts and no trailing slash"
 	Path string `json:"path"`
 }
 
@@ -150,10 +154,14 @@ type HTTPGetAction struct {
 	// +optional
 	Path string `json:"path,omitempty"`
 
+	// Port's MaxLength repeats the rule's 15-character limit on port names, so
+	// the API server can bound the rule's cost; it refuses no valid port.
+
 	// Port on the Pod IP: a number from 1 to 65535, or the name of a port of
 	// the container, resolved when the request is sent.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:MaxLength=15
 	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
 	Port intstr.IntOrString `json:"port"`
 }
@@ -168,10 +176,14 @@ type HTTPPostAction struct {
 	// +optional
 	Path string `json:"path,omitempty"`
 
+	// Port's MaxLength repeats the rule's 15-character limit on port names, so
+	// the API server can bound the rule's cost; it refuses no valid port.
+
 	// Port on the Pod IP: a number from 1 to 65535, or the name of a port of
 	// the container, resolved when the request is sent.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:MaxLength=15
 	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
 	Port intstr.IntOrString `json:"port"`
 }

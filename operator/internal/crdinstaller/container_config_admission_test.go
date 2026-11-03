@@ -116,6 +116,54 @@ func TestContainerConfigAdmission(t *testing.T) {
 		})
 	}
 
+	// The path and port rules are written to keep their cost bounded. These
+	// cases pin that they accept exactly what the plainer rules did: "." and
+	// ".." parts are found wherever they sit, dots inside a part are not, and
+	// a port name has at most 15 characters.
+	const unclean = "path must be absolute and clean"
+	const badPort = "port must be 1-65535 or a valid port name"
+	const longPortName = "may not be more than 15 bytes"
+	type pinnedCase struct {
+		name    string
+		config  snapshotv1.ContainerSnapshotConfig
+		refusal string
+	}
+	var pinned []pinnedCase
+	for _, path := range []string{"/.", "/..", "/a/./b", "/a/../b", "/a/.", "/a/.."} {
+		pinned = append(pinned, pinnedCase{"path " + path, config(fileProbe(path), nil), unclean})
+	}
+	for _, path := range []string{"/.a", "/..a", "/a.", "/a..", "/..."} {
+		pinned = append(pinned, pinnedCase{"path " + path, config(nil, filePostRestore(path)), ""})
+	}
+	for _, port := range []struct {
+		value   intstr.IntOrString
+		refusal string
+	}{
+		{intstr.FromString("abcdefghijklmno"), ""},
+		{intstr.FromString("abcdefghijklmnop"), longPortName},
+		{intstr.FromInt32(1), ""},
+		{intstr.FromInt32(65535), ""},
+		{intstr.FromInt32(0), badPort},
+		{intstr.FromInt32(65536), badPort},
+	} {
+		probe := config(httpProbe("/status", port.value), nil)
+		postRestore := config(nil, httpPostRestore("/resume", port.value))
+		pinned = append(pinned,
+			pinnedCase{"httpGet port " + port.value.String(), probe, port.refusal},
+			pinnedCase{"httpPost port " + port.value.String(), postRestore, port.refusal})
+	}
+	for i, tc := range pinned {
+		t.Run("podsnapshot-bounded-"+tc.name, func(t *testing.T) {
+			err := cl.Create(ctx, newSettingsSnapshot(fmt.Sprintf("bounded-%d", i), tc.config))
+			if tc.refusal == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.True(t, apierrors.IsInvalid(err), "invalid settings accepted: %v", err)
+			assert.Contains(t, err.Error(), tc.refusal)
+		})
+	}
+
 	t.Run("podsnapshot-defaults", func(t *testing.T) {
 		snap := newSettingsSnapshot("defaults", config(fileProbe("/tmp/ready"), httpPostRestore("/resume", intstr.FromInt32(8000))))
 		require.NoError(t, cl.Create(ctx, snap))
