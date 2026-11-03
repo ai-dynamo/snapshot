@@ -59,12 +59,15 @@ only the dump, and a `SnapshotJob` is bounded by its `activeDeadlineSeconds`.
 
 ## The post-restore action
 
-`runRestore` runs the action for each destination container:
+The agent runs the action for each destination container:
 
-1. **Before CRIU.** The agent checks the action's settings against the Pod
-   spec: for a file, a path that is not one of Snapshot's own control files;
-   for HTTP, a port the destination container has. A failed check fails the
-   restore before any CRIU work.
+1. **In the restore preflight.** With the restore's other checks, the agent
+   checks the action's settings against the Pod spec: for a file, a path that
+   is not one of Snapshot's own control files; for HTTP, a path that parses
+   and a port the destination container has. A failed check fails the restore
+   as other preflight failures do, before any CRIU work: the Pod's
+   `nvidia.com/Restored` condition becomes `False` with reason
+   `RestoreFailed`, and the destination container is left as it is.
 2. **After CRIU.** Before it writes `restore-complete`, the agent checks the
    file: it must not exist yet, and its directory must exist and be writable
    by the container's user. The file is checked only now because the restored
@@ -77,9 +80,10 @@ only the dump, and a `SnapshotJob` is bounded by its `activeDeadlineSeconds`.
    application that is still starting.
 
 One deadline, `config.restore.timeoutSeconds`, covers the restore and the
-action. When no attempt succeeds by then, or a check fails, the restore fails
-as any restore does: the agent writes `restore-failed` and kills the
-destination container, even though the restored process was already released.
+action. When no attempt succeeds by then, or the check after CRIU fails, the
+restore fails as any restore does: the agent writes `restore-failed` and kills
+the destination container, even though the restored process may already have
+been released.
 The steps in the failure are `checking the post-restore action` and `running
 the post-restore action`.
 
@@ -127,5 +131,6 @@ Each action can do only what the application itself could:
 | `agent/internal/lifecyclehooks` | The actions: `FileExists`, `CreateMarker`, `CheckMarkerTarget`, `CheckWritePath`, `ResolvePort`, `HTTPGet`, `HTTPPost`. The checkpoint probes: `ReadyCondition`, `FileProbe`, `HTTPProbe`. |
 | `agent/internal/runtime` | `ExecSync`, which runs a file action's command in the container through CRI. |
 | `agent/internal/controller/checkpoint_readiness.go` | The readiness gate: `checkpointGate`, which paces the probe's checks and counts the results. |
-| `agent/internal/controller/post_restore.go` | The post-restore action: `filePostRestore` and `httpPostRestore`, their checks, and recovery. |
+| `agent/internal/lifecyclehooks/postrestore.go` | The post-restore actions: `FilePostRestore` and `HTTPPostRestore`, with `Check`, `Recheck` and one `Notify` attempt. |
+| `agent/internal/controller/post_restore.go` | Running the post-restore action: the check in the restore preflight, the retries, and recovery. |
 | `api/podcontract` | `IsReservedControlFile`, Snapshot's own control files. |
