@@ -29,7 +29,8 @@ roadmap.
   nodes.
 - [Lifecycle hooks](reference/workload-contract.md#lifecycle-hooks) support a
   file or plain HTTP, without authentication or redirects. File hooks need
-  `/bin/sh` in the image.
+  a shell in the image: `/bin/sh`, `/usr/bin/sh`, `/bin/busybox`, or
+  `/busybox/sh`.
 
 ## GPU device selection and restore paths
 

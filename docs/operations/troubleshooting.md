@@ -45,7 +45,8 @@ of its own, so a probe that never passes waits until you delete the
 
 The agent refused the container's `checkpointReadinessProbe` before running it,
 because it can never pass: the container has no port with the probe's port
-name. The source pod also gets a Warning event with this reason.
+name, or the probe's HTTP path doesn't parse as a URL path. The source pod also
+gets a Warning event with this reason.
 
 The `PodSnapshot`'s spec can't change, so create a new one with a fixed probe.
 If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
@@ -424,10 +425,12 @@ Likely causes:
   container, or the container's user can't write it, for example on a
   read-only mount or with `readOnlyRootFilesystem`. File actions run as the
   container's user.
-- **The image has no `/bin/sh`.** File actions run a shell command in the
-  container, so the image needs a shell.
+- **The image has no shell.** File actions run a shell command in the
+  container, so the image needs `/bin/sh`, `/usr/bin/sh`, `/bin/busybox`, or
+  `/busybox/sh`.
 - **The path is one of Snapshot's own files** in the snapshot-control volume.
 - **The port name is not one of the destination container's ports.**
+- **The HTTP path doesn't parse** as a URL path.
 
 ### running the post-restore action
 

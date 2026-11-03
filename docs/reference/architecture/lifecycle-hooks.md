@@ -100,18 +100,21 @@ again, never CRIU or the checks:
 
 Each action can do only what the application itself could:
 
-- **Files** are checked and created by a short `/bin/sh` script that the agent
+- **Files** are checked and created by a short shell script that the agent
   runs in the container through CRI `ExecSync`, the way kubelet runs an `exec`
   probe. The script runs as the container's user, with its capabilities,
   seccomp and LSM profile, inside its mounts, so the kernel decides what it may
   read or write. The path is passed as an argument, never as part of the
   script. A marker is created with `set -C`, so it never overwrites a file, and
-  its directory is never created. The image needs `/bin/sh`.
+  its directory is never created. The agent tries `/bin/sh`, `/usr/bin/sh`,
+  `/bin/busybox sh`, and `/busybox/sh`, in that order, and uses the first one
+  that starts, so the image needs one of them.
 - **HTTP** requests go only to the Pod IP and the resolved port, as kubelet's
   `httpGet` probes do; a host-network Pod's IP is the node's. The URL is built
-  like kubelet's probe URL, so a path cannot name another host. The agent does
-  not follow redirects, so a redirect fails, does not use proxies from its
-  environment, and reads at most 10 KiB of a response without logging it.
+  like kubelet's probe URL, so a path cannot name another host. Unlike
+  kubelet, the agent refuses a path that doesn't parse. It does not follow
+  redirects, so a redirect fails, does not use proxies from its environment,
+  and never reads the response body: only the status counts.
 
 ## Code map
 

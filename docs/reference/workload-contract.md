@@ -150,7 +150,8 @@ own signals in the `PodSnapshot`'s
 
 A workload that uses them:
 
-- **MUST** have `/bin/sh` in the image for a file hook. Snapshot reads and
+- **MUST** have a shell in the image for a file hook: `/bin/sh`,
+  `/usr/bin/sh`, `/bin/busybox`, or `/busybox/sh`. Snapshot reads and
   creates the file by running a shell command in the container, as the
   container's user, so the file can be anywhere that user can reach, volumes
   included.
