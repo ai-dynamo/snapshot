@@ -50,7 +50,8 @@ type postRestoreHarness struct {
 	httpURL     string
 	httpTimeout time.Duration
 	waits       int
-	maxWaits    int // a wait after this many fails as if the deadline passed
+	waitPeriods []time.Duration // the period passed to each wait
+	maxWaits    int             // a wait after this many fails as if the deadline passed
 	restoreAdds string
 	restoreDir  string // a directory the restored files bring
 }
@@ -83,10 +84,11 @@ func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAct
 	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error { h.record("kill"); return nil }
 	w.hookExec = h
 	w.hookHTTP = &http.Client{Transport: h}
-	w.postRestoreWaitFn = func(ctx context.Context, _ time.Duration) error {
+	w.postRestoreWaitFn = func(ctx context.Context, period time.Duration) error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.waits++
+		h.waitPeriods = append(h.waitPeriods, period)
 		if h.waits > h.maxWaits {
 			return context.DeadlineExceeded
 		}
@@ -315,12 +317,17 @@ func TestPostRestoreRefusedTargetsFailThePreflight(t *testing.T) {
 }
 
 func TestPostRestoreHTTPRetriesUntilAccepted(t *testing.T) {
-	h := newPostRestoreHarness(t, httpPostRestoreSpec())
+	action := httpPostRestoreSpec()
+	// Not 1, the default for an unset period, so a lost period shows.
+	action.PeriodSeconds = 3
+	h := newPostRestoreHarness(t, action)
 	h.httpResults = []int{http.StatusNotFound, 0, http.StatusOK}
 
 	require.NoError(t, h.run(false))
 
 	assert.Equal(t, []string{"sentinel " + podcontract.RestoreCompleteFile, "POST", "POST", "POST"}, h.recordedEvents())
+	assert.Equal(t, []time.Duration{3 * time.Second, 3 * time.Second}, h.waitPeriods,
+		"periodSeconds is the wait after each failed attempt")
 	assert.Equal(t, "http://10.0.0.9:8000/checkpoint/resume", h.httpURL)
 	assert.InDelta(t, float64(4*time.Second), float64(h.httpTimeout), float64(time.Second), "the action's timeout bounds each attempt")
 }
