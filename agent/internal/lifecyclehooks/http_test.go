@@ -31,7 +31,11 @@ func serve(t *testing.T, path string, handler http.HandlerFunc) *url.URL {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return RequestURL(host, p, path)
+	u, err := RequestURL(host, p, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
 }
 
 func TestHTTPStatus(t *testing.T) {
@@ -78,9 +82,6 @@ func TestHTTPSendsKubeletStyleHeaders(t *testing.T) {
 		if got := r.Header.Get("Accept"); got != "*/*" {
 			t.Errorf("Accept = %q, want */*", got)
 		}
-		if got := r.Header.Get("Accept-Encoding"); got != "" {
-			t.Errorf("Accept-Encoding = %q, want none", got)
-		}
 		if r.ContentLength > 0 {
 			t.Errorf("body has %d bytes, want none", r.ContentLength)
 		}
@@ -120,8 +121,8 @@ func TestHTTPClientIgnoresTheProxyEnvironment(t *testing.T) {
 	if !ok || transport.Proxy != nil {
 		t.Fatal("the transport must not use a proxy")
 	}
-	if !transport.DisableKeepAlives || !transport.DisableCompression {
-		t.Fatal("the transport must disable keep-alives and compression")
+	if !transport.DisableKeepAlives {
+		t.Fatal("the transport must disable keep-alives")
 	}
 }
 
@@ -140,15 +141,6 @@ func TestHTTPTimeout(t *testing.T) {
 	}
 }
 
-func TestHTTPReadsOnlyPartOfALargeBody(t *testing.T) {
-	u := serve(t, "/", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(strings.Repeat("x", 4*maxResponseBody)))
-	})
-	if err := HTTPGet(t.Context(), NewHTTPClient(), u, time.Second); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestHTTPConnectionRefused(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -156,7 +148,11 @@ func TestHTTPConnectionRefused(t *testing.T) {
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
-	err = HTTPGet(t.Context(), NewHTTPClient(), RequestURL("127.0.0.1", port, "/"), time.Second)
+	u, err := RequestURL("127.0.0.1", port, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = HTTPGet(t.Context(), NewHTTPClient(), u, time.Second)
 	if err == nil || !strings.Contains(err.Error(), "failed to send HTTP GET") {
 		t.Fatalf("HTTPGet = %v, want a connection error", err)
 	}
@@ -180,10 +176,14 @@ func TestRequestURL(t *testing.T) {
 		{"10.0.0.5", 80, "https://other.example/x", "http://10.0.0.5:80/x"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
-			if got := RequestURL(tc.ip, tc.port, tc.path).String(); got != tc.want {
-				t.Fatalf("RequestURL = %q, want %q", got, tc.want)
+			u, err := RequestURL(tc.ip, tc.port, tc.path)
+			if err != nil || u.String() != tc.want {
+				t.Fatalf("RequestURL = %v, %v; want %q", u, err, tc.want)
 			}
 		})
+	}
+	if _, err := RequestURL("10.0.0.5", 80, "/%zz"); err == nil || !strings.Contains(err.Error(), "invalid HTTP path") {
+		t.Fatalf("RequestURL = %v, want an error for a path that doesn't parse", err)
 	}
 }
 

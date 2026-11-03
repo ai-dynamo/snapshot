@@ -6,7 +6,6 @@ package lifecyclehooks
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -21,17 +20,13 @@ import (
 // The HTTP actions behave like a Kubernetes httpGet probe. Each choice below
 // follows kubelet's prober (pkg/probe/http), unless it says otherwise.
 const (
-	// maxResponseBody bounds how much of a response is read. The body is
-	// never used or logged.
-	maxResponseBody = 10 << 10
 	// userAgent names the agent the way kubelet's kube-probe names kubelet.
 	userAgent = "snapshot-agent"
 )
 
 // NewHTTPClient returns the client hook requests go through. Like kubelet's
 // prober, it ignores the agent's proxy environment, which would send Pod
-// traffic elsewhere, and it opens a new connection for every request and asks
-// for no compression.
+// traffic elsewhere, and it opens a new connection for every request.
 //
 // Unlike kubelet, which follows redirects to the same host, it follows none:
 // the 3xx response is the result, and it fails. A redirect could otherwise
@@ -41,9 +36,8 @@ const (
 func NewHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			Proxy:              nil,
-			DisableKeepAlives:  true,
-			DisableCompression: true,
+			Proxy:             nil,
+			DisableKeepAlives: true,
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
@@ -97,15 +91,17 @@ func ResolvePort(pod *corev1.Pod, container string, port intstr.IntOrString) (in
 // probe's: the path as parsed, with the scheme and host set to http and the
 // Pod IP and port. Setting the host replaces any host the path names, so the
 // request goes to the Pod.
-func RequestURL(podIP string, port int, path string) *url.URL {
+//
+// Unlike kubelet, which sends a path that doesn't parse as it is, it fails:
+// kubelet keeps old probes working, and this API has none.
+func RequestURL(podIP string, port int, path string) (*url.URL, error) {
 	u, err := url.Parse(path)
 	if err != nil {
-		// Like kubelet, pass a path that doesn't parse along as it is.
-		u = &url.URL{Path: path}
+		return nil, fmt.Errorf("invalid HTTP path %q: %w", path, err)
 	}
 	u.Scheme = "http"
 	u.Host = net.JoinHostPort(podIP, strconv.Itoa(port))
-	return u
+	return u, nil
 }
 
 // HTTPGet sends a probe's GET. It succeeds on a 2xx status.
@@ -134,8 +130,9 @@ func send(ctx context.Context, client *http.Client, method string, u *url.URL, t
 	if err != nil {
 		return fmt.Errorf("failed to send HTTP %s: %w", method, err)
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
+	// The body is never read: only the status counts, and the connection is
+	// not reused.
+	_ = resp.Body.Close()
 	// Kubelet passes 200 to 399. Here a 3xx is a redirect that wasn't
 	// followed, so only a 2xx passes.
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
