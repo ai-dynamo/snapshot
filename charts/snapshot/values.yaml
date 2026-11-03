@@ -23,7 +23,7 @@ replicaCount: 1
 
 operator:
   # Empty in normal deployments. CPU conformance tests may set this to an
-  # annotation key to request a deterministic capture failure for a test pod.
+  # annotation key to request a deterministic checkpoint failure for a test pod.
   testFailCaptureSourceAnnotation: ""
 
   # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/storage.md.
@@ -108,7 +108,7 @@ storage:
   pvc:
     # Create a new PVC (set to false if using existing PVC)
     create: true
-    # Checkpoint PVC name, in the Helm release namespace. Name and namespace
+    # Snapshot volume name, in the Helm release namespace. Name and namespace
     # identify the store; create/size/storageClass only control provisioning.
     name: snapshot-pvc
     # PVC size
@@ -162,12 +162,12 @@ storage:
   oci:
     uri: ""
 
-# PageBroker sidecar: stages checkpoint images in memory and publishes them to
-# the checkpoint PVC it shares with the agent. See docs/operations/storage.md.
+# PageBroker sidecar: stages CRIU images in memory and publishes them to
+# the snapshot volume it shares with the agent. See docs/operations/storage.md.
 pageBroker:
   # Requires a PageBroker image implementing the PVC artifact backend. Roll this out before binding new contents.
   artifactAddressing: false
-  # Restore directly from the checkpoint directory, or opt into a staged copy.
+  # Restore directly from the snapshot directory, or opt into a staged copy.
   restoreMode: direct
   maxConcurrentRequests: 16
   staging:
@@ -228,9 +228,9 @@ daemonset:
   # such RuntimeClass exists; the field is then left out of the pod spec.
   runtimeClassName: nvidia
 
-  # Resource limits and requests. CRIU writes the checkpoint image into the
+  # Resource limits and requests. CRIU writes its image into the
   # memory-backed PageBroker staging volume from this container, so
-  # limits.memory also bounds the largest checkpoint image.
+  # limits.memory also bounds the largest CRIU image.
   resources:
     limits:
       cpu: 4
@@ -325,17 +325,17 @@ config:
 
   checkpoint:
     # Maximum seconds before the agent marks a checkpoint failed.
-    checkpointTimeoutSeconds: 3600
-    # Times a failed capture may be retried in place, beyond the first attempt.
+    timeoutSeconds: 3600
+    # Times a failed checkpoint may be retried in place, beyond the first attempt.
     # A PodSnapshot can override it with spec.checkpointRetryLimit; 0 keeps
-    # retry opt-in, so upgrading changes no existing capture's behaviour.
+    # retry opt-in, so upgrading changes no existing checkpoint's behaviour.
     retryLimit: 0
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed
-    restoreTimeoutSeconds: 7200
+    timeoutSeconds: 7200
     # Skip the restore compatibility check on every restore this agent handles.
-    # The gate refuses a restore whose checkpoint was captured somewhere the
+    # The gate refuses a restore whose snapshot was taken somewhere the
     # target node cannot reproduce; turning it off means those restores are
     # attempted and fail inside CRIU instead. Per-node escape hatch; a single
     # restore can opt out with the nvidia.com/snapshot-skip-compat-check
@@ -346,7 +346,7 @@ config:
     # Path to the criu binary
     binaryPath: /usr/local/sbin/criu
     # Ghost file size limit in bytes. Deleted-but-open files smaller than this
-    # are saved inline in the checkpoint image as ghost files.
+    # are saved inline in the snapshot as ghost files.
     ghostLimit: 536870912
     # CRIU logging verbosity (0-4)
     logLevel: 4

@@ -114,7 +114,7 @@ helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
   --namespace snapshot --create-namespace
 ```
 
-By default the chart provisions its own RWX checkpoint volume, shared by every
+By default the chart provisions its own RWX snapshot volume, shared by every
 checkpoint. See [Storage](docs/operations/storage.md) for the volume model and options
 (including reusing an existing claim), and [Installation](docs/operations/install.md)
 for install and uninstall.
@@ -176,7 +176,7 @@ operations, indexed below.
 **Operations**
 
 - [Installation](docs/operations/install.md) — Helm install and uninstall.
-- [Storage](docs/operations/storage.md) — the shared checkpoint volume and how to configure it.
+- [Storage](docs/operations/storage.md) — the shared snapshot volume and how to configure it.
 - [Storage best practices](docs/operations/storage/README.md) — backend tuning and examples.
 - [Why is my restore slow?](docs/operations/storage/slow-restore.md) — check timings, NFS clients, mount options, and fio results.
 - [Troubleshooting](docs/operations/troubleshooting.md) — common failures and where to look.

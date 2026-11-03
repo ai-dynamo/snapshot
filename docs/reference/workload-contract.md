@@ -5,10 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Workload contract
 
-Snapshot checkpoints a running GPU workload and restores it later. Capturing a
-workload before it's ready produces a wrong, oversized, or unrestorable
-checkpoint, so the workload must cooperate with the checkpoint/restore
-lifecycle: reach a state that's safe to capture, signal when it does, and
+Snapshot checkpoints a running GPU workload and restores it later. Checkpointing
+a workload before it's ready produces a wrong, oversized, or unrestorable
+snapshot, so the workload must cooperate with the checkpoint and restore
+lifecycle: reach a state that's safe to checkpoint, signal when it does, and
 resume correctly once restored. That cooperation — not any particular image —
 is the requirement. This page defines it.
 
@@ -20,7 +20,7 @@ container's entrypoint satisfies this contract; see
 
 A snapshot-ready workload has two parts:
 
-- **capture and restore steps** the workload process implements, and
+- **checkpoint and restore steps** the workload process implements, and
 - **pod requirements** that give the process the shared directory and the
   runtime conditions CRIU needs.
 
@@ -44,7 +44,7 @@ file) is described in
 The restore-pod side — annotations, the restore proxy, startup gate — is the
 [Restore Pod contract](restore-pod-contract.md).
 
-## The capture and restore steps
+## The checkpoint and restore steps
 
 These steps are built from the sentinels above. A sentinel the workload writes
 (`ready-for-snapshot`, `<framework>-restore-ready`) is a *promise that a
@@ -56,39 +56,39 @@ one rule:
 > wait until the agent's signal is observed.
 
 Steps marked **MUST** are load-bearing for correctness — violating one produces a
-wrong, oversized, or failed checkpoint. Steps marked **SHOULD** keep a correct
+wrong, oversized, or failed snapshot. Steps marked **SHOULD** keep a correct
 workload useful and operable.
 
-### Capture (source workload)
+### Checkpoint (source workload)
 
 1. **MUST** clear any stale `ready-for-snapshot` before initializing. A leftover
    file from a previous run would signal readiness before the engine is ready.
 2. **SHOULD** initialize the engine before signaling readiness.
 3. **SHOULD** run at least one real generation to warm the engine up before
    signaling readiness. Lazy CUDA context, autotuning, and graph capture happen
-   on first use; a checkpoint taken before them omits that state, so the
+   on first use; a snapshot taken before them omits that state, so the
    restored replica re-pays the cold start the checkpoint was meant to skip.
-   Neither of steps 2-3 is load-bearing for correctness — a checkpoint of a cold
+   Neither of steps 2-3 is load-bearing for correctness — a snapshot of a cold
    engine still restores — but skipping them defeats the purpose of
    checkpointing.
 4. **MUST** ensure no generation is in flight before signaling: pause it, or
    rely on a synchronous engine having returned.
 5. **SHOULD** bring GPU memory to a checkpoint-safe state (park it) before
    signaling, once step 4 holds. Skipping this still produces a working
-   checkpoint — it just captures more GPU memory than necessary, making the
-   checkpoint larger and slower to restore.
+   snapshot — it just saves more GPU memory than necessary, making the
+   snapshot larger and slower to restore.
 6. **SHOULD** roll back to a running state if the memory release in step 5
    fails, rather than signal readiness.
 7. **MUST** write `ready-for-snapshot` only once step 4 holds. This is the
-   promise the rest of the system trusts; the agent captures the process as soon
-   as the pod reports Ready.
+   promise the rest of the system trusts; the agent checkpoints the process as
+   soon as the pod reports Ready.
 
 ### Restore (restored workload)
 
 8. **MUST NOT** rely on its entrypoint running in the restore container.
    Snapshot replaces the restore container's command with its restore proxy,
    which waits for the restore and then follows the restored process. The
-   restored process continues from the checkpoint; nothing the entrypoint does
+   restored process continues from the snapshot; nothing the entrypoint does
    at startup happens again. On nodes without the restore proxy, the restore
    Pod's own inert command runs instead; see
    [Nodes without the restore proxy](restore-pod-contract.md#nodes-without-the-restore-proxy).
@@ -103,23 +103,23 @@ workload useful and operable.
 
 ### Matching configuration, per-engine calls
 
-**MUST** keep the capture and restore processes configured identically — the
-restored process *is* the captured process; a different configuration is
+**MUST** keep the checkpointed and restored processes configured identically —
+the restored process *is* the checkpointed process; a different configuration is
 undefined. This is easy to overlook for loader flags that change what gets
 loaded or how, for example vLLM's
 [`trust_remote_code`](https://docs.vllm.ai/en/v0.27.1/configuration/engine_args.html#-trust-remote-code-no-trust-remote-code),
 which permits executing a model repo's custom Python code during load.
 
-Steps 3-6 (capture: warm up, quiesce) and step 10 (restore: bring the engine
+Steps 3-6 (checkpoint: warm up, quiesce) and step 10 (restore: bring the engine
 back to serving) each break down into the same sub-requirements across
 engines — the table below lists what each engine calls to meet them.
 Different frameworks expose different function names for the same
 requirement, which is why these steps define the contract in terms of *what
 must happen*, not any one engine's API. Tiers carry over from their parent
-step: skipping a **MUST** row breaks capture or restore outright (for
+step: skipping a **MUST** row breaks the checkpoint or the restore outright (for
 example, checkpointing with a generation in flight, or resuming before GPU
 memory is restored, fails); skipping the **SHOULD** row still produces a
-working checkpoint, just a larger or colder one.
+working snapshot, just a larger or colder one.
 
 | Requirement | Tier | vLLM | TensorRT-LLM | SGLang |
 |------------|------|------|--------------|--------|
@@ -165,7 +165,7 @@ carries depends on what creates it:
 
 - **A `SnapshotJob`** needs only the annotation, on
   `spec.podTemplate.metadata.annotations`. The controller prepares the source Pod
-  for multi-GPU capture.
+  for multi-GPU checkpoints.
 - **A pod that Snapshot does not create** — such as a Deployment checkpointed
   through a `PodSnapshot` — must prepare itself. It copies the multi-GPU
   libraries from the Snapshot agent image with an init container, and starts the
@@ -232,7 +232,7 @@ custom image still has to meet these:
   the missing flags (`cpu-features: source avx512f, target missing`). A target
   that offers more is fine. Only the instruction sets in Snapshot's list are
   compared, so a restore onto a CPU missing one it does not list, such as
-  `waitpkg` on x86_64, goes ahead. The check needs both lists, so a checkpoint
+  `waitpkg` on x86_64, goes ahead. The check needs both lists, so a snapshot
   taken before the agent recorded them, or a restore onto a node whose agent
   could not read its own, is admitted unchecked.
 - **All file handles must be reopenable.** Disable caches that leave handles CRIU
@@ -250,7 +250,7 @@ custom image still has to meet these:
 ## Packaging methods
 
 - **Custom image (reference).** Start from the framework runtime image, add a
-  small entrypoint that implements the capture and restore steps, and set it as
+  small entrypoint that implements the checkpoint and restore steps, and set it as
   the command. The [usage guides](../guides/README.md) walk through this for
   vLLM, SGLang, and TensorRT-LLM.
 - **Any equivalent.** Mounting the entrypoint into a stock image and overriding
@@ -269,7 +269,7 @@ restores it with no Snapshot-side change. To bring one:
    work, park and restore GPU memory, resume. Any mechanism qualifies as long as
    it meets the requirement; an engine with no explicit memory-park call can
    rely on a synchronous request returning idle, as TensorRT-LLM does.
-2. **Implement the capture and restore steps over the shared directory** — read
+2. **Implement the checkpoint and restore steps over the shared directory** — read
    `SNAPSHOT_CONTROL_DIR`, clear then write `ready-for-snapshot` once quiesced,
    wait on `restore-complete`, and
    write a `<framework>-restore-ready` sentinel once the API is serving.
