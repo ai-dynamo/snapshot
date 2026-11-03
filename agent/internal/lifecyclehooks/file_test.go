@@ -100,7 +100,7 @@ func TestFileExists(t *testing.T) {
 				t.Fatalf("FileExists = %v, %v; want %v, error %v", got, err, tc.want, tc.wantErr)
 			}
 			// The path is an argument, never part of the script.
-			if cmd := shell.cmds[0]; cmd[len(cmd)-1] != tc.path || strings.Contains(cmd[2], tc.path) {
+			if cmd := shell.cmds[len(shell.cmds)-1]; cmd[len(cmd)-1] != tc.path || strings.Contains(cmd[2], tc.path) {
 				t.Fatalf("command %q doesn't pass the path as its last argument", cmd)
 			}
 		})
@@ -161,12 +161,31 @@ func TestFileActionsReportARuntimeThatCouldNotRunThem(t *testing.T) {
 	}
 }
 
+// lostReply stands for a runtime whose reply to the script is lost, after the
+// script may have run. The no-op that finds the shell succeeds.
+type lostReply struct{ scripts int }
+
+func (l *lostReply) ExecSync(_ context.Context, _ string, cmd []string, _ time.Duration) ([]byte, []byte, error) {
+	if cmd[len(cmd)-1] == "exit 0" {
+		return nil, nil, nil
+	}
+	l.scripts++
+	return nil, nil, errors.New("rpc error: code = Unavailable")
+}
+
+func TestFileActionsRunTheScriptOnce(t *testing.T) {
+	runtime := &lostReply{}
+	if err := CreateMarker(t.Context(), runtime, "ctr", "/released", time.Second); err == nil || runtime.scripts != 1 {
+		t.Fatalf("CreateMarker = %v after %d runs of the script, want an error after one", err, runtime.scripts)
+	}
+}
+
 func TestFileActionsFindTheShellInTheImage(t *testing.T) {
 	missing := map[string]error{
 		// containerd fails the exec itself; a runtime may also report the
 		// shell's own exit code for a command it can't find.
 		"exec error": errors.New("no such file or directory"),
-		"exit 127":   exitError(exitNotFound),
+		"exit 127":   exitError(127),
 	}
 	for _, shell := range shells {
 		for how, err := range missing {
@@ -179,8 +198,13 @@ func TestFileActionsFindTheShellInTheImage(t *testing.T) {
 				if _, err := os.Stat(file); err != nil {
 					t.Fatalf("the marker wasn't created: %v", err)
 				}
-				if got := image.cmds[len(image.cmds)-1][0]; got != shell[0] {
-					t.Fatalf("the last command ran %s, want %s", got, shell[0])
+				// The no-op found the shell, and the script ran once, with it.
+				last := image.cmds[len(image.cmds)-1]
+				if last[0] != shell[0] || last[len(last)-1] != file {
+					t.Fatalf("the last command was %q, want the script with %s", last, shell[0])
+				}
+				if noop := image.cmds[len(image.cmds)-2]; noop[0] != shell[0] || noop[len(noop)-1] != "exit 0" {
+					t.Fatalf("the command before the script was %q, want the no-op with %s", noop, shell[0])
 				}
 			})
 		}

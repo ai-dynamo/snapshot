@@ -71,7 +71,7 @@ const (
 )
 
 // shells are the commands that can run the scripts, tried in order until one
-// starts. Most images have /bin/sh. BusyBox has it as an applet, and the
+// runs in the container. Most images have /bin/sh. BusyBox has it as an applet, and the
 // distroless debug images keep BusyBox under /busybox. The scripts use only
 // POSIX shell built-ins, so any of these runs them the same way.
 var shells = [][]string{
@@ -80,12 +80,6 @@ var shells = [][]string{
 	{"/bin/busybox", "sh", "-c"},
 	{"/busybox/sh", "-c"},
 }
-
-// Shells exit with these codes when the command can't be found or run.
-const (
-	exitCannotRun = 126
-	exitNotFound  = 127
-)
 
 // FileExists reports whether a regular file exists at filePath in the
 // container. A missing file is false. Anything else at the path is an error,
@@ -157,29 +151,44 @@ func CheckMarkerTarget(ctx context.Context, e Execer, containerID, filePath stri
 	}
 }
 
-// runScript runs script with the first of shells that starts in the
+// runScript runs script once, with the first of shells that runs in the
 // container, and returns its exit code and error output. The error is set only
-// when the script didn't run to an exit code: no shell started, or the command
-// timed out.
+// when the script didn't run to an exit code: no shell ran, the runtime
+// failed, or the command timed out.
 func runScript(ctx context.Context, e Execer, containerID, script, filePath string, timeout time.Duration) (int, string, error) {
+	shell, err := findShell(ctx, e, containerID, timeout)
+	if err != nil {
+		return 0, "", err
+	}
+	cmd := slices.Concat(shell, []string{script, "sh", filePath})
+	_, stderr, err := e.ExecSync(ctx, containerID, cmd, timeout)
+	if err == nil {
+		return 0, "", nil
+	}
+	var exit interface{ ExitStatus() int }
+	if errors.As(err, &exit) {
+		return exit.ExitStatus(), output(stderr), nil
+	}
+	return 0, "", fmt.Errorf("failed to run the file action on %s in container %s: %w", filePath, containerID, err)
+}
+
+// findShell returns the first of shells that runs a no-op in the container,
+// as the container's user. The no-op is safe to repeat, so any failure moves
+// on to the next shell, and the script itself runs only once. A timeout stops
+// the search, so a hung runtime costs one timeout, not one per shell.
+func findShell(ctx context.Context, e Execer, containerID string, timeout time.Duration) ([]string, error) {
 	var errs []error
 	for _, shell := range shells {
-		cmd := append(slices.Clone(shell), script, "sh", filePath)
-		_, stderr, err := e.ExecSync(ctx, containerID, cmd, timeout)
+		_, _, err := e.ExecSync(ctx, containerID, slices.Concat(shell, []string{"exit 0"}), timeout)
 		if err == nil {
-			return 0, "", nil
-		}
-		var exit interface{ ExitStatus() int }
-		if errors.As(err, &exit) && exit.ExitStatus() != exitCannotRun && exit.ExitStatus() != exitNotFound {
-			return exit.ExitStatus(), output(stderr), nil
+			return shell, nil
 		}
 		if errors.Is(err, remote.ErrCommandTimedOut) {
-			return 0, "", fmt.Errorf("failed to run the file action on %s in container %s: %w", filePath, containerID, err)
+			return nil, fmt.Errorf("failed to run %s in container %s: %w", shell[0], containerID, err)
 		}
-		// This shell isn't in the image, or the runtime failed: try the next.
 		errs = append(errs, fmt.Errorf("%s: %w", shell[0], err))
 	}
-	return 0, "", fmt.Errorf("failed to run a shell in container %s; file actions need /bin/sh, /usr/bin/sh, /bin/busybox or /busybox/sh in the image: %w",
+	return nil, fmt.Errorf("failed to run a shell in container %s; file actions need /bin/sh, /usr/bin/sh, /bin/busybox or /busybox/sh in the image: %w",
 		containerID, errors.Join(errs...))
 }
 
