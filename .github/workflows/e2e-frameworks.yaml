@@ -332,8 +332,9 @@ jobs:
           secret_key="$(openssl rand -hex 16)"
           echo "::add-mask::${access_key}"
           echo "::add-mask::${secret_key}"
-          # The store is on the node's network, so each run takes its own ports.
-          port=$((10000 + (GITHUB_RUN_ID % 10000) * 2))
+          # The store is on the node's network, so each run takes its own pair of
+          # ports, above the Kubernetes node ports.
+          port=$((20000 + (GITHUB_RUN_ID % 5000) * 2))
           export SNAPSHOT_E2E_S3_PORT="${port}"
           export SNAPSHOT_E2E_S3_CONSOLE_PORT="$((port + 1))"
           export SNAPSHOT_E2E_S3_ACCESS_KEY="${access_key}"

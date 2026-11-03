@@ -75,7 +75,7 @@ def test_store_ports_follow_the_environment(monkeypatch: pytest.MonkeyPatch) -> 
     env = {item.name: item.value for item in container.env}
     assert env["MINIO_API_PORT_NUMBER"] == "19010"
     assert env["MINIO_CONSOLE_PORT_NUMBER"] == "19011"
-    assert container.ports[0].container_port == 19010
+    assert [port.container_port for port in container.ports] == [19010, 19011]
     assert container.readiness_probe.http_get.port == 19010
     assert s3.host_endpoint("10.0.0.5", settings.port) == "http://10.0.0.5:19010"
 

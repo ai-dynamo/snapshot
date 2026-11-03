@@ -159,7 +159,10 @@ def store_deployment(settings: S3Settings, namespace: str) -> client.V1Deploymen
         name="store",
         image=STORE_IMAGE,
         env=login + [client.V1EnvVar(name=name, value=value) for name, value in env.items()],
-        ports=[client.V1ContainerPort(container_port=settings.port)],
+        ports=[
+            client.V1ContainerPort(container_port=settings.port),
+            client.V1ContainerPort(container_port=settings.console_port),
+        ],
         readiness_probe=client.V1Probe(
             http_get=client.V1HTTPGetAction(
                 path="/minio/health/ready", port=settings.port
