@@ -349,8 +349,6 @@ jobs:
             echo "${values}"
             echo "SNAPSHOT_E2E_HELM_SET_END"
           } >> "${GITHUB_ENV}"
-          echo "SNAPSHOT_E2E_S3_PORT=${SNAPSHOT_E2E_S3_PORT}" >> "${GITHUB_ENV}"
-          echo "SNAPSHOT_E2E_S3_CONSOLE_PORT=${SNAPSHOT_E2E_S3_CONSOLE_PORT}" >> "${GITHUB_ENV}"
 
       - name: Install Snapshot in vCluster
         if: ${{ steps.selected.outputs.run == 'true' }}
