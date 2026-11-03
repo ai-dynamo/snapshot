@@ -180,6 +180,39 @@ func TestFileActionsRunTheScriptOnce(t *testing.T) {
 	}
 }
 
+// slowRuntime takes delay for every command. Like cri-client, it gives up
+// when ctx ends and reports that as a timeout.
+type slowRuntime struct {
+	delay    time.Duration
+	timeouts []time.Duration
+}
+
+func (r *slowRuntime) ExecSync(ctx context.Context, _ string, _ []string, timeout time.Duration) ([]byte, []byte, error) {
+	r.timeouts = append(r.timeouts, timeout)
+	select {
+	case <-time.After(r.delay):
+		return nil, nil, nil
+	case <-ctx.Done():
+		return nil, nil, fmt.Errorf("%w: %w", remote.ErrCommandTimedOut, ctx.Err())
+	}
+}
+
+func TestFileActionsKeepToOneTimeout(t *testing.T) {
+	// The no-op and the script each fit the timeout, but not both together.
+	runtime := &slowRuntime{delay: 300 * time.Millisecond}
+	timeout := 500 * time.Millisecond
+	start := time.Now()
+	err := CreateMarker(t.Context(), runtime, "ctr", "/released", timeout)
+	if elapsed := time.Since(start); !errors.Is(err, remote.ErrCommandTimedOut) || elapsed > timeout+200*time.Millisecond {
+		t.Fatalf("CreateMarker = %v after %s, want a timeout after about %s", err, elapsed, timeout)
+	}
+	// The runtime still gets the whole timeout for each command: CRI takes
+	// it in whole seconds, so a shorter one could round down to no limit.
+	if !slices.Equal(runtime.timeouts, []time.Duration{timeout, timeout}) {
+		t.Fatalf("commands got timeouts %v, want %s for the no-op and the script", runtime.timeouts, timeout)
+	}
+}
+
 func TestFileActionsFindTheShellInTheImage(t *testing.T) {
 	missing := map[string]error{
 		// containerd fails the exec itself; a runtime may also report the

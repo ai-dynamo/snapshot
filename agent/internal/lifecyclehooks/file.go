@@ -155,7 +155,15 @@ func CheckMarkerTarget(ctx context.Context, e Execer, containerID, filePath stri
 // container, and returns its exit code and error output. The error is set only
 // when the script didn't run to an exit code: no shell ran, the runtime
 // failed, or the command timed out.
+//
+// timeout bounds the whole action, finding the shell included. It is a
+// deadline on ctx, which the CRI call inherits. Each command still gets the
+// full timeout for the runtime to stop it: CRI takes it in whole seconds, and
+// the time left after the shell is found would round down to 0, which means
+// no limit.
 func runScript(ctx context.Context, e Execer, containerID, script, filePath string, timeout time.Duration) (int, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	shell, err := findShell(ctx, e, containerID, timeout)
 	if err != nil {
 		return 0, "", err
