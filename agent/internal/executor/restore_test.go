@@ -298,6 +298,10 @@ func (r *restoreFakeRuntime) TerminateContainer(context.Context, string) error {
 	return errors.New("not implemented")
 }
 
+func (r *restoreFakeRuntime) ExecSync(context.Context, string, []string, time.Duration) ([]byte, []byte, error) {
+	return nil, nil, errors.New("not implemented")
+}
+
 func (r *restoreFakeRuntime) Close() error { return nil }
 
 func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
@@ -492,6 +496,45 @@ func TestInspectRestoreTakesThePlaceholdersLSMProfile(t *testing.T) {
 	var incompatible *compat.IncompatibleError
 	if !errors.As(err, &incompatible) || incompatible.Mismatches[0].Check != compat.CheckLSMLabels {
 		t.Fatalf("inspectRestore(unlabeled) = %v, want an lsm-labels refusal", err)
+	}
+}
+
+// The MIG check and GPU discovery read one nvidia-smi listing between them.
+func TestInspectRestoreRunsNvidiaSMIOnce(t *testing.T) {
+	calls := filepath.Join(t.TempDir(), "calls")
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho call >> " + calls + "\nprintf '%s\\n' 'GPU 0: NVIDIA B200 (UUID: GPU-a)'\n"
+	if err := os.WriteFile(filepath.Join(dir, "nsenter"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake nsenter: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	manifest := types.NewCheckpointManifest(
+		"content-uid-123",
+		"main",
+		types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.OverlayManifest{},
+		types.HostManifest{},
+	)
+	manifest.CUDA = types.CUDAManifest{PIDs: []int{1}, SourceGPUUUIDs: []string{"GPU-a"}}
+	// Container visibility alone, so discovery needs no Kubernetes or kubelet.
+	rt := &restoreFakeRuntime{env: []string{"NVIDIA_VISIBLE_DEVICES=none"}}
+
+	// Inspection goes on to read device nodes this test has none of. Only the
+	// nvidia-smi count matters here.
+	_, _, _ = inspectRestore(context.Background(), rt, testr.New(t), RestoreRequest{
+		ContentUID:               "content-uid-123",
+		ContainerID:              "placeholder-id",
+		PodName:                  "restore-pod",
+		PodNamespace:             "default",
+		ArtifactContainerName:    "main",
+		DestinationContainerName: "main",
+		WithoutProxy:             true,
+	}, manifest)
+
+	if recorded, err := os.ReadFile(calls); err != nil || string(recorded) != "call\n" {
+		t.Fatalf("nvidia-smi ran %q, want once (%v)", recorded, err)
 	}
 }
 
@@ -1709,6 +1752,21 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(tools, "nvidia-smi"), []byte("#!/bin/sh\necho '"+gpuUUID+", Test GPU, 590.00'\n"), 0700); err != nil {
 					t.Fatal(err)
 				}
+				// The placeholder's own listing puts the selected GPU in bus order.
+				if err := os.WriteFile(filepath.Join(tools, "nsenter"), []byte("#!/bin/sh\necho 'GPU 0: Test GPU (UUID: "+gpuUUID+")'\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				hostProc := t.TempDir()
+				card := filepath.Join(hostProc, "driver", "nvidia", "gpus", "0000:10:00.0")
+				if err := os.MkdirAll(card, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(card, "information"), []byte("GPU UUID: \t "+gpuUUID+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				originalHostProc := hostProcPath
+				t.Cleanup(func() { hostProcPath = originalHostProc })
+				hostProcPath = hostProc
 				t.Setenv("PATH", tools)
 			}
 			if err := types.WriteManifest(directory, manifest); err != nil {

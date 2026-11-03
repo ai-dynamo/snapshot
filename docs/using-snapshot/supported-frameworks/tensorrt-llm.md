@@ -56,7 +56,7 @@ Move to the first 1.3.x GA once it is published.
 `OMPI_MCA_pml=ob1` and `OMPI_MCA_btl=tcp,self` keep MPI communication on TCP to
 avoid RDMA mappings that CRIU cannot restore. `TORCHINDUCTOR_COMPILE_THREADS=1`
 disables forked asynchronous compiler workers, which can inherit CUDA device
-mappings that prevent CRIU capture.
+mappings that prevent a CRIU dump.
 
 ### Model Cache
 

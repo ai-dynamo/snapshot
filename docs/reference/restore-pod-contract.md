@@ -15,7 +15,7 @@ restored, err := podcontract.Build(
     pod,
     podcontract.Request{
         SnapshotName:    snapshotName,
-        SourceContainer: capturedContainer,
+        SourceContainer: checkpointedContainer,
         Mappings:        mappings,
     },
     podcontract.Options{
@@ -47,16 +47,16 @@ without importing Snapshot's custom-resource API:
 outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
 ```
 
-The package also owns the shared control-volume, environment, capture-sentinel,
+The package also owns the shared control-volume, environment, checkpoint-sentinel,
 and CUDA job-file names used by Snapshot-managed source and restore Pods.
 
 The producer supplies `SourceContainer` from the referenced `PodSnapshot`.
 Empty mappings restore that source into the same-named destination only. The
 builder validates one-source-to-many-destination consistency but deliberately
-performs no API read to discover the captured source.
+performs no API read to discover the checkpointed source.
 
 Non-Go producers can implement the declarative form directly. This fan-out
-example restores the captured `main` process into two destination containers:
+example restores the checkpointed `main` process into two destination containers:
 
 ```yaml
 apiVersion: v1
@@ -157,7 +157,7 @@ without it; see [Nodes Without the Restore Proxy](#nodes-without-the-restore-pro
 
 The plugin decides which containers get the proxy when each container is
 created. Without `restore-container-map`, it reads the PodSnapshot that
-`restore-from` names, for the captured container's name. Create the restore Pod
+`restore-from` names, for the checkpointed container's name. Create the restore Pod
 after that PodSnapshot exists; it does not have to be Ready yet. Until it
 exists, container creation fails, and kubelet retries with a backoff of up to 5
 minutes.

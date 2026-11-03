@@ -25,7 +25,7 @@ Before you start, complete [Before You Start](../README.md#before-you-start) and
 The program loads the model selected in the capture manifest, runs one
 generation to initialize vLLM, and then calls `pause_generation()` and
 `release_kv_cache_memory()`. This discards the KV cache and keeps weights on the
-GPU for capture, without a CPU copy of the weights. It writes
+GPU for the checkpoint, without a CPU copy of the weights. It writes
 `ready-for-snapshot` only when the process is safe to checkpoint.
 
 ### After the Restore

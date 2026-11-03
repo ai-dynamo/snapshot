@@ -10,10 +10,10 @@ that never becomes Ready. Then it lists each step a checkpoint can fail at, with
 the likely causes and what to check. To find which step failed, see
 [Reading a Failure Message](reading-a-failure-message.md).
 
-## A Checkpoint Never Becomes Ready
+## A Snapshot Never Becomes Ready
 
 A `PodSnapshot` becomes Ready only after the `snapshot-agent` confirms the
-checkpoint contents. Writing the checkpoint is not enough on its own. Check the
+snapshot contents. Writing the snapshot is not enough on its own. Check the
 status and the agent logs:
 
 ```bash
@@ -82,7 +82,7 @@ kubectl get pvc -n <snapshot-ns>
 
 When the workload opted into the cuinterpose shim, every CUDA process must have
 loaded it, its delivery mount must be read-only, and the coordinator must
-answer before capture becomes destructive.
+answer before the checkpoint becomes destructive.
 
 **Likely causes:**
 
@@ -148,7 +148,7 @@ re-taking the checkpoint from a fresh replica.
 **Likely causes:**
 
 - The dump's image files cannot be read back from the staging directory
-- A file the dump references is missing from the upper directory, for example one deleted or replaced between the dump and the capture
+- A file the dump references is missing from the upper directory, for example one deleted or replaced between the dump and the diff
 
 ```bash
 kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'rootfs diff'

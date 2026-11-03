@@ -14,12 +14,12 @@ and how to run `snapshotctl checkpoint` and `snapshotctl restore`.
 
 - The snapshot Helm chart must already be installed in the target namespace
 - A `snapshot-agent` DaemonSet must be running in that namespace
-- The namespace must already have the checkpoint PVC mounted by the agent
+- The namespace must already have the snapshot volume mounted by the agent
 - The snapshot operator (`PodSnapshotReconciler`) must be installed in the cluster
 
 `snapshotctl checkpoint` creates a `PodSnapshot` CR, which the operator's
 `PodSnapshotReconciler` resolves into a `PodSnapshotContent` work order. The
-node agent then performs the CRIU capture. Both the operator and the agent are
+node agent then performs the CRIU dump. Both the operator and the agent are
 required; neither can be skipped.
 
 The caller must have the following RBAC permissions in the target namespace:
@@ -31,7 +31,7 @@ The caller must have the following RBAC permissions in the target namespace:
 
 - The snapshot Helm chart must already be installed in the target namespace
 - A `snapshot-agent` DaemonSet must be running in that namespace
-- The namespace must already have the checkpoint PVC mounted by the agent
+- The namespace must already have the snapshot volume mounted by the agent
 
 `snapshotctl restore` does not require the operator. The agent handles restore
 directly from pod annotations.

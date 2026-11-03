@@ -21,7 +21,7 @@ storage-specific tuning.
 
 ### resolving checkpoint artifact
 
-The agent locates the checkpoint directory for the referenced `PodSnapshot` on
+The agent locates the snapshot directory for the referenced `PodSnapshot` on
 this node's snapshot store mount and refuses a path that passes through a
 symlink.
 
@@ -29,7 +29,7 @@ symlink.
 
 - The snapshot store is not mounted on this node's agent
 - The `PodSnapshot` is not Ready yet or its content was deleted
-- The storage backing the checkpoint is not reachable from this node
+- The storage backing the snapshot is not reachable from this node
 
 ```bash
 kubectl get podsnapshot <name> -n <ns>
@@ -111,7 +111,7 @@ Check `NVIDIA_VISIBLE_DEVICES` and the GPU resource request on the restore pod.
 A checkpoint reports the same step when the agent builds the context from the
 source container's CUDA processes and GPUs. Check that the source pod still
 holds its GPU allocation and that its CUDA processes are running; a process
-that exited between the capture request and the dump leaves nothing to map.
+that exited between the checkpoint request and the dump leaves nothing to map.
 
 ### mounting agent bundle into placeholder
 
@@ -171,7 +171,7 @@ ended from outside:
 - `nsrestore was killed (signal: killed)`: nsrestore ended by signal before it
   could report. The agent log holds its last lines.
 - `...; the restore timeout expired`: the restore ran past
-  `config.restore.restoreTimeoutSeconds`. The cause before the semicolon is
+  `config.restore.timeoutSeconds`. The cause before the semicolon is
   what was running when time ran out, and it may carry one of the steps
   below. Raise the timeout, or find what stalled in the agent log.
 - `...; the restore was cancelled`: the restore was withdrawn or the agent
@@ -193,7 +193,7 @@ the checkpoint needs.
 - The staged checkpoint is not the one the agent validated, usually a storage mount that changed under it
 - An agent and nsrestore from different builds
 
-Compare the checkpoint directory on the node with the artifact PageBroker
+Compare the snapshot directory on the node with the artifact PageBroker
 reports, and check that the agent and nsrestore come from the same image.
 
 ### preparing CRIU restore
@@ -208,7 +208,7 @@ Compare the restore pod's volumes with the source pod's.
 
 ### applying rootfs diff
 
-nsrestore extracts the rootfs diff captured at checkpoint over the
+nsrestore extracts the rootfs diff saved at checkpoint over the
 placeholder's root filesystem, so files the workload wrote or changed are back
 before CRIU recreates the process. The cause carries tar's first message.
 
@@ -305,5 +305,5 @@ because something it had open at checkpoint is not there now: a file, a
 listening port, a peer, or GPU state.
 
 The agent log carries the process diagnostics and the `restore.log` lines
-captured at the failure. The workload's own output is in the restore pod's
+recorded at the failure. The workload's own output is in the restore pod's
 container logs.

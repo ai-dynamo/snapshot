@@ -130,7 +130,7 @@ spec:
 
 The recipe's `SnapshotJob` carries the `nvidia.com/snapshot-multi-gpu: enabled`
 annotation on `spec.podTemplate`, and the controller prepares the source pod for
-multi-GPU capture. If you write your own `SnapshotJob`, add the annotation the same
+multi-GPU checkpoints. If you write your own `SnapshotJob`, add the annotation the same
 way:
 
 ```yaml
@@ -176,5 +176,5 @@ deleted, so every serving replica, including the first, is brought up via
 
 - [Restore a Pod](restore.md) - Start a new pod from the snapshot, using the
   `PodSnapshot` name from this page
-- [Troubleshoot Checkpoints](../troubleshooting/checkpoints.md#a-checkpoint-never-becomes-ready) -
+- [Troubleshoot Checkpoints](../troubleshooting/checkpoints.md#a-snapshot-never-becomes-ready) -
   Fix a checkpoint that does not become Ready

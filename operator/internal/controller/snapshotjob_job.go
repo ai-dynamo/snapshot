@@ -96,7 +96,7 @@ func injectNonTargetArtifactContract(template *corev1.PodTemplateSpec, policy *s
 	}
 	for _, name := range nonTargets {
 		if name == target {
-			return fmt.Errorf("spec.nonTargetArtifacts.containers must not name capture target %q", name)
+			return fmt.Errorf("spec.nonTargetArtifacts.containers must not name target container %q", name)
 		}
 		var nonTarget *corev1.Container
 		for i := range template.Spec.Containers {

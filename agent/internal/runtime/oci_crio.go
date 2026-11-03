@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	internalapi "k8s.io/cri-api/pkg/apis"
@@ -47,6 +48,14 @@ func (r *CRIORuntime) TerminateContainer(ctx context.Context, containerID string
 		return fmt.Errorf("failed to terminate container %s: %w", containerID, err)
 	}
 	return nil
+}
+
+func (r *CRIORuntime) ExecSync(ctx context.Context, containerID string, cmd []string, timeout time.Duration) ([]byte, []byte, error) {
+	id, err := containerIDForRuntime(containerID, "cri-o://", "crio://")
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid CRI-O container ID %q: %w", containerID, err)
+	}
+	return r.svc.ExecSync(ctx, id, cmd, timeout)
 }
 
 func (r *CRIORuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {

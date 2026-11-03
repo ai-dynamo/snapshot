@@ -157,7 +157,7 @@ Figures 1–3 compare cold start with restore time for each engine.
 | DeepSeek-V4-Pro-NVFP4 | SGLang | TEP8 | 58.80 | 87.68 | 42.55 | 432.52 | 621.55 |
 
 Cold-start phases may not sum to the total because logging and instrumentation do not
-capture every interval. Each run saves the raw timings.
+record every interval. Each run saves the raw timings.
 
 ### Where the Restore Time Goes
 

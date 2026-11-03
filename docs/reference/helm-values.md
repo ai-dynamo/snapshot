@@ -42,7 +42,7 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 | `storage.pvc.basePath`                    | `/checkpoints` | Fixed agent mount path; cannot be changed.                                                                                                                                                                |
 | `storage.s3.endpoint`                     | `""`           | Required with `storage.type: s3`. S3-compatible endpoint, an absolute http(s) URL.                                                                                                                        |
 | `storage.s3.region`                       | `""`           | Required with `storage.type: s3`. Bucket region.                                                                                                                                                          |
-| `storage.s3.bucket`                       | `""`           | Required with `storage.type: s3`. Bucket holding the checkpoints.                                                                                                                                         |
+| `storage.s3.bucket`                       | `""`           | Required with `storage.type: s3`. Bucket holding the snapshots.                                                                                                                                         |
 | `storage.s3.prefix`                       | `""`           | Key prefix inside the bucket; empty is the bucket root.                                                                                                                                                   |
 | `storage.s3.credentialsSecretRef`         | `""`           | Required with `storage.type: s3`. Secret holding a shared-credentials file, mounted into PageBroker and the operator.                                                                                     |
 | `storage.s3.credentialsSecretKey`         | `credentials`  | Key in that Secret holding the credentials file.                                                                                                                                                          |
@@ -51,7 +51,7 @@ values, see [values.yaml](../../charts/snapshot/values.yaml).
 | `storage.s3.caBundleConfigMapRef`         | `""`           | ConfigMap holding the CA bundle for the endpoint's TLS certificate, mounted into PageBroker and the operator.                                                                                             |
 | `storage.s3.caBundleConfigMapKey`         | `ca.crt`       | Key in that ConfigMap holding the bundle.                                                                                                                                                                 |
 | `pageBroker.artifactAddressing`           | `false`        | Pass store configuration to a compatible PageBroker artifact backend. Deploy this before enabling `operator.bindNewContents`.                                                                             |
-| `operator.bindNewContents`                | `false`        | Bind new captures to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../operate/configure-storage.md#enable-artifact-addressing). Required for `storage.type: s3`. |
+| `operator.bindNewContents`                | `false`        | Bind new snapshots to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../operate/configure-storage.md#enable-artifact-addressing). Required for `storage.type: s3`. |
 | `pageBroker.s3.limits`                    | `{}`           | PageBroker's S3 transfer and transaction limits; see [S3 Transfer Limits](#s3-transfer-limits) for the keys and bounds.                                                                                |
 | `pageBroker.transferEngine.modelStreamer` | `{}`           | Tuning for the engine that reads S3 restores, written as given; keys are in [Model Streamer configuration](../../agent/pagebroker/MODEL_STREAMER.md).                                                |
 
@@ -77,11 +77,11 @@ rejects a key PageBroker does not know, an `activeTransactions` at or above
 ## PageBroker GPU Engine
 
 PageBroker runs in a persistent container in the agent DaemonSet. Its GPU engine
-uses CustomStorage for capture when the driver supports it; otherwise capture
-uses the driver-managed format. The agent runs CRIU. GPU payloads are read
-directly from the original checkpoint.
+uses CustomStorage for checkpoints when the driver supports it; otherwise a
+checkpoint uses the driver-managed format. The agent runs CRIU. GPU payloads
+are read directly from the original snapshot.
 `pageBroker.restoreMode` selects whether CRIU reads CPU images directly (the
-default) or from tmpfs staging. Restore uses the format recorded in the artifact.
+default) or from tmpfs staging. Restore uses the format recorded in the snapshot.
 
 | Value                              | Default                                    | Description                                       |
 |------------------------------------|--------------------------------------------|---------------------------------------------------|
@@ -110,8 +110,8 @@ payload checksums.
 | Value                          | Default                                 | Description                                                                                                                               |
 |--------------------------------|-----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
 | `daemonset.snapshotLogLevel`   | `info`                                  | Agent log level (`trace`/`debug`/`info`/`warn`/`error`).                                                                                  |
-| `daemonset.resources` | 2 CPU / 1Gi request, 4 CPU / 64Gi limit | Agent resource requests and limits. The memory limit also bounds the largest checkpoint image, which CRIU writes into PageBroker staging. GPU CustomStorage capture writes directly to the PVC instead and is not bound by this. |
-| `pageBroker.staging.sizeLimit` | `56Gi` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for checkpoint (except GPU CustomStorage capture) and staged restore. |
+| `daemonset.resources` | 2 CPU / 1Gi request, 4 CPU / 64Gi limit | Agent resource requests and limits. The memory limit also bounds the largest CRIU image, which CRIU writes into PageBroker staging. A GPU CustomStorage checkpoint writes directly to the PVC instead and is not bound by this. |
+| `pageBroker.staging.sizeLimit` | `56Gi` | Cap on the memory-backed staging volume shared by the agent and PageBroker, used for a checkpoint (except GPU CustomStorage) and a staged restore. |
 | `daemonset.nodeSelector`       | `nvidia.com/gpu.present: "true"`        | Targets GPU nodes.                                                                                                                        |
 | `daemonset.tolerations`        | GPU + `dedicated`                       | Node tolerations.                                                                                                                         |
 | `daemonset.runtimeClassName`   | `nvidia`                                | RuntimeClass for the agent pod; `""` omits it, for nodes where the NVIDIA runtime is containerd's default.                                |
@@ -125,8 +125,8 @@ payload checksums.
 `config.*` renders into the agent ConfigMap.
 
 - `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
-- `config.checkpoint.checkpointTimeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
-- `config.restore.restoreTimeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
+- `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
+- `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
 
 `config.criu.*` - CRIU options:
 

@@ -25,7 +25,7 @@ while keeping model weights on the GPU. It writes `ready-for-snapshot` only
 after both operations succeed.
 
 The program enables SGLang's memory saver and disables CPU weight backup.
-Weights are captured directly from GPU memory without a CPU backup copy.
+Weights are saved directly from GPU memory without a CPU backup copy.
 
 ### After the Restore
 
