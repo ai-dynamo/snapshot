@@ -501,7 +501,7 @@ the IP map.
 *Figure 5. Group checkpoint. Each shaded band is a round as in Figure 3, with every relay message passing through its agent.*
 
 The operator marks the `PodGroupSnapshot` Ready only when every member is
-Captured, and otherwise records which member failed and why, together with each
+Checkpointed, and otherwise records which member failed and why, together with each
 member's `startedAt`, copied from its `Started` condition. A member with that
 time has lost its source, since every source that started ends at its own dump
 or is terminated by the failure, whereas a member without it was never touched
@@ -915,8 +915,8 @@ spec:                                   # immutable
       podRef: {name: llm-worker-1, uid: <uid>, containers: [main]}
 status:                                 # the resource UID names the coordination session
   members:                              # keyed by id; startedAt is absent while the source is untouched
-  - {id: worker-0, rank: 0, nodeName: node-a, podSnapshot: {name: llm-tp8-worker-0, uid: <uid>}, startedAt: "2026-10-16T18:02:11Z", phase: Captured}
-  - {id: worker-1, rank: 1, nodeName: node-b, podSnapshot: {name: llm-tp8-worker-1, uid: <uid>}, startedAt: "2026-10-16T18:02:11Z", phase: Captured}
+  - {id: worker-0, rank: 0, nodeName: node-a, podSnapshot: {name: llm-tp8-worker-0, uid: <uid>}, startedAt: "2026-10-16T18:02:11Z", phase: Checkpointed}
+  - {id: worker-1, rank: 1, nodeName: node-b, podSnapshot: {name: llm-tp8-worker-1, uid: <uid>}, startedAt: "2026-10-16T18:02:11Z", phase: Checkpointed}
   conditions: []                        # Admitted, Ready, Failed
 ---
 apiVersion: nvidia.com/v1alpha1
@@ -970,10 +970,12 @@ report today, on each member's `PodSnapshotContent` and on each restore Pod's
 `nvidia.com/Restored` condition, which keeps its public reasons so that
 `ClassifyRestoreOutcome` reads a group restore exactly like a single one, and the
 operator alone aggregates those results into the group's status. Member phases
-progress through `Pending`, `Admitted`, `Capturing`, and `Captured` during
-capture, and through `Pending`, `Admitted`, `Restoring`, and `Released` during
-restore, with `Failed` and a reason otherwise; a restore is Ready only when every
-member is Released. Each member's write-once `startedAt` is the
+progress through `Pending`, `Admitted`, `Checkpointing`, and `Checkpointed`
+during capture, and through `Pending`, `Admitted`, `Restoring`, and `Released` during
+restore, with `Failed` and a reason otherwise. A restore is `Released` once its
+`release` barrier completes, after which the attempt's outcome no longer
+affects a released member, and `Ready` only when every member is Released,
+including any `postRestore` notification. Each member's write-once `startedAt` is the
 `lastTransitionTime` of its agent's record, the `Started` condition at capture or
 the `nvidia.com/RestoreStarted` condition at restore, both of which are set once
 and never removed, so the operator cannot miss them however fast a member fails
@@ -1310,7 +1312,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// Condition types. Released applies to PodGroupRestore only.
+// Condition types. Released applies to PodGroupRestore only: it is True once
+// the release barrier completes, after which the attempt's outcome no longer
+// affects a released member. Ready is True once every member is Checkpointed,
+// or every member is Released.
 const (
 	PodGroupConditionAdmitted = "Admitted"
 	PodGroupConditionReleased = "Released"
@@ -1338,9 +1343,23 @@ const (
 	PodGroupReasonCancelled           = "Cancelled"
 )
 
-// PodGroupSnapshotInUseFinalizer keeps a PodGroupSnapshot, and the artifacts of its
-// members, while any unfinished PodGroupRestore references its UID.
-const PodGroupSnapshotInUseFinalizer = "nvidia.com/snapshot-podgroup-in-use"
+// Control-plane keys, next to the existing ones in constants.go.
+const (
+	// PodGroupLabel holds the PodGroupSnapshot's name, and PodGroupMemberLabel
+	// the member ID, on each PodSnapshot that a PodGroupSnapshot owns.
+	PodGroupLabel       = "nvidia.com/snapshot-podgroup"
+	PodGroupMemberLabel = "nvidia.com/snapshot-podgroup-member"
+
+	// PodGroupProtocolsAnnotation on the agent DaemonSet's Pod template, and so
+	// on every agent Pod created from it, lists the group protocol versions that
+	// the agent supports, comma-separated, for example "v1" or "v1,v2".
+	PodGroupProtocolsAnnotation = "nvidia.com/snapshot-podgroup-protocols"
+
+	// PodGroupSnapshotInUseFinalizer keeps a PodGroupSnapshot, and the
+	// snapshots of its members, while any unfinished PodGroupRestore
+	// references its UID.
+	PodGroupSnapshotInUseFinalizer = "nvidia.com/snapshot-podgroup-in-use"
+)
 
 // ObjectIdentity names an exact object, in the operation's namespace or at
 // cluster scope.
@@ -1405,8 +1424,9 @@ type PodGroupSnapshotMember struct {
 	PodSnapshotTemplate *PodGroupMemberTemplate `json:"podSnapshotTemplate,omitempty"`
 }
 
+// The controller checks that members name distinct Pods: a CEL rule that
+// compares 256 Pod names exceeds the API server's cost budget.
 // +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.exists_one(n, n.id == m.id))",message="member IDs must be unique"
-// +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.filter(n, n.source.podRef.name == m.source.podRef.name).size() == 1)",message="source Pods must be distinct"
 type PodGroupSnapshotSpec struct {
 	// DeadlineSeconds bounds the capture, counted from creation.
 	// +kubebuilder:validation:Minimum=1
@@ -1421,21 +1441,21 @@ type PodGroupSnapshotSpec struct {
 	Members []PodGroupSnapshotMember `json:"members"`
 }
 
-// +kubebuilder:validation:Enum=Pending;Admitted;Capturing;Captured;Failed
-type CapturePhase string
+// +kubebuilder:validation:Enum=Pending;Admitted;Checkpointing;Checkpointed;Failed
+type CheckpointPhase string
 
 const (
-	CapturePending   CapturePhase = "Pending"
-	CaptureAdmitted  CapturePhase = "Admitted"
-	CaptureCapturing CapturePhase = "Capturing"
-	CaptureCaptured  CapturePhase = "Captured"
-	CaptureFailed    CapturePhase = "Failed"
+	CheckpointPhasePending       CheckpointPhase = "Pending"
+	CheckpointPhaseAdmitted      CheckpointPhase = "Admitted"
+	CheckpointPhaseCheckpointing CheckpointPhase = "Checkpointing"
+	CheckpointPhaseCheckpointed  CheckpointPhase = "Checkpointed"
+	CheckpointPhaseFailed        CheckpointPhase = "Failed"
 )
 
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.podSnapshot) || (has(self.podSnapshot) && self.podSnapshot == oldSelf.podSnapshot)",message="podSnapshot is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.content) || (has(self.content) && self.content == oldSelf.content)",message="content is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.startedAt) || (has(self.startedAt) && self.startedAt == oldSelf.startedAt)",message="startedAt is write-once"
-// +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Captured', 'Failed']) || self.phase == oldSelf.phase",message="final phases are immutable"
+// +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Checkpointed', 'Failed']) || self.phase == oldSelf.phase",message="final phases are immutable"
 type PodGroupSnapshotMemberStatus struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -1443,11 +1463,12 @@ type PodGroupSnapshotMemberStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	Rank int32 `json:"rank"`
 	// +optional
+	// +kubebuilder:validation:MaxLength=253
 	NodeName string `json:"nodeName,omitempty"`
 	// PodSnapshot is the child that the group owns for this member.
 	// +optional
 	PodSnapshot *ObjectIdentity `json:"podSnapshot,omitempty"`
-	// Content is the member's PodSnapshotContent, pinned once captured.
+	// Content is the member's PodSnapshotContent, pinned once checkpointed.
 	// +optional
 	Content *ObjectIdentity `json:"content,omitempty"`
 	// StartedAt is copied from the Started condition that the agent sets
@@ -1455,11 +1476,14 @@ type PodGroupSnapshotMemberStatus struct {
 	// never changed this source.
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
-	// +kubebuilder:default=Pending
-	Phase CapturePhase `json:"phase"`
 	// +optional
+	// +kubebuilder:default=Pending
+	Phase CheckpointPhase `json:"phase,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
 	Reason string `json:"reason,omitempty"`
 	// +optional
+	// +kubebuilder:validation:MaxLength=32768
 	Message string `json:"message,omitempty"`
 }
 
@@ -1483,6 +1507,7 @@ type PodGroupSnapshotStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Failed")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be no more than 63 characters because member PodSnapshots carry it as a label value"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, self.spec.members.exists(s, s.id == m.id))",message="status must refer to declared members"
 type PodGroupSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -1532,7 +1557,8 @@ type PodGroupRestoreTarget struct {
 	ContainerMappings []ContainerMapping `json:"containerMappings,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="self.targets.all(t, self.targets.filter(n, n.podRef.name == t.podRef.name).size() == 1)",message="target Pods must be distinct"
+// The controller checks that targets name distinct Pods, for the same reason
+// as for members.
 type PodGroupRestoreSpec struct {
 	SnapshotRef ObjectIdentity `json:"snapshotRef"`
 	// DeadlineSeconds bounds the restore, counted from creation. Admission
@@ -1552,11 +1578,11 @@ type PodGroupRestoreSpec struct {
 type RestorePhase string
 
 const (
-	RestorePending   RestorePhase = "Pending"
-	RestoreAdmitted  RestorePhase = "Admitted"
-	RestoreRestoring RestorePhase = "Restoring"
-	RestoreReleased  RestorePhase = "Released"
-	RestoreFailed    RestorePhase = "Failed"
+	RestorePhasePending   RestorePhase = "Pending"
+	RestorePhaseAdmitted  RestorePhase = "Admitted"
+	RestorePhaseRestoring RestorePhase = "Restoring"
+	RestorePhaseReleased  RestorePhase = "Released"
+	RestorePhaseFailed    RestorePhase = "Failed"
 )
 
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.pod) || (has(self.pod) && self.pod == oldSelf.pod)",message="target Pod is immutable"
@@ -1574,6 +1600,7 @@ type PodGroupRestoreMemberStatus struct {
 	// +optional
 	Pod *ObjectIdentity `json:"pod,omitempty"`
 	// +optional
+	// +kubebuilder:validation:MaxLength=253
 	NodeName string `json:"nodeName,omitempty"`
 	// Containers are the restore Pod's destination containers, with the ID
 	// each had at admission. Capped at one entry, like the mappings.
@@ -1591,11 +1618,14 @@ type PodGroupRestoreMemberStatus struct {
 	// this restore Pod.
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
-	// +kubebuilder:default=Pending
-	Phase RestorePhase `json:"phase"`
 	// +optional
+	// +kubebuilder:default=Pending
+	Phase RestorePhase `json:"phase,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
 	Reason string `json:"reason,omitempty"`
 	// +optional
+	// +kubebuilder:validation:MaxLength=32768
 	Message string `json:"message,omitempty"`
 }
 
@@ -1695,10 +1725,6 @@ const (
 	// annotations, and it requires the restore startup probe.
 	RestoreGroupAnnotation = "nvidia.com/restore-group"
 
-	// Labels on the PodSnapshots that a PodGroupSnapshot owns.
-	PodGroupLabel       = "nvidia.com/snapshot-podgroup"
-	PodGroupMemberLabel = "nvidia.com/snapshot-podgroup-member"
-
 	// RestoreStartedCondition is set to True on a group restore Pod before CRIU
 	// starts, under a field manager of its own, and never removed; from then
 	// on the agent never replays CRIU into the Pod. Its lastTransitionTime is
@@ -1712,10 +1738,6 @@ const (
 	// CoordinationDir is reserved in the control volume for rendezvous endpoints.
 	CoordinationDir = "coordination"
 
-	// PodGroupProtocolsAnnotation on the agent DaemonSet's Pod template, and so
-	// on every agent Pod created from it, lists the group protocol versions that
-	// the agent supports, for example "v1".
-	PodGroupProtocolsAnnotation = "nvidia.com/snapshot-podgroup-protocols"
 )
 
 // restore-complete on a group restore Pod:
