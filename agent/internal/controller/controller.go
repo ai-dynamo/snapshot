@@ -87,9 +87,9 @@ type NodeController struct {
 	// lock, which is enough because exactly one agent runs per node.
 	captureQueue workqueue.TypedRateLimitingInterface[string]
 
-	// checkpointProbeStates holds a *checkpointProbeState per work order whose container has a
-	// checkpoint readiness probe, while the agent waits for it.
-	checkpointProbeStates sync.Map
+	// checkpointGates holds a *checkpointGate per work order, while the agent waits for its
+	// source container to be ready for the checkpoint.
+	checkpointGates sync.Map
 	// hookExec runs a lifecycle hook's file action in its container, and
 	// hookHTTP sends its HTTP requests. Tests replace them.
 	hookExec lifecyclehooks.Execer
