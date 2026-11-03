@@ -238,47 +238,40 @@ func TestPostRestoreFileIsCreatedAfterRestoreComplete(t *testing.T) {
 	assert.True(t, h.hasFile(postRestoreMarker))
 }
 
-func TestPostRestoreFileThatExistsBeforeRestoreFailsBeforeRelease(t *testing.T) {
-	h := newPostRestoreHarness(t, filePostRestoreSpec(postRestoreMarker))
-	h.addFile(postRestoreMarker)
+func TestPostRestoreFileThatExistsBeforeTheRestoreCountsAsTheNotification(t *testing.T) {
+	// Nothing checks the file before the release, to keep the restore fast.
+	// The workload contract forbids such a file.
+	for _, tc := range []struct {
+		name  string
+		setup func(*postRestoreHarness)
+	}{
+		{"already in the container", func(h *postRestoreHarness) { h.addFile(postRestoreMarker) }},
+		{"brought back by the restored files", func(h *postRestoreHarness) { h.restoreAdds = postRestoreMarker }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPostRestoreHarness(t, filePostRestoreSpec(postRestoreMarker))
+			tc.setup(h)
 
-	err := h.run(false)
+			require.NoError(t, h.run(false))
 
-	require.Error(t, err)
-	assert.Equal(t, executor.StepCheckPostRestore, executor.StepOf(err))
-	assert.Contains(t, err.Error(), "already exists")
-	assert.Equal(t, 1, h.restores, "the file is checked once the restored files are in place")
-	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, h.recordedEvents(),
-		"the restored process must not be released")
+			assert.Equal(t, []string{"sentinel " + podcontract.RestoreCompleteFile}, h.recordedEvents(),
+				"the process is released, and Snapshot creates no file")
+		})
+	}
 }
 
-func TestPostRestoreFileThatTheRestoreBringsBackFails(t *testing.T) {
-	h := newPostRestoreHarness(t, filePostRestoreSpec(postRestoreMarker))
-	h.restoreAdds = postRestoreMarker
-
-	err := h.run(false)
-
-	require.Error(t, err)
-	assert.Equal(t, executor.StepCheckPostRestore, executor.StepOf(err))
-	assert.Equal(t, 1, h.restores)
-	assert.NotContains(t, h.recordedEvents(), "sentinel "+podcontract.RestoreCompleteFile,
-		"the restored process must not be released when the marker is already there")
-	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, h.recordedEvents())
-}
-
-func TestPostRestoreFileThatCantBeCreatedFailsBeforeRelease(t *testing.T) {
-	// The directory may come with the restored files, so it is checked only
-	// once they are in place, before the restored process is released.
+func TestPostRestoreFileThatCantBeCreatedFailsAfterRelease(t *testing.T) {
 	h := newPostRestoreHarness(t, filePostRestoreSpec("/no-such-dir/released"))
 
 	err := h.run(false)
 
 	require.Error(t, err)
-	assert.Equal(t, executor.StepCheckPostRestore, executor.StepOf(err))
-	assert.Contains(t, err.Error(), "does not exist")
-	assert.Equal(t, 1, h.restores)
-	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, h.recordedEvents(),
-		"the restored process must not be released")
+	assert.Equal(t, executor.StepPostRestore, executor.StepOf(err))
+	assert.Contains(t, err.Error(), "failed to create", "the error says why the file can't be created")
+	events := h.recordedEvents()
+	assert.Equal(t, "sentinel "+podcontract.RestoreCompleteFile, events[0], "nothing checks the file before the release")
+	assert.Equal(t, []string{"sentinel " + podcontract.RestoreFailedFile, "kill"}, events[len(events)-2:],
+		"a restored process whose application was never notified is stopped")
 }
 
 func TestPostRestoreFileWhoseDirectoryTheRestoreBringsSucceeds(t *testing.T) {

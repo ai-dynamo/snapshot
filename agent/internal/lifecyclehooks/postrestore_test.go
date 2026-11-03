@@ -22,22 +22,21 @@ func TestFilePostRestore(t *testing.T) {
 	h := &FilePostRestore{Exec: &localShell{}, Path: path, Timeout: 5 * time.Second}
 	target := PostRestoreTarget{Container: "main", ContainerID: "ctr"}
 
-	if err := h.Recheck(t.Context(), target); err != nil {
-		t.Fatalf("Recheck = %v, want nil before the file exists", err)
-	}
 	if err := h.Notify(t.Context(), target); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("the file wasn't created: %v", err)
 	}
-	// An earlier attempt created it, so a repeat succeeds.
+	// An existing file counts as the notification, so a repeat succeeds.
 	if err := h.Notify(t.Context(), target); err != nil {
-		t.Fatalf("Notify = %v, want nil for the file an earlier attempt created", err)
+		t.Fatalf("Notify = %v, want nil for an existing file", err)
 	}
-	// Before the release, the same file means it was there before Snapshot.
-	if err := h.Recheck(t.Context(), target); err == nil || !strings.Contains(err.Error(), "must not exist before Snapshot creates it") {
-		t.Fatalf("Recheck = %v, want an error for an existing file", err)
+
+	// A file that can't be created fails with the reason.
+	missing := &FilePostRestore{Exec: &localShell{}, Path: filepath.Join(dir, "no", "released"), Timeout: 5 * time.Second}
+	if err := missing.Notify(t.Context(), target); err == nil || !strings.Contains(err.Error(), "failed to create") {
+		t.Fatalf("Notify = %v, want a failure to create the file", err)
 	}
 }
 

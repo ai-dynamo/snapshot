@@ -32,9 +32,6 @@ type postRestoreHandler interface {
 	// Check refuses an action that can never run in container. It reads the
 	// Pod spec only, so the restore preflight runs it before any CRIU work.
 	Check(pod *corev1.Pod, container string) error
-	// Recheck runs once the restored files are in place, before
-	// restore-complete releases the restored process.
-	Recheck(ctx context.Context, target lifecyclehooks.PostRestoreTarget) error
 	// Notify tells the application once, after restore-complete;
 	// retryNotify repeats it.
 	Notify(ctx context.Context, target lifecyclehooks.PostRestoreTarget) error
@@ -98,18 +95,6 @@ func planPostRestore(
 		}
 	}
 	return handler, period, nil
-}
-
-// recheckPostRestore runs the action's Recheck once the restored files are in
-// place.
-func (op *restoreOperation) recheckPostRestore(ctx context.Context) error {
-	if op.postRestore == nil {
-		return nil
-	}
-	if err := op.postRestore.Recheck(ctx, op.postRestoreTarget()); err != nil {
-		return postRestoreStepError(executor.StepCheckPostRestore, err)
-	}
-	return nil
 }
 
 // notifyPostRestore tells the application, every postRestorePeriod until it

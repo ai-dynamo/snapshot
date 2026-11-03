@@ -30,11 +30,9 @@ type Execer interface {
 // plus a signal), so a failure of the shell itself, such as a redirect that
 // can't create the file, is never read as one of these answers.
 const (
-	exitMissing        = 10
-	exitNotRegular     = 11
-	exitExists         = 12
-	exitNoParent       = 13
-	exitParentReadOnly = 14
+	exitMissing    = 10
+	exitNotRegular = 11
+	exitExists     = 12
 )
 
 // The scripts take the path as $1, never as part of the script, so no path
@@ -45,7 +43,7 @@ var (
 	// is at the path, and exitNotRegular for anything else.
 	fileExistsScript = fmt.Sprintf(`[ -f "$1" ] && exit 0; [ -e "$1" ] && exit %d; exit %d`,
 		exitNotRegular, exitMissing)
-	// existingScript is the start of the two marker scripts: it exits
+	// existingScript is the start of the marker script: it exits
 	// exitExists when a regular file is at the path, and exitNotRegular for
 	// anything else there, a dangling symlink included: [ -e ] doesn't see
 	// one, but the create would fail on it.
@@ -55,13 +53,6 @@ var (
 	// (noclobber) makes the shell create it with O_EXCL, so a file that
 	// appears in between is not overwritten.
 	createMarkerScript = existingScript + `set -C; : > "$1"`
-	// checkMarkerTargetScript changes nothing. It exits exitNoParent when the
-	// parent is not a directory, and exitParentReadOnly when the user may not
-	// create a file in it, which takes write and search permission: [ -w ]
-	// and [ -x ] ask the kernel as the user, so a read-only mount counts too.
-	checkMarkerTargetScript = existingScript + fmt.Sprintf(
-		`d="${1%%/*}"; [ -n "$d" ] || d=/; [ -d "$d" ] || exit %d; [ -w "$d" ] && [ -x "$d" ] || exit %d`,
-		exitNoParent, exitParentReadOnly)
 )
 
 const (
@@ -119,35 +110,6 @@ func CreateMarker(ctx context.Context, e Execer, containerID, filePath string, t
 		return fmt.Errorf("%s in container %s exists and is not a regular file", filePath, containerID)
 	default:
 		return fmt.Errorf("failed to create %s in container %s: %s", filePath, containerID, output)
-	}
-}
-
-// CheckMarkerTarget reports whether CreateMarker could create filePath in the
-// container now, without creating it: nothing is at the path, and its parent
-// is a directory the container's user may write. A regular file already there
-// matches fs.ErrExist, as with CreateMarker.
-//
-// A restore runs it before CRIU, so a path the marker can't be written to,
-// such as one on a read-only mount, fails the restore before the work is done
-// rather than after.
-func CheckMarkerTarget(ctx context.Context, e Execer, containerID, filePath string, timeout time.Duration) error {
-	code, output, err := runScript(ctx, e, containerID, checkMarkerTargetScript, filePath, timeout)
-	if err != nil {
-		return err
-	}
-	switch code {
-	case 0:
-		return nil
-	case exitExists:
-		return fmt.Errorf("%s in container %s: %w", filePath, containerID, fs.ErrExist)
-	case exitNotRegular:
-		return fmt.Errorf("%s in container %s exists and is not a regular file", filePath, containerID)
-	case exitNoParent:
-		return fmt.Errorf("the directory of %s does not exist in container %s", filePath, containerID)
-	case exitParentReadOnly:
-		return fmt.Errorf("the container's user can't create files in the directory of %s in container %s", filePath, containerID)
-	default:
-		return fmt.Errorf("failed to check %s in container %s: exit code %d: %s", filePath, containerID, code, output)
 	}
 }
 

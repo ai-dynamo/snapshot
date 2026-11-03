@@ -6,7 +6,6 @@ package lifecyclehooks
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"net/http"
 	"time"
@@ -18,10 +17,10 @@ import (
 )
 
 // The post-restore actions below tell a restored application that it may
-// resume. Check runs before any CRIU work and reads the Pod spec only.
-// Recheck runs once the restored files are in place, before restore-complete
-// releases the restored process. Notify makes one attempt; the caller retries
-// it every period until it succeeds or the restore deadline passes.
+// resume. Check runs before any CRIU work and reads the Pod spec only. Notify
+// runs after restore-complete released the restored process, and makes one
+// attempt; the caller retries it every period until it succeeds or the
+// restore deadline passes.
 
 // PostRestoreTarget is the restored container a post-restore action notifies.
 type PostRestoreTarget struct {
@@ -46,29 +45,17 @@ func (h *FilePostRestore) Check(pod *corev1.Pod, container string) error {
 	return CheckWritePath(pod, container, h.Path)
 }
 
-// Recheck tests the file only once the restored files are in place, since
-// they can bring the file or its directory. The file must not exist yet: an
-// existing file would be taken for the notification, so the application
-// would never get one. And it must be possible to create: its directory
-// exists and the container's user may write it, so a read-only mount fails
-// the restore here rather than after the application was released.
-func (h *FilePostRestore) Recheck(ctx context.Context, target PostRestoreTarget) error {
-	err := CheckMarkerTarget(ctx, h.Exec, target.ContainerID, h.Path, h.Timeout)
-	if errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("%s already exists in container %s once the restored files are in place; "+
-			"the post-restore file must not exist before Snapshot creates it", h.Path, target.Container)
-	}
-	return err
-}
-
-// Notify counts an existing file as its own. Recheck found no file before
-// restore-complete, and only Notify creates it, so finding it here means an
-// earlier attempt created it: one whose reply was lost, or one before the
-// agent restarted.
+// Notify counts an existing file as the notification. Usually an earlier
+// attempt created it: one whose reply was lost, or one before the agent
+// restarted. Nothing checks the file before the release, to keep the restore
+// fast, so a file that was there before the restore, such as one the restored
+// files brought back, counts too: the workload contract forbids such a file,
+// and the application then gets no notification. A file that can't be created
+// fails each attempt with the reason, until the restore deadline.
 func (h *FilePostRestore) Notify(ctx context.Context, target PostRestoreTarget) error {
 	err := CreateMarker(ctx, h.Exec, target.ContainerID, h.Path, h.Timeout)
 	if errors.Is(err, fs.ErrExist) {
-		logr.FromContextOrDiscard(ctx).Info("Post-restore file already exists; an earlier attempt created it", "path", h.Path)
+		logr.FromContextOrDiscard(ctx).Info("Post-restore file already exists; counting it as the notification", "path", h.Path)
 		return nil
 	}
 	return err
@@ -92,9 +79,6 @@ func (h *HTTPPostRestore) Check(pod *corev1.Pod, container string) error {
 	_, err := ResolvePort(pod, container, h.Action.Port)
 	return err
 }
-
-// Recheck has nothing to check once the restored files are in place.
-func (h *HTTPPostRestore) Recheck(context.Context, PostRestoreTarget) error { return nil }
 
 func (h *HTTPPostRestore) Notify(ctx context.Context, target PostRestoreTarget) error {
 	podIP, err := target.PodIP(ctx)
