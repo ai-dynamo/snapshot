@@ -1,0 +1,396 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: podgrouprestores.nvidia.com
+spec:
+  group: nvidia.com
+  names:
+    kind: PodGroupRestore
+    listKind: PodGroupRestoreList
+    plural: podgrouprestores
+    shortNames:
+    - podgrouprestore
+    singular: podgrouprestore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Ready condition
+      jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - description: Failure reason
+      jsonPath: .status.conditions[?(@.type=='Failed')].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PodGroupRestore restores every member of a PodGroupSnapshot into its own
+          restore Pod, as one attempt. A PodGroupSnapshot can be restored many times;
+          each PodGroupRestore is a new attempt with new restore Pods.
+
+          No conversion: this type exists only in v1alpha1 (no other API version), so
+          it is not part of any conversion scheme.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PodGroupRestoreSpec defines the desired state of PodGroupRestore: the
+              PodGroupSnapshot to restore, and the Pod that receives each of its members.
+              The API server checks its shape. The operator checks the rest before it
+              admits the restore: that the targets match the snapshot's members one to
+              one and name distinct Pods, that each target Pod exists, and that each
+              target's startup probe allows for what remains of the deadline.
+            properties:
+              deadlineSeconds:
+                description: |-
+                  DeadlineSeconds bounds the whole restore, counted from the
+                  PodGroupRestore's creation. Members still restoring when it expires fail
+                  with DeadlineExceeded; members already released keep running.
+                format: int64
+                minimum: 1
+                type: integer
+              snapshotRef:
+                description: |-
+                  SnapshotRef names the PodGroupSnapshot to restore, in this namespace.
+                  Its UID is required, so a recreated PodGroupSnapshot with the same name
+                  is never restored in its place.
+                properties:
+                  name:
+                    description: Name of the object.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID of the object.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+              targets:
+                description: |-
+                  Targets are the restore Pods, one for each member of the
+                  PodGroupSnapshot. Their order carries no meaning.
+                items:
+                  description: |-
+                    PodGroupRestoreTarget is the restore Pod for one member of the
+                    PodGroupSnapshot. A target's rank is the rank of the snapshot member with the
+                    same ID; the restore never restates it.
+                  properties:
+                    containerMappings:
+                      description: |-
+                        ContainerMappings maps the member's checkpointed container to the
+                        restore Pod's container that receives its processes. When it is
+                        omitted, the checkpointed container restores into the container of the
+                        same name. It holds one entry, as PodReference.Containers does.
+                      items:
+                        description: |-
+                          ContainerMapping maps a member's checkpointed container to the restore Pod's
+                          container that receives its processes.
+                        properties:
+                          destination:
+                            description: Destination is the restore Pod's container
+                              that receives the processes.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          source:
+                            description: Source is the member's checkpointed container.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - destination
+                        - source
+                        type: object
+                      maxItems: 1
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - source
+                      x-kubernetes-list-type: map
+                    id:
+                      description: ID is the ID of the PodGroupSnapshot member that
+                        this target restores.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    podRef:
+                      description: PodRef names the restore Pod, in this namespace.
+                      properties:
+                        name:
+                          description: Name of the restore Pod.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        uid:
+                          description: |-
+                            UID of the restore Pod. When it is omitted, the operator admits the Pod
+                            that has this name at admission time, and records its UID in status.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                  required:
+                  - id
+                  - podRef
+                  type: object
+                maxItems: 256
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - id
+                x-kubernetes-list-type: map
+            required:
+            - deadlineSeconds
+            - snapshotRef
+            - targets
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
+          status:
+            description: |-
+              PodGroupRestoreStatus defines the observed state of PodGroupRestore. Only the
+              operator writes it.
+            properties:
+              conditions:
+                description: |-
+                  Conditions reflect the latest observations of the PodGroupRestore's
+                  state. Types: Admitted, Released, Ready, Failed.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              members:
+                description: |-
+                  Members reports each target's progress, keyed by ID. An entry names a
+                  target of spec.targets and, once written, is never removed.
+                items:
+                  description: |-
+                    PodGroupRestoreMemberStatus is the observed state of one target. Its
+                    bindings and startedAt are write-once, and its phase stops changing once
+                    final.
+                  properties:
+                    containers:
+                      description: |-
+                        Containers are the restore Pod's destination containers, each with the
+                        runtime ID it had at admission, when the operator pinned it. It holds
+                        one entry, as the container mappings do.
+                      items:
+                        description: |-
+                          PodGroupRestoreContainerStatus pins one destination container of a restore
+                          Pod.
+                        properties:
+                          containerID:
+                            description: ContainerID is the container's runtime ID
+                              at admission.
+                            maxLength: 1024
+                            minLength: 1
+                            type: string
+                          name:
+                            description: Name of the destination container.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - containerID
+                        - name
+                        type: object
+                      maxItems: 1
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - name
+                      x-kubernetes-list-type: map
+                    id:
+                      description: ID is the target's ID in spec.targets.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    message:
+                      description: Message is a human-readable explanation of the
+                        phase.
+                      maxLength: 32768
+                      type: string
+                    nodeName:
+                      description: NodeName is the node the restore Pod runs on, pinned
+                        at admission.
+                      maxLength: 253
+                      type: string
+                    phase:
+                      default: Pending
+                      description: Phase is the member's progress through the restore.
+                      enum:
+                      - Pending
+                      - Admitted
+                      - Restoring
+                      - Released
+                      - Failed
+                      type: string
+                    pod:
+                      description: Pod is the restore Pod, pinned when the operator
+                        admits the target.
+                      properties:
+                        name:
+                          description: Name of the object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        uid:
+                          description: UID of the object.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - uid
+                      type: object
+                    reason:
+                      description: |-
+                        Reason is a CamelCase word that explains the phase, such as
+                        PodIPChanged for a Failed member.
+                      maxLength: 1024
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    startedAt:
+                      description: |-
+                        StartedAt is when Snapshot began restoring into the restore Pod: the
+                        time of the restore Pod's nvidia.com/RestoreStarted condition, which the
+                        node agent sets before its first irreversible step. Absent means
+                        Snapshot never changed the restore Pod.
+                      format: date-time
+                      type: string
+                    targetPodIP:
+                      description: TargetPodIP is the restore Pod's IPv4 address,
+                        pinned at admission.
+                      format: ipv4
+                      maxLength: 15
+                      type: string
+                  required:
+                  - id
+                  type: object
+                  x-kubernetes-validations:
+                  - message: pod is write-once
+                    rule: '!has(oldSelf.pod) || (has(self.pod) && self.pod == oldSelf.pod)'
+                  - message: nodeName is write-once
+                    rule: '!has(oldSelf.nodeName) || (has(self.nodeName) && self.nodeName
+                      == oldSelf.nodeName)'
+                  - message: containers is write-once
+                    rule: '!has(oldSelf.containers) || (has(self.containers) && self.containers
+                      == oldSelf.containers)'
+                  - message: targetPodIP is write-once
+                    rule: '!has(oldSelf.targetPodIP) || (has(self.targetPodIP) &&
+                      self.targetPodIP == oldSelf.targetPodIP)'
+                  - message: startedAt is write-once
+                    rule: '!has(oldSelf.startedAt) || (has(self.startedAt) && self.startedAt
+                      == oldSelf.startedAt)'
+                  - message: Released and Failed are final phases
+                    rule: '!(oldSelf.phase in [''Released'', ''Failed'']) || self.phase
+                      == oldSelf.phase'
+                maxItems: 256
+                type: array
+                x-kubernetes-list-map-keys:
+                - id
+                x-kubernetes-list-type: map
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: status.members must name targets of spec.targets
+          rule: '!has(self.status) || !has(self.status.members) || self.status.members.all(m,
+            self.spec.targets.exists(t, t.id == m.id))'
+        - message: status.members entries cannot be removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.members) || (has(self.status)
+            && has(self.status.members) && oldSelf.status.members.all(o, self.status.members.exists(n,
+            n.id == o.id)))'
+    served: true
+    storage: true
+    subresources:
+      status: {}

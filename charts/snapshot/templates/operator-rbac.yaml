@@ -60,6 +60,8 @@ rules:
       - podsnapshots.nvidia.com
       - podsnapshotcontents.nvidia.com
       - snapshotjobs.nvidia.com
+      - podgroupsnapshots.nvidia.com
+      - podgrouprestores.nvidia.com
     verbs: ["get", "patch"]
   {{- end }}
 ---

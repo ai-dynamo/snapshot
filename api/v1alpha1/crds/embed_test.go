@@ -14,7 +14,10 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
-const chartCRDDir = "../../../charts/snapshot/crds"
+const (
+	chartCRDDir       = "../../../charts/snapshot/crds"
+	chartOperatorRBAC = "../../../charts/snapshot/templates/operator-rbac.yaml"
+)
 
 func readCRDDir(t *testing.T, dir string) map[string]string {
 	t.Helper()
@@ -88,6 +91,44 @@ func TestNamedAccessorsAreEmbedded(t *testing.T) {
 		}
 		if !slices.Contains(All(), manifest) {
 			t.Errorf("%s: accessor returns a manifest that is not in All()", name)
+		}
+	}
+}
+
+// The group kinds have no named accessor: the crd-installer reaches them only
+// through All().
+func TestAllIncludesThePodGroupCRDs(t *testing.T) {
+	for _, name := range []string{"podgroupsnapshots.nvidia.com", "podgrouprestores.nvidia.com"} {
+		if !slices.ContainsFunc(All(), func(manifest string) bool {
+			return strings.Contains(manifest, "\n  name: "+name+"\n")
+		}) {
+			t.Errorf("All() has no CRD named %s; run 'make generate'", name)
+		}
+	}
+}
+
+// The crd-installer may get and patch only the CRDs that the chart names, so a
+// CRD missing from that list stops the operator from starting.
+func TestChartLetsTheInstallerApplyEveryCRD(t *testing.T) {
+	rbac, err := os.ReadFile(chartOperatorRBAC)
+	if err != nil {
+		t.Fatalf("read %s: %v", chartOperatorRBAC, err)
+	}
+	for _, manifest := range All() {
+		manifestJSON, err := utilyaml.ToJSON([]byte(manifest))
+		if err != nil {
+			t.Fatalf("convert CRD to JSON: %v", err)
+		}
+		var crd struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(manifestJSON, &crd); err != nil {
+			t.Fatalf("decode CRD: %v", err)
+		}
+		if !strings.Contains(string(rbac), "- "+crd.Metadata.Name+"\n") {
+			t.Errorf("%s does not let the crd-installer apply %s", chartOperatorRBAC, crd.Metadata.Name)
 		}
 	}
 }

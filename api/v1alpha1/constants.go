@@ -16,4 +16,13 @@ const (
 	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
 	CheckpointVolumeName = "checkpoint-storage"
+
+	// PodGroupLabel holds the name of the PodGroupSnapshot that owns a
+	// PodSnapshot, on each PodSnapshot that a PodGroupSnapshot creates for its
+	// members.
+	PodGroupLabel = "nvidia.com/snapshot-podgroup"
+
+	// PodGroupMemberLabel holds the member ID of a PodSnapshot that a
+	// PodGroupSnapshot creates for one of its members.
+	PodGroupMemberLabel = "nvidia.com/snapshot-podgroup-member"
 )
