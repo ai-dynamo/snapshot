@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: pod groups
+templates:
+  - templates/operator-deployment.yaml
+  - templates/operator-rbac.yaml
+  - templates/daemonset.yaml
+release:
+  name: snapshot
+  namespace: snapshot-system
+tests:
+  - it: leaves the PodGroupSnapshot controller off by default
+    template: templates/operator-deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --enable-pod-groups=true
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --agent-namespace=snapshot-system
+
+  - it: grants no PodGroupSnapshot access by default
+    template: templates/operator-rbac.yaml
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["podgroupsnapshots"]
+            verbs: ["get", "list", "watch", "update", "patch"]
+
+  - it: runs the controller and points it at this release's node agents
+    template: templates/operator-deployment.yaml
+    set:
+      operator.podGroups: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --enable-pod-groups=true
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --agent-namespace=snapshot-system
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --agent-selector=app.kubernetes.io/component=snapshot-agent,app.kubernetes.io/instance=snapshot
+
+  - it: grants the operator access to PodGroupSnapshots, their status and finalizers
+    template: templates/operator-rbac.yaml
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    set:
+      operator.podGroups: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["podgroupsnapshots"]
+            verbs: ["get", "list", "watch", "update", "patch"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["podgroupsnapshots/status"]
+            verbs: ["get", "update", "patch"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["podgroupsnapshots/finalizers"]
+            verbs: ["update"]
+
+  # The agent does not support pod groups yet, so groups stay at AgentNotReady
+  # until the agent advertises a group protocol.
+  - it: does not mark the node agent Pods as group-capable
+    template: templates/daemonset.yaml
+    set:
+      operator.podGroups: true
+    asserts:
+      - notExists:
+          path: spec.template.metadata.annotations["nvidia.com/snapshot-podgroup-protocols"]
+
+  - it: refuses a podGroups value that is not a boolean
+    template: templates/operator-deployment.yaml
+    set:
+      operator.podGroups: "true"
+    asserts:
+      - failedTemplate: {}
