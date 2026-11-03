@@ -109,6 +109,17 @@ const (
 	RestoreProxyPath = SnapshotControlMountPath + "/" + RestoreProxyBinaryName
 )
 
+// IsReservedControlFile reports whether name is a file that Snapshot or its
+// helpers write in the snapshot-control volume. A workload's post-restore file
+// action must not name one: writing it would act as Snapshot's own signal.
+func IsReservedControlFile(name string) bool {
+	switch name {
+	case RestoreCompleteFile, RestoreFailedFile, RestoreProxyBinaryName, CUDAJobFileName:
+		return true
+	}
+	return false
+}
+
 // Exit codes reserved by the restore proxy. Every other code is the restored
 // workload's own, or 128 plus the signal number that killed it.
 const (

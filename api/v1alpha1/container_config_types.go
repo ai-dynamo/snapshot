@@ -70,11 +70,13 @@ type CheckpointReadinessProbe struct {
 // CheckpointReadinessProbeHandler is how the probe checks the application.
 type CheckpointReadinessProbeHandler struct {
 	// File succeeds when a regular file exists at the path, inside the
-	// container.
+	// container. Like an exec probe, Snapshot checks it by running a shell
+	// in the container, as the container's user, so the image needs a shell.
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 
-	// HTTPGet succeeds when a GET to the Pod IP returns 200.
+	// HTTPGet succeeds when a GET to the Pod IP returns a 2xx status.
+	// Snapshot does not follow redirects, so a 3xx fails.
 	// +optional
 	HTTPGet *HTTPGetAction `json:"httpGet,omitempty"`
 }
@@ -111,14 +113,17 @@ type PostRestoreAction struct {
 
 // PostRestoreHandler is how Snapshot notifies the restored application.
 type PostRestoreHandler struct {
-	// File creates a regular file at the path, inside the container. The
+	// File creates an empty regular file at the path, inside the container.
+	// Like an exec probe, Snapshot creates it by running a shell in the
+	// container, as the container's user, so the image needs a shell. The
 	// parent directory must exist. If the file already exists before the
 	// restore, the restore fails.
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 
-	// HTTPPost sends a POST with an empty body to the Pod IP. A 200 or 204
-	// response means the application accepted the notification.
+	// HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
+	// means the application accepted the notification. Snapshot does not
+	// follow redirects, so a 3xx fails.
 	// +optional
 	HTTPPost *HTTPPostAction `json:"httpPost,omitempty"`
 }
@@ -127,9 +132,11 @@ type PostRestoreHandler struct {
 type ControlFileAction struct {
 	// Path is an absolute, clean path inside the container: no empty, "." or
 	// ".." parts and no trailing slash, so two paths name the same file only
-	// if they are equal. It must be on the container's own filesystem or an
-	// emptyDir volume; paths on hostPath and PersistentVolumeClaim volumes are
-	// refused.
+	// if they are equal. Any path the container's user can reach works,
+	// volumes included, except the files Snapshot itself writes in the
+	// snapshot-control volume. A file on a volume that outlives the Pod stays
+	// there for the next checkpoint or restore unless the application
+	// removes it.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=2
 	// +kubebuilder:validation:MaxLength=4096
@@ -138,8 +145,9 @@ type ControlFileAction struct {
 }
 
 // HTTPGetAction is a GET to a port on the Pod IP. Like Kubernetes' own
-// httpGet, it has a path and a port. Snapshot does not follow redirects, and
-// does not support Pods on the host network.
+// httpGet, it has a path and a port. Snapshot does not follow redirects, so a
+// 3xx fails. As with a Kubernetes probe, the Pod IP of a Pod on the host
+// network is the node's IP.
 type HTTPGetAction struct {
 	// Path of the request. Empty means "/".
 	// +optional
@@ -155,8 +163,9 @@ type HTTPGetAction struct {
 
 // HTTPPostAction is a POST with an empty body to a port on the Pod IP. Like
 // Kubernetes' own httpGet, it has a path and a port. Snapshot does not follow
-// redirects, and does not support Pods on the host network. It is a separate
-// type from HTTPGetAction so either can grow fields of its own.
+// redirects, so a 3xx fails. As with a Kubernetes probe, the Pod IP of a Pod
+// on the host network is the node's IP. It is a separate type from
+// HTTPGetAction so either can grow fields of its own.
 type HTTPPostAction struct {
 	// Path of the request. Empty means "/".
 	// +optional
