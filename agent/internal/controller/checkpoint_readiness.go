@@ -162,6 +162,24 @@ type checkpointProbeHandler interface {
 	Probe(ctx context.Context, pod *corev1.Pod, status *corev1.ContainerStatus, timeout time.Duration) error
 }
 
+// now is nowFn, or time.Now for a controller built without one.
+func (w *NodeController) now() time.Time {
+	if w.nowFn != nil {
+		return w.nowFn()
+	}
+	return time.Now()
+}
+
+// requeueCapture is requeueCaptureFn, or captureQueue.AddAfter for a
+// controller built without one.
+func (w *NodeController) requeueCapture(name string, after time.Duration) {
+	if w.requeueCaptureFn != nil {
+		w.requeueCaptureFn(name, after)
+		return
+	}
+	w.captureQueue.AddAfter(name, after)
+}
+
 func containerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 	for i := range pod.Status.ContainerStatuses {
 		if pod.Status.ContainerStatuses[i].Name == name {
