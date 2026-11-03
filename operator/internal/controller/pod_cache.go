@@ -9,17 +9,37 @@ import (
 
 // TrimPodForCache keeps only the Pod fields the controllers read from the
 // cache. The operator watches every Pod in the cluster but never writes one.
+// Of the Pod's conditions it keeps only Ready, which PodGroupSnapshot
+// admission reads from the snapshot agent Pods.
 func TrimPodForCache(obj any) (any, error) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		return obj, nil
 	}
+	var conditions []corev1.PodCondition
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			conditions = append(conditions, c)
+		}
+	}
 	pod.ManagedFields = nil
 	pod.Spec = corev1.PodSpec{NodeName: pod.Spec.NodeName}
 	pod.Status = corev1.PodStatus{
 		Phase:                 pod.Status.Phase,
+		Conditions:            conditions,
 		ContainerStatuses:     pod.Status.ContainerStatuses,
 		InitContainerStatuses: pod.Status.InitContainerStatuses,
 	}
 	return pod, nil
+}
+
+// isPodReady reports whether the Pod's Ready condition is True. TrimPodForCache
+// keeps that condition, so this works on cached Pods.
+func isPodReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
