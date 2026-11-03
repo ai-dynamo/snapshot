@@ -1,0 +1,41 @@
+{
+  "chunks": [
+    {
+      "firstStartedAt": "2026-11-01T09:09:22.858Z",
+      "lastStartedAt": "2026-11-03T19:37:20.083Z",
+      "month": "2026-11",
+      "path": "index/v1/2026-11.ndjson",
+      "recordCount": 16,
+      "suites": [
+        "framework-checkpoint-restore"
+      ]
+    },
+    {
+      "firstStartedAt": "2026-10-01T09:08:20.707Z",
+      "lastStartedAt": "2026-10-31T09:10:18.282Z",
+      "month": "2026-10",
+      "path": "index/v1/2026-10.ndjson",
+      "recordCount": 96,
+      "suites": [
+        "framework-checkpoint-restore"
+      ]
+    },
+    {
+      "firstStartedAt": "2026-09-18T09:08:03.492Z",
+      "lastStartedAt": "2026-09-30T09:08:23.657Z",
+      "month": "2026-09",
+      "path": "index/v1/2026-09.ndjson",
+      "recordCount": 39,
+      "suites": [
+        "framework-checkpoint-restore"
+      ]
+    }
+  ],
+  "historyFormatVersion": 1,
+  "manifestVersion": 1,
+  "newestResultAt": "2026-11-03T19:48:09.537Z",
+  "recordCount": 151,
+  "supportedSchemaVersions": [
+    1
+  ]
+}
