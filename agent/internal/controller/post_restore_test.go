@@ -102,9 +102,12 @@ func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAct
 
 // ExecSync runs a file action's command as the runtime would, with the path
 // moved under the harness's root, and reports a non-zero exit the way
-// cri-client does.
+// cri-client does. The no-op that finds the shell always succeeds.
 func (h *postRestoreHarness) ExecSync(ctx context.Context, containerID string, cmd []string, _ time.Duration) ([]byte, []byte, error) {
 	require.Equal(h.t, "ctr-abc", containerID, "file actions run in the destination container")
+	if cmd[len(cmd)-1] == "exit 0" {
+		return nil, nil, nil
+	}
 	path := cmd[len(cmd)-1]
 	args := append(append([]string{}, cmd[1:len(cmd)-1]...), filepath.Join(h.root, path))
 	var stderr bytes.Buffer
