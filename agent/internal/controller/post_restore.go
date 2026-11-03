@@ -143,9 +143,13 @@ type httpPostRestore struct {
 	action *snapshotv1alpha1.HTTPPostAction
 }
 
-// check refuses a port name the destination container doesn't have. A named
-// port resolves against the destination, which runs the restored application.
+// check refuses a path that doesn't parse and a port name the destination
+// container doesn't have. A named port resolves against the destination,
+// which runs the restored application.
 func (h *httpPostRestore) check(_ context.Context, op *restoreOperation) error {
+	if _, err := lifecyclehooks.RequestURL("", 0, h.action.Path); err != nil {
+		return postRestoreStepError(executor.StepCheckPostRestore, err)
+	}
 	if _, err := lifecyclehooks.ResolvePort(op.pod, op.destination, h.action.Port); err != nil {
 		return postRestoreStepError(executor.StepCheckPostRestore, err)
 	}
@@ -164,7 +168,11 @@ func (h *httpPostRestore) notify(ctx context.Context, op *restoreOperation) erro
 		if err != nil {
 			return err
 		}
-		return lifecyclehooks.HTTPPost(ctx, h.client, lifecyclehooks.RequestURL(podIP, port, h.action.Path), h.timeout)
+		u, err := lifecyclehooks.RequestURL(podIP, port, h.action.Path)
+		if err != nil {
+			return err
+		}
+		return lifecyclehooks.HTTPPost(ctx, h.client, u, h.timeout)
 	})
 }
 

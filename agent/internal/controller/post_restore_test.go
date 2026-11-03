@@ -194,6 +194,12 @@ func httpPostRestoreSpecOn(port intstr.IntOrString) *snapshotv1alpha1.PostRestor
 	}
 }
 
+func httpPostRestoreSpecWithPath(path string) *snapshotv1alpha1.PostRestoreAction {
+	action := httpPostRestoreSpec()
+	action.HTTPPost.Path = path
+	return action
+}
+
 func recoveringPod(h *postRestoreHarness) {
 	h.pod.Status.Conditions = append(h.pod.Status.Conditions, corev1.PodCondition{
 		Type:   corev1.PodConditionType(podcontract.RestoredCondition),
@@ -291,6 +297,7 @@ func TestPostRestoreRefusedTargetsFailWithoutCRIU(t *testing.T) {
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 		}},
 		{"HTTP on a port name the destination doesn't have", httpPostRestoreSpecOn(intstr.FromString("metrics")), func(*corev1.Pod) {}},
+		{"HTTP path that doesn't parse", httpPostRestoreSpecWithPath("/%zz"), func(*corev1.Pod) {}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPostRestoreHarness(t, tc.action)
