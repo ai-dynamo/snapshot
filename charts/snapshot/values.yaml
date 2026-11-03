@@ -378,3 +378,9 @@ config:
     libDir: "/usr/local/lib/snapshot/criu-plugins"
     allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
     skipInFlight: true             # Skip in-flight TCP connections
+
+# Alpha: pod groups (SNEP-324), which checkpoint a group of cooperating Pods
+# together and restore it. The chart installs what pod groups need only when
+# this is true.
+podGroups:
+  enabled: false

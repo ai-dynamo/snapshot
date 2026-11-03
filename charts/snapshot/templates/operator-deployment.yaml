@@ -97,6 +97,17 @@ spec:
             {{- if .Values.operator.bindNewContents }}
             - --bind-new-contents=true
             {{- end }}
+            {{- if .Values.podGroups.enabled }}
+            # Pod-group admission checks the node agent Pods of this release
+            # on each member's node, selected as the agent DaemonSet selects them.
+            {{- /* Inert until the node agent supports pod groups: this chart does
+            not mark the agent Pods as group-capable yet, so every
+            PodGroupSnapshot waits with Admitted=False, reason AgentNotReady,
+            until its deadline, and no PodSnapshot is created for it. */}}
+            - --enable-pod-groups=true
+            - {{ printf "--agent-namespace=%s" .Release.Namespace | quote }}
+            - {{ printf "--agent-selector=app.kubernetes.io/component=snapshot-agent,app.kubernetes.io/instance=%s" .Release.Name | quote }}
+            {{- end }}
             {{- if eq .Values.storage.type "s3" }}
             - {{ printf "--pagebroker-s3-config-namespace=%s" .Release.Namespace | quote }}
             - {{ printf "--pagebroker-s3-config-name=%s" (include "snapshot.pageBrokerS3ConfigName" .) | quote }}
