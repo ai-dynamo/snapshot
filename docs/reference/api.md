@@ -151,7 +151,10 @@ agent can never run fails the `PodSnapshot` with reason
 `WaitingForCheckpointReadiness` event.
 
 A restore succeeds only after its `postRestore` action succeeds, within
-`config.restore.timeoutSeconds`. Its failures name the steps
+`config.restore.timeoutSeconds`; an agent restart can extend that by one
+timeout, as
+[Lifecycle hooks](architecture/lifecycle-hooks.md#recovery-after-an-agent-restart)
+explains. Its failures name the steps
 `checking the post-restore action` and `running the post-restore action`; see
 [Troubleshooting](../operations/troubleshooting.md#checking-the-post-restore-action).
 

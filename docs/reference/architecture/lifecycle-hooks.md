@@ -87,9 +87,9 @@ the restored process is not delayed. Two cases follow:
 One deadline, `config.restore.timeoutSeconds`, covers the restore and the
 action. When no attempt succeeds by then, the restore fails as any restore
 does: the agent writes `restore-failed` and kills the destination container,
-even though the restored process was already released. The steps in the
-failure are `checking the post-restore action` and `running the post-restore
-action`.
+even though the restored process was already released. That failure names
+the step `running the post-restore action`; settings refused in the restore
+preflight name `checking the post-restore action`.
 
 ### Recovery after an agent restart
 
@@ -132,7 +132,7 @@ Each action can do only what the application itself could:
 |---|---|
 | `api/v1alpha1/container_config_types.go` | The settings types and their validation. |
 | `operator/internal/controller` | Copying the settings: `snapshotjob_podsnapshot.go`, `podsnapshot_reconciler.go`, `container_settings.go`. |
-| `agent/internal/lifecyclehooks` | The actions: `FileExists`, `CreateMarker`, `CheckMarkerTarget`, `CheckWritePath`, `ResolvePort`, `HTTPGet`, `HTTPPost`. The checkpoint probes: `ReadyCondition`, `FileProbe`, `HTTPProbe`. |
+| `agent/internal/lifecyclehooks` | The actions: `FileExists`, `CreateMarker`, `CheckWritePath`, `ResolvePort`, `HTTPGet`, `HTTPPost`. The checkpoint probes: `ReadyCondition`, `FileProbe`, `HTTPProbe`. |
 | `agent/internal/runtime` | `ExecSync`, which runs a file action's command in the container through CRI. |
 | `agent/internal/controller/checkpoint_readiness.go` | The readiness gate: `checkpointGate`, which paces the probe's checks and counts the results. |
 | `agent/internal/lifecyclehooks/postrestore.go` | The post-restore actions: `FilePostRestore` and `HTTPPostRestore`, with `Check` and one `Notify` attempt. |
