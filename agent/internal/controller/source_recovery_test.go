@@ -78,7 +78,8 @@ func TestReviveSourceRefusesWhatItCannotPutBack(t *testing.T) {
 func TestReviveSourceLeavesAReleasedTreeRunning(t *testing.T) {
 	w, kills, revived := recoveryController(nil)
 
-	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(), executor.SuspendedSource{GPUPIDs: []int{4242}})
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), nil, os.Getpid(),
+		executor.SuspendedSource{GPUPIDs: []int{4242}}, true)
 
 	assert.Equal(t, 0, *kills, "a workload that was put back must not be killed")
 	assert.Equal(t, []int{4242}, *revived, "the capture's own GPU processes must be handed back")
@@ -89,7 +90,8 @@ func TestReviveSourceLeavesAReleasedTreeRunning(t *testing.T) {
 func TestRecoverSourceKillsOnlyWhatCannotBeRevived(t *testing.T) {
 	w, kills, _ := recoveryController(errors.New("process is failed"))
 
-	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(), executor.SuspendedSource{GPUPIDs: []int{4242}})
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), nil, os.Getpid(),
+		executor.SuspendedSource{GPUPIDs: []int{4242}}, true)
 
 	assert.Equal(t, 1, *kills, "a source that cannot be revived must not be left hanging")
 }
@@ -113,7 +115,8 @@ func TestRecoverSourceSurvivesACancelledCapture(t *testing.T) {
 	captureCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	w.recoverSourceAfterFailedDump(captureCtx, logr.Discard(), os.Getpid(), executor.SuspendedSource{GPUPIDs: []int{4242}})
+	w.recoverSourceAfterFailedDump(captureCtx, logr.Discard(), nil, os.Getpid(),
+		executor.SuspendedSource{GPUPIDs: []int{4242}}, true)
 
 	assert.Equal(t, []int{4242}, *revived, "a dead capture context must not skip the revival")
 	assert.Equal(t, 0, *kills)
@@ -125,9 +128,33 @@ func TestRecoverSourceSurvivesACancelledCapture(t *testing.T) {
 func TestReviveSourceRefusesATreeWhoseMappingsWereRemoved(t *testing.T) {
 	w, kills, revived := recoveryController(nil)
 
-	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), os.Getpid(),
-		executor.SuspendedSource{GPUPIDs: []int{4242}, CuInterposePrepared: true})
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), nil, os.Getpid(),
+		executor.SuspendedSource{GPUPIDs: []int{4242}, CuInterposePrepared: true}, true)
 
 	assert.Equal(t, 1, *kills, "a tree with removed mappings must not be left running")
 	assert.Empty(t, *revived, "reviving its GPUs would only make it look healthy")
+}
+
+// A workload nothing will capture again must not be left waiting for a
+// checkpoint that is not coming, however recoverable its GPU state is.
+func TestRecoverSourceEndsASourceNothingWillRetry(t *testing.T) {
+	w, kills, revived := recoveryController(nil)
+
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), nil, os.Getpid(),
+		executor.SuspendedSource{GPUPIDs: []int{4242}}, false)
+
+	assert.Equal(t, 1, *kills, "a source with no attempt to come must be ended")
+	assert.Empty(t, *revived, "reviving it would only leave it waiting")
+}
+
+// PageBroker holds the GPU memory and its execution is torn down before
+// recovery runs, so an in-place restore has nothing to restore from.
+func TestReviveSourceRefusesACustomStorageCapture(t *testing.T) {
+	w, kills, revived := recoveryController(nil)
+
+	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), nil, os.Getpid(),
+		executor.SuspendedSource{GPUPIDs: []int{4242}, CustomStorageUsed: true}, true)
+
+	assert.Equal(t, 1, *kills)
+	assert.Empty(t, *revived)
 }

@@ -67,10 +67,11 @@ func (e *sourceNeedsRecoveryError) Error() string { return e.cause.Error() }
 
 func (e *sourceNeedsRecoveryError) Unwrap() error { return e.cause }
 
-func sourceNeedsRecovery(err error, cudaHostPIDs []int, cuInterposePrepared bool) error {
+func sourceNeedsRecovery(err error, cudaHostPIDs []int, cuInterposePrepared, customStorageUsed bool) error {
 	return &sourceNeedsRecoveryError{cause: err, suspended: SuspendedSource{
 		GPUPIDs:             slices.Clone(cudaHostPIDs),
 		CuInterposePrepared: cuInterposePrepared,
+		CustomStorageUsed:   customStorageUsed,
 	}}
 }
 
@@ -83,6 +84,11 @@ type SuspendedSource struct {
 	// CuInterposePrepared reports that the capture removed the tree's shared GPU mappings.
 	// Nothing puts them back, so a source in that state can only be terminated.
 	CuInterposePrepared bool
+
+	// CustomStorageUsed reports that the GPU memory went to PageBroker rather than staying
+	// with the driver. That execution is torn down before recovery runs, so an in-place
+	// restore has nothing to restore from and the source can only be terminated.
+	CustomStorageUsed bool
 }
 
 // SuspendedSourceOf returns what a failed capture left behind, and whether the failure left
@@ -229,7 +235,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
 	if err != nil {
-		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator())
+		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator(), usePageBrokerGPU)
 	}
 
 	dumpComplete = true

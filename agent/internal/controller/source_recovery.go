@@ -5,9 +5,11 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -18,6 +20,12 @@ import (
 // has already failed, so this cannot wait on it indefinitely.
 const sourceRecoveryTimeout = 2 * time.Minute
 
+// Event reasons for what became of a workload whose capture failed.
+const (
+	reasonSourceRevived    = "SourceRevived"
+	reasonSourceTerminated = "SourceTerminated"
+)
+
 // recoverSourceAfterFailedDump decides what becomes of a workload whose dump
 // failed: hand it back its GPUs and leave it running, or kill it.
 //
@@ -27,7 +35,14 @@ const sourceRecoveryTimeout = 2 * time.Minute
 // state any retry would build on. It is killed only when it cannot be put back:
 // the GPU state is unrecoverable, or CRIU left a task seized or stopped, in
 // which case it would hang rather than resume.
-func (w *NodeController) recoverSourceAfterFailedDump(ctx context.Context, log logr.Logger, containerPID int, suspended executor.SuspendedSource) {
+func (w *NodeController) recoverSourceAfterFailedDump(
+	ctx context.Context,
+	log logr.Logger,
+	pod *corev1.Pod,
+	containerPID int,
+	suspended executor.SuspendedSource,
+	retryWillFollow bool,
+) {
 	// Detached from the capture: a dump that failed on its deadline leaves that
 	// context dead, and probing the GPUs through it returns no processes rather
 	// than an error — so the workload would be reported left running with its
@@ -35,23 +50,53 @@ func (w *NodeController) recoverSourceAfterFailedDump(ctx context.Context, log l
 	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sourceRecoveryTimeout)
 	defer cancel()
 
-	if reason, ok := w.reviveSource(recoveryCtx, log, containerPID, suspended); !ok {
+	// Reviving a workload nothing will capture again only leaves it waiting for a
+	// checkpoint that is not coming, which is worse than ending it.
+	reason := "no further attempt will be made"
+	revived := false
+	if retryWillFollow {
+		reason, revived = w.reviveSource(recoveryCtx, log, containerPID, suspended)
+	}
+	if !revived {
 		log.Info("Killing the source after a failed dump", "reason", reason)
 		if err := w.killCheckpointProcess(log, containerPID, "checkpoint failed"); err != nil {
 			log.Error(err, "Failed to kill target after checkpoint failure")
 		}
+		w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourceTerminated,
+			fmt.Sprintf("Terminated the source after a failed capture: %s", reason))
 		return
 	}
 	log.Info("Source left running after a failed dump", "pid", containerPID)
+	w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourceRevived,
+		"Handed the source back its GPUs after a failed capture; it is still running")
 }
 
-// reviveSource reports whether the workload is running again, and why not when
-// it is not.
+// emitRecoveryEvent tells the pod's owner what became of their workload. The
+// PodSnapshot only says the capture failed, which does not say whether the
+// workload is still alive.
+func (w *NodeController) emitRecoveryEvent(ctx context.Context, log logr.Logger, pod *corev1.Pod, reason, message string) {
+	if pod == nil {
+		return
+	}
+	eventType := corev1.EventTypeWarning
+	if reason == reasonSourceRevived {
+		eventType = corev1.EventTypeNormal
+	}
+	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, eventType, reason, message)
+}
+
+// reviveSource hands the workload back its GPUs and checks that CRIU let go,
+// reporting whether it is running again and, when it is not, what stopped it.
+// It changes the workload's state; the caller decides what to do with the
+// answer.
 func (w *NodeController) reviveSource(ctx context.Context, log logr.Logger, containerPID int, suspended executor.SuspendedSource) (string, bool) {
 	// Preparing a multi-GPU capture removes the tree's shared mappings, and
 	// nothing puts them back. Leaving it running would leave it running broken.
 	if suspended.CuInterposePrepared {
 		return "its shared GPU mappings were removed and cannot be restored", false
+	}
+	if suspended.CustomStorageUsed {
+		return "its GPU memory went to PageBroker, whose execution is already torn down", false
 	}
 
 	pids := snapshotruntime.ProcessTreePIDs(containerPID)

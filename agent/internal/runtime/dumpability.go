@@ -88,9 +88,12 @@ func SnapshotTree(procRoot string, pids []int) (TreeSnapshot, error) {
 // one it has not.
 //
 // CRIU seizes every task and injects a parasite, undoing both when it finishes.
-// A run that was interrupted can leave a task attached or stopped, and CRIU
-// cannot seize a task that is already seized. A task left this way also cannot
-// resume on its own.
+// A run that was interrupted can leave a task attached or stopped, and such a
+// task cannot resume on its own.
+//
+// Uninterruptible sleep is deliberately not disqualifying here: it ends by
+// itself, and a thread sitting in a driver call is ordinary right after a GPU
+// restore. Only a dump cares, because CRIU cannot seize such a task.
 func Released(procRoot string, pids []int) (bool, string) {
 	for _, pid := range pids {
 		tids, err := taskIDs(procRoot, pid)
@@ -107,8 +110,6 @@ func Released(procRoot string, pids []int) (bool, string) {
 				return false, fmt.Sprintf("task %d of process %d is still traced by %d", tid, pid, probe.TracerPID)
 			case probe.State == "T" || probe.State == "t":
 				return false, fmt.Sprintf("task %d of process %d is stopped", tid, pid)
-			case probe.State == "D":
-				return false, fmt.Sprintf("task %d of process %d is in uninterruptible sleep", tid, pid)
 			}
 		}
 	}
@@ -148,6 +149,21 @@ func Dumpable(procRoot string, recorded TreeSnapshot) (bool, string) {
 		return false, reason
 	}
 	for _, pid := range pids {
+		tids, err := taskIDs(procRoot, pid)
+		if err != nil {
+			return false, fmt.Sprintf("process %d is gone or unreadable: %v", pid, err)
+		}
+		for _, tid := range tids {
+			// A task blocked inside a driver call cannot be seized reliably, which
+			// only a dump needs — so this is Dumpable's concern, not Released's.
+			probe, err := probeTaskOf(procRoot, pid, tid)
+			if err != nil {
+				return false, fmt.Sprintf("task %d of process %d is gone or unreadable: %v", tid, pid, err)
+			}
+			if probe.State == "D" {
+				return false, fmt.Sprintf("task %d of process %d is in uninterruptible sleep", tid, pid)
+			}
+		}
 		probe, err := ProbeTask(procRoot, pid)
 		if err != nil {
 			return false, fmt.Sprintf("process %d is gone or unreadable: %v", pid, err)

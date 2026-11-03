@@ -5,7 +5,6 @@ package cuda
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/go-logr/logr"
@@ -37,34 +36,29 @@ func ProcessStates(ctx context.Context, pids []int, helperBinaryPath string) (ma
 //
 // Checkpointing is a reversible state machine, and a tree can be part way
 // through it: a suspend that failed leaves some processes merely locked while
-// others are already checkpointed. Each process is therefore dispatched on its
-// own state, and every one is attempted even after another fails — stopping at
-// the first error would leave the rest of the tree locked, which is worse than
-// not having tried. No device remapping is needed, because the workload is
-// being handed back the GPUs it never released.
+// others are already checkpointed, so each process is dispatched on its own
+// state. The first failure ends the attempt: the tree is only usable if every
+// process comes back, and the caller terminates it either way. No device
+// remapping is needed, because the workload is being handed back the GPUs it
+// never released.
 func ReviveProcessTree(ctx context.Context, pids []int, helperBinaryPath string, log logr.Logger) error {
-	var failures []error
 	for _, pid := range pids {
 		if err := reviveProcess(ctx, pid, helperBinaryPath, log); err != nil {
-			failures = append(failures, err)
+			return err
 		}
 	}
-	if len(failures) > 0 {
-		return errors.Join(failures...)
-	}
-	// The workload is only revived if every process is back to running: one left
-	// behind makes the tree unusable to whatever holds the other processes.
+	// Revived only if every process is back to running: one left behind makes
+	// the tree unusable to whatever holds the others.
 	for _, pid := range pids {
 		state, err := getState(ctx, pid, helperBinaryPath)
 		if err != nil {
-			failures = append(failures, fmt.Errorf("confirm process %d resumed: %w", pid, err))
-			continue
+			return fmt.Errorf("confirm process %d resumed: %w", pid, err)
 		}
 		if state != StateRunning {
-			failures = append(failures, fmt.Errorf("process %d is %q after revival, not %q", pid, state, StateRunning))
+			return fmt.Errorf("process %d is %q after revival, not %q", pid, state, StateRunning)
 		}
 	}
-	return errors.Join(failures...)
+	return nil
 }
 
 // reviveProcess walks one process back to running from wherever it stopped.
@@ -77,17 +71,17 @@ func reviveProcess(ctx context.Context, pid int, helperBinaryPath string, log lo
 	case StateRunning:
 		return nil
 	case StateLocked:
-		if err := unlock(ctx, pid, helperBinaryPath, log); err != nil {
+		if err := reviveAction(ctx, pid, actionUnlock, helperBinaryPath, log); err != nil {
 			return fmt.Errorf("unlock process %d: %w", pid, err)
 		}
 		return nil
 	case StateCheckpointed:
 		// Restoring in place, so the device map stays empty: these are the same
 		// GPUs the process was using.
-		if err := restoreProcess(ctx, pid, "", helperBinaryPath, log); err != nil {
+		if err := reviveAction(ctx, pid, actionRestore, helperBinaryPath, log); err != nil {
 			return fmt.Errorf("restore process %d: %w", pid, err)
 		}
-		if err := unlock(ctx, pid, helperBinaryPath, log); err != nil {
+		if err := reviveAction(ctx, pid, actionUnlock, helperBinaryPath, log); err != nil {
 			return fmt.Errorf("unlock process %d after restore: %w", pid, err)
 		}
 		return nil
@@ -96,4 +90,13 @@ func reviveProcess(ctx context.Context, pid int, helperBinaryPath string, log lo
 		// account for this process, so nothing can hand its GPUs back.
 		return fmt.Errorf("process %d is %q and cannot be revived", pid, state)
 	}
+}
+
+// reviveAction runs one helper action in its own process group. restore and
+// unlock normally run inside nsrestore and rely on the agent killing that
+// group; revival runs them from the agent, where no such kill exists, so
+// without their own group a helper child holding the output pipe would block
+// past the caller's deadline.
+func reviveAction(ctx context.Context, pid int, action, helperBinaryPath string, log logr.Logger) error {
+	return runAction(ctx, pid, action, "", helperBinaryPath, true, log)
 }

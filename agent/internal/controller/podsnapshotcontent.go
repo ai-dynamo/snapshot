@@ -625,7 +625,10 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	artifact, err := executor.Checkpoint(ctx, w.runtime, log, req, w.config)
 	if err != nil {
 		if suspended, needsRecovery := executor.SuspendedSourceOf(err); needsRecovery {
-			w.recoverSourceAfterFailedDump(ctx, log, params.ContainerPID, suspended)
+			// Nothing retries a capture yet, so no further attempt follows and the
+			// source is ended rather than left waiting. SNEP-394's retry loop is
+			// what will ask for it to be kept.
+			w.recoverSourceAfterFailedDump(ctx, log, params.Pod, params.ContainerPID, suspended, false)
 		}
 		return nil, fmt.Errorf("checkpoint: %w", err)
 	}

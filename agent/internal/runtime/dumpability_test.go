@@ -157,7 +157,7 @@ func TestReleased(t *testing.T) {
 		{name: "still traced", tracerPID: 99, state: "S"},
 		{name: "stopped", state: "T"},
 		{name: "traced-and-stopped", state: "t"},
-		{name: "uninterruptible sleep", state: "D"},
+		{name: "uninterruptible sleep still resumes on its own", state: "D", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			procRoot := t.TempDir()
@@ -200,7 +200,6 @@ func TestReleasedChecksEveryTask(t *testing.T) {
 	}{
 		{name: "a non-leader task is still traced", tracerPID: 99, state: "S"},
 		{name: "a non-leader task is stopped", state: "T"},
-		{name: "a non-leader task is in uninterruptible sleep", state: "D"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			procRoot := t.TempDir()
@@ -226,5 +225,20 @@ func TestReleasedAcceptsATreeWhoseTasksAreAllClean(t *testing.T) {
 
 	if released, reason := Released(procRoot, []int{42}); !released {
 		t.Errorf("Released() = false (%s), want true", reason)
+	}
+}
+
+// Uninterruptible sleep ends by itself, and a thread in a driver call is
+// ordinary right after a GPU restore — so it must not fail the post-revive
+// check, only the dump.
+func TestUninterruptibleSleepFailsOnlyTheDump(t *testing.T) {
+	procRoot := t.TempDir()
+	writeProcStatus(t, procRoot, 42, 0, 1, "D")
+
+	if released, reason := Released(procRoot, []int{42}); !released {
+		t.Errorf("Released() = false (%s), want true: a D task can still resume", reason)
+	}
+	if dumpable, _ := Dumpable(procRoot, TreeSnapshot{42: 1}); dumpable {
+		t.Error("Dumpable() = true, want false: CRIU cannot seize a D task")
 	}
 }
