@@ -10,9 +10,11 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -27,6 +29,8 @@ inline constexpr std::chrono::minutes kDefaultModelStreamerSubmissionTimeout{20}
 // Target bytes per batch and shared native admission budget. A file exceeding
 // the budget runs alone. This does not bound total checkpoint staging memory.
 inline constexpr std::uint64_t kDefaultRestoreBatchBytes = 10'000'000'000;
+inline constexpr std::size_t kDefaultRestorePreparationSlots = 2;
+inline constexpr std::size_t kMaxRestorePreparationSlots = 4;
 
 // Explicit values are fixed for one native session. Empty credentials select
 // the native AWS provider chain. Addressing, TLS/CA and worker configuration use
@@ -52,7 +56,8 @@ class ModelStreamerRestore {
   explicit ModelStreamerRestore(
       ModelStreamerSessionOptions options,
       std::chrono::milliseconds submission_timeout = kDefaultModelStreamerSubmissionTimeout,
-      std::uint64_t restore_batch_bytes = kDefaultRestoreBatchBytes);
+      std::uint64_t restore_batch_bytes = kDefaultRestoreBatchBytes,
+      std::size_t restore_preparation_slots = kDefaultRestorePreparationSlots);
   // Stops and joins the worker. Callers must finish using this object first.
   ~ModelStreamerRestore() noexcept;
   // Prevents copying ownership of the worker and native streamer handle.
@@ -69,6 +74,12 @@ class ModelStreamerRestore {
  private:
   friend class ModelStreamerRestoreTestPeer;
   enum class Admission { Pending, Claimed, Cancelled };
+
+  // Shared by batches from one Stage; only the worker accesses error after
+  // publication. Reject later batches without cancelling the shared session.
+  struct RestoreState {
+    std::exception_ptr error;
+  };
 
   // Owns one submission's mappings, ABI arrays, response progress, and completion
   // signal. Paths borrow the calling Stage operation's inventory; only a successful
@@ -94,6 +105,7 @@ class ModelStreamerRestore {
       std::vector<void*> destinations;
     } request;
 
+    std::shared_ptr<RestoreState> restore_state;
     uintmax_t bytes = 0;
     std::vector<bool> completed;
     std::size_t responses_received = 0;
@@ -114,6 +126,25 @@ class ModelStreamerRestore {
     int submission_done = 0;
   };
 
+  // Caller-owned slot. A future outcome is retained until this slot retires;
+  // shared entry ownership alone does not retain the inventory's borrowed paths.
+  struct Submission {
+    enum class State { Local, Published, Settled, Withdrawn };
+    std::shared_ptr<StreamerEntry> entry;
+    std::future<void> completion;
+    std::exception_ptr error;
+    State state = State::Local;
+
+    // Consume a ready future once, retaining its outcome for later checks.
+    void Observe() noexcept;
+    // Fence pending native admission before waiting on any sibling's drain.
+    void Withdraw() noexcept;
+    // Only published, non-withdrawn entries need completion before release.
+    void Drain() noexcept;
+    // Called only for local, settled or withdrawn work; pending_ may retain it.
+    void Release() noexcept;
+  };
+
   // Processes work until shutdown or failure, then drains native access before
   // completing retained entries. Owns all native API calls and active state.
   void Run() noexcept;
@@ -128,13 +159,20 @@ class ModelStreamerRestore {
   // Starts a native session on the worker thread.
   void Start();
   // Restores files in batches using a byte budget; an oversized file forms its
-  // own batch. Applies file permissions before native submission.
+  // own batch. Retains the configured number of batches, preparing ahead here.
+  // Drains all native access before returning or unwinding to the inventory owner.
   void RestoreFiles(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation);
-  // Submits an entry and waits, allowing cancellation before admission.
-  // Claimed buffers remain alive until native access ends.
-  void SubmitAndWait(const std::shared_ptr<StreamerEntry>& entry);
-  // Acquires pending_mutex_ to enqueue or reject, then wakes the worker.
-  void QueueSubmission(const std::shared_ptr<StreamerEntry>& entry);
+  // Fills an already-owned entry and advances file, preserving empty-file and
+  // batch-boundary handling. Check pending work between preparation operations.
+  void PrepareBatch(StreamerEntry& entry, std::vector<CheckpointFile>::const_iterator& file,
+      std::vector<CheckpointFile>::const_iterator end, const Path& destination,
+      const std::function<void()>& check_pending_work);
+  // Withdraw every pending entry before draining claimed work and releasing
+  // mappings. Stop only this restore's child cancellation scope.
+  static void CancelAndDrain(std::span<Submission> submissions, Cancellation stage_stop) noexcept;
+  // Enqueues or completes the promise with rejection/allocation failure.
+  // Caller ownership must be recorded before this no-throw publication boundary.
+  void QueueSubmission(const std::shared_ptr<StreamerEntry>& entry) noexcept;
   // Worker-only: selects under pending_mutex_ without removing the entry, so
   // failure cleanup retains ownership through native submission and registration.
   // Sets stopped when admission is closed; otherwise null means no entry fits.
@@ -142,7 +180,7 @@ class ModelStreamerRestore {
   // Worker-only: removes the selected front entry under pending_mutex_ after
   // submission handling finishes, including a handled rejection or cancellation.
   void RemoveHandledSubmission();
-  // Worker-only: removes one cancelled entry and sets error under pending_mutex_.
+  // Worker-only: removes one cancelled or failed-restore entry and sets error under pending_mutex_.
   // Returns null and clears error if none; complete its promise after unlocking.
   std::shared_ptr<StreamerEntry> TakeInterruptedSubmission(std::exception_ptr& error);
   // Worker-only, after admission closes: removes an entry under pending_mutex_
@@ -180,6 +218,7 @@ class ModelStreamerRestore {
   void* streamer_handle_ = nullptr;
   const std::chrono::milliseconds submission_timeout_;
   const uintmax_t restore_batch_bytes_;
+  const std::size_t restore_preparation_slots_;
   const ModelStreamerSessionOptions options_;
   const std::exception_ptr stopped_error_;
   std::thread worker_;

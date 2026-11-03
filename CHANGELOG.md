@@ -66,6 +66,11 @@ commit-level history for each release is on its
 
 ### Changed
 
+- S3 restores prepare one batch ahead of downloads by default. The tuning JSON
+  accepts `restorePreparationSlots` (1–4, default 2) to bound retained batches
+  per restore. Restart PageBroker after changing it. Shared native admission
+  limits remain unchanged; oversized files still run alone.
+
 - Checkpoint and restore failure messages open with the step they came from,
   as `while <step>: <cause>`, on the pod's `nvidia.com/Restored` condition, the
   `PodSnapshotContent` `Failed` condition, the restore events and the agent

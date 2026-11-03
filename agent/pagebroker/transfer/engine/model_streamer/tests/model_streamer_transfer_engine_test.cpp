@@ -21,6 +21,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <streamer/streamer.h>
@@ -48,6 +49,7 @@ struct FakeStreamer {
 std::atomic<unsigned> starts = 0;
 std::atomic<unsigned> ends = 0;
 std::atomic<RunaiFileStreamerSubmissionId> next_submission_id = 0;
+std::atomic<bool> hold_responses = false;
 bool fail_first_session = true;
 bool timeout_first_session = false;
 fs::path fake_s3_root;
@@ -88,6 +90,7 @@ class ModelStreamerTransferEngineTest : public ::testing::Test {
   void SetUp() override
   {
     starts = ends = next_submission_id = 0;
+    hold_responses = false;
     fail_first_session = true;
     timeout_first_session = false;
     credential_status = credential_calls = 0;
@@ -234,6 +237,8 @@ runai_file_streamer_response(
     unsigned)
 {
   auto& streamer = *static_cast<FakeStreamer*>(value);
+  if (hold_responses.load())
+    return RUNAI_FILE_STREAMER_RESPONSE_TIMED_OUT;
   if (streamer.next_response == streamer.responses.size())
     return RUNAI_FILE_STREAMER_RESPONSE_TIMED_OUT;
 
@@ -344,6 +349,36 @@ TEST_F(ModelStreamerTransferEngineTest, ConfiguredBatchBudgetSurvivesCoordinator
   prepared.inventory.files.push_back({"s3://local-test-bucket/other", "other", 1});
   EXPECT_NO_THROW(engine.StageRestore(std::move(prepared), root_.path() / "replaced"));
   EXPECT_EQ(next_submission_id.load() - before, 2U);
+  EXPECT_EQ(starts, 2U);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, ConfiguredPreparationCapacitySurvivesCoordinatorReplacement)
+{
+  fake_s3_root = root_.path();
+  std::ofstream(root_.path() / "data") << "123456789";
+  options_.restore_timeout = std::chrono::seconds(10);
+  const auto tuning = model_streamer::settings::ParseConfig(
+      R"({"restoreBatchBytes":9,"restorePreparationSlots":3})");
+  ModelStreamerTransferEngine engine(Config(), tuning);
+  EXPECT_THROW(engine.StageRestore(Prepared(), root_.path() / "failed"), TransferError);
+  hold_responses = true;
+  const auto destination = root_.path() / "replaced";
+  auto restored = std::async(std::launch::async, [&] {
+    auto prepared = Prepared();
+    prepared.inventory.files.clear();
+    for (unsigned i = 0; i < 4; ++i)
+      prepared.inventory.files.push_back({"s3://local-test-bucket/data", std::to_string(i), 9});
+    return engine.StageRestore(std::move(prepared), destination);
+  });
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!fs::exists(destination / "2") && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  EXPECT_TRUE(fs::exists(destination / "2"));
+  EXPECT_FALSE(fs::exists(destination / "3"));
+  EXPECT_EQ(restored.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+  hold_responses = false;
+  EXPECT_NO_THROW(restored.get());
+  EXPECT_TRUE(fs::exists(destination / "3"));
   EXPECT_EQ(starts, 2U);
 }
 
@@ -610,8 +645,9 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
   std::ofstream(root_.path() / "source") << "a";
   CheckpointInventory inventory;
   inventory.files.push_back({"s3://local-test-bucket/source", "data", 1, fs::perms::owner_read});
+  inventory.files.push_back({"s3://local-test-bucket/source", "next", 1, fs::perms::owner_read});
   options_.restore_timeout = std::chrono::hours(1);
-  ModelStreamerTransferEngine engine(Config());
+  ModelStreamerTransferEngine engine(Config(), model_streamer::settings::ParseConfig(R"({"restoreBatchBytes":1})"));
   const auto prepare = [&] {
     PreparedRestore prepared;
     prepared.inventory = inventory;
