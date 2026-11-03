@@ -124,8 +124,8 @@ Each action can do only what the application itself could:
 |---|---|
 | `api/v1alpha1/container_config_types.go` | The settings types and their validation. |
 | `operator/internal/controller` | Copying the settings: `snapshotjob_podsnapshot.go`, `podsnapshot_reconciler.go`, `container_settings.go`. |
-| `agent/internal/lifecyclehooks` | The actions: `FileExists`, `CreateMarker`, `CheckMarkerTarget`, `CheckWritePath`, `ResolvePort`, `HTTPGet`, `HTTPPost`. |
+| `agent/internal/lifecyclehooks` | The actions: `FileExists`, `CreateMarker`, `CheckMarkerTarget`, `CheckWritePath`, `ResolvePort`, `HTTPGet`, `HTTPPost`. The checkpoint probes: `ReadyCondition`, `FileProbe`, `HTTPProbe`. |
 | `agent/internal/runtime` | `ExecSync`, which runs a file action's command in the container through CRI. |
-| `agent/internal/controller/checkpoint_readiness.go` | The probe at the readiness gate: `fileProbe` and `httpProbe`. |
+| `agent/internal/controller/checkpoint_readiness.go` | The readiness gate: `checkpointGate`, which paces the probe's checks and counts the results. |
 | `agent/internal/controller/post_restore.go` | The post-restore action: `filePostRestore` and `httpPostRestore`, their checks, and recovery. |
 | `api/podcontract` | `IsReservedControlFile`, Snapshot's own control files. |
