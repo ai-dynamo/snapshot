@@ -319,7 +319,8 @@ func TestCheckpointPreparationFailure(t *testing.T) {
 					assert.ErrorContains(t, err, fmt.Sprintf("abort PageBroker checkpoint %q: read PageBroker response: EOF", transactionID))
 					assert.ErrorIs(t, err, io.EOF)
 				}
-				assert.False(t, CheckpointNeedsSourceKill(err))
+				_, needsRecovery := SuspendedSourceOf(err)
+				assert.False(t, needsRecovery)
 				for _, path := range []string{workingDirectory, cfg.Storage.BasePath} {
 					entries, err := os.ReadDir(path)
 					require.NoError(t, err)
@@ -429,7 +430,8 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	require.ErrorContains(t, err, "while preparing PageBroker checkpoint")
 	assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
 	assert.Less(t, time.Since(start), 3*time.Second)
-	assert.False(t, CheckpointNeedsSourceKill(err))
+	_, needsRecovery := SuspendedSourceOf(err)
+	assert.False(t, needsRecovery)
 	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts"))
 }
 
@@ -510,9 +512,26 @@ func TestCheckpointBoundSendsArtifactTarget(t *testing.T) {
 	waitPageBrokerTest(t, server)
 }
 
-func TestCheckpointNeedsSourceKill(t *testing.T) {
-	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
-	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
+// Recovery hands back exactly the GPU processes the capture found, so the
+// failure has to carry them: a probe cannot tell "not a CUDA process" from a
+// helper that failed, and an empty list would strand a suspended workload.
+func TestSuspendedSourceOf(t *testing.T) {
+	suspended, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41, 42}, false, false))
+	assert.True(t, needsRecovery)
+	assert.Equal(t, []int{41, 42}, suspended.GPUPIDs)
+	assert.False(t, suspended.CuInterposePrepared)
+
+	_, needsRecovery = SuspendedSourceOf(errors.New("prepare failed"))
+	assert.False(t, needsRecovery, "a failure before the source was touched needs no recovery")
+
+	cpuOnly, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), nil, false, false))
+	assert.True(t, needsRecovery)
+	assert.Empty(t, cpuOnly.GPUPIDs, "a CPU-only capture still needs recovery, with no GPUs to hand back")
+
+	// Multi-GPU preparation removes the tree's shared mappings, which nothing restores.
+	multiGPU, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41}, true, false))
+	assert.True(t, needsRecovery)
+	assert.True(t, multiGPU.CuInterposePrepared)
 }
 
 // TestCheckpointCommitFailureReleasesOnlySettledFailures drives a completed dump

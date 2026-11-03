@@ -52,19 +52,53 @@ func IsCleanupFailure(err error) bool {
 	return errors.As(err, &cleanup)
 }
 
-// checkpointNeedsSourceKillError reports a failure after CUDA or CRIU may have left the source unsafe.
-type checkpointNeedsSourceKillError struct{ cause error }
+// sourceNeedsRecoveryError reports a failure after CUDA or CRIU had already touched the source,
+// which leaves it suspended rather than running. What becomes of it is the caller's decision.
+//
+// It carries the GPU processes the capture found, so recovery hands back exactly those rather
+// than probing for them again: the probe cannot tell "not a CUDA process" from a helper that
+// failed, and reading an empty list as "nothing to revive" would strand a suspended workload.
+type sourceNeedsRecoveryError struct {
+	cause     error
+	suspended SuspendedSource
+}
 
-func (e *checkpointNeedsSourceKillError) Error() string { return e.cause.Error() }
+func (e *sourceNeedsRecoveryError) Error() string { return e.cause.Error() }
 
-func (e *checkpointNeedsSourceKillError) Unwrap() error { return e.cause }
+func (e *sourceNeedsRecoveryError) Unwrap() error { return e.cause }
 
-func checkpointNeedsSourceKill(err error) error { return &checkpointNeedsSourceKillError{cause: err} }
+func sourceNeedsRecovery(err error, cudaHostPIDs []int, cuInterposePrepared, customStorageUsed bool) error {
+	return &sourceNeedsRecoveryError{cause: err, suspended: SuspendedSource{
+		GPUPIDs:             slices.Clone(cudaHostPIDs),
+		CuInterposePrepared: cuInterposePrepared,
+		CustomStorageUsed:   customStorageUsed,
+	}}
+}
 
-// CheckpointNeedsSourceKill reports whether a failed checkpoint may have left the source unsafe.
-func CheckpointNeedsSourceKill(err error) bool {
-	var checkpointError *checkpointNeedsSourceKillError
-	return errors.As(err, &checkpointError)
+// SuspendedSource describes what a failed capture left behind, so the caller can decide
+// whether the workload can be put back.
+type SuspendedSource struct {
+	// GPUPIDs are the GPU processes the capture found, to be handed their GPUs back.
+	GPUPIDs []int
+
+	// CuInterposePrepared reports that the capture removed the tree's shared GPU mappings.
+	// Nothing puts them back, so a source in that state can only be terminated.
+	CuInterposePrepared bool
+
+	// CustomStorageUsed reports that the GPU memory went to PageBroker rather than staying
+	// with the driver. That execution is torn down before recovery runs, so an in-place
+	// restore has nothing to restore from and the source can only be terminated.
+	CustomStorageUsed bool
+}
+
+// SuspendedSourceOf returns what a failed capture left behind, and whether the failure left
+// the source needing recovery at all.
+func SuspendedSourceOf(err error) (SuspendedSource, bool) {
+	var recoverable *sourceNeedsRecoveryError
+	if !errors.As(err, &recoverable) {
+		return SuspendedSource{}, false
+	}
+	return recoverable.suspended, true
 }
 
 // CheckpointRequest holds the content-owned inputs for a checkpoint operation.
@@ -201,7 +235,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
 	if err != nil {
-		return nil, checkpointNeedsSourceKill(err)
+		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator(), usePageBrokerGPU)
 	}
 
 	dumpComplete = true
