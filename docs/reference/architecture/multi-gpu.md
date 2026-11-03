@@ -700,9 +700,6 @@ Before starting CRIU restore, the agent verifies the captured library identities
 Shim socket paths are excluded from rootfs archives because CRIU restores the live socket bindings with the process tree.
 CRIU also restores namespace PIDs, shim records, and host carriers.
 
-The agent restores the CUDA state of all processes in parallel, then unlocks them one at a time.
-Restore stays serial for CustomStorage checkpoints and for checkpoints taken under `cuda-checkpoint --launch-job`.
-
 `LOAD_ALLOCATIONS` recreates backing in the selected holders, copies carrier contents into it, and restores their mappings, permissions, and export FDs.
 `RESTORE_UNICAST` reconnects the other holders to that same backing at their original addresses.
 For each reconstruction phase, the coordinator sends requests across the group and waits for every participant's reply before advancing.
