@@ -71,8 +71,7 @@ type CheckpointReadinessProbe struct {
 type CheckpointReadinessProbeHandler struct {
 	// File succeeds when a regular file exists at the path, inside the
 	// container. Like an exec probe, Snapshot checks it by running a shell
-	// in the container, as the container's user, so the image needs /bin/sh,
-	// /usr/bin/sh, /bin/busybox or /busybox/sh.
+	// in the container, as the container's user, so the image needs a shell.
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 
@@ -116,10 +115,9 @@ type PostRestoreAction struct {
 type PostRestoreHandler struct {
 	// File creates an empty regular file at the path, inside the container.
 	// Like an exec probe, Snapshot creates it by running a shell in the
-	// container, as the container's user, so the image needs /bin/sh,
-	// /usr/bin/sh, /bin/busybox or /busybox/sh. The parent directory must
-	// exist. If the file already exists before the restore, the restore
-	// fails.
+	// container, as the container's user, so the image needs a shell. The
+	// parent directory must exist. If the file already exists before the
+	// restore, the restore fails.
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 
