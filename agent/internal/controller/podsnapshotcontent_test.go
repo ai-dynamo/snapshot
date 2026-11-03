@@ -161,6 +161,9 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 		log:          logr.Discard(),
 		captureQueue: newTestCaptureQueue(t),
 	}
+	// Set the clock and requeue as newDefaultController does.
+	w.nowFn = time.Now
+	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
 	for _, o := range objs {
 		if _, ok := o.(*snapshotv1alpha1.PodSnapshotContent); ok {
