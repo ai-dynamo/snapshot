@@ -41,6 +41,12 @@ const (
 	// agent.
 	RestoredCondition = "nvidia.com/Restored"
 
+	// RestoreStartedCondition is set to True on a group target before the node
+	// agent first changes the Pod, and is never removed, so a restarted agent
+	// never restores into the Pod twice. Its lastTransitionTime is the
+	// member's startedAt in its PodGroupRestore.
+	RestoreStartedCondition = "nvidia.com/RestoreStarted"
+
 	// RestoreReasonInProgress marks active restore execution.
 	RestoreReasonInProgress = "RestoreInProgress"
 	// RestoreReasonSucceeded marks a terminal all-destinations success.

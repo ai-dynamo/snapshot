@@ -25,4 +25,16 @@ const (
 	// PodGroupMemberLabel holds the member ID of a PodSnapshot that a
 	// PodGroupSnapshot creates for one of its members.
 	PodGroupMemberLabel = "nvidia.com/snapshot-podgroup-member"
+
+	// PodGroupProtocolsAnnotation on the node agent DaemonSet's Pod template,
+	// and so on every agent Pod, lists the group protocol versions that the
+	// agent supports, as a comma-separated list such as "v1,v2". The group
+	// controllers place member work only on nodes whose agent lists a
+	// compatible version.
+	PodGroupProtocolsAnnotation = "nvidia.com/snapshot-podgroup-protocols"
+
+	// PodGroupSnapshotInUseFinalizer keeps a PodGroupSnapshot, and the
+	// snapshots of its members, while any unfinished PodGroupRestore references
+	// its UID.
+	PodGroupSnapshotInUseFinalizer = "nvidia.com/snapshot-podgroup-in-use"
 )

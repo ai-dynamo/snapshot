@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -22,6 +23,12 @@ const (
 	// comma-separated list of source=destination pairs. When absent, restore
 	// uses the captured container name as the destination.
 	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
+
+	// RestoreGroupAnnotation names the PodGroupRestore, in the Pod's namespace,
+	// that the restore Pod is a target of. A group target carries it instead of
+	// RestoreFromAnnotation and RestoreContainerMapAnnotation, and must carry
+	// the restore startup probe.
+	RestoreGroupAnnotation = "nvidia.com/restore-group"
 
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
 	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
@@ -66,6 +73,10 @@ const (
 	// job file.
 	CUDAJobFilePath = SnapshotControlMountPath + "/" + CUDAJobFileName
 
+	// CoordinationDir is the directory of the control volume reserved for the
+	// rendezvous endpoints of a group member's communication libraries.
+	CoordinationDir = "coordination"
+
 	// RestoreStandbyModeEnv asked standby-aware workload entrypoints to remain
 	// inert until Snapshot replaced them with restored processes. Snapshot
 	// published the name but never injected it.
@@ -98,6 +109,10 @@ const (
 	// RestoreCompletePIDKey names the restored process's PID, relative to the
 	// destination container's PID namespace, in RestoreCompleteFile.
 	RestoreCompletePIDKey = "pid"
+
+	// RestoreCompleteAttemptKey names, in RestoreCompleteFile, the UID of the
+	// PodGroupRestore that released a group target. A standalone restore omits it.
+	RestoreCompleteAttemptKey = "attempt"
 
 	// RestoreProxyBinaryName is the PID 1 process Snapshot runs in restore
 	// destination containers. It waits for RestoreCompleteFile, then follows
@@ -139,11 +154,21 @@ type RestoreComplete struct {
 	// PID is the restored process, relative to the destination container's
 	// PID namespace.
 	PID int
+
+	// Attempt is the UID of the PodGroupRestore that released a group target, and
+	// empty for a standalone restore.
+	Attempt types.UID
 }
 
-// FormatRestoreComplete renders the content of RestoreCompleteFile.
+// FormatRestoreComplete renders the content of RestoreCompleteFile. The
+// attempt key is written only for a group target, so a standalone restore's
+// file is unchanged.
 func FormatRestoreComplete(rc RestoreComplete) []byte {
-	return []byte(RestoreCompletePIDKey + "=" + strconv.Itoa(rc.PID) + "\n")
+	content := RestoreCompletePIDKey + "=" + strconv.Itoa(rc.PID) + "\n"
+	if rc.Attempt != "" {
+		content += RestoreCompleteAttemptKey + "=" + string(rc.Attempt) + "\n"
+	}
+	return []byte(content)
 }
 
 // ParseRestoreComplete reads the content of RestoreCompleteFile. Unknown keys
@@ -159,17 +184,25 @@ func ParseRestoreComplete(data []byte) (RestoreComplete, error) {
 		if !ok {
 			return RestoreComplete{}, fmt.Errorf("invalid %s line %q: expected key=value", RestoreCompleteFile, line)
 		}
-		if key != RestoreCompletePIDKey {
-			continue
+		switch key {
+		case RestoreCompletePIDKey:
+			if rc.PID != 0 {
+				return RestoreComplete{}, fmt.Errorf("duplicate %s key %q", RestoreCompleteFile, key)
+			}
+			pid, err := strconv.Atoi(value)
+			if err != nil || pid <= 0 {
+				return RestoreComplete{}, fmt.Errorf("invalid %s %s %q", RestoreCompleteFile, key, value)
+			}
+			rc.PID = pid
+		case RestoreCompleteAttemptKey:
+			if rc.Attempt != "" {
+				return RestoreComplete{}, fmt.Errorf("duplicate %s key %q", RestoreCompleteFile, key)
+			}
+			if value == "" {
+				return RestoreComplete{}, fmt.Errorf("invalid %s %s %q", RestoreCompleteFile, key, value)
+			}
+			rc.Attempt = types.UID(value)
 		}
-		if rc.PID != 0 {
-			return RestoreComplete{}, fmt.Errorf("duplicate %s key %q", RestoreCompleteFile, key)
-		}
-		pid, err := strconv.Atoi(value)
-		if err != nil || pid <= 0 {
-			return RestoreComplete{}, fmt.Errorf("invalid %s %s %q", RestoreCompleteFile, key, value)
-		}
-		rc.PID = pid
 	}
 	if rc.PID == 0 {
 		return RestoreComplete{}, fmt.Errorf("%s has no %s", RestoreCompleteFile, RestoreCompletePIDKey)
