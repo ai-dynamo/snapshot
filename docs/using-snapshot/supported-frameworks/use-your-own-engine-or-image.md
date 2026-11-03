@@ -5,15 +5,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Use your own engine or image
 
-The supported frameworks are vLLM, SGLang, and TensorRT-LLM, but Snapshot works
-with any inference engine whose workload meets the
-[workload contract](../../reference/workload-contract.md): how it prepares for a
-checkpoint, how it resumes after a restore, and what its pod must carry.
+Snapshot is not limited to vLLM, SGLang and TensorRT-LLM. It works with any
+inference engine whose workload meets the
+[Workload Contract](../../reference/workload-contract.md), which covers:
 
-- To package an engine the way these guides do, with the runtime image
-  unmodified and a small program mounted from a ConfigMap, or to bake the
-  program into your own image, see
-  [Packaging methods](../../reference/workload-contract.md#packaging-methods).
-- To add support for an engine that is not covered here, follow
-  [Support a new inference server](../../reference/workload-contract.md#support-a-new-inference-server).
-  The [engine guides](vllm.md) are worked examples of the same contract.
+- How the workload prepares for a checkpoint
+- How it resumes after a restore
+- What its pod must carry
+
+Where to go next:
+
+- To package your engine the way the pages in this section do, see
+  [Packaging Methods](../../reference/workload-contract.md#packaging-methods).
+  You can keep the runtime image unmodified and mount a small program from a
+  ConfigMap, or bake the program into your own image.
+- To add support for an engine that this section does not cover, see
+  [Support a New Inference Server](../../reference/workload-contract.md#support-a-new-inference-server).
+  The [vLLM](vllm.md), [SGLang](sglang.md) and
+  [TensorRT-LLM](tensorrt-llm.md) pages are worked examples of the same contract.

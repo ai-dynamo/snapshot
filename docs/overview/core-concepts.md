@@ -86,5 +86,5 @@ again; create a new pod to restore again. This is why restore pods use
 ## Primitives, Not Orchestration
 
 Snapshot provides the checkpoint and restore primitives for GPU pods.
-Orchestration — which pods to checkpoint, when, and how the checkpoints are
-restored — is left to the systems that integrate it.
+Orchestration (which pods to checkpoint, when, and how the checkpoints are
+restored) is left to the systems that integrate it.

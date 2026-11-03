@@ -5,9 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Amazon S3
 
-Tune S3 transfers for Snapshot. For installation values and credentials, use
-the [S3 storage setup](../configure-storage.md#other-backends). See
-[Tune Storage](README.md) for other backends.
+Use this page to tune S3 transfers for Snapshot restores. It covers where to
+place the bucket, how to choose an instance with enough network bandwidth, and
+how to set up parallel reads. These are starting recommendations, and there are
+no published Snapshot benchmark results for them.
+
+To connect Snapshot to the bucket first, including the endpoint and credentials,
+see [Other Backends](../configure-storage.md#other-backends). For other storage
+options, see [Tune Storage](README.md).
 
 ## Setup
 
@@ -64,5 +69,4 @@ Measure parallel S3 downloads from the same node and route used by PageBroker.
 Also record bytes, transfer time, instance type, Region, and reader settings.
 For downloads to a file, measure the destination disk separately with fio.
 
-Then use the [common measurement procedure](../../troubleshooting/slow-restores.md#5-repeat-the-real-restore)
-to compare with a real Snapshot restore.
+After you change a setting on this page, check the result with a real restore. Follow [Repeat the Real Restore](../../troubleshooting/slow-restores.md#repeat-the-real-restore) and compare the restore time with the time before the change.

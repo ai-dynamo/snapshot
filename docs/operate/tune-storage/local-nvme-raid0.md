@@ -5,10 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 
 # Local NVMe and RAID0
 
-Use this setup for snapshots on a node-local array. This local-PVC example
-places the operator and node agent on one storage node. Schedule source Pods
-and restore Pods on that node through their workload manifests.
-See [Tune Storage](README.md) for shared backends.
+Use this page to store snapshots on drives that are local to one node, such as
+NVMe drives combined with RAID0. The storage is on one node, so the operator and
+node agent run on that node, and the source pod and restore pods must run there
+too. The page covers when RAID0 helps, the local PV and PVC setup, the
+difference between EC2 instance store and EBS, and how to check the array. These
+are starting recommendations, and there are no published Snapshot benchmark
+results for them.
+
+For storage that is shared across nodes, see [Tune Storage](README.md).
 
 ## When to Use It
 
@@ -83,7 +88,7 @@ findmnt --target <snapshot-path> --output TARGET,SOURCE,FSTYPE,OPTIONS
 
 ## Verify
 
-Follow the [common measurement procedure](../../troubleshooting/slow-restores.md#5-repeat-the-real-restore).
+After you change a setting on this page, check the result with a real restore. Follow [Repeat the Real Restore](../../troubleshooting/slow-restores.md#repeat-the-real-restore) and compare the restore time with the time before the change.
 Test direct I/O on the array as well as buffered I/O.
 
 Also record drive count, RAID level, stripe chunk size, and filesystem.

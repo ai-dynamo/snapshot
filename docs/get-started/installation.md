@@ -43,6 +43,8 @@ helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
   --namespace snapshot --create-namespace
 ```
 
+For every value you can set, see [Helm Chart Values](../reference/helm-values.md).
+
 ### Snapshot Volume
 
 - By default, the chart creates a `ReadWriteMany` snapshot volume that every

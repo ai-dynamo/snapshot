@@ -58,9 +58,9 @@ navigation:
   - section: Using Snapshot
     slug: using-snapshot
     contents:
-      - page: Overview
+      - page: Checkpoint and Restore Flow
         path: ../docs/using-snapshot/README.md
-        slug: overview
+        slug: checkpoint-and-restore-flow
       - section: Supported Frameworks
         slug: supported-frameworks
         contents:
@@ -114,15 +114,15 @@ navigation:
   - section: Reference
     slug: reference
     contents:
-      - page: API
+      - page: API Reference
         path: ../docs/reference/api.md
         slug: api
-      - page: snapshotctl CLI
-        path: ../docs/reference/cli.md
-        slug: snapshotctl-cli
       - page: Helm Chart Values
         path: ../docs/reference/helm-values.md
         slug: helm-chart-values
+      - page: snapshotctl CLI
+        path: ../docs/reference/cli.md
+        slug: snapshotctl-cli
       - page: Workload Contract
         path: ../docs/reference/workload-contract.md
         slug: workload-contract

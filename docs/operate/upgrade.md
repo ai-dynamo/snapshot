@@ -33,6 +33,9 @@ one of two ways:
     --reset-then-reuse-values
   ```
 
+For the defaults a new chart version can change, see
+[Helm Chart Values](../reference/helm-values.md).
+
 During the upgrade:
 
 - The node agent restarts on each GPU node.

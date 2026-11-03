@@ -5,11 +5,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # Troubleshoot the Agent
 
+Use this page when the node agent or a component it runs fails. It covers an
+agent or restore pod that will not start, a GPU that fails with
+`target GPU is unavailable`, PageBroker that does not start after an S3 settings
+change, and CRIU reporting `Unable to create tun`.
+
 ## The Agent or a Restore Pod Will Not Start
 
 The `snapshot-agent` runs privileged with `hostPID`, `hostIPC`, and `hostNetwork`.
-If the namespace enforces a restrictive Pod Security level, the agent — or a
-restore pod — can be rejected. See [Allow the Privileged Node Agent](../get-started/installation.md#allow-the-privileged-node-agent).
+If the namespace enforces a restrictive Pod Security level, the agent or a
+restore pod can be rejected. See [Allow the Privileged Node Agent](../get-started/installation.md#allow-the-privileged-node-agent).
 
 When using AWS EFS, make sure a reused static PV references a real EFS file
 system ID and has mount targets reachable from every GPU node. A placeholder

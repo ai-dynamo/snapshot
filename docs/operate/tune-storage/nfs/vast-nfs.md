@@ -5,10 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # VAST NFS
 
-Configure an existing VAST-backed PVC for large snapshot files. This page
-covers storage NICs and mount options validated with Snapshot in the
-published [benchmarks](../../../overview/performance.md).
-See [Tune Storage](../README.md) for other backends.
+Use this page to set up and tune a PVC on VAST NFS storage for large snapshot
+files. It covers installing the VAST NFS client, choosing the NFS version, and
+setting the storage NICs, connections, mount options and I/O mode. The NIC and
+mount option settings were validated with Snapshot in the published
+[benchmarks](../../../overview/performance.md).
+
+For guidance that applies to all NFS storage, see [NFS](README.md). For other
+storage options, see [Tune Storage](../README.md).
 
 ## Setup
 
@@ -92,7 +96,7 @@ when comparing settings. See [VAST's benchmark guide](https://kb.vastdata.com/do
 ## Verify
 
 Inspect the mount in the node agent container using the
-[restore-node checks](../../../troubleshooting/slow-restores.md#3-check-the-restore-node).
+[restore-node checks](../../../troubleshooting/slow-restores.md#check-the-restore-node).
 On the node, check traffic on each storage NIC:
 
 ```bash
@@ -103,4 +107,4 @@ Check traffic counters on each selected NIC before and after a restore. If
 only one NIC carries traffic, check `localports` and routing before adding
 connections.
 
-Use the [common measurement procedure](../../../troubleshooting/slow-restores.md#5-repeat-the-real-restore).
+After you change a setting on this page, check the result with a real restore. Follow [Repeat the Real Restore](../../../troubleshooting/slow-restores.md#repeat-the-real-restore) and compare the restore time with the time before the change.

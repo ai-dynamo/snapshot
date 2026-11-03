@@ -5,10 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Helm Chart Values
 
-Snapshot is configured through the Helm chart. The values below show their
-defaults; see [Configure Storage](../operate/configure-storage.md) for the storage model.
+Use this page to look up the Helm values that configure Snapshot. Set a value
+with `--set` or in a values file when you install or upgrade the chart. The
+tables show each value's default.
 
-See [values.yaml](../../charts/snapshot/values.yaml) for the full configuration surface.
+For what the storage values mean, see
+[Configure Storage](../operate/configure-storage.md). For the full list of
+values, see [values.yaml](../../charts/snapshot/values.yaml).
 
 ## Images and Rollout
 
@@ -121,11 +124,11 @@ payload checksums.
 
 `config.*` renders into the agent ConfigMap.
 
-- `config.overlay.exclusions` — rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
-- `config.checkpoint.checkpointTimeoutSeconds` — maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
-- `config.restore.restoreTimeoutSeconds` — maximum seconds for a restore before the agent marks it failed. Default `7200`.
+- `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
+- `config.checkpoint.checkpointTimeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
+- `config.restore.restoreTimeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
 
-`config.criu.*` — CRIU options:
+`config.criu.*` - CRIU options:
 
 | Value               | Default                                | Description                                                                              |
 |---------------------|----------------------------------------|------------------------------------------------------------------------------------------|

@@ -5,8 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Amazon EFS
 
-Tune an existing EFS-backed PVC for Snapshot.
-See [Tune Storage](../README.md) for other backends.
+Use this page to tune a PVC on Amazon EFS for Snapshot restores. It covers
+buffered CRIU image I/O, NFS read-ahead, the EFS throughput mode, and mount
+options. These are starting recommendations from AWS's EFS guidance, and there
+are no published Snapshot benchmark results for them.
+
+For guidance that applies to all NFS storage, see [NFS](README.md). For other
+storage options, see [Tune Storage](../README.md).
 
 ## Setup
 
@@ -38,7 +43,7 @@ mount helper in `amazon-efs-utils` 1.33.2 or later sets it to 15 times `rsize`.
 This requires `optimize_readahead`, which is enabled by default. With
 `rsize=1048576`, that is 15360 KiB. Check the value on the restore node where
 EFS is mounted. Run this shell block inside the node agent container, using
-the execution context from the [restore-node checks](../../../troubleshooting/slow-restores.md#3-check-the-restore-node):
+the execution context from the [restore-node checks](../../../troubleshooting/slow-restores.md#check-the-restore-node):
 
 ```bash
 EFS_MOUNT="<efs-mount>"
@@ -66,6 +71,6 @@ above to tune buffered reads.
 
 ## Verify
 
-Use the [common measurement procedure](../../../troubleshooting/slow-restores.md#5-repeat-the-real-restore).
+After you change a setting on this page, check the result with a real restore. Follow [Repeat the Real Restore](../../../troubleshooting/slow-restores.md#repeat-the-real-restore) and compare the restore time with the time before the change.
 Also record the EFS throughput mode, `amazon-efs-utils` version, and effective
 `read_ahead_kb`.

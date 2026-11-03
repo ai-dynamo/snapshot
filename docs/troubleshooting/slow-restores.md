@@ -6,9 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # Troubleshoot Slow Restores
 
 Use this walkthrough to find the slow phase before changing storage settings.
-See [Tune Storage](../operate/tune-storage/README.md) for backend setup.
+See [Tune Storage](../operate/tune-storage/README.md) for storage setup.
 
-## 1. Find the Slow Phase
+## Find the Slow Phase
 
 Read the `Restore timing summary` from the node agent that handled the restore.
 Use the largest phase to choose the next check:
@@ -17,7 +17,7 @@ Use the largest phase to choose the next check:
 | --- | --- |
 | `criu_restore` | Check CPU image size, the CRIU source (PVC or staging), and I/O mode. For PVC reads, compare the same mount with fio. |
 | `cuda_restore` | Compare GPU payload size with sustained storage bandwidth. If storage is fast, check CUDA setup and GPU transfers before increasing buffers. |
-| `pagebroker_stage` | Check backend download/read throughput and staging memory. For S3, check the Region, instance bandwidth, and reader concurrency. |
+| `pagebroker_stage` | Check storage download/read throughput and staging memory. For S3, check the Region, instance bandwidth, and reader concurrency. |
 | `pagebroker_mount`, `pagebroker_commit`, `criu_prepare` | Inspect the surrounding agent logs for mount, transaction, or CRIU preparation delays. |
 
 Measure application readiness and the first inference request separately.
@@ -39,7 +39,7 @@ can interfere with checkpoint operations. Tune `pageBroker.transferBufferCount`
 and `pageBroker.transferChunkBytes` together, accounting for their product on
 every visible GPU.
 
-## 2. Check the Storage Configuration
+## Check the Storage Configuration
 
 Identify whether the snapshot is on a PVC or in S3. For a PVC, check whether
 CRIU reads directly from storage or from PageBroker staging:
@@ -52,7 +52,7 @@ Check the CRIU I/O mode saved in the snapshot. Changing
 For S3, check that the bucket and restore node use the same Region and that
 the endpoint and credentials match the bucket.
 
-## 3. Check the Restore Node
+## Check the Restore Node
 
 Record the Snapshot image versions, Linux kernel, GPU driver, and, for NFS,
 the NFS client version.
@@ -81,7 +81,7 @@ kubectl --context "<context>" --namespace "<snapshot-namespace>" \
 For NFS, confirm the client supports the mount options shown by `findmnt`.
 Check storage NIC traffic and routing before increasing transfer buffers.
 
-## 4. Measure Storage with fio
+## Measure Storage with fio
 
 [fio](https://fio.readthedocs.io/en/master/fio_doc.html) generates read/write
 requests and reports bandwidth, IOPS, and latency. Match the file, I/O mode,
@@ -108,7 +108,7 @@ fio reuses destination buffers, so resident buffers usually avoid repeated
 first-touch allocation faults. It measures the storage path; a fast fio result
 does not include the work to populate workload memory or restore CPU/GPU state.
 
-## 5. Repeat the Real Restore
+## Repeat the Real Restore
 
 Change one setting at a time. Keep the model revision, snapshot, workload image,
 GPU count, and checkpoint preparation fixed. For a CRIU I/O-mode comparison,
@@ -120,7 +120,7 @@ separately. Record:
 - Mount options in use for filesystem storage.
 - `config.criu.imageIoMode` and `pageBroker.restoreMode`.
 - Cache state, request size, and concurrency for storage measurements.
-- CPU, GPU, staging, and application readiness times, plus backend-specific settings.
+- CPU, GPU, staging, and application readiness times, plus storage-specific settings.
 
 Check inference after each restore. Preserve compatible model, compiler, and
 autotuning caches when taking a new snapshot. Use the

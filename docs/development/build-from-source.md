@@ -2,7 +2,7 @@
 
 This guide builds the Snapshot operator and node-agent images from a checkout of
 this repository and installs the chart against them. Most users should install
-[From a Release](../../README.md#from-a-release) instead — build from source when developing Snapshot or testing unreleased changes.
+[From a Release](../../README.md#from-a-release) instead. Build from source when developing Snapshot or testing unreleased changes.
 
 ## Prerequisites
 
@@ -71,11 +71,11 @@ See [Installation](../get-started/installation.md) for storage and uninstall opt
 
 Common `make` targets from the repo root:
 
-- `make build` — compile the agent and operator
-- `make test` — run unit tests across the `api`, `agent`, and `operator` modules
-- `make lint` — run linters
-- `make helm-lint` — lint the Helm chart
-- `make check` — the full pre-merge gate (generate, license headers, fmt, tidy, lint, and more)
+- `make build` - Compile the agent and operator
+- `make test` - Run unit tests across the `api`, `agent`, and `operator` modules
+- `make lint` - Run linters
+- `make helm-lint` - Lint the Helm chart
+- `make check` - The full pre-merge gate (generate, license headers, fmt, tidy, lint, and more)
 
 The PageBroker image build runs its native unit tests without a local S3 service,
 Python test harness, GPU, or cluster.

@@ -5,8 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # NFS
 
-Use this guidance for shared NFS storage, then select your backend setup.
-See [Tune Storage](../README.md) for other backends.
+This page covers what applies to all shared NFS storage: storage limits, direct
+and buffered I/O, and mount options. For your storage service, see
+[VAST NFS](vast-nfs.md) or [Amazon EFS](amazon-efs.md). For other storage
+options, see [Tune Storage](../README.md).
 
 ## Check the Storage Limits
 
@@ -15,7 +17,7 @@ service limit, network speed, and other clients that use the same storage.
 More connections cannot increase throughput beyond these limits.
 
 Check the NFS version and client support before you select mount options.
-Use the backend examples below.
+Use the examples below.
 
 ## Direct I/O (`O_DIRECT`)
 
@@ -45,7 +47,7 @@ reads can use the client page cache and read-ahead. Allow memory for that cache.
 | `nconnect` | Number of transport connections; the supported range depends on the client |
 
 Inspect the mount in the node agent container, where the snapshot path is
-resolved. Follow the [restore-node checks](../../../troubleshooting/slow-restores.md#3-check-the-restore-node).
+resolved. Follow the [restore-node checks](../../../troubleshooting/slow-restores.md#check-the-restore-node).
 
 ## Examples
 
@@ -54,4 +56,4 @@ resolved. Follow the [restore-node checks](../../../troubleshooting/slow-restore
 
 ## Validate a Configuration
 
-Use the [common measurement procedure](../../../troubleshooting/slow-restores.md#5-repeat-the-real-restore).
+After you change a setting on this page, check the result with a real restore. Follow [Repeat the Real Restore](../../../troubleshooting/slow-restores.md#repeat-the-real-restore) and compare the restore time with the time before the change.

@@ -5,12 +5,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # Troubleshoot Restores
 
+Use this page when a restore is slow or fails. It starts with a restore that is
+slower than expected. Then it lists each step a restore can fail at, with the
+likely causes and what to check. To find which step failed, see
+[Reading a Failure Message](reading-a-failure-message.md).
+
 ## A Restore Is Slower Than Expected
 
 Read the `Restore timing summary` from the node agent on the restore Pod's node.
 Check whether CPU restore, CUDA restore, or staging takes the most time. Follow
 [Troubleshoot Slow Restores](slow-restores.md) for the next check and
-backend-specific tuning.
+storage-specific tuning.
 
 ## Restore Fails at a Step
 
@@ -20,9 +25,11 @@ The agent locates the checkpoint directory for the referenced `PodSnapshot` on
 this node's snapshot store mount and refuses a path that passes through a
 symlink.
 
-Likely causes: the snapshot store is not mounted on this node's agent; the
-`PodSnapshot` is not Ready yet or its content was deleted; the storage backing
-the checkpoint is not reachable from this node.
+**Likely causes:**
+
+- The snapshot store is not mounted on this node's agent
+- The `PodSnapshot` is not Ready yet or its content was deleted
+- The storage backing the checkpoint is not reachable from this node
 
 ```bash
 kubectl get podsnapshot <name> -n <ns>
@@ -35,8 +42,10 @@ kubectl get pvc -n <ns>
 
 The agent reads `manifest.json` from the artifact directory.
 
-Likely causes: a partial or corrupt artifact, or one written by an agent
-version this agent cannot read.
+**Likely causes:**
+
+- A partial or corrupt artifact
+- An artifact written by an agent version this agent cannot read
 
 Re-take the checkpoint with the agent version that will restore it.
 
@@ -47,8 +56,10 @@ annotation asked for, and a GPU checkpoint taken through PageBroker
 CustomStorage can only be restored on a node whose agent has CustomStorage
 available.
 
-Likely causes: the restore mapping names a container that was not the one
-checkpointed; the restore pod landed on a node without CustomStorage support.
+**Likely causes:**
+
+- The restore mapping names a container that was not the one checkpointed
+- The restore pod landed on a node without CustomStorage support
 
 Check the container mapping on the restore pod against the `PodSnapshot`, and
 the node's agent configuration.
@@ -74,9 +85,11 @@ process (check `lsm-labels`). Agents that predate this check write no such
 record, so their checkpoints are refused even when the dumped processes carry
 labels. Re-checkpoint with an agent that records them.
 
-Likely causes: the placeholder container exited or restarted before the agent
-reached it; the runtime did not answer; the placeholder has fewer GPUs
-allocated than the checkpoint used, or none.
+**Likely causes:**
+
+- The placeholder container exited or restarted before the agent reached it
+- The runtime did not answer
+- The placeholder has fewer GPUs allocated than the checkpoint used, or none
 
 ```bash
 kubectl describe pod <restore-pod> -n <ns>
@@ -88,8 +101,10 @@ kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
 The agent builds the mapping PageBroker uses to place checkpointed GPU memory
 on the placeholder's GPUs.
 
-Likely causes: the placeholder has no visible GPUs; the device mapping recorded
-at checkpoint does not match the devices allocated now.
+**Likely causes:**
+
+- The placeholder has no visible GPUs
+- The device mapping recorded at checkpoint does not match the devices allocated now
 
 Check `NVIDIA_VISIBLE_DEVICES` and the GPU resource request on the restore pod.
 
@@ -103,8 +118,10 @@ that exited between the capture request and the dump leaves nothing to map.
 The agent bind-mounts its binaries into the placeholder's mount namespace so
 nsrestore, CRIU and the CUDA tools run inside it.
 
-Likely causes: the placeholder's mount namespace went away because the
-container restarted; the agent lacks the privileges to mount into it.
+**Likely causes:**
+
+- The placeholder's mount namespace went away because the container restarted
+- The agent lacks the privileges to mount into it
 
 Look for container restarts on the restore pod and for the mount error in the
 agent log.
@@ -121,9 +138,11 @@ this restore. The cause carries PageBroker's failure code, such as
 `ARTIFACT_NOT_FOUND`, `STORAGE_UNAVAILABLE` or `ACCESS_DENIED`, or a connection
 error when PageBroker was not reachable at all.
 
-Likely causes: the `pagebroker` container is not ready; the control socket path
-in the agent configuration does not match; the storage backend holding the
-artifact is unavailable or rejects the credentials.
+**Likely causes:**
+
+- The `pagebroker` container is not ready
+- The control socket path in the agent configuration does not match
+- The storage that holds the artifact is unavailable or rejects the credentials
 
 ```bash
 kubectl logs $agent -n <snapshot-ns> -c pagebroker
@@ -169,9 +188,10 @@ nsrestore re-reads the manifest from the checkpoint as staged inside the
 placeholder and checks that the PageBroker execution handed to it matches what
 the checkpoint needs.
 
-Likely causes: the staged checkpoint is not the one the agent validated,
-usually a storage mount that changed under it; an agent and nsrestore from
-different builds.
+**Likely causes:**
+
+- The staged checkpoint is not the one the agent validated, usually a storage mount that changed under it
+- An agent and nsrestore from different builds
 
 Compare the checkpoint directory on the node with the artifact PageBroker
 reports, and check that the agent and nsrestore come from the same image.
@@ -192,9 +212,11 @@ nsrestore extracts the rootfs diff captured at checkpoint over the
 placeholder's root filesystem, so files the workload wrote or changed are back
 before CRIU recreates the process. The cause carries tar's first message.
 
-Likely causes: the placeholder image differs from the source image, so a path
-in the diff cannot be created; a read-only root filesystem on the restore pod;
-a diff entry the placeholder lacks permission to write.
+**Likely causes:**
+
+- The placeholder image differs from the source image, so a path in the diff cannot be created
+- A read-only root filesystem on the restore pod
+- A diff entry the placeholder lacks permission to write
 
 Check that the restore pod uses the same image as the checkpointed pod and
 that its root filesystem is writable.
@@ -205,11 +227,14 @@ For a GPU checkpoint, nsrestore prepares the CUDA job file and the GPU device
 mounts, and opens the CUDA tools it will need after CRIU replaces the mount
 namespace.
 
-Likely causes: a multi-GPU checkpoint with no CUDA job file, which the message
-names; take the checkpoint again with the source launched under
-`cuda-checkpoint --launch-job`. Otherwise GPU device paths the placeholder
-cannot see, or a bundle mount that went away because the placeholder
-restarted.
+**Likely causes:**
+
+- A multi-GPU checkpoint with no CUDA job file. The message names it
+- GPU device paths that the placeholder cannot see
+- A bundle mount that went away because the placeholder restarted
+
+For the first cause, take the checkpoint again with the source launched under
+`cuda-checkpoint --launch-job`.
 
 ```bash
 kubectl exec <restore-pod> -n <ns> -c <container> -- nvidia-smi -L
@@ -224,10 +249,12 @@ cause is the last error CRIU logged and the agent log holds the key lines of
 `failed to unmount /dev/shm before restore`, and `restore.log` has nothing on
 them.
 
-Likely causes: a file, socket or mount the process had open at checkpoint is
-not present in the placeholder; a listening port already taken; a kernel or
-CRIU version that cannot recreate a resource the dump recorded; an AppArmor
-profile CRIU cannot apply.
+**Likely causes:**
+
+- A file, socket or mount the process had open at checkpoint is not present in the placeholder
+- A listening port already taken
+- A kernel or CRIU version that cannot recreate a resource the dump recorded
+- An AppArmor profile CRIU cannot apply
 
 Look past CRIU's nonfatal probes, such as the TUN message above, to the final
 errors in the agent log. Check the restore pod against the
@@ -240,11 +267,13 @@ restores GPU device mounts and GPU memory, through the driver's checkpoint tool
 or through PageBroker for CustomStorage, and for a multi-GPU workload runs the
 cuinterpose restore that rebuilds shared GPU memory.
 
-Likely causes: the restored process tree does not contain the PIDs the
-checkpoint recorded; the restore pod's GPUs do not match the checkpoint's device
-map; the driver refused the restore; PageBroker could not serve the GPU
-memory; the cuinterpose restore failed, multi-GPU workloads only, with the
-coordinator's output in the message after `cuinterpose coordinator:`.
+**Likely causes:**
+
+- The restored process tree does not contain the PIDs the checkpoint recorded
+- The restore pod's GPUs do not match the checkpoint's device map
+- The driver refused the restore
+- PageBroker could not serve the GPU memory
+- The cuinterpose restore failed, multi-GPU workloads only, with the coordinator's output in the message after `cuinterpose coordinator:`
 
 The agent log carries the CUDA restore output and, for CustomStorage, the
 PageBroker result. Check the restore pod's GPU allocation against the
@@ -257,9 +286,11 @@ complete so it can release what it staged. A failure here does not undo the
 restore: the pod is marked restored, and the failure is reported on a
 `RestoreCleanupFailed` warning event and in the agent log.
 
-Likely causes: PageBroker restarted during the restore
-(`TRANSACTION_NOT_FOUND`); the restore outlived the transaction
-(`TRANSACTION_EXPIRED`); a connection error.
+**Likely causes:**
+
+- PageBroker restarted during the restore (`TRANSACTION_NOT_FOUND`)
+- The restore outlived the transaction (`TRANSACTION_EXPIRED`)
+- A connection error
 
 Check the `pagebroker` container's logs and restarts. Staged data is released
 by PageBroker's own expiry.

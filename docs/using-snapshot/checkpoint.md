@@ -1,41 +1,59 @@
 # Checkpoint a Pod
 
-Checkpointing saves an initialized replica's state as a snapshot. There
-are two ways to do it, depending on the use case:
-
-| Method | Choose it when… | Implication |
-|--------|-----------------|-------------|
-| **`PodSnapshot`** | The running replica can be controlled and tracked | It checkpoints a replica you run yourself. It needs orchestration: bringing the replica up, waiting until it is ready, then triggering the checkpoint. |
-| **`SnapshotJob`** | The running pod cannot be tracked directly | Snapshot runs the whole flow: it creates the replica, checkpoints it, and tears it down. Self-contained, but the source is discarded, so every replica (including the first) comes up via [restore](restore.md). |
-
-When you finish, you have a Ready `PodSnapshot` with a name. You use that name in
+Checkpointing saves an initialized replica's state as a snapshot. When you finish,
+you have a Ready `PodSnapshot` with a name. You use that name in
 [Restore a Pod](restore.md) to start a new pod from the snapshot.
 
-This is stage 2 of [Using Snapshot](README.md): checkpoint a running
-pod. It continues from stage 1, the framework page you used
-([vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md), or
-[TensorRT-LLM](supported-frameworks/tensorrt-llm.md)): a `PodSnapshot` needs the
-source replica that page deployed, and a `SnapshotJob` needs only the ConfigMap it
-created and the [Model Cache](README.md#model-cache).
+## Before You Start
 
-Run the commands from [Choose Your Recipe](README.md#choose-your-recipe) first, in
-the same terminal. The commands on this page use the values they set.
+- Run the commands from [Choose Your Recipe](README.md#choose-your-recipe) in the
+  same terminal. The commands on this page use the values they set.
+- Prepare the workload on the page for your framework
+  ([vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md) or
+  [TensorRT-LLM](supported-frameworks/tensorrt-llm.md)). What you need from it
+  depends on the method you choose.
+- The examples on this page use the vLLM Qwen3 0.6B recipe. For another recipe,
+  change the names to match yours: in the YAML, in the file name and in the
+  commands.
 
-## Option 1 — `PodSnapshot` (Checkpoint a Running Pod)
+## Choose a Method
+
+| Method | Choose it when… | What it does | What you need |
+|--------|-----------------|--------------|---------------|
+| **`PodSnapshot`** | The running replica can be controlled and tracked | Checkpoints a replica you run yourself. You orchestrate it: bring the replica up, wait until it is ready, then trigger the checkpoint. | The source replica that the framework page deployed |
+| **`SnapshotJob`** | The running pod cannot be tracked directly | Snapshot runs the whole flow: it creates the replica, checkpoints it and tears it down. The source is discarded, so every replica, including the first, comes up via [restore](restore.md). | The ConfigMap from the framework page and the [Model Cache](README.md#model-cache) |
+
+## Option 1 - `PodSnapshot` (Checkpoint a Running Pod)
+
+### What the Pod Needs
 
 Point at the source replica that is already up and ready. Snapshot does not
-create this pod, so its spec must carry everything the
-[workload contract](../reference/workload-contract.md#pod-requirements) requires:
-the `/snapshot-control` volume mount, the seccomp profile that checkpointing
-requires, and a readiness gate on `/snapshot-control/ready-for-snapshot`. The
-source Deployment of every recipe does.
+create this pod, so the pod must already have what checkpointing needs: a
+`/snapshot-control` volume where the workload signals Snapshot, the seccomp profile
+that checkpointing requires, and a readiness gate that holds the pod until it is
+safe to checkpoint. The source Deployment of every recipe already has all three.
+See the [Workload Contract](../reference/workload-contract.md#pod-requirements) if
+you use your own pod.
 
-1. Save a `PodSnapshot` naming the pod and the container to checkpoint as
-   `vllm-qwen3-0-6b-snapshot.yaml`. Give it the name of your recipe's
-   `SnapshotJob` from the [recipe table](README.md#choose-your-recipe), so that
-   the restore step finds it whichever method you use. The names below are for
-   the vLLM Qwen3 0.6B recipe. For another recipe, replace them with your own,
-   in the YAML, the file name, and the commands in step 2:
+Eight-GPU recipes need nothing different here. Their source Deployment also carries
+the multi-GPU annotation, init container and launcher that
+[Multi-GPU Workloads](../reference/workload-contract.md#multi-gpu-workloads)
+describes.
+
+### Run the Checkpoint
+
+1. Find the name of the source pod you deployed on the framework page
+   ([Deploy the Source Pod](supported-frameworks/vllm.md#deploy-the-source-pod)):
+
+   ```bash
+   kubectl get pods \
+     --namespace "$WORKLOAD_NAMESPACE" \
+     --selector app="$SOURCE_NAME"
+   ```
+
+2. Save a `PodSnapshot` as `vllm-qwen3-0-6b-snapshot.yaml`. It names the source pod
+   and the container to checkpoint. Replace `<pod-id>` with the suffix of the pod
+   name from step 1:
 
    ```yaml
    apiVersion: nvidia.com/v1alpha1
@@ -50,7 +68,10 @@ source Deployment of every recipe does.
            - main
    ```
 
-2. Apply it and wait until the `PodSnapshot` is ready:
+   The `PodSnapshot` name matches `$SNAPSHOT_NAME`, the name a `SnapshotJob` uses
+   for your recipe, so the restore step finds it whichever method you use.
+
+3. Apply it and wait until the `PodSnapshot` is ready:
 
    ```bash
    kubectl apply \
@@ -67,23 +88,23 @@ The operator binds a cluster-scoped `PodSnapshotContent` and records the artifac
 The source replica is terminated once the checkpoint completes, so it does not keep
 serving.
 
-**Eight-GPU recipes.** The `PodSnapshot` is the same. The source Deployment
-already carries the multi-GPU annotation, init container, and launcher that
-[Multi-GPU Workloads](../reference/workload-contract.md#multi-gpu-workloads)
-describes.
+## Option 2 - `SnapshotJob` (Checkpoint a Throwaway Pod)
 
-## Option 2 — `SnapshotJob` (Checkpoint a Throwaway Pod)
+A `SnapshotJob` runs a replica from a pod template and checkpoints it once the
+replica is ready. When the resulting `PodSnapshot` is ready, the job completes and
+removes the source replica. There is no long-running replica to manage, which fits
+pipeline use cases.
 
-`SnapshotJob` runs a replica from a pod template, checkpoints it once ready, and
-completes from the resulting `PodSnapshot` — removing the source replica. There is
-no long-running replica to manage, which fits pipeline use cases.
+### What the Job Contains
 
-`spec.podTemplate` only needs the workload's own container spec — image,
-command, resources, and any volumes it mounts. The controller injects the
-`/snapshot-control` volume and mount, `SNAPSHOT_CONTROL_DIR`, the
-`ready-for-snapshot` readiness probe, and the seccomp profile before creating the
-source pod. The framework recipes do not need `/dev/net/tun`. CRIU can log a
-nonfatal TUN capability-probe error when the device is absent. See
+- **You provide** the workload's own container spec, in `spec.podTemplate`: the
+  image, command, resources and any volumes it mounts.
+- **The controller adds** the rest before it creates the source pod: the
+  `/snapshot-control` volume and mount, `SNAPSHOT_CONTROL_DIR`, the
+  `ready-for-snapshot` readiness probe and the seccomp profile.
+
+The framework recipes do not need `/dev/net/tun`. If the device is absent, CRIU can
+log a nonfatal TUN capability-probe error. See
 [TUN probe errors](../troubleshooting/agent.md#criu-reports-unable-to-create-tun).
 
 Each recipe ships a ready-to-apply `SnapshotJob`. Its shape is:
@@ -105,32 +126,12 @@ spec:
           # resources, and the volumes it mounts, such as the app.py ConfigMap.
 ```
 
-Apply the `SnapshotJob` of your recipe and wait for it to complete:
+### Eight-GPU Recipes
 
-```bash
-kubectl apply \
-  --namespace "$WORKLOAD_NAMESPACE" \
-  --filename "$SNAPSHOTJOB_MANIFEST"
-
-kubectl wait \
-  --namespace "$WORKLOAD_NAMESPACE" \
-  --for=condition=Completed snapshotjob/"$SNAPSHOT_NAME" \
-  --timeout="$WAIT"
-
-# the resulting PodSnapshot to restore from:
-kubectl get snapshotjob "$SNAPSHOT_NAME" \
-  --namespace "$WORKLOAD_NAMESPACE" \
-  --output jsonpath='{.status.podSnapshotName}'
-```
-
-The `PodSnapshot` has the same name as its `SnapshotJob`. Because the source
-replica is deleted, every serving replica — including the first — is brought up
-via [restore](restore.md).
-
-**Eight-GPU recipes.** The `SnapshotJob` carries the
-`nvidia.com/snapshot-multi-gpu: enabled` annotation on `spec.podTemplate`, and the
-controller prepares the source Pod for multi-GPU capture. Add the annotation to
-your own `SnapshotJob` the same way:
+The recipe's `SnapshotJob` carries the `nvidia.com/snapshot-multi-gpu: enabled`
+annotation on `spec.podTemplate`, and the controller prepares the source pod for
+multi-GPU capture. If you write your own `SnapshotJob`, add the annotation the same
+way:
 
 ```yaml
 spec:
@@ -140,9 +141,40 @@ spec:
         nvidia.com/snapshot-multi-gpu: enabled
 ```
 
+### Run the Checkpoint
+
+1. Apply the `SnapshotJob` of your recipe:
+
+   ```bash
+   kubectl apply \
+     --namespace "$WORKLOAD_NAMESPACE" \
+     --filename "$SNAPSHOTJOB_MANIFEST"
+   ```
+
+2. Wait for it to complete:
+
+   ```bash
+   kubectl wait \
+     --namespace "$WORKLOAD_NAMESPACE" \
+     --for=condition=Completed snapshotjob/"$SNAPSHOT_NAME" \
+     --timeout="$WAIT"
+   ```
+
+3. Read the name of the resulting `PodSnapshot` to restore from:
+
+   ```bash
+   kubectl get snapshotjob "$SNAPSHOT_NAME" \
+     --namespace "$WORKLOAD_NAMESPACE" \
+     --output jsonpath='{.status.podSnapshotName}'
+   ```
+
+The `PodSnapshot` has the same name as its `SnapshotJob`. The source replica is
+deleted, so every serving replica, including the first, is brought up via
+[restore](restore.md).
+
 ## Next Steps
 
-If a checkpoint does not become Ready, see
-[Troubleshoot Checkpoints](../troubleshooting/checkpoints.md#a-checkpoint-never-becomes-ready).
-
-- [Restore a Pod](restore.md) uses the `PodSnapshot` name from this page.
+- [Restore a Pod](restore.md) - Start a new pod from the snapshot, using the
+  `PodSnapshot` name from this page
+- [Troubleshoot Checkpoints](../troubleshooting/checkpoints.md#a-checkpoint-never-becomes-ready) -
+  Fix a checkpoint that does not become Ready

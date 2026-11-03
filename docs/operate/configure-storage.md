@@ -1,11 +1,19 @@
 # Configure Storage
 
-For backend tuning and examples, see [Tune Storage](tune-storage/README.md).
+Snapshot keeps every snapshot in one snapshot store that all node agents can reach.
+By default, the store is a snapshot volume, which is a Kubernetes
+PersistentVolumeClaim (PVC) that supports `ReadWriteMany`. You can use an
+S3-compatible bucket instead with `storage.type: s3`. Workload pods never mount
+the snapshot store.
 
-Snapshot keeps every checkpoint in one store that all node agents reach: a
-snapshot volume by default, or an S3-compatible bucket with `storage.type: s3`.
-Each agent's PageBroker sidecar publishes snapshots there and reads
-them back for restore; workload pods never mount the snapshot store.
+The node agent's PageBroker container publishes snapshots to the store and reads
+them back for restore. See [Architecture Overview](../overview/architecture-overview.md)
+for what PageBroker does.
+
+> [!NOTE]
+> To choose a storage type and tune it for faster restores, see
+> [Tune Storage](tune-storage/README.md). It compares NFS (VAST or Amazon EFS),
+> local NVMe with RAID0, and Amazon S3, and has a setup and tuning page for each.
 
 The snapshot store must prevent unauthorized modification of artifacts through
 filesystem permissions or the storage server's access controls. PageBroker requests
@@ -18,13 +26,15 @@ as SMB can report these modes from mount settings rather than per-directory perm
 ### PVC Settings
 
 With `storage.type: pvc`, the default, the snapshot store is a Kubernetes
-PersistentVolumeClaim (PVC). Because
-agents on multiple GPU nodes mount it concurrently, it must support
-`ReadWriteMany` (RWX). The chart provisions one PVC per cluster by default and
-mounts it at `/checkpoints` in every agent.
+PersistentVolumeClaim (PVC). Agents on multiple GPU nodes mount it at the same
+time, so it must support `ReadWriteMany` (RWX). The chart provisions one PVC per
+cluster by default and mounts it at `/checkpoints` in every agent. The claim is
+always in the Helm release namespace. For `storage.type: s3`, see
+[Other Backends](#other-backends).
 
-For `storage.type: pvc`, the chart's `storage.pvc` values control the PVC (for
-`s3`, see [Other Backends](#other-backends)):
+Set the following Helm values to control the PVC. The
+[Helm Chart Values](../reference/helm-values.md#storage) reference lists all
+storage values:
 
 | Value                      | Purpose                                             | Default        |
 |----------------------------|-----------------------------------------------------|----------------|
@@ -33,8 +43,6 @@ For `storage.type: pvc`, the chart's `storage.pvc` values control the PVC (for
 | `storage.pvc.size`         | Requested size                                      | `1Ti`          |
 | `storage.pvc.storageClass` | Storage class (empty = cluster default)             | `""`           |
 | `storage.pvc.basePath`     | Mount path inside the agent                         | `/checkpoints` |
-
-The claim is always in the Helm release namespace.
 
 ### Use an RWX Storage Class
 
@@ -57,32 +65,58 @@ helm install snapshot ... \
 ```
 
 The named claim must support `ReadWriteMany`. Access modes are immutable, so a
-`ReadWriteOnce` claim cannot be converted in place — create a new RWX claim and, if
+`ReadWriteOnce` claim cannot be converted in place. Create a new RWX claim and, if
 the existing checkpoints are needed, copy them over once.
 
 ### Retention
 
-Chart-created PVCs are retained when the Helm release is removed, so checkpoints
-survive an uninstall.
+When the chart creates the PVC, `helm uninstall` does not delete it, so the
+snapshots stay on the volume. To reuse them, install again with
+`storage.pvc.create=false` and `storage.pvc.name` set to the kept claim (see
+[Use an Existing PVC](#use-an-existing-pvc)). To free the storage, delete the
+claim yourself:
+
+```bash
+kubectl delete pvc snapshot-pvc --namespace snapshot
+```
+
+A claim that you created yourself is never deleted by the chart.
 
 ## Other Backends
 
-`storage.type` supports `pvc` and `s3`. `oci` is reserved in the chart for
-future use and is not supported today.
+The snapshot store is `pvc` by default. To store snapshots in an S3-compatible
+bucket instead, set `storage.type: s3`.
 
-`storage.type: s3` requires `operator.bindNewContents: true`, because S3 has no
-legacy local-path capture mode; the chart fails the render without it. See
-[Enable Artifact Addressing](#enable-artifact-addressing) for the rollout order.
+> [!NOTE]
+> `storage.type` also has an `oci` value that is reserved for future use. It is
+> not supported today.
 
-With `storage.type: s3`, the chart passes PageBroker the settings below. The S3
-backend ships with the agent and PageBroker images of a Snapshot release newer
-than v0.2.0; see [S3 Snapshot Store](../get-started/prerequisites.md#s3-snapshot-store). PageBroker reads them once at
-startup, so changing one restarts PageBroker on each node, and it can fail to
-start briefly until the operator has rewritten its configuration. See
-[PageBroker Does Not Start After an S3 Settings Change](../troubleshooting/agent.md#pagebroker-does-not-start-after-an-s3-settings-change).
-After changing the endpoint, bucket, region or prefix, restart the agent
-DaemonSet once the operator pod is Ready, so PageBroker reads the operator's
-current configuration; PageBroker does not re-read it while running.
+### S3 Requirements
+
+- The S3 backend ships with the agent and PageBroker images of a Snapshot
+  release newer than v0.2.0. See
+  [S3 Snapshot Store](../get-started/prerequisites.md#s3-snapshot-store)
+- `storage.type: s3` requires `operator.bindNewContents: true`, because S3 has no
+  legacy local-path capture mode. The chart fails the render without it. See
+  [Enable Artifact Addressing](#enable-artifact-addressing) for the rollout order
+
+### Required S3 Settings
+
+With `storage.type: s3`, set these values:
+
+- `storage.s3.endpoint` - S3-compatible endpoint
+- `storage.s3.region` - Bucket region
+- `storage.s3.bucket` - Bucket that holds the snapshots
+- `storage.s3.credentialsSecretRef` - Secret that holds the credentials file
+
+See [Helm Chart Values](../reference/helm-values.md#storage) for all S3 values,
+including the key prefix and the credentials key.
+
+### Optional S3 Settings
+
+These settings apply only to `storage.type: s3`. PageBroker, the node agent
+container that reads and writes the snapshot store, uses them to connect to the
+bucket and tune transfers.
 
 | Value | Effect | Default |
 |-------|--------|---------|
@@ -96,6 +130,17 @@ When `pageBroker.s3.limits.stagingBytes` is omitted, the chart fills it from the
 staging volume cap, so PageBroker refuses a staged restore the volume cannot
 hold instead of filling it. An explicit `stagingBytes` is not checked against
 the volume.
+
+### Change S3 Settings
+
+PageBroker reads the S3 settings once at startup, so changing one restarts
+PageBroker on each node, and it can fail to start briefly until the operator has
+rewritten its configuration. See
+[PageBroker Does Not Start After an S3 Settings Change](../troubleshooting/agent.md#pagebroker-does-not-start-after-an-s3-settings-change).
+
+After changing the endpoint, bucket, region or prefix, restart the agent
+DaemonSet once the operator pod is Ready, so PageBroker reads the operator's
+current configuration. PageBroker does not re-read it while running.
 
 ## PageBroker Staging
 
@@ -145,7 +190,7 @@ protocol and ship as a pair.
 
 ### Size the Staging Volume
 
-Because the staging volume is RAM, size the agent pod for it:
+The staging volume is RAM, so size the agent pod for it:
 
 | Value                                | Purpose                                                                                        | Default      |
 |---------------------------------------|--------------------------------------------------------------------------------------------------|--------------|
@@ -156,7 +201,7 @@ Because the staging volume is RAM, size the agent pod for it:
 
 To checkpoint workloads whose CPU memory exceeds the defaults, raise the
 staging cap and the agent memory limit together, leaving headroom above the
-cap for agent process memory — for example, a 200Gi staging budget with 24Gi
+cap for agent process memory. For example, a 200Gi staging budget with 24Gi
 of headroom:
 
 ```bash
@@ -182,20 +227,20 @@ RAM, where a checkpoint is written before it is committed to the checkpoint
 store, and where an artifact is prefetched before CRIU restores from it. It is
 not accounted like a disk. A memory-backed `emptyDir` has no size of its own,
 so **without a `sizeLimit` it grows until the node runs out of memory**, and
-its pages are charged to the cgroup of whichever container wrote them — not to
-the volume, and not to the pod as a whole.
+its pages are charged to the cgroup of whichever container wrote them, not to
+the volume and not to the pod as a whole.
 
 Two containers write it, each against its own limit:
 
 | Writer | When | Charged to |
 |---|---|---|
-| agent | checkpoint — CRIU writes the image | `daemonset.resources.limits.memory` |
-| PageBroker | staged restore — prefetching the artifact | `pageBroker.resources.limits.memory` |
+| agent | checkpoint (CRIU writes the image) | `daemonset.resources.limits.memory` |
+| PageBroker | staged restore (prefetching the artifact) | `pageBroker.resources.limits.memory` |
 
-So one oversized request is enough to exceed a container's limit, and the
+One oversized request is enough to exceed a container's limit, and the
 kernel OOM-kills **that container**, not the request. The agent or PageBroker
 restarts, and every other capture and restore in flight on that node dies with
-it — including other tenants'. A single workload too large to stage therefore
+it, including other tenants'. A single workload too large to stage therefore
 takes checkpointing and restore off the whole node rather than failing its own
 request.
 
@@ -211,7 +256,7 @@ container limit lets the two together reach it while the volume is still under
 its cap.
 
 **The chart enforces this.** A `sizeLimit` that does not leave room is lowered
-to one that does — the **smaller** of the two writers' memory limits, less a
+to one that does: the **smaller** of the two writers' memory limits, less a
 reserve of 8Gi or an eighth of a smaller limit. The smaller limit is what
 matters because either container can be the one that fills the volume. Nothing
 is rejected: a chart that refuses to render would break installs that work
@@ -230,11 +275,11 @@ container:
   test clusters that only set the limits.
 
 To keep a specific staging size, raise **both** writers' memory limits above it
-rather than raising the cap alone — the cap follows whichever is smaller.
+rather than raising the cap alone. The cap follows whichever is smaller.
 
 The staging-space check (`INSUFFICIENT_STORAGE`) only rejects a transfer that
 would exceed `sizeLimit`; it does not guarantee protection from an OOM kill,
-and it has no way to know the size of a checkpoint before CRIU writes it — the
+and it has no way to know the size of a checkpoint before CRIU writes it. The
 headroom above is what makes an oversized checkpoint fail the capture instead
 of the agent. Leaving `sizeLimit` missing, null, or empty falls back to the
 chart's `56Gi` default, not the node's allocatable memory.
@@ -245,35 +290,23 @@ When upgrading from a chart that shipped without PageBroker, do not use
 `helm upgrade --reuse-values`: it keeps the previous chart's defaults, including
 the old 4Gi agent memory limit. Use `--reset-then-reuse-values` instead, which
 resets to the new chart's defaults but still carries forward any value you
-explicitly overrode before — including an old memory limit or staging size, if
+explicitly overrode before, including an old memory limit or staging size, if
 you had set one. Review `daemonset.resources.limits.memory`,
 `pageBroker.resources.limits.memory`, and `pageBroker.staging.sizeLimit`
 together after upgrading, or pass all three explicitly.
 
 ## Store Identity and Artifact Addressing
 
-### Store Identity
+Snapshot ties each snapshot to the store it was written to. Every restore and
+delete checks this link first, so a snapshot cannot be read or deleted through a
+different store, for example after the installation is pointed at another
+bucket. This is called artifact addressing. It is off by default, and
+`storage.type: s3` requires it.
 
-The chart resolves these
-values into `storage.yaml` in the existing configuration ConfigMap, mounted at
-`/etc/snapshot/storage.yaml` in PageBroker and the operator manager. The file
-carries one backend block and that populated block selects the backend; Helm's
-`storage.type` only chooses which block to render. The agent
-receives only its existing `config.yaml`; its configuration has no PVC identity
-block. Provisioning settings (`create`, `size`, `storageClass`) do not identify
-the artifact store.
-
-The PVC store ID hashes the backend, claim namespace/name and normalized path
-inside the claim. The current installation uses the entire claim, so that path
-is `/`, independent of the container-local `/checkpoints` mount. Neither a
-caller-supplied store ID nor an additional PVC namespace setting is required.
-`storage.pvc.basePath` retains its existing mount-path meaning.
-
-The operator validates this resolved identity at startup and uses it to check
-artifact cleanup against each content's recorded store. New captures use the
-legacy filesystem flow by default. Artifact addressing requires a compatible
-PageBroker image and the separate activation steps below; see
-[Other Backends](#other-backends) for `storage.type: s3`.
+- **Artifact:** the stored data of one checkpointed container
+- **Content:** the `PodSnapshotContent` object that records one snapshot
+- **Bound:** content that records the ID of its store
+- **Store ID:** the identity of the store, built from its settings
 
 ### Enable Artifact Addressing
 
@@ -303,6 +336,34 @@ Once bound content exists, keep a compatible broker with artifact addressing
 enabled for its reads and restores. Turning off `operator.bindNewContents` stops
 new bound captures while preserving support for existing ones; it does not
 convert their storage format or permit downgrading the agents to a legacy build.
+
+### Store Identity
+
+The chart resolves the `storage.*`
+values into `storage.yaml` in the existing configuration ConfigMap, mounted at
+`/etc/snapshot/storage.yaml` in PageBroker and the operator manager. The file
+carries one backend block and that populated block selects the backend; Helm's
+`storage.type` only chooses which block to render. The agent
+receives only its existing `config.yaml`; its configuration has no PVC identity
+block. Provisioning settings (`create`, `size`, `storageClass`) do not identify
+the artifact store.
+
+The PVC store ID hashes the backend, claim namespace/name and normalized path
+inside the claim. The current installation uses the entire claim, so that path
+is `/`, independent of the container-local `/checkpoints` mount. Neither a
+caller-supplied store ID nor an additional PVC namespace setting is required.
+`storage.pvc.basePath` retains its existing mount-path meaning.
+
+For S3, the store ID hashes the backend, endpoint, region, bucket and prefix.
+Credentials, bucket addressing and the CA bundle are not part of it, so changing
+them does not change the ID.
+
+The operator validates this resolved identity at startup and uses it to check
+artifact cleanup against each content's recorded store. New captures use the
+legacy filesystem flow by default. Artifact addressing requires a compatible
+PageBroker image and the separate activation steps in
+[Enable Artifact Addressing](#enable-artifact-addressing); see
+[Other Backends](#other-backends) for `storage.type: s3`.
 
 ### How PageBroker Addresses Artifacts
 

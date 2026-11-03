@@ -10,9 +10,8 @@ image, and one program, `app.py`, is mounted into it from a ConfigMap to prepare
 TensorRT-LLM for checkpoint and validate it after restore. The Snapshot agent
 injects the restore tooling at runtime.
 
-This is stage 1 of [Using Snapshot](../README.md): prepare the workload. Complete
-[Before You Start](../README.md#before-you-start) and
-[pick a recipe](../README.md#choose-your-recipe) first. The commands run from
+Before you start, complete [Before You Start](../README.md#before-you-start) and
+[Choose Your Recipe](../README.md#choose-your-recipe). Run the commands from
 `docs/using-snapshot`.
 
 > [!NOTE]
@@ -41,8 +40,8 @@ across this release. These settings are enforced by `app.py`.
 After restore, the process recreates KV cache, calls `LLM.generate()` again, and
 starts an API on port 8000. It writes `trtllm-restore-ready` only after that
 generation succeeds and the API is listening.
-[Restore](../restore.md#verify-the-restored-pod) shows how to confirm the
-restore.
+To check that the restore worked, see
+[Verify the Restored Pod](../restore.md#verify-the-restored-pod).
 
 ### Image and Settings
 
@@ -120,8 +119,10 @@ containers:
 ### Run Another Model
 
 To run another model, select one supported by the chosen TensorRT-LLM image and
-change it in both places in a copy of the manifest, because the main container runs
-offline from the model cache.
+change the model name in both places in a copy of the manifest: the `model-cache`
+init container, which downloads the model, and the `main` container's `model`
+argument. The main container runs offline from the model cache, so it can only
+load a model the init container has downloaded.
 
 ### Engine Sizing
 
@@ -156,13 +157,14 @@ restored inference checks on the same eight B200 GPUs. Both places pin a
 
 ## Deploy the Source Pod
 
-Deploy the source pod that Option 1 (`PodSnapshot`) checkpoints. When you finish,
-you have a running pod that is ready to checkpoint. You need its name for the
-`PodSnapshot` that you create in [Checkpoint a Pod](../checkpoint.md).
+This section is for checkpointing with a `PodSnapshot`. It deploys the source pod
+that the `PodSnapshot` checkpoints. When you finish, you have a running pod that is
+ready to checkpoint. You need its name for the `PodSnapshot` that you create in
+[Checkpoint a Pod](../checkpoint.md).
 
-Skip this step if you checkpoint with a `SnapshotJob`: it creates the source
-replica itself. Continue with
-[Checkpoint, Option 2](../checkpoint.md#option-2--snapshotjob-checkpoint-a-throwaway-pod).
+If you checkpoint with a `SnapshotJob`, skip this section: the job creates the
+source replica itself. Continue with
+[Checkpoint, Option 2](../checkpoint.md#option-2---snapshotjob-checkpoint-a-throwaway-pod).
 
 1. Apply the source manifest of your recipe. The commands on this page are for
    the TensorRT-LLM Qwen3 0.6B recipe. For another recipe, use its manifest and its
@@ -208,5 +210,5 @@ replica itself. Continue with
 
 ## Next Steps
 
-- [Checkpoint a Pod](../checkpoint.md)
-- [Restore a Pod](../restore.md)
+- [Checkpoint a Pod](../checkpoint.md) - Create a snapshot of the source replica
+- [Restore a Pod](../restore.md) - Start a new pod from the snapshot

@@ -10,7 +10,7 @@ roadmap.
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 - The checkpointed workload must not have tools that intercept `libcuda.so`
-  calls (e.g. Datadog GPU monitoring) — CUDA calls may fail or hang after
+  calls (e.g. Datadog GPU monitoring). CUDA calls may fail or hang after
   restore, with undefined results. Disable such interception for workloads
   that will be snapshotted.
 - The restore proxy needs a container runtime with NRI v0.10 or newer, enabled:

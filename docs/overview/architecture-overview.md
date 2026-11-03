@@ -88,7 +88,7 @@ From a ready pod to a stored artifact:
    container. (A `SnapshotJob` instead runs the pod itself and creates the
    `PodSnapshot` once the pod is Ready.)
 2. **Bind.** The operator reads the source pod, pins its UID and node name, and
-   creates the bound `PodSnapshotContent` — labelled for that node. An
+   creates the bound `PodSnapshotContent`, labeled for that node. An
    unscheduled pod is requeued; a same-named replacement fails the snapshot
    rather than capturing the wrong process.
 3. **Claim.** The agent on that node picks the work order off its capture queue,
@@ -96,7 +96,7 @@ From a ready pod to a stored artifact:
    changes reach the queue.
 4. **Quiesce.** The agent waits for the target container to report Ready. That
    readiness probe gates on `ready-for-snapshot`, which the workload writes only
-   once no GPU work is in flight — see the
+   once no GPU work is in flight. See the
    [Workload Contract](../reference/workload-contract.md).
 5. **Capture**, in this order, into a PageBroker transaction:
    GPU state first (PageBroker's GPU engine, or `cuda-checkpoint`), then the
@@ -140,7 +140,7 @@ sequenceDiagram
 The same four stages the [benchmarks](performance.md) break
 restore time into:
 
-1. **Agent setup** — the agent's restore queue picks up a pod on its node
+1. **Agent setup.** The agent's restore queue picks up a pod on its node
    carrying `restore-from`. It preflights the `PodSnapshot`, the bound content
    and the artifact, runs the [Compatibility Gates](#compatibility-gates),
    resolves the destination container's PID, and mounts the agent's binary
@@ -150,15 +150,15 @@ restore time into:
    plugin also reports the container's ID to the restore queue the moment it
    starts, so the restore does not wait for kubelet to publish the container in
    the pod status.
-2. **CRIU restore** — the agent execs `nsrestore` inside the destination's
+2. **CRIU restore.** The agent execs `nsrestore` inside the destination's
    namespaces. It applies the rootfs diff, prepares the GPU device mounts, and
    runs the CRIU restore that reads the checkpoint images and rebuilds the
    process tree. This is a bulk read from the snapshot store and is the
    largest stage for every model measured.
-3. **CUDA restore** — checkpoint-time PIDs are remapped onto the restored ones,
+3. **CUDA restore.** Checkpoint-time PIDs are remapped onto the restored ones,
    then GPU memory is restored and the processes unlocked, through PageBroker's
    GPU engine or `cuda-checkpoint` depending on how the artifact was captured.
-4. **Wake / remap** — temporary mounts are released, the PageBroker transaction
+4. **Wake / remap.** Temporary mounts are released, the PageBroker transaction
    is committed, and the restored process is validated. The agent then writes
    `restore-complete` into the control volume, which is what the restored
    workload is blocked on; it leaves quiescence and resumes serving. The agent
@@ -206,7 +206,7 @@ sequenceDiagram
 
 A checkpoint only runs on a node that resembles the one it was captured on, so
 the agent compares the artifact's manifest against the target before it commits
-to a restore — at **preflight** (manifest and pod only) and again at **inspect**
+to a restore, at **preflight** (manifest and pod only) and again at **inspect**
 (once the node's GPUs and the container's mounts are readable). Checks cover CPU
 architecture, kernel version, image digest, CPU and memory limits, mounts, GPU
 model and count, and driver version. A mismatch refuses the restore with the
@@ -225,16 +225,15 @@ An artifact is addressed by the `PodSnapshotContent` UID and the captured
 container name, so a deleted-and-recreated content object can never adopt a
 stale artifact. Content bound to a store also carries a backend-neutral
 `storage.storeID`, which is what lets a second backend be added without
-changing how callers address a checkpoint — see
+changing how callers address a checkpoint. See
 [SNEP-237: S3-compatible object storage](../design/237-s3-storage/README.md).
 
 PageBroker adds a memory-backed staging volume shared with the agent. By default
 CRIU dumps into staging and PageBroker publishes to the snapshot store on
 success. With a PVC, restore reads the artifact directly
 (`pageBroker.restoreMode: direct`); with S3, restore always stages the
-artifact from the bucket first. Because
-staging is RAM, its cap and the agent's memory limit have to be sized together —
-see [Configure Storage](../operate/configure-storage.md).
+artifact from the bucket first. Staging is RAM, so its cap and the agent's memory
+limit have to be sized together. See [Configure Storage](../operate/configure-storage.md).
 
 Artifact lifetime follows the API object. Deleting a `PodSnapshot` cascades to
 its `PodSnapshotContent`, whose cleanup finalizer hands the artifact to the
@@ -271,13 +270,13 @@ place against the still-running workload.
 The node agent and PageBroker are privileged, run in the host PID namespace, and
 mount the container runtime's socket and state: entering another container's
 namespaces and driving CRIU requires it. That is the main boundary to be aware
-of when deciding where to install Snapshot — the namespace running the agent is
+of when deciding where to install Snapshot: the namespace running the agent is
 as trusted as the node.
 
 Workloads stay unprivileged, and never mount the snapshot store; the agent
 mediates every read and write. Checkpointed containers need a seccomp profile
 blocking `io_uring`, which CRIU cannot checkpoint, and the chart ships one.
-Snapshots contain the workload's complete memory — protect the store
+Snapshots contain the workload's complete memory, so protect the store
 accordingly. See [Allow the Privileged Node Agent](../get-started/installation.md#allow-the-privileged-node-agent).
 
 ## Multi-GPU
@@ -304,8 +303,8 @@ survive. CuInterpose, the opt-in component that provides this, is described in
 
 ## See Also
 
-- [API Reference](../reference/api.md) — fields, conditions, annotations, Helm values.
-- [Workload Contract](../reference/workload-contract.md) — what a workload must do to be captured and restored.
-- [Restore Pod Contract](../reference/restore-pod-contract.md) — the pod shape a restore requires.
+- [API Reference](../reference/api.md) - Fields, conditions, annotations, Helm values.
+- [Workload Contract](../reference/workload-contract.md) - What a workload must do to be captured and restored.
+- [Restore Pod Contract](../reference/restore-pod-contract.md) - The pod shape a restore requires.
 - [Configure Storage](../operate/configure-storage.md) and [Allow the Privileged Node Agent](../get-started/installation.md#allow-the-privileged-node-agent).
-- [Benchmarks](performance.md) — where restore time actually goes.
+- [Benchmarks](performance.md) - Where restore time actually goes.

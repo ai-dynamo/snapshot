@@ -2,35 +2,35 @@
 
 Snapshot checkpoints a running inference replica, so a new replica restores from
 the snapshot in seconds instead of loading the model from scratch. This section
-takes you through the flow once, end to end. You are done when a restored replica
-is up and ready without cold-starting.
+takes you through the flow once, end to end. At the end, a restored replica is up
+and ready without cold-starting.
 
 ## The Flow
 
-| Stage | What you do | Page |
+| Phase | What you do | Page |
 |-------|-------------|------|
-| 1. Prepare the workload | Create the ConfigMap with the framework's `app.py` and deploy the source replica | [vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md), [TensorRT-LLM](supported-frameworks/tensorrt-llm.md) |
-| 2. Checkpoint a running pod | Create a snapshot of the source replica, with a `PodSnapshot` or a `SnapshotJob` | [Checkpoint a Pod](checkpoint.md) |
-| 3. Restore a new pod from the snapshot | Start a new replica from the snapshot | [Restore a Pod](restore.md) |
+| Prepare the workload | Create the ConfigMap with the framework's `app.py` and deploy the source replica | [vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md), [TensorRT-LLM](supported-frameworks/tensorrt-llm.md) |
+| Checkpoint a running pod | Create a snapshot of the source replica, with a `PodSnapshot` or a `SnapshotJob` | [Checkpoint a Pod](checkpoint.md) |
+| Restore a new pod from the snapshot | Start a new replica from the snapshot | [Restore a Pod](restore.md) |
 
 ## What This Page Covers
 
-This page is the setup for all three stages. You do it once, before stage 1:
+This page is the setup for the whole flow. You do it once, before you prepare the workload:
 
 - [Before You Start](#before-you-start) - Install Snapshot, download the example
   files and pick the namespace.
 - [Model Cache](#model-cache) - Create the volume that holds the model files.
 - [Choose Your Recipe](#choose-your-recipe) - Pick the framework, model and GPU
-  count, and set the values the later commands use.
+  count, and set the values the commands on the other pages use.
 
 The commands are the same for every inference framework (vLLM, SGLang and
-TensorRT-LLM) and every recipe. Every later command uses the recipe you choose here.
+TensorRT-LLM) and every recipe. The recipe you choose here sets the values they use.
 
 > [!NOTE]
 > This section uses `kubectl` to show the resources and the flow. In production, a
 > controller or platform creates and watches these resources through the Kubernetes
-> API as part of its own control loop. `kubectl` here is just for illustration and
-> for trying things out by hand.
+> API as part of its own control loop. The `kubectl` commands here let you run each
+> step yourself and see what happens.
 
 ## Before You Start
 
@@ -57,9 +57,9 @@ TensorRT-LLM) and every recipe. Every later command uses the recipe you choose h
    | `<framework>/restore/1-gpu.yaml`, `8-gpu.yaml` | The restore Deployments, by GPU count. |
 
 3. **Pick the namespace** where the workload runs, creating it if it does not
-   exist. This is your own namespace for the replicas, not the one Snapshot is
-   installed in (`snapshot` in the [Installation](../get-started/installation.md)
-   command). The commands read it from `WORKLOAD_NAMESPACE`:
+   exist. Use a different namespace from the one Snapshot is installed in
+   (`snapshot` in the [Installation](../get-started/installation.md) command).
+   The commands read it from `WORKLOAD_NAMESPACE`:
 
    ```bash
    export WORKLOAD_NAMESPACE=<namespace>
@@ -94,7 +94,7 @@ kubectl apply \
 ## Choose Your Recipe
 
 A recipe is one inference framework serving one model on a fixed number of GPUs.
-Choose one row from the table. Every later command uses it.
+Choose one row from the table. The commands on the other pages use it.
 
 | Recipe | FRAMEWORK | MODEL | GPUS |
 |--------|-------------|---------|--------|
@@ -135,8 +135,10 @@ export WAIT=$([ "$GPUS" = 1 ] && echo 30m || echo 120m)
 
 ### Eight-GPU Recipes
 
-A multi-GPU recipe runs one model across the GPUs of a single node. Multi-node is
-not supported yet.
+A multi-GPU recipe runs one model across the GPUs of a single node.
+
+> [!NOTE]
+> Multi-node is not supported yet.
 
 Before you use an eight-GPU recipe:
 
@@ -151,11 +153,16 @@ Before you use an eight-GPU recipe:
   See [Prerequisites](../get-started/prerequisites.md#multi-gpu-workloads).
 - **Agent image** - If you checkpoint with a `PodSnapshot`, the source manifest
   needs the image of your installed Snapshot agent: an init container copies
-  Snapshot's multi-GPU libraries from it. You paste it into the manifest when you
-  deploy the source replica on the framework page. A `SnapshotJob` needs nothing.
+  Snapshot's multi-GPU libraries from it. You set it when you deploy the source
+  replica, under Deploy the Source Pod on the page for your framework
+  ([vLLM](supported-frameworks/vllm.md#deploy-the-source-pod),
+  [SGLang](supported-frameworks/sglang.md#deploy-the-source-pod),
+  [TensorRT-LLM](supported-frameworks/tensorrt-llm.md#deploy-the-source-pod)). A
+  `SnapshotJob` creates the source replica itself, so you can skip this.
 
-To read the agent image, use the namespace Snapshot is installed in (`snapshot` in
-the [Installation](../get-started/installation.md) command):
+To get the agent image, read it from the `snapshot-agent` DaemonSet in the
+namespace where you installed Snapshot (`snapshot` in the
+[Installation](../get-started/installation.md) command):
 
 ```bash
 export SNAPSHOT_AGENT_IMAGE=$(kubectl get daemonset snapshot-agent \
@@ -165,11 +172,8 @@ export SNAPSHOT_AGENT_IMAGE=$(kubectl get daemonset snapshot-agent \
 
 ## Next Steps
 
-Start with stage 1 for your framework: [vLLM](supported-frameworks/vllm.md),
-[SGLang](supported-frameworks/sglang.md) or
-[TensorRT-LLM](supported-frameworks/tensorrt-llm.md).
-
-See the [Workload Contract](../reference/workload-contract.md) for what a workload
-must do to be checkpointed, and the
-[Restore Pod Contract](../reference/restore-pod-contract.md) to generate restore
-pods from a controller, operator or serving platform.
+- [vLLM](supported-frameworks/vllm.md), [SGLang](supported-frameworks/sglang.md) or
+  [TensorRT-LLM](supported-frameworks/tensorrt-llm.md) - Prepare the workload for
+  your framework
+- [Checkpoint a Pod](checkpoint.md) - Create a snapshot of the source replica
+- [Restore a Pod](restore.md) - Start a new pod from the snapshot

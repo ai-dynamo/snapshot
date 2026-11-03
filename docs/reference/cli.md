@@ -1,19 +1,21 @@
 # `snapshotctl` CLI
 
-`snapshotctl` is a lower-level utility for checkpointing and restoring a pod
-directly from a pod manifest. It is not the primary path — most users drive
-Snapshot through the [Kubernetes resources](../using-snapshot/README.md) — but it is handy
-for validation and debugging, and it is a quick way to try checkpoint/restore by
-hand.
+`snapshotctl` is a command-line tool that checkpoints and restores a pod
+directly from a pod manifest. Most users do not need it, because they use the
+[Kubernetes resources](../using-snapshot/README.md) instead. Use it to validate a
+setup, debug, or try a checkpoint and restore by hand.
+
+This page covers what each command needs, what the pod manifest must contain,
+and how to run `snapshotctl checkpoint` and `snapshotctl restore`.
 
 ## Requirements
 
 ### Checkpoint
 
-- the snapshot Helm chart must already be installed in the target namespace
-- a `snapshot-agent` DaemonSet must be running in that namespace
-- the namespace must already have the checkpoint PVC mounted by the agent
-- the snapshot operator (`PodSnapshotReconciler`) must be installed in the cluster
+- The snapshot Helm chart must already be installed in the target namespace
+- A `snapshot-agent` DaemonSet must be running in that namespace
+- The namespace must already have the checkpoint PVC mounted by the agent
+- The snapshot operator (`PodSnapshotReconciler`) must be installed in the cluster
 
 `snapshotctl checkpoint` creates a `PodSnapshot` CR, which the operator's
 `PodSnapshotReconciler` resolves into a `PodSnapshotContent` work order. The
@@ -27,9 +29,9 @@ The caller must have the following RBAC permissions in the target namespace:
 
 ### Restore
 
-- the snapshot Helm chart must already be installed in the target namespace
-- a `snapshot-agent` DaemonSet must be running in that namespace
-- the namespace must already have the checkpoint PVC mounted by the agent
+- The snapshot Helm chart must already be installed in the target namespace
+- A `snapshot-agent` DaemonSet must be running in that namespace
+- The namespace must already have the checkpoint PVC mounted by the agent
 
 `snapshotctl restore` does not require the operator. The agent handles restore
 directly from pod annotations.
@@ -68,7 +70,7 @@ snapshotctl checkpoint \
 ```
 
 The manifest must be a `Pod` (not a Deployment or Job) using a
-[snapshot-ready workload](../using-snapshot/README.md) — `snapshotctl` rejects any
+[snapshot-ready workload](../using-snapshot/README.md). `snapshotctl` rejects any
 other `kind`. The supported frameworks ship capture Deployments. Wrap the selected manifest's
 `spec.template.spec` in a Pod manifest to use it here:
 
@@ -104,7 +106,7 @@ snapshotctl restore \
 ```
 
 The restore manifest must contain a container with the same name checkpointed by that
-`PodSnapshot`. `snapshotctl` returns once the restore is submitted — watch the
+`PodSnapshot`. `snapshotctl` returns once the restore is submitted. Watch the
 pod's `nvidia.com/Restored` status condition, readiness, and events for progress.
 
 To clone the same checkpoint into multiple containers, add a flat

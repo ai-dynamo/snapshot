@@ -1,12 +1,14 @@
 # API Reference
 
-Snapshot's API is a set of Kubernetes custom resources, plus the annotations,
-labels, and pod conditions that drive them. All custom
+Use this page to look up the Snapshot API. It lists the three custom resources,
+`PodSnapshot`, `PodSnapshotContent` and `SnapshotJob`, and the annotations,
+labels, pod conditions and control volume that work with them. All custom
 resources are in API group `nvidia.com`, version `v1alpha1`.
 
-For how these fit together, see [How to Use It](../../README.md#how-to-use-it)
-and [Using Snapshot](../using-snapshot/README.md).
-For the Helm configuration, see [Helm Chart Values](helm-values.md).
+To see how these fit together, read [Core Concepts](../overview/core-concepts.md).
+To use them in a checkpoint and restore, follow
+[Using Snapshot](../using-snapshot/README.md). For chart settings, see
+[Helm Chart Values](helm-values.md).
 
 ## Custom Resources
 
@@ -120,10 +122,10 @@ The caller sets these annotations on the new pod to trigger a restore:
 |-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `nvidia.com/restore-from`               | Names the `PodSnapshot`, in the pod's namespace, to restore into the pod.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `nvidia.com/restore-container-map`      | Optional. Comma-separated `source=destination` pairs mapping the single captured container to one or more restore containers. When absent, the captured container name is the destination.                                                                                                                                                                                                                                                                                                                                                                       |
-| `nvidia.com/snapshot-skip-compat-check` | Optional. Set to `"true"` to attempt the restore without the compatibility checks, which otherwise refuse a checkpoint this node cannot run. The value must parse as a boolean, so any other spelling, including `"yes"`, leaves the checks in place. Treat it as a debugging escape hatch: a restore that should have been refused instead fails somewhere inside CRIU. Adding it to a pod whose restore was already refused reopens that restore in place, so this is the one case that needs no new pod — a restore that was attempted and failed still does. |
+| `nvidia.com/snapshot-skip-compat-check` | Optional. Set to `"true"` to attempt the restore without the compatibility checks, which otherwise refuse a checkpoint this node cannot run. The value must parse as a boolean, so any other spelling, including `"yes"`, leaves the checks in place. Treat it as a debugging escape hatch: a restore that should have been refused instead fails somewhere inside CRIU. Adding it to a pod whose restore was already refused reopens that restore in place, so this is the one case that needs no new pod. A restore that was attempted and failed still does. |
 
-Snapshot then reports restore progress with a pod status condition — written by
-the node agent, not set by the caller:
+Snapshot then reports restore progress with a pod status condition, written by
+the node agent and not set by the caller:
 
 | Pod condition         | Description                                                                                                                                                         |
 |-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
