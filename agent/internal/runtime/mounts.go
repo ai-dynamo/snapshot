@@ -83,7 +83,7 @@ func ClassifyMounts(mounts []types.MountInfo, ociSpec *specs.Spec, rootFS string
 // Policy (evaluated top to bottom):
 //  1. Skip: non-OCI /proc/*, /sys/*, /run/* submounts (virtual/runtime, not in placeholder)
 //     and NVIDIA device plugin allocation markers (named after the source's GPUs)
-//  2. Native: the container's procfs, /proc and its read-only binds (CRIU mounts procfs for the restored PID namespace)
+//  2. Native: the container's procfs (CRIU mounts it for the restored PID namespace)
 //  3. Native: /dev/shm tmpfs (CRIU saves and restores content)
 //  4. Masked: OCI masked non-directory paths that exist under rootFS → /dev/null
 //  5. Externalize: everything else (OCI mounts the runtime recreates in placeholder)
@@ -109,15 +109,12 @@ func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []str
 			continue
 		}
 
-		// Let CRIU mount the container's procfs natively. The restored tree
-		// runs in a new PID namespace nested in the placeholder's, so the
-		// placeholder's procfs numbers its processes differently: /proc/self
-		// resolves, but /proc/<getpid()> does not exist or names another
-		// process. CRIU mounts a procfs owned by the restored PID namespace and
-		// recreates the read-only binds of it (/proc/sys and the like) from
-		// that mount. Another procfs, such as the host's bound in by a
-		// hostPath volume, stays external: CRIU can only recreate binds of a
-		// filesystem it mounts itself.
+		// Leave the container's procfs, /proc and its read-only binds such as
+		// /proc/sys, to CRIU, which mounts it for the restored PID namespace.
+		// The placeholder's procfs numbers processes in the outer namespace,
+		// where /proc/<getpid()> is missing or another process. Any other
+		// procfs, such as the host's from a hostPath volume, stays external:
+		// CRIU can only rebuild binds of a filesystem it mounts itself.
 		if m.FSType == "proc" && m.Device == procDevice {
 			continue
 		}
