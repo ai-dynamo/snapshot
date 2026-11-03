@@ -107,8 +107,9 @@ Each action can do only what the application itself could:
   read or write. The path is passed as an argument, never as part of the
   script. A marker is created with `set -C`, so it never overwrites a file, and
   its directory is never created. The agent tries `/bin/sh`, `/usr/bin/sh`,
-  `/bin/busybox sh`, and `/busybox/sh`, in that order, and uses the first one
-  that starts, so the image needs one of them.
+  `/bin/busybox sh`, and `/busybox/sh`, in that order, with an `exit 0`
+  no-op, and uses the first that runs it, so the image needs one of them. The
+  script itself then runs once, with that shell.
 - **HTTP** requests go only to the Pod IP and the resolved port, as kubelet's
   `httpGet` probes do; a host-network Pod's IP is the node's. The URL is built
   like kubelet's probe URL, so a path cannot name another host. Unlike
