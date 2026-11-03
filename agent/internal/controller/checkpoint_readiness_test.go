@@ -44,8 +44,12 @@ type probeHarness struct {
 }
 
 // ExecSync stands for the runtime running a file probe in the container: a
-// scripted error fails the check, and nil is a file that exists.
+// scripted error fails the check, and nil is a file that exists. The no-op
+// that finds the shell always succeeds.
 func (h *probeHarness) ExecSync(_ context.Context, containerID string, cmd []string, timeout time.Duration) ([]byte, []byte, error) {
+	if cmd[len(cmd)-1] == "exit 0" {
+		return nil, nil, nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.fileContainer, h.filePath, h.fileTO = containerID, cmd[len(cmd)-1], timeout
