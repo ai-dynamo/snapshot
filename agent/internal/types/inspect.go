@@ -15,6 +15,7 @@ type MountInfo struct {
 	FSType     string
 	VFSOptions string // superblock options (e.g. "upperdir=...")
 	ReadOnly   bool   // per-mount "ro" option, which CRIU reapplies on restore
+	Device     string // "major:minor" of the filesystem; binds of one filesystem share it
 
 	// IsOCIManaged is true when the mount destination matches an OCI spec entry
 	// (including /run/ ↔ /var/run/ aliasing). Set by ClassifyMounts.
