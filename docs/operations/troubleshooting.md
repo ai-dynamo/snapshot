@@ -426,8 +426,9 @@ Likely causes:
   read-only mount or with `readOnlyRootFilesystem`. File actions run as the
   container's user.
 - **The image has no shell.** File actions run a shell command in the
-  container, so the image needs `/bin/sh`, `/usr/bin/sh`, `/bin/busybox`, or
-  `/busybox/sh`.
+  container, so the image needs one of the shells the
+  [workload contract](../reference/workload-contract.md#lifecycle-hooks)
+  lists.
 - **The path is one of Snapshot's own files** in the snapshot-control volume.
 - **The port name is not one of the destination container's ports.**
 - **The HTTP path doesn't parse** as a URL path.
