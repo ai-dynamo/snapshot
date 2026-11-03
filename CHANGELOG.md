@@ -128,6 +128,11 @@ commit-level history for each release is on its
   NRI socket directory, `/var/run/nri`, and the new chart value
   `daemonset.nriHostNamespace` limits it to one host namespace, for clusters
   that share nodes, such as vCluster tenants: each installation sets its own.
+- Restore semantics: a restored process sees a `/proc` of its own PID
+  namespace rather than the restore container's, so lookups by PID work after
+  a restore: `cuInit` in a CUDA process started after the restore (#593) and
+  UCX shared-memory endpoints (#802). Only checkpoints taken after the upgrade
+  get it; take older ones again.
 
 ### Deprecated
 
