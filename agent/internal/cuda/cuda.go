@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-logr/logr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/client-go/kubernetes"
@@ -714,19 +715,26 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 	return timings, nil
 }
 
-// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs. It
-// runs inside nsrestore and shares its process group so cancellation reaches the CUDA
-// helper. helperBinaryPath identifies the binary in that namespace, including through
-// an inherited descriptor opened before CRIU restores the workload filesystem.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
+// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
+// Restores run concurrently, up to `concurrency` at a time; unlocks stay
+// serial. It runs inside nsrestore and shares its process group so
+// cancellation reaches the CUDA helper. helperBinaryPath identifies the binary
+// in that namespace, including through an inherited descriptor opened before
+// CRIU restores the workload filesystem.
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, concurrency int, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 
 	start := time.Now()
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(max(concurrency, 1))
 	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, helperBinaryPath, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
-		}
+		group.Go(func() error {
+			return restoreProcess(groupCtx, pid, deviceMap, helperBinaryPath, log)
+		})
+	}
+	if err := group.Wait(); err != nil {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 
 	for _, pid := range cudaPIDs {
