@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,24 @@ func (s *localShell) ExecSync(ctx context.Context, _ string, cmd []string, timeo
 		return stdout.Bytes(), stderr.Bytes(), exitError(exit.ExitCode())
 	}
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+// oneShell stands for an image with only one of the shells. A command for
+// any other one fails with missing, as the runtime reports a missing binary;
+// that shell runs as the local /bin/sh.
+type oneShell struct {
+	path    string
+	missing error
+	cmds    [][]string
+}
+
+func (s *oneShell) ExecSync(ctx context.Context, id string, cmd []string, timeout time.Duration) ([]byte, []byte, error) {
+	s.cmds = append(s.cmds, cmd)
+	if cmd[0] != s.path {
+		return nil, nil, s.missing
+	}
+	local := append([]string{"/bin/sh"}, cmd[slices.Index(cmd, "-c"):]...)
+	return (&localShell{}).ExecSync(ctx, id, local, timeout)
 }
 
 // failingExec stands for a runtime that couldn't run the command.
@@ -137,8 +156,34 @@ func TestFileActionsReportARuntimeThatCouldNotRunThem(t *testing.T) {
 		t.Fatalf("FileExists = %v, want the timeout", err)
 	}
 	err = CreateMarker(t.Context(), failingExec{errors.New(`exec: "/bin/sh": not found`)}, "ctr", "/released", time.Second)
-	if err == nil || !strings.Contains(err.Error(), "need a shell in the image") {
+	if err == nil || !strings.Contains(err.Error(), "file actions need /bin/sh") {
 		t.Fatalf("CreateMarker = %v, want a hint about the missing shell", err)
+	}
+}
+
+func TestFileActionsFindTheShellInTheImage(t *testing.T) {
+	missing := map[string]error{
+		// containerd fails the exec itself; a runtime may also report the
+		// shell's own exit code for a command it can't find.
+		"exec error": errors.New("no such file or directory"),
+		"exit 127":   exitError(exitNotFound),
+	}
+	for _, shell := range shells {
+		for how, err := range missing {
+			t.Run(shell[0]+" after "+how, func(t *testing.T) {
+				file := filepath.Join(t.TempDir(), "released")
+				image := &oneShell{path: shell[0], missing: err}
+				if err := CreateMarker(t.Context(), image, "ctr", file, 5*time.Second); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(file); err != nil {
+					t.Fatalf("the marker wasn't created: %v", err)
+				}
+				if got := image.cmds[len(image.cmds)-1][0]; got != shell[0] {
+					t.Fatalf("the last command ran %s, want %s", got, shell[0])
+				}
+			})
+		}
 	}
 }
 

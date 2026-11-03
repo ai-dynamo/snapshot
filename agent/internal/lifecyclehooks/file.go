@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"strings"
 	"time"
 
@@ -67,6 +68,23 @@ const (
 	// maxOutput bounds the command output kept for an error, as kubelet bounds
 	// an exec probe's.
 	maxOutput = 10 << 10
+)
+
+// shells are the commands that can run the scripts, tried in order until one
+// starts. Most images have /bin/sh. BusyBox has it as an applet, and the
+// distroless debug images keep BusyBox under /busybox. The scripts use only
+// POSIX shell built-ins, so any of these runs them the same way.
+var shells = [][]string{
+	{"/bin/sh", "-c"},
+	{"/usr/bin/sh", "-c"},
+	{"/bin/busybox", "sh", "-c"},
+	{"/busybox/sh", "-c"},
+}
+
+// Shells exit with these codes when the command can't be found or run.
+const (
+	exitCannotRun = 126
+	exitNotFound  = 127
 )
 
 // FileExists reports whether a regular file exists at filePath in the
@@ -139,23 +157,30 @@ func CheckMarkerTarget(ctx context.Context, e Execer, containerID, filePath stri
 	}
 }
 
-// runScript runs script with /bin/sh in the container and returns its exit
-// code and error output. The error is set only when the script didn't run to
-// an exit code: the runtime failed, or the command timed out.
+// runScript runs script with the first of shells that starts in the
+// container, and returns its exit code and error output. The error is set only
+// when the script didn't run to an exit code: no shell started, or the command
+// timed out.
 func runScript(ctx context.Context, e Execer, containerID, script, filePath string, timeout time.Duration) (int, string, error) {
-	cmd := []string{"/bin/sh", "-c", script, "sh", filePath}
-	_, stderr, err := e.ExecSync(ctx, containerID, cmd, timeout)
-	if err == nil {
-		return 0, "", nil
+	var errs []error
+	for _, shell := range shells {
+		cmd := append(slices.Clone(shell), script, "sh", filePath)
+		_, stderr, err := e.ExecSync(ctx, containerID, cmd, timeout)
+		if err == nil {
+			return 0, "", nil
+		}
+		var exit interface{ ExitStatus() int }
+		if errors.As(err, &exit) && exit.ExitStatus() != exitCannotRun && exit.ExitStatus() != exitNotFound {
+			return exit.ExitStatus(), output(stderr), nil
+		}
+		if errors.Is(err, remote.ErrCommandTimedOut) {
+			return 0, "", fmt.Errorf("failed to run the file action on %s in container %s: %w", filePath, containerID, err)
+		}
+		// This shell isn't in the image, or the runtime failed: try the next.
+		errs = append(errs, fmt.Errorf("%s: %w", shell[0], err))
 	}
-	var exit interface{ ExitStatus() int }
-	if errors.As(err, &exit) {
-		return exit.ExitStatus(), output(stderr), nil
-	}
-	if errors.Is(err, remote.ErrCommandTimedOut) {
-		return 0, "", fmt.Errorf("failed to run the file action on %s in container %s: %w", filePath, containerID, err)
-	}
-	return 0, "", fmt.Errorf("failed to run /bin/sh in container %s; file actions need a shell in the image: %w", containerID, err)
+	return 0, "", fmt.Errorf("failed to run a shell in container %s; file actions need /bin/sh, /usr/bin/sh, /bin/busybox or /busybox/sh in the image: %w",
+		containerID, errors.Join(errs...))
 }
 
 func output(b []byte) string {
