@@ -65,7 +65,7 @@ func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAct
 	h := &postRestoreHarness{t: t, pod: pod, root: t.TempDir(), maxWaits: 3}
 	require.NoError(t, os.MkdirAll(filepath.Join(h.root, "app-release"), 0o755))
 	w := makeTestController(t, pod)
-	w.config.Restore.RestoreTimeoutSeconds = 60
+	w.config.Restore.TimeoutSeconds = 60
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
 	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error) {
 		h.mu.Lock()

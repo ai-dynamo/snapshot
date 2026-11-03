@@ -1167,7 +1167,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 // must never run again. Its checks already passed in the interrupted run.
 //
 // The interrupted run's deadline is gone with it, so the action gets a full
-// restoreTimeoutSeconds again: a restart can extend it by one timeout.
+// config.restore.timeoutSeconds again: a restart can extend it by one timeout.
 func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 	postCtx := ctx
 	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {

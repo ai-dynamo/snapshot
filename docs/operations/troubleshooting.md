@@ -413,8 +413,9 @@ Likely causes:
 
 After writing `restore-complete`, the agent notifies the restored application:
 it creates the file, or sends the HTTP POST, every `periodSeconds` until it
-succeeds or the restore deadline (`restoreTimeoutSeconds`) passes. The restore
-fails, and the restored container is stopped, when no attempt succeeded.
+succeeds or the restore deadline (`config.restore.timeoutSeconds`) passes. The
+restore fails, and the restored container is stopped, when no attempt
+succeeded.
 
 Likely causes: the application does not listen on the port at the restore
 Pod's IP, for example because it bound only to the source Pod's IP; the
