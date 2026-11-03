@@ -151,7 +151,7 @@ agent can never run fails the `PodSnapshot` with reason
 `WaitingForCheckpointReadiness` event.
 
 A restore succeeds only after its `postRestore` action succeeds, within
-`config.restore.restoreTimeoutSeconds`. Its failures name the steps
+`config.restore.timeoutSeconds`. Its failures name the steps
 `checking the post-restore action` and `running the post-restore action`; see
 [Troubleshooting](../operations/troubleshooting.md#checking-the-post-restore-action).
 

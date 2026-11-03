@@ -54,8 +54,8 @@ the workload says.
   event is posted once per work order; after an agent restart it can come
   again.
 
-The wait has no deadline of its own: `checkpointTimeoutSeconds` bounds only the
-dump, and a `SnapshotJob` is bounded by its `activeDeadlineSeconds`.
+The wait has no deadline of its own: `config.checkpoint.timeoutSeconds` bounds
+only the dump, and a `SnapshotJob` is bounded by its `activeDeadlineSeconds`.
 
 ## The post-restore action
 
@@ -76,11 +76,12 @@ dump, and a `SnapshotJob` is bounded by its `activeDeadlineSeconds`.
    It retries every failure, since a `404` or a missing directory may be an
    application that is still starting.
 
-One deadline, `restoreTimeoutSeconds`, covers the restore and the action. When
-no attempt succeeds by then, or a check fails, the restore fails as any restore
-does: the agent writes `restore-failed` and kills the destination container,
-even though the restored process was already released. The steps in the failure
-are `checking the post-restore action` and `running the post-restore action`.
+One deadline, `config.restore.timeoutSeconds`, covers the restore and the
+action. When no attempt succeeds by then, or a check fails, the restore fails
+as any restore does: the agent writes `restore-failed` and kills the
+destination container, even though the restored process was already released.
+The steps in the failure are `checking the post-restore action` and `running
+the post-restore action`.
 
 ### Recovery after an agent restart
 
@@ -93,8 +94,8 @@ again, never CRIU or the checks:
   `restore-complete`, and only the agent creates it afterwards.
 - An HTTP action is sent again. Applications must handle a repeated
   notification.
-- The action gets a full `restoreTimeoutSeconds` again, so a restart can extend
-  the deadline by one timeout.
+- The action gets a full `config.restore.timeoutSeconds` again, so a restart
+  can extend the deadline by one timeout.
 
 ## Safety of the actions
 
