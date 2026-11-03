@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1366,27 +1367,42 @@ func TestDeviceRulesAllowReadWrite(t *testing.T) {
 }
 
 func TestRestoreAndUnlockProcessTreeConcurrency(t *testing.T) {
-	const sleep = 200 * time.Millisecond
 	pids := []int{11, 12, 13, 14}
-	installFakeCUDAHelper(t, fmt.Sprintf(`case " $* " in *" --action restore "*) sleep %.2f ;; esac`, sleep.Seconds()))
+	concurrency := len(pids)
+	dir := t.TempDir()
+	installFakeCUDAHelper(t, fmt.Sprintf(`
+dir=%s
+limit=%d
+case " $* " in
+	*" --action restore "*)
+		touch "$dir/running.$$" "$dir/started.$$"
+		for _ in $(seq 200); do
+			[ "$(ls "$dir" | grep -c '^started\.')" -ge "$limit" ] && break
+			sleep 0.01
+		done
+		ls "$dir" | grep -c '^running\.' >> "$dir/counts"
+		rm "$dir/running.$$"
+		;;
+esac
+`, dir, concurrency))
 
-	for _, tc := range []struct {
-		name        string
-		concurrency int
-		maxDuration time.Duration
-	}{
-		{name: "four concurrent processes", concurrency: 4, maxDuration: 2 * sleep},
-		// errgroup blocks forever on a limit of zero.
-		{name: "zero limit still completes", concurrency: 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			started := time.Now()
-			if _, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", cudaCheckpointHelperBinary, tc.concurrency, logr.Discard()); err != nil {
-				t.Fatalf("RestoreAndUnlockProcessTree() error = %v", err)
-			}
-			if duration := time.Since(started); tc.maxDuration > 0 && duration > tc.maxDuration {
-				t.Fatalf("restored %d ranks in %s, expected under %s", len(pids), duration, tc.maxDuration)
-			}
-		})
+	if _, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", cudaCheckpointHelperBinary, concurrency, logr.Discard()); err != nil {
+		t.Fatalf("RestoreAndUnlockProcessTree() error = %v", err)
+	}
+
+	counts, err := os.ReadFile(filepath.Join(dir, "counts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	peak := 0
+	for _, count := range strings.Fields(string(counts)) {
+		n, err := strconv.Atoi(count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peak = max(peak, n)
+	}
+	if peak != concurrency {
+		t.Fatalf("peak concurrent restores = %d, want %d", peak, concurrency)
 	}
 }
