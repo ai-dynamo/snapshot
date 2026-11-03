@@ -1370,8 +1370,9 @@ func TestRestoreAndUnlockProcessTreeConcurrency(t *testing.T) {
 	pids := []int{11, 12, 13, 14}
 	concurrency := len(pids)
 	dir := t.TempDir()
+	t.Setenv("FAKE_HELPER_DIR", dir)
 	installFakeCUDAHelper(t, fmt.Sprintf(`
-dir=%s
+dir="$FAKE_HELPER_DIR"
 limit=%d
 case " $* " in
 	*" --action restore "*)
@@ -1384,7 +1385,7 @@ case " $* " in
 		rm "$dir/running.$$"
 		;;
 esac
-`, dir, concurrency))
+`, concurrency))
 
 	if _, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", cudaCheckpointHelperBinary, concurrency, logr.Discard()); err != nil {
 		t.Fatalf("RestoreAndUnlockProcessTree() error = %v", err)
