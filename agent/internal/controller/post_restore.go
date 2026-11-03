@@ -7,16 +7,38 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"time"
 
+	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/lifecyclehooks"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
+
+// errRestoreInterrupted is a restore whose post-restore action the agent
+// stopped before it finished. The restore stays in progress, so the next
+// agent resumes the action from restore-complete; it is not an outcome.
+var errRestoreInterrupted = errors.New("the agent stopped before the post-restore action finished")
+
+// postRestoreHandler is one kind of lifecycle.postRestore action. The
+// lifecyclehooks package implements it: a file action and an HTTP action. A
+// restore without an action has no handler.
+type postRestoreHandler interface {
+	// Check refuses an action that can never run in container. It reads the
+	// Pod spec only, so the restore preflight runs it before any CRIU work.
+	Check(pod *corev1.Pod, container string) error
+	// Recheck runs once the restored files are in place, before
+	// restore-complete releases the restored process.
+	Recheck(ctx context.Context, target lifecyclehooks.PostRestoreTarget) error
+	// Notify tells the application once, after restore-complete;
+	// retryNotify repeats it.
+	Notify(ctx context.Context, target lifecyclehooks.PostRestoreTarget) error
+}
 
 // postRestoreAction returns the lifecycle.postRestore action saved with the
 // checkpoint for the source container, or nil. Restore reads it from the
@@ -32,175 +54,107 @@ func postRestoreAction(content *snapshotv1alpha1.PodSnapshotContent, sourceConta
 	return nil
 }
 
-// postRestoreHandler is one kind of lifecycle.postRestore action. Every
-// restore plan holds one; without an action it is noPostRestore, so the
-// restore needs no checks for a missing action.
-type postRestoreHandler interface {
-	// check runs before any CRIU work, so an action that can never run
-	// restores nothing. It reads the Pod spec only: the container's files
-	// aren't restored yet.
-	check(ctx context.Context, op *restoreOperation) error
-	// recheck runs once the restored files are in place, before
-	// restore-complete releases the restored process.
-	recheck(ctx context.Context, op *restoreOperation) error
-	// notify tells the application, after restore-complete, every
-	// periodSeconds until it succeeds or ctx ends at the restore deadline.
-	notify(ctx context.Context, op *restoreOperation) error
-}
-
-// newPostRestoreHandler returns the handler for the action's kind. It is the
-// only place that tells the kinds apart.
-func (w *NodeController) newPostRestoreHandler(action *snapshotv1alpha1.PostRestoreAction) postRestoreHandler {
+// newPostRestoreHandler returns the handler for the action's kind and the
+// time between its attempts. It is the only place that tells the kinds apart.
+// A file action runs through exec, and an HTTP action sends through client.
+// Without an action, the handler is nil.
+func newPostRestoreHandler(action *snapshotv1alpha1.PostRestoreAction, exec lifecyclehooks.Execer, client *http.Client) (postRestoreHandler, time.Duration, error) {
 	if action == nil {
-		return noPostRestore{}
+		return nil, 0, nil
 	}
-	retry := postRestoreRetry{
-		period:  time.Duration(max(action.PeriodSeconds, 1)) * time.Second,
-		timeout: time.Duration(max(action.TimeoutSeconds, 1)) * time.Second,
-	}
+	period := time.Duration(max(action.PeriodSeconds, 1)) * time.Second
+	timeout := time.Duration(max(action.TimeoutSeconds, 1)) * time.Second
 	switch {
 	case action.File != nil:
-		return &filePostRestore{postRestoreRetry: retry, exec: w.hookExec, path: action.File.Path}
+		return &lifecyclehooks.FilePostRestore{Exec: exec, Path: action.File.Path, Timeout: timeout}, period, nil
 	case action.HTTPPost != nil:
-		return &httpPostRestore{postRestoreRetry: retry, client: w.hookHTTP, action: action.HTTPPost}
+		return &lifecyclehooks.HTTPPostRestore{Client: client, Action: action.HTTPPost, Timeout: timeout}, period, nil
 	default:
-		return invalidPostRestore{errors.New("lifecycle.postRestore has neither file nor httpPost")}
+		return nil, 0, errors.New("lifecycle.postRestore has neither file nor httpPost")
 	}
 }
 
-// noPostRestore is a checkpoint without a post-restore action.
-type noPostRestore struct{}
-
-func (noPostRestore) check(context.Context, *restoreOperation) error   { return nil }
-func (noPostRestore) recheck(context.Context, *restoreOperation) error { return nil }
-func (noPostRestore) notify(context.Context, *restoreOperation) error  { return nil }
-
-// invalidPostRestore is an action that can never run. Its check fails the
-// restore before any CRIU work, as any refused action does.
-type invalidPostRestore struct{ err error }
-
-func (h invalidPostRestore) check(context.Context, *restoreOperation) error {
-	return postRestoreStepError(executor.StepCheckPostRestore, h.err)
-}
-func (invalidPostRestore) recheck(context.Context, *restoreOperation) error { return nil }
-func (invalidPostRestore) notify(context.Context, *restoreOperation) error  { return nil }
-
-// filePostRestore creates a file in the destination container, as the
-// container's user.
-type filePostRestore struct {
-	postRestoreRetry
-	exec lifecyclehooks.Execer
-	path string
-}
-
-// check refuses one of Snapshot's own control files.
-func (h *filePostRestore) check(_ context.Context, op *restoreOperation) error {
-	if err := lifecyclehooks.CheckWritePath(op.pod, op.destination, h.path); err != nil {
-		return postRestoreStepError(executor.StepCheckPostRestore, err)
-	}
-	return nil
-}
-
-// recheck tests the file only once the restored files are in place, since
-// they can bring the file or its directory. The file must not exist yet: an
-// existing file would be taken for the notification, so the application
-// would never get one. And it must be possible to create: its directory
-// exists and the container's user may write it, so a read-only mount fails
-// the restore here rather than after the application was released.
-func (h *filePostRestore) recheck(ctx context.Context, op *restoreOperation) error {
-	err := lifecyclehooks.CheckMarkerTarget(ctx, h.exec, op.containerID, h.path, h.timeout)
-	if errors.Is(err, fs.ErrExist) {
-		return postRestoreStepError(executor.StepCheckPostRestore, fmt.Errorf(
-			"%s already exists in container %s once the restored files are in place; "+
-				"the post-restore file must not exist before Snapshot creates it",
-			h.path, op.destination))
-	}
+// planPostRestore builds the restore's post-restore handler and refuses an
+// action that can never run in one of the destination containers, so such an
+// action restores nothing.
+func planPostRestore(
+	pod *corev1.Pod,
+	mappings []podcontract.ContainerMapping,
+	action *snapshotv1alpha1.PostRestoreAction,
+	exec lifecyclehooks.Execer,
+	client *http.Client,
+) (postRestoreHandler, time.Duration, error) {
+	handler, period, err := newPostRestoreHandler(action, exec, client)
 	if err != nil {
+		return nil, 0, postRestoreStepError(executor.StepCheckPostRestore, err)
+	}
+	if handler == nil {
+		return nil, 0, nil
+	}
+	for _, mapping := range mappings {
+		if err := handler.Check(pod, mapping.Destination); err != nil {
+			return nil, 0, postRestoreStepError(executor.StepCheckPostRestore,
+				fmt.Errorf("container %q: %w", mapping.Destination, err))
+		}
+	}
+	return handler, period, nil
+}
+
+// recheckPostRestore runs the action's Recheck once the restored files are in
+// place.
+func (op *restoreOperation) recheckPostRestore(ctx context.Context) error {
+	if op.postRestore == nil {
+		return nil
+	}
+	if err := op.postRestore.Recheck(ctx, op.postRestoreTarget()); err != nil {
 		return postRestoreStepError(executor.StepCheckPostRestore, err)
 	}
 	return nil
 }
 
-// notify counts an existing file as its own. recheck found no file before
-// restore-complete, and only this step creates it, so finding it here means
-// an earlier run created it and the agent restarted before recording
-// success.
-func (h *filePostRestore) notify(ctx context.Context, op *restoreOperation) error {
-	return h.retry(ctx, op, func(ctx context.Context) error {
-		err := lifecyclehooks.CreateMarker(ctx, h.exec, op.containerID, h.path, h.timeout)
-		if errors.Is(err, fs.ErrExist) {
-			op.log.Info("Post-restore file already exists; an earlier attempt created it", "path", h.path)
-			return nil
-		}
-		return err
-	})
-}
-
-// httpPostRestore sends a POST to the restore Pod's IP.
-type httpPostRestore struct {
-	postRestoreRetry
-	client *http.Client
-	action *snapshotv1alpha1.HTTPPostAction
-}
-
-// check refuses a path that doesn't parse and a port name the destination
-// container doesn't have. A named port resolves against the destination,
-// which runs the restored application.
-func (h *httpPostRestore) check(_ context.Context, op *restoreOperation) error {
-	if _, err := lifecyclehooks.RequestURL("", 0, h.action.Path); err != nil {
-		return postRestoreStepError(executor.StepCheckPostRestore, err)
+// notifyPostRestore tells the application, every postRestorePeriod until it
+// succeeds or ctx ends at the restore deadline.
+func (op *restoreOperation) notifyPostRestore(ctx context.Context) error {
+	if op.postRestore == nil {
+		return nil
 	}
-	if _, err := lifecyclehooks.ResolvePort(op.pod, op.destination, h.action.Port); err != nil {
-		return postRestoreStepError(executor.StepCheckPostRestore, err)
+	target := op.postRestoreTarget()
+	return retryNotify(logr.NewContext(ctx, op.log), op.log, op.postRestorePeriod, op.controller.postRestoreWaitFn,
+		func(ctx context.Context) error { return op.postRestore.Notify(ctx, target) })
+}
+
+func (op *restoreOperation) postRestoreTarget() lifecyclehooks.PostRestoreTarget {
+	return lifecyclehooks.PostRestoreTarget{
+		Pod:         op.pod,
+		Container:   op.destination,
+		ContainerID: op.containerID,
+		PodIP:       op.podIP,
 	}
-	return nil
 }
 
-func (h *httpPostRestore) recheck(context.Context, *restoreOperation) error { return nil }
-
-func (h *httpPostRestore) notify(ctx context.Context, op *restoreOperation) error {
-	return h.retry(ctx, op, func(ctx context.Context) error {
-		podIP, err := op.podIP(ctx)
-		if err != nil {
-			return err
-		}
-		port, err := lifecyclehooks.ResolvePort(op.pod, op.destination, h.action.Port)
-		if err != nil {
-			return err
-		}
-		u, err := lifecyclehooks.RequestURL(podIP, port, h.action.Path)
-		if err != nil {
-			return err
-		}
-		return lifecyclehooks.HTTPPost(ctx, h.client, u, h.timeout)
-	})
-}
-
-// postRestoreRetry runs an action's attempts. Every failure is retried: a 404
-// or a missing directory may be an application that is still starting.
-type postRestoreRetry struct {
-	period, timeout time.Duration
-}
-
-func (r postRestoreRetry) retry(ctx context.Context, op *restoreOperation, attempt func(context.Context) error) error {
+// retryNotify runs notifyFn every period until it succeeds, or until waitFn
+// fails because ctx ended. Every failure is retried: a 404 or a missing
+// directory may be an application that is still starting.
+func retryNotify(
+	ctx context.Context,
+	log logr.Logger,
+	period time.Duration,
+	waitFn func(context.Context, time.Duration) error,
+	notifyFn func(context.Context) error,
+) error {
 	for n := 1; ; n++ {
-		err := attempt(ctx)
+		err := notifyFn(ctx)
 		if err == nil {
-			op.log.Info("Post-restore action succeeded", "attempts", n)
+			log.Info("Post-restore action succeeded", "attempts", n)
 			return nil
 		}
-		op.log.V(1).Info("Post-restore action failed; retrying", "attempt", n, "error", err.Error())
-		if waitErr := op.controller.postRestoreWaitFn(ctx, r.period); waitErr != nil {
+		log.V(1).Info("Post-restore action failed; retrying", "attempt", n, "error", err.Error())
+		if waitErr := waitFn(ctx, period); waitErr != nil {
 			return postRestoreStepError(executor.StepPostRestore,
 				fmt.Errorf("no success before the restore deadline after %d attempt(s); last error: %w", n, err))
 		}
 	}
 }
-
-// errRestoreInterrupted is a restore whose post-restore action the agent
-// stopped before it finished. The restore stays in progress, so the next
-// agent resumes the action from restore-complete; it is not an outcome.
-var errRestoreInterrupted = errors.New("the agent stopped before the post-restore action finished")
 
 // failPostRestore fails the restore after its post-restore action failed,
 // unless ctx ended: the agent is shutting down, and writing restore-failed or

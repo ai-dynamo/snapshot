@@ -93,9 +93,12 @@ func newPostRestoreHarness(t *testing.T, action *snapshotv1alpha1.PostRestoreAct
 		return ctx.Err()
 	}
 	h.w = w
+	handler, period, err := newPostRestoreHandler(action, w.hookExec, w.hookHTTP)
+	require.NoError(t, err)
 	h.plan = &restorePlan{
-		artifact:    &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"},
-		postRestore: w.newPostRestoreHandler(action),
+		artifact:          &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"},
+		postRestore:       handler,
+		postRestorePeriod: period,
 	}
 	return h
 }
@@ -286,7 +289,7 @@ func TestPostRestoreFileWhoseDirectoryTheRestoreBringsSucceeds(t *testing.T) {
 	assert.True(t, h.hasFile("/app-data/released"))
 }
 
-func TestPostRestoreRefusedTargetsFailWithoutCRIU(t *testing.T) {
+func TestPostRestoreRefusedTargetsFailThePreflight(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		action *snapshotv1alpha1.PostRestoreAction
@@ -301,16 +304,19 @@ func TestPostRestoreRefusedTargetsFailWithoutCRIU(t *testing.T) {
 		}},
 		{"HTTP on a port name the destination doesn't have", httpPostRestoreSpecOn(intstr.FromString("metrics")), func(*corev1.Pod) {}},
 		{"HTTP path that doesn't parse", httpPostRestoreSpecWithPath("/%zz"), func(*corev1.Pod) {}},
+		{"neither file nor httpPost", &snapshotv1alpha1.PostRestoreAction{PeriodSeconds: 1, TimeoutSeconds: 1}, func(*corev1.Pod) {}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newPostRestoreHarness(t, tc.action)
+			h := newPostRestoreHarness(t, nil)
 			tc.mutate(h.pod)
+			mappings := []podcontract.ContainerMapping{{Source: "main", Destination: "main"}}
 
-			err := h.run(false)
+			// The restore preflight runs it, so a refused action restores nothing.
+			handler, _, err := planPostRestore(h.pod, mappings, tc.action, h.w.hookExec, h.w.hookHTTP)
 
 			require.Error(t, err)
+			assert.Nil(t, handler)
 			assert.Equal(t, executor.StepCheckPostRestore, executor.StepOf(err))
-			assert.Equal(t, 0, h.restores)
 		})
 	}
 }

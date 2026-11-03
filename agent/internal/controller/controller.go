@@ -137,8 +137,11 @@ type restorePlan struct {
 	mappings []podcontract.ContainerMapping
 	// Read once in preflight, so both gates reach the same answer.
 	skipCompatCheck bool
-	// postRestore runs the checkpoint's lifecycle.postRestore action.
-	postRestore postRestoreHandler
+	// postRestore runs the checkpoint's lifecycle.postRestore action, every
+	// postRestorePeriod until it succeeds; nil without an action. The
+	// preflight already checked it against the destination containers.
+	postRestore       postRestoreHandler
+	postRestorePeriod time.Duration
 }
 
 type restoreResultState int
@@ -167,15 +170,16 @@ func (e *restorePendingError) Error() string {
 }
 
 type restoreOperation struct {
-	controller      *NodeController
-	pod             *corev1.Pod
-	artifact        *restoreArtifact
-	postRestore     postRestoreHandler
-	skipCompatCheck bool
-	destination     string
-	containerID     string
-	startedAt       time.Time
-	log             logr.Logger
+	controller        *NodeController
+	pod               *corev1.Pod
+	artifact          *restoreArtifact
+	postRestore       postRestoreHandler
+	postRestorePeriod time.Duration
+	skipCompatCheck   bool
+	destination       string
+	containerID       string
+	startedAt         time.Time
+	log               logr.Logger
 }
 
 const (
@@ -627,11 +631,19 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
 		return nil, newRestorePendingError("PodIPPending", fmt.Sprintf("Waiting for restore Pod %s/%s to receive an IP address", pod.Namespace, pod.Name))
 	}
+	// The post-restore action is checked against the Pod spec here, so an
+	// action that can never run restores nothing.
+	postRestore, postRestorePeriod, err := planPostRestore(pod, mappings,
+		postRestoreAction(content, target.SourceContainerName), w.hookExec, w.hookHTTP)
+	if err != nil {
+		return nil, err
+	}
 	return &restorePlan{
-		artifact:        artifact,
-		mappings:        mappings,
-		skipCompatCheck: skipCompatCheck,
-		postRestore:     w.newPostRestoreHandler(postRestoreAction(content, target.SourceContainerName)),
+		artifact:          artifact,
+		mappings:          mappings,
+		skipCompatCheck:   skipCompatCheck,
+		postRestore:       postRestore,
+		postRestorePeriod: postRestorePeriod,
 	}, nil
 }
 
@@ -1120,12 +1132,6 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		}
 	}
 
-	// The Pod spec is checked before any CRIU work, so an action that can
-	// never run restores nothing.
-	if err := op.postRestore.check(ctx, op); err != nil {
-		return op.failRestore(ctx, err)
-	}
-
 	// One deadline covers the restore and its post-restore action.
 	restoreCtx := ctx
 	if timeout := w.config.Restore.RestoreTimeout(); timeout > 0 {
@@ -1150,13 +1156,13 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
-	if err := op.postRestore.recheck(ctx, op); err != nil {
+	if err := op.recheckPostRestore(ctx); err != nil {
 		return op.failRestore(ctx, err)
 	}
 	if err := op.completeRestore(ctx, restored); err != nil {
 		return err
 	}
-	if err := op.postRestore.notify(restoreCtx, op); err != nil {
+	if err := op.notifyPostRestore(restoreCtx); err != nil {
 		return op.failPostRestore(ctx, err)
 	}
 	return nil
@@ -1175,7 +1181,7 @@ func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 		postCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	if err := op.postRestore.notify(postCtx, op); err != nil {
+	if err := op.notifyPostRestore(postCtx); err != nil {
 		return op.failPostRestore(ctx, err)
 	}
 	return nil
@@ -1212,20 +1218,17 @@ func (w *NodeController) newRestoreOperation(
 ) *restoreOperation {
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	artifact := plan.artifact
-	postRestore := plan.postRestore
-	if postRestore == nil {
-		postRestore = noPostRestore{}
-	}
 	return &restoreOperation{
-		controller:      w,
-		pod:             pod,
-		artifact:        artifact,
-		postRestore:     postRestore,
-		skipCompatCheck: plan.skipCompatCheck,
-		destination:     destination,
-		containerID:     containerID,
-		startedAt:       startedAt,
-		log:             w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
+		controller:        w,
+		pod:               pod,
+		artifact:          artifact,
+		postRestore:       plan.postRestore,
+		postRestorePeriod: plan.postRestorePeriod,
+		skipCompatCheck:   plan.skipCompatCheck,
+		destination:       destination,
+		containerID:       containerID,
+		startedAt:         startedAt,
+		log:               w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
 	}
 }
 
