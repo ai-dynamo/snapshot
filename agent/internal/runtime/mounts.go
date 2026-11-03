@@ -81,6 +81,7 @@ func ClassifyMounts(mounts []types.MountInfo, ociSpec *specs.Spec, rootFS string
 //
 // Policy (evaluated top to bottom):
 //  1. Skip: non-OCI /proc/*, /sys/*, /run/* submounts (virtual/runtime, not in placeholder)
+//     and NVIDIA device plugin allocation markers (named after the source's GPUs)
 //  2. Native: /dev/shm tmpfs (CRIU saves and restores content)
 //  3. Masked: OCI masked non-directory paths that exist under rootFS → /dev/null
 //  4. Externalize: everything else (OCI mounts the runtime recreates in placeholder)
@@ -95,6 +96,12 @@ func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []str
 
 		// Skip non-OCI virtual/runtime mounts — these won't exist in the placeholder
 		if !m.IsOCIManaged && (strings.HasPrefix(m.MountPoint, "/proc/") || strings.HasPrefix(m.MountPoint, "/sys/") || strings.HasPrefix(m.MountPoint, "/run/")) {
+			skipped = append(skipped, m.MountPoint)
+			continue
+		}
+
+		// Skip device plugin allocation markers — the placeholder has its own
+		if isDeviceListMarker(m.MountPoint) {
 			skipped = append(skipped, m.MountPoint)
 			continue
 		}
@@ -118,6 +125,19 @@ func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []str
 	}
 
 	return extMap, skipped
+}
+
+// deviceListMarkerDirs hold the allocation markers of the NVIDIA device plugin's
+// volume-mounts strategy: /dev/null bound at <dir>/<GPU UUID>. Kubelet adds them
+// to the OCI spec, but only the container runtime reads them, to create the
+// container. Externalizing one would demand the source GPU's UUID in the restore
+// pod, which a restore onto any other GPU cannot have.
+var deviceListMarkerDirs = []string{"/run/nvidia-container-devices/", "/var/run/nvidia-container-devices/"}
+
+func isDeviceListMarker(mountPoint string) bool {
+	return slices.ContainsFunc(deviceListMarkerDirs, func(dir string) bool {
+		return strings.HasPrefix(mountPoint, dir)
+	})
 }
 
 // RemountProcSys remounts /proc/sys read-write or read-only.
