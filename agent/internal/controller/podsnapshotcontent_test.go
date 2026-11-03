@@ -214,7 +214,9 @@ func makeSourcePod() *corev1.Pod {
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{
-				{Name: "main", Ready: true, ContainerID: "containerd://abc123"},
+				// Kubelet reports a container Ready only while it runs.
+				{Name: "main", Ready: true, ContainerID: "containerd://abc123",
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
 			},
 		},
 	}
