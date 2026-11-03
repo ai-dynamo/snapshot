@@ -3,8 +3,9 @@
 
 // Package lifecyclehooks runs the file and HTTP actions a container's settings
 // ask for at points in its checkpoint and restore lifecycle: the checkpoint
-// readiness probe and the post-restore action. It only performs the actions;
-// when to run them, how often, and what a result means is the caller's.
+// readiness probe and the post-restore action. It performs the actions and
+// single probe checks; when to run them, how often, and how to count the
+// results is the caller's.
 package lifecyclehooks
 
 import (

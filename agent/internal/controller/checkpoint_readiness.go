@@ -18,7 +18,7 @@ import (
 )
 
 // checkpointGate decides when a work order's source container may be
-// checkpointed. getCheckpointGate builds it once per work order; probeIfDue
+// checkpointed. getCheckpointGate builds it once per work order; runProbeIfDue
 // then runs its handler every period, until it succeeds threshold times in a
 // row. Only the goroutine holding the work order's queue key touches it.
 type checkpointGate struct {
@@ -40,7 +40,7 @@ type checkpointGate struct {
 // call. Without a checkpointReadinessProbe the gate is the container's Ready
 // condition, as before. With one, building it refuses a probe that can never
 // run and announces the wait on the source Pod. Both read only the spec, so a
-// container restart doesn't rebuild the gate; probeIfDue resets its count.
+// container restart doesn't rebuild the gate; runProbeIfDue resets its count.
 //
 // A nil gate means the work order failed here; err is then the error of
 // writing that status.
@@ -53,9 +53,9 @@ func (w *NodeController) getCheckpointGate(
 	if gate, ok := w.checkpointGates.Load(content.Name); ok {
 		return gate.(*checkpointGate), nil
 	}
-	gate, err := w.newCheckpointGate(findCheckpointReadinessProbe(content, containerName))
+	gate, err := newCheckpointGate(findCheckpointReadinessProbe(content, containerName), w.hookExec, w.hookHTTP)
 	if err == nil {
-		err = gate.handler.check(pod, containerName)
+		err = gate.handler.Check(pod, containerName)
 	}
 	logger := logr.FromContextOrDiscard(ctx)
 	if err != nil {
@@ -74,10 +74,11 @@ func (w *NodeController) getCheckpointGate(
 }
 
 // newCheckpointGate returns the gate for probe, or for the Ready condition
-// when probe is nil. It is the only place that tells the kinds apart.
-func (w *NodeController) newCheckpointGate(probe *snapshotv1alpha1.CheckpointReadinessProbe) (*checkpointGate, error) {
+// when probe is nil. It is the only place that tells the kinds apart. A file
+// probe runs through exec, and an HTTP probe sends through client.
+func newCheckpointGate(probe *snapshotv1alpha1.CheckpointReadinessProbe, exec lifecyclehooks.Execer, client *http.Client) (*checkpointGate, error) {
 	if probe == nil {
-		return &checkpointGate{handler: readyCondition{}, threshold: 1}, nil
+		return &checkpointGate{handler: lifecyclehooks.ReadyCondition{}, threshold: 1}, nil
 	}
 	gate := &checkpointGate{
 		initialDelay: time.Duration(probe.InitialDelaySeconds) * time.Second,
@@ -88,19 +89,19 @@ func (w *NodeController) newCheckpointGate(probe *snapshotv1alpha1.CheckpointRea
 	}
 	switch {
 	case probe.File != nil:
-		gate.handler = &fileProbe{exec: w.hookExec, path: probe.File.Path}
+		gate.handler = &lifecyclehooks.FileProbe{Exec: exec, Path: probe.File.Path}
 	case probe.HTTPGet != nil:
-		gate.handler = &httpProbe{client: w.hookHTTP, action: probe.HTTPGet}
+		gate.handler = &lifecyclehooks.HTTPProbe{Client: client, Action: probe.HTTPGet}
 	default:
 		return nil, errors.New("it has neither file nor httpGet")
 	}
 	return gate, nil
 }
 
-// probeIfDue runs the handler if a check is due, and reports whether the
+// runProbeIfDue runs the handler if a check is due, and reports whether the
 // container may be checkpointed. If not, next is when the next check is due;
 // zero means a Pod event will wake the work order.
-func (g *checkpointGate) probeIfDue(ctx context.Context, pod *corev1.Pod, status *corev1.ContainerStatus, now time.Time) (ready bool, next time.Time) {
+func (g *checkpointGate) runProbeIfDue(ctx context.Context, pod *corev1.Pod, status *corev1.ContainerStatus, now time.Time) (ready bool, next time.Time) {
 	logger := logr.FromContextOrDiscard(ctx)
 	if status == nil || status.State.Running == nil {
 		// A start is a Pod status change, and that wakes the work order again.
@@ -112,7 +113,7 @@ func (g *checkpointGate) probeIfDue(ctx context.Context, pod *corev1.Pod, status
 		return false, g.nextCheck
 	}
 	g.nextCheck = now.Add(g.period)
-	if err := g.handler.probe(ctx, pod, status, g.timeout); err != nil {
+	if err := g.handler.Probe(ctx, pod, status, g.timeout); err != nil {
 		logger.V(1).Info("Source container not ready for checkpoint", "pod", pod.Name, "container", status.Name, "error", err.Error())
 		g.successes = 0
 	} else {
@@ -151,79 +152,14 @@ func findCheckpointReadinessProbe(content *snapshotv1alpha1.PodSnapshotContent, 
 }
 
 // checkpointProbeHandler is one way to tell that the source container is
-// ready for a checkpoint.
+// ready for a checkpoint. The lifecyclehooks package implements it: the
+// container's Ready condition, a file probe and an HTTP probe.
 type checkpointProbeHandler interface {
-	// check refuses a probe that can never run. It reads the Pod spec only,
+	// Check refuses a probe that can never run. It reads the Pod spec only,
 	// so waiting would not change its answer.
-	check(pod *corev1.Pod, containerName string) error
-	// probe runs one check. Any error is a failed check.
-	probe(ctx context.Context, pod *corev1.Pod, status *corev1.ContainerStatus, timeout time.Duration) error
-}
-
-// readyCondition is the gate without a checkpointReadinessProbe: the
-// container's Ready condition, as before probes.
-type readyCondition struct{}
-
-func (readyCondition) check(*corev1.Pod, string) error { return nil }
-
-func (readyCondition) probe(_ context.Context, pod *corev1.Pod, status *corev1.ContainerStatus, _ time.Duration) error {
-	if !isContainerReady(pod, status.Name) {
-		return errors.New("the container is not Ready")
-	}
-	return nil
-}
-
-// fileProbe succeeds when a regular file exists at path in the source
-// container. It reads as the container's user, so any path is allowed.
-type fileProbe struct {
-	exec lifecyclehooks.Execer
-	path string
-}
-
-func (p *fileProbe) check(*corev1.Pod, string) error { return nil }
-
-func (p *fileProbe) probe(ctx context.Context, _ *corev1.Pod, status *corev1.ContainerStatus, timeout time.Duration) error {
-	exists, err := lifecyclehooks.FileExists(ctx, p.exec, status.ContainerID, p.path, timeout)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return fmt.Errorf("%s does not exist", p.path)
-	}
-	return nil
-}
-
-// httpProbe succeeds when a GET to the source Pod's IP returns a 2xx status.
-type httpProbe struct {
-	client *http.Client
-	action *snapshotv1alpha1.HTTPGetAction
-}
-
-// check refuses a path that doesn't parse and a named port the container
-// doesn't have.
-func (p *httpProbe) check(pod *corev1.Pod, containerName string) error {
-	if _, err := lifecyclehooks.RequestURL("", 0, p.action.Path); err != nil {
-		return err
-	}
-	_, err := lifecyclehooks.ResolvePort(pod, containerName, p.action.Port)
-	return err
-}
-
-func (p *httpProbe) probe(ctx context.Context, pod *corev1.Pod, status *corev1.ContainerStatus, timeout time.Duration) error {
-	podIP, err := lifecyclehooks.HTTPTarget(pod)
-	if err != nil {
-		return err
-	}
-	// check already resolved it, so this only fails if the Pod changed.
-	port, err := lifecyclehooks.ResolvePort(pod, status.Name, p.action.Port)
-	if err != nil {
-		return err
-	}
-	u, err := lifecyclehooks.RequestURL(podIP, port, p.action.Path)
-	if err != nil {
-		return err
-	}
-	return lifecyclehooks.HTTPGet(ctx, p.client, u, timeout)
+	Check(pod *corev1.Pod, containerName string) error
+	// Probe runs one check. Any error is a failed check.
+	Probe(ctx context.Context, pod *corev1.Pod, status *corev1.ContainerStatus, timeout time.Duration) error
 }
 
 func containerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {

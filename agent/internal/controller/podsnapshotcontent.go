@@ -174,7 +174,7 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return err
 	}
 	now := w.nowFn()
-	ready, next := gate.probeIfDue(ctx, pod, containerStatus(pod, containerName), now)
+	ready, next := gate.runProbeIfDue(ctx, pod, containerStatus(pod, containerName), now)
 	if !ready {
 		// Pod events wake the work order more often than the period, so the
 		// gate paces the checks and says when the next one is due.
