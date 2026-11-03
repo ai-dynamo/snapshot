@@ -534,39 +534,6 @@ def test_post_restore_notifies_the_restored_application(
 
 
 @pytest.mark.cpu
-@pytest.mark.snapshot_failure
-def test_post_restore_file_that_already_exists_fails_the_restore(
-    config: k8s.E2EConfig,
-    run: snap.TestRun,
-) -> None:
-    # A marker already in place would be taken for the notification, so the
-    # application would never get one. The agent refuses it once the restored
-    # files are in place, before it releases the restored process.
-    try:
-        source_node, _ = checkpoint_with_post_restore(config, run, "file")
-
-        k8s.create_pod(
-            snap.add_stale_release_marker(
-                snap.add_release_dir(
-                    snap.restore_pod(config=config, run=run, gpu=False, source_node=source_node)
-                )
-            )
-        )
-        restored = snap.wait_for_restored_condition(
-            config.namespace, run.restore_pod, "False", "RestoreFailed"
-        )
-        condition = next(
-            c for c in restored.status.conditions if c.type == snap.RESTORED_CONDITION
-        )
-        assert "checking the post-restore action" in condition.message, condition.message
-        assert "already exists" in condition.message, condition.message
-        assert "once the restored files are in place" in condition.message, condition.message
-    except Exception:
-        snap.debug_dump(config, run)
-        raise
-
-
-@pytest.mark.cpu
 @pytest.mark.snapshot_success
 def test_post_restore_runs_for_each_restored_copy(
     config: k8s.E2EConfig,

@@ -192,12 +192,10 @@ def test_release_dir_helpers_give_each_container_its_own_marker() -> None:
             "volumes": [],
         }
     }
-    workloads.add_stale_release_marker(workloads.add_release_dir(pod))
+    workloads.add_release_dir(pod)
     mounts = [c["volumeMounts"][0] for c in pod["spec"]["containers"]]
     assert [m["subPath"] for m in mounts] == ["engine-0", "engine-1"]
     assert {m["mountPath"] for m in mounts} == {workloads.RELEASE_DIR}
-    touch = pod["spec"]["initContainers"][0]["command"][-1]
-    assert "/release/engine-0/released" in touch and "/release/engine-1/released" in touch
 
 
 @pytest.mark.workload

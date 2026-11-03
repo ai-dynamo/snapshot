@@ -37,7 +37,6 @@ from snapshot_e2e.workloads import SIGTERM_EXIT
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import add_release_dir
-from snapshot_e2e.workloads import add_stale_release_marker
 from snapshot_e2e.workloads import multi_restore_pod
 from snapshot_e2e.workloads import restore_pod
 from snapshot_e2e.workloads import restore_proxy

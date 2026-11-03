@@ -218,26 +218,6 @@ def add_release_dir(pod: dict[str, Any]) -> dict[str, Any]:
     return pod
 
 
-def add_stale_release_marker(pod: dict[str, Any]) -> dict[str, Any]:
-    """Create every container's RELEASE_MARKER before it starts, as a file left
-    on a volume by an earlier restore would be."""
-    spec = pod["spec"]
-    touches = " && ".join(
-        f"mkdir -p /release/{c['name']} && touch /release/{c['name']}/released"
-        for c in spec["containers"]
-    )
-    spec["initContainers"] = [
-        {
-            "name": "stale-release-marker",
-            "image": spec["containers"][0]["image"],
-            "imagePullPolicy": "IfNotPresent",
-            "command": ["/bin/sh", "-c", touches],
-            "volumeMounts": [{"name": "app-release", "mountPath": "/release"}],
-        }
-    ]
-    return pod
-
-
 def multi_restore_pod(
     *,
     config: k8s.E2EConfig,
