@@ -173,8 +173,12 @@ type httpProbe struct {
 	action *snapshotv1alpha1.HTTPGetAction
 }
 
-// check refuses a named port the container doesn't have.
+// check refuses a path that doesn't parse and a named port the container
+// doesn't have.
 func (p *httpProbe) check(pod *corev1.Pod, containerName string) error {
+	if _, err := lifecyclehooks.RequestURL("", 0, p.action.Path); err != nil {
+		return err
+	}
 	_, err := lifecyclehooks.ResolvePort(pod, containerName, p.action.Port)
 	return err
 }
@@ -189,7 +193,11 @@ func (p *httpProbe) probe(ctx context.Context, pod *corev1.Pod, status *corev1.C
 	if err != nil {
 		return err
 	}
-	return lifecyclehooks.HTTPGet(ctx, p.client, lifecyclehooks.RequestURL(podIP, port, p.action.Path), timeout)
+	u, err := lifecyclehooks.RequestURL(podIP, port, p.action.Path)
+	if err != nil {
+		return err
+	}
+	return lifecyclehooks.HTTPGet(ctx, p.client, u, timeout)
 }
 
 func (w *NodeController) checkpointProbeState(name string) *checkpointProbeState {

@@ -313,12 +313,15 @@ func TestCheckpointProbe_RefusedTargetsFailTheWorkOrder(t *testing.T) {
 	}
 	unknownPort := *httpSpec.DeepCopy()
 	unknownPort.HTTPGet.Port = intstr.FromString("metrics")
+	badPath := *httpSpec.DeepCopy()
+	badPath.HTTPGet.Path = "/%zz"
 	for _, tc := range []struct {
 		name      string
 		probe     snapshotv1alpha1.CheckpointReadinessProbe
 		mutatePod func(*corev1.Pod)
 	}{
 		{"HTTP on a port name the container doesn't have", unknownPort, nil},
+		{"HTTP path that doesn't parse", badPath, nil},
 		{"neither file nor httpGet", snapshotv1alpha1.CheckpointReadinessProbe{PeriodSeconds: 1, TimeoutSeconds: 1, SuccessThreshold: 1}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
