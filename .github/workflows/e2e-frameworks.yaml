@@ -339,10 +339,7 @@ jobs:
           export SNAPSHOT_E2E_S3_CONSOLE_PORT="$((port + 1))"
           export SNAPSHOT_E2E_S3_ACCESS_KEY="${access_key}"
           export SNAPSHOT_E2E_S3_SECRET_KEY="${secret_key}"
-          uv run --locked --project e2e python -m snapshot_e2e.s3 deploy
-          SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT="$(uv run --locked --project e2e python -m snapshot_e2e.s3 endpoint)"
-          export SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT
-          values="$(uv run --locked --project e2e python -m snapshot_e2e.s3 helm-set)"
+          values="$(uv run --locked --project e2e python -m snapshot_e2e.s3 deploy)"
           values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.level=INFO"
           values="${values}"$'\n'"pageBroker.transferEngine.modelStreamer.logging.toStderr=true"
           {

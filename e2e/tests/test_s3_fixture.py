@@ -17,7 +17,8 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> s3.S3Settings:
     for name in list(os.environ):
         if name.startswith("SNAPSHOT_E2E_S3_"):
             monkeypatch.delenv(name)
-    monkeypatch.setenv("SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT", "http://172.18.0.1:9000")
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_ACCESS_KEY", "run-access")
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_SECRET_KEY", "run-secret-key")
     return s3.S3Settings.from_env()
 
 
@@ -32,42 +33,24 @@ def test_credentials_file_is_the_shared_credentials_format(
     }
 
 
-def test_helm_values_select_a_plain_http_path_style_store(
-    settings: s3.S3Settings,
-) -> None:
-    values = dict(item.split("=", 1) for item in s3.helm_set(settings))
+def test_helm_values_select_a_plain_http_path_style_store() -> None:
+    values = dict(item.split("=", 1) for item in s3.helm_set("http://172.18.0.1:19000"))
     assert values["storage.type"] == "s3"
-    assert values["storage.s3.endpoint"] == settings.cluster_endpoint
+    assert values["storage.s3.endpoint"] == "http://172.18.0.1:19000"
     assert values["storage.s3.addressing"] == "path"
     assert values["storage.s3.allowHttp"] == "true"
-    assert values["storage.s3.credentialsSecretRef"] == settings.credentials_secret
+    assert values["storage.s3.credentialsSecretRef"] == s3.CREDENTIALS_SECRET
     assert values["operator.bindNewContents"] == "true"
 
 
-def test_helm_values_pass_through_the_installer_unchanged(
-    settings: s3.S3Settings,
-) -> None:
-    lines = s3.helm_set(settings)
+def test_helm_values_pass_through_the_installer_unchanged() -> None:
+    lines = s3.helm_set("http://172.18.0.1:19000")
     assert setup.parse_helm_overrides(None, "\n".join(lines)) == lines
 
 
-def test_helm_values_need_the_cluster_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT", raising=False)
-    with pytest.raises(ValueError, match="SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT"):
-        s3.helm_set(s3.S3Settings.from_env())
-
-
-def test_settings_follow_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SNAPSHOT_E2E_S3_BUCKET", "other")
-    monkeypatch.setenv("SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT", "http://s3.test:9000")
-    settings = s3.S3Settings.from_env()
-    assert settings.bucket == "other"
-    assert settings.cluster_endpoint == "http://s3.test:9000"
-
-
 def test_store_ports_follow_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_ACCESS_KEY", "run-access")
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_SECRET_KEY", "run-secret-key")
     monkeypatch.setenv("SNAPSHOT_E2E_S3_PORT", "19010")
     monkeypatch.setenv("SNAPSHOT_E2E_S3_CONSOLE_PORT", "19011")
     settings = s3.S3Settings.from_env()
@@ -94,7 +77,7 @@ def test_store_login_follows_the_environment(monkeypatch: pytest.MonkeyPatch) ->
     env = {item.name: item for item in container.env}
     for key in ("MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"):
         assert env[key].value is None
-        assert env[key].value_from.secret_key_ref.name == settings.credentials_secret
+        assert env[key].value_from.secret_key_ref.name == s3.CREDENTIALS_SECRET
         assert env[key].value_from.secret_key_ref.key == key
     credentials = s3.credentials_file(settings)
     assert "run-access" in credentials and "run-secret-key" in credentials
@@ -148,3 +131,22 @@ def test_deploy_refuses_to_run_without_a_login(
 
     with pytest.raises(SystemExit):
         s3.main(["deploy"])
+
+
+def test_deploy_prints_the_chart_values_for_the_store_it_created(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_ACCESS_KEY", "run-access")
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_SECRET_KEY", "run-secret-key")
+    monkeypatch.setenv("SNAPSHOT_E2E_S3_PORT", "20010")
+    monkeypatch.setattr(s3.config, "load_kube_config", lambda *_: None)
+    monkeypatch.setattr(s3, "deploy_store", lambda settings, namespace: None)
+    monkeypatch.setattr(
+        s3, "store_endpoint", lambda namespace, port: f"http://10.0.0.5:{port}"
+    )
+
+    assert s3.main(["deploy"]) == 0
+
+    values = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    assert values["storage.s3.endpoint"] == "http://10.0.0.5:20010"
+    assert values["storage.type"] == "s3"

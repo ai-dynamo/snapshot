@@ -137,10 +137,11 @@ it records its benchmark result under the case `vllm-s3`, so it does not replace
 the checkpoint-volume vLLM result. The `framework` input selects it with `vllm-s3`.
 
 The store runs in the vCluster as a pod. `python -m snapshot_e2e.s3 deploy` creates
-it with the credentials Secret and a default bucket. It needs `SNAPSHOT_E2E_S3_ACCESS_KEY` and
-`SNAPSHOT_E2E_S3_SECRET_KEY`, because the store listens on the node network and must not use a
-default login; the workflow generates both per job. `python -m snapshot_e2e.s3
-endpoint` prints the node address the chart is given. The store runs on the host
+it with the credentials Secret and a default bucket, then prints the chart values, one
+`KEY=VALUE` per line, with the node address the chart reaches the store at. It needs
+`SNAPSHOT_E2E_S3_ACCESS_KEY` and `SNAPSHOT_E2E_S3_SECRET_KEY`, because the store listens
+on the node network and must not use a default login; the workflow generates both per job.
+The store runs on the host
 network because the agent pod, which hosts PageBroker, does too and cannot resolve
 cluster service names. The job derives `SNAPSHOT_E2E_S3_PORT` and
 `SNAPSHOT_E2E_S3_CONSOLE_PORT` from the run id, so two runs on one node do not collide. In S3 mode

@@ -3,13 +3,12 @@
 
 """The S3-compatible store the S3 e2e suite installs Snapshot against.
 
-The store runs inside the cluster, on the host network of one node, and the
-chart reaches it at ``cluster_endpoint``. Jobs that share a node need different
-``SNAPSHOT_E2E_S3_PORT`` and ``SNAPSHOT_E2E_S3_CONSOLE_PORT`` values.
+The store runs inside the cluster, on the host network of one node. Jobs that
+share a node need different ``SNAPSHOT_E2E_S3_PORT`` and
+``SNAPSHOT_E2E_S3_CONSOLE_PORT`` values. The store listens on the node network,
+so ``SNAPSHOT_E2E_S3_ACCESS_KEY`` and ``SNAPSHOT_E2E_S3_SECRET_KEY`` are required.
 
-    python -m snapshot_e2e.s3 helm-set   # chart values, one KEY=VALUE per line
-    python -m snapshot_e2e.s3 deploy     # the store itself, inside the cluster
-    python -m snapshot_e2e.s3 endpoint   # the node address that store is reached at
+    python -m snapshot_e2e.s3 deploy     # the store, then chart values, one KEY=VALUE per line
 """
 
 from __future__ import annotations
@@ -26,6 +25,12 @@ CREDENTIALS_KEY = "credentials"
 ROOT_USER_KEY = "MINIO_ROOT_USER"
 ROOT_PASSWORD_KEY = "MINIO_ROOT_PASSWORD"
 DEFAULT_NAMESPACE = "snapshot-e2e"
+BUCKET = "snapshot-e2e"
+PREFIX = "snapshots"
+REGION = "us-east-1"
+CREDENTIALS_SECRET = "snapshot-s3-credentials"
+ACCESS_KEY_ENV = "SNAPSHOT_E2E_S3_ACCESS_KEY"
+SECRET_KEY_ENV = "SNAPSHOT_E2E_S3_SECRET_KEY"
 STORE_NAME = "snapshot-s3"
 DEFAULT_STORE_PORT = 19000
 DEFAULT_STORE_CONSOLE_PORT = 19001
@@ -38,32 +43,26 @@ STORE_READY_TIMEOUT_SECONDS = 300
 
 @dataclass(frozen=True)
 class S3Settings:
-    cluster_endpoint: str
     access_key: str
     secret_key: str
-    bucket: str
-    prefix: str
-    region: str
-    credentials_secret: str
     port: int
     console_port: int
 
     @classmethod
     def from_env(cls) -> "S3Settings":
-        env = os.environ.get
+        env = os.environ
+        missing = [name for name in (ACCESS_KEY_ENV, SECRET_KEY_ENV) if not env.get(name)]
+        if missing:
+            raise ValueError(
+                f"{', '.join(missing)} required: the store listens on the node network "
+                "and must not use a default login"
+            )
         return cls(
-            cluster_endpoint=env("SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT", ""),
-            access_key=env("SNAPSHOT_E2E_S3_ACCESS_KEY", "minioadmin"),
-            secret_key=env("SNAPSHOT_E2E_S3_SECRET_KEY", "minioadmin"),
-            bucket=env("SNAPSHOT_E2E_S3_BUCKET", "snapshot-e2e"),
-            prefix=env("SNAPSHOT_E2E_S3_PREFIX", "snapshots").strip("/"),
-            region=env("SNAPSHOT_E2E_S3_REGION", "us-east-1"),
-            credentials_secret=env(
-                "SNAPSHOT_E2E_S3_CREDENTIALS_SECRET", "snapshot-s3-credentials"
-            ),
-            port=int(env("SNAPSHOT_E2E_S3_PORT", str(DEFAULT_STORE_PORT))),
+            access_key=env[ACCESS_KEY_ENV],
+            secret_key=env[SECRET_KEY_ENV],
+            port=int(env.get("SNAPSHOT_E2E_S3_PORT", DEFAULT_STORE_PORT)),
             console_port=int(
-                env("SNAPSHOT_E2E_S3_CONSOLE_PORT", str(DEFAULT_STORE_CONSOLE_PORT))
+                env.get("SNAPSHOT_E2E_S3_CONSOLE_PORT", DEFAULT_STORE_CONSOLE_PORT)
             ),
         )
 
@@ -76,18 +75,14 @@ def credentials_file(settings: S3Settings) -> str:
     )
 
 
-def helm_set(settings: S3Settings) -> list[str]:
-    if not settings.cluster_endpoint:
-        raise ValueError(
-            "SNAPSHOT_E2E_S3_CLUSTER_ENDPOINT is required: the address the cluster uses to reach the store"
-        )
+def helm_set(endpoint: str) -> list[str]:
     return [
         "storage.type=s3",
-        f"storage.s3.endpoint={settings.cluster_endpoint}",
-        f"storage.s3.region={settings.region}",
-        f"storage.s3.bucket={settings.bucket}",
-        f"storage.s3.prefix={settings.prefix}",
-        f"storage.s3.credentialsSecretRef={settings.credentials_secret}",
+        f"storage.s3.endpoint={endpoint}",
+        f"storage.s3.region={REGION}",
+        f"storage.s3.bucket={BUCKET}",
+        f"storage.s3.prefix={PREFIX}",
+        f"storage.s3.credentialsSecretRef={CREDENTIALS_SECRET}",
         "storage.s3.addressing=path",
         "storage.s3.allowHttp=true",
         "operator.bindNewContents=true",
@@ -104,7 +99,7 @@ def ensure_credentials_secret(settings: S3Settings, namespace: str) -> None:
         if exc.status != 409:
             raise
     secret = client.V1Secret(
-        metadata=client.V1ObjectMeta(name=settings.credentials_secret),
+        metadata=client.V1ObjectMeta(name=CREDENTIALS_SECRET),
         string_data={
             CREDENTIALS_KEY: credentials_file(settings),
             ROOT_USER_KEY: settings.access_key,
@@ -116,7 +111,7 @@ def ensure_credentials_secret(settings: S3Settings, namespace: str) -> None:
     except client.ApiException as exc:
         if exc.status != 409:
             raise
-        api.replace_namespaced_secret(settings.credentials_secret, namespace, secret)
+        api.replace_namespaced_secret(CREDENTIALS_SECRET, namespace, secret)
 
 
 def host_endpoint(host_ip: str, port: int = DEFAULT_STORE_PORT) -> str:
@@ -140,7 +135,7 @@ def store_endpoint(namespace: str, port: int = DEFAULT_STORE_PORT) -> str:
 def store_deployment(settings: S3Settings, namespace: str) -> client.V1Deployment:
     labels = {"app.kubernetes.io/name": STORE_NAME}
     env = {
-        "MINIO_DEFAULT_BUCKETS": settings.bucket,
+        "MINIO_DEFAULT_BUCKETS": BUCKET,
         "MINIO_API_PORT_NUMBER": str(settings.port),
         "MINIO_CONSOLE_PORT_NUMBER": str(settings.console_port),
     }
@@ -149,7 +144,7 @@ def store_deployment(settings: S3Settings, namespace: str) -> client.V1Deploymen
             name=key,
             value_from=client.V1EnvVarSource(
                 secret_key_ref=client.V1SecretKeySelector(
-                    name=settings.credentials_secret, key=key
+                    name=CREDENTIALS_SECRET, key=key
                 )
             ),
         )
@@ -219,29 +214,16 @@ def deploy_store(settings: S3Settings, namespace: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("helm-set", "deploy", "endpoint"))
-    args = parser.parse_args(argv)
-    settings = S3Settings.from_env()
+    parser.add_argument("command", choices=("deploy",))
+    parser.parse_args(argv)
+    try:
+        settings = S3Settings.from_env()
+    except ValueError as exc:
+        parser.error(str(exc))
     namespace = os.environ.get("SNAPSHOT_E2E_TEST_NAMESPACE", DEFAULT_NAMESPACE)
-    if args.command == "helm-set":
-        print("\n".join(helm_set(settings)))
-        return 0
-    if args.command == "deploy":
-        missing = [
-            name
-            for name in ("SNAPSHOT_E2E_S3_ACCESS_KEY", "SNAPSHOT_E2E_S3_SECRET_KEY")
-            if not os.environ.get(name)
-        ]
-        if missing:
-            parser.error(
-                f"deploy needs {', '.join(missing)}: the store listens on the node network "
-                "and must not use a default login"
-            )
     config.load_kube_config(os.environ.get("KUBECONFIG"))
-    if args.command == "endpoint":
-        print(store_endpoint(namespace, settings.port))
-        return 0
     deploy_store(settings, namespace)
+    print("\n".join(helm_set(store_endpoint(namespace, settings.port))))
     return 0
 
 
