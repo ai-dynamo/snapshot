@@ -63,11 +63,11 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <line class="frm" x1="10.0" y1="1076.0" x2="950.0" y2="1076.0" stroke-width="1" stroke-dasharray="6 4"/>
 <text x="20.0" y="1089.0" class="tagt" font-size="12" font-weight="700" text-anchor="start" dominant-baseline="central">else · accepted</text>
 <text x="173.3" y="92.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">member PodSnapshotContent, owned through</text>
-<text x="173.3" y="108.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">its PodSnapshot by the set</text>
+<text x="173.3" y="108.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">its PodSnapshot by the group</text>
 <line class="arw" x1="96.7" y1="120.0" x2="248.0" y2="120.0" stroke-width="1.2" marker-end="url(#ah)"/>
 <rect class="k-t" x="135.5" y="134.0" width="229.0" height="44" rx="5" stroke-width="0.8"/>
 <text x="250.0" y="148.0" class="k-t-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">read rank, size, and UID from the</text>
-<text x="250.0" y="164.0" class="k-t-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">parent PodSetSnapshot</text>
+<text x="250.0" y="164.0" class="k-t-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">parent PodGroupSnapshot</text>
 <rect class="k-g" x="684.3" y="192.0" width="255.7" height="92" rx="5" stroke-width="0.8"/>
 <text x="812.2" y="206.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">quiesce: no new work on shared</text>
 <text x="812.2" y="222.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">memory, communicators, or peers;</text>
@@ -172,9 +172,9 @@ text{font-family:Helvetica,Arial,"Liberation Sans",sans-serif}
 <line class="arw" x1="250.0" y1="2154.0" x2="98.7" y2="2154.0" stroke-width="1.2" marker-end="url(#ah)"/>
 <text x="326.7" y="2174.0" class="tx" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">Leave(captured)</text>
 <line class="arw" x1="250.0" y1="2186.0" x2="401.3" y2="2186.0" stroke-width="1.2" marker-end="url(#ah)"/>
-<rect class="k-g" x="20.0" y="2200.0" width="178.4" height="44" rx="5" stroke-width="0.8"/>
-<text x="109.2" y="2214.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">every member Captured:</text>
-<text x="109.2" y="2230.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">PodSetSnapshot Ready</text>
+<rect class="k-g" x="20.0" y="2200.0" width="190.8" height="44" rx="5" stroke-width="0.8"/>
+<text x="115.4" y="2214.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">every member Captured:</text>
+<text x="115.4" y="2230.0" class="k-g-t" font-size="13" font-weight="400" text-anchor="middle" dominant-baseline="central">PodGroupSnapshot Ready</text>
 <rect class="k-g" x="27.0" y="14.0" width="139.3" height="48.0" rx="7" stroke-width="0.8"/>
 <text x="96.7" y="29.0" class="k-g-t" font-size="14" font-weight="700" text-anchor="middle" dominant-baseline="central">Operator</text>
 <text x="96.7" y="48.0" class="k-g-s" font-size="12" font-weight="400" text-anchor="middle" dominant-baseline="central">via API</text>
