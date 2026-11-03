@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "transfer/engine/model_streamer/model_streamer_restore.hpp"
 #include "utils/config.hpp"
 #include "utils/json.hpp"
 
@@ -18,6 +19,7 @@ namespace {
 using Json = nlohmann::json;
 constexpr char kReadChunkBytesKey[] = "readChunkBytes";
 constexpr char kRestoreBatchBytesKey[] = "restoreBatchBytes";
+constexpr char kRestorePreparationSlotsKey[] = "restorePreparationSlots";
 constexpr char kProcessGroupSizeKey[] = "processGroupSize";
 constexpr char kS3ReaderKey[] = "s3Reader";
 constexpr char kConcurrencyKey[] = "concurrency";
@@ -147,6 +149,9 @@ Options::Validate() const
 {
   if (restore_batch_bytes == 0)
     Invalid(kRestoreBatchBytesKey);
+  if (restore_preparation_slots && (*restore_preparation_slots == 0 ||
+                                  *restore_preparation_slots > kMaxRestorePreparationSlots))
+    Invalid(kRestorePreparationSlotsKey);
   for (const auto& setting : kNumbers) {
     const auto& value = this->*setting.member;
     if (!IsWithinBounds(value, setting))
@@ -193,13 +198,22 @@ ParseConfig(std::string_view text)
   catch (const std::exception&) {
     Invalid("JSON");
   }
-  ValidateFields(value, "", {kRestoreBatchBytesKey, kS3ReaderKey, kLoggingKey});
+  ValidateFields(value, "", {kRestoreBatchBytesKey, kRestorePreparationSlotsKey, kS3ReaderKey, kLoggingKey});
   if (value.contains(kS3ReaderKey))
     ValidateFields(value.at(kS3ReaderKey), kS3ReaderKey, {});
   if (value.contains(kLoggingKey))
     ValidateFields(value.at(kLoggingKey), kLoggingKey, {kLevelKey, kToStderrKey});
 
   Options options;
+  if (value.contains(kRestorePreparationSlotsKey)) {
+    try {
+      options.restore_preparation_slots = utils::Unsigned(
+          value.at(kRestorePreparationSlotsKey), kMaxRestorePreparationSlots, 1);
+    }
+    catch (const std::exception&) {
+      Invalid(kRestorePreparationSlotsKey);
+    }
+  }
   if (value.contains(kRestoreBatchBytesKey)) {
     try {
       options.restore_batch_bytes = utils::Unsigned(

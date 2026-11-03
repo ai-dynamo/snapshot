@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <future>
@@ -163,6 +164,7 @@ ModelStreamerRestore::StreamerEntry::TryAddFile(const CheckpointFile& file, cons
   // Native reads write through this mapping, so final file permissions can be
   // applied before submission. Record the mapping first for failure cleanup.
   ApplyPermissions(destination, file.permissions, cancellation);
+  cancellation.ThrowIfCancelled();
   bytes += file_bytes;
   return true;
 }
@@ -186,12 +188,16 @@ ModelStreamerRestore::ModelStreamerRestore(std::chrono::milliseconds submission_
 ModelStreamerRestore::ModelStreamerRestore(
     ModelStreamerSessionOptions options,
     std::chrono::milliseconds submission_timeout,
-    std::uint64_t restore_batch_bytes)
-    : submission_timeout_(submission_timeout), restore_batch_bytes_(restore_batch_bytes), options_(std::move(options)),
+    std::uint64_t restore_batch_bytes, std::size_t restore_preparation_slots)
+    : submission_timeout_(submission_timeout), restore_batch_bytes_(restore_batch_bytes),
+      restore_preparation_slots_(restore_preparation_slots), options_(std::move(options)),
       stopped_error_(std::make_exception_ptr(std::runtime_error("Model Streamer restore stopped")))
 {
   if (restore_batch_bytes_ == 0)
     throw std::invalid_argument("restore batch bytes must be positive");
+  if (restore_preparation_slots_ == 0 || restore_preparation_slots_ > kMaxRestorePreparationSlots)
+    throw std::invalid_argument("restore preparation slots must be between 1 and " +
+                                std::to_string(kMaxRestorePreparationSlots));
   if (submission_timeout_ <= std::chrono::milliseconds::zero())
     throw std::invalid_argument("Model Streamer submission timeout must be positive");
   if (!HasCompleteCredentials(options_))
@@ -303,14 +309,19 @@ ModelStreamerRestore::Start()
 }
 
 void
-ModelStreamerRestore::QueueSubmission(const std::shared_ptr<StreamerEntry>& entry)
+ModelStreamerRestore::QueueSubmission(const std::shared_ptr<StreamerEntry>& entry) noexcept
 {
   std::exception_ptr error;
-  {
+  try {
     std::lock_guard lock(pending_mutex_);
     error = terminal_error_;
     if (!error)
       pending_.push_back(entry);
+  }
+  catch (...) {
+    // A failed deque insertion has no effect. Complete the unpublished entry
+    // rather than leaving its caller waiting on a promise nobody will fulfill.
+    error = std::current_exception();
   }
   if (error)
     FailEntry(*entry, std::move(error));
@@ -340,8 +351,10 @@ ModelStreamerRestore::TakeInterruptedSubmission(std::exception_ptr& error)
 {
   std::lock_guard lock(pending_mutex_);
   for (auto entry = pending_.begin(); entry != pending_.end(); ++entry) {
-    if (const auto reason = (*entry)->cancellation.Reason()) {
+    error = (*entry)->restore_state ? (*entry)->restore_state->error : nullptr;
+    if (const auto reason = (*entry)->cancellation.Reason())
       error = std::make_exception_ptr(CancellationError(*reason));
+    if (error) {
       auto interrupted = std::move(*entry);
       pending_.erase(entry);
       return interrupted;
@@ -392,8 +405,9 @@ ModelStreamerRestore::CanAdmit(const StreamerEntry& entry) const
 void
 ModelStreamerRestore::SubmitPending()
 {
-  DiscardInterruptedPending();
   while (true) {
+    // A rejection in the previous iteration may have failed a queued sibling.
+    DiscardInterruptedPending();
     bool stopped = false;
     const auto entry = SelectPendingSubmission(stopped);
     if (stopped)
@@ -466,7 +480,10 @@ ModelStreamerRestore::SubmitToStreamer(StreamerEntry& entry)
     const std::runtime_error error("submit Model Streamer restore: " + StreamerError(response));
     if (response == RUNAI_FILE_STREAMER_RESPONSE_UNKNOWN_ERROR || submission_id != 0)
       throw error;
-    FailEntry(entry, std::make_exception_ptr(error));
+    auto& restore_error = entry.restore_state->error;
+    if (!restore_error)
+      restore_error = std::make_exception_ptr(error);
+    FailEntry(entry, restore_error);
     return 0;
   }
   if (submission_id == 0)
@@ -579,7 +596,11 @@ ModelStreamerRestore::FinishFailedSession()
 {
   StopStreamer();
   for (auto& [id, entry] : active_) {
-    FailEntry(*entry, std::make_exception_ptr(std::runtime_error(entry->first_error)));
+    // Fence queued siblings only after native access ends, before waking callers.
+    auto& restore_error = entry->restore_state->error;
+    if (!restore_error)
+      restore_error = std::make_exception_ptr(std::runtime_error(entry->first_error));
+    FailEntry(*entry, restore_error);
   }
   active_.clear();
   active_bytes_ = 0;
@@ -607,62 +628,138 @@ ModelStreamerRestore::FailAll(std::exception_ptr error) noexcept
 }
 
 void
-ModelStreamerRestore::SubmitAndWait(const std::shared_ptr<StreamerEntry>& entry)
+ModelStreamerRestore::StreamerEntry::Withdraw() noexcept
 {
-  auto completion = entry->completion.get_future();
-  QueueSubmission(entry);
-  auto& admission = entry->admission;
-  const auto& cancellation = entry->cancellation;
-  while (completion.wait_for(std::chrono::milliseconds::zero()) != std::future_status::ready) {
-    if (const auto reason = cancellation.Reason()) {
-      auto expected = Admission::Pending;
-      if (admission.compare_exchange_strong(expected, Admission::Cancelled))
-        throw CancellationError(*reason);
-      // The worker won admission. Wait for successful completion or native
-      // teardown before releasing mappings, even after the caller's deadline.
+  if (completion_state == CompletionState::Published) {
+    auto expected = Admission::Pending;
+    if (admission.compare_exchange_strong(expected, Admission::Cancelled))
+      completion_state = CompletionState::Withdrawn;
+  }
+}
+
+void
+ModelStreamerRestore::StreamerEntry::Drain() noexcept
+{
+  if (completion_state != CompletionState::Published)
+    return;
+  try {
+    completion_future.get();
+  }
+  catch (...) {
+    completion_error = std::current_exception();
+  }
+  completion_state = CompletionState::Settled;
+}
+
+// Per-call ownership stays on the caller; only published entries cross threads.
+struct ModelStreamerRestore::RestoreProgress {
+  const CheckpointInventory& inventory;
+  const Path& destination;
+  std::vector<CheckpointFile>::const_iterator next_file;
+  Cancellation stage_stop;
+  std::shared_ptr<RestoreState> restore_state;
+  std::deque<std::shared_ptr<StreamerEntry>> submissions;
+};
+
+void
+ModelStreamerRestore::CheckRestoreProgress(RestoreProgress& progress)
+{
+  for (auto& entry : progress.submissions) {
+    if (entry->completion_state == StreamerEntry::CompletionState::Published &&
+        entry->completion_future.wait_for(std::chrono::milliseconds::zero()) == std::future_status::ready)
+      entry->Drain();
+    if (entry->completion_error)
+      std::rethrow_exception(entry->completion_error);
+  }
+  progress.stage_stop.ThrowIfCancelled();
+}
+
+bool
+ModelStreamerRestore::PrepareNextBatch(RestoreProgress& progress)
+{
+  CheckRestoreProgress(progress);
+  auto& file = progress.next_file;
+  if (file == progress.inventory.files.end())
+    return false;
+  // Own the entry before filesystem work. Failed insertion destroys the still
+  // unprepared entry; outer cleanup drains any previously published batches.
+  auto& entry = *progress.submissions.emplace_back(std::make_shared<StreamerEntry>());
+  entry.restore_state = progress.restore_state;
+  entry.cancellation = progress.stage_stop;
+  while (file != progress.inventory.files.end()) {
+    const Path staged = progress.destination / file->relative_path;
+    if (file->size_bytes == 0) {
+      CreateEmptyFile(*file, staged, entry.cancellation);
+    }
+    else if (!entry.TryAddFile(*file, staged, restore_batch_bytes_)) {
       break;
     }
-    if (admission.load() == Admission::Claimed)
-      break;
-    completion.wait_until(std::min(
-        cancellation.Deadline(), Cancellation::Clock::now() + kCancellationPollInterval));
+    CheckRestoreProgress(progress);
+    ++file;
   }
-  completion.get();
+  // Check outstanding failures and cancellation after the final operation,
+  // before publishing the prepared entry.
+  CheckRestoreProgress(progress);
+  if (entry.request.paths.empty()) {
+    entry.ReleaseMappings();
+    progress.submissions.pop_back();
+    return false;
+  }
+  return true;
+}
+
+void
+ModelStreamerRestore::WaitAndRetireFrontBatch(RestoreProgress& progress)
+{
+  CheckRestoreProgress(progress);
+  auto& front = progress.submissions.front();
+  while (front->completion_state == StreamerEntry::CompletionState::Published) {
+    front->completion_future.wait_until(std::min(
+        progress.stage_stop.Deadline(), Cancellation::Clock::now() + kCancellationPollInterval));
+    CheckRestoreProgress(progress);
+  }
+  front->ReleaseMappings();
+  progress.submissions.pop_front();
+}
+
+void
+ModelStreamerRestore::CancelAndDrain(RestoreProgress& progress) noexcept
+{
+  progress.stage_stop.Cancel();
+  // Fence all pending siblings before any potentially blocking native drain.
+  for (auto& entry : progress.submissions)
+    entry->Withdraw();
+  while (!progress.submissions.empty()) {
+    progress.submissions.front()->Drain();
+    progress.submissions.front()->ReleaseMappings();
+    progress.submissions.pop_front();
+  }
 }
 
 void
 ModelStreamerRestore::RestoreFiles(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
-  for (auto file = inventory.files.begin(); file != inventory.files.end();) {
-    auto entry = std::make_shared<StreamerEntry>();
-    entry->cancellation = cancellation;
-    auto& request = entry->request;
-    try {
-      while (file != inventory.files.end()) {
-        cancellation.ThrowIfCancelled();
-        const Path staged = destination / file->relative_path;
-        if (file->size_bytes == 0) {
-          CreateEmptyFile(*file, staged, cancellation);
-          ++file;
-          continue;
-        }
-
-        if (!entry->TryAddFile(*file, staged, restore_batch_bytes_))
-          break;
-        ++file;
+  RestoreProgress progress{inventory, destination, inventory.files.begin(), Cancellation::ChildOf(cancellation),
+                           std::make_shared<RestoreState>(), {}};
+  try {
+    while (progress.next_file != inventory.files.end()) {
+      if (progress.submissions.size() == restore_preparation_slots_)
+        WaitAndRetireFrontBatch(progress);
+      if (PrepareNextBatch(progress)) {
+        CheckRestoreProgress(progress);
+        auto& entry = progress.submissions.back();
+        entry->completion_future = entry->completion.get_future();
+        entry->completion_state = StreamerEntry::CompletionState::Published;
+        QueueSubmission(entry);
       }
-
-      if (!request.paths.empty())
-        SubmitAndWait(entry);
     }
-    catch (...) {
-      // A queued entry can outlive its caller. The admission handshake either
-      // prevented submission or waited for successful completion or native
-      // teardown before reaching here.
-      entry->ReleaseMappings();
-      throw;
-    }
-    entry->ReleaseMappings();
+    while (!progress.submissions.empty())
+      WaitAndRetireFrontBatch(progress);
+  }
+  catch (...) {
+    const auto primary = std::current_exception();
+    CancelAndDrain(progress);
+    std::rethrow_exception(primary);
   }
 }
 

@@ -92,6 +92,12 @@ commit-level history for each release is on its
   a **checkpoint** (the verb) and what it writes is a **snapshot** (the noun).
   No condition type, reason or label changed, so nothing that matches on those
   strings needs updating; only the two values above were renamed.
+- S3 restores prepare one batch ahead of downloads by default. Configure
+  `pageBroker.transferEngine.modelStreamer.restorePreparationSlots` in Helm
+  values, or `restorePreparationSlots` in the tuning JSON (1–20, default 2),
+  to bound retained batches per restore. Restart PageBroker after changing it.
+  Shared native admission limits remain unchanged; oversized files run alone.
+
 - Checkpoint and restore failure messages open with the step they came from,
   as `while <step>: <cause>`, on the pod's `nvidia.com/Restored` condition, the
   `PodSnapshotContent` `Failed` condition, the restore events and the agent

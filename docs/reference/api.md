@@ -265,6 +265,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `pageBroker.s3.limits`                    | `{}`           | PageBroker's S3 transfer and transaction limits; see [S3 transfer limits](#s3-transfer-limits) for the keys and bounds.                                                                                |
 | `pageBroker.transferEngine.modelStreamer` | `{}`           | Tuning for the engine that reads S3 restores, written as given; keys are in [Model Streamer configuration](../../agent/pagebroker/MODEL_STREAMER.md).                                                |
 | `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` | `10000000000` | S3 restore batch and shared admission budget in bytes; an oversized file runs alone. Does not cap total staging memory. |
+| `pageBroker.transferEngine.modelStreamer.restorePreparationSlots` | `2` | Retained batches per S3 restore, including preparation in progress; 1–20. Does not increase native download admission limits. |
 
 ### S3 transfer limits
 
