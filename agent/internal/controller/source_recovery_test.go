@@ -173,7 +173,7 @@ func TestRecoverSourceDoesNotClaimATerminationThatFailed(t *testing.T) {
 	w.recoverSourceAfterFailedDump(context.Background(), logr.Discard(), pod, os.Getpid(),
 		executor.SuspendedSource{GPUPIDs: []int{4242}}, false)
 
-	assert.True(t, sawEventReason(w.clientset.(*k8sfake.Clientset), reasonSourceTerminationFailed),
+	assert.True(t, sawEventReason(w.clientset.(*k8sfake.Clientset), reasonSourcePodTerminationFailed),
 		"a failed kill must not be reported as a termination")
-	assert.False(t, sawEventReason(w.clientset.(*k8sfake.Clientset), reasonSourceTerminated))
+	assert.False(t, sawEventReason(w.clientset.(*k8sfake.Clientset), reasonSourcePodTerminated))
 }

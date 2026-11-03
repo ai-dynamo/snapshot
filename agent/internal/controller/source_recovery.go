@@ -20,11 +20,11 @@ import (
 // has already failed, so this cannot wait on it indefinitely.
 const sourceRecoveryTimeout = 2 * time.Minute
 
-// Event reasons for what became of a workload whose capture failed.
+// Event reasons for what became of a source Pod whose checkpoint failed.
 const (
-	reasonSourceRevived           = "SourceRevived"
-	reasonSourceTerminated        = "SourceTerminated"
-	reasonSourceTerminationFailed = "SourceTerminationFailed"
+	reasonSourcePodResumed           = "SourcePodResumed"
+	reasonSourcePodTerminated        = "SourcePodTerminated"
+	reasonSourcePodTerminationFailed = "SourcePodTerminationFailed"
 )
 
 // recoverSourceAfterFailedDump decides what becomes of a workload whose dump
@@ -59,33 +59,33 @@ func (w *NodeController) recoverSourceAfterFailedDump(
 		reason, revived = w.reviveSource(recoveryCtx, log, containerPID, suspended)
 	}
 	if !revived {
-		log.Info("Killing the source after a failed dump", "reason", reason)
+		log.Info("Terminating the source Pod after a failed checkpoint", "reason", reason)
 		if err := w.killCheckpointProcess(log, containerPID, "checkpoint failed"); err != nil {
 			// Saying it was terminated would leave the workload suspended while
 			// the only thing an owner can see says it is gone.
 			log.Error(err, "Failed to kill target after checkpoint failure")
-			w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourceTerminationFailed,
-				fmt.Sprintf("Could not end the source after a failed capture, so it may still be suspended: %v", err))
+			w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourcePodTerminationFailed,
+				fmt.Sprintf("Could not terminate the source Pod after a failed checkpoint, so it may still be suspended: %v", err))
 			return
 		}
-		w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourceTerminated,
-			fmt.Sprintf("Ended the source after a failed capture: %s", reason))
+		w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourcePodTerminated,
+			fmt.Sprintf("Terminated the source Pod after a failed checkpoint: %s", reason))
 		return
 	}
-	log.Info("Source left running after a failed dump", "pid", containerPID)
-	w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourceRevived,
-		"Handed the source back its GPUs after a failed capture; it is still running")
+	log.Info("Source Pod resumed after a failed checkpoint", "pid", containerPID)
+	w.emitRecoveryEvent(recoveryCtx, log, pod, reasonSourcePodResumed,
+		"Resumed the source Pod after a failed checkpoint; it is still running")
 }
 
-// emitRecoveryEvent tells the pod's owner what became of their workload. The
-// PodSnapshot only says the capture failed, which does not say whether the
-// workload is still alive.
+// emitRecoveryEvent tells the source Pod's owner what became of their workload.
+// The PodSnapshot only says the checkpoint failed, which does not say whether
+// the workload is still alive.
 func (w *NodeController) emitRecoveryEvent(ctx context.Context, log logr.Logger, pod *corev1.Pod, reason, message string) {
 	if pod == nil {
 		return
 	}
 	eventType := corev1.EventTypeWarning
-	if reason == reasonSourceRevived {
+	if reason == reasonSourcePodResumed {
 		eventType = corev1.EventTypeNormal
 	}
 	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, eventType, reason, message)
