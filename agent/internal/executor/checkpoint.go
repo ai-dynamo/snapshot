@@ -196,7 +196,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return nil, failStep(StepPrepareCheckpoint, err)
 	}
 
-	state.CuInterpose, err = inspectCuInterpose(ctx, state, req.CuInterposeRequested)
+	state.CuInterpose, err = inspectCuInterpose(ctx, state, req.CuInterposeRequested, req.Group == nil)
 	if err != nil {
 		return nil, failStep(StepInspectCuInterpose, err)
 	}
@@ -205,7 +205,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		// Every check above only read the source, so a refusal leaves it as
 		// Snapshot found it.
 		admitStart := time.Now()
-		if err := admitCapture(ctx, req.Group, req.PodIP); err != nil {
+		if err := admitCapture(ctx, req.Group, req.PodIP, state); err != nil {
 			return nil, failStep(StepAdmitGroup, err)
 		}
 		admitDuration = time.Since(admitStart)
@@ -394,7 +394,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 // inspectCuInterpose verifies the shim libraries in every CUDA process and their
 // delivery mount. When a coordinator is in use, it also checks every participant
 // before capture becomes destructive.
-func inspectCuInterpose(ctx context.Context, state *types.CheckpointContainerSnapshot, requested bool) (*types.CuInterposeManifest, error) {
+func inspectCuInterpose(ctx context.Context, state *types.CheckpointContainerSnapshot, requested, alone bool) (*types.CuInterposeManifest, error) {
 	inspection, err := cuda.InspectCuInterposeLibraries(snapshotruntime.HostProcPath, state.CUDAHostPIDs, requested)
 	if err != nil {
 		return nil, err
@@ -406,8 +406,10 @@ func inspectCuInterpose(ctx context.Context, state *types.CheckpointContainerSna
 	if err := checkCuInterposeMountReadOnly(state.Mounts); err != nil {
 		return nil, err
 	}
-	if manifest.UsesCoordinator() {
-		if err := cuda.InspectCuInterpose(ctx, coordinatorTarget(state.PID, manifest.PIDs)); err != nil {
+	// A pod group member's coordinator inspects in the group's admission
+	// instead, with every other member's.
+	if alone && manifest.UsesCoordinator() {
+		if err := cuda.InspectCuInterpose(ctx, coordinatorTarget(state.PID, manifest.PIDs, nil)); err != nil {
 			return nil, fmt.Errorf("inspect cuinterpose: %w", err)
 		}
 	}
@@ -428,12 +430,13 @@ func checkCuInterposeMountReadOnly(mounts []types.MountInfo) error {
 	return nil
 }
 
-func coordinatorTarget(hostPID int, namespacePIDs []int) cuda.CuInterposeTarget {
+func coordinatorTarget(hostPID int, namespacePIDs []int, relay *cuda.CuInterposeRelay) cuda.CuInterposeTarget {
 	return cuda.CuInterposeTarget{
 		ProcRoot:      snapshotruntime.HostProcPath,
 		HostPID:       hostPID,
 		NamespacePIDs: namespacePIDs,
 		Binary:        cuda.DefaultCoordinatorBinaryPath,
+		Relay:         relay,
 	}
 }
 
@@ -493,7 +496,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	timings := &checkpointPhaseTimings{}
 
 	// GPU capture must finish before CRIU and filesystem capture.
-	gpuDuration, err := captureGPU(ctx, data, state, checkpointDir, cudaJobFile, log, gpu)
+	gpuDuration, err := captureGPU(ctx, data, state, checkpointDir, cudaJobFile, log, gpu, g)
 	if err != nil {
 		return nil, failStep(StepCheckpointGPU, err)
 	}
@@ -572,14 +575,17 @@ func captureOverlay(upperDir string, overlay types.OverlayManifest, checkpointDi
 }
 
 func captureGPU(ctx context.Context, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot,
-	checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution,
+	checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, g *group.Member,
 ) (time.Duration, error) {
 	if len(state.CUDAHostPIDs) == 0 {
 		return 0, nil
 	}
 	if data.CuInterpose.UsesCoordinator() {
 		// Remove shared mappings before either CUDA checkpoint path locks the processes.
-		if err := cuda.PrepareCuInterpose(ctx, coordinatorTarget(state.PID, data.CuInterpose.PIDs), checkpointDir); err != nil {
+		err := withRelay(ctx, g, func(relay *cuda.CuInterposeRelay) error {
+			return cuda.PrepareCuInterpose(ctx, coordinatorTarget(state.PID, data.CuInterpose.PIDs, relay), checkpointDir)
+		})
+		if err != nil {
 			return 0, fmt.Errorf("prepare cuinterpose: %w", err)
 		}
 	}

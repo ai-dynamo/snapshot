@@ -514,13 +514,17 @@ the first member gave, such as `Refused` or `MemberFailed`.
 
 The member publishes its Pod IP, and at restore the capture its artifact
 belongs to, then waits for every other member's, and for every member to
-accept. Nothing has changed in any workload yet, so the attempt ends as
-`Refused` and every member is left as Snapshot found it.
+accept. At capture, the cuInterpose coordinator of every Pod that runs one
+inspects as its Pod's relay in the group, and the lowest-ranked relay checks
+the group's topology. Nothing has changed in any workload yet, so the attempt
+ends as `Refused` and every member is left as Snapshot found it.
 
 Likely causes: the Pod has no IP yet, or another member refused first, or the
-attempt's deadline passed before every member arrived. At restore, the
-member's artifact may also have been captured on its own or by another member
-of the group, or the members may restore different captures.
+attempt's deadline passed before every member arrived. The cuInterpose relay
+may also have refused the group's topology, for example memory one Pod imports
+that no member exported, which its error names. At restore, the member's
+artifact may also have been captured on its own or by another member of the
+group, or the members may restore different captures.
 
 ### waiting for the pod group's other members
 

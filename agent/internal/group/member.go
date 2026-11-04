@@ -3,8 +3,8 @@
 
 // Package group is the agent's part in a pod group's capture or restore, as
 // SNEP-324 defines it. A member joins its attempt's coordination session,
-// exchanges admissions with the other members, and passes the group's
-// barriers.
+// exchanges admissions with the other members, passes the group's barriers,
+// and carries its Pod's cuInterpose relay to the session.
 package group
 
 import (
@@ -50,6 +50,9 @@ type Admission struct {
 	// member's artifact was captured in. Every member must restore the same
 	// capture.
 	CaptureID string `json:"captureID,omitempty"`
+	// RunsRelay reports that the member's Pod runs a cuInterpose coordinator,
+	// which takes part in the group as its relay.
+	RunsRelay bool `json:"runsRelay,omitempty"`
 }
 
 // Member is one member's part in one attempt. The caller joins, hands the
