@@ -68,9 +68,11 @@ spec:
               deadlineSeconds:
                 description: |-
                   DeadlineSeconds bounds the whole restore, counted from the
-                  PodGroupRestore's creation. Members still restoring when it expires fail
-                  with DeadlineExceeded; members already released keep running.
+                  PodGroupRestore's creation, and is at most a day. Members still restoring
+                  when it expires fail with DeadlineExceeded; members already released keep
+                  running.
                 format: int64
+                maximum: 86400
                 minimum: 1
                 type: integer
               snapshotRef:

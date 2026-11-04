@@ -67,10 +67,11 @@ spec:
               deadlineSeconds:
                 description: |-
                   DeadlineSeconds bounds the whole checkpoint, counted from the
-                  PodGroupSnapshot's creation. Members still being checkpointed when it
-                  expires fail with DeadlineExceeded; members already checkpointed keep
-                  their snapshots.
+                  PodGroupSnapshot's creation, and is at most a day. Members still being
+                  checkpointed when it expires fail with DeadlineExceeded; members already
+                  checkpointed keep their snapshots.
                 format: int64
+                maximum: 86400
                 minimum: 1
                 type: integer
               members:

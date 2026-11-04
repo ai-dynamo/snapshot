@@ -22,10 +22,12 @@ type PodGroupRestoreSpec struct {
 	SnapshotRef ObjectIdentity `json:"snapshotRef"`
 
 	// DeadlineSeconds bounds the whole restore, counted from the
-	// PodGroupRestore's creation. Members still restoring when it expires fail
-	// with DeadlineExceeded; members already released keep running.
+	// PodGroupRestore's creation, and is at most a day. Members still restoring
+	// when it expires fail with DeadlineExceeded; members already released keep
+	// running.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=86400
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
 
 	// Targets are the restore Pods, one for each member of the

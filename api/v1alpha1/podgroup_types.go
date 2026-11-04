@@ -48,7 +48,9 @@ const (
 	// PodGroupReasonCoordinatorLost means the attempt lost its coordination
 	// session, for example because the coordinator restarted.
 	PodGroupReasonCoordinatorLost = "CoordinatorLost"
-	// PodGroupReasonCancelled means the group was deleted before any member started.
+	// PodGroupReasonCancelled means the attempt was cancelled because its group
+	// was deleted. A group reports it only when no member started; a member can
+	// report it after starting, when the deletion raced the commit.
 	PodGroupReasonCancelled = "Cancelled"
 )
 

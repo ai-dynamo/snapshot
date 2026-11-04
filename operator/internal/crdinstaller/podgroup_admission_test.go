@@ -94,6 +94,10 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 		{"zero-deadline", func(s *snapshotv1.PodGroupSnapshotSpec) {
 			s.DeadlineSeconds = 0
 		}, "spec.deadlineSeconds in body should be greater than or equal to 1"},
+		{"deadline-of-a-day", func(s *snapshotv1.PodGroupSnapshotSpec) { s.DeadlineSeconds = 86400 }, ""},
+		{"deadline-over-a-day", func(s *snapshotv1.PodGroupSnapshotSpec) {
+			s.DeadlineSeconds = 86401
+		}, "spec.deadlineSeconds in body should be less than or equal to 86400"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snapshot := newPodGroupSnapshot(tc.name, 1)
@@ -244,6 +248,10 @@ func TestPodGroupRestoreAdmission(t *testing.T) {
 		{"zero-deadline", func(s *snapshotv1.PodGroupRestoreSpec) {
 			s.DeadlineSeconds = 0
 		}, "spec.deadlineSeconds in body should be greater than or equal to 1"},
+		{"deadline-of-a-day", func(s *snapshotv1.PodGroupRestoreSpec) { s.DeadlineSeconds = 86400 }, ""},
+		{"deadline-over-a-day", func(s *snapshotv1.PodGroupRestoreSpec) {
+			s.DeadlineSeconds = 86401
+		}, "spec.deadlineSeconds in body should be less than or equal to 86400"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			restore := newPodGroupRestore(tc.name, 1)

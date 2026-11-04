@@ -12,11 +12,12 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.exists_one(n, n.id == m.id))",message="member IDs must be unique"
 type PodGroupSnapshotSpec struct {
 	// DeadlineSeconds bounds the whole checkpoint, counted from the
-	// PodGroupSnapshot's creation. Members still being checkpointed when it
-	// expires fail with DeadlineExceeded; members already checkpointed keep
-	// their snapshots.
+	// PodGroupSnapshot's creation, and is at most a day. Members still being
+	// checkpointed when it expires fail with DeadlineExceeded; members already
+	// checkpointed keep their snapshots.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=86400
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
 
 	// Members are the Pods to checkpoint together, 1 to 256 of them. A
