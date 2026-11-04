@@ -45,7 +45,7 @@ class ModelStreamerConfigTest : public ::testing::Test {
   std::map<std::string, std::optional<std::string>> previous_;
 };
 
-TEST_F(ModelStreamerConfigTest, OmissionPreservesLibraryAndLegacyDaemonDefaults)
+TEST_F(ModelStreamerConfigTest, OmissionUsesLibraryAndPageBrokerDefaults)
 {
   auto options = ResolveOptions(ParseConfig("{}"));
   EXPECT_TRUE(options.NativeEnvironment().empty());
@@ -55,7 +55,7 @@ TEST_F(ModelStreamerConfigTest, OmissionPreservesLibraryAndLegacyDaemonDefaults)
   EXPECT_EQ(env.at("RUNAI_STREAMER_S3_MAX_RETRIES"), "3");
   EXPECT_EQ(env.at("RUNAI_STREAMER_S3_TIMEOUT"), "0");
   EXPECT_EQ(env.at("RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS"), "60000");
-  EXPECT_EQ(env.at("RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB"), "128");
+  EXPECT_EQ(env.at("RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB"), "512");
   EXPECT_EQ(env.at("RUNAI_STREAMER_CHUNK_BYTESIZE"), "16777216");
   EXPECT_EQ(env.at("RUNAI_STREAMER_S3_MAX_CONNECTIONS"), "4");
   EXPECT_FALSE(env.contains("RUNAI_STREAMER_FS_QUEUE_DEPTH"));
@@ -67,7 +67,7 @@ TEST_F(ModelStreamerConfigTest, UploadTuningDoesNotChangeReaderMemoryOrConnectio
   storage.transfer.upload_limits.buffer_budget = 2ULL * 1024 * 1024 * 1024;
   storage.transfer.upload_limits.active_files = 4;
   const auto options = ResolveOptions({}, &storage);
-  EXPECT_EQ(options.s3_max_inflight_mib, 128);
+  EXPECT_EQ(options.s3_max_inflight_mib, 512);
   EXPECT_EQ(options.s3_max_connections, 4);
 }
 

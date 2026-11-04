@@ -1094,7 +1094,8 @@ TEST_F(ModelStreamerSessionTest, LaterBatchFailureReleasesMappingsAndStopsInvent
   auto inventory = Inventory(4);
   for (auto& file : inventory.files)
     file.size_bytes = 6'000'000'000;
-  ModelStreamerRestore restore;
+  // This scenario retires A before preparing C, using a two-slot window.
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, kDefaultRestoreBatchBytes, 2);
   auto result = std::async(std::launch::async, [&] { restore.Stage(inventory, root_ / "partial"); });
   {
     std::unique_lock lock(state.mutex);
@@ -2312,7 +2313,8 @@ TEST_P(PipelineReadyFailureTest, RetiresTwoFailedFuturesWithObservedErrorPrecede
   state.hold_producer = true;
   state.allow_responses = false;
   state.hold_end = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  // Hold exactly two published futures before injecting their failures.
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, 2);
   Cancellation parent;
   auto result = std::async(std::launch::async, [&] {
     producer_restore = &restore;
@@ -2750,7 +2752,8 @@ TEST_F(ModelStreamerSessionTest, PipelineWorkerStartsNextBatchDuringBlockedPrepa
   state.allow_responses = false;
   state.hold_allocation = 3;
   state.pause_after_completion = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, 3);
+  // Exercise the default window: A downloading, B queued, C preparing.
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
   auto inventory = Inventory(5);
   auto result = std::async(std::launch::async, [&] {
     restore.Stage(inventory, root_ / "worker-overlap");

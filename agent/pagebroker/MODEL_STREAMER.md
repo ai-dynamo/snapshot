@@ -36,14 +36,14 @@ This example illustrates the schema, not recommended performance settings:
 ```json
 {
   "restoreBatchBytes": 10000000000,
-  "restorePreparationSlots": 2,
+  "restorePreparationSlots": 3,
   "readChunkBytes": 8388608,
   "processGroupSize": 1,
   "s3Reader": {
     "concurrency": 2,
     "targetGbps": 10,
     "maxConnections": 8,
-    "maxInflightMiB": 128,
+    "maxInflightMiB": 512,
     "maxRetries": 3,
     "retryWindowSeconds": 0,
     "lowSpeedTimeoutMs": 2000,
@@ -58,7 +58,7 @@ Native variable names below omit the common `RUNAI_STREAMER_` prefix.
 | JSON field | Native setting | Accepted values |
 | --- | --- | --- |
 | `restoreBatchBytes` | PageBroker batch/admission budget; no native variable | Positive unsigned 64-bit integer in bytes; default 10000000000 (10 GB) |
-| `restorePreparationSlots` | PageBroker preparation capacity; no native variable | Integer, 1–20; default 2, per restore |
+| `restorePreparationSlots` | PageBroker preparation capacity; no native variable | Integer, 1–20; default 3, per restore |
 | `readChunkBytes` | `CHUNK_BYTESIZE` | Integer, 2 MiB–1 GiB; native S3 reads floor it to 5 MiB |
 | `processGroupSize` | `PROCESS_GROUP_SIZE` | Positive unsigned 32-bit integer |
 | `s3Reader.concurrency` | `OBJ_CONCURRENCY` | Integer, 1–1024 |
@@ -87,10 +87,10 @@ concurrency only when its specific setting is absent. Explicit values are checke
 
 When S3 storage is configured, omitted reader settings retain these fallbacks:
 
-| Reader field | Existing PageBroker fallback |
+| Reader field | PageBroker fallback |
 | --- | --- |
 | `maxConnections` | 4, independent of upload concurrency |
-| `maxInflightMiB` | 128, independent of the upload buffer budget |
+| `maxInflightMiB` | 512 per native client, independent of the upload buffer budget |
 | `readChunkBytes` | Smaller of 16 MiB and `limits.uploadPartBytes` |
 | `lowSpeedTimeoutMs` | `limits.requestSeconds * 1000` |
 | `maxRetries` | 3 |
@@ -108,9 +108,9 @@ Reader tuning does not change SDK upload limits.
 shared native session. A file larger than the budget runs alone; files are not
 split at batch boundaries. Each restore retains up to `restorePreparationSlots`
 batches, including preparation in progress and completed work awaiting cleanup.
-The default of two prepares one batch ahead while earlier reads run; one waits
-for each batch to complete before preparing the next. Native admission uses
-the shared byte and submission limits. Larger batches can reduce submission
+The default of three prepares up to two batches ahead while earlier reads run.
+One slot waits for each batch to complete before preparing the next. Native
+admission uses the shared byte and submission limits. Larger batches can reduce submission
 barriers and let small files share workers with larger files, but prepare more
 staging data before the first download.
 
@@ -121,6 +121,8 @@ leaves the files' backing storage allocated, and the staging volume must hold
 the entire snapshot. Concurrent restores retain the existing transaction and
 staging limits. Preparation ahead can change peak memory and contention.
 Worker count and per-client inflight windows still control download concurrency.
+With eight clients, the default 512 MiB window per client allows 4 GiB of inflight
+data in aggregate; this is not a bound on total process memory.
 Changing either setting requires a PageBroker restart. More preparation slots
 can increase memory use and contention; they do not increase native admission
 limits or guarantee faster restores.
@@ -133,7 +135,7 @@ Set `restorePreparationSlots` through
 `pageBroker.transferEngine.modelStreamer.restorePreparationSlots` in Helm
 values, or the tuning JSON shown above. It is fixed for the coordinator's
 lifetime and preserved when a failed coordinator is replaced.
-Start with two; compare other values with the same batch budget and reader
+Start with three; compare other values with the same batch budget and reader
 settings before changing it.
 
 ## Native behavior

@@ -61,6 +61,7 @@ constexpr char kErrorLogLevel[] = "ERROR";
 
 constexpr std::size_t kMaxConfigBytes = 65536;
 constexpr std::uint64_t kMiB = 1024 * 1024;
+constexpr std::uint64_t kDefaultS3MaxInflightMiB = 512;
 constexpr std::uint64_t kMaxCount = std::numeric_limits<unsigned>::max();
 
 struct NumericSetting {
@@ -302,7 +303,7 @@ ResolveOptions(Options options, const S3Config* storage)
     options.s3_retry_window_seconds = options.s3_retry_window_seconds.value_or(0);
     options.s3_low_speed_timeout_ms = options.s3_low_speed_timeout_ms.value_or(upload.request_timeout.count());
     // Keep native reader memory and connection defaults independent of upload limits.
-    options.s3_max_inflight_mib = options.s3_max_inflight_mib.value_or(128);
+    options.s3_max_inflight_mib = options.s3_max_inflight_mib.value_or(kDefaultS3MaxInflightMiB);
     options.read_chunk_bytes = options.read_chunk_bytes.value_or(std::min<std::uint64_t>(16 * kMiB, upload.part_size));
     options.s3_max_connections = options.s3_max_connections.value_or(4);
   }
