@@ -247,6 +247,11 @@ func (w *NodeController) captureOwnerForPod(pod *corev1.Pod) (string, error) {
 	return chooseActiveContent(objs), nil
 }
 
+const attemptRetryDelayCeiling = 60 * time.Second
+
+// Overridden in tests so a retry does not wait out a real backoff.
+var attemptRetryInitialDelay = 5 * time.Second
+
 // runCheckpoint executes the dump, then writes the terminal status. It runs inline on the queue
 // item rather than a goroutine of its own, which is what keeps the key claimed for the whole dump.
 // The dump terminates the target, so there is no release step.
@@ -272,12 +277,72 @@ func (w *NodeController) runCheckpoint(
 		defer cancel()
 	}
 
-	artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
-		cuInterposeRequested, contentUID, artifactPath)
-	if err != nil {
-		return w.markCheckpointFailed(ctx, content, classifyCaptureFailure(err).reason, err)
+	logger := logr.FromContextOrDiscard(ctx)
+	budget := w.config.Checkpoint.ResolveRetryLimit()
+	spent := 0
+	logger.V(1).Info("Resolved the capture's retry budget", "retries", budget)
+	for {
+		artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
+			cuInterposeRequested, contentUID, artifactPath)
+		if err == nil {
+			return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
+		}
+
+		failure := classifyCaptureFailure(err)
+		suspended, _ := executor.SuspendedSourceOf(err)
+		// Repeats of the dump come out of the same budget as fresh attempts, so a
+		// caller asking for two retries gets two, however they were spent.
+		spent += suspended.DumpRetriesUsed
+
+		retryWillFollow := failure.retryable && spent < budget && captureCtx.Err() == nil &&
+			w.workOrderStillCapturable(ctx, content)
+		w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, retryWillFollow)
+		if !retryWillFollow {
+			return w.markCheckpointFailed(ctx, content, terminalReason(failure, spent, budget), err)
+		}
+
+		spent++
+		emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning,
+			reasonCheckpointAttemptFailed,
+			fmt.Sprintf("Checkpoint attempt failed (%s); retrying, %d of %d retries used: %v",
+				failure.reason, spent, budget, err))
+		select {
+		case <-captureCtx.Done():
+			w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, false)
+			return w.markCheckpointFailed(ctx, content, failure.reason, err)
+		case <-time.After(attemptRetryDelay(spent)):
+		}
 	}
-	return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
+}
+
+// terminalReason separates a capture that used up its retries from one that
+// failed on its first try, which read the same before.
+func terminalReason(failure captureFailure, spent, budget int) string {
+	if failure.retryable && budget > 0 && spent >= budget {
+		return reasonRetriesExhausted
+	}
+	return failure.reason
+}
+
+// attemptRetryDelay spaces fresh attempts, each of which suspends the workload
+// again, so a node that is briefly unable to take one is not hammered.
+func attemptRetryDelay(attempt int) time.Duration {
+	delay := attemptRetryInitialDelay << (attempt - 1)
+	if delay > attemptRetryDelayCeiling {
+		return attemptRetryDelayCeiling
+	}
+	return delay
+}
+
+// workOrderStillCapturable reports whether the work order is still ours to act
+// on. The exclusion that holds it is in-memory, so nothing can take it
+// mid-capture, but it can be deleted or made terminal from elsewhere.
+func (w *NodeController) workOrderStillCapturable(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) bool {
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	if err := w.client.Get(ctx, client.ObjectKey{Name: content.Name}, current); err != nil {
+		return false
+	}
+	return current.UID == content.UID && current.DeletionTimestamp.IsZero() && !isContentTerminal(current)
 }
 
 // attemptCheckpoint runs one dump and reports what happened, writing no status.
@@ -632,14 +697,10 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		StoreID:               params.StoreID,
 		DumpRetryLimit:        params.DumpRetryLimit,
 	}
+	// Recovering the source belongs to runCheckpoint, which is the only place that
+	// knows whether another attempt follows.
 	artifact, err := executor.Checkpoint(ctx, w.runtime, log, req, w.config)
 	if err != nil {
-		if suspended, needsRecovery := executor.SuspendedSourceOf(err); needsRecovery {
-			// Nothing retries a capture yet, so no further attempt follows and the
-			// source is ended rather than left waiting. SNEP-394's retry loop is
-			// what will ask for it to be kept.
-			w.recoverSourceAfterFailedDump(ctx, log, params.Pod, params.ContainerPID, suspended, false)
-		}
 		return nil, fmt.Errorf("checkpoint: %w", err)
 	}
 
