@@ -307,3 +307,48 @@ listening port, a peer, or GPU state.
 The agent log carries the process diagnostics and the `restore.log` lines
 recorded at the failure. The workload's own output is in the restore pod's
 container logs.
+
+### checking the post-restore action
+
+When the checkpoint's container has a `lifecycle.postRestore` action, the agent
+checks its settings against the restore Pod's spec before restoring anything.
+The Pod's `nvidia.com/Restored` condition becomes `False` with reason
+`RestoreFailed`, and nothing is restored.
+
+Likely causes:
+- **The path is one of Snapshot's own files** in the snapshot-control volume.
+- **The port name is not one of the destination container's ports.**
+- **The HTTP path does not parse** as a URL path.
+
+### running the post-restore action
+
+After writing `restore-complete`, the agent notifies the restored application:
+it creates the file, or sends the HTTP POST, every `periodSeconds` until it
+succeeds or the restore deadline (`config.restore.timeoutSeconds`) passes. The
+restore fails, and the restored container is stopped, when no attempt
+succeeded.
+
+Likely causes:
+- **The file cannot be created.** Its directory does not exist in the restore
+  container, or the container's user cannot write it, for example on a
+  read-only mount or with `readOnlyRootFilesystem`. File actions run as the
+  container's user.
+- **The image has no shell.** File actions run a shell command in the
+  container, so the image needs one of the shells the
+  [Workload Contract](../reference/workload-contract.md#lifecycle-hooks)
+  lists.
+- **The application does not listen on the port at the restore Pod's IP**, for
+  example because it bound only to the source Pod's IP.
+- **The endpoint returns a status other than 2xx**, including a redirect, which
+  the agent does not follow.
+- **A NetworkPolicy blocks the agent.**
+
+The message carries the last attempt's error. The agent log shows every attempt
+at debug level.
+
+A file that already exists before the restore does not fail it: the agent takes
+it as the notification, so the restore succeeds and the application is never
+notified. Use a path that only Snapshot writes, such as one on an `emptyDir`
+that the restore Pod mounts for this purpose. A file on a volume that outlives
+the Pod, such as a `PersistentVolumeClaim`, stays there from an earlier restore
+until the application removes it.

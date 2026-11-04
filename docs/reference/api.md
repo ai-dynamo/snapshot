@@ -26,11 +26,12 @@ The namespaced binding for one container's snapshot; consumed by restore.
 
 `spec`:
 
-| Field                      | Type     | Required | Description                                                                               |
-|----------------------------|----------|----------|-------------------------------------------------------------------------------------------|
-| `source.podRef.name`       | string   | yes      | Name of the source pod, in the same namespace.                                            |
-| `source.podRef.uid`        | string   | no       | UID of the source pod, so the agent dumps that exact pod and not a same-named recreation. |
-| `source.podRef.containers` | []string | yes      | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must be a DNS label.          |
+| Field                      | Type     | Required | Description                                                                                                         |
+|----------------------------|----------|----------|---------------------------------------------------------------------------------------------------------------------|
+| `source.podRef.name`       | string   | yes      | Name of the source pod, in the same namespace.                                                                      |
+| `source.podRef.uid`        | string   | no       | UID of the source pod, so the agent dumps that exact pod and not a same-named recreation.                           |
+| `source.podRef.containers` | []string | yes      | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must be a DNS label.                                    |
+| `containers`               | []ContainerSnapshotConfig | no       | Settings for a checkpointed container, by `name`. At most one entry. See [Container settings](#container-settings). |
 
 `status`:
 
@@ -54,6 +55,7 @@ when it binds a `PodSnapshot`; callers never create it.
 | `source.podRef`         | PodReference | yes      | The pod to dump (`name` / `uid` / `containers`).                                                                                                                                                                 |
 | `source.nodeName`       | string       | yes      | Node the source pod runs on; selects the node agent that performs the dump.                                                                                                                                      |
 | `storage.storeID`       | string       | no       | Backend-neutral store binding, immutable with the rest of `spec`. When `storage` is present, the ID must be `store-v1-` followed by 64 lowercase hexadecimal characters. Omitted by legacy filesystem producers. |
+| `containers`            | []ContainerSnapshotConfig | no       | The `PodSnapshot`'s [container settings](#container-settings), with defaults filled in. Every restore of this checkpoint uses them, even after the `PodSnapshot` or `SnapshotJob` changes or is gone.            |
 
 `status`:
 
@@ -86,13 +88,13 @@ one declarative object.
 |----------------------------------------|-----------------|----------|------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `podTemplate`                          | PodTemplateSpec | yes      | —          | The workload to run and checkpoint. The controller injects the snapshot contract (control volume, readiness probe, seccomp); image, command, GPU resources, and sidecars are the caller's. |
 | `podSnapshotTemplate.targetContainers` | []string        | no       | `["main"]` | Container(s) to checkpoint. Exactly one in `v1alpha1`; each must name a container present in `podTemplate`.                                                                             |
+| `podSnapshotTemplate.containers`       | []ContainerSnapshotConfig | no       | —          | [Container settings](#container-settings), copied to the generated `PodSnapshot`. Each `name` must be in `targetContainers`.                                                            |
 | `activeDeadlineSeconds`                | int64           | no       | `3600`     | Total time allowed for scheduling, quiesce, and dump; applied to the batch/v1 Job.                                                                                                      |
 | `nonTargetArtifacts.containers`        | []string        | no       | —          | Non-target containers that write artifacts to the snapshot volume. Must be nonempty if `nonTargetArtifacts` is set.                                                               |
 | `nonTargetArtifacts.onFailure`         | string          | no       | `Retain`   | `Retain` keeps a failed attempt's artifacts. `Cleanup` lets the operator delete them once all writers have stopped.                                                                     |
 
-`podSnapshotTemplate` itself is required; its only field, `targetContainers`,
-defaults. The object's `metadata.name` must be at most 63 characters (it is used
-as a label value).
+`podSnapshotTemplate` itself is required; its fields are optional. The object's
+`metadata.name` must be at most 63 characters (it is used as a label value).
 
 `status`:
 
@@ -113,6 +115,52 @@ as a label value).
 | `Captured`  | The CRIU dump of the target container is complete (the `PodSnapshot` is Ready). |
 | `Completed` | The snapshot is durable and the source Job has finished.                      |
 | `Failed`    | A terminal failure occurred.                                                    |
+
+### Container settings
+
+An entry in `PodSnapshot.spec.containers` or
+`SnapshotJob.spec.podSnapshotTemplate.containers`, of type
+`ContainerSnapshotConfig`, sets lifecycle hooks for one checkpointed
+container. Every field but `name` is optional. What the workload
+must do for each hook is in the
+[Workload Contract](workload-contract.md#lifecycle-hooks).
+
+| Field                                          | Type          | Default | Description                                                                                  |
+|------------------------------------------------|---------------|---------|----------------------------------------------------------------------------------------------|
+| `name`                                         | string        | —       | Required. A container in `source.podRef.containers` (`targetContainers` in a `SnapshotJob`). |
+| `checkpointReadinessProbe.file.path`           | string        | —       | Checkpoint once a regular file exists at this path in the container.                         |
+| `checkpointReadinessProbe.httpGet.path`        | string        | `/`     | Checkpoint once a GET to this path on the Pod IP returns a 2xx status.                       |
+| `checkpointReadinessProbe.httpGet.port`        | int or string | —       | Required with `httpGet`. A port number, or the name of one of the container's ports.         |
+| `checkpointReadinessProbe.initialDelaySeconds` | int32         | `0`     | Seconds after the container starts before the first check.                                   |
+| `checkpointReadinessProbe.periodSeconds`       | int32         | `1`     | Seconds between checks.                                                                      |
+| `checkpointReadinessProbe.timeoutSeconds`      | int32         | `1`     | Seconds each check may take.                                                                 |
+| `checkpointReadinessProbe.successThreshold`    | int32         | `1`     | Checks in a row that must succeed.                                                           |
+| `lifecycle.postRestore.file.path`              | string        | —       | After restore, create an empty file at this path in the container.                           |
+| `lifecycle.postRestore.httpPost.path`          | string        | `/`     | After restore, send a POST with an empty body to this path on the Pod IP.                    |
+| `lifecycle.postRestore.httpPost.port`          | int or string | —       | Required with `httpPost`. A port number, or the name of one of the container's ports.        |
+| `lifecycle.postRestore.periodSeconds`          | int32         | `1`     | Seconds between attempts.                                                                    |
+| `lifecycle.postRestore.timeoutSeconds`         | int32         | `1`     | Seconds each attempt may take.                                                               |
+
+A probe sets exactly one of `file` or `httpGet`, and `postRestore` exactly one
+of `file` or `httpPost`. A file path is absolute and clean (no empty, `.` or
+`..` parts) and at most 4096 characters, and the two hooks' file paths must
+differ.
+
+Without a `checkpointReadinessProbe`, the node agent checkpoints once the
+container is Ready, as before. With one, the probe decides instead, and a
+`SnapshotJob` keeps the container's own readiness probe rather than replacing
+it with the `ready-for-snapshot` one. A probe the
+agent can never run fails the `PodSnapshot` with reason
+`InvalidCheckpointReadinessProbe`; while it waits, the source Pod gets a
+`WaitingForCheckpointReadiness` event.
+
+A restore succeeds only after its `postRestore` action succeeds, within
+`config.restore.timeoutSeconds`; an agent restart can extend that by one
+timeout, as
+[Lifecycle hooks](../design/lifecycle-hooks/README.md#recovery-after-an-agent-restart)
+explains. Its failures name the steps
+`checking the post-restore action` and `running the post-restore action`; see
+[Troubleshoot Restores](../troubleshooting/restores.md#checking-the-post-restore-action).
 
 ## Restore
 

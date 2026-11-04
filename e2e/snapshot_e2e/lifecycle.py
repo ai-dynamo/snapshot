@@ -18,17 +18,25 @@ from kubernetes import client
 from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
+from snapshot_e2e.workloads import CHECKPOINT_DIR
+from snapshot_e2e.workloads import CHECKPOINT_READY
 from snapshot_e2e.workloads import CONTAINER
 from snapshot_e2e.workloads import CONTROL_DIR
 from snapshot_e2e.workloads import CUDA_HOLD
 from snapshot_e2e.workloads import EXIT_REQUEST
 from snapshot_e2e.workloads import FILE_TOKEN
+from snapshot_e2e.workloads import HOOKS_PORT
+from snapshot_e2e.workloads import HOOKS_PORT_NAME
+from snapshot_e2e.workloads import HOOKS_RESUME_PATH
+from snapshot_e2e.workloads import HOOKS_STATUS_PATH
 from snapshot_e2e.workloads import OBSERVATIONS
+from snapshot_e2e.workloads import RELEASE_MARKER
 from snapshot_e2e.workloads import RESTORE_DONE
 from snapshot_e2e.workloads import RESTORE_PROXY
 from snapshot_e2e.workloads import SIGTERM_EXIT
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
+from snapshot_e2e.workloads import add_release_dir
 from snapshot_e2e.workloads import multi_restore_pod
 from snapshot_e2e.workloads import restore_pod
 from snapshot_e2e.workloads import restore_proxy
@@ -79,6 +87,8 @@ def create_podsnapshot(
     pod_name: str,
     pod_uid: str,
     container: str = CONTAINER,
+    *,
+    containers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
@@ -94,6 +104,8 @@ def create_podsnapshot(
             }
         },
     }
+    if containers is not None:
+        body["spec"]["containers"] = containers
     return client.CustomObjectsApi().create_namespaced_custom_object(
         GROUP,
         VERSION,

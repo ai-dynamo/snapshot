@@ -33,6 +33,29 @@ guides](../using-snapshot/README.md) -- missing the control volume, seccomp prof
 or readiness gate Snapshot relies on -- or that omits mounts or secrets the
 replica needs to start.
 
+When the container has a `checkpointReadinessProbe`, the agent waits for that
+probe, not for Ready, and the source pod has a `WaitingForCheckpointReadiness`
+event. The agent logs each failed check at debug level. Check a file probe from
+inside the source container. Check an HTTP probe against the pod's IP and port
+from another pod or the node, not against `localhost` inside the container: the
+agent sends the request from the node to the pod's IP. The wait has no deadline
+of its own, so a probe that never passes waits until you delete the
+`PodSnapshot`, or until the source Pod ends: it fails, exits or is deleted, or
+a `SnapshotJob`'s `activeDeadlineSeconds` stops it. The `PodSnapshot` then
+fails at most five minutes after the Pod ended.
+
+## A Checkpoint Fails with `InvalidCheckpointReadinessProbe`
+
+The agent refused the container's `checkpointReadinessProbe` before running it,
+because it can never pass: the container has no port with the probe's port
+name, or the probe's HTTP path does not parse as a URL path. The source pod also
+gets a Warning event with this reason.
+
+The `PodSnapshot`'s spec cannot change, so create a new one with a fixed probe.
+If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
+in `podSnapshotTemplate.containers` instead: the `SnapshotJob` copies its
+template into the `PodSnapshot` it creates.
+
 ## Checkpoint Fails at a Step
 
 ### resolving checkpoint artifact path

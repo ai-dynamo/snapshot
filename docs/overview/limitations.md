@@ -27,6 +27,9 @@ roadmap.
   tenants, work only when each sets `daemonset.nriHostNamespace` to its own host
   namespace. An installation with it empty acts on every restore Pod on its
   nodes.
+- [Lifecycle Hooks](../reference/workload-contract.md#lifecycle-hooks) support a
+  file or plain HTTP, without authentication or redirects. File hooks need
+  a shell in the image.
 
 ## GPU Device Selection and Restore Paths
 

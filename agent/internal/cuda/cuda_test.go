@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1362,5 +1363,47 @@ func TestDeviceRulesAllowReadWrite(t *testing.T) {
 				t.Fatalf("deviceRulesAllowReadWrite() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeConcurrency(t *testing.T) {
+	pids := []int{11, 12, 13, 14}
+	concurrency := len(pids)
+	dir := t.TempDir()
+	t.Setenv("FAKE_HELPER_DIR", dir)
+	installFakeCUDAHelper(t, fmt.Sprintf(`
+dir="$FAKE_HELPER_DIR"
+limit=%d
+case " $* " in
+	*" --action restore "*)
+		touch "$dir/running.$$" "$dir/started.$$"
+		for _ in $(seq 200); do
+			[ "$(ls "$dir" | grep -c '^started\.')" -ge "$limit" ] && break
+			sleep 0.01
+		done
+		ls "$dir" | grep -c '^running\.' >> "$dir/counts"
+		rm "$dir/running.$$"
+		;;
+esac
+`, concurrency))
+
+	if _, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", cudaCheckpointHelperBinary, concurrency, logr.Discard()); err != nil {
+		t.Fatalf("RestoreAndUnlockProcessTree() error = %v", err)
+	}
+
+	counts, err := os.ReadFile(filepath.Join(dir, "counts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	peak := 0
+	for _, count := range strings.Fields(string(counts)) {
+		n, err := strconv.Atoi(count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peak = max(peak, n)
+	}
+	if peak != concurrency {
+		t.Fatalf("peak concurrent restores = %d, want %d", peak, concurrency)
 	}
 }

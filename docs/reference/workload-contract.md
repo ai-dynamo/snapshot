@@ -33,7 +33,7 @@ through an environment variable and signals across it with sentinel files.
 | Name | Direction | Meaning |
 |------|-----------|---------|
 | `SNAPSHOT_CONTROL_DIR` | agent → workload | Path to the shared directory (mounted at `/snapshot-control`). The workload reads it here rather than hard-coding the path. |
-| `ready-for-snapshot` | workload writes | The workload is quiesced and safe to checkpoint. The source pod's readiness probe gates on this file. |
+| `ready-for-snapshot` | workload writes | The workload is quiesced and safe to checkpoint. Without a `checkpointReadinessProbe`, the source pod's readiness probe gates on this file. |
 | `restore-complete` | agent writes, workload waits | The workload's state is restored; it may resume. |
 | `SNAPSHOT_RESTORE_STANDBY` | deprecated | Restore containers no longer run their own command, so nothing has to stay inert. Snapshot never set it. |
 | `<framework>-restore-ready` | workload writes | A workload-chosen sentinel meaning "restored and serving." The restore pod's readiness probe gates on it. |
@@ -80,8 +80,10 @@ workload useful and operable.
 6. **SHOULD** roll back to a running state if the memory release in step 5
    fails, rather than signal readiness.
 7. **MUST** write `ready-for-snapshot` only once step 4 holds. This is the
-   promise the rest of the system trusts; the agent checkpoints the process as
-   soon as the pod reports Ready.
+   promise the rest of the system trusts; without a
+   `checkpointReadinessProbe`, the agent checkpoints the process as soon as the
+   pod reports Ready. With one, that probe must pass only once step 4 holds
+   instead; see [Lifecycle Hooks](#lifecycle-hooks).
 
 ### Restore (Restored Workload)
 
@@ -134,6 +136,41 @@ contract admits. Any inference server that fills in its own column of the table
 and meets the pod and runtime requirements below is snapshot-ready. See
 [Support a New Inference Server](#support-a-new-inference-server).
 
+## Lifecycle Hooks
+
+Instead of the readiness gate and `restore-complete`, a workload can name its
+own signals in the `PodSnapshot`'s
+[container settings](api.md#container-settings):
+
+- `checkpointReadinessProbe`: a file, or an HTTP GET that returns a 2xx, that
+  says the workload is safe to checkpoint. It replaces the Ready condition for
+  this purpose, so the readiness probe can mean "ready to serve". Step 7 applies
+  to it: succeed only once step 4 holds.
+- `lifecycle.postRestore`: after the restore, Snapshot creates a file, or sends
+  a POST with an empty body, that tells the workload it may resume. It replaces
+  step 9's wait on `restore-complete`.
+
+A workload that uses them:
+
+- **MUST** have a shell in the image for a file hook: `/bin/sh`,
+  `/usr/bin/sh`, `/bin/busybox`, or `/busybox/sh`. Snapshot reads and
+  creates the file by running a shell command in the container, as the
+  container's user, so the file can be anywhere that user can reach, volumes
+  included.
+- **MUST NOT** have the `postRestore` file in place before the restore, not even
+  in the checkpointed filesystem: Snapshot takes an existing file as the
+  notification, so the application is never notified. A path on an
+  `emptyDir` that only the restore Pod mounts avoids this. A file on a volume
+  that outlives the Pod, such as a `PersistentVolumeClaim`, stays there for the
+  next restore unless the workload removes it. In a restore Pod with several
+  destination containers, give each its own path, for example with `subPath`.
+- **MUST** answer HTTP on all of the container's addresses, not only the source
+  Pod's IP: requests go to the Pod IP, which changes on restore. A NetworkPolicy
+  must let the node agent reach the port.
+- **MUST** answer the `postRestore` POST with a 2xx and handle it more than
+  once. Snapshot retries until it gets one, and repeats it after an agent
+  restart. Snapshot does not follow redirects, so answer at the configured path.
+
 ## Pod Requirements
 
 The source pod gives the workload the shared directory and the conditions
@@ -145,8 +182,10 @@ fields are:
   equal to the container name, and `SNAPSHOT_CONTROL_DIR` set to that mount;
 - a seccomp profile that blocks io_uring (`profiles/block-iouring.json`), which
   CRIU cannot checkpoint (see [Security](../get-started/installation.md#allow-the-privileged-node-agent)); and
-- a readiness gate on `/snapshot-control/ready-for-snapshot`, so the pod reports
-  Ready only once it is safe to checkpoint.
+- without a `checkpointReadinessProbe`, a readiness gate on
+  `/snapshot-control/ready-for-snapshot`, so the pod reports Ready only once it
+  is safe to checkpoint. With one, the probe decides when to checkpoint, and the
+  pod keeps its own readiness probe; see [Lifecycle Hooks](#lifecycle-hooks).
 
 Restore pods carry different requirements: the `nvidia.com/restore-from`
 annotation, the source's command (Snapshot replaces it with its restore proxy),

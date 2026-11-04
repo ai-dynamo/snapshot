@@ -123,9 +123,6 @@ spec:
                         ContainerSnapshotConfig holds the settings for one checkpointed container,
                         matched to it by name. Snapshot copies them into the PodSnapshotContent at
                         checkpoint time, and every restore of that snapshot uses that copy.
-
-                        Not enabled yet: the operator rejects a checkpointReadinessProbe or a
-                        lifecycle until support is complete.
                       properties:
                         checkpointReadinessProbe:
                           description: |-
@@ -233,8 +230,8 @@ spec:
                                     File creates an empty regular file at the path, inside the container.
                                     Like an exec probe, Snapshot creates it by running a shell in the
                                     container, as the container's user, so the image needs a shell. The
-                                    parent directory must exist. If the file already exists before the
-                                    restore, the restore fails.
+                                    parent directory must exist. The file must not exist before the
+                                    restore: Snapshot takes an existing file as the notification.
                                   properties:
                                     path:
                                       description: |-
