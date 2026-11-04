@@ -80,11 +80,12 @@ func (e *sourceNeedsRecoveryError) Error() string { return e.cause.Error() }
 
 func (e *sourceNeedsRecoveryError) Unwrap() error { return e.cause }
 
-func sourceNeedsRecovery(err error, cudaHostPIDs []int, cuInterposePrepared, customStorageUsed bool) error {
+func sourceNeedsRecovery(err error, cudaHostPIDs []int, cuInterposePrepared, customStorageUsed bool, dumpRetriesUsed int) error {
 	return &sourceNeedsRecoveryError{cause: err, suspended: SuspendedSource{
 		GPUPIDs:             slices.Clone(cudaHostPIDs),
 		CuInterposePrepared: cuInterposePrepared,
 		CustomStorageUsed:   customStorageUsed,
+		DumpRetriesUsed:     dumpRetriesUsed,
 	}}
 }
 
@@ -102,6 +103,16 @@ type SuspendedSource struct {
 	// with the driver. That execution is torn down before recovery runs, so an in-place
 	// restore has nothing to restore from and the source can only be terminated.
 	CustomStorageUsed bool
+
+	// DumpRetriesUsed is how much of the retry budget this attempt already spent repeating
+	// its dump, so one budget covers repeats and fresh attempts alike.
+	DumpRetriesUsed int
+}
+
+// SuspendedSourceFailure marks err as having left the source suspended, carrying what
+// recovery needs to decide what becomes of it.
+func SuspendedSourceFailure(err error, suspended SuspendedSource) error {
+	return &sourceNeedsRecoveryError{cause: err, suspended: suspended}
 }
 
 // SuspendedSourceOf returns what a failed capture left behind, and whether the failure left
@@ -254,7 +265,11 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetriesRemaining)
 	if err != nil {
-		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator(), usePageBrokerGPU)
+		repeats := 0
+		if captureTimings != nil {
+			repeats = captureTimings.DumpRetries
+		}
+		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator(), usePageBrokerGPU, repeats)
 	}
 
 	dumpComplete = true
@@ -533,10 +548,10 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 			return timings, nil
 		}
 		if recordedTree == nil {
-			return nil, err
+			return timings, err
 		}
 		if attempt >= retriesRemaining {
-			return nil, err
+			return timings, err
 		}
 		// The probe decides, not the shape of the failure: the suspend is already
 		// paid for, and repeating the dump is only safe while CRIU can still seize
@@ -544,20 +559,22 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		dumpable, reason := dumpableFunc(snapshotruntime.HostProcPath, recordedTree)
 		if !dumpable {
 			log.V(1).Info("Not repeating the dump", "reason", reason)
-			return nil, err
+			return timings, err
 		}
-		log.Info("Repeating the dump against the suspended workload", "attempt", attempt+1, "error", err.Error())
-		timings.DumpRetries++
 		select {
 		case <-ctx.Done():
-			return nil, err
+			return timings, err
 		case <-time.After(dumpRetryDelay(attempt)):
 		}
 		// select picks at random when the wait and the cancellation are both ready,
 		// so the deadline gets the last word rather than one dump in two.
 		if ctx.Err() != nil {
-			return nil, err
+			return timings, err
 		}
+		// Counted as the repeat's dump starts, so a capture cancelled in the backoff
+		// does not spend a retry it never took.
+		timings.DumpRetries++
+		log.Info("Repeating the dump against the suspended workload", "attempt", timings.DumpRetries, "error", err.Error())
 	}
 }
 
