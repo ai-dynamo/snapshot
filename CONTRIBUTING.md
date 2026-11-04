@@ -121,7 +121,8 @@ the bulk of the review.
 
 Snapshot states one general minimum dependency floor — GPU Operator and CUDA
 driver version — in the README's
-[Prerequisites](README.md#prerequisites). If your feature only works on a
+[Prerequisites](README.md#prerequisites) and in
+[Baseline Prerequisites](docs/get-started/prerequisites.md#baseline-prerequisites). If your feature only works on a
 newer driver, GPU Operator, or other dependency version than that floor, add a
 row for it to the table in
 [Prerequisites by Feature](docs/get-started/prerequisites.md#prerequisites-by-feature) in the same pull request.

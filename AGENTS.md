@@ -183,10 +183,11 @@ rg -l '1\.27\.1' go.work */go.mod hack/tools.mk agent/Dockerfile .github/workflo
 vim operator/Dockerfile   # FROM golang:1.28-alpine
 ```
 
-**Document a feature's version floor in the compatibility reference, not just
+**Document a feature's version floor on the Prerequisites page, not just
 in an error message.** Snapshot's general minimum driver and GPU Operator
 version lives in the README's
-[Prerequisites](README.md#prerequisites). A feature that needs more than that
+[Prerequisites](README.md#prerequisites) and in
+[Baseline Prerequisites](docs/get-started/prerequisites.md#baseline-prerequisites). A feature that needs more than that
 floor must add a row to
 [docs/get-started/prerequisites.md](docs/get-started/prerequisites.md) in the same
 change — see

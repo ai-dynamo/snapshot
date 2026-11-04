@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Use your own engine or image
+# Use Your Own Engine or Image
 
 Snapshot is not limited to vLLM, SGLang and TensorRT-LLM. It works with any
 inference engine whose workload meets the

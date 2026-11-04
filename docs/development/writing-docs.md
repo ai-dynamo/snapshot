@@ -23,18 +23,22 @@ description.
 | --- | --- |
 | Which fields, annotations, labels, or conditions exist, and what are their defaults? | [API Reference](../reference/api.md) |
 | Which Helm values exist? | [Helm Chart Values](../reference/helm-values.md) |
-| Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Prerequisites](../get-started/prerequisites.md) for the driver and CUDA versions, baseline and per feature, and the README [Prerequisites](../../README.md#prerequisites) for the rest of the cluster requirements |
+| Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Prerequisites](../get-started/prerequisites.md), the baseline and the requirements per feature |
 | What must my workload or Pod do? | [Workload Contract](../reference/workload-contract.md), [Restore Pod Contract](../reference/restore-pod-contract.md) |
-| How do I install, configure, upgrade, or clean up? | [`docs/operate/`](../operate) |
+| How do I install or uninstall? | [Installation](../get-started/installation.md) |
+| How do I configure storage or upgrade? | [`docs/operate/`](../operate) |
 | How do I checkpoint a pod and restore it for the first time? | [Using Snapshot](../using-snapshot/README.md) |
-| It failed. Why, and what do I do? | [Troubleshooting](../troubleshooting/reading-a-failure-message.md) |
-| What is not supported? | [Limitations](../overview/limitations.md) |
-| How do the pieces fit together? | The [architecture overview](../overview/architecture-overview.md) |
+| It failed. Why, and what do I do? | [`docs/troubleshooting/`](../troubleshooting), starting at [Reading a Failure Message](../troubleshooting/reading-a-failure-message.md) |
+| What is not supported? | [Limitations and Known Issues](../overview/limitations.md) |
+| How do the pieces fit together? | [Architecture](../overview/architecture-overview.md) |
 | How does one subsystem or flow work inside? | A detailed page in [`docs/design/`](../design), such as [Multi-GPU](../design/multi-gpu/README.md) |
-| Why was it designed this way? | A [SNEP](../design/README.md) |
+| Why was it designed this way? | A [Snapshot Enhancement Proposal (SNEP)](../design/README.md) |
 | What changed in this release? | [CHANGELOG.md](../../CHANGELOG.md) |
 
-State every fact once, and link to it from other pages.
+One set of facts is listed twice, so a change updates both: the baseline
+prerequisites (the README [Prerequisites](../../README.md#prerequisites) and the
+[Prerequisites](../get-started/prerequisites.md) page). State every other fact
+once, and link to it from other pages.
 
 ## What a Change Touches
 
@@ -73,7 +77,7 @@ this page.
 | --- | --- | --- |
 | API reference | A table row per field, value, annotation, label, or condition: name, type, required, default, one sentence. Behavior a row cannot hold goes in a few sentences under the table, with a link to the page that has the procedure | Rows and a few sentences |
 | Contract | Short requirements that use the exact names the workload sees: environment variables, paths, annotations | About 12 lines |
-| Operations | One section: what it does, the settings, how to check it, where to look when it fails | About 25 lines |
+| Operate | One section: what it does, the settings, how to check it, where to look when it fails | About 25 lines |
 | Troubleshooting | One section per symptom, titled as the user sees it: the cause in a sentence or two, commands to confirm it, the fix | About 12 lines |
 | Prerequisites | One table row: the feature, the minimum versions it needs, a link to the page that documents it, and, when it is not obvious, what a node below the minimum shows | 1 row |
 | Limitations | One bullet: the limit, and a link to the workaround if there is one | A bullet |
@@ -89,7 +93,7 @@ easy to read.
 
 | | Overview | Detailed page |
 | --- | --- | --- |
-| Page | [Architecture](../overview/architecture-overview.md) | One per subsystem or flow in [`docs/overview/`](../overview) |
+| Page | [Architecture](../overview/architecture-overview.md) | One per subsystem or flow in [`docs/design/`](../design) |
 | Reader | Anyone who wants the mental model | A contributor changing that subsystem |
 | Holds | The components and what each is responsible for, the resources, how a checkpoint and a restore proceed in a few steps, where data lives, the trust boundaries | How the subsystem works: algorithms, ordering and why, queues and retries, failure reasons and timeouts, protocols and file formats |
 | Names | Components and resources | Functions, queues, files, reasons, and settings, as the code spells them |
@@ -208,7 +212,7 @@ The feature's own page links to that row and does not repeat the number.
   in a detailed page.
 - [ ] Names and terms match [Naming Conventions](naming.md).
 - [ ] A new page is linked from the index of its section: the
-  [Using Snapshot overview](../using-snapshot/README.md) for a guide, one line in the architecture
+  [Using Snapshot](../using-snapshot/README.md) for a guide, one line in the architecture
   overview for a detailed architecture page, and
   [docs/README.md](../README.md) for any other page.
 - [ ] A version requirement beyond the baseline has a row in Prerequisites.
