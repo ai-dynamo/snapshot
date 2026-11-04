@@ -196,6 +196,25 @@ func TestBuildMountPolicy(t *testing.T) {
 			wantExt: map[string]string{"/proc/acpi": "/proc/acpi"},
 		},
 		{
+			name: "the container's procfs and its read-only binds are left to CRIU",
+			mounts: []types.MountInfo{
+				{MountPoint: "/proc", FSType: "proc", Device: "0:61", IsOCIManaged: true},
+				{MountPoint: "/proc/sys", FSType: "proc", Device: "0:61", IsOCIManaged: true, ReadOnly: true},
+				{MountPoint: "/proc/acpi", FSType: "tmpfs", Device: "0:70", IsOCIManaged: true, ReadOnly: true},
+			},
+			wantExt:      map[string]string{"/proc/acpi": "/proc/acpi"},
+			wantNotInExt: []string{"/proc", "/proc/sys"},
+		},
+		{
+			name: "another procfs bound into the container stays external",
+			mounts: []types.MountInfo{
+				{MountPoint: "/proc", FSType: "proc", Device: "0:61", IsOCIManaged: true},
+				{MountPoint: "/host/proc", FSType: "proc", Device: "0:22", IsOCIManaged: true, ReadOnly: true},
+			},
+			wantExt:      map[string]string{"/host/proc": "/host/proc"},
+			wantNotInExt: []string{"/proc"},
+		},
+		{
 			name: "/dev/shm tmpfs is not externalized",
 			mounts: []types.MountInfo{
 				{MountPoint: "/dev/shm", FSType: "tmpfs"},

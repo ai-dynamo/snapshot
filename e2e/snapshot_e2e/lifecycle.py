@@ -1309,8 +1309,10 @@ def assert_restored_workload_mounts(
     """Check the restored workload's mount table, not the container's.
 
     The agent mounts securityfs for CRIU while it restores, and the restored
-    workload must not see it. With empty_dir, the workload must also still
-    have its own empty mount at that path.
+    workload must not see it. The workload runs in a PID namespace nested in
+    the container's, and must see a procfs of that namespace, with /proc/sys
+    still read-only. With empty_dir, the workload must also still have its own
+    empty mount at that path.
     """
     success_marker = "__snapshot_restored_mounts_verified__"
     # Each read is its own assignment, so set -e stops the script when the
@@ -1330,6 +1332,16 @@ def assert_restored_workload_mounts(
       echo "the restored workload sees securityfs"
       exit 1
     fi
+    # Look the workload up in its own /proc by the PID it has in its own
+    # namespace, as software such as UCX does with getpid(). The entry must be
+    # the workload itself, so its start time (stat field 22) must match.
+    inner_pid="$(awk '/^NSpid:/ {{print $NF}}' {PROC_ROOT}/$restored_pid/status)"
+    started="$(sed 's/.*) //' {PROC_ROOT}/$restored_pid/stat | cut -d' ' -f20)"
+    seen="$(sed 's/.*) //' {PROC_ROOT}/$restored_pid/root/proc/$inner_pid/stat | cut -d' ' -f20)"
+    test -n "$started"
+    test "$seen" = "$started"
+    printf '%s\\n' "$mounts" | awk \\
+      '$5 == "/proc/sys" && $6 ~ /^ro(,|$)/ && / - proc / {{ found = 1 }} END {{ exit !found }}'
     {empty_dir_checks if empty_dir else ""}
     echo {success_marker}
     """
