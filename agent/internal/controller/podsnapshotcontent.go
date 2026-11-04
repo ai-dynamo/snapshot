@@ -292,6 +292,9 @@ func (w *NodeController) runCheckpoint(
 		}
 
 		failure := classifyCaptureFailure(err)
+		// Measured while the source is still suspended, so the tree the dump was
+		// sizing is the one still there to size.
+		failure, err = w.refineFullStaging(ctx, failure, err, containerPID)
 		suspended, _ := executor.SuspendedSourceOf(err)
 		// Repeats of the dump come out of the same budget as fresh attempts, so a
 		// caller asking for two retries gets two, however they were spent.
@@ -384,8 +387,7 @@ func (w *NodeController) attemptCheckpoint(
 		StartedAt:            time.Now(),
 		CuInterposeRequested: cuInterposeRequested,
 		StoreID:              storeID,
-		// Read only once a dump has failed, so a capture that succeeds never reads it.
-		DumpRetryLimit: dumpRetryLimit,
+		DumpRetryLimit:       dumpRetryLimit,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here

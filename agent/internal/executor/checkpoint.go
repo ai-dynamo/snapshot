@@ -18,6 +18,7 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
@@ -517,6 +518,26 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
+// DumpSpaceError names the directory a dump ran out of room in. PageBroker
+// chooses that directory, so it is not always the node's staging volume, and a
+// caller measuring the wrong filesystem would reach the wrong conclusion about
+// whether retrying could ever help.
+type DumpSpaceError struct {
+	Dir string
+	Err error
+}
+
+func (e *DumpSpaceError) Error() string { return e.Err.Error() }
+func (e *DumpSpaceError) Unwrap() error { return e.Err }
+
+// withDumpDirectory records where a dump was writing when it filled the volume.
+func withDumpDirectory(err error, dir string) error {
+	if err == nil || !errors.Is(err, unix.ENOSPC) {
+		return err
+	}
+	return &DumpSpaceError{Dir: dir, Err: err}
+}
+
 // captureCheckpointFunc is overridden in tests: captureCheckpoint runs CRIU
 // against a live process tree, which a unit test cannot satisfy.
 var captureCheckpointFunc = captureCheckpoint
@@ -539,7 +560,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 
 	for attempt := 0; ; attempt++ {
-		err := dumpCheckpointFunc(ctx, criuOpts, criuSettings, data, state, checkpointDir, timings, log)
+		err := withDumpDirectory(dumpCheckpointFunc(ctx, criuOpts, criuSettings, data, state, checkpointDir, timings, log), checkpointDir)
 		if err == nil {
 			return timings, nil
 		}

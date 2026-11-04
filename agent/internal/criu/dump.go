@@ -4,6 +4,7 @@
 package criu
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	criulib "github.com/checkpoint-restore/go-criu/v8"
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -24,6 +26,18 @@ const (
 	criuConfFilename   = "criu.conf"
 	dumpLogTailMaxSize = 16 * 1024
 )
+
+// withFullDiskErrno re-reports a full staging volume as the errno for it.
+//
+// CRIU surfaces ENOSPC only as message text, so the string is matched here, in
+// one place, rather than by every caller that needs to tell a volume that is
+// out of room from any other dump failure.
+func withFullDiskErrno(err error) error {
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), unix.ENOSPC.Error()) {
+		return err
+	}
+	return errors.Join(err, unix.ENOSPC)
+}
 
 // BuildDumpOptions creates CRIU options from the container snapshot and settings.
 // It also writes the criu.conf file for options that cannot be passed via RPC.
@@ -126,7 +140,7 @@ func ExecuteDump(
 			"skip_mnt", criuOpts.GetSkipMnt(),
 			"dump_log_tail", readLogTail(dumpLogPath),
 		)
-		return 0, fmt.Errorf("CRIU dump failed: %w", err)
+		return 0, withFullDiskErrno(fmt.Errorf("CRIU dump failed: %w", err))
 	}
 
 	criuDumpDuration := time.Since(criuDumpStart)
