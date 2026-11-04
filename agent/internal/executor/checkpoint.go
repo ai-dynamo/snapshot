@@ -149,6 +149,9 @@ type CheckpointRequest struct {
 	// and when it could not, why. It is asked only after a dump has failed. Nil
 	// repeats whenever the workload is still dumpable.
 	DumpWorthRepeating func(err error) (bool, string)
+	// OnDumpRepeat reports each repeat as it is taken, so a repeat is visible while the
+	// capture is still running rather than only in how it ended. Nil reports nothing.
+	OnDumpRepeat func(repeat int, err error)
 
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
@@ -269,7 +272,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return nil, failStep(StepConfigureCheckpoint, err)
 	}
 
-	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetryLimit, req.DumpWorthRepeating)
+	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetryLimit, req.DumpWorthRepeating, req.OnDumpRepeat)
 	if err != nil {
 		repeats := 0
 		if captureTimings != nil {
@@ -547,7 +550,7 @@ func withDumpDirectory(err error, dir string) error {
 // against a live process tree, which a unit test cannot satisfy.
 var captureCheckpointFunc = captureCheckpoint
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, retryLimit int, worthRepeating func(error) (bool, string)) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, retryLimit int, worthRepeating func(error) (bool, string), onRepeat func(int, error)) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// GPU capture must finish before CRIU and filesystem capture.
@@ -594,6 +597,9 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		}
 		log.Info("Repeating the dump against the suspended workload", "attempt", attempt+1, "error", err.Error())
 		timings.DumpRetries++
+		if onRepeat != nil {
+			onRepeat(timings.DumpRetries, err)
+		}
 		select {
 		case <-ctx.Done():
 			return timings, err
