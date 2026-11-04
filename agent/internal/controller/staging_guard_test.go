@@ -211,3 +211,31 @@ func TestRefineFullStagingMeasuresASurvivingAncestor(t *testing.T) {
 	assert.Equal(t, reasonStagingUnavailable, got.reason)
 	assert.True(t, got.retryable)
 }
+
+// Repeating a dump is otherwise decided by probing the workload, which answers
+// whether another dump can run — not whether it could end any differently.
+func TestDumpWorthRepeating(t *testing.T) {
+	dumpDir := t.TempDir()
+	enospc := &executor.DumpSpaceError{Dir: dumpDir,
+		Err: errors.Join(errors.New("CRIU dump failed"), unix.ENOSPC)}
+
+	for _, tc := range []struct {
+		name    string
+		err     error
+		minimum int64
+		want    bool
+	}{
+		{name: "an image that can never fit is not repeated", err: enospc, minimum: 16 << 30},
+		{name: "an image that fits is repeated", err: enospc, minimum: 1 << 30, want: true},
+		{name: "any other failure is left to the probe", err: errors.New("criu exploded"), minimum: 16 << 30, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := guardController(dumpDir, 8<<30, tc.minimum, nil, nil)
+			got, reason := w.dumpWorthRepeating(context.Background(), 42)(tc.err)
+			assert.Equal(t, tc.want, got)
+			if !tc.want {
+				assert.NotEmpty(t, reason, "a refusal must say why")
+			}
+		})
+	}
+}

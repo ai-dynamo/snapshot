@@ -41,7 +41,7 @@ func TestAttemptCheckpointReportsFailureWithoutRecordingIt(t *testing.T) {
 	}
 
 	_, err := w.attemptCheckpoint(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/artifacts/uid", 0)
+		"main", "cid", 1, false, "uid", "/artifacts/uid", 0, nil)
 
 	if !errors.Is(err, want) {
 		t.Errorf("attemptCheckpoint() = %v, want %v", err, want)
@@ -64,7 +64,7 @@ func TestAttemptCheckpointPassesTheResolvedTarget(t *testing.T) {
 	}
 
 	if _, err := w.attemptCheckpoint(context.Background(), content, &corev1.Pod{},
-		"main", "cid", 42, true, "uid", "/artifacts/uid", 0); err != nil {
+		"main", "cid", 42, true, "uid", "/artifacts/uid", 0, nil); err != nil {
 		t.Fatalf("attemptCheckpoint() = %v", err)
 	}
 
@@ -105,7 +105,7 @@ func TestAttemptCheckpointInheritsTheCallersBudget(t *testing.T) {
 	want, _ := budget.Deadline()
 
 	if _, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/a", 0); err != nil {
+		"main", "cid", 1, false, "uid", "/a", 0, nil); err != nil {
 		t.Fatalf("attemptCheckpoint() = %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestAttemptCheckpointReportsAnExhaustedBudget(t *testing.T) {
 	defer cancel()
 
 	_, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/a", 0)
+		"main", "cid", 1, false, "uid", "/a", 0, nil)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("attemptCheckpoint() = %v, want %v", err, context.DeadlineExceeded)
@@ -338,4 +338,25 @@ func TestRunCheckpointSharesOneBudgetAcrossAttempts(t *testing.T) {
 	assert.Equal(t, reasonRetriesExhausted,
 		meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions,
 			snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
+}
+
+// A settled failure ended the checkpoint on its own terms. Reporting that the
+// retries ran out would bury the thing an operator has to act on.
+func TestTerminalReasonKeepsASettledReason(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failure captureFailure
+		want    string
+	}{
+		{"retries running out reads as exhaustion",
+			captureFailure{reason: reasonStagingUnavailable, retryable: true}, reasonRetriesExhausted},
+		{"an image too large keeps its own reason",
+			captureFailure{reason: reasonImageTooLarge}, reasonImageTooLarge},
+		{"a full store keeps its own reason",
+			captureFailure{reason: reasonStoreExhausted}, reasonStoreExhausted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, terminalReason(tc.failure, 2, 2))
+		})
+	}
 }

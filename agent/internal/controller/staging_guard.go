@@ -103,3 +103,20 @@ func nearestExistingDir(dir string) string {
 		current = parent
 	}
 }
+
+// dumpWorthRepeating refuses to repeat a dump nothing could make fit.
+//
+// Repeating is otherwise decided by probing the workload, which answers whether
+// another dump *can* run, not whether it could end differently. An image larger
+// than the volume it is written to ends the same way every time, and SNEP-394
+// asks that a capture which cannot be recovered fail immediately and keep its
+// retries rather than spend them proving the point.
+func (w *NodeController) dumpWorthRepeating(ctx context.Context, containerPID int) func(error) (bool, string) {
+	return func(err error) (bool, string) {
+		failure, _ := w.refineFullStaging(ctx, classifyCaptureFailure(err), err, containerPID)
+		if failure.reason == reasonImageTooLarge {
+			return false, "the image cannot fit the volume it is written to"
+		}
+		return true, ""
+	}
+}
