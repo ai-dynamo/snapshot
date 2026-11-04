@@ -373,7 +373,24 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  sourceMount,
 	})
 
-	result, err := execNSRestoreFunc(ctx, log, req, snap, bundleMount, containerCheckpointPath, gpu)
+	var kept *keptConnections
+	if req.Group != nil {
+		checkpointPath := artifactPath
+		if !direct {
+			checkpointPath = staged
+		}
+		kept, err = keepConnections(ctx, log, req.Group, manifest, req.TargetPodIP, snap.PlaceholderPID, checkpointPath)
+		if err != nil {
+			return RestoreResult{}, failStep(StepKeepPeerConnections, err)
+		}
+		// Lifting a hold that is gone succeeds, so this only acts when the
+		// restore fails before every member restored its sockets.
+		defer kept.close()
+	}
+	result, err := execNSRestoreFunc(ctx, log, req, snap, bundleMount, containerCheckpointPath, gpu, kept)
+	if kept != nil {
+		err = kept.wait(err)
+	}
 	if err != nil {
 		if usePageBrokerGPU {
 			// Abort may stop the placeholder before the controller can write its
@@ -386,6 +403,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			}
 		}
 		return RestoreResult{}, failStepUnlessNamed(StepRunNSRestore, err)
+	}
+	if kept != nil {
+		// CRIU waited at sockets-restored for the other members, which the
+		// summary counts as the group's time, not CRIU's.
+		result.CRIURestoreDuration -= kept.waited
+		groupDuration += kept.waited
 	}
 	gpuRestoreComplete = usePageBrokerGPU
 	lastMount := activeMounts[len(activeMounts)-1]
@@ -755,7 +778,7 @@ func existingMountPaths(targetRoot string, destinations []string, aliases map[st
 	return existing
 }
 
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string, gpu *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string, gpu *pagebroker.CustomStorageExecution, kept *keptConnections) (*RestoreInNamespaceResult, error) {
 
 	cmd, closeFiles, err := snapshotruntime.CommandInNamespaces(ctx, snap.PlaceholderPID, mp.NsFd(),
 		snap.TargetRoot, filepath.Join(nsmount.SnapshotBinSrc, "nsrestore"))
@@ -786,6 +809,9 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	cmd.Args = append(cmd.Args, args...)
+	if kept != nil {
+		kept.inherit(cmd)
+	}
 	if gpu != nil {
 		hostProc, err := os.Open(snapshotruntime.HostProcPath)
 		if err != nil {
