@@ -76,9 +76,23 @@ func (o podGroupSnapshotObservation) member(rank int) podGroupMemberObservation 
 	return podGroupMemberObservation{}
 }
 
-// maxConditionMessageLength is the API server's limit on a condition's message
-// and on a member's message.
-const maxConditionMessageLength = 32768
+const (
+	// maxConditionMessageLength is the API server's limit on a condition's
+	// message.
+	maxConditionMessageLength = 32768
+	// maxMemberMessageLength is the API server's limit on a member's message:
+	// short, so that the messages of 256 members fit in one object.
+	maxMemberMessageLength = 1024
+)
+
+// The messages of a member failed by a cause of the whole group. Each is short
+// and fixed, so a long cause is never copied into every member; the group's
+// Failed condition keeps the detail.
+const (
+	podGroupRefusedMemberMessage   = "the PodGroupSnapshot was refused; see its Failed condition"
+	podGroupDeadlineMemberMessage  = "the PodGroupSnapshot's deadline passed; see its Failed condition"
+	podGroupCancelledMemberMessage = "the PodGroupSnapshot was deleted before any member started; see its Failed condition"
+)
 
 // podGroupCause is why the operator fails a group or a member: a reason and its
 // message.
@@ -94,12 +108,14 @@ type podGroupCause struct {
 //
 // Each member's phase comes from the first matching row:
 //
-//	Failed         its PodSnapshot is Failed: that condition's reason and message
+//	Failed         its PodSnapshot is Failed: that condition's reason, and its
+//	               message cut to maxMemberMessageLength bytes
 //	Failed         its pinned PodSnapshot is gone, as the API server confirmed:
 //	               PodSnapshotDeleted
 //	Failed         the group was refused, passed its deadline, or was deleted
 //	               before any member started, and the member is not
-//	               Checkpointed: that cause's reason
+//	               Checkpointed: that cause's reason, with a fixed message
+//	               pointing to the group's Failed condition
 //	Checkpointed   its PodSnapshot is Ready and its content is seen: pins content
 //	Checkpointing  it has startedAt
 //	Admitted       it has a PodSnapshot: pins podSnapshot
@@ -154,10 +170,10 @@ func derivePodGroupSnapshotStatus(
 	outcomes := podGroupMemberOutcomesOf(next.Members)
 
 	pastDeadline := !now.Before(observed.deadline)
-	if cause := podGroupMemberCause(spec, observed, pastDeadline, outcomes.committed); cause != nil {
+	if cause := podGroupMemberCause(observed, pastDeadline, outcomes.committed); cause != nil {
 		for i := range next.Members {
 			if m := &next.Members[i]; !isCheckpointPhaseFinal(m.Phase) {
-				m.Phase, m.Reason, m.Message = snapshotv1alpha1.CheckpointPhaseFailed, cause.reason, capMessage(cause.message)
+				m.Phase, m.Reason, m.Message = snapshotv1alpha1.CheckpointPhaseFailed, cause.reason, cause.message
 			}
 		}
 	}
@@ -229,7 +245,8 @@ func deriveMemberStatus(m *snapshotv1alpha1.PodGroupSnapshotMemberStatus, observ
 	switch {
 	case snap != nil && snapshotv1alpha1.IsPodSnapshotFailed(snap):
 		cond := meta.FindStatusCondition(snap.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-		m.Phase, m.Reason, m.Message = snapshotv1alpha1.CheckpointPhaseFailed, cond.Reason, capMessage(cond.Message)
+		m.Phase, m.Reason = snapshotv1alpha1.CheckpointPhaseFailed, cond.Reason
+		m.Message = capMessage(cond.Message, maxMemberMessageLength)
 	case observed.podSnapshotDeleted && m.PodSnapshot != nil:
 		m.Phase, m.Reason = snapshotv1alpha1.CheckpointPhaseFailed, snapshotv1alpha1.ReasonPodSnapshotDeleted
 		m.Message = fmt.Sprintf("PodSnapshot %q was deleted before the member was checkpointed", m.PodSnapshot.Name)
@@ -249,20 +266,16 @@ func deriveMemberStatus(m *snapshotv1alpha1.PodGroupSnapshotMemberStatus, observ
 // podGroupMemberCause is the cause that fails every unfinished member: the
 // three ways the operator itself ends an attempt. It does not depend on the
 // group's Failed reason, so a group that failed because of one member still
-// fails the others at its deadline.
-func podGroupMemberCause(
-	spec *snapshotv1alpha1.PodGroupSnapshotSpec,
-	observed podGroupSnapshotObservation,
-	pastDeadline, committed bool,
-) *podGroupCause {
+// fails the others at its deadline. Its message is the member's fixed one,
+// since every member gets it; podGroupFailure explains the group's.
+func podGroupMemberCause(observed podGroupSnapshotObservation, pastDeadline, committed bool) *podGroupCause {
 	switch {
 	case observed.admission.state == podGroupAdmissionRefused:
-		return &podGroupCause{observed.admission.reason, observed.admission.message}
+		return &podGroupCause{observed.admission.reason, podGroupRefusedMemberMessage}
 	case pastDeadline:
-		return &podGroupCause{snapshotv1alpha1.PodGroupReasonDeadlineExceeded,
-			fmt.Sprintf("the deadline of %d seconds passed before the member was checkpointed", spec.DeadlineSeconds)}
+		return &podGroupCause{snapshotv1alpha1.PodGroupReasonDeadlineExceeded, podGroupDeadlineMemberMessage}
 	case observed.deleting && !committed:
-		return &podGroupCause{snapshotv1alpha1.PodGroupReasonCancelled, podGroupCancelledMessage}
+		return &podGroupCause{snapshotv1alpha1.PodGroupReasonCancelled, podGroupCancelledMemberMessage}
 	}
 	return nil
 }
@@ -561,17 +574,18 @@ func setPodGroupCondition(
 		Type:               condType,
 		Status:             conditionStatus,
 		Reason:             cause.reason,
-		Message:            capMessage(cause.message),
+		Message:            capMessage(cause.message, maxConditionMessageLength),
 		LastTransitionTime: metav1.NewTime(now),
 	})
 }
 
-// capMessage cuts a message to maxConditionMessageLength bytes, dropping any
-// character the cut splits. A member's message can already be at the limit,
-// and the group's message adds to it.
-func capMessage(message string) string {
-	if len(message) <= maxConditionMessageLength {
+// capMessage cuts a message to limit bytes, dropping any character the cut
+// splits. The API server counts characters, so the cut message always fits. A
+// PodSnapshot's message can be longer than a member's limit, and a group's
+// message adds to a member's.
+func capMessage(message string, limit int) string {
+	if len(message) <= limit {
 		return message
 	}
-	return strings.ToValidUTF8(message[:maxConditionMessageLength], "")
+	return strings.ToValidUTF8(message[:limit], "")
 }
