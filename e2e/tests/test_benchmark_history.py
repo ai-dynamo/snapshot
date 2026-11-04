@@ -228,10 +228,8 @@ def test_framework_workflow_checks_repository_before_using_gpu_cluster() -> None
     assert "continue-on-error" not in check
     assert all("continue-on-error" not in step for step in check["steps"])
     assert "if" not in check
-    assert framework_jobs["datadog-gate"]["needs"] == "check"
-    assert set(framework_jobs["e2e"]["needs"]) == {"check", "datadog-gate"}
+    assert framework_jobs["e2e"]["needs"] == "check"
     # Default job conditions block failed or skipped prerequisites.
-    assert "if" not in framework_jobs["datadog-gate"]
     assert "if" not in framework_jobs["e2e"]
 
 
