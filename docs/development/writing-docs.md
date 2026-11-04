@@ -22,8 +22,8 @@ description.
 | The reader asks | Page |
 | --- | --- |
 | Which fields, annotations, labels, or conditions exist, and what are their defaults? | [API Reference](../reference/api.md) |
-| Which Helm values exist? | [Helm Chart Values](../reference/helm-values.md) and the [chart README](../../charts/snapshot/README.md) |
-| Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Compatibility](../get-started/prerequisites.md) for the driver and CUDA versions, baseline and per feature, and the README [Prerequisites](../../README.md#prerequisites) for the rest of the cluster requirements |
+| Which Helm values exist? | [Helm Chart Values](../reference/helm-values.md) |
+| Which driver, CUDA, GPU Operator, kernel, or runtime versions do I need? | [Prerequisites](../get-started/prerequisites.md) for the driver and CUDA versions, baseline and per feature, and the README [Prerequisites](../../README.md#prerequisites) for the rest of the cluster requirements |
 | What must my workload or Pod do? | [Workload Contract](../reference/workload-contract.md), [Restore Pod Contract](../reference/restore-pod-contract.md) |
 | How do I install, configure, upgrade, or clean up? | [`docs/operate/`](../operate) |
 | How do I checkpoint a pod and restore it for the first time? | [Using Snapshot](../using-snapshot/README.md) |
@@ -34,10 +34,7 @@ description.
 | Why was it designed this way? | A [SNEP](../design/README.md) |
 | What changed in this release? | [CHANGELOG.md](../../CHANGELOG.md) |
 
-Two sets of facts are listed twice, so a change updates both: Helm values (the
-API reference and the chart README) and the baseline prerequisites (the README
-and the chart README). State every other fact once, and link to it from other
-pages.
+State every fact once, and link to it from other pages.
 
 ## What a Change Touches
 
@@ -47,7 +44,7 @@ answers. A new option or feature usually alters these:
 1. The API reference: its rows.
 2. A contract page: what it requires of a workload or Pod, if anything.
 3. One section in `docs/operate/`, if an operator must do something.
-4. [Compatibility](../get-started/prerequisites.md): one row, if the feature needs
+4. [Prerequisites](../get-started/prerequisites.md): one row, if the feature needs
    a newer driver, CUDA, GPU Operator, kernel, or runtime than the baseline.
 5. Architecture: the overview, if the change adds or removes a component, a
    resource, or a step of the checkpoint or restore flow; a detailed page, if it
@@ -62,7 +59,7 @@ leave them alone when it does not:
 | Using Snapshot | The default first-run path for checkpoint and restore changes |
 | Troubleshooting | An issue, a support case, or the request reports a failure that users hit |
 | Limitations | The change adds or removes an unsupported case |
-| README | A page is added or removed |
+| [docs/README.md](../README.md) | A page is added or removed |
 
 Where the change matters on any other page, add one sentence with a link.
 
@@ -78,7 +75,7 @@ this page.
 | Contract | Short requirements that use the exact names the workload sees: environment variables, paths, annotations | About 12 lines |
 | Operations | One section: what it does, the settings, how to check it, where to look when it fails | About 25 lines |
 | Troubleshooting | One section per symptom, titled as the user sees it: the cause in a sentence or two, commands to confirm it, the fix | About 12 lines |
-| Compatibility | One table row: the feature, the minimum versions it needs, a link to the page that documents it, and, when it is not obvious, what a node below the minimum shows | 1 row |
+| Prerequisites | One table row: the feature, the minimum versions it needs, a link to the page that documents it, and, when it is not obvious, what a node below the minimum shows | 1 row |
 | Limitations | One bullet: the limit, and a link to the workaround if there is one | A bullet |
 | CHANGELOG | What is new or changed, what to do on upgrade, a flag on CRD changes, and a link to the details. Do not restate the details | About 5 lines |
 | Guide | Numbered steps with runnable commands on one path. No alternatives, worked examples of options, or production hardening | |
@@ -122,14 +119,14 @@ the subsystem has no page yet, add one. A mechanism is explained once, in its de
 State a requirement as a minimum version ("580 or newer"). Say how to check it
 when that is not obvious, and what a node below it shows, such as a refusal that
 names a compatibility check or a CUDA error code. A feature that needs more than
-the baseline gets one row in [Compatibility](../get-started/prerequisites.md); see
+the baseline gets one row in [Prerequisites](../get-started/prerequisites.md); see
 [CONTRIBUTING.md](../../CONTRIBUTING.md#documenting-a-feature-specific-version-floor).
 The feature's own page links to that row and does not repeat the number.
 
 ## Before You Write
 
 1. Search for the fact:
-   `rg -n '<identifier or phrase>' README.md docs charts/snapshot/README.md CHANGELOG.md`.
+   `rg -n '<identifier or phrase>' README.md docs CHANGELOG.md`.
    If it exists, edit that text. Do not add a second copy.
 2. Write only what the change description, the code, the chart, the CRD, or a
    test states. A value or behavior you were not given is a question for the
@@ -164,7 +161,28 @@ The feature's own page links to that row and does not repeat the number.
   result belongs in a detailed architecture page.
 - Use a table, a list, or a command for a set of facts or steps.
 - Wrap prose at 80 columns. Tables and code blocks are exempt.
-- Use sentence case for headings. Use one H1 per page and do not skip levels.
+- Use Title Case for headings. Use one H1 per page and do not skip levels.
+- Make link text the title of the page it links to.
+- Do not use em dashes. Use a period, a comma, a colon, or parentheses.
+- Write notes as `> [!NOTE]`, not as bold text.
+- Do not start a sentence with "Because" or "So". Write a direct statement.
+- Write full words instead of contractions: "do not", "cannot", "it is".
+- Keep sentences under 30 words.
+- Cut filler ("simply", "just", "in order to", "it is important to note") and
+  marketing words ("seamless", "powerful", "leverage", "comprehensive").
+- Name the thing: write the field, flag, or command, not "configure the
+  appropriate settings".
+- Put the condition before the instruction: "To enable X, set `y`".
+- Write one action per numbered step.
+- Introduce every list, table, and code block with a complete sentence.
+- Use "can" for capability and "may" only for an uncertain outcome.
+- Write "for example", "that is", and "and so on" instead of "e.g.", "i.e.",
+  and "etc.".
+- Use the Oxford comma, do not write "please", and write "NVIDIA" in capitals.
+- Use "backend" only for `pvc` and `s3`. Use "storage option" for anything else.
+- Open every page with an intro that says what the page covers.
+- End a page with Next Steps as `- [Link] - Description`, with a capital letter
+  after the hyphen.
 - Write short, active, present-tense sentences. Name the actor: "The operator
   deletes the directory", not "The directory is deleted".
 - Address the reader as "you", and write steps as imperatives.
@@ -191,9 +209,9 @@ The feature's own page links to that row and does not repeat the number.
 - [ ] Names and terms match [Naming Conventions](naming.md).
 - [ ] A new page is linked from the index of its section: the
   [Using Snapshot overview](../using-snapshot/README.md) for a guide, one line in the architecture
-  overview for a detailed architecture page, and the README "Documentation"
-  index for any other page.
-- [ ] A version requirement beyond the baseline has a row in Compatibility.
+  overview for a detailed architecture page, and
+  [docs/README.md](../README.md) for any other page.
+- [ ] A version requirement beyond the baseline has a row in Prerequisites.
 - [ ] A user-visible change has a CHANGELOG entry.
 - [ ] Every relative link resolves.
 

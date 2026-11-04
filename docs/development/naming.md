@@ -73,7 +73,7 @@ out of the reference.
 | destination container | The container in a restore Pod that you restore into. `nvidia.com/restore-container-map` maps the target container to one or more destination containers | `target container` or `restore target` for this side |
 | node agent | The per-node DaemonSet (`snapshot-agent`) that drives CRIU and `cuda-checkpoint`. After the first use, "agent" is enough | `agent` for an AI assistant |
 | PageBroker | The broker sidecar of the node agent | `pagebroker` or `page broker` in prose |
-| baseline | The minimum versions every installation needs, in the baseline row of Compatibility | `general floor`, `default requirements` |
+| baseline | The minimum versions every installation needs, in the baseline row of Prerequisites | `general floor`, `default requirements` |
 
 Add a row when a concept could be called two ways, or when one definition has to
 hold across pages. A feature name does not need a row.
