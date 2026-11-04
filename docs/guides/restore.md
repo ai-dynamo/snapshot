@@ -141,7 +141,9 @@ whose source names the artifact rather than a pod.
    marks both `Ready` with reason `ArtifactImported`. That means the reference is
    accepted. It does not mean the bytes are anywhere. The operator cannot check
    node-local storage, and a restore on a node that does not hold the artifact
-   yet waits for it (`ArtifactPending`), as it does for any artifact.
+   yet waits for it (`ArtifactPending`) until it arrives. This is where an import
+   differs from a checkpoint taken in the cluster, whose restore fails when its
+   artifact is missing: that `Ready` promises the bytes, an import's does not.
 
 4. **Restore** with `nvidia.com/restore-from: <name>`, as above.
 

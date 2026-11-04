@@ -2058,13 +2058,17 @@ func TestPreflightRestoreOfAnImportFindsTheArtifactUnderItsCapturedUID(t *testin
 	snapshot, content := importedSnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
 
-	// Nothing yet under the captured UID: the restore waits, as for any artifact not there yet,
-	// and does not look under the importing content's own UID instead.
+	// Nothing yet under the captured UID: the restore waits for it to arrive, unlike a checkpoint
+	// taken here whose Ready promised the bytes, and does not look under the importing content's
+	// own UID instead.
 	own, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(own, 0o700))
 	_, err = w.preflightRestore(context.Background(), pod)
 	require.Error(t, err)
+	var pending *restorePendingError
+	require.True(t, errors.As(err, &pending), "a missing imported artifact is still arriving: %v", err)
+	assert.Equal(t, "ArtifactPending", pending.reason)
 	assert.Contains(t, err.Error(), importedArtifactUID)
 
 	// The artifact as it was captured, and as a stager or a copy from S3 lays it down: its

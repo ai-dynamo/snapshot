@@ -541,7 +541,8 @@ func buildImportedPodSnapshotContent(snap *snapshotv1alpha1.PodSnapshot, content
 // markImportedContentReady records an import as Ready: accepted as a reference to its artifact. It
 // says nothing about where the artifact's bytes are, which the operator cannot know — with a
 // node-local snapshot store the answer differs per node. A restore on a node without them waits
-// for them (ArtifactPending), the same as for a checkpoint whose store is slow to show it.
+// for them (ArtifactPending), where a checkpoint taken here fails its restore instead: its Ready
+// promises the bytes, an import's does not.
 func (sr *PodSnapshotReconciler) markImportedContentReady(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) error {
 	if snapshotv1alpha1.IsPodSnapshotContentSucceeded(content) {
 		return nil

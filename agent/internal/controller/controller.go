@@ -757,7 +757,14 @@ func (w *NodeController) resolveRestoreArtifact(
 		return nil, err
 	}
 	if !ready {
-		// Ready guarantees a usable artifact; absence is stale state, not a retryable dependency.
+		// An import is Ready as a reference: its bytes reach each node by other means, such as a
+		// pre-warm from object storage, so on a node they have not reached yet they are a
+		// dependency still arriving. For a checkpoint taken here, Ready guarantees a usable
+		// artifact; absence is stale state, not a retryable dependency.
+		if content.IsImported() {
+			return nil, newRestorePendingError("ArtifactPending",
+				fmt.Sprintf("Waiting for imported artifact %s to reach this node", path))
+		}
 		return nil, fmt.Errorf("artifact %s for Ready PodSnapshotContent %s is missing", path, content.Name)
 	}
 	return &restoreArtifact{
