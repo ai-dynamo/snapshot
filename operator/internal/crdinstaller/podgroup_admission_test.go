@@ -131,7 +131,8 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 	})
 
 	// The status rules compare every entry with every member, so the largest
-	// group must stay within the API server's runtime cost limits.
+	// group must stay within the API server's runtime cost limits. Its 256
+	// messages, each at the limit, must also fit in one object.
 	t.Run("status-256-entries-at-maximum-lengths", func(t *testing.T) {
 		snapshot := newPodGroupSnapshot("status-256-entries", 0)
 		snapshot.Spec.Members = longestSnapshotMembers()
@@ -143,6 +144,7 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 		require.NoError(t, cl.Status().Update(t.Context(), snapshot))
 		for i := range snapshot.Status.Members {
 			snapshot.Status.Members[i].Phase = snapshotv1.CheckpointPhaseAdmitted
+			snapshot.Status.Members[i].Message = strings.Repeat("x", 1024)
 		}
 		require.NoError(t, cl.Status().Update(t.Context(), snapshot))
 	})
@@ -174,8 +176,11 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 		{"reason-not-camelcase", nil, func(ms *[]member) {
 			(*ms)[0].Reason = "member failed"
 		}, "members[0].reason in body should match"},
+		{"message-at-the-limit", nil, func(ms *[]member) {
+			(*ms)[0].Message = strings.Repeat("x", 1024)
+		}, ""},
 		{"message-too-long", nil, func(ms *[]member) {
-			(*ms)[0].Message = strings.Repeat("x", 32769)
+			(*ms)[0].Message = strings.Repeat("x", 1025)
 		}, "status.members[0].message: Too long"},
 		{"node-name-too-long", nil, func(ms *[]member) {
 			(*ms)[0].NodeName = strings.Repeat("x", 254)
@@ -279,6 +284,7 @@ func TestPodGroupRestoreAdmission(t *testing.T) {
 		require.NoError(t, cl.Status().Update(t.Context(), restore))
 		for i := range restore.Status.Members {
 			restore.Status.Members[i].Phase = snapshotv1.RestorePhaseAdmitted
+			restore.Status.Members[i].Message = strings.Repeat("x", 1024)
 		}
 		require.NoError(t, cl.Status().Update(t.Context(), restore))
 	})
@@ -316,8 +322,11 @@ func TestPodGroupRestoreAdmission(t *testing.T) {
 		{"reason-not-camelcase", nil, func(ms *[]member) {
 			(*ms)[0].Reason = "member failed"
 		}, "members[0].reason in body should match"},
+		{"message-at-the-limit", nil, func(ms *[]member) {
+			(*ms)[0].Message = strings.Repeat("x", 1024)
+		}, ""},
 		{"message-too-long", nil, func(ms *[]member) {
-			(*ms)[0].Message = strings.Repeat("x", 32769)
+			(*ms)[0].Message = strings.Repeat("x", 1025)
 		}, "status.members[0].message: Too long"},
 		{"two-containers", nil, func(ms *[]member) {
 			(*ms)[0].Containers = []snapshotv1.PodGroupRestoreContainerStatus{

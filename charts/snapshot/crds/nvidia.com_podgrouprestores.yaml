@@ -296,9 +296,11 @@ spec:
                       minLength: 1
                       type: string
                     message:
-                      description: Message is a human-readable explanation of the
-                        phase.
-                      maxLength: 32768
+                      description: |-
+                        Message is a human-readable explanation of the phase, in at most 1024
+                        characters, so that the messages of 256 members fit in one object.
+                        Longer explanations belong in the group's conditions.
+                      maxLength: 1024
                       type: string
                     nodeName:
                       description: NodeName is the node the restore Pod runs on, pinned

@@ -183,9 +183,11 @@ type PodGroupRestoreMemberStatus struct {
 	// +kubebuilder:validation:Pattern=`^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`
 	Reason string `json:"reason,omitempty"`
 
-	// Message is a human-readable explanation of the phase.
+	// Message is a human-readable explanation of the phase, in at most 1024
+	// characters, so that the messages of 256 members fit in one object.
+	// Longer explanations belong in the group's conditions.
 	// +optional
-	// +kubebuilder:validation:MaxLength=32768
+	// +kubebuilder:validation:MaxLength=1024
 	Message string `json:"message,omitempty"`
 }
 
