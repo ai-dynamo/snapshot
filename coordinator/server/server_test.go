@@ -28,6 +28,10 @@ const (
 	codeInsufficientResources = 10023
 )
 
+// codeMaximumConsumers is the JetStream API error code the embedded server
+// refuses a consumer past its stream's limit with.
+const codeMaximumConsumers = 10026
+
 // requireCode checks that err is a JetStream API error with code.
 func requireCode(t *testing.T, err error, code int, msgAndArgs ...any) {
 	t.Helper()
@@ -47,9 +51,9 @@ func fill(ctx context.Context, m *member, ns session.Namespace, size int) error 
 }
 
 // TestLimits covers the limits the embedded server enforces: each bucket's
-// largest value, and the library bucket's number of keys, neither of which
-// reserves memory, a message over the server's largest, and the one memory cap
-// every session shares.
+// largest value and number of consumers, and the library bucket's number of
+// keys, none of which reserves memory, a message over the server's largest,
+// and the one memory cap every session shares.
 func TestLimits(t *testing.T) {
 	t.Run("more than ten sessions fit within the default memory cap", func(t *testing.T) {
 		h := newHarness(t)
@@ -78,6 +82,33 @@ func TestLimits(t *testing.T) {
 			"the session's Snapshot bucket is not affected")
 		require.NoError(t, h.connect(other, 0).insert(ctx, session.NamespaceLibrary, "comm-8", []byte("id")),
 			"another session is not affected")
+	})
+
+	t.Run("a bucket refuses a member's consumers past its limit, in its session only", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := within(t)
+		spec, other := h.ensure(1), h.ensure(1)
+		js, err := jetstream.New(h.connect(spec, 0).nc)
+		require.NoError(t, err)
+		for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)),
+			session.LibraryBucket(string(spec.UID))} {
+			stream, err := js.Stream(ctx, "KV_"+bucket)
+			require.NoError(t, err)
+			info, err := stream.Info(ctx)
+			require.NoError(t, err)
+			// Durable consumers outlive their creator's connection, so only the
+			// limit bounds them.
+			durable := func(i int) error {
+				_, err := stream.CreateConsumer(ctx, jetstream.ConsumerConfig{Durable: fmt.Sprintf("durable-%d", i),
+					AckPolicy: jetstream.AckExplicitPolicy})
+				return err
+			}
+			for i := info.State.Consumers; i < info.Config.MaxConsumers; i++ {
+				require.NoError(t, durable(i), "bucket %s", bucket)
+			}
+			requireCode(t, durable(info.Config.MaxConsumers), codeMaximumConsumers, "bucket %s", bucket)
+		}
+		h.connect(other, 0) // which watches another session's Snapshot bucket
 	})
 
 	t.Run("a value over each cap", func(t *testing.T) {

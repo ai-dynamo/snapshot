@@ -217,11 +217,13 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 			s.log.Error(err, "Deleting the buckets of a session that failed to open failed", "attempt", uid)
 		}
 	}()
-	if a.snapshot, err = s.createBucket(ctx, session.SnapshotBucket(uid), 0, s.cfg.MaxValue); err != nil {
+	members := len(spec.Members)
+	if a.snapshot, err = s.createBucket(ctx, session.SnapshotBucket(uid), 0, s.cfg.MaxValue,
+		members*session.MaxConsumersPerMember+coordinatorConsumers); err != nil {
 		return nil, err
 	}
-	if _, err = s.createBucket(ctx, session.LibraryBucket(uid), s.cfg.MaxLibraryKeys,
-		s.cfg.MaxLibraryValue); err != nil {
+	if _, err = s.createBucket(ctx, session.LibraryBucket(uid), s.cfg.MaxLibraryKeys, s.cfg.MaxLibraryValue,
+		members*session.MaxLibraryConsumersPerMember); err != nil {
 		return nil, err
 	}
 	if _, err = a.snapshot.Put(ctx, session.KeyMeta, meta); err != nil {
@@ -233,12 +235,18 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 	return a, nil
 }
 
-// createBucket creates one in-memory bucket, bounded by its largest value and,
-// unless maxKeys is zero, by its number of keys, neither of which reserves
-// memory. JetStream's key-value configuration has no key limit, so it is set on
-// the bucket's stream, before any member can reach the bucket.
-func (s *Server) createBucket(ctx context.Context, bucket string, maxKeys, maxValue int) (jetstream.KeyValue,
-	error) {
+// coordinatorConsumers is how many consumers the coordinator holds on each
+// Snapshot bucket: the watch of the departures and the end that follow starts.
+// Its connection is in-process and never reconnects.
+const coordinatorConsumers = 1
+
+// createBucket creates one in-memory bucket, bounded by its largest value, by
+// how many consumers it may have, and, unless maxKeys is zero, by its number of
+// keys, none of which reserves memory. JetStream's key-value configuration has
+// neither a consumer nor a key limit, so both are set on the bucket's stream,
+// before any member can reach the bucket.
+func (s *Server) createBucket(ctx context.Context, bucket string, maxKeys, maxValue, maxConsumers int) (
+	jetstream.KeyValue, error) {
 	kv, err := s.js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:       bucket,
 		Storage:      jetstream.MemoryStorage,
@@ -248,15 +256,15 @@ func (s *Server) createBucket(ctx context.Context, bucket string, maxKeys, maxVa
 	if err != nil {
 		return nil, fmt.Errorf("create bucket %s: %w", bucket, err)
 	}
-	if maxKeys == 0 {
-		return kv, nil
-	}
 	stream, err := s.js.Stream(ctx, "KV_"+bucket)
 	if err != nil {
 		return nil, fmt.Errorf("bound bucket %s: %w", bucket, err)
 	}
 	cfg := stream.CachedInfo().Config
-	cfg.MaxMsgs = int64(maxKeys)
+	cfg.MaxConsumers = maxConsumers
+	if maxKeys != 0 {
+		cfg.MaxMsgs = int64(maxKeys)
+	}
 	if _, err := s.js.UpdateStream(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("bound bucket %s: %w", bucket, err)
 	}

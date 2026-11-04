@@ -66,9 +66,11 @@ func TestEnsure(t *testing.T) {
 		assert.NotZero(t, meta.Epoch)
 		assert.Equal(t, session.MaxValue, meta.MaxValue)
 		assert.Equal(t, session.MaxLibraryValue, meta.MaxLibraryValue)
-		for bucket, limits := range map[string][2]int{
-			session.SnapshotBucket(string(spec.UID)): {-1, session.MaxValue},
-			session.LibraryBucket(string(spec.UID)):  {session.MaxLibraryKeys, session.MaxLibraryValue},
+		for bucket, limits := range map[string][3]int{
+			session.SnapshotBucket(string(spec.UID)): {-1, session.MaxValue,
+				3*session.MaxConsumersPerMember + coordinatorConsumers},
+			session.LibraryBucket(string(spec.UID)): {session.MaxLibraryKeys, session.MaxLibraryValue,
+				3 * session.MaxLibraryConsumersPerMember},
 		} {
 			stream, err := h.srv.js.Stream(within(t), "KV_"+bucket)
 			require.NoError(t, err)
@@ -76,6 +78,7 @@ func TestEnsure(t *testing.T) {
 			assert.Equal(t, int64(-1), cfg.MaxBytes, "bucket %s must reserve no memory", bucket)
 			assert.Equal(t, int64(limits[0]), cfg.MaxMsgs, "bucket %s", bucket)
 			assert.Equal(t, int32(limits[1]+valueHeadroom), cfg.MaxMsgSize, "bucket %s", bucket)
+			assert.Equal(t, limits[2], cfg.MaxConsumers, "bucket %s", bucket)
 			assert.Equal(t, jetstream.MemoryStorage, cfg.Storage, "bucket %s", bucket)
 			assert.Equal(t, 1, cfg.Replicas, "bucket %s", bucket)
 		}

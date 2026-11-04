@@ -81,6 +81,49 @@ func TestReconnect(t *testing.T) {
 			require.NoError(t, s.Err())
 		}
 	})
+
+	t.Run("the most a member waits on at once stays within its buckets' consumer limits across breaks",
+		func(t *testing.T) {
+			ctx := within(t)
+			ses := h.session(t, 2)
+			sessions := ses.connectAll(t)
+			get := func(ns session.Namespace, key string) <-chan error {
+				out := make(chan error, 1)
+				go func() {
+					_, err := sessions[0].Namespace(ns).Get(ctx, key, time.Minute)
+					out <- err
+				}()
+				return out
+			}
+			// What session.MaxConsumersPerMember and
+			// session.MaxLibraryConsumersPerMember allow besides the end the client
+			// always watches: three waits on the Snapshot bucket and one on the
+			// library bucket.
+			waits := []<-chan error{
+				barrier(ctx, sessions[0], "admitted"),
+				get(session.NamespaceSnapshot, "ip.1"),
+				get(session.NamespaceCuInterpose, "command"),
+				get(session.NamespaceLibrary, "comm"),
+			}
+			for _, wait := range waits {
+				requireWaiting(t, wait)
+			}
+			// Each break replaces every one of the member's consumers; a write
+			// completes only once the member has reconnected.
+			for i := range 2 {
+				ses.cut(0)
+				require.NoError(t, sessions[0].Namespace(session.NamespaceSnapshot).Insert(ctx,
+					fmt.Sprintf("break.%d", i), nil))
+			}
+			require.NoError(t, sessions[1].Barrier(ctx, "admitted"))
+			for ns, key := range map[session.Namespace]string{session.NamespaceSnapshot: "ip.1",
+				session.NamespaceCuInterpose: "command", session.NamespaceLibrary: "comm"} {
+				require.NoError(t, sessions[1].Namespace(ns).Insert(ctx, key, []byte("v")))
+			}
+			for _, wait := range waits {
+				require.NoError(t, <-wait)
+			}
+		})
 }
 
 // TestCoordinatorLost restarts the coordinator under a session: a member that
