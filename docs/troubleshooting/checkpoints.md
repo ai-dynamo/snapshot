@@ -56,6 +56,37 @@ If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
 in `podSnapshotTemplate.containers` instead: the `SnapshotJob` copies its
 template into the `PodSnapshot` it creates.
 
+## A Checkpoint Fails with `RetriesExhausted`
+
+The checkpoint was retried as often as `config.checkpoint.retryLimit` allows and
+failed every time. The message names how many retries were spent and the last
+cause: `after 2 of 2 retries: <cause>`. Treat the cause as the failure; the
+retries only say it did not clear on its own.
+
+```bash
+kubectl get podsnapshotcontent <name> -o jsonpath='{.status.conditions[?(@.type=="Failed")].message}'
+kubectl get events -n <ns> --field-selector involvedObject.name=<source-pod> | grep CheckpointAttemptFailed
+```
+
+Each attempt a retry follows emits a `CheckpointAttemptFailed` event on the
+source pod, including the repeats of the dump, so the events show what each
+attempt hit rather than only how the checkpoint ended. The attempt that ended
+the checkpoint emits one too, under the reason recorded on the checkpoint.
+
+## A Checkpoint Fails with `ImageTooLarge`, `StagingUnavailable`, or `StoreExhausted`
+
+Three different shortages, which need different fixes:
+
+| Reason | What ran out | What to do |
+| --- | --- | --- |
+| `StagingUnavailable` | The node's staging volume was occupied when the checkpoint needed it. Retried automatically | Nothing, unless it repeats: then stagger the checkpoints sharing that node |
+| `ImageTooLarge` | The image cannot fit the volume it is written to, however empty it is. The message gives the shortfall in bytes | Raise `pageBroker.staging.sizeLimit`, and the agent memory limit with it. See [Configure Storage](../operate/configure-storage.md) |
+| `StoreExhausted` | The destination store is full. No retry on this node frees room there | Free space in the store, or point the checkpoint at one with room |
+
+`ImageTooLarge` is reported two ways: refused before the dump starts, from an
+estimate of the image, or after a dump has run out of room part-written. Both
+name the same shortfall.
+
 ## Checkpoint Fails at a Step
 
 ### resolving checkpoint artifact path

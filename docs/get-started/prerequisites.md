@@ -37,6 +37,15 @@ S3 backend. The chart ships the agent and PageBroker as a pair, so
 `image.agent.tag` selects both. With S3, you do not need a `ReadWriteMany`
 storage class. See [Other Backends](../operate/configure-storage.md#other-backends).
 
+### GPU Memory Written Straight to the Store
+
+Requires a CUDA user-mode driver (`libcuda.so`) 13.4 or newer, which
+`nvidia-smi` reports as `CUDA UMD Version`. Below it the driver offers no
+PageBroker CustomStorage support and PageBroker skips it silently: the
+checkpoint still succeeds, with the GPU memory going into the CRIU image and
+counting against the node's staging volume instead. The artifact manifest
+records `cudaRestore.customStorage` for the checkpoint that was taken.
+
 ### Multi-GPU Workloads
 
 Requires the baseline if the workload holds no multicast groups. Otherwise,
