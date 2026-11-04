@@ -22,6 +22,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
+	"github.com/ai-dynamo/snapshot/agent/internal/group"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -140,6 +141,12 @@ type CheckpointRequest struct {
 	// CuInterposeRequested is the workload's explicit opt-in. Capture then fails unless
 	// every CUDA process loaded the shim. Without it, a loaded shim is still captured.
 	CuInterposeRequested bool
+
+	// Group, for a member of a pod group, runs the capture as the member's part
+	// in the group's capture. Nil for a Pod captured on its own. The caller joins
+	// the group and leaves it once the capture has succeeded. A failed capture
+	// fails the attempt for every member.
+	Group *group.Member
 }
 
 type checkpointPhaseTimings struct {
@@ -148,6 +155,9 @@ type checkpointPhaseTimings struct {
 	OverlayCaptureDuration time.Duration
 	// DumpRetries counts repeats of the dump against the same suspended tree.
 	DumpRetries int
+	// GroupDuration is the time a pod group member spent at the group's
+	// barriers, mostly waiting for the other members.
+	GroupDuration time.Duration
 }
 
 // Checkpoint captures a container through PageBroker and commits its artifact.
@@ -162,6 +172,13 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	ctx = logr.NewContext(ctx, log)
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
+	if req.Group != nil {
+		defer func() {
+			if retErr != nil {
+				failGroup(ctx, log, req.Group)
+			}
+		}()
+	}
 
 	bound := req.StoreID != ""
 	var target *pagebroker.ArtifactTarget
@@ -236,6 +253,16 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return nil, failStep(StepInspectCuInterpose, err)
 	}
+	var admitDuration time.Duration
+	if req.Group != nil {
+		// Every check above only read the source, so a refusal leaves it as
+		// Snapshot found it.
+		admitStart := time.Now()
+		if err := admitCapture(ctx, req.Group, req.PodIP); err != nil {
+			return nil, failStep(StepAdmitGroup, err)
+		}
+		admitDuration = time.Since(admitStart)
+	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 && !usePageBrokerGPU {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir)
@@ -252,7 +279,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return nil, failStep(StepConfigureCheckpoint, err)
 	}
 
-	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetriesRemaining)
+	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetriesRemaining, req.Group)
 	if err != nil {
 		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator(), usePageBrokerGPU)
 	}
@@ -268,23 +295,31 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	switchDuration := time.Since(switchStart)
 
 	wall := time.Since(checkpointStart)
+	// groupDuration is the time spent in the pod group's admission and
+	// barriers, mostly waiting for the other members.
+	groupDuration := admitDuration + captureTimings.GroupDuration
 	unaccounted := remainingDuration(wall,
 		gpuDeviceMapDuration,
 		captureTimings.CUDACheckpointDuration,
 		captureTimings.CRIUDumpDuration,
 		captureTimings.OverlayCaptureDuration,
 		switchDuration,
+		groupDuration,
 	)
+	phases := map[string]string{
+		"gpu_device_map":                gpuDeviceMapDuration.String(),
+		"cuda_checkpoint":               captureTimings.CUDACheckpointDuration.String(),
+		"criu_dump":                     captureTimings.CRIUDumpDuration.String(),
+		"overlay_capture":               captureTimings.OverlayCaptureDuration.String(),
+		"remove_old_version_and_switch": switchDuration.String(),
+		"unaccounted":                   unaccounted.String(),
+	}
+	if req.Group != nil {
+		phases["group"] = groupDuration.String()
+	}
 	summary := map[string]any{
 		"duration": wall.String(),
-		"phases": map[string]string{
-			"gpu_device_map":                gpuDeviceMapDuration.String(),
-			"cuda_checkpoint":               captureTimings.CUDACheckpointDuration.String(),
-			"criu_dump":                     captureTimings.CRIUDumpDuration.String(),
-			"overlay_capture":               captureTimings.OverlayCaptureDuration.String(),
-			"remove_old_version_and_switch": switchDuration.String(),
-			"unaccounted":                   unaccounted.String(),
-		},
+		"phases":   phases,
 	}
 	if !req.StartedAt.IsZero() {
 		summary["started_to_complete"] = time.Since(req.StartedAt).String()
@@ -494,6 +529,9 @@ func configureCheckpoint(
 		}
 	}
 	m.CuInterpose = state.CuInterpose
+	if req.Group != nil {
+		m.Group = groupManifest(req.Group)
+	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
 		return nil, nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
@@ -506,7 +544,7 @@ func configureCheckpoint(
 // against a live process tree, which a unit test cannot satisfy.
 var captureCheckpointFunc = captureCheckpoint
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, retriesRemaining int) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, retriesRemaining int, g *group.Member) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// GPU capture must finish before CRIU and filesystem capture.
@@ -515,6 +553,18 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		return nil, failStep(StepCheckpointGPU, err)
 	}
 	timings.CUDACheckpointDuration = gpuDuration
+
+	if g != nil {
+		// No member's network freezes while another member still has a step
+		// that needs it. CRIU then drops the Pod's traffic once it freezes the
+		// processes, and keeps it dropped after the dump ends them. A repeated
+		// dump needs no second barrier: every member is already past those steps.
+		barrierStart := time.Now()
+		if err := g.Barrier(ctx, group.NetFreeze); err != nil {
+			return nil, failStep(StepGroupBarrier, err)
+		}
+		timings.GroupDuration = time.Since(barrierStart)
+	}
 
 	// Recorded once the workload is suspended, so a later probe compares against
 	// the tree the dump was meant to capture. Only a capture that may repeat pays

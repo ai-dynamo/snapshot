@@ -25,6 +25,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
+	"github.com/ai-dynamo/snapshot/agent/internal/group"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -144,7 +145,7 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 func TestGPUCheckpointCannotFallBackWhenExecutionIsMissing(t *testing.T) {
 	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{}, &types.CheckpointManifest{CUDA: types.CUDAManifest{CustomStorage: true}},
 		&types.CheckpointContainerSnapshot{CUDAHostPIDs: []int{12}, CUDANSPIDs: []int{12}},
-		t.TempDir(), "", logr.Discard(), nil, 0)
+		t.TempDir(), "", logr.Discard(), nil, 0, nil)
 	require.ErrorContains(t, err, "missing PageBroker CustomStorage execution context")
 }
 
@@ -380,7 +381,7 @@ func TestCapturePreparesOnlyCoordinatorParticipants(t *testing.T) {
 			_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
 				&types.CheckpointManifest{CuInterpose: identity},
 				&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1}, CUDANSPIDs: []int{1}},
-				t.TempDir(), "", logr.Discard(), nil, 0)
+				t.TempDir(), "", logr.Discard(), nil, 0, nil)
 			require.ErrorContains(t, err, tc.wantError)
 		})
 	}
@@ -613,7 +614,7 @@ func TestCheckpointCommitFailureReleasesOnlySettledFailures(t *testing.T) {
 			t.Cleanup(func() { captureCheckpointFunc = originalCapture })
 			captureCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
 				*types.CheckpointContainerSnapshot, string, string, logr.Logger, *pagebroker.CustomStorageExecution,
-				int,
+				int, *group.Member,
 			) (*checkpointPhaseTimings, error) {
 				return &checkpointPhaseTimings{}, nil
 			}
@@ -698,7 +699,7 @@ func TestCheckpointKeepsStagingWhenTheCommitCannotDial(t *testing.T) {
 	originalCapture := captureCheckpointFunc
 	t.Cleanup(func() { captureCheckpointFunc = originalCapture })
 	captureCheckpointFunc = func(context.Context, *criurpc.CriuOpts, *types.CRIUSettings, *types.CheckpointManifest,
-		*types.CheckpointContainerSnapshot, string, string, logr.Logger, *pagebroker.CustomStorageExecution, int,
+		*types.CheckpointContainerSnapshot, string, string, logr.Logger, *pagebroker.CustomStorageExecution, int, *group.Member,
 	) (*checkpointPhaseTimings, error) {
 		// The dump completes just as the capture's context dies, so the commit
 		// that follows cannot dial.
@@ -764,7 +765,7 @@ func TestCaptureCheckpointRepeatsTheDump(t *testing.T) {
 
 			timings, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
 				&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
-				logr.Discard(), nil, tc.limit)
+				logr.Discard(), nil, tc.limit, nil)
 
 			assert.Equal(t, tc.wantDumps, dumps, "number of dumps")
 			if tc.wantSuccess {
@@ -802,7 +803,7 @@ func TestCaptureCheckpointStopsWhenTheTreeIsNoLongerDumpable(t *testing.T) {
 
 	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
 		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
-		logr.Discard(), nil, 5)
+		logr.Discard(), nil, 5, nil)
 
 	require.Error(t, err)
 	assert.Equal(t, 1, dumps, "a tree CRIU cannot seize must not be dumped again")
@@ -828,7 +829,7 @@ func TestCaptureCheckpointDoesNotRepeatWithoutTheRecordedTree(t *testing.T) {
 
 	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
 		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
-		logr.Discard(), nil, 5)
+		logr.Discard(), nil, 5, nil)
 
 	require.Error(t, err)
 	assert.Equal(t, 1, dumps, "without the recorded tree there is nothing to repeat against")
@@ -873,7 +874,7 @@ func TestCaptureCheckpointStopsWhenTheContextIsDone(t *testing.T) {
 
 			_, err := captureCheckpoint(ctx, nil, &types.CRIUSettings{},
 				&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
-				logr.Discard(), nil, 5)
+				logr.Discard(), nil, 5, nil)
 
 			require.Error(t, err)
 			assert.Equal(t, 1, dumps, "a capture whose context is done must not dump again")
@@ -901,7 +902,7 @@ func TestCaptureCheckpointSkipsTheTreeWhenNoRetriesRemain(t *testing.T) {
 
 	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
 		&types.CheckpointManifest{}, &types.CheckpointContainerSnapshot{PID: 1}, t.TempDir(), "",
-		logr.Discard(), nil, 0)
+		logr.Discard(), nil, 0, nil)
 
 	require.Error(t, err)
 	assert.Zero(t, snapshots, "a capture that cannot repeat must not walk the tree")
