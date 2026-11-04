@@ -33,6 +33,19 @@ import (
 
 const pageBrokerAbortTimeout = 30 * time.Second
 
+const dumpRetryDelayCeiling = 30 * time.Second
+
+// Overridden in tests so a repeat does not wait out a real backoff.
+var dumpRetryInitialDelay = 2 * time.Second
+
+// Seams: the dump and the probe, so the repeat decision is testable without
+// CRIU or a live process tree.
+var (
+	dumpCheckpointFunc = dumpCheckpoint
+	dumpableFunc       = snapshotruntime.Dumpable
+	snapshotTreeFunc   = snapshotruntime.SnapshotTree
+)
+
 // cleanupFailure marks a failure from releasing a transaction, as opposed to the
 // capture failure it is reported alongside. The two travel joined, so without a
 // mark a classifier can only tell them apart by the order they were joined in.
@@ -116,6 +129,10 @@ type CheckpointRequest struct {
 	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
 
+	// DumpRetryLimit is how many times the dump may be repeated against a workload that
+	// is still suspended and still dumpable, over and above the first attempt.
+	DumpRetryLimit int
+
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
@@ -129,6 +146,8 @@ type checkpointPhaseTimings struct {
 	CUDACheckpointDuration time.Duration
 	CRIUDumpDuration       time.Duration
 	OverlayCaptureDuration time.Duration
+	// DumpRetries counts repeats of the dump against the same suspended tree.
+	DumpRetries int
 }
 
 // Checkpoint captures a container through PageBroker and commits its artifact.
@@ -233,7 +252,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return nil, failStep(StepConfigureCheckpoint, err)
 	}
 
-	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu)
+	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetryLimit)
 	if err != nil {
 		return nil, sourceNeedsRecovery(err, state.CUDAHostPIDs, data.CuInterpose.UsesCoordinator(), usePageBrokerGPU)
 	}
@@ -487,7 +506,7 @@ func configureCheckpoint(
 // against a live process tree, which a unit test cannot satisfy.
 var captureCheckpointFunc = captureCheckpoint
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, retryLimit int) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// GPU capture must finish before CRIU and filesystem capture.
@@ -497,9 +516,70 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 	timings.CUDACheckpointDuration = gpuDuration
 
+	// Recorded once the workload is suspended, so a later probe compares against
+	// the tree the dump was meant to capture.
+	suspendedTree, err := snapshotTreeFunc(snapshotruntime.HostProcPath, snapshotruntime.ProcessTreePIDs(state.PID))
+	if err != nil {
+		log.V(1).Info("Cannot record the suspended tree; the dump will not be repeated", "error", err.Error())
+	}
+
+	for attempt := 0; ; attempt++ {
+		err := dumpCheckpointFunc(ctx, criuOpts, criuSettings, data, state, checkpointDir, timings, log)
+		if err == nil {
+			return timings, nil
+		}
+		if suspendedTree == nil {
+			return nil, err
+		}
+		if attempt >= retryLimit {
+			return nil, err
+		}
+		// The probe decides, not the shape of the failure: the suspend is already
+		// paid for, and repeating the dump is only safe while CRIU can still seize
+		// the tree it left behind.
+		dumpable, reason := dumpableFunc(snapshotruntime.HostProcPath, suspendedTree)
+		if !dumpable {
+			log.V(1).Info("Not repeating the dump", "reason", reason)
+			return nil, err
+		}
+		log.Info("Repeating the dump against the suspended workload", "attempt", attempt+1, "error", err.Error())
+		timings.DumpRetries++
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(dumpRetryDelay(attempt)):
+		}
+	}
+}
+
+// dumpRetryDelay spaces repeats so a node momentarily out of staging has time to
+// free some, without letting the gap grow past what a capture can spend waiting.
+func dumpRetryDelay(attempt int) time.Duration {
+	delay := dumpRetryInitialDelay << attempt
+	if delay > dumpRetryDelayCeiling {
+		return dumpRetryDelayCeiling
+	}
+	return delay
+}
+
+// dumpCheckpoint writes the image of a workload that is already suspended.
+//
+// Separate from the suspend because only the suspend is expensive: it moves GPU
+// memory to host memory, and a tree that is still dumpable can have its image
+// written again without paying that twice.
+func dumpCheckpoint(
+	ctx context.Context,
+	criuOpts *criurpc.CriuOpts,
+	criuSettings *types.CRIUSettings,
+	data *types.CheckpointManifest,
+	state *types.CheckpointContainerSnapshot,
+	checkpointDir string,
+	timings *checkpointPhaseTimings,
+	log logr.Logger,
+) error {
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 	if err != nil {
-		return nil, failStep(StepDumpCRIU, err)
+		return failStep(StepDumpCRIU, err)
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 
@@ -507,21 +587,21 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	// dump did rather than what the node was expected to allow.
 	data.CRIUDump.LSMLabels, err = criu.RecordedLSMLabels(checkpointDir)
 	if err != nil {
-		return nil, fmt.Errorf("read the dump's security labels: %w", err)
+		return fmt.Errorf("read the dump's security labels: %w", err)
 	}
 	if err := types.WriteManifest(checkpointDir, data); err != nil {
-		return nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
+		return fmt.Errorf("failed to write checkpoint manifest: %w", err)
 	}
 
 	if state.UpperDir != "" {
 		overlayCaptureStart := time.Now()
 		if err := captureOverlay(state.UpperDir, data.Overlay, checkpointDir, log); err != nil {
-			return nil, failStep(StepCaptureOverlay, err)
+			return failStep(StepCaptureOverlay, err)
 		}
 		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 	}
 
-	return timings, nil
+	return nil
 }
 
 // captureOverlay records the upperdir's rootfs diff and deleted files for a
