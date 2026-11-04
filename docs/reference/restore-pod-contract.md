@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Restore Pod contract
+# Restore Pod Contract
 
 A Pod requests restore by naming a ready `PodSnapshot` in its namespace. The
 Snapshot node agent restores only Pods that implement this contract.
@@ -127,8 +127,8 @@ the migration window; hand-authored Pods may omit the alias.
 
 The `restore-complete` startup probe shown above is optional workload lifecycle
 policy. Set `Options.EnableStartupGate` when Kubernetes must withhold readiness
-and liveness until restore completes. Because Kubernetes supports only one
-startup probe, the builder then replaces any existing startup probe with the
+and liveness until restore completes. Kubernetes supports only one
+startup probe, so the builder then replaces any existing startup probe with the
 canonical restore-completion gate while preserving workload liveness and
 readiness probes. Its failure threshold allows 1,800 consecutive one-second
 failures; if restoration exceeds that budget, kubelet kills the container, and
@@ -153,7 +153,7 @@ and exits with its exit code, so the container ends when the restored workload
 does. If the proxy is not PID 1, the agent fails the restore. Keep the source's
 command in restore Pods; it never runs. Other containers in the Pod, such as
 sidecars, are left alone. Nodes whose runtime cannot run the proxy restore
-without it; see [Nodes without the restore proxy](#nodes-without-the-restore-proxy).
+without it; see [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
 
 The plugin decides which containers get the proxy when each container is
 created. Without `restore-container-map`, it reads the PodSnapshot that
@@ -186,7 +186,7 @@ The proxy reserves two exit codes:
 Every other exit code is the restored workload's own, or 128 plus the number of
 the signal that ended it.
 
-## Nodes without the restore proxy
+## Nodes Without the Restore Proxy
 
 On a node whose container runtime has no NRI, or NRI older than v0.10
 (containerd older than 2.2, or NRI disabled), the agent restores without the
