@@ -51,14 +51,6 @@ type PodSnapshotSpec struct {
 	// +kubebuilder:validation:Required
 	Source PodSnapshotSource `json:"source"`
 
-	// CheckpointRetryLimit is how many times a failed checkpoint may be retried in
-	// place, over and above the first attempt: 0 means one attempt and no retry.
-	// Unset means this request expressed no preference and the agent's
-	// cluster-wide default applies, which is distinct from an explicit 0.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
-
 	// Containers holds settings for the checkpointed containers, matched by
 	// name to source.podRef.containers. It is a separate list so settings stay
 	// the same when other kinds of source are added.

@@ -100,9 +100,6 @@ type PageBrokerSpec struct {
 // DefaultCheckpointTimeoutSeconds bounds a dump for a config written before the field existed.
 const DefaultCheckpointTimeoutSeconds = 3600
 
-// DefaultCheckpointRetryLimit keeps retry opt-in, so upgrading changes no existing capture.
-const DefaultCheckpointRetryLimit = 0
-
 // maxTimeoutSeconds is the largest value that survives conversion to a time.Duration, which counts
 // nanoseconds in an int64. Past it the multiplication wraps negative, and a negative timeout reads
 // as "no timeout" at every call site — so an absurd value would silently remove the bound it asked
@@ -115,10 +112,6 @@ type CheckpointSpec struct {
 	// as does one still spelling it checkpointTimeoutSeconds, and an agent upgraded ahead of its
 	// ConfigMap has to start — with the guard on.
 	TimeoutSeconds *int `yaml:"timeoutSeconds"`
-
-	// RetryLimit is the cluster-wide default number of in-place retries for a failed checkpoint,
-	// used when the request names none. Absent is read as DefaultCheckpointRetryLimit.
-	RetryLimit *int `yaml:"retryLimit"`
 }
 
 // CheckpointTimeout bounds one dump, defaulting when the config omits it.
@@ -129,23 +122,7 @@ func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
 	return time.Duration(*c.TimeoutSeconds) * time.Second
 }
 
-// ResolveRetryLimit returns the retries a checkpoint may take. The request's own value wins when it
-// has one — including an explicit 0, which asks for no retry — and absent falls back to the
-// cluster default.
-func (c *CheckpointSpec) ResolveRetryLimit(requested *int32) int {
-	if requested != nil {
-		return int(*requested)
-	}
-	if c.RetryLimit != nil {
-		return *c.RetryLimit
-	}
-	return DefaultCheckpointRetryLimit
-}
-
 func (c *CheckpointSpec) Validate() error {
-	if c.RetryLimit != nil && *c.RetryLimit < 0 {
-		return &ConfigError{Field: "retryLimit", Message: "retryLimit must not be negative"}
-	}
 	if c.TimeoutSeconds == nil {
 		return nil
 	}
