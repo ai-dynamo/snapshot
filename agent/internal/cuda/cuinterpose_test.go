@@ -84,13 +84,19 @@ func TestCoordinatorArgvContract(t *testing.T) {
 
 	// Restore already runs inside the restored namespaces.
 	binary, argvFile = fakeCoordinator(t, 0)
-	if err := RestoreCuInterpose(context.Background(), "/tmp/checkpoint", []int{623}, binary); err != nil {
+	// A pod group member's coordinator inherits its session socket as a relay.
+	session, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	defer session.Close()
+	relay := &CuInterposeRelay{Session: session, Args: []string{"--rank", "1", "--relay-ranks", "0,1"}}
+	if err := RestoreCuInterpose(context.Background(), "/tmp/checkpoint", []int{623}, binary, relay); err != nil {
 		t.Fatalf("RestoreCuInterpose() error = %v", err)
 	}
 	argv, _ = os.ReadFile(argvFile)
 	want = strings.Join([]string{
 		"--restore", "--checkpoint-dir", "/tmp/checkpoint",
-		"--socket-dir", cuInterposeSocketDir, "--process", "623", "",
+		"--socket-dir", cuInterposeSocketDir, "--process", "623",
+		"--session-fd", "3", "--rank", "1", "--relay-ranks", "0,1", "",
 	}, "\n")
 	if string(argv) != want {
 		t.Fatalf("restore argv:\n%s", argv)
@@ -104,7 +110,7 @@ func TestCoordinatorFailureIncludesStderr(t *testing.T) {
 	for _, err := range []error{
 		InspectCuInterpose(context.Background(), target),
 		PrepareCuInterpose(context.Background(), target, t.TempDir()),
-		RestoreCuInterpose(context.Background(), "/checkpoint", []int{1}, binary),
+		RestoreCuInterpose(context.Background(), "/checkpoint", []int{1}, binary, nil),
 	} {
 		if err == nil {
 			t.Fatal("expected failure")

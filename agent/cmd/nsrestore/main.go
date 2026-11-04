@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
@@ -40,6 +42,8 @@ func main() {
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	lsmProfile := flag.String("lsm-profile", "", "CRIU lsm_profile for the restored processes")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	relaySessionFD := flag.Int("relay-session-fd", -1, "Inherited session socket of the cuInterpose relay of a pod group member")
+	relayArgs := flag.String("relay-args", "", "Space-separated arguments that place the cuInterpose relay in its pod group")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
 	flag.Parse()
 
@@ -58,6 +62,16 @@ func main() {
 		LSMProfile:     *lsmProfile,
 		TargetPodIP:    *targetPodIP,
 		BundleDir:      *bundleDir,
+	}
+
+	if *relaySessionFD >= 0 {
+		if err := validateInheritedDescriptors([]inheritedDescriptor{{"relay session socket", *relaySessionFD, unix.S_IFSOCK}}); err != nil {
+			fatal(log, err, "invalid relay session socket")
+		}
+		opts.Relay = &cuda.CuInterposeRelay{
+			Session: os.NewFile(uintptr(*relaySessionFD), "relay-session"),
+			Args:    strings.Fields(*relayArgs),
+		}
 	}
 
 	var err error
