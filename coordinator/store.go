@@ -32,7 +32,8 @@ type Store interface {
 	// session.ErrNotFound at once, and with a wait it returns the value as soon
 	// as it is inserted, or reports session.ErrNotYet when the wait expires.
 	// It returns early, with how the session ended, if the session ends first,
-	// and with ctx's error if ctx is done first.
+	// and with ctx's error if ctx is done first. A wait past its bucket's most
+	// consumers reports session.ErrTooMany.
 	Get(ctx context.Context, key string, wait time.Duration) ([]byte, error)
 
 	// Delete removes key whether or not it exists. A later Insert of key

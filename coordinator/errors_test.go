@@ -29,6 +29,8 @@ func TestMapError(t *testing.T) {
 		{"a value over the bucket's maximum", &jetstream.APIError{ErrorCode: jsMessageTooLarge}, session.ErrTooLarge},
 		{"a full bucket", &jetstream.APIError{ErrorCode: jsStoreFailed}, session.ErrTooMany},
 		{"a server out of memory", &jetstream.APIError{ErrorCode: jsInsufficientResources}, session.ErrTooMany},
+		{"a bucket at its most consumers", &jetstream.APIError{ErrorCode: jsMaximumConsumers}, session.ErrTooMany},
+		{"a watch's bucket at its most consumers", &nats.APIError{ErrorCode: jsMaximumConsumers}, session.ErrTooMany},
 		{"a closed connection", nats.ErrConnectionClosed, net.ErrClosed},
 		{"a deadline", context.DeadlineExceeded, context.DeadlineExceeded},
 		{"an error of package session", session.ErrNotYet, session.ErrNotYet},
@@ -38,7 +40,8 @@ func TestMapError(t *testing.T) {
 			require.ErrorIs(t, mapError(tt.err), tt.want)
 		})
 	}
-	for _, err := range []error{nats.ErrBadSubject, &jetstream.APIError{ErrorCode: 1}, jetstream.ErrBadBucket} {
+	for _, err := range []error{nats.ErrBadSubject, &jetstream.APIError{ErrorCode: 1}, &nats.APIError{ErrorCode: 1},
+		jetstream.ErrBadBucket} {
 		mapped := mapError(err)
 		for e := mapped; e != nil; e = errors.Unwrap(e) {
 			assert.NotContains(t, fmt.Sprintf("%T", e), "nats", "%v leaks a NATS type", err)

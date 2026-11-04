@@ -20,17 +20,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The JetStream API error codes the embedded server refuses a write with, which
-// the client reports as session.ErrTooLarge and session.ErrTooMany.
+// The JetStream API error codes the embedded server refuses a write or a
+// consumer with, which the client reports as session.ErrTooLarge and
+// session.ErrTooMany.
 const (
 	codeMessageTooLarge       = 10054
 	codeStoreFailed           = 10077
 	codeInsufficientResources = 10023
+	codeMaximumConsumers      = 10026
 )
-
-// codeMaximumConsumers is the JetStream API error code the embedded server
-// refuses a consumer past its stream's limit with.
-const codeMaximumConsumers = 10026
 
 // requireCode checks that err is a JetStream API error with code.
 func requireCode(t *testing.T, err error, code int, msgAndArgs ...any) {
@@ -88,10 +86,11 @@ func TestLimits(t *testing.T) {
 		h := newHarness(t)
 		ctx := within(t)
 		spec, other := h.ensure(1), h.ensure(1)
-		js, err := jetstream.New(h.connect(spec, 0).nc)
+		m := h.connect(spec, 0)
+		js, err := jetstream.New(m.nc)
 		require.NoError(t, err)
-		for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)),
-			session.LibraryBucket(string(spec.UID))} {
+		for _, ns := range []session.Namespace{session.NamespaceSnapshot, session.NamespaceLibrary} {
+			bucket := m.bucket(ns).Bucket()
 			stream, err := js.Stream(ctx, "KV_"+bucket)
 			require.NoError(t, err)
 			info, err := stream.Info(ctx)
@@ -107,6 +106,12 @@ func TestLimits(t *testing.T) {
 				require.NoError(t, durable(i), "bucket %s", bucket)
 			}
 			requireCode(t, durable(info.Config.MaxConsumers), codeMaximumConsumers, "bucket %s", bucket)
+			// A watch, which is how the client creates its consumers, is
+			// refused with the same code, through nats.go's older API.
+			_, err = m.bucket(ns).Watch(ctx, string(ns)+".k")
+			var apiErr *nats.APIError
+			require.ErrorAs(t, err, &apiErr, "bucket %s", bucket)
+			assert.Equal(t, codeMaximumConsumers, int(apiErr.ErrorCode), "bucket %s", bucket)
 		}
 		h.connect(other, 0) // which watches another session's Snapshot bucket
 	})
