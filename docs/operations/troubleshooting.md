@@ -39,8 +39,9 @@ inside the source container. Check an HTTP probe against the pod's IP and port
 from another pod or the node, not against `localhost` inside the container: the
 agent sends the request from the node to the pod's IP. The wait has no deadline
 of its own, so a probe that never passes waits until you delete the
-`PodSnapshot`, or until a `SnapshotJob`'s `activeDeadlineSeconds` ends the
-source Pod. The `PodSnapshot` then fails up to five minutes later.
+`PodSnapshot`, or until the source Pod ends: it fails, exits or is deleted, or
+a `SnapshotJob`'s `activeDeadlineSeconds` stops it. The `PodSnapshot` then
+fails at most five minutes after the Pod ended.
 
 ## A checkpoint fails with `InvalidCheckpointReadinessProbe`
 
