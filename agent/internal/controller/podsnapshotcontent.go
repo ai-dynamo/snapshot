@@ -51,6 +51,8 @@ type CheckpointParams struct {
 	// DumpRetriesRemaining is what is left of the capture's retry budget; a repeat of
 	// the dump spends it like any other retry.
 	DumpRetriesRemaining int
+	// DumpWorthRepeating reports whether repeating could reach a different outcome.
+	DumpWorthRepeating func(err error) (bool, string)
 	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
 }
@@ -284,7 +286,7 @@ func (w *NodeController) runCheckpoint(
 	logger.V(1).Info("Resolved the capture's retry budget", "retries", budget)
 	for {
 		artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
-			cuInterposeRequested, contentUID, artifactPath, budget-spent)
+			cuInterposeRequested, contentUID, artifactPath, budget-spent, w.dumpWorthRepeating(ctx, containerPID))
 		if err == nil {
 			return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
 		}
@@ -450,6 +452,7 @@ func (w *NodeController) attemptCheckpoint(
 	contentUID string,
 	artifactPath string,
 	dumpRetriesRemaining int,
+	dumpWorthRepeating func(error) (bool, string),
 ) (*pagebroker.PublishedArtifact, error) {
 	storeID := ""
 	if content.Spec.Storage != nil {
@@ -466,6 +469,7 @@ func (w *NodeController) attemptCheckpoint(
 		CuInterposeRequested: cuInterposeRequested,
 		StoreID:              storeID,
 		DumpRetriesRemaining: dumpRetriesRemaining,
+		DumpWorthRepeating:   dumpWorthRepeating,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
@@ -788,6 +792,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		CuInterposeRequested: params.CuInterposeRequested,
 		StoreID:              params.StoreID,
 		DumpRetriesRemaining: params.DumpRetriesRemaining,
+		DumpWorthRepeating:   params.DumpWorthRepeating,
 	}
 	// Recovering the source belongs to runCheckpoint, which is the only place that
 	// knows whether another attempt follows.
