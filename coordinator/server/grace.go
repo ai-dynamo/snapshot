@@ -73,8 +73,9 @@ func (s *Server) connected(c natsserver.ClientInfo) {
 		a.conns[member] = make(map[uint64]struct{})
 	}
 	a.conns[member][c.ID] = struct{}{}
-	if timer := a.grace[member]; timer != nil {
-		timer.Stop()
+	// A timer that no longer stops has fired: the member's grace period ran
+	// out, and its timer stays until the session's end is recorded.
+	if timer := a.grace[member]; timer != nil && timer.Stop() {
 		delete(a.grace, member)
 		s.log.Info("Member reconnected within its grace period", "attempt", a.spec.UID, "member", member)
 	}
@@ -101,7 +102,6 @@ func (s *Server) disconnected(c natsserver.ClientInfo) {
 			if a.grace[member] != timer {
 				return false
 			}
-			delete(a.grace, member)
 			s.log.Info("Member did not reconnect within its grace period", "attempt", a.spec.UID, "member", member)
 			return true
 		})

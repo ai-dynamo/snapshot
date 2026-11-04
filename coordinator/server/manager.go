@@ -98,16 +98,22 @@ type attempt struct {
 	members  []session.Member
 	epoch    uint64
 	snapshot jetstream.KeyValue
-	// cancel stops following the session's keys.
+	// life lasts until the session is removed or the coordinator shuts down,
+	// which call cancel, or until follow has seen the session end. It bounds
+	// following the session's keys and retrying its end.
+	life   context.Context
 	cancel context.CancelFunc
 
 	// Guarded by Server.mu.
 	deadline clock.Timer
 	// conns holds the connections of each member, by client ID.
 	conns map[string]map[uint64]struct{}
-	// grace holds the grace timer of each member with no connection.
+	// grace holds the grace timer of each member with no connection, and of a
+	// member whose grace period ran out until the session's end is recorded.
 	grace map[string]clock.Timer
-	ended bool
+	// ending is set once an expiry has started recording the session's end.
+	ending bool
+	ended  bool
 }
 
 // has reports whether member is a member of the attempt.
@@ -170,13 +176,7 @@ func (s *Server) Ensure(ctx context.Context, spec Spec) error {
 	if !a.ended {
 		var timer clock.Timer
 		timer = s.cfg.Clock.AfterFunc(remaining, func() {
-			s.expire(a, session.ReasonDeadlineExceeded, func() bool {
-				if a.deadline != timer {
-					return false
-				}
-				a.deadline = nil
-				return true
-			})
+			s.expire(a, session.ReasonDeadlineExceeded, func() bool { return a.deadline == timer })
 		})
 		a.deadline = timer
 	}
@@ -311,7 +311,7 @@ func (s *Server) follow(ctx context.Context, a *attempt) error {
 		}
 		return fmt.Errorf("watch the session: %w", err)
 	}
-	a.cancel = cancel
+	a.life, a.cancel = life, cancel
 	leftPrefix := session.LeftKey("")
 	// Ensure holds Server.control, so Shutdown is not waiting for wg yet.
 	s.wg.Add(1)
@@ -436,20 +436,40 @@ func (s *Server) Fail(ctx context.Context, uid types.UID, reason string) error {
 	return err
 }
 
-// expireTimeout bounds failing a session when its deadline or a member's grace
-// period runs out.
+// expireTimeout bounds each try to fail a session when its deadline or a
+// member's grace period runs out.
 const expireTimeout = 5 * time.Second
 
+// The wait between tries to record the end of a session whose deadline or
+// grace period ran out: it starts at firstEndRetry and doubles up to
+// maxEndRetry.
+const (
+	firstEndRetry = 100 * time.Millisecond
+	maxEndRetry   = time.Second
+)
+
 // expire fails a session when its deadline or a member's grace period runs
-// out. A timer that was stopped or replaced may fire all the same, so claim,
+// out. A timer that was stopped or replaced may fire all the same, so armed,
 // which expire calls under Server.mu, reports whether the timer that fired is
-// still the one armed and, if so, retires it. A session that has ended is left
-// alone, and so is every session once Shutdown has begun, which waits for a
-// failure under way.
-func (s *Server) expire(a *attempt, reason string, claim func() bool) {
+// still the one armed. A session that has ended is left alone, and so is every
+// session once Shutdown has begun, which records its own end and waits for an
+// expiry under way.
+//
+// Recording the end can fail, such as at the memory cap, which no write is
+// exempt from and nothing reserves room under. A session that has to end must
+// not stay open once memory frees, so expire tries again, waiting from
+// firstEndRetry up to maxEndRetry, until the end is recorded, by expire or
+// anything else, or the session's life ends because it is removed or the
+// coordinator shuts down. It never holds Server.control. The timer that fired
+// stays armed meanwhile, so a member that reconnects after its grace period
+// ran out does not keep the session, and one that disconnects again starts no
+// second grace period. One expiry at a time records a session's end: the first
+// reason recorded wins anyway.
+func (s *Server) expire(a *attempt, reason string, armed func() bool) {
 	s.mu.Lock()
-	run := !a.ended && !s.shutdown && claim()
+	run := !a.ended && !a.ending && !s.shutdown && armed()
 	if run {
+		a.ending = true
 		s.wg.Add(1)
 	}
 	s.mu.Unlock()
@@ -457,10 +477,22 @@ func (s *Server) expire(a *attempt, reason string, claim func() bool) {
 		return
 	}
 	defer s.wg.Done()
-	ctx, cancel := context.WithTimeout(context.Background(), expireTimeout)
-	defer cancel()
-	if err := s.endWith(ctx, a, []byte(reason)); err != nil && !ended(err) {
-		s.log.Error(err, "Failing a session failed", "attempt", a.spec.UID, "reason", reason)
+	for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
+		ctx, cancel := context.WithTimeout(a.life, expireTimeout)
+		err := s.endWith(ctx, a, []byte(reason))
+		cancel()
+		if err == nil || ended(err) || a.life.Err() != nil {
+			return
+		}
+		if wait == firstEndRetry {
+			s.log.Error(err, "Failing a session failed; retrying until its end is recorded", "attempt", a.spec.UID,
+				"reason", reason)
+		}
+		select {
+		case <-time.After(wait):
+		case <-a.life.Done():
+			return
+		}
 	}
 }
 

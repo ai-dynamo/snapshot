@@ -53,14 +53,18 @@
 // coordinator when every member has left, when the deadline passes, when a
 // member's grace period runs out, when it removes a session still open, and
 // when it shuts down; or by a member that finds the coordinator lost the
-// session it joined.
+// session it joined. Once the deadline passes or a grace period runs out, the
+// coordinator keeps trying to record the end, which the memory cap may refuse,
+// until it is recorded, the session is removed, or the coordinator shuts down.
 //
 // # The grace period
 //
 // The coordinator follows every member's connections through the connect and
 // disconnect events, by user name. When a member has no connection left, its
-// grace period starts, and a new connection ends it; if it runs out while the
-// session is open, the session fails with session.ReasonMemberFailed. A member
+// grace period starts, and a new connection before it runs out ends it. Once
+// it runs out while the session is open, the session fails with
+// session.ReasonMemberFailed, even if the member connects again before the
+// end is recorded. A member
 // that has left still gets one, since its relay and its libraries keep using
 // the connection until the session ends.
 //

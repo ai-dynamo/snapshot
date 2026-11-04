@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +139,111 @@ func TestDeadline(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second, 5*time.Millisecond)
 	assert.Equal(t, "failed "+string(spec.UID)+" DeadlineExceeded", h.observer.of(spec.UID)[1])
+}
+
+// TestEndAtTheMemoryCap covers a session whose deadline or grace period runs
+// out while the memory cap refuses the write that records its end: the
+// coordinator keeps trying, so the session fails once memory frees, and stops
+// once the session is removed or the coordinator shuts down.
+func TestEndAtTheMemoryCap(t *testing.T) {
+	capped := func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 2<<20, 64<<10 }
+
+	t.Run("a deadline that passes at the cap fails the session once memory frees", func(t *testing.T) {
+		h := newHarness(t, capped)
+		ctx := within(t)
+		spec := h.ensure(1)
+		m := h.connect(spec, 0)
+		filler := h.spec(1)
+		filler.Deadline = spec.Deadline.Add(time.Hour)
+		require.NoError(t, h.srv.Ensure(ctx, filler))
+		h.fillCap(h.connect(filler, 0))
+		h.clock.Step(time.Hour)
+		h.awaitRetry(spec)
+		_, ok := h.ended(spec)
+		require.False(t, ok, "the cap must refuse the end")
+		require.NoError(t, h.srv.Remove(ctx, filler.UID))
+		endsSoon(t, m, session.ReasonDeadlineExceeded)
+		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
+			5*time.Millisecond)
+		assert.Equal(t, "failed "+string(spec.UID)+" DeadlineExceeded", h.observer.of(spec.UID)[1])
+	})
+
+	t.Run("a grace period that runs out at the cap fails the session once memory frees", func(t *testing.T) {
+		h := newHarness(t, capped)
+		spec := h.ensureForGrace(2)
+		members := h.connectAll(spec)
+		filler := h.ensureForGrace(1)
+		h.fillCap(h.connect(filler, 0))
+		members[0].nc.Close()
+		require.Equal(t, DefaultGrace, h.clock.AwaitTimer(t))
+		h.clock.Step(DefaultGrace)
+		h.awaitRetry(spec)
+		_, ok := h.ended(spec)
+		require.False(t, ok, "the cap must refuse the end")
+		back := h.connect(spec, 0)
+		require.NoError(t, h.srv.Remove(within(t), filler.UID))
+		endsSoon(t, members[1], session.ReasonMemberFailed)
+		endsSoon(t, back, session.ReasonMemberFailed)
+	})
+
+	t.Run("removing the session stops the retries", func(t *testing.T) {
+		h := newHarness(t, capped)
+		spec := h.ensure(1)
+		h.fillCap(h.connect(spec, 0))
+		h.clock.Step(time.Hour)
+		h.awaitRetry(spec)
+		require.NoError(t, h.srv.Remove(within(t), spec.UID))
+		// Shutdown waits for every expiry under way.
+		require.NoError(t, returns(t, "Shutdown", func() error { return h.srv.Shutdown(within(t)) }))
+	})
+
+	t.Run("shutting down stops the retries", func(t *testing.T) {
+		h := newHarness(t, capped)
+		spec := h.ensure(1)
+		h.fillCap(h.connect(spec, 0))
+		h.clock.Step(time.Hour)
+		h.awaitRetry(spec)
+		require.Error(t, returns(t, "Shutdown", func() error { return h.srv.Shutdown(within(t)) }),
+			"the cap refuses CoordinatorLost too")
+	})
+}
+
+// fillCap fills the memory cap through m until not even an empty value fits,
+// which leaves no room to record any session's end either.
+func (h *harness) fillCap(m *member) {
+	h.t.Helper()
+	ctx := within(h.t)
+	for pass, size := range []int{60 << 10, 1 << 10, 32, 0} {
+		var err error
+		for i := 0; err == nil; i++ {
+			err = m.insert(ctx, session.NamespaceSnapshot, fmt.Sprintf("%c%d", 'a'+pass, i), make([]byte, size))
+		}
+		requireCode(h.t, err, codeInsufficientResources)
+	}
+}
+
+// awaitRetry waits until the coordinator has failed to record the end of
+// spec's session, and is trying again.
+func (h *harness) awaitRetry(spec Spec) {
+	h.t.Helper()
+	require.Eventually(h.t, func() bool {
+		return slices.ContainsFunc(h.logs.all(), func(line string) bool {
+			return strings.Contains(line, "retrying until its end is recorded") &&
+				strings.Contains(line, string(spec.UID))
+		})
+	}, 10*time.Second, 5*time.Millisecond)
+}
+
+// endsSoon checks that m sees its session fail with reason within twice the
+// longest wait between tries to record the end.
+func endsSoon(t *testing.T, m *member, reason string) {
+	t.Helper()
+	select {
+	case <-m.done:
+		require.ErrorIs(t, m.err, &session.AbortError{Reason: reason})
+	case <-time.After(2 * maxEndRetry):
+		t.Fatalf("the session did not fail with %s within %v", reason, 2*maxEndRetry)
+	}
 }
 
 // TestClosing covers the session closing once every member has left, and only
