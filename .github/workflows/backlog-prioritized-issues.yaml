@@ -12,9 +12,6 @@ on:
   # so a schedule is the only way to notice a new Priority value.
   schedule:
     - cron: "17 5 * * *"
-  issues:
-    types:
-      - labeled
 
 permissions: {}
 
@@ -27,9 +24,6 @@ env:
 jobs:
   backlog:
     name: Move prioritized issues out of triage
-    if: github.event_name != 'issues' || startsWith(github.event.label.name, 'priority')
-    # Job-level so that a skipped run for an unrelated label never replaces a
-    # pending run in the group.
     concurrency:
       group: ${{ github.workflow }}
       cancel-in-progress: false
