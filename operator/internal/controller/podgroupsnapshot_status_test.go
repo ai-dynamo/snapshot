@@ -182,7 +182,7 @@ func TestDerivePodGroupSnapshotMemberTable(t *testing.T) {
 			want: func() snapshotv1alpha1.PodGroupSnapshotMemberStatus {
 				m := pgPinned("a", 0, snapshotv1alpha1.CheckpointPhaseFailed)
 				m.Reason = snapshotv1alpha1.PodGroupReasonDeadlineExceeded
-				m.Message = "the deadline of 600 seconds passed before the member was checkpointed"
+				m.Message = podGroupDeadlineMemberMessage
 				return m
 			}(),
 		},
@@ -208,7 +208,7 @@ func TestDerivePodGroupSnapshotMemberTable(t *testing.T) {
 			deleting: true,
 			want: func() snapshotv1alpha1.PodGroupSnapshotMemberStatus {
 				m := pgPinned("a", 0, snapshotv1alpha1.CheckpointPhaseFailed)
-				m.Reason, m.Message = snapshotv1alpha1.PodGroupReasonCancelled, podGroupCancelledMessage
+				m.Reason, m.Message = snapshotv1alpha1.PodGroupReasonCancelled, podGroupCancelledMemberMessage
 				return m
 			}(),
 		},
@@ -219,12 +219,12 @@ func TestDerivePodGroupSnapshotMemberTable(t *testing.T) {
 			want:     pgPinned("a", 0, snapshotv1alpha1.CheckpointPhaseCheckpointing),
 		},
 		{
-			name:      "a refused group fails the member with the refusal",
+			name:      "a refused group fails the member with the refusal's reason",
 			member:    podGroupMemberObservation{nodeName: "node-a"},
 			admission: refused,
 			want: snapshotv1alpha1.PodGroupSnapshotMemberStatus{
 				NodeName: "node-a", Phase: snapshotv1alpha1.CheckpointPhaseFailed,
-				Reason: snapshotv1alpha1.PodGroupReasonRefused, Message: "source Pod is gone",
+				Reason: snapshotv1alpha1.PodGroupReasonRefused, Message: podGroupRefusedMemberMessage,
 			},
 		},
 		{
@@ -808,16 +808,35 @@ func TestDerivePodGroupSnapshotIsStable(t *testing.T) {
 }
 
 func TestDerivePodGroupSnapshotCapsMessages(t *testing.T) {
-	long := strings.Repeat("é", maxConditionMessageLength) // two bytes each
-	snap := pgSnap("a", metav1.Condition{Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue,
-		Reason: "Long", Message: long})
-	got := pgDerive(pgSpec("a"), pgObserved(podGroupMemberObservation{podSnapshot: snap}), snapshotv1alpha1.PodGroupSnapshotStatus{})
+	// One byte, then two-byte characters, so every cut splits a character.
+	long := "x" + strings.Repeat("é", maxConditionMessageLength)
 
-	assert.LessOrEqual(t, len(got.Members[0].Message), maxConditionMessageLength)
-	for _, cond := range got.Conditions {
-		assert.LessOrEqual(t, len(cond.Message), maxConditionMessageLength, cond.Type)
-		assert.True(t, strings.HasPrefix(cond.Message, `member "a" (rank 0) failed with Long: é`), cond.Type)
-	}
+	t.Run("a member's own failure", func(t *testing.T) {
+		snap := pgSnap("a", metav1.Condition{
+			Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue, Reason: "Long", Message: long,
+		})
+		observed := pgObserved(podGroupMemberObservation{podSnapshot: snap})
+		got := pgDerive(pgSpec("a"), observed, snapshotv1alpha1.PodGroupSnapshotStatus{})
+
+		assert.Equal(t, long[:maxMemberMessageLength-1], got.Members[0].Message)
+		failed := meta.FindStatusCondition(got.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
+		require.NotNil(t, failed)
+		assert.Equal(t, `member "a" (rank 0) failed with Long: `+got.Members[0].Message, failed.Message)
+	})
+
+	t.Run("a group-wide cause", func(t *testing.T) {
+		observed := pgObserved(podGroupMemberObservation{}, podGroupMemberObservation{})
+		observed.admission = podGroupRefusal(long)
+		got := pgDerive(pgSpec("a", "b"), observed, snapshotv1alpha1.PodGroupSnapshotStatus{})
+
+		require.NotNil(t, meta.FindStatusCondition(got.Conditions, snapshotv1alpha1.PodGroupConditionFailed))
+		for _, cond := range got.Conditions {
+			assert.Equal(t, long[:maxConditionMessageLength-1], cond.Message, cond.Type)
+		}
+		for _, m := range got.Members {
+			assert.Equal(t, podGroupRefusedMemberMessage, m.Message, m.ID)
+		}
+	})
 }
 
 func TestPodGroupSnapshotReleasable(t *testing.T) {
