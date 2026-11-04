@@ -5,8 +5,11 @@ package criu
 
 import (
 	"bytes"
+	"encoding/binary"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +36,7 @@ func TestRewriteSocketMetadataRewritesInternalUnixSocketPair(t *testing.T) {
 		},
 	}
 
-	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321, nil)
 	if err != nil {
 		t.Fatalf("rewrite socket metadata: %v", err)
 	}
@@ -66,7 +69,7 @@ func TestRewriteSocketMetadataPreservesExternalUnixSocketPeer(t *testing.T) {
 		Entries: []*crit.CriuEntry{{Message: client}, {Message: external}},
 	}
 
-	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321, nil)
 	if err != nil {
 		t.Fatalf("rewrite socket metadata: %v", err)
 	}
@@ -87,7 +90,7 @@ func TestRewriteSocketMetadataRejectsMissingUnixSocketPeer(t *testing.T) {
 	entry.Usk.Peer = proto.Uint32(4242)
 	image := &crit.CriuImage{Entries: []*crit.CriuEntry{{Message: entry}}}
 
-	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321, nil)
 	if err == nil || !strings.Contains(err.Error(), "unresolved peer inode 4242") {
 		t.Fatalf("rewrite socket metadata error = %v", err)
 	}
@@ -102,7 +105,7 @@ func TestRewriteSocketMetadataRejectsMissingUnixSocketInode(t *testing.T) {
 
 	_, _, err := rewriteSocketMetadata(&crit.CriuImage{
 		Entries: []*crit.CriuEntry{{Message: entry}},
-	}, 987654321)
+	}, 987654321, nil)
 	if err == nil || !strings.Contains(err.Error(), "missing inode metadata") {
 		t.Fatalf("rewrite socket metadata error = %v", err)
 	}
@@ -131,6 +134,7 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 		987654321,
 		t.TempDir(),
 		mounter.mount,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("prepare restore image directory: %v", err)
@@ -231,6 +235,7 @@ func TestPrepareRestoreImageDirWithoutRewritesUsesCheckpointDirectly(t *testing.
 		987654321,
 		t.TempDir(),
 		mounter.mount,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("prepare restore image directory: %v", err)
@@ -267,7 +272,7 @@ func TestRewriteSocketMetadataRejectsUnexpectedEntryTypes(t *testing.T) {
 	image := &crit.CriuImage{
 		Entries: []*crit.CriuEntry{{Message: &sk_unix.UnixSkEntry{}}},
 	}
-	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321, nil)
 	if err == nil || !strings.Contains(err.Error(), "unexpected files.img entry 0 type") {
 		t.Fatalf("rewrite socket metadata error = %v", err)
 	}
@@ -297,6 +302,7 @@ func TestPrepareRestoreImageDirConcurrentRewriteMetadataIsIndependent(t *testing
 				restoreID,
 				t.TempDir(),
 				mounter.mount,
+				nil,
 			)
 			results <- result{path: path, cleanup: cleanup, err: err}
 		}()
@@ -522,4 +528,129 @@ func decodeFilesImageEntries(t *testing.T, data []byte) []*fdinfo.FileEntry {
 		entries[i] = entry.Message.(*fdinfo.FileEntry)
 	}
 	return entries
+}
+
+func TestPrepareRestoreImageDirKeepsPeerConnections(t *testing.T) {
+	peers := IPMap{netip.MustParseAddr("100.65.2.20"): netip.MustParseAddr("100.66.2.20")}
+	for _, tc := range []struct {
+		name  string
+		peers IPMap
+		// kept says which of the connections the restore keeps.
+		kept []bool
+	}{
+		{"group member", peers, []bool{true, true, true, false}},
+		{"Pod on its own", nil, []bool{false, false, false, false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkpointPath := t.TempDir()
+			toPeer, fromPeer, mappedToPeer, toOther := peerSocketTopology()
+			for _, entry := range []*fdinfo.FileEntry{toPeer, toOther} {
+				entry.Isk.Opts.SoKeepalive = proto.Bool(true)
+			}
+			entries := []*fdinfo.FileEntry{toPeer, fromPeer, mappedToPeer, toOther}
+			writeFilesImage(t, checkpointPath, entries)
+
+			mounter := &capturingFilesImageMounter{}
+			_, cleanup, err := prepareRestoreImageDirForRestoreIDWithMount(checkpointPath, 987654321, t.TempDir(), mounter.mount, tc.peers)
+			if err != nil {
+				t.Fatalf("prepare restore image directory: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := cleanup(); err != nil {
+					t.Errorf("cleanup restore image directory: %v", err)
+				}
+			})
+			capturedImages := mounter.capturedImages()
+			if len(capturedImages) != 1 {
+				t.Fatalf("captured files images = %d, want 1", len(capturedImages))
+			}
+			restored := decodeFilesImageEntries(t, capturedImages[0])
+			for i, entry := range entries {
+				got := restored[i].Isk
+				if !tc.kept[i] {
+					if got.GetState() != linuxTCPStateClose || got.GetDstPort() != 0 {
+						t.Errorf("connection %d was not disconnected: %v", i, got)
+					}
+					if got.GetOpts().GetSoKeepalive() != entry.Isk.GetOpts().GetSoKeepalive() {
+						t.Errorf("connection %d changed SO_KEEPALIVE, want it untouched", i)
+					}
+					continue
+				}
+				// A kept connection comes back as dumped, without keepalive.
+				want := proto.Clone(entry).(*fdinfo.FileEntry)
+				if want.Isk.GetOpts().GetSoKeepalive() {
+					want.Isk.Opts.SoKeepalive = proto.Bool(false)
+				}
+				if !proto.Equal(restored[i], want) {
+					t.Errorf("kept connection %d:\n got: %v\nwant: %v", i, restored[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestPreservedConnectionsMovesBothEnds(t *testing.T) {
+	checkpointPath := t.TempDir()
+	toPeer, fromPeer, mappedToPeer, toOther := peerSocketTopology()
+	toPeer.Isk.Opts.SoKeepalive = proto.Bool(true)
+	writeFilesImage(t, checkpointPath, []*fdinfo.FileEntry{toPeer, fromPeer, mappedToPeer, toOther})
+
+	peers := IPMap{netip.MustParseAddr("100.65.2.20"): netip.MustParseAddr("100.66.2.20")}
+	ipMap := IPMap{
+		netip.MustParseAddr("100.65.1.10"): netip.MustParseAddr("100.66.1.10"),
+		netip.MustParseAddr("100.65.2.20"): netip.MustParseAddr("100.66.2.20"),
+	}
+	got, err := PreservedConnections(checkpointPath, peers, ipMap)
+	if err != nil {
+		t.Fatalf("PreservedConnections: %v", err)
+	}
+	connection := func(local, remote string, keepAlive bool) TCPConnection {
+		return TCPConnection{Local: netip.MustParseAddrPort(local), Remote: netip.MustParseAddrPort(remote), KeepAlive: keepAlive}
+	}
+	want := []TCPConnection{
+		connection("100.66.1.10:40000", "100.66.2.20:6001", true),
+		connection("100.66.1.10:6000", "100.66.2.20:50000", false),
+		connection("100.66.1.10:40001", "100.66.2.20:6001", false),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("PreservedConnections = %v, want %v", got, want)
+	}
+
+	if got, err := PreservedConnections(checkpointPath, nil, ipMap); err != nil || len(got) != 0 {
+		t.Fatalf("PreservedConnections without peers = %v, %v, want none", got, err)
+	}
+}
+
+// peerSocketTopology returns established connections from a Pod at
+// 100.65.1.10: one it opened to a peer at 100.65.2.20, one the peer opened to
+// it, one to the peer through a dual-stack socket, and one to 100.65.3.30,
+// outside the group.
+func peerSocketTopology() (toPeer, fromPeer, mappedToPeer, toOther *fdinfo.FileEntry) {
+	pod, peer, other := netip.MustParseAddr("100.65.1.10"), netip.MustParseAddr("100.65.2.20"), netip.MustParseAddr("100.65.3.30")
+	toPeer = newTCPSocketEntry(1, 101, 40000, 6001, linuxTCPStateEstablished, ipv4Words(pod), ipv4Words(peer))
+	fromPeer = newTCPSocketEntry(2, 102, 6000, 50000, linuxTCPStateEstablished, ipv4Words(pod), ipv4Words(peer))
+	mappedToPeer = newTCPSocketEntry(3, 103, 40001, 6001, linuxTCPStateEstablished, mappedIPv4Words(pod), mappedIPv4Words(peer))
+	toOther = newTCPSocketEntry(4, 104, 41000, 443, linuxTCPStateEstablished, ipv4Words(pod), ipv4Words(other))
+	for _, entry := range []*fdinfo.FileEntry{toPeer, fromPeer, toOther} {
+		entry.Isk.Family = proto.Uint32(unix.AF_INET)
+		entry.Isk.V6Only = nil
+	}
+	return toPeer, fromPeer, mappedToPeer, toOther
+}
+
+// ipv4Words encodes an IPv4 address the way CRIU's images hold it.
+func ipv4Words(addr netip.Addr) []uint32 {
+	address := addr.As4()
+	return []uint32{binary.LittleEndian.Uint32(address[:])}
+}
+
+// mappedIPv4Words encodes an IPv4 address as the IPv4-mapped IPv6 address a
+// dual-stack socket holds.
+func mappedIPv4Words(addr netip.Addr) []uint32 {
+	address := addr.As16()
+	words := make([]uint32, 4)
+	for i := range words {
+		words[i] = binary.LittleEndian.Uint32(address[i*4:])
+	}
+	return words
 }
