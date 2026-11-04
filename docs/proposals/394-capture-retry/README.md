@@ -94,9 +94,9 @@ of #319.
    `PodSnapshotContent` is created. Every recovery acts on the pod already named
    by `PodSnapshotContent.spec.source.podRef`.
 2. **Surviving a node-agent restart.** An attempt in flight when the agent dies
-   is not resumed; the work order fails through the existing content resync and
-   capture-lease expiry. Keeping the agent alive is goal 6; resuming across its
-   death is not.
+   is not resumed. Its exclusion is in-memory, so it dies with the process and
+   the work order comes back through the existing content resync. Keeping the
+   agent alive is goal 6; resuming across its death is not.
 3. **Telling the workload that no checkpoint is coming.** The other half of
    #319. It changes the workload contract rather than the agent's capture path.
 4. **Restore-path retry or cold-start fallback** (#247, #244). Setting names are
@@ -196,12 +196,17 @@ Release is therefore a confirmed step, not best-effort.
 Retry lives entirely within the node agent, inside the handling of one
 `PodSnapshotContent`. No controller above the agent participates.
 
-Two existing mechanisms bound an attempt. The **in-flight guard** is
-process-local and stops one agent starting a second attempt for the same work
-order. The **capture lease** is a Kubernetes `Lease` naming the agent that owns
-the work order, so that overlapping agent instances — during a rollout, say —
-cannot both capture the same workload. Both are already held while a capture
-runs; retry simply keeps them across attempts.
+One existing mechanism bounds an attempt: the capture workqueue's **per-key
+exclusion**. It is in-memory and process-local, so one agent cannot start a
+second attempt for the same work order, and it is held for the whole reconcile
+rather than per attempt — retry simply keeps it across attempts.
+
+It is process-local, so it does not separate overlapping agent instances. That
+is already true of a single capture and is not something retry introduces, but
+retry does hold a work order for longer and so widens the window. The node
+agent is a DaemonSet with one pod per node, and a rolling update stops the old
+pod before the new one starts, so two agents own the same node only
+transiently.
 
 ### Deciding what to repeat
 
@@ -283,8 +288,10 @@ Three properties are load-bearing:
   so release is conditional on which recovery was chosen.
 - **An attempt that re-stages must confirm release first.** The agent proceeds
   only once the previous transaction is terminal and its transfers have drained.
-- **The lease is re-checked between attempts.** A lost lease means another
-  holder may own the work order; retrying under one ends the capture.
+- **The work order is re-read between attempts.** It is held in memory for the
+  whole reconcile, so nothing can take it mid-capture, but it can be deleted or
+  reach a terminal state from elsewhere; an attempt under one of those ends the
+  capture.
 
 Attempts are spaced by exponential backoff whose initial delay and ceiling are
 hard-coded constants. The total time a retrying capture can consume is already
