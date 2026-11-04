@@ -42,6 +42,8 @@ func makeNodeControllerWithInterceptor(t *testing.T, fc *fakeCheckpointer, funcs
 		runtime:      &fakeRuntime{},
 		log:          logr.Discard(),
 		captureQueue: newTestCaptureQueue(t),
+		sendSignalFn: func(logr.Logger, int, syscall.Signal, string) error { return nil },
+		hostProcPath: "/proc",
 	}
 	// Set the clock and requeue as newDefaultController does.
 	w.nowFn = time.Now

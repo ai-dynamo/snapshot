@@ -520,7 +520,7 @@ func TestCheckpointBoundSendsArtifactTarget(t *testing.T) {
 // failure has to carry them: a probe cannot tell "not a CUDA process" from a
 // helper that failed, and an empty list would strand a suspended workload.
 func TestSuspendedSourceOf(t *testing.T) {
-	suspended, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41, 42}, false, false))
+	suspended, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41, 42}, false, false, 0))
 	assert.True(t, needsRecovery)
 	assert.Equal(t, []int{41, 42}, suspended.GPUPIDs)
 	assert.False(t, suspended.CuInterposePrepared)
@@ -528,12 +528,12 @@ func TestSuspendedSourceOf(t *testing.T) {
 	_, needsRecovery = SuspendedSourceOf(errors.New("prepare failed"))
 	assert.False(t, needsRecovery, "a failure before the source was touched needs no recovery")
 
-	cpuOnly, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), nil, false, false))
+	cpuOnly, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), nil, false, false, 0))
 	assert.True(t, needsRecovery)
 	assert.Empty(t, cpuOnly.GPUPIDs, "a CPU-only capture still needs recovery, with no GPUs to hand back")
 
 	// Multi-GPU preparation removes the tree's shared mappings, which nothing restores.
-	multiGPU, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41}, true, false))
+	multiGPU, needsRecovery := SuspendedSourceOf(sourceNeedsRecovery(errors.New("capture failed"), []int{41}, true, false, 0))
 	assert.True(t, needsRecovery)
 	assert.True(t, multiGPU.CuInterposePrepared)
 }
