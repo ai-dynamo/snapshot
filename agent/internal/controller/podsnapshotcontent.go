@@ -281,7 +281,7 @@ func (w *NodeController) runCheckpoint(
 	logger.V(1).Info("Resolved the capture's retry budget", "retries", budget)
 	for {
 		artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
-			cuInterposeRequested, contentUID, artifactPath)
+			cuInterposeRequested, contentUID, artifactPath, budget-spent)
 		if err == nil {
 			return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
 		}
@@ -297,9 +297,11 @@ func (w *NodeController) runCheckpoint(
 		// caller asking for two retries gets two, however they were spent.
 		spent += suspended.DumpRetriesUsed
 
-		retryWillFollow := failure.retryable && spent < budget && captureCtx.Err() == nil &&
+		wantRetry := failure.retryable && spent < budget && captureCtx.Err() == nil &&
 			w.workOrderStillCapturable(ctx, content)
-		w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, retryWillFollow)
+		// The recovery has the last word: a source it could not put back has
+		// nothing left to capture, so the retry is abandoned rather than spent.
+		retryWillFollow := w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, wantRetry)
 		if !retryWillFollow {
 			recorded := err
 			if spent > 0 {
@@ -368,6 +370,7 @@ func (w *NodeController) attemptCheckpoint(
 	cuInterposeRequested bool,
 	contentUID string,
 	artifactPath string,
+	dumpRetriesRemaining int,
 ) (*pagebroker.PublishedArtifact, error) {
 	storeID := ""
 	if content.Spec.Storage != nil {
@@ -384,7 +387,7 @@ func (w *NodeController) attemptCheckpoint(
 		CuInterposeRequested: cuInterposeRequested,
 		StoreID:              storeID,
 		// Read only once a dump has failed, so a capture that succeeds never reads it.
-		DumpRetriesRemaining: w.config.Checkpoint.ResolveRetryLimit(),
+		DumpRetriesRemaining: dumpRetriesRemaining,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
