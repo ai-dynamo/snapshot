@@ -79,6 +79,31 @@ Use the same agent image for the DaemonSet and cuinterpose installer.
 {{- end }}
 
 {{/*
+The agent's affinity: daemonset.affinity with the agent's supported
+architectures added to every required node selector term. Terms are ORed, so
+the architecture has to be in each one to hold for the whole requirement. An
+empty or null term matches no nodes and stays empty.
+*/}}
+{{- define "snapshot.agentAffinity" -}}
+{{- $affinity := deepCopy (.Values.daemonset.affinity | default dict) -}}
+{{- $nodeAffinity := $affinity.nodeAffinity | default dict -}}
+{{- $required := $nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution | default dict -}}
+{{- $architecture := dict "key" "kubernetes.io/arch" "operator" "In" "values" (list "amd64" "arm64") -}}
+{{- $terms := list -}}
+{{- range $required.nodeSelectorTerms -}}
+{{- $term := . | default dict -}}
+{{- if or $term.matchExpressions $term.matchFields -}}
+{{- $term = set $term "matchExpressions" (prepend ($term.matchExpressions | default list) $architecture) -}}
+{{- end -}}
+{{- $terms = append $terms $term -}}
+{{- end -}}
+{{- $_ := set $required "nodeSelectorTerms" ($terms | default (list (dict "matchExpressions" (list $architecture)))) -}}
+{{- $_ = set $nodeAffinity "requiredDuringSchedulingIgnoredDuringExecution" $required -}}
+{{- $_ = set $affinity "nodeAffinity" $nodeAffinity -}}
+{{- toYaml $affinity -}}
+{{- end }}
+
+{{/*
 Convert a Kubernetes quantity to bytes, or empty when it is not a form we parse.
 */}}
 {{- define "snapshot.quantityBytes" -}}

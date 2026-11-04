@@ -63,6 +63,12 @@ commit-level history for each release is on its
   `pageBroker.transferEngine.modelStreamer`. Changing one restarts PageBroker.
   An install that sets none of them is unchanged. See
   [Storage](docs/operations/storage.md#other-backends).
+- `daemonset.affinity` accepts `nodeAffinity` instead of failing the install.
+  The chart adds the agent's supported architectures to every non-empty
+  required node selector term, so a term such as
+  `example.com/pool DoesNotExist` keeps the agent off those nodes. An install
+  that sets none is unchanged. See
+  [Agent DaemonSet and access](docs/reference/api.md#agent-daemonset-and-access).
 
 ### Changed
 
