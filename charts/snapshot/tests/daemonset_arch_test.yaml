@@ -8,18 +8,71 @@ tests:
   - it: schedules on amd64 and arm64 nodes
     asserts:
       - equal:
-          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0]
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms
           value:
-            key: kubernetes.io/arch
-            operator: In
-            values:
-              - amd64
-              - arm64
+            - matchExpressions:
+                - key: kubernetes.io/arch
+                  operator: In
+                  values:
+                    - amd64
+                    - arm64
 
-  - it: rejects a custom nodeAffinity
+  - it: adds the architecture to every non-empty custom required term
     set:
       daemonset.affinity:
-        nodeAffinity: {}
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: example.com/pool
+                    operator: DoesNotExist
+              - matchFields:
+                  - key: metadata.name
+                    operator: In
+                    values:
+                      - gpu-001
+              - {}
+              - null
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              preference:
+                matchExpressions:
+                  - key: example.com/tier
+                    operator: In
+                    values:
+                      - fast
     asserts:
-      - failedTemplate:
-          errorPattern: restricts kubernetes.io/arch to amd64 and arm64
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity
+          value:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: kubernetes.io/arch
+                      operator: In
+                      values:
+                        - amd64
+                        - arm64
+                    - key: example.com/pool
+                      operator: DoesNotExist
+                - matchExpressions:
+                    - key: kubernetes.io/arch
+                      operator: In
+                      values:
+                        - amd64
+                        - arm64
+                  matchFields:
+                    - key: metadata.name
+                      operator: In
+                      values:
+                        - gpu-001
+                - {}
+                - {}
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 1
+                preference:
+                  matchExpressions:
+                    - key: example.com/tier
+                      operator: In
+                      values:
+                        - fast

@@ -188,6 +188,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `pageBroker.transferChunkBytes` | Bytes per transfer slot | `134217728` |
 | `pageBroker.maxPinnedBytes` | Total pinned memory limit, including allocation rounding. Zero sets no limit | `0` |
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
+| `daemonset.affinity` | Affinity for the agent pod. The chart adds `kubernetes.io/arch In (amd64, arm64)` to every non-empty required node selector term, so a term with `example.com/pool DoesNotExist` keeps the agent off those nodes on supported architectures. Empty and null terms still match no nodes | `{}` |
 | `daemonset.runtimeClassName` | RuntimeClass for the agent pod. Set `""` to omit it when the NVIDIA runtime is containerd's default and no `nvidia` RuntimeClass exists | `nvidia` |
 | `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 256Mi limit |
 | `operator.bindNewContents` | Bind new snapshots to the configured store. Enable after all agents have completed the compatible artifact-backend rollout; see [storage activation](../../docs/operations/storage.md#enable-artifact-addressing). Required for `storage.type: s3` | `false` |

@@ -253,7 +253,8 @@ daemonset:
   # Pod annotations
   podAnnotations: {}
 
-  # Affinity rules
+  # Affinity rules. The chart adds kubernetes.io/arch In (amd64, arm64) to every
+  # non-empty required node selector term.
   affinity: {}
 
   # Init container configuration
