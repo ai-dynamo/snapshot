@@ -99,6 +99,10 @@ type NodeController struct {
 	nowFn            func() time.Time
 	requeueCaptureFn func(name string, after time.Duration)
 
+	// postRestoreWaitFn waits between post-restore attempts: waitOrDone.
+	// Tests replace it.
+	postRestoreWaitFn func(ctx context.Context, d time.Duration) error
+
 	handledRestores sync.Map
 
 	// startedRestoreContainers holds, per restoreContainerKey, the ID of a
@@ -133,6 +137,11 @@ type restorePlan struct {
 	mappings []podcontract.ContainerMapping
 	// Read once in preflight, so both gates reach the same answer.
 	skipCompatCheck bool
+	// postRestore runs the checkpoint's lifecycle.postRestore action, every
+	// postRestorePeriod until it succeeds; nil without an action. The
+	// preflight already checked it against the destination containers.
+	postRestore       postRestoreHandler
+	postRestorePeriod time.Duration
 }
 
 type restoreResultState int
@@ -161,14 +170,16 @@ func (e *restorePendingError) Error() string {
 }
 
 type restoreOperation struct {
-	controller      *NodeController
-	pod             *corev1.Pod
-	artifact        *restoreArtifact
-	skipCompatCheck bool
-	destination     string
-	containerID     string
-	startedAt       time.Time
-	log             logr.Logger
+	controller        *NodeController
+	pod               *corev1.Pod
+	artifact          *restoreArtifact
+	postRestore       postRestoreHandler
+	postRestorePeriod time.Duration
+	skipCompatCheck   bool
+	destination       string
+	containerID       string
+	startedAt         time.Time
+	log               logr.Logger
 }
 
 const (
@@ -277,6 +288,7 @@ func newDefaultController(
 		hookExec:                  rt,
 		hookHTTP:                  lifecyclehooks.NewHTTPClient(),
 		nowFn:                     time.Now,
+		postRestoreWaitFn:         waitOrDone,
 	}
 	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.checkpointFn = w.executorCheckpoint
@@ -619,7 +631,20 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
 		return nil, newRestorePendingError("PodIPPending", fmt.Sprintf("Waiting for restore Pod %s/%s to receive an IP address", pod.Namespace, pod.Name))
 	}
-	return &restorePlan{artifact: artifact, mappings: mappings, skipCompatCheck: skipCompatCheck}, nil
+	// The post-restore action is checked against the Pod spec here, so an
+	// action that can never run restores nothing.
+	postRestore, postRestorePeriod, err := planPostRestore(pod, mappings,
+		postRestoreAction(content, target.SourceContainerName), w.hookExec, w.hookHTTP)
+	if err != nil {
+		return nil, err
+	}
+	return &restorePlan{
+		artifact:          artifact,
+		mappings:          mappings,
+		skipCompatCheck:   skipCompatCheck,
+		postRestore:       postRestore,
+		postRestorePeriod: postRestorePeriod,
+	}, nil
 }
 
 func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, error) {
@@ -1002,6 +1027,10 @@ func (w *NodeController) restoreDestination(
 	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", artifact.SnapshotName, destination))
 
 	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, recovering); err != nil {
+		if errors.Is(err, errRestoreInterrupted) {
+			// Not an outcome: the next agent resumes the post-restore action.
+			return result
+		}
 		var incompatible *compat.IncompatibleError
 		if errors.As(err, &incompatible) {
 			result.state = restoreResultIncompatible
@@ -1083,6 +1112,10 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //     CRIU-restored process resumes inside the polling loop that waits on
 //     this file, exits quiescence, and resumes the engine. On failure, write
 //     restore-failed and kill the placeholder instead.
+//  3. With a lifecycle.postRestore action, notify the application within the
+//     same deadline. The restore preflight already checked its settings;
+//     nothing checks its file before step 2, so the release is not delayed.
+//     A failure here also fails the restore and kills the container.
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) (retErr error) {
 	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
 	// Without this the placeholder keeps waiting for a restore that panicked.
@@ -1095,10 +1128,11 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 			return err
 		}
 		if completed {
-			return nil
+			return op.recoverPostRestore(ctx)
 		}
 	}
 
+	// One deadline covers the restore and its post-restore action.
 	restoreCtx := ctx
 	if timeout := w.config.Restore.RestoreTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
@@ -1122,7 +1156,32 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
-	return op.completeRestore(ctx, restored)
+	if err := op.completeRestore(ctx, restored); err != nil {
+		return err
+	}
+	if err := op.notifyPostRestore(restoreCtx); err != nil {
+		return op.failPostRestore(ctx, err)
+	}
+	return nil
+}
+
+// recoverPostRestore finishes a restore that an agent restart interrupted
+// after restore-complete: only the post-restore action can be left, and CRIU
+// must never run again. This pass's preflight already checked its settings.
+//
+// The interrupted run's deadline is gone with it, so the action gets a full
+// config.restore.timeoutSeconds again: a restart can extend it by one timeout.
+func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
+	postCtx := ctx
+	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
+		var cancel context.CancelFunc
+		postCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	if err := op.notifyPostRestore(postCtx); err != nil {
+		return op.failPostRestore(ctx, err)
+	}
+	return nil
 }
 
 // recoverCompletedRestore avoids replaying CRIU when the destination-scoped
@@ -1157,14 +1216,16 @@ func (w *NodeController) newRestoreOperation(
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	artifact := plan.artifact
 	return &restoreOperation{
-		controller:      w,
-		pod:             pod,
-		artifact:        artifact,
-		skipCompatCheck: plan.skipCompatCheck,
-		destination:     destination,
-		containerID:     containerID,
-		startedAt:       startedAt,
-		log:             w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
+		controller:        w,
+		pod:               pod,
+		artifact:          artifact,
+		postRestore:       plan.postRestore,
+		postRestorePeriod: plan.postRestorePeriod,
+		skipCompatCheck:   plan.skipCompatCheck,
+		destination:       destination,
+		containerID:       containerID,
+		startedAt:         startedAt,
+		log:               w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
 	}
 }
 

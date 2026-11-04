@@ -385,6 +385,46 @@ The agent log carries the process diagnostics and the `restore.log` lines
 recorded at the failure. The workload's own output is in the restore pod's
 container logs.
 
+### checking the post-restore action
+
+When the checkpoint's container has a `lifecycle.postRestore` action, the agent
+checks its settings before restoring anything. It checks a file action's file
+once the restored files are in place, before it releases the restored process,
+since the restored files can bring the file or its directory.
+
+Likely causes:
+- **The file already exists.** The message names the path. The file was in the
+  restore container already, or came back with the restored files. An existing
+  file would be taken for the notification, so the application would never get
+  one. Use a path that only Snapshot writes, such as one on an
+  emptyDir that the restore Pod mounts for this purpose. A file on a volume
+  that outlives the Pod, such as a PersistentVolumeClaim, stays there from an
+  earlier restore until the application removes it.
+- **The file can't be created.** Its directory does not exist in the restore
+  container, or the container's user can't write it, for example on a
+  read-only mount or with `readOnlyRootFilesystem`. File actions run as the
+  container's user.
+- **The image has no `/bin/sh`.** File actions run a shell command in the
+  container, so the image needs a shell.
+- **The path is one of Snapshot's own files** in the snapshot-control volume.
+- **The port name is not one of the destination container's ports.**
+
+### running the post-restore action
+
+After writing `restore-complete`, the agent notifies the restored application:
+it creates the file, or sends the HTTP POST, every `periodSeconds` until it
+succeeds or the restore deadline (`config.restore.timeoutSeconds`) passes. The
+restore fails, and the restored container is stopped, when no attempt
+succeeded.
+
+Likely causes: the application does not listen on the port at the restore
+Pod's IP, for example because it bound only to the source Pod's IP; the
+endpoint returns a status other than 2xx, including a redirect, which the agent
+does not follow; a NetworkPolicy blocks the agent.
+
+The message carries the last attempt's error. The agent log shows every attempt
+at debug level.
+
 ## Checkpoint fails at a step
 
 ### resolving checkpoint artifact path
