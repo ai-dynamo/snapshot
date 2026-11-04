@@ -43,7 +43,7 @@ func TestAttemptCheckpointReportsFailureWithoutRecordingIt(t *testing.T) {
 	}
 
 	_, err := w.attemptCheckpoint(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/artifacts/uid", 0, nil)
+		"main", "cid", 1, false, "uid", "/artifacts/uid", 0, nil, nil)
 
 	if !errors.Is(err, want) {
 		t.Errorf("attemptCheckpoint() = %v, want %v", err, want)
@@ -66,7 +66,7 @@ func TestAttemptCheckpointPassesTheResolvedTarget(t *testing.T) {
 	}
 
 	if _, err := w.attemptCheckpoint(context.Background(), content, &corev1.Pod{},
-		"main", "cid", 42, true, "uid", "/artifacts/uid", 0, nil); err != nil {
+		"main", "cid", 42, true, "uid", "/artifacts/uid", 0, nil, nil); err != nil {
 		t.Fatalf("attemptCheckpoint() = %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestAttemptCheckpointInheritsTheCallersBudget(t *testing.T) {
 	want, _ := budget.Deadline()
 
 	if _, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/a", 0, nil); err != nil {
+		"main", "cid", 1, false, "uid", "/a", 0, nil, nil); err != nil {
 		t.Fatalf("attemptCheckpoint() = %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestAttemptCheckpointReportsAnExhaustedBudget(t *testing.T) {
 	defer cancel()
 
 	_, err := w.attemptCheckpoint(budget, &snapshotv1alpha1.PodSnapshotContent{}, &corev1.Pod{},
-		"main", "cid", 1, false, "uid", "/a", 0, nil)
+		"main", "cid", 1, false, "uid", "/a", 0, nil, nil)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("attemptCheckpoint() = %v, want %v", err, context.DeadlineExceeded)
@@ -428,6 +428,44 @@ func TestTerminalReasonKeepsASettledReason(t *testing.T) {
 			assert.Equal(t, tc.want, terminalReason(tc.failure, 2, 2))
 		})
 	}
+}
+
+// A repeated dump spends the same budget as a fresh attempt, so an owner has to
+// see it as it happens. Before, the repeats were invisible: a capture whose
+// repeats used up the budget reported only how it ended.
+func TestRunCheckpointReportsEveryRepeatAndAttempt(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(3)
+
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	attempts := 0
+	w.checkpointFn = func(_ context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		attempts++
+		if attempts > 1 {
+			return nil, nil
+		}
+		// The first attempt repeats its dump twice before giving up on them.
+		require.NotNil(t, params.OnDumpRepeat, "the repeat must have somewhere to report")
+		params.OnDumpRepeat(1, retryable)
+		params.OnDumpRepeat(2, retryable)
+		return nil, executor.SuspendedSourceFailure(retryable, executor.SuspendedSource{DumpRetriesUsed: 2})
+	}
+
+	// A fresh attempt only follows a source the recovery could put back, so the
+	// live test process stands in for one.
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	events := eventsForReason(w.clientset.(*fake.Clientset), reasonCheckpointAttemptFailed)
+	require.Len(t, events, 3, "two repeats and the fresh attempt that followed them")
+	assert.Contains(t, events[0].Message, "1 of 3 retries used")
+	assert.Contains(t, events[1].Message, "2 of 3 retries used")
+	assert.Contains(t, events[2].Message, "3 of 3 retries used")
 }
 
 // The dump kills the source, so a commit that failed after it has nothing left

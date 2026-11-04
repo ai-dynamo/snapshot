@@ -53,6 +53,8 @@ type CheckpointParams struct {
 	DumpRetriesRemaining int
 	// DumpWorthRepeating reports whether repeating could reach a different outcome.
 	DumpWorthRepeating func(err error) (bool, string)
+	// OnDumpRepeat reports each repeat as it is taken. Nil reports nothing.
+	OnDumpRepeat func(repeat int, err error)
 	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
 }
@@ -287,8 +289,14 @@ func (w *NodeController) runCheckpoint(
 	sourceLive := false
 	logger.V(1).Info("Resolved the capture's retry budget", "retries", budget)
 	for {
+		onDumpRepeat := func(repeat int, dumpErr error) {
+			// Refined like the outer loop's, so one cause does not read as two
+			// problems under two reasons.
+			refined, _ := w.refineFullStaging(ctx, classifyCaptureFailure(dumpErr), dumpErr, containerPID)
+			w.reportAttemptFailed(ctx, logger, pod, refined.reason, spent+repeat, budget, dumpErr)
+		}
 		artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
-			cuInterposeRequested, contentUID, artifactPath, budget-spent, w.dumpWorthRepeating(ctx, containerPID))
+			cuInterposeRequested, contentUID, artifactPath, budget-spent, w.dumpWorthRepeating(ctx, containerPID), onDumpRepeat)
 		if err == nil {
 			return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
 		}
@@ -317,10 +325,7 @@ func (w *NodeController) runCheckpoint(
 		}
 
 		spent++
-		emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning,
-			reasonCheckpointAttemptFailed,
-			fmt.Sprintf("Checkpoint attempt failed (%s); retrying, %d of %d retries used: %v",
-				attempt.failure.reason, spent, budget, err))
+		w.reportAttemptFailed(ctx, logger, pod, attempt.failure.reason, spent, budget, err)
 		select {
 		case <-captureCtx.Done():
 			w.endSource(ctx, logger, pod, containerPID, sourceLive)
@@ -393,6 +398,18 @@ func (w *NodeController) failCheckpoint(
 	return w.markCheckpointFailed(ctx, content, reason, cause)
 }
 
+// reportAttemptFailed tells the source Pod's owner that an attempt failed and
+// another is coming. Both a repeated dump and a fresh attempt report through
+// here, so the retries read the same whichever kind was spent.
+func (w *NodeController) reportAttemptFailed(
+	ctx context.Context, logger logr.Logger, pod *corev1.Pod, reason string, spent, budget int, err error,
+) {
+	emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning,
+		reasonCheckpointAttemptFailed,
+		fmt.Sprintf("Checkpoint attempt failed (%s); retrying, %d of %d retries used: %v",
+			reason, spent, budget, err))
+}
+
 // terminalReason separates a checkpoint that used up its retries from one that
 // failed on its first try, which read the same before. Retries spent repeating
 // the dump count: the caller asked for that many tries and got them.
@@ -456,6 +473,7 @@ func (w *NodeController) attemptCheckpoint(
 	artifactPath string,
 	dumpRetriesRemaining int,
 	dumpWorthRepeating func(error) (bool, string),
+	onDumpRepeat func(repeat int, err error),
 ) (*pagebroker.PublishedArtifact, error) {
 	storeID := ""
 	if content.Spec.Storage != nil {
@@ -473,6 +491,7 @@ func (w *NodeController) attemptCheckpoint(
 		StoreID:              storeID,
 		DumpRetriesRemaining: dumpRetriesRemaining,
 		DumpWorthRepeating:   dumpWorthRepeating,
+		OnDumpRepeat:         onDumpRepeat,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
@@ -796,6 +815,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		StoreID:              params.StoreID,
 		DumpRetriesRemaining: params.DumpRetriesRemaining,
 		DumpWorthRepeating:   params.DumpWorthRepeating,
+		OnDumpRepeat:         params.OnDumpRepeat,
 	}
 	// Recovering the source belongs to runCheckpoint, which is the only place that
 	// knows whether another attempt follows.
