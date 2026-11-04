@@ -105,7 +105,11 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		}
 	}
 
-	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
+	ipMap, err := criu.RestoreIPMap(m, opts.TargetPodIP, nil)
+	if err != nil {
+		return nil, failStep(StepPrepareCRIURestore, err)
+	}
+	if err := criu.ConfigureInetRemap(m, ipMap, log); err != nil {
 		return nil, failStep(StepPrepareCRIURestore, err)
 	}
 	criuOpts, err := criu.BuildRestoreOpts(m, opts.CgroupRoot, opts.LSMProfile, log)
@@ -247,7 +251,7 @@ func executeRestore(
 			log.Error(err, "failed to unmount securityfs")
 		}
 	}()
-	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, unmountSecurityFS, log)
+	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, nil, unmountSecurityFS, nil, log)
 	if err != nil {
 		return nil, 0, nil, failStep(StepRestoreCRIU, err)
 	}

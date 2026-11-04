@@ -5,8 +5,10 @@ package criu
 
 import (
 	"fmt"
+	"maps"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -19,10 +21,97 @@ const (
 	InetRemapEnvVar = "SNAPSHOT_CRIU_INET_REMAP_FILE"
 )
 
-// ConfigureInetRemap writes the CRIU plugin manifest for pod IP changes.
+// IPMap maps the IP each restored Pod had at capture to its IP now. As a
+// flag.Value, it reads and prints old=new pairs separated by commas.
+type IPMap map[netip.Addr]netip.Addr
+
+func (m IPMap) String() string {
+	pairs := make([]string, 0, len(m))
+	for _, old := range slices.SortedFunc(maps.Keys(m), netip.Addr.Compare) {
+		pairs = append(pairs, old.String()+"="+m[old].String())
+	}
+	return strings.Join(pairs, ",")
+}
+
+func (m *IPMap) Set(value string) error {
+	ipMap := IPMap{}
+	if value == "" {
+		*m = ipMap
+		return nil
+	}
+	for pair := range strings.SplitSeq(value, ",") {
+		oldIP, newIP, ok := strings.Cut(pair, "=")
+		if !ok {
+			return fmt.Errorf("IP mapping %q is not <old-ip>=<new-ip>", pair)
+		}
+		oldAddr, err := netip.ParseAddr(oldIP)
+		if err != nil {
+			return fmt.Errorf("IP mapping %q: %w", pair, err)
+		}
+		newAddr, err := netip.ParseAddr(newIP)
+		if err != nil {
+			return fmt.Errorf("IP mapping %q: %w", pair, err)
+		}
+		if _, ok := ipMap[oldAddr]; ok {
+			return fmt.Errorf("IP %s is mapped twice", oldAddr)
+		}
+		ipMap[oldAddr] = newAddr
+	}
+	*m = ipMap
+	return nil
+}
+
+// moved returns the IP that replaces addr, which is addr itself when m does not
+// move it.
+func (m IPMap) moved(addr netip.Addr) netip.Addr {
+	if to, ok := m[addr]; ok {
+		return to
+	}
+	return addr
+}
+
+// RestoreIPMap returns the IP map of one restore: this Pod's IP at capture,
+// from its manifest, mapped to targetPodIP, together with peers, which maps the
+// other members of the Pod's group. This Pod's own pair is left out when either
+// IP is unknown.
+func RestoreIPMap(m *types.CheckpointManifest, targetPodIP string, peers IPMap) (IPMap, error) {
+	ipMap := maps.Clone(peers)
+	if ipMap == nil {
+		ipMap = IPMap{}
+	}
+	sourcePodIP := strings.TrimSpace(m.K8s.PodIP)
+	targetPodIP = strings.TrimSpace(targetPodIP)
+	if sourcePodIP != "" && targetPodIP != "" {
+		sourceAddr, err := netip.ParseAddr(sourcePodIP)
+		if err != nil {
+			return nil, fmt.Errorf("invalid source pod IP %q in checkpoint manifest: %w", sourcePodIP, err)
+		}
+		targetAddr, err := netip.ParseAddr(targetPodIP)
+		if err != nil {
+			return nil, fmt.Errorf("invalid target pod IP %q: %w", targetPodIP, err)
+		}
+		if peer, ok := ipMap[sourceAddr]; ok && peer != targetAddr {
+			return nil, fmt.Errorf("pod IP %s moves to %s, but a peer mapping moves it to %s", sourceAddr, targetAddr, peer)
+		}
+		ipMap[sourceAddr] = targetAddr
+	}
+	// No two Pods hold one IP, so neither can a restore's map.
+	sources := make(map[netip.Addr]netip.Addr, len(ipMap))
+	for from, to := range ipMap {
+		if other, ok := sources[to]; ok {
+			return nil, fmt.Errorf("pod IPs %s and %s both move to %s", other, from, to)
+		}
+		sources[to] = from
+	}
+	return ipMap, nil
+}
+
+// ConfigureInetRemap writes the CRIU plugin manifest for the IP changes in
+// ipMap. The plugin rewrites both addresses of every restored INET socket, so a
+// connection between members of a group comes back between their new IPs.
 func ConfigureInetRemap(
 	m *types.CheckpointManifest,
-	targetPodIP string,
+	ipMap IPMap,
 	log logr.Logger,
 ) error {
 	if err := os.Unsetenv(InetRemapEnvVar); err != nil {
@@ -34,34 +123,16 @@ func ConfigureInetRemap(
 		return nil
 	}
 
-	sourcePodIP := strings.TrimSpace(m.K8s.PodIP)
-	targetPodIP = strings.TrimSpace(targetPodIP)
-	if sourcePodIP == "" || targetPodIP == "" {
-		log.V(1).Info("Skipping CRIU INET socket remap",
-			"source_pod_ip_present", sourcePodIP != "",
-			"target_pod_ip_present", targetPodIP != "",
-		)
+	changed := maps.Clone(ipMap)
+	maps.DeleteFunc(changed, func(from, to netip.Addr) bool { return from == to })
+	if len(changed) == 0 {
+		log.V(1).Info("Skipping CRIU INET socket remap: no pod IP changed", "ip_map", ipMap.String())
 		return nil
 	}
-
-	sourceAddr, err := netip.ParseAddr(sourcePodIP)
-	if err != nil {
-		return fmt.Errorf("invalid source pod IP %q in checkpoint manifest: %w", sourcePodIP, err)
-	}
-	targetAddr, err := netip.ParseAddr(targetPodIP)
-	if err != nil {
-		return fmt.Errorf("invalid target pod IP %q: %w", targetPodIP, err)
-	}
-	if sourceAddr == targetAddr {
-		log.V(1).Info("Skipping CRIU INET socket remap: pod IP unchanged", "pod_ip", sourcePodIP)
-		return nil
-	}
-	if !sourceAddr.Is4() || !targetAddr.Is4() {
-		return fmt.Errorf(
-			"CRIU INET socket remap only supports IPv4 pod IPs today: source=%q target=%q",
-			sourcePodIP,
-			targetPodIP,
-		)
+	for from, to := range changed {
+		if !from.Is4() || !to.Is4() {
+			return fmt.Errorf("CRIU INET socket remap only supports IPv4 pod IPs today: old=%q new=%q", from, to)
+		}
 	}
 	if strings.TrimSpace(m.CRIUDump.CRIU.LibDir) == "" && strings.TrimSpace(os.Getenv("CRIU_LIBS_DIR")) == "" {
 		return fmt.Errorf("CRIU INET socket remap requires criu.libDir or CRIU_LIBS_DIR so CRIU can load the Snapshot CRIU plugin")
@@ -80,8 +151,12 @@ func ConfigureInetRemap(
 		return fmt.Errorf("failed to create CRIU INET remap file: %w", err)
 	}
 	remapPath := remapFile.Name()
-	content := fmt.Sprintf("# generated by Snapshot\n%s %s\n", sourceAddr.String(), targetAddr.String())
-	if _, err := remapFile.WriteString(content); err != nil {
+	var content strings.Builder
+	content.WriteString("# generated by Snapshot\n")
+	for _, old := range slices.SortedFunc(maps.Keys(changed), netip.Addr.Compare) {
+		fmt.Fprintf(&content, "%s %s\n", old, changed[old])
+	}
+	if _, err := remapFile.WriteString(content.String()); err != nil {
 		_ = remapFile.Close()
 		_ = os.Remove(remapPath)
 		return fmt.Errorf("failed to write CRIU INET remap file: %w", err)
@@ -95,8 +170,7 @@ func ConfigureInetRemap(
 	}
 
 	log.Info("Configured CRIU INET socket remap",
-		"source_pod_ip", sourcePodIP,
-		"target_pod_ip", targetPodIP,
+		"ip_map", changed.String(),
 		"remap_file", remapPath,
 	)
 	return nil

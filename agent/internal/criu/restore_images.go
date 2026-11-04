@@ -40,21 +40,25 @@ type tcpPortRewrite struct {
 
 type mountFilesImageFunc func(checkpointPath, replacementFilesImagePath string) (func() error, error)
 
-func prepareRestoreImageDir(checkpointPath, scratchDir string) (string, func() error, error) {
+// prepareRestoreImageDir prepares the images CRIU restores from. peers maps the
+// capture-time IPs of the other members of the Pod's group, whose connections the
+// restore keeps.
+func prepareRestoreImageDir(checkpointPath, scratchDir string, peers IPMap) (string, func() error, error) {
 	// The placeholder mount namespace remains container-specific with shareProcessNamespace.
 	var stat unix.Stat_t
 	if err := unix.Stat(placeholderMountNamespacePath, &stat); err != nil {
 		return "", nil, fmt.Errorf("failed to stat placeholder mount namespace at %s: %w", placeholderMountNamespacePath, err)
 	}
-	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino, scratchDir)
+	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino, scratchDir, peers)
 }
 
-func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64, scratchDir string) (string, func() error, error) {
+func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64, scratchDir string, peers IPMap) (string, func() error, error) {
 	return prepareRestoreImageDirForRestoreIDWithMount(
 		checkpointPath,
 		restoreID,
 		scratchDir,
 		mountFilesImage,
+		peers,
 	)
 }
 
@@ -63,6 +67,7 @@ func prepareRestoreImageDirForRestoreIDWithMount(
 	restoreID uint64,
 	scratchDir string,
 	mountReplacement mountFilesImageFunc,
+	peers IPMap,
 ) (string, func() error, error) {
 	checkpointPath, err := filepath.Abs(checkpointPath)
 	if err != nil {
@@ -73,7 +78,7 @@ func prepareRestoreImageDirForRestoreIDWithMount(
 	if err != nil {
 		return "", nil, err
 	}
-	reservationFDs, rewritten, err := rewriteSocketMetadata(image, restoreID)
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, restoreID, peers)
 	if err != nil {
 		return "", nil, err
 	}
@@ -93,6 +98,35 @@ func prepareRestoreImageDirForRestoreIDWithMount(
 		return "", nil, err
 	}
 	return checkpointPath, restoreImageCleanup(reservationFDs, removeImageView), nil
+}
+
+// TCPConnection is an established TCP connection, seen from this Pod's end.
+type TCPConnection struct {
+	Local, Remote netip.AddrPort
+	// KeepAlive reports whether the socket had SO_KEEPALIVE at capture.
+	KeepAlive bool
+}
+
+// PreservedConnections returns the connections that a restore from
+// checkpointPath keeps for peers, as they will be once ipMap has moved their
+// addresses: the restore's IP map, which covers this Pod and peers.
+func PreservedConnections(checkpointPath string, peers, ipMap IPMap) ([]TCPConnection, error) {
+	image, err := decodeFilesImage(checkpointPath)
+	if err != nil {
+		return nil, err
+	}
+	_, _, kept, _ := planTCPPortRewrites(image, peers)
+	connections := make([]TCPConnection, 0, len(kept))
+	for _, socket := range kept {
+		local, _ := normalizedIPAddress(socket.GetFamily(), socket.SrcAddr)
+		remote, _ := normalizedIPAddress(socket.GetFamily(), socket.DstAddr)
+		connections = append(connections, TCPConnection{
+			Local:     netip.AddrPortFrom(ipMap.moved(local), uint16(socket.GetSrcPort())),
+			Remote:    netip.AddrPortFrom(ipMap.moved(remote), uint16(socket.GetDstPort())),
+			KeepAlive: socket.GetOpts().GetSoKeepalive(),
+		})
+	}
+	return connections, nil
 }
 
 func decodeFilesImage(checkpointPath string) (*crit.CriuImage, error) {
@@ -129,9 +163,10 @@ func decodeImage(checkpointPath, filename string, entryType proto.Message) (*cri
 }
 
 // rewriteSocketMetadata gives each clone private socket identities while
-// preserving listeners. The caller owns the returned reservation descriptors.
-func rewriteSocketMetadata(image *crit.CriuImage, restoreID uint64) ([]int, bool, error) {
-	tcpRewrites, tcpDisconnects, forbiddenPorts := planTCPPortRewrites(image)
+// preserving listeners and connections to peers. The caller owns the returned
+// reservation descriptors.
+func rewriteSocketMetadata(image *crit.CriuImage, restoreID uint64, peers IPMap) ([]int, bool, error) {
+	tcpRewrites, tcpDisconnects, kept, forbiddenPorts := planTCPPortRewrites(image, peers)
 	var reservationFDs []int
 	for i := range tcpRewrites {
 		port, reservationFD, err := reserveDualStackTCPPort(forbiddenPorts)
@@ -206,6 +241,17 @@ func rewriteSocketMetadata(image *crit.CriuImage, restoreID uint64) ([]int, bool
 		clear(socket.DstAddr)
 		rewritten = true
 	}
+	for _, socket := range kept {
+		// A keepalive probe from a kept connection could abort it while its peer
+		// is still restoring, so the restore leaves keepalive off until every
+		// member has restored its sockets, and the agent turns it back on. CRIU
+		// keeps the keepalive timings itself, and does not save TCP_USER_TIMEOUT
+		// at all.
+		if socket.GetOpts().GetSoKeepalive() {
+			socket.Opts.SoKeepalive = proto.Bool(false)
+			rewritten = true
+		}
+	}
 	return reservationFDs, rewritten, nil
 }
 
@@ -259,13 +305,14 @@ func restoreImageCleanup(reservationFDs []int, removeImageView func() error) fun
 	}
 }
 
-func planTCPPortRewrites(image *crit.CriuImage) (
-	[]tcpPortRewrite,
-	[]*sk_inet.InetSkEntry,
-	map[uint32]struct{},
+func planTCPPortRewrites(image *crit.CriuImage, peers IPMap) (
+	rewrites []tcpPortRewrite,
+	disconnects []*sk_inet.InetSkEntry,
+	kept []*sk_inet.InetSkEntry,
+	forbiddenPorts map[uint32]struct{},
 ) {
 	var sockets []*sk_inet.InetSkEntry
-	forbiddenPorts := make(map[uint32]struct{})
+	forbiddenPorts = make(map[uint32]struct{})
 
 	for _, entry := range image.Entries {
 		file, ok := entry.Message.(*fdinfo.FileEntry)
@@ -281,8 +328,6 @@ func planTCPPortRewrites(image *crit.CriuImage) (
 		}
 	}
 
-	var rewrites []tcpPortRewrite
-	var disconnects []*sk_inet.InetSkEntry
 	// Keep listener ports stable. Only rewrite connections whose reciprocal
 	// endpoint is also in the image, so both halves retain a valid TCP tuple.
 	for _, socket := range sockets {
@@ -296,12 +341,19 @@ func planTCPPortRewrites(image *crit.CriuImage) (
 			}
 		}
 		if len(rewrite.peers) == 0 {
-			disconnects = append(disconnects, socket)
+			// A connection to another member of the group keeps its tuple: that
+			// member restores the other end from its own image, and the INET
+			// remap plugin moves both addresses to the members' new IPs.
+			if isPeerConnection(socket, peers) {
+				kept = append(kept, socket)
+			} else {
+				disconnects = append(disconnects, socket)
+			}
 		} else if len(rewrite.peers) == 1 && !hasTCPListener(socket, sockets) {
 			rewrites = append(rewrites, rewrite)
 		}
 	}
-	return rewrites, disconnects, forbiddenPorts
+	return rewrites, disconnects, kept, forbiddenPorts
 }
 
 func isTCPSocket(socket *sk_inet.InetSkEntry) bool {
@@ -336,6 +388,14 @@ func reciprocalTCPPair(a, b *sk_inet.InetSkEntry) bool {
 		a.GetDstPort() == b.GetSrcPort() &&
 		aSrc == bDst &&
 		aDst == bSrc
+}
+
+// isPeerConnection reports whether socket connects to the capture-time IP of
+// another member of the Pod's group, one of the keys of peers.
+func isPeerConnection(socket *sk_inet.InetSkEntry, peers IPMap) bool {
+	remote, ok := normalizedIPAddress(socket.GetFamily(), socket.DstAddr)
+	_, peer := peers[remote]
+	return ok && peer
 }
 
 func hasSupportedTCPAddresses(socket *sk_inet.InetSkEntry) bool {
