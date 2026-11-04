@@ -174,6 +174,21 @@ func TestBuildMountPolicy(t *testing.T) {
 			wantNotInExt: []string{"/run/some-daemon"},
 		},
 		{
+			name: "OCI-managed device plugin allocation markers are skipped",
+			mounts: []types.MountInfo{
+				{MountPoint: "/run/nvidia-container-devices/GPU-d36ed66d-d1b8-d6b8-d277-e02d9d7b04c8", IsOCIManaged: true},
+				{MountPoint: "/var/run/nvidia-container-devices/GPU-52f3de69-3398-5340-e8f4-515fe3aa2ba5", IsOCIManaged: true},
+			},
+			wantSkipped: []string{
+				"/run/nvidia-container-devices/GPU-d36ed66d-d1b8-d6b8-d277-e02d9d7b04c8",
+				"/var/run/nvidia-container-devices/GPU-52f3de69-3398-5340-e8f4-515fe3aa2ba5",
+			},
+			wantNotInExt: []string{
+				"/run/nvidia-container-devices/GPU-d36ed66d-d1b8-d6b8-d277-e02d9d7b04c8",
+				"/var/run/nvidia-container-devices/GPU-52f3de69-3398-5340-e8f4-515fe3aa2ba5",
+			},
+		},
+		{
 			name: "OCI-managed /proc submount is externalized, not skipped",
 			mounts: []types.MountInfo{
 				{MountPoint: "/proc/acpi", IsOCIManaged: true},
