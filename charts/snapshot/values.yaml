@@ -28,11 +28,6 @@ operator:
 
   # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/storage.md.
   bindNewContents: false
-
-  # Temporary, for end-to-end tests only: accept containers[].checkpointReadinessProbe
-  # and containers[].lifecycle on PodSnapshot and SnapshotJob before the agent
-  # fully supports them. Removed when the feature ships (SNEP-411).
-  lifecycleHooks: false
   resources:
     limits:
       cpu: 500m
