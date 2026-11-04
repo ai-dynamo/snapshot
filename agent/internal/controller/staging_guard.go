@@ -97,3 +97,17 @@ func nearestExistingDir(dir string) string {
 		current = parent
 	}
 }
+
+// dumpWorthRepeating refuses to repeat a dump nothing could make fit.
+//
+// The probe answers whether another dump can run, not whether it could end
+// differently; an image too large for its volume ends the same way every time.
+func (w *NodeController) dumpWorthRepeating(ctx context.Context, containerPID int) func(error) (bool, string) {
+	return func(err error) (bool, string) {
+		failure, _ := w.refineFullStaging(ctx, classifyCaptureFailure(err), err, containerPID)
+		if failure.reason == reasonImageTooLarge {
+			return false, "the image cannot fit the volume it is written to"
+		}
+		return true, ""
+	}
+}
