@@ -290,6 +290,9 @@ func (w *NodeController) runCheckpoint(
 		}
 
 		attempt := classifyAttempt(err)
+		// Measured while the source is still suspended, so the tree the dump was
+		// sizing is the one still there to size.
+		attempt.failure, err = w.refineFullStaging(ctx, attempt.failure, err, containerPID)
 		// Repeats of the dump come out of the same budget as fresh attempts, so a
 		// caller asking for two retries gets two, however they were spent.
 		spent += attempt.suspended.DumpRetriesUsed
@@ -462,7 +465,6 @@ func (w *NodeController) attemptCheckpoint(
 		StartedAt:            time.Now(),
 		CuInterposeRequested: cuInterposeRequested,
 		StoreID:              storeID,
-		// Read only once a dump has failed, so a capture that succeeds never reads it.
 		DumpRetriesRemaining: dumpRetriesRemaining,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has

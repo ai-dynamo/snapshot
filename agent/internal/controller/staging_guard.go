@@ -5,10 +5,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
 
@@ -47,4 +51,49 @@ func (w *NodeController) checkStagingCapacity(ctx context.Context, containerPID 
 			minimum, total, shortfall)
 	}
 	return nil
+}
+
+// refineFullStaging tells a staging volume that is momentarily occupied from one
+// this image can never fit, for a dump that ran out of room part-written.
+//
+// The preflight only ever establishes "too big", never "fits", so only
+// measuring says whether retrying this one is worth anything.
+func (w *NodeController) refineFullStaging(ctx context.Context, failure captureFailure, err error, containerPID int) (captureFailure, error) {
+	var spaceErr *executor.DumpSpaceError
+	if !errors.As(err, &spaceErr) || spaceErr.Dir == "" {
+		return failure, err
+	}
+	logger := logr.FromContextOrDiscard(ctx)
+	// The dump's directory is usually released before the failure is classified;
+	// its nearest surviving ancestor reports the same capacity.
+	total, capacityErr := w.stagingCapacityFn(nearestExistingDir(spaceErr.Dir))
+	if capacityErr != nil {
+		logger.V(1).Info("Cannot measure staging; reporting the dump failure unrefined", "error", capacityErr.Error())
+		return failure, err
+	}
+	minimum, sizeErr := w.minimumImageSizeFn(snapshotruntime.HostProcPath, snapshotruntime.ProcessTreePIDs(containerPID))
+	if sizeErr != nil {
+		logger.V(1).Info("Cannot size the image; reporting the dump failure unrefined", "error", sizeErr.Error())
+		return failure, err
+	}
+	if shortfall := snapshotruntime.StagingShortfall(minimum, total); shortfall > 0 {
+		return captureFailure{reason: reasonImageTooLarge}, fmt.Errorf(
+			"%w: image needs at least %d bytes but %s holds %d, short by %d",
+			err, minimum, spaceErr.Dir, total, shortfall)
+	}
+	// It fits, so the volume was occupied rather than too small — which frees up.
+	return captureFailure{reason: reasonStagingUnavailable, retryable: true}, err
+}
+
+func nearestExistingDir(dir string) string {
+	for current := dir; ; {
+		if _, err := os.Stat(current); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return current
+		}
+		current = parent
+	}
 }
