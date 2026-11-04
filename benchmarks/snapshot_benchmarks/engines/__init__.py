@@ -59,7 +59,7 @@ class ModelSpec:
 
 class Engine(Protocol):
     """A snapshot-ready inference framework, as built and deployed by the
-    corresponding docs/guides/<engine>/ guide.
+    corresponding docs/using-snapshot/<engine>/ guide.
 
     Implementations load and patch the guide's own deployment YAML rather than
     hand-building pod specs, so the benchmark can't silently drift from the

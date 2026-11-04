@@ -12,7 +12,7 @@ CACHE_HELPER_IMAGE = "docker.io/library/python:3.12-slim@sha256:cb33f7f771ecec2e
 
 
 def app_configmap(engine, namespace, name):
-    data = {"app.py": (ROOT / "docs/guides" / engine.guide / "app.py").read_text()}
+    data = {"app.py": (ROOT / "docs/using-snapshot" / engine.guide / "app.py").read_text()}
     data.update(
         {
             p.name: p.read_text()

@@ -62,7 +62,7 @@ commit-level history for each release is on its
   (`storage.s3.caBundleConfigMapRef`), `pageBroker.s3.limits` and
   `pageBroker.transferEngine.modelStreamer`. Changing one restarts PageBroker.
   An install that sets none of them is unchanged. See
-  [Storage](docs/operations/storage.md#other-backends).
+  [Storage](docs/operate/configure-storage.md#other-backends).
 
 ### Changed
 
@@ -164,7 +164,7 @@ node, cutting cold-start time for large inference workloads.
 ### Known limitations
 
 Checkpoint and restore require compatible GPU and driver versions between the
-source and target node. See [Limitations](docs/limitations.md) for the current
+source and target node. See [Limitations](docs/overview/limitations.md) for the current
 boundaries.
 
 ## [0.1.0-rc2] - 2026-09-03

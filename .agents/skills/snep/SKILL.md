@@ -14,8 +14,8 @@ Proposal (SNEP). SNEPs are design documents for significant Snapshot changes;
 they establish motivation, scope, design, trade-offs, and validation before
 implementation.
 
-Read [the SNEP process](../../../docs/proposals/README.md) and [the SNEP
-template](../../../docs/proposals/NNNN-template/README.md) before starting.
+Read [the SNEP process](../../../docs/design/README.md) and [the SNEP
+template](../../../docs/design/NNNN-template/README.md) before starting.
 They are the source of truth when they differ from this skill.
 
 ## Working style
@@ -37,13 +37,13 @@ They are the source of truth when they differ from this skill.
 Ask for a Snapshot tracking issue number or its GitHub issue URL. The issue
 number is the SNEP number; do not create a new proposal without one.
 
-Search `docs/proposals/<issue-number>-*/README.md` for an existing proposal.
+Search `docs/design/<issue-number>-*/README.md` for an existing proposal.
 If it exists, tell the user its path and ask whether to continue editing it or
 start a replacement. For a continuation, review the existing headings in order
 and ask which sections to keep, revise, or complete.
 
 If it does not exist, ask for a short descriptive title. Confirm the proposed
-path, `docs/proposals/<issue-number>-<kebab-case-title>/README.md`, then copy
+path, `docs/design/<issue-number>-<kebab-case-title>/README.md`, then copy
 the template into that path. Replace its title placeholder and run `make
 update-toc` so the initial document is navigable. Retain the template's SPDX
 header, headings, and `<!-- toc -->` markers.
