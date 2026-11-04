@@ -4,14 +4,19 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -184,6 +189,200 @@ func TestDeliveriesCannotChangeAnotherAttemptsKeys(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, meta.Revision(), after.Revision(), "another attempt's meta must stay unchanged")
 	assert.Equal(t, meta.Value(), after.Value(), "another attempt's meta must stay unchanged")
+}
+
+// TestDeliveriesCannotReachTheJetStreamAPI guards another attempt's buckets
+// against a member that delivers its own writes to the JetStream API. Members
+// share one account, which imports $JS.API.>, and JetStream does not bound a
+// push consumer's deliveries by its creator's publish permissions
+// (nats-server#8274; its fix, nats-server#8279, was closed, since a client
+// allowed to create a consumer owns its settings). Such a delivery does reach
+// the API through the import, but it keeps its original subject, under the
+// member's own bucket, which names no API endpoint, so the API drops it without
+// acting or answering. The test tries purging, deleting, deleting a message
+// of, and updating both of another attempt's streams, and deleting one of their
+// consumers, with deliveries that carry a reply subject and with ones that do
+// not. It fails if the API ever audits such a delivery, or if the other
+// attempt's streams, meta, consumers, or member change.
+func TestDeliveriesCannotReachTheJetStreamAPI(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	spec, other := h.ensure(1), h.ensure(1)
+	own := session.SnapshotBucket(string(spec.UID))
+	m, theirs := h.connect(spec, 0), h.connect(other, 0)
+	// The library bucket gets a first message, for MSG.DELETE to name, and a
+	// watch, for CONSUMER.DELETE to name.
+	_, err := theirs.library.Put(ctx, "library.k", []byte("v"))
+	require.NoError(t, err)
+	watch, err := theirs.library.Watch(context.Background(), "library.>")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = watch.Stop() })
+
+	// The API audits every request it handles, such as a member's own.
+	audits, err := h.srv.conn.SubscribeSync(natsserver.JSAuditAdvisory)
+	require.NoError(t, err)
+	require.NoError(t, h.srv.conn.Flush())
+	_, err = m.nc.Request("$JS.API.STREAM.INFO.KV_"+own, nil, 2*time.Second)
+	require.NoError(t, err)
+	require.True(t, audited(t, audits, "$JS.API.STREAM.INFO.KV_"+own, 5*time.Second),
+		"the API must audit a member's own request")
+
+	var probe int
+	buckets := []struct{ label, bucket string }{
+		{"snapshot", session.SnapshotBucket(string(other.UID))},
+		{"library", session.LibraryBucket(string(other.UID))},
+	}
+	for _, b := range buckets {
+		stream := "KV_" + b.bucket
+		for _, ack := range []string{"none", "explicit"} {
+			for _, action := range []string{"purge", "delete", "message delete", "update", "consumer delete"} {
+				t.Run(fmt.Sprintf("%s %s with ack %s", b.label, action, ack), func(t *testing.T) {
+					before := h.state(t, other)
+					var subject string
+					var payload []byte
+					switch action {
+					case "purge":
+						subject, payload = "$JS.API.STREAM.PURGE."+stream, []byte("{}")
+					case "delete":
+						subject = "$JS.API.STREAM.DELETE." + stream
+					case "message delete":
+						subject, payload = "$JS.API.STREAM.MSG.DELETE."+stream, []byte(`{"seq":1}`)
+					case "update":
+						cfg := before.Streams[stream].Config
+						cfg.MaxMsgs = 1
+						subject = "$JS.API.STREAM.UPDATE." + stream
+						payload, err = json.Marshal(cfg)
+						require.NoError(t, err)
+					case "consumer delete":
+						subject = "$JS.API.CONSUMER.DELETE." + stream + "." +
+							h.consumerOf(t, stream, session.InboxPrefix(string(other.UID), theirs.id))
+					}
+					probe++
+					key := fmt.Sprintf("probe%d", probe)
+					delivery := m.deliver(t, h, key, payload, subject, ack)
+					assert.Equal(t, "$KV."+own+".snapshot."+key, delivery.Subject,
+						"a delivery must keep its original subject")
+					assert.False(t, audited(t, audits, subject, pending), "the API must not handle the delivery")
+					assert.Equal(t, before, h.state(t, other), "another attempt's streams and meta must stay unchanged")
+					select {
+					case <-theirs.done:
+						t.Fatalf("another attempt's member must keep watching, but its session ended: %v", theirs.Err())
+					default:
+					}
+				})
+			}
+		}
+	}
+}
+
+// attemptState is what TestDeliveriesCannotReachTheJetStreamAPI compares of an
+// attempt: each stream's configuration, message count, and consumers, by
+// stream name, and the revision of its meta.
+type attemptState struct {
+	Streams map[string]streamState
+	Meta    uint64
+}
+
+// streamState is what attemptState holds of one stream.
+type streamState struct {
+	Config    jetstream.StreamConfig
+	Messages  uint64
+	Consumers []string
+}
+
+// state returns the state of an attempt, which must have both of its streams.
+func (h *harness) state(t *testing.T, spec Spec) attemptState {
+	t.Helper()
+	ctx := within(t)
+	state := attemptState{Streams: make(map[string]streamState)}
+	for _, bucket := range []string{session.SnapshotBucket(string(spec.UID)), session.LibraryBucket(string(spec.UID))} {
+		stream, err := h.srv.js.Stream(ctx, "KV_"+bucket)
+		require.NoError(t, err, "the attempt's stream must exist")
+		info, err := stream.Info(ctx)
+		require.NoError(t, err)
+		var consumers []string
+		list := stream.ListConsumers(ctx)
+		for c := range list.Info() {
+			consumers = append(consumers, c.Name)
+		}
+		require.NoError(t, list.Err())
+		slices.Sort(consumers)
+		state.Streams["KV_"+bucket] = streamState{Config: info.Config, Messages: info.State.Msgs, Consumers: consumers}
+	}
+	meta, err := h.srv.lookup(spec.UID).snapshot.Get(ctx, session.KeyMeta)
+	require.NoError(t, err)
+	state.Meta = meta.Revision()
+	return state
+}
+
+// consumerOf returns the name of the consumer of stream that delivers to an
+// inbox under prefix.
+func (h *harness) consumerOf(t *testing.T, stream, prefix string) string {
+	t.Helper()
+	ctx := within(t)
+	s, err := h.srv.js.Stream(ctx, stream)
+	require.NoError(t, err)
+	list := s.ListConsumers(ctx)
+	var name string
+	for c := range list.Info() {
+		if strings.HasPrefix(c.Config.DeliverSubject, prefix+".") {
+			name = c.Name
+		}
+	}
+	require.NoError(t, list.Err())
+	require.NotEmpty(t, name, "%s must have a consumer delivering under %s", stream, prefix)
+	return name
+}
+
+// deliver makes the member deliver a write to subject: it creates a push
+// consumer of its own Snapshot stream, filtered on key, with subject as its
+// delivery subject and ack as its ack policy, then writes payload under key.
+// It returns the delivery, which the coordinator's connection receives too,
+// since it shares the members' account, and deletes the consumer.
+func (m *member) deliver(t *testing.T, h *harness, key string, payload []byte, subject, ack string) *nats.Msg {
+	t.Helper()
+	ctx := within(t)
+	own := "KV_" + m.snapshot.Bucket()
+	delivered, err := h.srv.conn.SubscribeSync(subject)
+	require.NoError(t, err)
+	defer func() { _ = delivered.Unsubscribe() }()
+	require.NoError(t, h.srv.conn.Flush())
+	name := "deliver-" + key
+	reply, err := m.nc.Request("$JS.API.CONSUMER.CREATE."+own+"."+name,
+		[]byte(`{"stream_name":"`+own+`","config":{"name":"`+name+`","deliver_subject":"`+subject+
+			`","ack_policy":"`+ack+`","filter_subject":"$KV.`+m.snapshot.Bucket()+`.snapshot.`+key+`"}}`),
+		2*time.Second)
+	require.NoError(t, err)
+	var created struct {
+		Error *struct{ Description string } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(reply.Data, &created))
+	require.Nil(t, created.Error, "a member may create a consumer of its own stream")
+	t.Cleanup(func() {
+		_, _ = m.nc.Request("$JS.API.CONSUMER.DELETE."+own+"."+name, nil, 2*time.Second)
+	})
+	require.NoError(t, m.insert(ctx, session.NamespaceSnapshot, key, payload))
+	delivery, err := delivered.NextMsg(10 * time.Second)
+	require.NoError(t, err, "the consumer must have delivered to %s", subject)
+	return delivery
+}
+
+// audited reports whether the API audits a request on subject within wait.
+func audited(t *testing.T, audits *nats.Subscription, subject string, wait time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(wait)
+	for {
+		msg, err := audits.NextMsg(time.Until(deadline))
+		if errors.Is(err, nats.ErrTimeout) {
+			return false
+		}
+		require.NoError(t, err)
+		var audit natsserver.JSAPIAudit
+		require.NoError(t, json.Unmarshal(msg.Data, &audit))
+		if audit.Subject == subject {
+			return true
+		}
+	}
 }
 
 // requireViolation waits for the server to report a permission violation
