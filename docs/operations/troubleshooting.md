@@ -533,6 +533,21 @@ Likely causes: another member failed, and its agent's log carries the step.
 Or the attempt's deadline passed, or the coordinator was lost
 (`CoordinatorLost`).
 
+### keeping the connections to the pod group's other members
+
+At restore, the member keeps its TCP connections to the other members. Before
+CRIU runs, the agent drops the packets of those connections in the restore
+Pod's network namespace. CRIU then restores the member and waits, before any
+of its processes runs, until every member has restored its sockets
+(`sockets-restored`). The agent then lifts the hold, turns `SO_KEEPALIVE` back
+on for the connections that had it, and lets CRIU continue.
+
+Likely causes: another member failed, or the attempt's deadline passed before
+every member restored its sockets. Or the agent could not write the hold's
+nftables table in the Pod's network namespace, for example on a node whose
+kernel lacks nf_tables. Or nsrestore exited before CRIU restored the sockets,
+and then the agent log also names the step nsrestore failed at.
+
 ```bash
 kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
 ```
