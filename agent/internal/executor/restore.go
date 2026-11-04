@@ -21,6 +21,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
+	"github.com/ai-dynamo/snapshot/agent/internal/group"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
@@ -130,6 +131,12 @@ type RestoreRequest struct {
 	PageBrokerControlSocketPath string
 	PageBrokerRestoreMode       string
 
+	// Group, for a member of a pod group, runs the restore as the member's part
+	// in the group's restore. Nil for a Pod restored on its own. The caller joins
+	// the group and leaves it once the restore has succeeded. A failed restore
+	// fails the attempt for every member.
+	Group *group.Member
+
 	// PublishedArtifact, when set, switches restore to the artifact-addressed
 	// RPCs; read from the content's recorded status, never reconstructed here.
 	PublishedArtifact *pagebroker.PublishedArtifact
@@ -184,6 +191,14 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	ctx = logr.NewContext(ctx, log)
 	if mounts == nil {
 		return RestoreResult{}, fmt.Errorf("restore mounter is required")
+	}
+	if req.Group != nil {
+		defer func() {
+			// A restore that only failed its cleanup has released its member.
+			if retErr != nil && !errors.As(retErr, new(*RestoreCleanupError)) {
+				failGroup(ctx, log, req.Group)
+			}
+		}()
 	}
 
 	transactionID := ""
@@ -286,6 +301,18 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return RestoreResult{}, failStep(StepInspectPlaceholder, err)
 	}
+	// groupDuration is the time spent in the pod group's admission and
+	// barriers, mostly waiting for the other members.
+	var groupDuration time.Duration
+	if req.Group != nil {
+		// Every check above only read the placeholder, so a refusal leaves it
+		// as Snapshot found it.
+		admitStart := time.Now()
+		if err := admitRestore(ctx, req.Group, req.TargetPodIP, manifest.Group); err != nil {
+			return RestoreResult{}, failStep(StepAdmitGroup, err)
+		}
+		groupDuration = time.Since(admitStart)
+	}
 
 	var gpuContext *pagebroker.GpuContext
 	if usePageBrokerGPU {
@@ -387,6 +414,14 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err := validateRestoredProcessFunc(snap.TargetRoot, result.RestoredPID, log); err != nil {
 		return RestoreResult{}, failStep(StepValidateRestored, err)
 	}
+	if req.Group != nil {
+		// No member is released before every member is reconstructed.
+		releaseStart := time.Now()
+		if err := req.Group.Barrier(ctx, group.Release); err != nil {
+			return RestoreResult{}, failStep(StepGroupBarrier, err)
+		}
+		groupDuration += time.Since(releaseStart)
+	}
 
 	// Restored processes still need these paths for lazy core loading and
 	// LD_PRELOAD in later child processes. Only temporary restore mounts go away.
@@ -407,20 +442,25 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		result.CRIUPrepareDuration,
 		result.CRIURestoreDuration,
 		result.CUDARestoreDuration,
+		groupDuration,
 	)
+	phases := map[string]string{
+		"pagebroker_stage":  pageBrokerStageDuration.String(),
+		"pagebroker_mount":  pageBrokerMountDuration.String(),
+		"pagebroker_commit": pageBrokerCommitDuration.String(),
+		"gpu_device_map":    gpuDeviceMapDuration.String(),
+		"overlay_capture":   result.OverlayCaptureDuration.String(),
+		"criu_prepare":      result.CRIUPrepareDuration.String(),
+		"criu_restore":      result.CRIURestoreDuration.String(),
+		"cuda_restore":      result.CUDARestoreDuration.String(),
+		"unaccounted":       unaccounted.String(),
+	}
+	if req.Group != nil {
+		phases["group"] = groupDuration.String()
+	}
 	summary := map[string]any{
 		"duration": wall.String(),
-		"phases": map[string]string{
-			"pagebroker_stage":  pageBrokerStageDuration.String(),
-			"pagebroker_mount":  pageBrokerMountDuration.String(),
-			"pagebroker_commit": pageBrokerCommitDuration.String(),
-			"gpu_device_map":    gpuDeviceMapDuration.String(),
-			"overlay_capture":   result.OverlayCaptureDuration.String(),
-			"criu_prepare":      result.CRIUPrepareDuration.String(),
-			"criu_restore":      result.CRIURestoreDuration.String(),
-			"cuda_restore":      result.CUDARestoreDuration.String(),
-			"unaccounted":       unaccounted.String(),
-		},
+		"phases":   phases,
 	}
 	if !req.StartedAt.IsZero() {
 		summary["started_to_complete"] = time.Since(req.StartedAt).String()

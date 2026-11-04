@@ -5,6 +5,7 @@ package types
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,6 +35,20 @@ type CheckpointManifest struct {
 	Host     HostManifest      `yaml:"host,omitempty"`
 	// CuInterpose identifies the libraries verified in the source processes.
 	CuInterpose *CuInterposeManifest `yaml:"cuinterpose,omitempty"`
+	// Group records the pod group capture this checkpoint is one member of.
+	// Nil for a Pod captured on its own.
+	Group *GroupManifest `yaml:"group,omitempty"`
+}
+
+// GroupManifest is a member's part in a pod group capture: what a group
+// restore checks every member against, and builds its IP map from.
+type GroupManifest struct {
+	// CaptureID is the PodGroupSnapshot's UID, the same for every member.
+	CaptureID string `yaml:"captureID"`
+	Member    string `yaml:"member"`
+	Rank      int    `yaml:"rank"`
+	// PodIPs holds every member's Pod IP at capture, by rank.
+	PodIPs []netip.Addr `yaml:"podIPs"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object

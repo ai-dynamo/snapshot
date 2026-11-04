@@ -188,7 +188,7 @@ verify-base-packages:
 AGENT_BUILD_FLAGS = --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
 	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
-	  --build-context=api=./api --build-context=compliance=./hack/compliance
+	  --build-context=api=./api --build-context=coordinator=./coordinator --build-context=compliance=./hack/compliance
 
 docker-build-agent:
 	docker buildx build $(DOCKER_BUILD_ARGS) $(AGENT_BUILD_FLAGS) \
