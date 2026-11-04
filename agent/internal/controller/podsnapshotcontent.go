@@ -301,7 +301,11 @@ func (w *NodeController) runCheckpoint(
 			w.workOrderStillCapturable(ctx, content)
 		w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, retryWillFollow)
 		if !retryWillFollow {
-			return w.markCheckpointFailed(ctx, content, terminalReason(failure, spent, budget), err)
+			recorded := err
+			if spent > 0 {
+				recorded = fmt.Errorf("after %d of %d retries: %w", spent, budget, err)
+			}
+			return w.markCheckpointFailed(ctx, content, terminalReason(failure, spent, budget), recorded)
 		}
 
 		spent++
@@ -318,10 +322,14 @@ func (w *NodeController) runCheckpoint(
 	}
 }
 
-// terminalReason separates a capture that used up its retries from one that
-// failed on its first try, which read the same before.
+// terminalReason separates a checkpoint that used up its retries from one that
+// failed on its first try, which read the same before. Retries spent repeating
+// the dump count: the caller asked for that many tries and got them.
+//
+// Only a failure another attempt could have cleared reads as exhaustion; a
+// settled one ended the checkpoint on its own terms.
 func terminalReason(failure captureFailure, spent, budget int) string {
-	if failure.retryable && budget > 0 && spent >= budget {
+	if failure.retryable && spent > 0 && spent >= budget {
 		return reasonRetriesExhausted
 	}
 	return failure.reason
