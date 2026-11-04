@@ -366,12 +366,15 @@ func TestClose(t *testing.T) {
 	require.ErrorIs(t, sessions[1].Err(), &session.AbortError{Reason: session.ReasonMemberFailed})
 }
 
-// TestCloseWhileWatching closes a member while its watches are still being
-// created: the one that follows the session's end, which Connect starts, and
-// a Barrier's. nats.go never closes the channel of a watch cancelled as it is
-// created, so a client that waited for that channel would never return from
-// Close or the Barrier. Each Close gives the race one chance, so the test
-// closes many members.
+// TestCloseWhileWatching is a stress test. It closes members while their
+// watches may still be being created: the one that follows the session's end,
+// which Connect starts, and a Barrier's. nats.go may never close the channel
+// of a watch cancelled as it is created (nats-io/nats.go#2223), so a client
+// that waited for that channel would never return from Close or the Barrier.
+// Nothing makes a Close land in that window, which only a hook in production
+// code could hold open, so each Close gives the race one chance and the test
+// closes many members. The window is narrow: before the fix, the test failed
+// in 2 of 8 concurrent runs of 100 under -race, and rarely on an idle machine.
 func TestCloseWhileWatching(t *testing.T) {
 	h := newHarness(t)
 	for i := range 50 {
