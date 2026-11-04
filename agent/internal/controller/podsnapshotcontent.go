@@ -282,8 +282,11 @@ func (w *NodeController) runCheckpoint(
 	spent := 0
 	logger.V(1).Info("Resolved the capture's retry budget", "retries", budget)
 	for {
+		// Repeats draw on what is left of the budget, not on a fresh allowance per
+		// attempt: otherwise each attempt could repeat the full limit again and a
+		// capture would take more retries than were ever asked for.
 		artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
-			cuInterposeRequested, contentUID, artifactPath)
+			cuInterposeRequested, contentUID, artifactPath, budget-spent)
 		if err == nil {
 			return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
 		}
@@ -294,9 +297,12 @@ func (w *NodeController) runCheckpoint(
 		// caller asking for two retries gets two, however they were spent.
 		spent += suspended.DumpRetriesUsed
 
-		retryWillFollow := failure.retryable && spent < budget && captureCtx.Err() == nil &&
+		wantRetry := failure.retryable && spent < budget && captureCtx.Err() == nil &&
 			w.workOrderStillCapturable(ctx, content)
-		w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, retryWillFollow)
+		// The recovery has the last word: a source it could not put back has
+		// nothing left to capture, so the retry is abandoned rather than spent
+		// on a workload that is already gone.
+		retryWillFollow := w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, wantRetry)
 		if !retryWillFollow {
 			recorded := err
 			if spent > 0 {
@@ -362,6 +368,7 @@ func (w *NodeController) attemptCheckpoint(
 	cuInterposeRequested bool,
 	contentUID string,
 	artifactPath string,
+	dumpRetryLimit int,
 ) (*pagebroker.PublishedArtifact, error) {
 	storeID := ""
 	if content.Spec.Storage != nil {
@@ -378,7 +385,7 @@ func (w *NodeController) attemptCheckpoint(
 		CuInterposeRequested: cuInterposeRequested,
 		StoreID:              storeID,
 		// Read only once a dump has failed, so a capture that succeeds never reads it.
-		DumpRetryLimit:        w.config.Checkpoint.ResolveRetryLimit(),
+		DumpRetryLimit: dumpRetryLimit,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
@@ -688,19 +695,19 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	log := logr.FromContextOrDiscard(ctx)
 
 	req := executor.CheckpointRequest{
-		ContainerID:           params.ContainerID,
-		ContainerName:         params.ContainerName,
-		ContentUID:            params.ContentUID,
-		StartedAt:             params.StartedAt,
-		NodeName:              w.config.NodeName,
-		PodName:               params.Pod.Name,
-		PodNamespace:          params.Pod.Namespace,
-		PodIP:                 params.Pod.Status.PodIP,
-		Pod:                   podEnvironment(params.Pod, params.ContainerName),
-		Clientset:             w.clientset,
-		CuInterposeRequested:  params.CuInterposeRequested,
-		StoreID:               params.StoreID,
-		DumpRetryLimit:        params.DumpRetryLimit,
+		ContainerID:          params.ContainerID,
+		ContainerName:        params.ContainerName,
+		ContentUID:           params.ContentUID,
+		StartedAt:            params.StartedAt,
+		NodeName:             w.config.NodeName,
+		PodName:              params.Pod.Name,
+		PodNamespace:         params.Pod.Namespace,
+		PodIP:                params.Pod.Status.PodIP,
+		Pod:                  podEnvironment(params.Pod, params.ContainerName),
+		Clientset:            w.clientset,
+		CuInterposeRequested: params.CuInterposeRequested,
+		StoreID:              params.StoreID,
+		DumpRetryLimit:       params.DumpRetryLimit,
 	}
 	// Recovering the source belongs to runCheckpoint, which is the only place that
 	// knows whether another attempt follows.
