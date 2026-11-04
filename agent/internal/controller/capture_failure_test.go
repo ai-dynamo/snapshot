@@ -25,6 +25,33 @@ func TestClassifyCaptureFailure(t *testing.T) {
 		{"an unrecognised error says no more than it knows", errors.New("criu exited 1"), reasonCheckpointFailed, false},
 		{"the capture ran out of time", context.DeadlineExceeded, reasonCheckpointTimeout, false},
 		{"staging refused under contention frees up", pagebroker.NewFailureError(pagebroker.Failure_INSUFFICIENT_STORAGE, ""), reasonStagingUnavailable, true},
+		{
+			"the destination store running out is not staging",
+			&executor.StepError{Step: executor.StepCommitCheckpoint,
+				Err: pagebroker.NewFailureError(pagebroker.Failure_INSUFFICIENT_STORAGE, "")},
+			reasonStoreExhausted, false,
+		},
+		{
+			// Observed on a node whose destination PVC filled: PageBroker reports it
+			// as a generic storage error, not as INSUFFICIENT_STORAGE.
+			"a destination that filled while writing the artifact",
+			&executor.StepError{Step: executor.StepCommitCheckpoint,
+				Err: pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR,
+					"filesystem error: cannot copy file: No space left on device [pages-2.img]")},
+			reasonStoreExhausted, false,
+		},
+		{
+			"a storage error that is not a full store may still clear",
+			&executor.StepError{Step: executor.StepCommitCheckpoint,
+				Err: pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR, "transient read error")},
+			reasonCheckpointFailed, true,
+		},
+		{
+			"staging running out at the dump is still staging",
+			&executor.StepError{Step: executor.StepDumpCRIU,
+				Err: pagebroker.NewFailureError(pagebroker.Failure_INSUFFICIENT_STORAGE, "")},
+			reasonStagingUnavailable, true,
+		},
 		{"a storage error may clear", pagebroker.NewFailureError(pagebroker.Failure_STORAGE_ERROR, ""), reasonCheckpointFailed, true},
 		{"an internal error may clear", pagebroker.NewFailureError(pagebroker.Failure_INTERNAL_ERROR, ""), reasonCheckpointFailed, true},
 		{"the broker may come back", pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, ""), reasonCheckpointFailed, true},
