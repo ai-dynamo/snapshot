@@ -38,6 +38,9 @@ type RestoreOptions struct {
 	TargetPodIP            string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
+	// Relay, for a member of a pod group, runs the cuInterpose coordinator as
+	// its Pod's relay in the group.
+	Relay *cuda.CuInterposeRelay
 }
 
 type RestoreInNamespaceResult struct {
@@ -332,7 +335,7 @@ func executeRestore(
 			// CUDA is unlocked, but the application still waits for restore-complete. Socket
 			// names retain the checkpoint's innermost namespace PIDs, whereas the native CUDA
 			// calls above need PIDs visible to the restoring process.
-			err := cuda.RestoreCuInterpose(ctx, opts.CheckpointPath, m.CuInterpose.PIDs, coordinatorFdPath)
+			err := cuda.RestoreCuInterpose(ctx, opts.CheckpointPath, m.CuInterpose.PIDs, coordinatorFdPath, opts.Relay)
 			if err != nil {
 				return nil, 0, nil, failStep(StepRestoreCUDA, fmt.Errorf("restore cuinterpose: %w", err))
 			}
