@@ -274,7 +274,10 @@ UID, because each resource is exactly one attempt. The coordinator follows the
 group resources through a read-only watch and creates the session of every
 unfinished attempt, so sessions need no creation API and the resource remains
 the single source of truth; when the attempt has ended and its resource is final
-or deleted, the coordinator removes the session and all of its keys.
+or deleted, the coordinator removes the session and all of its keys. Once a
+resource's deletion has started, its session never completes the `admitted`
+barrier, so a deleted attempt either committed before its deletion or never
+commits.
 
 A session is two key-value buckets in the coordinator's embedded NATS server,
 both held in memory. One serves Snapshot's own components, the agents and
@@ -979,8 +982,27 @@ including any `postRestore` notification. Each member's write-once `startedAt` i
 `lastTransitionTime` of its agent's record, the `Started` condition at capture or
 the `nvidia.com/RestoreStarted` condition at restore, both of which are set once
 and never removed, so the operator cannot miss them however fast a member fails
-afterwards. It tells the owner which workloads Snapshot changed, and the group
-reports `Refused` only when no member has it.
+afterwards. It tells the owner which workloads Snapshot changed.
+
+The operator derives the group's status from these records alone, by fixed
+rules. It refuses a group, or keeps it waiting, before it creates any member
+work, and from then on it fails a group itself only at the deadline, or when
+the group is deleted before any member started, both of which the coordinator
+observes as well; every other failure comes from a member. An agent reports a
+failure on its own member's record: a member that fails on its own reports its
+own reason, whereas a member that fails because the session ended reports the
+session's reason, which is one of the group's. `Admitted` turns True on the
+first `startedAt`, since agents record their start only after the `admitted`
+barrier, and `Failed` keeps the first reason it receives:
+
+- `MemberFailed`, or the session's `CoordinatorLost`, `DeadlineExceeded`, or
+  `Cancelled`, as soon as a member has failed and some member has started;
+- `Refused` only once every member has reported its end and none has started,
+  so `Refused` always means that no source was changed;
+- `DeadlineExceeded` at the deadline, and `Cancelled` when the group is deleted
+  before any member started;
+- `MemberFailed` when every member has ended in any other way, for instance
+  after a member's `PodSnapshot` was deleted, which may hide its start.
 
 Members need not be configured alike. Each member may carry a
 `podSnapshotTemplate` with the settings that its `PodSnapshot` receives: labels
@@ -1341,6 +1363,18 @@ const (
 	PodGroupReasonMemberFailed        = "MemberFailed"
 	PodGroupReasonCoordinatorLost     = "CoordinatorLost"
 	PodGroupReasonCancelled           = "Cancelled"
+)
+
+// Reasons on the Admitted condition while the attempt has not committed: the
+// operator waits for a source Pod to be scheduled, for the agent on a member's
+// node, or for the members of an earlier group of the same name to be deleted,
+// then for the members to pass admission. Committed marks the first startedAt.
+const (
+	PodGroupReasonSourcePodUnscheduled = "SourcePodUnscheduled"
+	PodGroupReasonAgentNotReady        = "AgentNotReady"
+	PodGroupReasonPreviousGroupCleanup = "PreviousGroupCleanup"
+	PodGroupReasonAdmitting            = "Admitting"
+	PodGroupReasonCommitted            = "Committed"
 )
 
 // Control-plane keys, next to the existing ones in constants.go.
