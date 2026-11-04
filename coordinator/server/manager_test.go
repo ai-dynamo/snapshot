@@ -4,11 +4,14 @@
 package server
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -241,6 +244,51 @@ func TestRemove(t *testing.T) {
 	t.Run("an unknown attempt", func(t *testing.T) {
 		require.NoError(t, h.srv.Remove(ctx, "unknown"))
 	})
+}
+
+// TestEnsureCancelledWhileWatching is a stress test. It ends Ensure's context
+// while follow may still be creating the session's watch: as soon as the
+// session's Snapshot bucket reports the watch's consumer. nats.go may never
+// close the channel of a watch cancelled as it is created
+// (nats-io/nats.go#2223), so an Ensure that waited for that channel would
+// never return, and, since Ensure holds control, neither would Remove or
+// Shutdown. Nothing makes the cancellation land in that window, which only a
+// hook in production code could hold open, so each Ensure gives the race one
+// chance and the test ensures many attempts. The window is narrow: before the
+// fix, the test hung in 1 of 8 concurrent runs of 100 under -race.
+func TestEnsureCancelledWhileWatching(t *testing.T) {
+	h := newHarness(t)
+	for i := range 100 {
+		spec := h.spec(1)
+		ctx, cancel := context.WithCancel(context.Background())
+		watched, err := h.srv.conn.Subscribe(fmt.Sprintf("%s.KV_%s.*", natsserver.JSAdvisoryConsumerCreatedPre,
+			session.SnapshotBucket(string(spec.UID))), func(*nats.Msg) { cancel() })
+		require.NoError(t, err)
+		err = returns(t, fmt.Sprintf("Ensure %d", i), func() error { return h.srv.Ensure(ctx, spec) })
+		cancel()
+		require.NoError(t, watched.Unsubscribe())
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled, "Ensure %d", i)
+		}
+		require.NoError(t, returns(t, fmt.Sprintf("Remove %d", i), func() error {
+			return h.srv.Remove(within(t), spec.UID)
+		}))
+	}
+	require.NoError(t, returns(t, "Shutdown", func() error { return h.srv.Shutdown(within(t)) }))
+}
+
+// returns calls call, and fails the test unless it returns within 20 seconds.
+func returns(t *testing.T, what string, call func() error) error {
+	t.Helper()
+	returned := make(chan error, 1)
+	go func() { returned <- call() }()
+	select {
+	case err := <-returned:
+		return err
+	case <-within(t).Done():
+		t.Fatalf("%s did not return", what)
+		return nil
+	}
 }
 
 // TestShutdown covers shutting down: every open session fails with

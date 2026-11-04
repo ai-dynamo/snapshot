@@ -215,9 +215,12 @@ type Server struct {
 	token   string
 	account *natsserver.Account
 	conn    *nats.Conn
-	js      jetstream.JetStream
-	events  *nats.Conn
-	ready   atomic.Bool
+	// connClosed is closed once conn is, by Shutdown; nats.go then delivers
+	// nothing more to any watch.
+	connClosed chan struct{}
+	js         jetstream.JetStream
+	events     *nats.Conn
+	ready      atomic.Bool
 
 	// control serializes Ensure, Remove, and Shutdown, which create and
 	// delete buckets.
@@ -248,11 +251,12 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("create the JetStream directory: %w", err)
 	}
 	s := &Server{
-		cfg:      cfg,
-		log:      cfg.Log,
-		storeDir: storeDir,
-		token:    hex.EncodeToString(token),
-		attempts: make(map[types.UID]*attempt),
+		cfg:        cfg,
+		log:        cfg.Log,
+		storeDir:   storeDir,
+		token:      hex.EncodeToString(token),
+		connClosed: make(chan struct{}),
+		attempts:   make(map[types.UID]*attempt),
 	}
 	if err := s.start(); err != nil {
 		s.stop()
@@ -308,7 +312,8 @@ func (s *Server) start() error {
 	if err := s.account.EnableJetStream(nil, nil); err != nil {
 		return fmt.Errorf("enable JetStream: %w", err)
 	}
-	if s.conn, err = s.connect(coordinatorUser); err != nil {
+	if s.conn, err = s.connect(coordinatorUser,
+		nats.ClosedHandler(func(*nats.Conn) { close(s.connClosed) })); err != nil {
 		return err
 	}
 	if s.js, err = jetstream.New(s.conn); err != nil {
@@ -321,9 +326,9 @@ func (s *Server) start() error {
 }
 
 // connect opens one of the coordinator's in-process connections.
-func (s *Server) connect(user string) (*nats.Conn, error) {
-	nc, err := nats.Connect("", nats.InProcessServer(s.ns), nats.UserInfo(user, ""), nats.Token(s.token),
-		nats.Name(user))
+func (s *Server) connect(user string, opts ...nats.Option) (*nats.Conn, error) {
+	nc, err := nats.Connect("", append([]nats.Option{nats.InProcessServer(s.ns), nats.UserInfo(user, ""),
+		nats.Token(s.token), nats.Name(user)}, opts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("open the coordinator's %s connection: %w", user, err)
 	}

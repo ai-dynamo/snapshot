@@ -298,8 +298,16 @@ func (s *Server) follow(ctx context.Context, a *attempt) error {
 	if err != nil {
 		cancel()
 		if w != nil {
-			for range w.Updates() {
-			}
+			// The watch was cancelled as it was created, so nats.go may never
+			// close its channel (nats-io/nats.go#2223). Only the connection's
+			// close, in Shutdown, then ends drain, and Shutdown waits for
+			// control, which Ensure holds, so the watch drains on its own
+			// instead of here.
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.drain(w)
+			}()
 		}
 		return fmt.Errorf("watch the session: %w", err)
 	}
@@ -309,11 +317,7 @@ func (s *Server) follow(ctx context.Context, a *attempt) error {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		defer func() {
-			// The watch's channel closes once its subscription has.
-			for range w.Updates() {
-			}
-		}()
+		defer s.drain(w)
 		defer cancel()
 		left := make(map[string]bool, len(a.members))
 		for e := range w.Updates() {
@@ -331,6 +335,35 @@ func (s *Server) follow(ctx context.Context, a *attempt) error {
 		}
 	}()
 	return nil
+}
+
+// drain consumes a cancelled watch until its channel closes, which happens once
+// its subscription has, or until the coordinator's connection has closed.
+// nats.go may never close the channel of a watch cancelled before WatchFiltered
+// returned (nats-io/nats.go#2223), so the connection's close, which Shutdown
+// does before it waits for what the server started, is what bounds the wait.
+// nats.go delivers nothing after it, so emptying the channel frees the one
+// delivery that may be blocked on it.
+func (s *Server) drain(w jetstream.KeyWatcher) {
+	for {
+		select {
+		case _, ok := <-w.Updates():
+			if !ok {
+				return
+			}
+		case <-s.connClosed:
+			for {
+				select {
+				case _, ok := <-w.Updates():
+					if !ok {
+						return
+					}
+				default:
+					return
+				}
+			}
+		}
+	}
 }
 
 // closeSession closes a session every member has left.
