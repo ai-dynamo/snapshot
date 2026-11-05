@@ -37,6 +37,9 @@ type podGroupSnapshotObservation struct {
 	admission podGroupAdmission
 	// deleting is true once the group has a deletion timestamp.
 	deleting bool
+	// restores holds, for a group being deleted, the PodGroupRestores that
+	// reference its UID.
+	restores []snapshotv1alpha1.PodGroupRestore
 	// deadline is the group's creation time plus spec.deadlineSeconds.
 	deadline time.Time
 }
@@ -258,13 +261,16 @@ func isCheckpointPhaseFinal(phase snapshotv1alpha1.CheckpointPhase) bool {
 }
 
 // podGroupSnapshotReleasable reports whether a PodGroupSnapshot that is being
-// deleted may drop its finalizer: once its attempt has ended, Ready or Failed,
-// and no member is still being checkpointed, so garbage collection never
-// deletes a member's PodSnapshot while its agent is dumping. A group deleted
-// before any member started has ended with Cancelled. The deadline bounds the
-// wait: it turns every member still Checkpointing into Failed, and the group
-// into Failed if it was not already.
-func podGroupSnapshotReleasable(status *snapshotv1alpha1.PodGroupSnapshotStatus) bool {
+// deleted may drop its finalizer. It may once its own attempt has ended, Ready
+// or Failed, with no member still being checkpointed, so garbage collection
+// never deletes a member's PodSnapshot while its agent is dumping, and once
+// every observed PodGroupRestore that references it has finished, so it never
+// deletes one that an agent is restoring from. A group deleted before any
+// member started has ended with Cancelled. The deadlines bound the wait: a
+// group's turns every member still Checkpointing into Failed, and the group
+// into Failed if it was not already, and a restore's does the same for the
+// restore.
+func podGroupSnapshotReleasable(observed podGroupSnapshotObservation, status *snapshotv1alpha1.PodGroupSnapshotStatus) bool {
 	ended := meta.FindStatusCondition(status.Conditions, snapshotv1alpha1.PodGroupConditionReady) != nil ||
 		meta.IsStatusConditionTrue(status.Conditions, snapshotv1alpha1.PodGroupConditionFailed)
 	if !ended {
@@ -272,6 +278,11 @@ func podGroupSnapshotReleasable(status *snapshotv1alpha1.PodGroupSnapshotStatus)
 	}
 	for _, m := range status.Members {
 		if m.Phase == snapshotv1alpha1.CheckpointPhaseCheckpointing {
+			return false
+		}
+	}
+	for i := range observed.restores {
+		if !podGroupRestoreFinished(&observed.restores[i].Status) {
 			return false
 		}
 	}

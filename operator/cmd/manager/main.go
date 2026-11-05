@@ -210,6 +210,17 @@ func main() {
 			ctrl.Log.Error(err, "unable to set up PodGroupSnapshot controller")
 			os.Exit(1)
 		}
+		podGroupRestoreReconciler := &controller.PodGroupRestoreReconciler{
+			Client:             mgr.GetClient(),
+			NonCacheReadClient: mgr.GetAPIReader(),
+			Recorder:           mgr.GetEventRecorderFor("podgrouprestore-controller"),
+			AgentNamespace:     podGroups.agentNamespace,
+			AgentSelector:      agentSelector,
+		}
+		if err := podGroupRestoreReconciler.SetupWithManager(mgr); err != nil {
+			ctrl.Log.Error(err, "unable to set up PodGroupRestore controller")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
