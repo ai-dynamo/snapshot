@@ -116,14 +116,19 @@ type CheckpointSpec struct {
 	// ConfigMap has to start — with the guard on.
 	TimeoutSeconds *int `yaml:"timeoutSeconds"`
 
-	// RetryLimit is how many times a failed capture may be retried, beyond the first attempt.
-	// Absent is read as DefaultCheckpointRetryLimit. The limit is cluster-wide: a capture cannot
-	// ask for its own, so one node's answer holds for every request it serves.
+	// RetryLimit is how many times a failed capture may be retried, beyond the first attempt,
+	// for a request that asks for no particular number. Absent is read as
+	// DefaultCheckpointRetryLimit.
 	RetryLimit *int `yaml:"retryLimit"`
 }
 
-// ResolveRetryLimit reports the retries a capture may take, defaulting when the config omits it.
-func (c *CheckpointSpec) ResolveRetryLimit() int {
+// ResolveRetryLimit reports the retries a capture may take. The request's own value wins when it
+// has one — including an explicit 0, which asks for no retry — and absent defers to the cluster
+// default. Absent and zero are different answers, which is why the request's value is a pointer.
+func (c *CheckpointSpec) ResolveRetryLimit(requested *int32) int {
+	if requested != nil {
+		return int(*requested)
+	}
 	if c.RetryLimit == nil {
 		return DefaultCheckpointRetryLimit
 	}

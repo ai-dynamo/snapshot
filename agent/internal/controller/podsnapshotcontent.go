@@ -282,7 +282,7 @@ func (w *NodeController) runCheckpoint(
 	}
 
 	logger := logr.FromContextOrDiscard(ctx)
-	budget := w.config.Checkpoint.ResolveRetryLimit()
+	budget := w.config.Checkpoint.ResolveRetryLimit(content.Spec.CheckpointRetryLimit)
 	spent := 0
 	logger.V(1).Info("Resolved the capture's retry budget", "retries", budget)
 	for {

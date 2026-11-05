@@ -62,7 +62,12 @@ commit-level history for each release is on its
   attempt. A dump that fails against a workload CRIU can still seize is written
   again without suspending it twice; one that cannot be is retried from a fresh
   suspend, with the source Pod left running in between. The limit is
-  cluster-wide. Each failed attempt emits a `CheckpointAttemptFailed` event on
+  cluster-wide, and a single capture overrides it with
+  `PodSnapshot.spec.checkpointRetryLimit` (or
+  `SnapshotJob.spec.podSnapshotTemplate.checkpointRetryLimit`); unset defers to
+  the cluster value, and an explicit `0` asks for no retry. The resolved value is
+  saved on `PodSnapshotContent.spec.checkpointRetryLimit`. CRD change: deploy
+  the matching CRDs, operator and node agent together. Each failed attempt emits a `CheckpointAttemptFailed` event on
   the source Pod, and a checkpoint that uses up its retries fails with
   `RetriesExhausted` rather than reading like a first-attempt failure. See
   [Checkpoint retries](docs/operations/troubleshooting.md#a-checkpoint-fails-with-retriesexhausted).
