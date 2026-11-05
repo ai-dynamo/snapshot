@@ -25,6 +25,14 @@ const (
 	// dump: its probe can never run, such as an HTTP probe on a port name the
 	// container doesn't have.
 	reasonInvalidCheckpointReadinessProbe = "InvalidCheckpointReadinessProbe"
+
+	// reasonRetriesExhausted separates a checkpoint that used up its retries from
+	// one that failed on its first try.
+	reasonRetriesExhausted = "RetriesExhausted"
+
+	// reasonCheckpointAttemptFailed reports one failed attempt on the source Pod,
+	// so an owner sees the retries rather than only the outcome.
+	reasonCheckpointAttemptFailed = "CheckpointAttemptFailed"
 )
 
 // captureFailure is how a failed attempt reads: the reason recorded on the work
