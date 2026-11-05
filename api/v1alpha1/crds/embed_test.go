@@ -228,6 +228,8 @@ func TestSnapshotJobIncludesTemplateMetadataAdmissionRules(t *testing.T) {
 	wantTemplateRules := []string{
 		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job' in self.metadata.labels)",
 		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job-uid' in self.metadata.labels)",
+		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup' in self.metadata.labels)",
+		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup-member' in self.metadata.labels)",
 	}
 	for _, rule := range wantTemplateRules {
 		if !containsValidationRule(templateValidations, rule) {

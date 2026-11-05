@@ -353,6 +353,14 @@ spec:
                           nvidia.com/snapshot-podgroup-member
                         rule: '!has(self.metadata) || !has(self.metadata.labels) ||
                           !(''nvidia.com/snapshot-podgroup-member'' in self.metadata.labels)'
+                      - message: metadata.labels must not set controller-owned label
+                          nvidia.com/snapshot-job
+                        rule: '!has(self.metadata) || !has(self.metadata.labels) ||
+                          !(''nvidia.com/snapshot-job'' in self.metadata.labels)'
+                      - message: metadata.labels must not set controller-owned label
+                          nvidia.com/snapshot-job-uid
+                        rule: '!has(self.metadata) || !has(self.metadata.labels) ||
+                          !(''nvidia.com/snapshot-job-uid'' in self.metadata.labels)'
                     source:
                       description: |-
                         Source identifies the Pod to checkpoint, as for a standalone
@@ -613,9 +621,9 @@ spec:
         - message: metadata.name must be no more than 63 characters because member
             PodSnapshots carry it as a label value
           rule: size(self.metadata.name) <= 63
-        - message: status.members must name members of spec.members
+        - message: status.members rank must be the member's position in spec.members
           rule: '!has(self.status) || !has(self.status.members) || self.status.members.all(m,
-            self.spec.members.exists(s, s.id == m.id))'
+            m.rank < size(self.spec.members) && self.spec.members[m.rank].id == m.id)'
         - message: status.members entries cannot be removed
           rule: '!has(oldSelf.status) || !has(oldSelf.status.members) || (has(self.status)
             && has(self.status.members) && oldSelf.status.members.all(o, self.status.members.exists(n,

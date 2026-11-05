@@ -77,6 +77,12 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 		{"template-sets-member-label", func(s *snapshotv1.PodGroupSnapshotSpec) {
 			s.Members[0].PodSnapshotTemplate = templateWithLabel(snapshotv1.PodGroupMemberLabel)
 		}, "metadata.labels must not set controller-owned label " + snapshotv1.PodGroupMemberLabel},
+		{"template-sets-snapshotjob-label", func(s *snapshotv1.PodGroupSnapshotSpec) {
+			s.Members[0].PodSnapshotTemplate = templateWithLabel(snapshotv1.SnapshotJobOwnerLabel)
+		}, "metadata.labels must not set controller-owned label " + snapshotv1.SnapshotJobOwnerLabel},
+		{"template-sets-snapshotjob-uid-label", func(s *snapshotv1.PodGroupSnapshotSpec) {
+			s.Members[0].PodSnapshotTemplate = templateWithLabel(snapshotv1.SnapshotJobOwnerUIDLabel)
+		}, "metadata.labels must not set controller-owned label " + snapshotv1.SnapshotJobOwnerUIDLabel},
 		{"no-members", func(s *snapshotv1.PodGroupSnapshotSpec) { s.Members = nil }, "spec.members: Required value"},
 		{"257-members", func(s *snapshotv1.PodGroupSnapshotSpec) {
 			s.Members = snapshotMembers(257)
@@ -167,8 +173,14 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 	cases := []statusCase[member]{
 		{"undeclared-id", nil, func(ms *[]member) {
 			*ms = append(*ms, member{ID: "worker-9"})
-		}, "status.members must name members of spec.members"},
+		}, "status.members rank must be the member's position in spec.members"},
 		{"remove-an-entry", nil, func(ms *[]member) { *ms = (*ms)[:1] }, "status.members entries cannot be removed"},
+		{"rank-not-its-position", nil, func(ms *[]member) {
+			(*ms)[0].Rank = 1
+		}, "status.members rank must be the member's position in spec.members"},
+		{"rank-out-of-range", nil, func(ms *[]member) {
+			(*ms)[1].Rank = 2
+		}, "status.members rank must be the member's position in spec.members"},
 		{"remove-every-entry", nil, func(ms *[]member) { *ms = nil }, "status.members entries cannot be removed"},
 		{"pending-can-advance", nil, setPhase(snapshotv1.CheckpointPhaseAdmitted), ""},
 		{"checkpointed-is-final", setPhase(snapshotv1.CheckpointPhaseCheckpointed), setPhase(snapshotv1.CheckpointPhaseFailed), finalCheckpoint},
@@ -208,6 +220,36 @@ func TestPodGroupSnapshotAdmission(t *testing.T) {
 			require.NoError(t, cl.Status().Update(t.Context(), snapshot))
 			tc.after(&snapshot.Status.Members)
 			requireAdmission(t, cl.Status().Update(t.Context(), snapshot), tc.refusal)
+		})
+	}
+}
+
+// TestTemplatesReserveEachOthersOwnershipLabels checks that neither kind's
+// PodSnapshot template can set the labels the other kind's controller selects
+// its PodSnapshots by.
+func TestTemplatesReserveEachOthersOwnershipLabels(t *testing.T) {
+	cl := startPodGroupEnv(t)
+	for _, tc := range []struct {
+		name, label string
+		refused     bool
+	}{
+		{"group", snapshotv1.PodGroupLabel, true},
+		{"group-member", snapshotv1.PodGroupMemberLabel, true},
+		{"job", snapshotv1.SnapshotJobOwnerLabel, true},
+		{"job-uid", snapshotv1.SnapshotJobOwnerUIDLabel, true},
+		{"another", "example.com/team", false},
+	} {
+		t.Run("snapshotjob-"+tc.name, func(t *testing.T) {
+			job := newSettingsJob("label-"+tc.name, snapshotv1.ContainerSnapshotConfig{Name: "main"})
+			job.Namespace = podGroupNamespace
+			job.Spec.PodSnapshotTemplate.Metadata = &snapshotv1.PodSnapshotTemplateMetadata{
+				Labels: map[string]string{tc.label: "x"},
+			}
+			refusal := ""
+			if tc.refused {
+				refusal = "metadata.labels must not set controller-owned label " + tc.label
+			}
+			requireAdmission(t, cl.Create(t.Context(), job), refusal)
 		})
 	}
 }
