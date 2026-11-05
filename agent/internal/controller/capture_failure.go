@@ -6,6 +6,9 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
@@ -33,6 +36,10 @@ const (
 	// reasonCheckpointAttemptFailed reports one failed attempt on the source Pod,
 	// so an owner sees the retries rather than only the outcome.
 	reasonCheckpointAttemptFailed = "CheckpointAttemptFailed"
+
+	// reasonStoreExhausted is the destination store out of room, which no retry
+	// on this node clears. Staging running out is reasonStagingUnavailable.
+	reasonStoreExhausted = "StoreExhausted"
 )
 
 // captureFailure is how a failed attempt reads: the reason recorded on the work
@@ -56,11 +63,23 @@ func classifyCaptureFailure(err error) captureFailure {
 	}
 	switch failure.Code() {
 	case pagebroker.Failure_INSUFFICIENT_STORAGE:
+		// Which store ran out depends on where: the commit writes the artifact to
+		// the destination, and no retry on this node frees room there.
+		if executor.StepOf(err) == executor.StepCommitCheckpoint {
+			return captureFailure{reason: reasonStoreExhausted}
+		}
 		// Refused before any bytes were written, so the node is momentarily full
 		// rather than this image being too big for it.
 		return captureFailure{reason: reasonStagingUnavailable, retryable: true}
 	case pagebroker.Failure_STORAGE_ERROR, pagebroker.Failure_INTERNAL_ERROR,
 		pagebroker.Failure_UNAVAILABLE, pagebroker.Failure_STORAGE_UNAVAILABLE:
+		// A destination that filled while the artifact was being written reports a
+		// generic storage error, so the message is the only thing that separates it
+		// from a store that is merely unwell. Retrying this node clears neither,
+		// but only one of them is the operator's to fix.
+		if executor.StepOf(err) == executor.StepCommitCheckpoint && isOutOfSpace(err) {
+			return captureFailure{reason: reasonStoreExhausted}
+		}
 		return captureFailure{reason: reasonCheckpointFailed, retryable: true}
 	case pagebroker.Failure_TRANSACTION_NOT_FOUND, pagebroker.Failure_TRANSACTION_EXPIRED:
 		// The broker is not holding the transaction, so whatever was staged for it
@@ -94,4 +113,11 @@ func captureCause(err error) error {
 		return err
 	}
 	return err
+}
+
+// isOutOfSpace reports a full filesystem. PageBroker gives a full destination no
+// code of its own, so for its errors the message text is all there is.
+func isOutOfSpace(err error) bool {
+	return errors.Is(err, unix.ENOSPC) ||
+		strings.Contains(strings.ToLower(err.Error()), unix.ENOSPC.Error())
 }

@@ -51,6 +51,8 @@ type CheckpointParams struct {
 	// DumpRetryLimit is how many times the dump may be repeated against the suspended
 	// workload.
 	DumpRetryLimit int
+	// DumpWorthRepeating reports whether repeating could reach a different outcome.
+	DumpWorthRepeating func(err error) (bool, string)
 	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
 }
@@ -286,12 +288,15 @@ func (w *NodeController) runCheckpoint(
 		// attempt: otherwise each attempt could repeat the full limit again and a
 		// capture would take more retries than were ever asked for.
 		artifact, err := w.attemptCheckpoint(captureCtx, content, pod, containerName, containerID, containerPID,
-			cuInterposeRequested, contentUID, artifactPath, budget-spent)
+			cuInterposeRequested, contentUID, artifactPath, budget-spent, w.dumpWorthRepeating(ctx, containerPID))
 		if err == nil {
 			return w.markCheckpointReady(ctx, content, artifactPath, containerName, artifact)
 		}
 
 		failure := classifyCaptureFailure(err)
+		// Measured while the source is still suspended, so the tree the dump was
+		// sizing is the one still there to size.
+		failure, err = w.refineFullStaging(ctx, failure, err, containerPID)
 		suspended, _ := executor.SuspendedSourceOf(err)
 		// Repeats of the dump come out of the same budget as fresh attempts, so a
 		// caller asking for two retries gets two, however they were spent.
@@ -328,8 +333,13 @@ func (w *NodeController) runCheckpoint(
 // terminalReason separates a checkpoint that used up its retries from one that
 // failed on its first try, which read the same before. Retries spent repeating
 // the dump count: the caller asked for that many tries and got them.
+//
+// Only a failure that retrying could have cleared reads as exhaustion. A settled
+// one ended the checkpoint on its own terms, and saying the retries ran out
+// would bury the thing an operator has to act on — an image too large for the
+// node reads as ImageTooLarge, not as a capture that was unlucky twice.
 func terminalReason(failure captureFailure, spent, budget int) string {
-	if spent > 0 && spent >= budget {
+	if failure.retryable && spent > 0 && spent >= budget {
 		return reasonRetriesExhausted
 	}
 	return failure.reason
@@ -369,6 +379,7 @@ func (w *NodeController) attemptCheckpoint(
 	contentUID string,
 	artifactPath string,
 	dumpRetryLimit int,
+	dumpWorthRepeating func(error) (bool, string),
 ) (*pagebroker.PublishedArtifact, error) {
 	storeID := ""
 	if content.Spec.Storage != nil {
@@ -384,8 +395,8 @@ func (w *NodeController) attemptCheckpoint(
 		StartedAt:            time.Now(),
 		CuInterposeRequested: cuInterposeRequested,
 		StoreID:              storeID,
-		// Read only once a dump has failed, so a capture that succeeds never reads it.
-		DumpRetryLimit: dumpRetryLimit,
+		DumpRetryLimit:       dumpRetryLimit,
+		DumpWorthRepeating:   dumpWorthRepeating,
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
@@ -708,6 +719,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		CuInterposeRequested: params.CuInterposeRequested,
 		StoreID:              params.StoreID,
 		DumpRetryLimit:       params.DumpRetryLimit,
+		DumpWorthRepeating:   params.DumpWorthRepeating,
 	}
 	// Recovering the source belongs to runCheckpoint, which is the only place that
 	// knows whether another attempt follows.

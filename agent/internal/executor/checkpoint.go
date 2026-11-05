@@ -18,6 +18,7 @@ import (
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
@@ -144,6 +145,11 @@ type CheckpointRequest struct {
 	// is still suspended and still dumpable, over and above the first attempt.
 	DumpRetryLimit int
 
+	// DumpWorthRepeating reports whether repeating could reach a different outcome,
+	// and when it could not, why. It is asked only after a dump has failed. Nil
+	// repeats whenever the workload is still dumpable.
+	DumpWorthRepeating func(err error) (bool, string)
+
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
@@ -263,7 +269,7 @@ func checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return nil, failStep(StepConfigureCheckpoint, err)
 	}
 
-	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetryLimit)
+	captureTimings, err := captureCheckpointFunc(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, gpu, req.DumpRetryLimit, req.DumpWorthRepeating)
 	if err != nil {
 		repeats := 0
 		if captureTimings != nil {
@@ -517,11 +523,31 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
+// DumpSpaceError names the directory a dump ran out of room in. PageBroker
+// chooses that directory, so it is not always the node's staging volume, and a
+// caller measuring the wrong filesystem would reach the wrong conclusion about
+// whether retrying could ever help.
+type DumpSpaceError struct {
+	Dir string
+	Err error
+}
+
+func (e *DumpSpaceError) Error() string { return e.Err.Error() }
+func (e *DumpSpaceError) Unwrap() error { return e.Err }
+
+// withDumpDirectory records where a dump was writing when it filled the volume.
+func withDumpDirectory(err error, dir string) error {
+	if err == nil || !errors.Is(err, unix.ENOSPC) {
+		return err
+	}
+	return &DumpSpaceError{Dir: dir, Err: err}
+}
+
 // captureCheckpointFunc is overridden in tests: captureCheckpoint runs CRIU
 // against a live process tree, which a unit test cannot satisfy.
 var captureCheckpointFunc = captureCheckpoint
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, retryLimit int) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, gpu *pagebroker.CustomStorageExecution, retryLimit int, worthRepeating func(error) (bool, string)) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// GPU capture must finish before CRIU and filesystem capture.
@@ -539,7 +565,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 
 	for attempt := 0; ; attempt++ {
-		err := dumpCheckpointFunc(ctx, criuOpts, criuSettings, data, state, checkpointDir, timings, log)
+		err := withDumpDirectory(dumpCheckpointFunc(ctx, criuOpts, criuSettings, data, state, checkpointDir, timings, log), checkpointDir)
 		if err == nil {
 			return timings, nil
 		}
@@ -548,6 +574,15 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		}
 		if attempt >= retryLimit {
 			return timings, err
+		}
+		// Asked before the tree is probed: a dump nothing could make fit is not
+		// worth repeating however seizable the workload still is, and the retries
+		// it would spend are better kept unspent.
+		if worthRepeating != nil {
+			if ok, reason := worthRepeating(err); !ok {
+				log.V(1).Info("Not repeating the dump", "reason", reason)
+				return timings, err
+			}
 		}
 		// The probe decides, not the shape of the failure: the suspend is already
 		// paid for, and repeating the dump is only safe while CRIU can still seize
