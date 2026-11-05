@@ -169,8 +169,16 @@ if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
 	t.Setenv("DYNAMO_TEST_TRACE", trace)
 	t.Setenv("DYNAMO_TEST_JOB_FILE", liveJobFile)
 
-	if _, err := CheckpointProcessTree(context.Background(), []int{101, 202}, liveJobFile, checkpointDir, logr.Discard()); err != nil {
+	timings, err := CheckpointProcessTree(context.Background(), []int{101, 202}, liveJobFile, checkpointDir, logr.Discard())
+	if err != nil {
 		t.Fatalf("CheckpointProcessTree() error = %v", err)
+	}
+	if timings.LockDuration <= 0 || timings.CopyDuration <= 0 {
+		t.Fatalf("cuda lock/copy timings = %s / %s", timings.LockDuration, timings.CopyDuration)
+	}
+	if timings.TotalDuration < timings.LockDuration+timings.CopyDuration+timings.JobFileDuration {
+		t.Fatalf("cuda total %s is less than lock %s + copy %s + job %s",
+			timings.TotalDuration, timings.LockDuration, timings.CopyDuration, timings.JobFileDuration)
 	}
 	traceContent, err := os.ReadFile(trace)
 	if err != nil {
