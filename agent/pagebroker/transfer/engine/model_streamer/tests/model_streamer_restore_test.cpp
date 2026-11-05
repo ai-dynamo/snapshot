@@ -47,7 +47,9 @@ TEST(ModelStreamerRestoreTest, ReadsOnlyTheRecordedPrefix)
   test::TemporaryDirectory root;
   const auto source = root.path() / "source";
   std::ofstream(source) << "checkpoint-extra";
-  ModelStreamerRestore restore;
+  model_streamer::settings::Options tuning;
+  tuning.restore_batch_bytes = 4;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, tuning);
   CheckpointInventory inventory;
   inventory.files.push_back({source.string(), "data", 10});
   const auto destination = root.path() / "restored";

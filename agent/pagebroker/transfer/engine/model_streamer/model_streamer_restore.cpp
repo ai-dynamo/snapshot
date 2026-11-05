@@ -95,6 +95,42 @@ CheckedRestoreFileSize(uintmax_t bytes)
   return static_cast<size_t>(bytes);
 }
 
+std::size_t
+RestorePageSize()
+{
+  const long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0)
+    throw std::runtime_error("invalid restore mapping page size");
+  return static_cast<std::size_t>(page_size);
+}
+
+std::size_t
+RestoreRangeLength(std::size_t remaining, uintmax_t budget, std::size_t page_size)
+{
+  if (remaining <= budget)
+    return remaining;
+  // Keep ordinary chunk boundaries aligned, without rejecting sub-page budgets.
+  return static_cast<std::size_t>(budget >= page_size ? budget - budget % page_size : budget);
+}
+
+FileDescriptor
+CreateRestoreFile(const CheckpointFile& file, const Path& destination, Cancellation cancellation)
+{
+  const auto file_bytes = CheckedRestoreFileSize(file.size_bytes);
+  FileDescriptor descriptor(open(destination.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
+  if (descriptor.get() < 0)
+    throw SystemError("create restore staging file");
+  cancellation.ThrowIfCancelled();
+  // Establish final length without allocating backing for ranges not yet prepared.
+  if (ftruncate(descriptor.get(), static_cast<off_t>(file_bytes)) != 0)
+    throw SystemError("size restore staging file");
+  cancellation.ThrowIfCancelled();
+  // Retain this writable descriptor even when final permissions forbid reopening.
+  ApplyPermissions(destination, file.permissions, cancellation);
+  cancellation.ThrowIfCancelled();
+  return descriptor;
+}
+
 void
 CreateDirectoryTree(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation)
 {
@@ -132,50 +168,50 @@ ModelStreamerRestore::StreamerEntry::~StreamerEntry() noexcept
   ReleaseMappings();
 }
 
-bool
-ModelStreamerRestore::StreamerEntry::TryAddFile(const CheckpointFile& file, const Path& destination, uintmax_t batch_bytes)
+void
+ModelStreamerRestore::StreamerEntry::AddRange(
+    const CheckpointFile& file, int descriptor, std::size_t offset, std::size_t length, std::size_t page_size)
 {
-  if (!request.paths.empty() &&
-      (bytes >= batch_bytes || file.size_bytes > batch_bytes - bytes))
-    return false;
+  const auto file_bytes = CheckedRestoreFileSize(file.size_bytes);
+  if (offset > file_bytes || length == 0 || length > file_bytes - offset)
+    throw std::runtime_error("invalid restore file range");
   if (request.paths.size() == std::numeric_limits<unsigned>::max())
     throw std::runtime_error("too many files in one Model Streamer submission");
-
-  const size_t file_bytes = CheckedRestoreFileSize(file.size_bytes);
+  const auto mapping_offset = offset - offset % page_size;
+  const auto prefix = offset - mapping_offset;
+  const auto mapping_length = prefix + length;
+  // Allocate all metadata before acquiring a mapping. Cleanup owns envelopes
+  // independently of ABI arrays, including a partially constructed request.
   request.paths.push_back(file.source_locator.c_str());
   request.range_counts.push_back(1);
-  request.offsets.push_back(0);
-  request.sizes.push_back(file_bytes);
+  request.offsets.push_back(offset);
+  request.sizes.push_back(length);
   request.destinations.push_back(MAP_FAILED);
   completed.push_back(false);
+  auto& mapping = mappings.emplace_back(Mapping{MAP_FAILED, mapping_length});
 
-  FileDescriptor descriptor(open(destination.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
-  if (descriptor.get() < 0)
-    throw SystemError("create restore staging file");
-  // Reserve backing storage before native writes; sparse mappings can SIGBUS on ENOSPC.
-  const int allocation_error = posix_fallocate(descriptor.get(), 0, static_cast<off_t>(file_bytes));
+  // Reserve only this range before native writes; sparse mappings can SIGBUS on ENOSPC.
+  const int allocation_error = posix_fallocate(descriptor, static_cast<off_t>(offset), static_cast<off_t>(length));
   if (allocation_error != 0)
     throw std::system_error(allocation_error, std::generic_category(), "allocate restore staging file");
   cancellation.ThrowIfCancelled();
-  void* address = mmap(nullptr, file_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor.get(), 0);
+  void* address = mmap(nullptr, mapping_length, PROT_READ | PROT_WRITE, MAP_SHARED,
+                       descriptor, static_cast<off_t>(mapping_offset));
   if (address == MAP_FAILED)
     throw SystemError("map restore staging file");
-  request.destinations.back() = address;
-  // Native reads write through this mapping, so final file permissions can be
-  // applied before submission. Record the mapping first for failure cleanup.
-  ApplyPermissions(destination, file.permissions, cancellation);
+  mapping.base = address;
+  request.destinations.back() = static_cast<char*>(address) + prefix;
   cancellation.ThrowIfCancelled();
-  bytes += file_bytes;
-  return true;
+  bytes += length;
 }
 
 void
 ModelStreamerRestore::StreamerEntry::ReleaseMappings() noexcept
 {
-  for (size_t i = 0; i < request.destinations.size(); ++i) {
-    if (request.destinations[i] != MAP_FAILED) {
-      munmap(request.destinations[i], request.sizes[i]);
-      request.destinations[i] = MAP_FAILED;
+  for (auto& mapping : mappings) {
+    if (mapping.base != MAP_FAILED) {
+      munmap(mapping.base, mapping.length);
+      mapping.base = MAP_FAILED;
     }
   }
 }
@@ -397,9 +433,6 @@ ModelStreamerRestore::CanAdmit(const StreamerEntry& entry) const
   if (active_.size() >= kActiveSubmissionLimit ||
       std::any_of(active_.begin(), active_.end(), [](const auto& item) { return !item.second->first_error.empty(); }))
     return false;
-  // An oversized file may run by itself.
-  if (active_.empty())
-    return true;
   if (active_bytes_ >= restore_batch_bytes_)
     return false;
   return entry.bytes <= restore_batch_bytes_ - active_bytes_;
@@ -662,6 +695,9 @@ struct ModelStreamerRestore::RestoreProgress {
   Cancellation stage_stop;
   std::shared_ptr<RestoreState> restore_state;
   std::deque<std::shared_ptr<StreamerEntry>> submissions;
+  std::size_t file_offset = 0;
+  FileDescriptor file_descriptor{-1};
+  const std::size_t page_size = RestorePageSize();
 };
 
 void
@@ -690,15 +726,28 @@ ModelStreamerRestore::PrepareNextBatch(RestoreProgress& progress)
   entry.restore_state = progress.restore_state;
   entry.cancellation = progress.stage_stop;
   while (file != progress.inventory.files.end()) {
-    const Path staged = progress.destination / file->relative_path;
     if (file->size_bytes == 0) {
-      CreateEmptyFile(*file, staged, entry.cancellation);
+      CreateEmptyFile(*file, progress.destination / file->relative_path, entry.cancellation);
+      ++file;
     }
-    else if (!entry.TryAddFile(*file, staged, restore_batch_bytes_)) {
-      break;
+    else {
+      const auto file_bytes = CheckedRestoreFileSize(file->size_bytes);
+      const auto length = RestoreRangeLength(file_bytes - progress.file_offset, restore_batch_bytes_, progress.page_size);
+      // Do not create or allocate a file until its selected range fits. Small
+      // files are not split merely to fill unused space in the current batch.
+      if (length > restore_batch_bytes_ - entry.bytes)
+        break;
+      if (progress.file_descriptor.get() < 0)
+        progress.file_descriptor = CreateRestoreFile(*file, progress.destination / file->relative_path, entry.cancellation);
+      entry.AddRange(*file, progress.file_descriptor.get(), progress.file_offset, length, progress.page_size);
+      progress.file_offset += length;
+      if (progress.file_offset != file_bytes)
+        break;  // One range per source path in each native submission.
+      progress.file_descriptor = FileDescriptor{-1};
+      progress.file_offset = 0;
+      ++file;
     }
     CheckRestoreProgress(progress);
-    ++file;
   }
   // Check outstanding failures and cancellation after the final operation,
   // before publishing the prepared entry.

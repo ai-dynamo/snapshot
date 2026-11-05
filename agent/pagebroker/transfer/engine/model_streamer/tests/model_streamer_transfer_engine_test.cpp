@@ -277,7 +277,9 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
     return result;
   };
   {
-    ModelStreamerTransferEngine engine(Config());
+    model_streamer::settings::Options tuning;
+    tuning.restore_batch_bytes = 4;
+    ModelStreamerTransferEngine engine(Config(), tuning);
     EXPECT_THROW(engine.StageRestore(prepare(), root / "first"), std::runtime_error);
     EXPECT_EQ(starts, 1);
     EXPECT_EQ(ends, 1);
@@ -288,6 +290,9 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
     EXPECT_EQ(std::string(std::istreambuf_iterator<char>(restored), std::istreambuf_iterator<char>()), "recovered");
     EXPECT_EQ(starts, 2);
     EXPECT_NO_THROW(engine.StageRestore(prepare(), root / "third"));
+    std::ifstream reused(root / "third" / "data");
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(reused), std::istreambuf_iterator<char>()), "recovered");
+    EXPECT_EQ(fs::file_size(root / "third/data"), 9U);
     EXPECT_EQ(starts, 2);
     EXPECT_EQ(ends, 1);
   }

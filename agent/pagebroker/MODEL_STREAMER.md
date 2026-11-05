@@ -104,8 +104,9 @@ Reader tuning does not change SDK upload limits.
 
 ## Restore batching
 
-`restoreBatchBytes` controls the target download batch size (default: 10 GB).
-Files larger than this value are downloaded whole.
+`restoreBatchBytes` controls the maximum download batch size (default: 10 GB).
+Large files are downloaded in bounded ranges, allowing preparation and download
+to overlap. Checkpoint files and S3 objects are unchanged.
 
 `restorePreparationSlots` controls how many batches each restore can prepare
 ahead, including the active batch (default: 3). Higher values may improve
