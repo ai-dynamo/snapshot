@@ -38,8 +38,9 @@ type Store interface {
 	// consumers reports session.ErrTooMany.
 	Get(ctx context.Context, key string, wait time.Duration) ([]byte, error)
 
-	// Delete removes key whether or not it exists. A later Insert of key
-	// starts afresh.
+	// Delete removes key whether or not it exists, and writes nothing if it
+	// is absent, so deleting a key that was never inserted succeeds even in a
+	// full library bucket. A later Insert of key starts afresh.
 	Delete(ctx context.Context, key string) error
 }
 
@@ -183,6 +184,15 @@ func (st *store) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	return st.s.do(ctx, func(ctx context.Context) error {
+		// An absent key needs no delete marker, which would take one of the
+		// library bucket's keys.
+		_, err := st.kv.Get(ctx, k)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 		return st.kv.Delete(ctx, k)
 	})
 }

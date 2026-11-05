@@ -304,4 +304,16 @@ func TestStoreLimits(t *testing.T) {
 			require.ErrorIs(t, err, tt.wantErr)
 		})
 	}
+
+	t.Run("deleting from a full library bucket", func(t *testing.T) {
+		ctx := within(t)
+		store := newHarness(t, small).session(t, 1).connect(t, 0).Namespace(session.NamespaceLibrary)
+		for i := range 8 {
+			require.NoError(t, store.Insert(ctx, fmt.Sprintf("k%d", i), nil))
+		}
+		require.ErrorIs(t, store.Insert(ctx, "k8", nil), session.ErrTooMany)
+		require.NoError(t, store.Delete(ctx, "never-inserted"), "a key that was never inserted")
+		require.NoError(t, store.Delete(ctx, "k0"), "a key that exists")
+		require.NoError(t, store.Insert(ctx, "k0", []byte("again")), "an Insert after a Delete")
+	})
 }
