@@ -273,8 +273,10 @@ A session corresponds to exactly one attempt, that is, one capture of a
 UID, because each resource is exactly one attempt. The coordinator follows the
 group resources through a read-only watch and creates the session of every
 unfinished attempt, so sessions need no creation API and the resource remains
-the single source of truth; when the attempt has ended and its resource is final
-or deleted, the coordinator removes the session and all of its keys. Once a
+the single source of truth. The coordinator removes a session and all of its
+keys once its resource is deleted, or once the resource is final and the
+session has ended or its deadline has passed, so a session whose end cannot be
+recorded, for instance at the memory cap, is still removed. Once a
 resource's deletion has started, the coordinator fails its session with
 `Cancelled` unless every member has already arrived at the `admitted` barrier.
 Members decide on their own that a barrier is complete, so a member that saw it
@@ -796,11 +798,11 @@ The coordinator, by contrast, keeps sessions only in memory. In alpha its
 embedded server holds every bucket in memory, as a single replica, so a
 coordinator restart loses every session in flight. When the coordinator creates
 a session, it writes an epoch, drawn at random, into the session's `meta` key,
-and every agent remembers the epoch it read; an agent that reconnects and finds
-a different epoch, or no session, knows that the coordinator lost what it held,
-so it reports `CoordinatorLost` and ends the session with that reason. The owner
-then retries with a new attempt, which for a restore means fresh Pods. For this
-to be prompt, the coordinator opens its client listener only after it has
+and every agent presents the epoch it read whenever it reconnects. If the
+coordinator has recreated the session since, it fails the session with
+`CoordinatorLost` before admitting the agent, and an agent that finds no
+session at all reports `CoordinatorLost` as well. The owner then retries with a
+new attempt, which for a restore means fresh Pods. For this to be prompt, the coordinator opens its client listener only after it has
 recreated the session of every unfinished attempt; otherwise an agent that
 reconnects early would find no session and fail nothing, members that had not
 connected yet would join the recreated session, and the attempt would wait for
@@ -815,11 +817,12 @@ so this SNEP leaves the choice to operational evidence
 
 ### Session semantics
 
-Agents, relays, and the agent's library endpoint speak the standard NATS
-protocol to the server that the coordinator embeds. What Snapshot defines is the
-semantics of the six session patterns, the session's lifetime, and what a
-failure means; every client implements them the same way, and the coordinator
-relies on nothing else.
+Only agents connect to the coordinator: each speaks the standard NATS protocol
+to the server that the coordinator embeds, through Snapshot's session client,
+and the relay and libraries reach the session through their agent. What
+Snapshot defines is the semantics of the six session patterns, the session's
+lifetime, and what a failure means; the session client implements them, and
+the coordinator relies on nothing else.
 
 - `Insert(key, value)` stores the value if the key is absent, and every reader
   sees it at once. If the key already holds the same value, it succeeds; if it
@@ -861,9 +864,10 @@ The guarantees assume crash-stop failures, trusted agents, and one serving
 coordinator per attempt. For safety, a key keeps the first value inserted under
 it until it is deleted, a barrier counts each member once, and a session ends
 once, after which every client that is still connected learns how. For
-progress, every wait ends at the attempt deadline, at its phase timeout, or when
-the session ends, and a lost member fails the attempt one grace period after
-its connection is seen closing. Nothing orders operations by clock, although
+progress, every wait ends at its phase timeout, when the session ends, or at the
+attempt deadline, which an agent that cannot reach the coordinator enforces on
+its own, a few seconds late to allow for clock skew. A lost member fails the
+attempt one grace period after its connection is seen closing. Nothing orders operations by clock, although
 deadline accuracy and leader election depend on timing assumptions: the
 deadline counts from the creation time that the API server records, measured
 against the coordinator's clock, and Lease renewal assumes bounded drift and
@@ -1014,11 +1018,10 @@ their own signals, and a member without a template gets the defaults of a
 `PodSnapshot` without settings. Capture copies the container settings into the
 member's `PodSnapshotContent`, as for any `PodSnapshot`, so every restore uses
 them and a `PodGroupRestore` carries none. The controller sets everything else
-on the member's `PodSnapshot`: its name, owner reference, and group labels, its
-source from the member, and a `checkpointRetryLimit` of 0, since retrying a
-member in place is a non-goal. The template is therefore a type of its own
-rather than SnapshotJob's `PodSnapshotTemplate`, which also names the target
-containers and a retry limit, and a test fails whenever SNEP-411's settings
+on the member's `PodSnapshot`: its name, owner reference, and group labels, and
+its source from the member. The template is therefore a type of its own rather
+than SnapshotJob's `PodSnapshotTemplate`, which also names the target
+containers, and a test fails whenever SNEP-411's settings
 gain a field, so that a new one, such as a hook before capture, reaches groups
 only once its place relative to the barriers is defined. Settings never change
 a member's rank or its part in the protocol, so cuInterpose's leader still
@@ -1027,7 +1030,7 @@ remain a compatible addition.
 
 | Resource or contract | Change | Purpose |
 | --- | --- | --- |
-| `PodSnapshot` and `PodSnapshotContent` | No schema change; group-owned children carry an owner reference and a member-ID label, take their settings from the member's template with no retry in place, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent reads group parameters from the parent group, each member keeps its own settings, and the operator learns which sources Snapshot changed |
+| `PodSnapshot` and `PodSnapshotContent` | No schema change; group-owned children carry an owner reference and a member-ID label, take their settings from the member's template, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent reads group parameters from the parent group, each member keeps its own settings, and the operator learns which sources Snapshot changed |
 | Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs, plus each process's rendezvous file path | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
 | Restore Pod contract | New annotation `nvidia.com/restore-group: <PodGroupRestore>`, used instead of `restore-from` and `restore-container-map`, which decides the attempt a Pod belongs to; group targets must carry the restore startup probe, and the NRI plugin never runs the original command while the group context is missing | One source of truth, and no race with standalone restore |
 | `restore-complete` file | Adds an `attempt` key holding the `PodGroupRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
@@ -1133,8 +1136,8 @@ typical workload a member's records stay well under a MiB, far below the 32 MiB
 cap on Snapshot's values, and they are gathered only to the leader; the handle table
 grows by 128 bytes per recreated handle, one old and one new, and NCCL
 identifiers take 128 bytes per communicator.
-One watch of the library bucket per node, which fills a per-node cache, keeps
-library traffic to one delivery per key per node, which comfortably supports at least 100
+Pushed waits and per-node coalescing keep library traffic to about one upstream
+request per key per node, which comfortably supports at least 100
 concurrent library clients per session with per-operation latency well under 100
 milliseconds. Because sessions are independent, one coordinator replica serves
 many concurrent attempts and can later be sharded by attempt; alpha qualifies
@@ -1424,7 +1427,7 @@ type TargetPodReference struct {
 // PodGroupMemberTemplate holds the settings that a member's PodSnapshot
 // receives, and only those whose meaning in a group is defined. The
 // controller sets the rest: the PodSnapshot's name, owner reference, and group
-// labels, spec.source from the member, and spec.checkpointRetryLimit to 0.
+// labels, and spec.source from the member.
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup"
 // +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-podgroup-member' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-podgroup-member"
 type PodGroupMemberTemplate struct {
