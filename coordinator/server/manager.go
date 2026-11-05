@@ -255,10 +255,10 @@ const consumerInactiveThreshold = natsserver.JsDeleteWaitTimeDefault
 
 // createBucket creates one in-memory bucket, bounded by its largest value, by
 // how many consumers it may have and how long an unused one lasts, and, unless
-// maxKeys is zero, by its number of keys, none of which reserves memory.
-// JetStream's key-value configuration has none of the consumer limits nor a
-// key limit, so they are set on the bucket's stream, before any member can
-// reach the bucket.
+// maxKeys is zero, by its number of keys, none of which reserves memory, and
+// refusing rollups and purges. JetStream's key-value configuration has none of
+// these but the largest value, so the rest are set on the bucket's stream,
+// before any member can reach the bucket.
 func (s *Server) createBucket(ctx context.Context, bucket string, maxKeys, maxValue, maxConsumers int) (
 	jetstream.KeyValue, error) {
 	kv, err := s.js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
@@ -277,6 +277,9 @@ func (s *Server) createBucket(ctx context.Context, bucket string, maxKeys, maxVa
 	cfg := stream.CachedInfo().Config
 	cfg.MaxConsumers = maxConsumers
 	cfg.ConsumerLimits.InactiveThreshold = consumerInactiveThreshold
+	// A publish that rolls a bucket up purges it, meta and ended included.
+	// The session never purges, so a bucket refuses both.
+	cfg.AllowRollup, cfg.DenyPurge = false, true
 	if maxKeys != 0 {
 		cfg.MaxMsgs = int64(maxKeys)
 	}

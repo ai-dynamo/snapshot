@@ -21,13 +21,14 @@ import (
 )
 
 // The JetStream API error codes the embedded server refuses a write or a
-// consumer with, which the client reports as session.ErrTooLarge and
-// session.ErrTooMany.
+// consumer with. The client reports the first three as session.ErrTooLarge and
+// session.ErrTooMany, waits out the fourth, and never rolls a bucket up.
 const (
 	codeMessageTooLarge       = 10054
 	codeStoreFailed           = 10077
 	codeInsufficientResources = 10023
 	codeMaximumConsumers      = 10026
+	codeRollupFailed          = 10111
 )
 
 // requireCode checks that err is a JetStream API error with code.

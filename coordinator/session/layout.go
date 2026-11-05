@@ -34,7 +34,9 @@ const (
 
 	// KeyEnded holds how the session ended: the reason it failed, or no bytes
 	// at all when it closed because every member left. It is only ever
-	// created, so the first outcome wins.
+	// created, so the first outcome wins. Every member's connection may write
+	// it, so a misbehaving member can overwrite or delete it within its own
+	// attempt, which is no worse than failing the session through Fail.
 	KeyEnded = "ended"
 
 	// barrierPrefix starts each member's arrival at a barrier:

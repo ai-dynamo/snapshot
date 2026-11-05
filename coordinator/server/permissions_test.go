@@ -57,7 +57,8 @@ func TestPermissionsAllowEveryPattern(t *testing.T) {
 
 // TestPermissionsRefuse checks every subject a member's connection must not
 // reach: another member's keys, meta, another attempt's buckets, the API that
-// creates and deletes buckets, other inboxes, and the system account.
+// creates and deletes buckets, other inboxes, and the system account, and that
+// its own buckets refuse a rollup, which would purge them.
 func TestPermissionsRefuse(t *testing.T) {
 	h := newHarness(t)
 	spec, other := h.ensure(2), h.ensure(1)
@@ -91,6 +92,17 @@ func TestPermissionsRefuse(t *testing.T) {
 			requireViolation(t, violations, `Publish to "`+subject+`"`)
 		})
 	}
+
+	t.Run("a rollup of its own bucket", func(t *testing.T) {
+		js, err := jetstream.New(nc)
+		require.NoError(t, err)
+		rollup := nats.NewMsg("$KV." + own + ".snapshot.x")
+		rollup.Header.Set(jetstream.MsgRollup, jetstream.MsgRollupAll)
+		_, err = js.PublishMsg(within(t), rollup)
+		requireCode(t, err, codeRollupFailed)
+		_, err = h.srv.lookup(spec.UID).snapshot.Get(within(t), session.KeyMeta)
+		require.NoError(t, err, "meta must stay")
+	})
 
 	subscriptions := map[string]string{
 		"another member's inbox":    "_INBOX." + string(spec.UID) + ".member-1.>",
