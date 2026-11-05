@@ -47,8 +47,7 @@ class ModelStreamerRestore {
   explicit ModelStreamerRestore(
       ModelStreamerSessionOptions options,
       std::chrono::milliseconds submission_timeout = kDefaultModelStreamerSubmissionTimeout,
-      std::uint64_t restore_batch_bytes = kDefaultRestoreBatchBytes,
-      std::size_t restore_preparation_slots = kDefaultRestorePreparationSlots);
+      const model_streamer::settings::Options& settings = {});
   // Stops and joins the worker. Callers must finish using this object first.
   ~ModelStreamerRestore() noexcept;
   // Prevents copying ownership of the worker and native streamer handle.

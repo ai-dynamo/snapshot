@@ -19,6 +19,7 @@
 #include <map>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <sys/stat.h>
@@ -36,6 +37,15 @@ using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
 namespace {
+model_streamer::settings::Options
+RestoreSettings(std::uint64_t batch_bytes, std::optional<std::uint64_t> preparation_slots = std::nullopt)
+{
+  model_streamer::settings::Options settings;
+  settings.restore_batch_bytes = batch_bytes;
+  settings.restore_preparation_slots = preparation_slots;
+  return settings;
+}
+
 // The session binary alone injects allocation failure; dependencies stay intact.
 thread_local bool fail_next_allocation = false;
 thread_local std::size_t fail_pending_allocation_size = 0;
@@ -1019,18 +1029,19 @@ TEST_F(ModelStreamerSessionTest, ConfiguredBudgetChangesBatchBoundaries)
   for (size_t i = 0; i < sizes.size(); ++i)
     inventory.files[i].size_bytes = sizes[i];
   {
-    ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 10);
+    ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(10));
     ASSERT_NO_THROW(restore.Stage(inventory, root_ / "small-budget"));
     EXPECT_EQ(state.submission_bytes, (std::vector<uintmax_t>{10, 1}));
   }
   state.submission_bytes.clear();
   {
-    ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 11);
+    ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(11));
     ASSERT_NO_THROW(restore.Stage(inventory, root_ / "large-budget"));
     EXPECT_EQ(state.submission_bytes, (std::vector<uintmax_t>{11}));
   }
   EXPECT_FALSE(HasMapping(root_));
-  EXPECT_THROW((ModelStreamerRestore{{}, kDefaultModelStreamerSubmissionTimeout, 0}), std::invalid_argument);
+  EXPECT_THROW((ModelStreamerRestore{{}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(0)}),
+               std::invalid_argument);
 }
 
 TEST_F(ModelStreamerSessionTest, SubmitsOversizedFileAloneAndContinuesInventory)
@@ -1058,7 +1069,7 @@ TEST_F(ModelStreamerSessionTest, OversizedSubmissionExcludesOtherReadsUntilCompl
   state.sparse_allocations = true;
   state.allow_responses = false;
   state.pause_after_completion = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 64);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(64));
   auto inventory = Inventory();
   inventory.files.front().size_bytes = 65;
   auto large = std::async(std::launch::async, [&] { restore.Stage(inventory, root_ / "large"); });
@@ -1095,7 +1106,8 @@ TEST_F(ModelStreamerSessionTest, LaterBatchFailureReleasesMappingsAndStopsInvent
   for (auto& file : inventory.files)
     file.size_bytes = 6'000'000'000;
   // This scenario retires A before preparing C, using a two-slot window.
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, kDefaultRestoreBatchBytes, 2);
+  ModelStreamerRestore restore(
+      {}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(kDefaultRestoreBatchBytes, 2));
   auto result = std::async(std::launch::async, [&] { restore.Stage(inventory, root_ / "partial"); });
   {
     std::unique_lock lock(state.mutex);
@@ -1840,7 +1852,8 @@ TEST_P(PipelineWindowTest, BoundsPreparationAndWrapsConfiguredWindow)
   state.hold_producer = true;
   state.producer_window_slots = settings.slots;
   state.hold_allocation = settings.slots + 1;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, settings.budget, settings.slots);
+  ModelStreamerRestore restore(
+      {}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(settings.budget, settings.slots));
   const unsigned files = settings.slots * 3 + 1;
   auto inventory = Inventory(files);
   for (auto& file : inventory.files)
@@ -1918,7 +1931,7 @@ TEST_P(PipelineRecoverableFailureTest, RejectsQueuedSiblingBeforeCallerResumesAn
   state.hold_request = rejection;
   state.reject_request = rejection ? 1 : 0;
   state.storage_failure_submission = rejection ? 0 : 1;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 2, slots);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(2, slots));
   auto inventory = Inventory(slots + 2);
   for (auto& file : inventory.files)
     file.size_bytes = 2;
@@ -1977,7 +1990,7 @@ INSTANTIATE_TEST_SUITE_P(FailureCauses, PipelineRecoverableFailureTest,
 TEST_F(ModelStreamerSessionTest, FailedQueuedBatchDoesNotBlockPeerOnByteBudget)
 {
   state.allow_responses = false;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 2);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(2));
   auto active = std::async(std::launch::async, [&] {
     restore.Stage(Inventory(), root_ / "active");
   });
@@ -2019,7 +2032,7 @@ TEST_P(PipelinePreparationFailureTest, DrainsBorrowedPointersAndPreservesPrimary
     state.fail_mapping = slots;
   else
     state.fail_permission_call = slots;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, slots);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, slots));
   Cancellation parent;
   auto sibling = Cancellation::ChildOf(parent);
   auto result = std::async(std::launch::async, [&] {
@@ -2083,7 +2096,7 @@ TEST_F(ModelStreamerSessionTest, PipelineQueuePublicationFailureDoesNotCancelCla
   state.allow_responses = false;
   state.hold_request = true;
   state.hold_allocation = 2;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1));
   auto active_inventory = Inventory();
   active_inventory.files[0].permissions = fs::perms::owner_read;
   auto failed_inventory = Inventory(4);
@@ -2150,7 +2163,7 @@ TEST_P(PipelineCapacityTest, WithdrawsAllPendingSiblingsBeforeActiveDrain)
   state.hold_producer = true;
   state.producer_window_slots = slots;
   state.hold_end = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, slots);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, slots));
   Cancellation stop;
   auto result = std::async(std::launch::async, [&] {
     producer_restore = &restore;
@@ -2184,7 +2197,7 @@ TEST_P(PipelineCapacityTest, WithdrawsAllPendingSiblingsBeforeActiveDrain)
 
 TEST_P(PipelineCapacityTest, EmptyFilesPartialAndOversizedBatchesPreserveContents)
 {
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 3, GetParam());
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(3, GetParam()));
   EXPECT_NO_THROW(restore.Stage({}, root_ / "empty"));
   auto empty_files = Inventory(3);
   for (auto& file : empty_files.files)
@@ -2224,7 +2237,8 @@ INSTANTIATE_TEST_SUITE_P(Slots, PipelineCapacityTest, ::testing::Values(1U, 2U, 
 TEST_F(ModelStreamerSessionTest, RejectsInvalidPreparationCapacityBeforeStartingWorker)
 {
   for (unsigned slots : {0U, 21U})
-    EXPECT_THROW((ModelStreamerRestore({}, kDefaultModelStreamerSubmissionTimeout, 1, slots)), std::invalid_argument);
+    EXPECT_THROW((ModelStreamerRestore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, slots))),
+                 std::invalid_argument);
   EXPECT_EQ(state.starts, 0U);
 }
 
@@ -2238,7 +2252,7 @@ TEST_P(PipelineCancellationTest, BlockedPreparationStillDrainsClaimedWork)
   Cancellation stop;
   const auto deadline = Cancellation::Clock::now() + 200ms;
   const auto cancellation = GetParam() ? stop.WithDeadline(deadline) : stop;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1));
   auto result = std::async(std::launch::async, [&] {
     restore.Stage(Inventory(4), root_ / "cancel-prepare", cancellation);
   });
@@ -2273,7 +2287,7 @@ TEST_F(ModelStreamerSessionTest, PipelineKnownFailureStopsPartiallyPreparedBatch
   state.hold_allocation = 2;
   state.allow_responses = false;
   state.hold_end = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1));
   auto result = std::async(std::launch::async, [&] {
     restore.Stage(Inventory(4), root_ / "known-failure");
   });
@@ -2314,7 +2328,7 @@ TEST_P(PipelineReadyFailureTest, RetiresTwoFailedFuturesWithObservedErrorPrecede
   state.allow_responses = false;
   state.hold_end = true;
   // Hold exactly two published futures before injecting their failures.
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, 2);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, 2));
   Cancellation parent;
   auto result = std::async(std::launch::async, [&] {
     producer_restore = &restore;
@@ -2361,7 +2375,7 @@ TEST_F(ModelStreamerSessionTest, PipelinePreparationFailureDoesNotCancelLivePeer
   state.fail_allocation = 2;
   state.allow_responses = false;
   state.hold_end = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 2);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(2));
   auto inventory = Inventory(3);
   inventory.files[1].size_bytes = 2;
   Cancellation first_stop, peer_stop;
@@ -2407,7 +2421,7 @@ TEST_F(ModelStreamerSessionTest, PipelineEntryAllocationFailureStillDrainsFront)
   state.allow_responses = false;
   state.hold_end = true;
   state.arm_slot_failure = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1));
   Cancellation parent;
   auto result = std::async(std::launch::async, [&] {
     producer_restore = &restore;
@@ -2445,7 +2459,7 @@ TEST_F(ModelStreamerSessionTest, PipelineFrontCompletionDuringBlockedAllocationI
 {
   state.hold_allocation = 2;
   state.allow_responses = false;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, 3);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, 3));
   auto inventory = Inventory(5);
   auto result = std::async(std::launch::async, [&] {
     restore.Stage(inventory, root_ / "completion-during-prepare");
@@ -2484,7 +2498,7 @@ TEST_F(ModelStreamerSessionTest, PipelinePendingFrontCancellationReleasesTailsDu
   state.allow_responses = false;
   state.hold_end = true;
   state.hold_allocation = 4;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, 3);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, 3));
   Cancellation active_stop, pending_stop;
   auto active = std::async(std::launch::async, [&] {
     restore.Stage(Inventory(), root_ / "active", active_stop);
@@ -2526,7 +2540,7 @@ TEST_F(ModelStreamerSessionTest, PipelineCreationFailureDrainsPublishedAndPartia
   state.allow_responses = false;
   state.hold_allocation = 2;
   state.hold_end = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, 4);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, 4));
   Cancellation parent;
   auto sibling = Cancellation::ChildOf(parent);
   auto result = std::async(std::launch::async, [&] {
@@ -2572,7 +2586,7 @@ TEST_P(PipelineBlockedFrontFailureTest, StopsPrivatePreparationAfterRecoverableF
   state.hold_request = rejection;
   state.reject_request = rejection ? 1 : 0;
   state.storage_failure_submission = rejection ? 0 : 1;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, 3);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, 3));
   Cancellation parent;
   auto result = std::async(std::launch::async, [&] {
     restore.Stage(Inventory(5), root_ / "failed-front", parent);
@@ -2620,7 +2634,7 @@ TEST_F(ModelStreamerSessionTest, PipelineConcurrentCallersKeepIndependentQueues)
 {
   state.allow_responses = false;
   state.hold_allocation = 2;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 2, 3);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(2, 3));
   auto inventory = Inventory(3);
   inventory.files[1].size_bytes = 2;
   auto peer_inventory = inventory;
@@ -2659,7 +2673,7 @@ TEST_F(ModelStreamerSessionTest, PipelineLocalQueueGrowthFailureDrainsAcceptedFr
   ASSERT_NE(block_bytes, 0U);
   state.allow_responses = false;
   state.hold_end = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, 2);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, 2));
   auto result = std::async(std::launch::async, [&] {
     PreparedRestore preparation;
     preparation.inventory = Inventory(64);
@@ -2698,7 +2712,7 @@ TEST_F(ModelStreamerSessionTest, PipelineQueueFailureDrainsEarlierClaimedSubmiss
   state.hold_request = true;
   state.hold_allocation = 2;
   state.hold_end = true;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1));
   auto inventory = Inventory(4);
   for (auto& file : inventory.files)
     file.permissions = fs::perms::owner_read;
@@ -2753,7 +2767,7 @@ TEST_F(ModelStreamerSessionTest, PipelineWorkerStartsNextBatchDuringBlockedPrepa
   state.hold_allocation = 3;
   state.pause_after_completion = true;
   // Exercise the default window: A downloading, B queued, C preparing.
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1));
   auto inventory = Inventory(5);
   auto result = std::async(std::launch::async, [&] {
     restore.Stage(inventory, root_ / "worker-overlap");
@@ -2799,7 +2813,7 @@ TEST_F(ModelStreamerSessionTest, PipelineEmptySuffixDoesNotRepublishOutstandingB
   state.allow_responses = false;
   state.hold_producer = true;
   state.producer_window_slots = 2;
-  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, 1, 3);
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, RestoreSettings(1, 3));
   auto inventory = Inventory(4);
   for (unsigned i = 2; i < 4; ++i) {
     inventory.files[i].size_bytes = 0;

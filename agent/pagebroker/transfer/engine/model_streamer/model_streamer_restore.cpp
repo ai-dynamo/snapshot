@@ -188,9 +188,11 @@ ModelStreamerRestore::ModelStreamerRestore(std::chrono::milliseconds submission_
 ModelStreamerRestore::ModelStreamerRestore(
     ModelStreamerSessionOptions options,
     std::chrono::milliseconds submission_timeout,
-    std::uint64_t restore_batch_bytes, std::size_t restore_preparation_slots)
-    : submission_timeout_(submission_timeout), restore_batch_bytes_(restore_batch_bytes),
-      restore_preparation_slots_(restore_preparation_slots), options_(std::move(options)),
+    const model_streamer::settings::Options& settings)
+    : submission_timeout_(submission_timeout),
+      restore_batch_bytes_(settings.restore_batch_bytes.value_or(kDefaultRestoreBatchBytes)),
+      restore_preparation_slots_(settings.restore_preparation_slots.value_or(kDefaultRestorePreparationSlots)),
+      options_(std::move(options)),
       stopped_error_(std::make_exception_ptr(std::runtime_error("Model Streamer restore stopped")))
 {
   if (restore_batch_bytes_ == 0)
