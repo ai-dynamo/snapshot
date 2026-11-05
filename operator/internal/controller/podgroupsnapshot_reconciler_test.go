@@ -439,7 +439,8 @@ func TestPodGroupSnapshotReconciler_WaitsForAPreviousIncarnation(t *testing.T) {
 
 	res := reconcileGroup(t, r)
 
-	assert.Equal(t, podGroupAdmissionRequeue, res.RequeueAfter)
+	assert.InDelta(t, time.Until(group.CreationTimestamp.Add(600*time.Second)).Seconds(), res.RequeueAfter.Seconds(), 5,
+		"no polling: the leftover's deletion reconciles the group through Owns, which maps by owner name")
 	assert.Len(t, listMemberPodSnapshots(t, r), 1, "nothing is created while the earlier group's PodSnapshot remains")
 	got := getGroup(t, r)
 	admitted := groupCondition(t, got, snapshotv1alpha1.PodGroupConditionAdmitted)

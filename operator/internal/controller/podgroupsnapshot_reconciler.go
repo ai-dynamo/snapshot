@@ -60,19 +60,6 @@ type PodGroupSnapshotReconciler struct {
 	AgentSelector  labels.Selector
 }
 
-const (
-	// podGroupProtocolVersion is the group protocol version this operator
-	// speaks. Admission requires the agent on every member's node to list it.
-	podGroupProtocolVersion = "v1"
-
-	// podGroupAdmissionRequeue is how often admission looks again while it
-	// waits for a source Pod to be scheduled or for an agent. It polls instead
-	// of watching: mapping a Pod event back to the groups that wait on its
-	// node would need an index of waiting groups by node, and the deadline
-	// bounds the wait anyway.
-	podGroupAdmissionRequeue = 10 * time.Second
-)
-
 // Reconcile is a thin sequence: observe the members and, while no member work
 // exists, run admission; derive the status; record it; then act on it, by
 // creating the members' PodSnapshots or, for a group being deleted, releasing
@@ -88,7 +75,7 @@ func (r *PodGroupSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 	if !deleting {
-		if added, err := r.ensureFinalizer(ctx, group); err != nil || added {
+		if added, err := addPodGroupFinalizer(ctx, r.Client, group); err != nil || added {
 			return ctrl.Result{}, err
 		}
 	}
@@ -105,36 +92,13 @@ func (r *PodGroupSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	if deleting {
 		if podGroupSnapshotReleasable(&group.Status) {
-			return ctrl.Result{}, r.releaseFinalizer(ctx, group)
+			// Garbage collection then deletes the members' PodSnapshots.
+			return ctrl.Result{}, removePodGroupFinalizer(ctx, r.Client, group)
 		}
 	} else if err := r.createMemberPodSnapshots(ctx, group, observed, now); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: podGroupSnapshotRequeue(observed, &group.Status, now)}, nil
-}
-
-// ensureFinalizer adds the in-use finalizer when absent, reporting added=true
-// when it updated the group; the resulting watch event reconciles it again.
-func (r *PodGroupSnapshotReconciler) ensureFinalizer(ctx context.Context, group *snapshotv1alpha1.PodGroupSnapshot) (bool, error) {
-	if controllerutil.ContainsFinalizer(group, snapshotv1alpha1.PodGroupInUseFinalizer) {
-		return false, nil
-	}
-	controllerutil.AddFinalizer(group, snapshotv1alpha1.PodGroupInUseFinalizer)
-	if err := r.Update(ctx, group); err != nil {
-		return false, fmt.Errorf("add PodGroupSnapshot finalizer: %w", err)
-	}
-	return true, nil
-}
-
-// releaseFinalizer removes the in-use finalizer, after which garbage collection
-// deletes the members' PodSnapshots. The next pull request adds unfinished
-// PodGroupRestores to podGroupSnapshotReleasable.
-func (r *PodGroupSnapshotReconciler) releaseFinalizer(ctx context.Context, group *snapshotv1alpha1.PodGroupSnapshot) error {
-	controllerutil.RemoveFinalizer(group, snapshotv1alpha1.PodGroupInUseFinalizer)
-	if err := r.Update(ctx, group); err != nil {
-		return fmt.Errorf("remove PodGroupSnapshot finalizer: %w", err)
-	}
-	return nil
 }
 
 // observe reads each member's PodSnapshot, its bound content and its source
@@ -373,42 +337,21 @@ func isMemberPodSnapshot(group *snapshotv1alpha1.PodGroupSnapshot, rank int, sna
 }
 
 // recordStatus patches the group's status when it changed, then emits an event
-// for each transition. The patch carries the resourceVersion it was derived
-// from, so a status derived from a stale cache is refused instead of
-// rewriting a Failed reason recorded since; the conflict requeues. On success
-// group holds the patched object.
+// for each transition (see patchPodGroupStatus). On success group holds the
+// patched object.
 func (r *PodGroupSnapshotReconciler) recordStatus(ctx context.Context, group *snapshotv1alpha1.PodGroupSnapshot, desired snapshotv1alpha1.PodGroupSnapshotStatus) error {
 	if apiequality.Semantic.DeepEqual(group.Status, desired) {
 		return nil
 	}
 	original := group.DeepCopy()
 	group.Status = desired
-	if err := r.Status().Patch(ctx, group, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
-		return fmt.Errorf("patch PodGroupSnapshot status: %w", err)
-	}
-	for _, e := range podGroupSnapshotTransitions(original.Status.Conditions, group.Status.Conditions) {
-		r.Recorder.Event(group, e.eventType, e.reason, e.message)
-	}
-	return nil
+	return patchPodGroupStatus(ctx, r.Client, r.Recorder, original, group, original.Status.Conditions, desired.Conditions)
 }
 
-// podGroupSnapshotRequeue is when to look at a group again without an event:
-// soon while admission waits, since it polls, and at the deadline while any
-// member is unfinished, since the deadline is no event either. A group whose
-// members are all final has ended, Ready or Failed.
+// podGroupSnapshotRequeue is when to look at a group again without an event,
+// by the rule both kinds share (see podGroupRequeue).
 func podGroupSnapshotRequeue(observed podGroupSnapshotObservation, status *snapshotv1alpha1.PodGroupSnapshotStatus, now time.Time) time.Duration {
-	untilDeadline := observed.deadline.Sub(now)
-	unfinished := false
-	for _, m := range status.Members {
-		unfinished = unfinished || !isCheckpointPhaseFinal(m.Phase)
-	}
-	if !unfinished || untilDeadline <= 0 {
-		return 0
-	}
-	if observed.admission.state == podGroupAdmissionWaiting {
-		return min(podGroupAdmissionRequeue, untilDeadline)
-	}
-	return untilDeadline
+	return podGroupRequeue(observed.admission, observed.deadline, now, podGroupSnapshotMemberViews(status.Members))
 }
 
 // SetupWithManager watches the group, the PodSnapshots it owns, and every
@@ -419,8 +362,8 @@ func (r *PodGroupSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NonCacheReadClient == nil {
 		return errors.New("pod group snapshot reconciler requires a non-cache read client")
 	}
-	if r.AgentNamespace == "" || r.AgentSelector == nil || r.AgentSelector.Empty() {
-		return errors.New("pod group snapshot reconciler requires the agent namespace and a non-empty agent selector")
+	if err := validatePodGroupAgents(r.AgentNamespace, r.AgentSelector); err != nil {
+		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&snapshotv1alpha1.PodGroupSnapshot{}).

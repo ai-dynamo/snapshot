@@ -7,8 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -87,13 +85,12 @@ func (r *PodGroupSnapshotReconciler) admit(ctx context.Context, reader client.Re
 	if len(unscheduled) > 0 {
 		return podGroupAdmission{podGroupAdmissionWaiting, snapshotv1alpha1.PodGroupReasonSourcePodUnscheduled, strings.Join(unscheduled, "; ")}, nil
 	}
-	blocked, err := r.blockedAgentNodes(ctx, reader, nodes)
+	wait, err := waitForPodGroupAgents(ctx, reader, r.AgentNamespace, r.AgentSelector, nodes)
 	if err != nil {
 		return podGroupAdmission{}, err
 	}
-	if len(blocked) > 0 {
-		return podGroupAdmission{podGroupAdmissionWaiting, snapshotv1alpha1.PodGroupReasonAgentNotReady,
-			fmt.Sprintf("waiting for the node agent on %d node(s): %s", len(blocked), strings.Join(blocked, "; "))}, nil
+	if wait != nil {
+		return *wait, nil
 	}
 	return podGroupAdmission{state: podGroupAdmissionPassed}, nil
 }
@@ -134,66 +131,4 @@ func podGroupSnapshotSpecRefusal(group *snapshotv1alpha1.PodGroupSnapshot) *podG
 func isPreviousIncarnationPodSnapshot(group *snapshotv1alpha1.PodGroupSnapshot, snap *snapshotv1alpha1.PodSnapshot) bool {
 	owner := metav1.GetControllerOf(snap)
 	return owner != nil && isPodGroupSnapshotOwner(owner) && owner.Name == group.Name && owner.UID != group.UID
-}
-
-// podGroupRefusal refuses a group with Refused and message.
-func podGroupRefusal(message string) podGroupAdmission {
-	return podGroupAdmission{podGroupAdmissionRefused, snapshotv1alpha1.PodGroupReasonRefused, message}
-}
-
-// blockedAgentNodes returns, in node order, each node whose node agent is
-// not ready for groups and why. An agent is ready when its Pod is Ready and its
-// PodGroupProtocolsAnnotation lists podGroupProtocolVersion. Every agent Pod
-// on the node must be ready, so an agent being replaced by an older one never
-// passes.
-func (r *PodGroupSnapshotReconciler) blockedAgentNodes(ctx context.Context, reader client.Reader, nodes map[string]struct{}) ([]string, error) {
-	agents := &corev1.PodList{}
-	if err := reader.List(ctx, agents,
-		client.InNamespace(r.AgentNamespace),
-		client.MatchingLabelsSelector{Selector: r.AgentSelector},
-	); err != nil {
-		return nil, fmt.Errorf("list node agent Pods: %w", err)
-	}
-	agentsByNode := make(map[string][]*corev1.Pod, len(agents.Items))
-	for i := range agents.Items {
-		agent := &agents.Items[i]
-		agentsByNode[agent.Spec.NodeName] = append(agentsByNode[agent.Spec.NodeName], agent)
-	}
-
-	var blocked []string
-	for _, node := range slices.Sorted(maps.Keys(nodes)) {
-		if why := agentNotReadyForGroups(agentsByNode[node]); why != "" {
-			blocked = append(blocked, fmt.Sprintf("node %q: %s", node, why))
-		}
-	}
-	return blocked, nil
-}
-
-// agentNotReadyForGroups says why the agent Pods of one node cannot serve a
-// group member, or returns "".
-func agentNotReadyForGroups(agents []*corev1.Pod) string {
-	if len(agents) == 0 {
-		return "no node agent Pod runs on it"
-	}
-	for _, agent := range agents {
-		protocols, advertised := agent.Annotations[snapshotv1alpha1.PodGroupProtocolsAnnotation]
-		switch {
-		case !isPodReady(agent):
-			return fmt.Sprintf("agent Pod %q is not Ready", agent.Name)
-		case !advertised:
-			return fmt.Sprintf("agent Pod %q does not support pod groups", agent.Name)
-		case !slices.Contains(splitProtocols(protocols), podGroupProtocolVersion):
-			return fmt.Sprintf("agent Pod %q supports group protocols %q, not %s", agent.Name, protocols, podGroupProtocolVersion)
-		}
-	}
-	return ""
-}
-
-// splitProtocols splits a PodGroupProtocolsAnnotation value, such as "v1,v2".
-func splitProtocols(value string) []string {
-	protocols := strings.Split(value, ",")
-	for i := range protocols {
-		protocols[i] = strings.TrimSpace(protocols[i])
-	}
-	return protocols
 }
