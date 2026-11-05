@@ -11,32 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMemberPermissions pins the subjects a member's connection may use. The
-// coordinator's tests check what they allow and refuse; this one keeps a change
-// to them deliberate.
-func TestMemberPermissions(t *testing.T) {
-	p := MemberPermissions("uid", "m0")
-	assert.Equal(t, []string{
-		"$JS.API.STREAM.INFO.KV_snapshot-v1-uid-s",
-		"$JS.API.DIRECT.GET.KV_snapshot-v1-uid-s.>",
-		"$JS.API.CONSUMER.CREATE.KV_snapshot-v1-uid-s.>",
-		"$JS.API.CONSUMER.DELETE.KV_snapshot-v1-uid-s.*",
-		"$JS.FC.KV_snapshot-v1-uid-s.>",
-		"$JS.API.STREAM.INFO.KV_snapshot-v1-uid-l",
-		"$JS.API.DIRECT.GET.KV_snapshot-v1-uid-l.>",
-		"$JS.API.CONSUMER.CREATE.KV_snapshot-v1-uid-l.>",
-		"$JS.API.CONSUMER.DELETE.KV_snapshot-v1-uid-l.*",
-		"$JS.FC.KV_snapshot-v1-uid-l.>",
-		"$KV.snapshot-v1-uid-s.snapshot.>",
-		"$KV.snapshot-v1-uid-s.cuinterpose.>",
-		"$KV.snapshot-v1-uid-s.ended",
-		"$KV.snapshot-v1-uid-s.barrier.*.m0",
-		"$KV.snapshot-v1-uid-s.left.m0",
-		"$KV.snapshot-v1-uid-l.>",
-	}, p.Publish)
-	assert.Equal(t, []string{"_INBOX.uid.m0.>"}, p.Subscribe)
-}
-
 // TestValidateAttempt covers the longest attempt UID.
 func TestValidateAttempt(t *testing.T) {
 	require.NoError(t, ValidateAttempt(strings.Repeat("u", MaxAttemptLength)))

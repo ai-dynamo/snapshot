@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package sessiontest holds only tests: those of the session client, package
-// coordinator, against the real coordinator, package server, and the test that
-// ties the client's connection settings to the coordinator's. It is the only
-// package that imports both. Each member reaches the coordinator through
-// a TCP proxy of its own, which a test cuts to break the member's connection,
-// and points at a new coordinator to restart it.
+// Package sessiontest holds only tests: those of session behavior, through the
+// session client, package coordinator, against the real coordinator, package
+// server, and the test that ties the client's connection settings to the
+// coordinator's. It is the only package that imports both. One fake clock
+// times both sides: the coordinator's deadlines and grace periods, and each
+// member's own deadline. Each member reaches the coordinator through a TCP
+// proxy of its own, which a test cuts to break the member's connection, and
+// points at a new coordinator to restart it. What a misbehaving connection can
+// do is package server's to test, over raw connections.
 package sessiontest
 
 import (
@@ -31,8 +34,11 @@ import (
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testclock"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,6 +57,8 @@ type harness struct {
 	ca    *x509.CertPool
 	auth  *authorizer
 	clock *testclock.Clock
+	// logs records what every member's client logs.
+	logs *logLines
 	// observer records what the current coordinator sees of sessions.
 	observer *recorder
 	proxies  []*proxy
@@ -66,7 +74,18 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 	h := &harness{
 		t: t, ca: ca, auth: &authorizer{},
 		clock: testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
+		logs:  &logLines{},
 	}
+	// Every subject a client sends must be one its permissions allow. The check
+	// is best-effort: a refusal that races a closing connection can go unseen.
+	// The deterministic tests of the subjects whose refusal changes nothing a
+	// client returns are TestWaitsFreeTheirConsumers, for the deletion of a
+	// watch's consumer, and package server's TestFlowControlReplies.
+	t.Cleanup(func() {
+		for _, line := range h.logs.all() {
+			assert.NotContains(t, line, "refused a publish", "a client sent a subject it is not permitted")
+		}
+	})
 	h.cfg = server.Config{
 		Host: "127.0.0.1",
 		// Any free port, as nats-server's RANDOM_PORT picks.
@@ -124,13 +143,19 @@ type testSession struct {
 	proxies []*proxy
 }
 
-// session ensures a session with n members for the test t, whose members'
-// proxies stop when t ends.
+// session ensures a session with n members, whose deadline is an hour away,
+// for the test t, whose members' proxies stop when t ends.
 func (h *harness) session(t *testing.T, n int) *testSession {
+	t.Helper()
+	return h.sessionUntil(t, n, h.clock.Now().Add(time.Hour))
+}
+
+// sessionUntil ensures a session with n members and deadline for the test t.
+func (h *harness) sessionUntil(t *testing.T, n int, deadline time.Time) *testSession {
 	t.Helper()
 	ses := &testSession{h: h, spec: server.Spec{
 		UID:      types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())),
-		Deadline: h.clock.Now().Add(time.Hour),
+		Deadline: deadline,
 	}}
 	for i := range n {
 		ses.spec.Members = append(ses.spec.Members, session.Member{ID: fmt.Sprintf("member-%d", i), Rank: i})
@@ -153,6 +178,7 @@ func (ses *testSession) config(member int) coordinator.Config {
 		Member:     ses.spec.Members[member].ID,
 		Token:      func() (string, error) { return memberToken, nil },
 		Clock:      ses.h.clock,
+		Log:        ses.h.logs.logger(),
 	}
 }
 
@@ -195,6 +221,13 @@ func (ses *testSession) cut(member int) { ses.proxies[member].cut() }
 // client keeps to itself. The connection closes when the test ends.
 func (ses *testSession) raw(t *testing.T, member int) jetstream.KeyValue {
 	t.Helper()
+	return ses.rawBucket(t, member, session.SnapshotBucket(string(ses.spec.UID)))
+}
+
+// rawBucket returns one of the session's buckets over a plain NATS connection
+// of member, as raw does.
+func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetstream.KeyValue {
+	t.Helper()
 	uid, id := string(ses.spec.UID), ses.spec.Members[member].ID
 	nc, err := nats.Connect("tls://"+ses.h.srv.Addr().String(),
 		nats.Secure(&tls.Config{RootCAs: ses.h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
@@ -206,25 +239,45 @@ func (ses *testSession) raw(t *testing.T, member int) jetstream.KeyValue {
 	t.Cleanup(nc.Close)
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
-	kv, err := js.KeyValue(within(t), session.SnapshotBucket(uid))
+	kv, err := js.KeyValue(within(t), bucket)
 	require.NoError(t, err)
 	return kv
 }
 
 // awaitMostConsumers waits until the session's Snapshot bucket holds its most
-// consumers, which it reads over a plain connection that holds none.
+// consumers.
 func (ses *testSession) awaitMostConsumers(t *testing.T) {
 	t.Helper()
+	ses.awaitConsumers(t, session.SnapshotBucket(string(ses.spec.UID)), 0)
+}
+
+// awaitConsumers waits until one of the session's buckets holds n consumers,
+// or its most if n is zero.
+func (ses *testSession) awaitConsumers(t *testing.T, bucket string, n int) {
+	t.Helper()
+	ses.consumersWithin(t, bucket, 10*time.Second, func(held, most int) bool {
+		if n == 0 {
+			return held >= most
+		}
+		return held >= n
+	})
+}
+
+// consumersWithin requires that, within d, ok reports true of how many
+// consumers one of the session's buckets holds and how many it may hold, which
+// it reads over a plain connection of a member, which holds none.
+func (ses *testSession) consumersWithin(t *testing.T, bucket string, d time.Duration, ok func(held, most int) bool) {
+	t.Helper()
 	ctx := within(t)
-	kv := ses.raw(t, 1)
+	kv := ses.rawBucket(t, 1, bucket)
 	require.Eventually(t, func() bool {
 		status, err := kv.Status(ctx)
 		if err != nil {
 			return false
 		}
 		info := status.(*jetstream.KeyValueBucketStatus).StreamInfo()
-		return info.State.Consumers >= info.Config.MaxConsumers
-	}, 10*time.Second, 5*time.Millisecond, "the Snapshot bucket must reach its most consumers")
+		return ok(info.State.Consumers, info.Config.MaxConsumers)
+	}, d, 5*time.Millisecond, "the consumers of bucket %s", bucket)
 }
 
 // awaitKey waits until kv holds key, and fails the test if it does not within
@@ -283,6 +336,26 @@ func awaitDone(t *testing.T, s coordinator.Session) {
 	case <-within(t).Done():
 		t.Fatal("the session did not end")
 	}
+}
+
+// logLines records every log line.
+type logLines struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logLines) logger() logr.Logger {
+	return funcr.New(func(prefix, args string) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.lines = append(l.lines, prefix+" "+args)
+	}, funcr.Options{})
+}
+
+func (l *logLines) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.lines)
 }
 
 // authorizer admits memberToken, unless refuse is set, and refuses any other.

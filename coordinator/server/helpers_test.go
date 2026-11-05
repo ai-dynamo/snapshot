@@ -289,18 +289,6 @@ func (h *harness) kick(spec Spec, member int) {
 	}
 }
 
-// awaitGrace waits until a member's grace period has started or ended, as
-// running says.
-func (h *harness) awaitGrace(spec Spec, member int, running bool) {
-	h.t.Helper()
-	require.Eventually(h.t, func() bool {
-		h.srv.mu.Lock()
-		defer h.srv.mu.Unlock()
-		a := h.srv.attempts[spec.UID]
-		return (a.grace[spec.Members[member].ID] != nil) == running
-	}, 10*time.Second, 5*time.Millisecond)
-}
-
 // ended returns the ended key of an attempt, and false if it is absent.
 func (h *harness) ended(spec Spec) (string, bool) {
 	h.t.Helper()

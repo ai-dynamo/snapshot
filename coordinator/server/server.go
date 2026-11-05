@@ -32,11 +32,15 @@ const DefaultMaxBytes = 1 << 30
 
 // DefaultGrace is how long a member whose connection closed has to connect
 // again before the coordinator fails its session with
-// session.ReasonMemberFailed. It exceeds the time either side takes to notice
-// a dead connection, so a connection that breaks while the agent and the
-// coordinator keep running is restored within it. It does not cover an agent
-// restart, and is not meant to: a restarted agent never rejoins an attempt in
-// flight.
+// session.ReasonMemberFailed. A grace period starts only once the coordinator
+// sees the connection close, and a client that has connected again by then
+// never left its member without a connection. So what must fit within it is
+// the session client noticing a dead connection and connecting again, which
+// restores a connection that breaks while the agent and the coordinator keep
+// running. How long the coordinator takes to notice a dead connection changes
+// only how late a member that never comes back fails the attempt. It does not
+// cover an agent restart, and is not meant to: a restarted agent never rejoins
+// an attempt in flight.
 const DefaultGrace = 20 * time.Second
 
 // The coordinator's side of a member's keepalive. The coordinator gives up on

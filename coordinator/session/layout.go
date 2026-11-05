@@ -165,7 +165,12 @@ func MemberPermissions(attempt, member string) Permissions {
 			"$JS.API.DIRECT.GET."+stream+".>",      // Get
 			"$JS.API.CONSUMER.CREATE."+stream+".>", // Watch, through an ordered consumer
 			"$JS.API.CONSUMER.DELETE."+stream+".*", // stopping a watch
-			"$JS.FC."+stream+".>",                  // a watch's flow control replies
+			// A watch's flow control replies, which nats.go sends whenever the
+			// server asks, once a value past its threshold has been delivered.
+			// Refusing one logs a violation on both sides, and stalls a watch
+			// that then receives a second large value, such as a Barrier's
+			// that faces a misbehaving member's large arrivals.
+			"$JS.FC."+stream+".>",
 		)
 	}
 	kv := "$KV." + snapshot + "."

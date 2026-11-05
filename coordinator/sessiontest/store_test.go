@@ -176,6 +176,13 @@ func TestGet(t *testing.T) {
 			wantErr: session.ErrNotYet},
 		{name: "a key inserted during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
 			during: insert(session.NamespaceSnapshot, "late"), want: "late"},
+		// The one case that delivers megabytes through a wait's watch. The
+		// server asks the watch for flow control, but whether the reply goes
+		// through changes nothing here: package server's TestFlowControlReplies
+		// tests that.
+		{name: "a large value inserted during the wait", ns: session.NamespaceSnapshot,
+			wait: time.Minute, during: insert(session.NamespaceSnapshot, strings.Repeat("v", 4<<20)),
+			want: strings.Repeat("v", 4<<20)},
 		{name: "a library key inserted during the wait", ns: session.NamespaceLibrary, wait: time.Minute,
 			during: insert(session.NamespaceLibrary, "late"), want: "late"},
 		{name: "a key deleted, then inserted again, during the wait", ns: session.NamespaceCuInterpose, wait: time.Minute,
@@ -281,6 +288,10 @@ func TestStoreLimits(t *testing.T) {
 		repeat  bool
 		wantErr error
 	}{
+		{name: "a value of the Snapshot bucket's largest", limits: defaults, ns: session.NamespaceSnapshot,
+			value: session.MaxValue},
+		{name: "a value of the library bucket's largest", limits: defaults, ns: session.NamespaceLibrary,
+			value: session.MaxLibraryValue},
 		{name: "a value over Meta's limit", limits: small, ns: session.NamespaceSnapshot, value: 4<<10 + 1,
 			wantErr: session.ErrTooLarge},
 		{name: "a library value over Meta's limit", limits: defaults, ns: session.NamespaceLibrary,

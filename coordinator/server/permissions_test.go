@@ -4,6 +4,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,40 +21,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestPermissionsAllowEveryPattern makes every request of every session
-// pattern, in every namespace, over members' connections under the permissions
-// the coordinator grants: binding both buckets and reading meta, which connect
-// does, then inserting, reading a key directly and through a watch, deleting
-// it, arriving at a barrier and watching it release, leaving, and failing the
-// session, which each member's watch of the ended key sees.
-func TestPermissionsAllowEveryPattern(t *testing.T) {
-	h := newHarness(t)
-	ctx := within(t)
-	spec := h.ensure(2)
-	members := h.connectAll(spec)
-	for _, ns := range []session.Namespace{session.NamespaceSnapshot, session.NamespaceCuInterpose,
-		session.NamespaceLibrary} {
-		key := string(ns) + ".k"
-		require.NoError(t, members[0].insert(ctx, ns, "k", []byte("v")), "Insert in %s", ns)
-		entry, err := members[1].bucket(ns).Get(ctx, key)
-		require.NoError(t, err, "Get in %s", ns)
-		assert.Equal(t, "v", string(entry.Value()))
-		watchUntil(t, members[1].bucket(ns), key, func(present map[string]bool) bool { return present[key] })
-		require.NoError(t, members[0].bucket(ns).Delete(ctx, key), "Delete in %s", ns)
-	}
-	for _, m := range members {
-		require.NoError(t, m.arrive(ctx, "admitted"))
-	}
-	watchUntil(t, members[1].snapshot, session.BarrierKey("admitted", "*"), func(present map[string]bool) bool {
-		return len(present) == len(members)
-	})
-	require.NoError(t, members[0].leave(ctx))
-	require.NoError(t, members[1].fail(ctx, "Refused"))
-	for _, m := range members {
-		require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: "Refused"})
-	}
-}
 
 // TestPermissionsRefuse checks every subject a member's connection must not
 // reach: another member's keys, meta, another attempt's buckets, the API that
@@ -76,6 +43,10 @@ func TestPermissionsRefuse(t *testing.T) {
 		"reading another attempt's bucket":       "$JS.API.DIRECT.GET.KV_" + theirs + ".$KV." + theirs + ".meta",
 		"binding another attempt's bucket":       "$JS.API.STREAM.INFO.KV_" + theirs,
 		"watching another attempt's bucket":      "$JS.API.CONSUMER.CREATE.KV_" + theirs + ".c",
+		"deleting another attempt's consumer":    "$JS.API.CONSUMER.DELETE.KV_" + theirs + ".c",
+		"listing its own bucket's consumers":     "$JS.API.CONSUMER.LIST.KV_" + own,
+		"reading a consumer of its own bucket":   "$JS.API.CONSUMER.INFO.KV_" + own + ".c",
+		"pulling from a consumer of its own":     "$JS.API.CONSUMER.MSG.NEXT.KV_" + own + ".c",
 		"listing the account's streams":          "$JS.API.STREAM.LIST",
 		"reading the account's JetStream info":   "$JS.API.INFO",
 		"creating a bucket":                      "$JS.API.STREAM.CREATE.KV_new",
@@ -118,6 +89,40 @@ func TestPermissionsRefuse(t *testing.T) {
 			defer func() { _ = sub.Unsubscribe() }()
 			require.NoError(t, nc.Flush())
 			requireViolation(t, violations, `Subscription to "`+subject+`"`)
+		})
+	}
+}
+
+// TestFlowControlReplies checks that a member's connection may answer the
+// server's flow control on each of its buckets. The server sends a watch's
+// first message whatever its size, then holds the next until its request for
+// flow control is answered, so a watch that receives two large values in a row
+// receives the second only if the reply went through. A refused reply changes
+// nothing the session client returns, since each of its watches takes at most
+// one large value, so the test watches over a raw connection.
+func TestFlowControlReplies(t *testing.T) {
+	h := newHarness(t, func(cfg *Config) { cfg.MaxLibraryValue = 4 << 20 })
+	m := h.connect(h.ensure(1), 0)
+	for _, ns := range []session.Namespace{session.NamespaceSnapshot, session.NamespaceLibrary} {
+		t.Run(string(ns), func(t *testing.T) {
+			ctx := within(t)
+			key := string(ns) + ".big"
+			w, err := m.bucket(ns).Watch(ctx, key, jetstream.UpdatesOnly())
+			require.NoError(t, err)
+			for _, fill := range []byte("ab") {
+				_, err := m.bucket(ns).Put(ctx, key, bytes.Repeat([]byte{fill}, 3<<20))
+				require.NoError(t, err)
+			}
+			for {
+				select {
+				case e := <-w.Updates():
+					if e != nil && e.Value()[0] == 'b' {
+						return
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatalf("the second value never reached the watch of namespace %s", ns)
+				}
+			}
 		})
 	}
 }

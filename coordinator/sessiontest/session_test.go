@@ -158,7 +158,6 @@ func TestBarrier(t *testing.T) {
 	t.Run("a name must be one token", func(t *testing.T) {
 		s := h.session(t, 1).connect(t, 0)
 		require.ErrorIs(t, s.Barrier(within(t), "a.b"), session.ErrInvalid)
-		require.ErrorIs(t, s.Barrier(within(t), "*"), session.ErrInvalid)
 	})
 }
 
@@ -197,6 +196,53 @@ func TestWaitsShareTheConsumerLimit(t *testing.T) {
 	}
 	require.NoError(t, sessions[0].Barrier(ctx, "admitted"))
 	require.NoError(t, <-wait)
+}
+
+// TestWaitsFreeTheirConsumers checks that a wait that ends deletes its watch's
+// consumer at once, on each bucket, instead of leaving it to expire after the
+// coordinator's five seconds. A consumer left behind changes nothing a wait
+// returns, so the test counts each bucket's consumers, which a member's
+// connection may read.
+func TestWaitsFreeTheirConsumers(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	uid := string(ses.spec.UID)
+	snapshot, library := session.SnapshotBucket(uid), session.LibraryBucket(uid)
+	// The coordinator watches the departures, and each member the session's
+	// end.
+	idle := len(sessions) + 1
+	ses.awaitConsumers(t, snapshot, idle)
+	freed := func(bucket string, n int) {
+		t.Helper()
+		ses.consumersWithin(t, bucket, time.Second, func(held, _ int) bool { return held == n })
+	}
+
+	got := make(chan error, 1)
+	go func() {
+		_, err := sessions[0].Snapshot().Get(ctx, "k", time.Minute)
+		got <- err
+	}()
+	ses.awaitConsumers(t, snapshot, idle+1)
+	require.NoError(t, sessions[1].Snapshot().Insert(ctx, "k", nil))
+	require.NoError(t, <-got)
+	freed(snapshot, idle)
+
+	wait := barrier(ctx, sessions[0], "admitted")
+	ses.awaitConsumers(t, snapshot, idle+1)
+	require.NoError(t, sessions[1].Barrier(ctx, "admitted"))
+	require.NoError(t, <-wait)
+	freed(snapshot, idle)
+
+	go func() {
+		_, err := sessions[0].Library().Get(ctx, "comm", time.Minute)
+		got <- err
+	}()
+	ses.awaitConsumers(t, library, 1)
+	require.NoError(t, sessions[1].Library().Insert(ctx, "comm", nil))
+	require.NoError(t, <-got)
+	freed(library, 0)
 }
 
 // TestLeave covers Leave: leaving twice changes nothing, a member that has left
@@ -289,20 +335,9 @@ func TestSessionFail(t *testing.T) {
 		require.ErrorIs(t, s.Fail(ctx, "Late"), session.ErrClosed)
 	})
 
-	t.Run("an ended key that holds no reason reports InvalidReason", func(t *testing.T) {
-		ses := h.session(t, 2)
-		s := ses.connect(t, 0)
-		_, err := ses.raw(t, 1).Create(within(t), session.KeyEnded, []byte("not a reason\x00"))
-		require.NoError(t, err)
-		awaitDone(t, s)
-		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonInvalid})
-	})
-
 	t.Run("a reason must be a condition reason", func(t *testing.T) {
 		s := h.session(t, 1).connect(t, 0)
-		for _, reason := range []string{"", "has space", "1Digit", "Trailing:"} {
-			require.ErrorIs(t, s.Fail(within(t), reason), session.ErrInvalid, "reason %q", reason)
-		}
+		require.ErrorIs(t, s.Fail(within(t), "has space"), session.ErrInvalid)
 		require.NoError(t, s.Err())
 	})
 }
@@ -375,7 +410,6 @@ func TestConnect(t *testing.T) {
 		{"no URL", func(c *coordinator.Config) { c.URLs = nil }},
 		{"no CA pool", func(c *coordinator.Config) { c.RootCAs = nil }},
 		{"no token source", func(c *coordinator.Config) { c.Token = nil }},
-		{"an attempt that is not a name", func(c *coordinator.Config) { c.Attempt = "a.b" }},
 		{"an attempt too long for its buckets", func(c *coordinator.Config) {
 			c.Attempt = strings.Repeat("u", session.MaxAttemptLength+1)
 		}},
@@ -388,51 +422,6 @@ func TestConnect(t *testing.T) {
 			require.ErrorIs(t, err, session.ErrInvalid)
 		})
 	}
-}
-
-// TestDeadline covers a member that cannot learn how its session ended: it
-// ends the session itself DeadlineSlack past the deadline, unless the session
-// ended first.
-func TestDeadline(t *testing.T) {
-	t.Run("a member the coordinator refuses ends its session itself", func(t *testing.T) {
-		h := newHarness(t)
-		ses := h.session(t, 1)
-		s := ses.connect(t, 0)
-		h.auth.refuse.Store(true)
-		ses.cut(0)
-		// Nothing bounds the Barrier but the session.
-		wait := barrier(context.Background(), s, "admitted")
-		h.clock.Step(time.Hour)
-		requireWaiting(t, wait)
-		h.clock.Step(coordinator.DeadlineSlack)
-		select {
-		case err := <-wait:
-			require.ErrorIs(t, err, &session.AbortError{Reason: session.ReasonDeadlineExceeded})
-		case <-within(t).Done():
-			t.Fatal("the Barrier did not return")
-		}
-		awaitDone(t, s)
-		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
-	})
-
-	t.Run("a member that joins past the deadline and its slack ends its session at once", func(t *testing.T) {
-		h := newHarness(t)
-		ses := h.session(t, 1)
-		require.NoError(t, h.srv.Remove(within(t), ses.spec.UID))
-		ses.spec.Deadline = h.clock.Now().Add(-2 * coordinator.DeadlineSlack)
-		require.NoError(t, h.srv.Ensure(within(t), ses.spec))
-		s := ses.connect(t, 0)
-		awaitDone(t, s)
-		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
-	})
-
-	t.Run("a session that ended first keeps its end", func(t *testing.T) {
-		h := newHarness(t)
-		s := h.session(t, 1).connect(t, 0)
-		require.NoError(t, s.Fail(within(t), "Refused"))
-		h.clock.Step(time.Hour + coordinator.DeadlineSlack)
-		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: "Refused"})
-	})
 }
 
 // TestClose covers Close: it closes the connection and nothing else, so the

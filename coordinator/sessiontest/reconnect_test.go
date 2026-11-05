@@ -236,6 +236,14 @@ func TestRemoved(t *testing.T) {
 		}
 	})
 
+	t.Run("a session that ended keeps its outcome", func(t *testing.T) {
+		h := newHarness(t)
+		ses := h.session(t, 1)
+		require.NoError(t, ses.connect(t, 0).Fail(within(t), "Refused"))
+		require.NoError(t, h.srv.Remove(within(t), ses.spec.UID))
+		assert.Equal(t, []string{"opened", "failed Refused"}, h.observer.of(ses.spec.UID))
+	})
+
 	t.Run("with no room left to record its end", func(t *testing.T) {
 		h := newHarness(t, func(cfg *server.Config) { cfg.MaxBytes, cfg.MaxValue = 1<<20, 64<<10 })
 		ctx := within(t)

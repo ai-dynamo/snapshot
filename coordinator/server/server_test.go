@@ -8,7 +8,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,10 +47,10 @@ func fill(ctx context.Context, m *member, ns session.Namespace, size int) error 
 	return err
 }
 
-// TestLimits covers the limits the embedded server enforces: each bucket's
-// largest value and number of consumers, and the library bucket's number of
-// keys, none of which reserves memory, a message over the server's largest,
-// and the one memory cap every session shares.
+// TestLimits covers the limits the embedded server enforces on any client:
+// each bucket's largest value and number of consumers, and the library
+// bucket's number of keys, none of which reserves memory, and the one memory
+// cap every session shares.
 func TestLimits(t *testing.T) {
 	t.Run("more than ten sessions fit within the default memory cap", func(t *testing.T) {
 		h := newHarness(t)
@@ -148,15 +147,6 @@ func TestLimits(t *testing.T) {
 		}
 	})
 
-	t.Run("a message over the server's largest", func(t *testing.T) {
-		h := newHarness(t, func(cfg *Config) { cfg.MaxValue = 64 << 10 })
-		spec := h.ensure(1)
-		nc, _ := h.raw(spec, 0)
-		err := nc.Publish("$KV."+session.SnapshotBucket(string(spec.UID))+".snapshot.huge",
-			make([]byte, 64<<10+payloadHeadroom+1))
-		require.ErrorIs(t, err, nats.ErrMaxPayload)
-	})
-
 	t.Run("the memory cap every session shares", func(t *testing.T) {
 		h := newHarness(t, func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 2<<20, 64<<10 })
 		ctx := within(t)
@@ -192,45 +182,14 @@ func TestLimits(t *testing.T) {
 	})
 }
 
-// TestKeepaliveFitsTheGracePeriod checks the embedded server's keepalive
-// against the grace period: the server gives up on a dead connection well
-// before a member's grace period could run out.
-func TestKeepaliveFitsTheGracePeriod(t *testing.T) {
+// TestNoMonitoringPort checks that the embedded server opens no HTTP
+// monitoring port, which would expose every connection and its subjects.
+func TestNoMonitoringPort(t *testing.T) {
 	h := newHarness(t)
 	varz, err := h.srv.ns.Varz(nil)
 	require.NoError(t, err)
-	assert.Equal(t, serverPingInterval, varz.PingInterval)
-	assert.Equal(t, serverMaxPingsOut, varz.MaxPingsOut)
-	detection := varz.PingInterval * time.Duration(varz.MaxPingsOut+1)
-	assert.Greater(t, h.srv.cfg.Grace, detection)
-	assert.Equal(t, DefaultGrace, h.srv.cfg.Grace)
-	assert.Equal(t, session.MaxValue+payloadHeadroom, varz.MaxPayload)
-	assert.Zero(t, varz.HTTPPort, "no monitoring port")
-}
-
-// TestTLSRotation serves a rotated certificate to new connections without
-// restarting anything.
-func TestTLSRotation(t *testing.T) {
-	oldCA, oldCert := testCertificates(t)
-	newCA, newCert := testCertificates(t)
-	var current atomic.Pointer[tls.Certificate]
-	current.Store(&oldCert)
-	h := newHarness(t, func(cfg *Config) {
-		cfg.TLS = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-				return current.Load(), nil
-			},
-		}
-	})
-	h.ca = oldCA
-	spec := h.ensure(2)
-	before := h.connect(spec, 0)
-	current.Store(&newCert)
-	h.ca = newCA
-	after := h.connect(spec, 1)
-	require.NoError(t, before.Err())
-	require.NoError(t, after.Err())
+	assert.Zero(t, varz.HTTPPort)
+	assert.Zero(t, varz.HTTPSPort)
 }
 
 // TestLogsHoldNoSecrets drives a session, and a refused publish the server

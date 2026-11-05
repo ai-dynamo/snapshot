@@ -50,6 +50,15 @@ func connectLater(h *harness, spec Spec, member int) <-chan error {
 	return out
 }
 
+// requireNoGrace checks that no member of spec has a grace period running.
+func (h *harness) requireNoGrace(spec Spec) {
+	h.t.Helper()
+	time.Sleep(pending)
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	assert.Empty(h.t, h.srv.attempts[spec.UID].grace)
+}
+
 // requirePending fails the test if the call has returned.
 func requirePending(t *testing.T, call <-chan error) {
 	t.Helper()
@@ -119,6 +128,15 @@ func TestAuthentication(t *testing.T) {
 		require.ErrorIs(t, err, jetstream.ErrBucketNotFound)
 	})
 
+	t.Run("a refused client starts no grace period for the member it names", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.ensure(1)
+		h.connect(spec, 0)
+		_, err := h.dial(spec, spec.Members[0].ID, "stolen", 0)
+		require.ErrorIs(t, err, nats.ErrAuthorization)
+		h.requireNoGrace(spec)
+	})
+
 	t.Run("admits a member once its attempt has a session", func(t *testing.T) {
 		h := h.sub(t)
 		spec := h.spec(1)
@@ -170,11 +188,12 @@ func TestInternalToken(t *testing.T) {
 
 // TestEpochFence covers a member that reconnects with the epoch of a session
 // the coordinator no longer holds: the coordinator fails the session it holds
-// now before admitting the member, so the member never writes to it.
+// now before admitting the member, so the member never writes to it, and every
+// other member learns the end, those that had not connected yet included.
 func TestEpochFence(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
-	spec := h.ensure(2)
+	spec := h.ensure(3)
 	old := h.srv.lookup(spec.UID).epoch
 	// The host never recreates an attempt it removed; a test may, to
 	// give it another epoch, as a restart would.
@@ -194,6 +213,8 @@ func TestEpochFence(t *testing.T) {
 	require.True(t, ok, "the session must have failed by the time the member is admitted")
 	assert.Equal(t, session.ReasonCoordinatorLost, reason)
 	require.ErrorIs(t, awaitEnd(t, fresh), session.ErrCoordinatorLost)
+	late := h.connect(spec2, 2)
+	require.ErrorIs(t, awaitEnd(t, late), session.ErrCoordinatorLost, "a member that had not connected yet")
 }
 
 // pipeAddr is the address of an in-process connection.
