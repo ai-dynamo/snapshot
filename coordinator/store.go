@@ -38,9 +38,10 @@ type Store interface {
 	// most consumers waits for one to free, within the wait.
 	Get(ctx context.Context, key string, wait time.Duration) ([]byte, error)
 
-	// Delete removes key whether or not it exists, and writes nothing if it
-	// is absent, so deleting a key that was never inserted succeeds even in a
-	// full library bucket. A later Insert of key starts afresh.
+	// Delete removes key whether or not it exists. In the library bucket,
+	// which limits its number of keys, deleted ones included, it writes
+	// nothing if key is absent, so deleting a key that was never inserted
+	// succeeds even in a full bucket. A later Insert of key starts afresh.
 	Delete(ctx context.Context, key string) error
 }
 
@@ -56,7 +57,8 @@ func (s *client) CuInterpose() Store {
 
 // Library implements Session.
 func (s *client) Library() Store {
-	return &store{s: s, kv: s.library, ns: session.NamespaceLibrary, maxValue: s.meta.MaxLibraryValue}
+	return &store{s: s, kv: s.library, ns: session.NamespaceLibrary, maxValue: s.meta.MaxLibraryValue,
+		limitsKeys: true}
 }
 
 // store is one namespace of a session.
@@ -65,6 +67,9 @@ type store struct {
 	kv       jetstream.KeyValue
 	ns       session.Namespace
 	maxValue int
+	// limitsKeys is set for a bucket that limits its number of keys, deleted
+	// ones included, which a delete marker for an absent key would take one of.
+	limitsKeys bool
 }
 
 // key returns the bucket key of a caller's key.
@@ -178,14 +183,14 @@ func (st *store) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	return st.s.do(ctx, func(ctx context.Context) error {
-		// An absent key needs no delete marker, which would take one of the
-		// library bucket's keys.
-		_, err := st.kv.Get(ctx, k)
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
+		if st.limitsKeys {
+			_, err := st.kv.Get(ctx, k)
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
 		}
 		return st.kv.Delete(ctx, k)
 	})
