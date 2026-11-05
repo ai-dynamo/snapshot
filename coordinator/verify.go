@@ -56,11 +56,12 @@ func (s *client) verifier() {
 
 // check verifies the session by reading Meta again. The same epoch means the
 // coordinator still holds the session the member joined, which answers every
-// request and reconnect before check began. Another epoch, or no Meta, means it
-// recreated the session after losing it, and no bucket means it no longer
-// holds the session at all: either way, the session ends with
-// session.ErrCoordinatorLost, after failing a recreated session with that
-// reason.
+// request and reconnect before check began. Another epoch, no Meta, or no
+// bucket means the coordinator no longer holds that session, so the session
+// ends with session.ErrCoordinatorLost. Only a coordinator restart recreates a
+// session, and the coordinator fails a session it recreated before it admits a
+// member that presents another epoch, which the client does whenever it
+// reconnects.
 func (s *client) check() {
 	for {
 		s.mu.Lock()
@@ -77,11 +78,9 @@ func (s *client) check() {
 		case err == nil && meta.Epoch == s.meta.Epoch:
 			s.settled(target)
 			return
-		case err == nil, errors.Is(err, session.ErrNotFound):
-			s.lose(true)
-			return
-		case errors.Is(err, jetstream.ErrStreamNotFound), errors.Is(err, jetstream.ErrBucketNotFound):
-			s.lose(false)
+		case err == nil, errors.Is(err, session.ErrNotFound), errors.Is(err, jetstream.ErrStreamNotFound),
+			errors.Is(err, jetstream.ErrBucketNotFound):
+			s.lose()
 			return
 		}
 		select {
@@ -94,16 +93,8 @@ func (s *client) check() {
 	}
 }
 
-// lose ends a session the coordinator lost. If the coordinator recreated it,
-// the session first fails the recreated one, so every member learns at once;
-// creating ended fails only if something ended it already, which serves as
-// well.
-func (s *client) lose(recreated bool) {
-	if recreated {
-		ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
-		_, _ = s.snapshot.Create(ctx, session.KeyEnded, []byte(session.ReasonCoordinatorLost))
-		cancel()
-	}
+// lose ends a session the coordinator lost.
+func (s *client) lose() {
 	s.log.Info("The coordinator lost the session")
 	s.finish(session.ErrCoordinatorLost)
 }

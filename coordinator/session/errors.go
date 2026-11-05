@@ -49,9 +49,10 @@ var (
 	// ErrCoordinatorLost reports that the coordinator no longer holds the
 	// session, because it restarted, or removed the session before this member
 	// received its end: the member found a session with another epoch, or
-	// none. It is an *AbortError, so it also matches a session that ended with
-	// ReasonCoordinatorLost for any other reason, such as another member
-	// noticing first.
+	// none. It is an *AbortError, so it also matches a session that the
+	// coordinator failed with ReasonCoordinatorLost: one it shut down under,
+	// or recreated after a restart, which it fails as soon as a member that
+	// joined the lost one reconnects.
 	ErrCoordinatorLost error = &AbortError{Reason: ReasonCoordinatorLost}
 )
 
@@ -72,8 +73,8 @@ func (e *AbortError) Is(target error) bool {
 }
 
 // The reasons a session fails with besides those a member supplies to Fail:
-// the coordinator's, a member's that finds the coordinator lost, and the one
-// that replaces an ended key that holds no reason. They match the condition
+// the coordinator's, and the one that replaces an ended key that holds no
+// reason. They match the condition
 // reasons the operator reports on the set resource.
 const (
 	// ReasonDeadlineExceeded is the reason the coordinator fails a session

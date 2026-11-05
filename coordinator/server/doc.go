@@ -50,11 +50,10 @@
 // set resource is unfinished, and Remove once it is deleted, or once it is
 // final and its session has ended or its deadline has passed. A session ends
 // exactly once, through the ended key, which is only ever created: by a
-// member's Fail; by the
-// coordinator when every member has left, when the deadline passes, when a
-// member's grace period runs out, when it removes a session still open, and
-// when it shuts down; or by a member that finds the coordinator lost the
-// session it joined. Once every member has left, the deadline passes, or a
+// member's Fail, or by the coordinator when every member has left, when the
+// deadline passes, when a member's grace period runs out, when it removes a
+// session still open, when it shuts down, and when it admits a member that
+// joined the session before the coordinator recreated it. Once every member has left, the deadline passes, or a
 // grace period runs out, the coordinator keeps trying to record the end, which
 // the memory cap may refuse, until it is recorded, the session is removed, or
 // the coordinator shuts down.

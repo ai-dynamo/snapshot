@@ -43,6 +43,7 @@
 // reconnect, when a watch stops on its own, and when an operation finds its
 // bucket missing. Another epoch, or no session, means the coordinator no
 // longer holds what the member had, so the session ends with
-// session.ErrCoordinatorLost, after failing a recreated session with
-// session.ReasonCoordinatorLost so every other member learns at once.
+// session.ErrCoordinatorLost. The coordinator fails a session it recreated,
+// with session.ReasonCoordinatorLost, before it admits a member that presents
+// another epoch, so every other member learns at once.
 package coordinator
