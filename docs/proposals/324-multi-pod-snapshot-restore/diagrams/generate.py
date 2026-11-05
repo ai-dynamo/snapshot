@@ -7,10 +7,12 @@ Run `python3 generate.py` from any directory; it rewrites every *.svg next to
 this file. Sequence diagrams are plain data (actors and steps) rendered by
 `sequence()`, so a change to a flow is an edit to its step list. Text widths
 are measured with Liberation Sans, which is metric-compatible with Arial and
-Helvetica, and fall back to an estimate when that font is not installed.
+Helvetica, and fall back to an estimate, with a warning, when that font is not
+installed.
 """
 
 import os
+import warnings
 from xml.sax.saxutils import escape
 
 try:
@@ -36,6 +38,9 @@ def tw(text, size, bold=False):
                 font = ImageFont.truetype(FONTS[bold], size)
             except OSError:
                 font = None
+        if font is None:
+            warnings.warn(f"{FONTS[bold]} is not available, so text widths are estimated and the SVGs will change",
+                          stacklevel=2)
         _font_cache[key] = font
     font = _font_cache[key]
     if font is None:
@@ -333,7 +338,7 @@ CHECKPOINT = (
         ("m", "A", "C", "barrier snapshot/admitted, once its own checks pass"),
         ("m", "C", "A", "every member admitted: the attempt commits", 1),
         ("m", "A", "O", "Started condition on its PodSnapshotContent, before anything irreversible"),
-        ("m", "A", "W", "CUDA prepare on every process at once: libraries tear down"),
+        ("m", "A", "W", "beta: CUDA prepare on every process at once, libraries tear down"),
         ("m", "A", "L", "run the relay in prepare mode"),
         ("m", "A", "R", "run the relays in prepare mode"),
         ("r", "round 2 · BEGIN_CHECKPOINT"),
@@ -417,8 +422,8 @@ RESTORE = (
         ("x",),
         ("m", "N", "A", "restore succeeded", 1),
         ("m", "A", "W", "write the rendezvous endpoint in coordination/"),
-        ("m", "A", "C", "barrier snapshot/resume"),
-        ("m", "A", "W", "CUDA resume on every process: libraries rendezvous (figure 7)"),
+        ("m", "A", "C", "beta: barrier snapshot/resume"),
+        ("m", "A", "W", "beta: CUDA resume on every process, libraries rendezvous (figure 7)"),
         ("m", "A", "C", "barrier snapshot/release"),
         ("m", "C", "A", "every rank reconstructed, release allowed", 1),
         ("m", "A", "W", "write restore-complete with the attempt ID"),
@@ -593,7 +598,7 @@ def phases():
         ("p", "Barrier: admitted"),
         ("COMMIT",),
         ("g", "Record: Started condition"),
-        ("a", "CUDA prepare: libraries tear down"),
+        ("a", "Beta: CUDA prepare, libraries tear down"),
         ("t", "Round: begin, revalidate"),
         ("t", "Rounds: destructive phases"),
         ("g", "CUDA lock and checkpoint"),
@@ -628,8 +633,9 @@ def phases():
     b.append(line(rcx, right_bottom, rcx, y3 - 2))
     wait_top = y - gap                   # bottom of the CRIU restore box
     prev = None
-    for k, label in (("p", "Endpoint, barrier: resume"),
-                     ("a", "CUDA resume: libraries rendezvous"),
+    for k, label in (("g", "Write the rendezvous endpoint"),
+                     ("p", "Beta: barrier resume"),
+                     ("a", "Beta: CUDA resume, libraries rendezvous"),
                      ("p", "Barrier: release, restore-complete"),
                      ("g", "Workload resumes")):
         if prev is not None:
@@ -656,11 +662,12 @@ def phases():
         b.append(T(lx2 + 18, ly + 6, label, "tm", 12, anchor="start"))
     svg("phases.svg", W, ly + 34, "Phases of a group checkpoint and a group restore",
         "Checkpoint: the workload quiesces and reports ready-for-snapshot, admission all-gather, an INSPECT round, "
-        "admitted barrier, commit, the Started record, CUDA prepare, a revalidation round, destructive cuInterpose "
+        "admitted barrier, commit, the Started record, CUDA prepare (beta), a revalidation round, destructive cuInterpose "
         "rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU dump with its network lock. Restore: admission, admitted "
         "barrier, commit, the RestoreStarted record, CRIU restore under a narrow "
         "hold, then in parallel the sockets-restored barrier and CUDA restore with the cuInterpose rounds, then the "
-        "endpoint and resume barrier, CUDA resume, and the release barrier, after which the workload resumes; the "
+        "rendezvous endpoint, the resume barrier and CUDA resume once CUDA Checkpoint's resume phase is released (beta), "
+        "and the release barrier, after which the workload resumes; the "
         "workload waits from CRIU restore until restore-complete.", b)
 
 
@@ -672,12 +679,13 @@ def main():
              "The leader inserts one command that every relay reads, every rank executes it at once, and each relay "
              "inserts a reply that the leader collects.", *ROUND, width=860)
     sequence("checkpoint.svg", "Group checkpoint",
-             "Admission with an INSPECT round, the admitted barrier and commit, the Started record, CUDA prepare, a "
+             "Admission with an INSPECT round, the admitted barrier and commit, the Started record, CUDA prepare (beta), a "
              "BEGIN_CHECKPOINT round, three destructive rounds, CUDA lock and checkpoint, net-freeze barrier, CRIU "
              "dump.", *CHECKPOINT, width=960)
     sequence("restore.svg", "Group restore up to release",
              "Admission, commit, CRIU restore under a narrow hold, sockets-restored barrier in parallel with CUDA "
-             "restore and the cuInterpose rounds, resume barrier and CUDA resume, release barrier; the workload waits "
+             "restore and the cuInterpose rounds, resume barrier and CUDA resume (beta), release barrier; the workload "
+             "waits "
              "from CRIU restore until restore-complete.", *RESTORE, width=1000)
     sequence("library-rendezvous.svg", "Library rendezvous through the session",
              "Rank 0 of a communicator sets a new unique ID through its agent's library endpoint, and the other "
