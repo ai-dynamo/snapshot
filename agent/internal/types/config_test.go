@@ -146,15 +146,18 @@ func TestResolveRetryLimit(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		configured *int
+		requested  *int32
 		want       int
 	}{
-		{"absent takes the default", nil, DefaultCheckpointRetryLimit},
-		{"a configured limit is honoured", ptr.To(3), 3},
-		{"a configured zero is honoured", ptr.To(0), 0},
+		{"neither set takes the default", nil, nil, DefaultCheckpointRetryLimit},
+		{"the cluster default applies when the request is silent", ptr.To(3), nil, 3},
+		{"a configured zero is honoured", ptr.To(0), nil, 0},
+		{"an explicit request wins", ptr.To(3), ptr.To(int32(1)), 1},
+		{"an explicit zero is a request, not absence", ptr.To(3), ptr.To(int32(0)), 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &CheckpointSpec{RetryLimit: tc.configured}
-			if got := c.ResolveRetryLimit(); got != tc.want {
+			if got := c.ResolveRetryLimit(tc.requested); got != tc.want {
 				t.Errorf("ResolveRetryLimit() = %d, want %d", got, tc.want)
 			}
 		})

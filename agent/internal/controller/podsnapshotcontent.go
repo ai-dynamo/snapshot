@@ -280,7 +280,7 @@ func (w *NodeController) runCheckpoint(
 	}
 
 	logger := logr.FromContextOrDiscard(ctx)
-	budget := w.config.Checkpoint.ResolveRetryLimit()
+	budget := w.config.Checkpoint.ResolveRetryLimit(content.Spec.CheckpointRetryLimit)
 	spent := 0
 	// A workload an earlier attempt put back for a retry. Recovery only hears
 	// about the attempt that suspended one, so without this a revived source

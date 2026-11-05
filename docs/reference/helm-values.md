@@ -129,7 +129,7 @@ payload checksums.
 
 - `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
 - `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
-- `config.checkpoint.retryLimit` - Times a failed checkpoint may be retried, beyond the first attempt. Default `0`, which keeps retry off. The limit is cluster-wide; a `PodSnapshot` cannot ask for its own. See [A Checkpoint Fails with `RetriesExhausted`](../troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted).
+- `config.checkpoint.retryLimit` - Times a failed checkpoint may be retried, beyond the first attempt. Default `0`, which keeps retry off. It applies to a request that asks for no particular number; a `PodSnapshot` overrides it with `spec.checkpointRetryLimit`. See [A Checkpoint Fails with `RetriesExhausted`](../troubleshooting/checkpoints.md#a-checkpoint-fails-with-retriesexhausted).
 - `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
 
 `config.criu.*` - CRIU options:
