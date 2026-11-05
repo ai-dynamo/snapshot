@@ -18,6 +18,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"k8s.io/utils/clock"
 )
 
 // Session is one member's part in one attempt. Its operations are safe for
@@ -64,8 +65,11 @@ type Session interface {
 	Fail(ctx context.Context, reason string) error
 
 	// Done is closed once the session has ended, or the coordinator was lost.
-	// The session's connection closes then, since it has nothing left to
-	// carry.
+	// It is closed at the latest DeadlineSlack past Meta's deadline: a member
+	// that has not learned how its session ended by then, because it cannot
+	// reach the coordinator, ends the session itself, with
+	// session.ReasonDeadlineExceeded. The session's connection closes then,
+	// since it has nothing left to carry.
 	Done() <-chan struct{}
 
 	// Err returns nil until Done is closed, and then how the session ended:
@@ -84,6 +88,7 @@ type client struct {
 	attempt, member string
 	log             logr.Logger
 	nc              *nats.Conn
+	clock           clock.Clock
 
 	// Set by join, and read-only afterwards. joined is set last, as the
 	// verifier starts.
@@ -159,6 +164,22 @@ func (s *client) finish(err error) {
 		close(s.done)
 		s.nc.Close()
 	})
+}
+
+// expire ends the session with session.ReasonDeadlineExceeded once Meta's
+// deadline has passed by DeadlineSlack, unless the session ends or is closed
+// first. It owns its timer, so nothing else touches it.
+func (s *client) expire() {
+	defer s.wg.Done()
+	timer := s.clock.NewTimer(s.meta.Deadline.Sub(s.clock.Now()) + DeadlineSlack)
+	defer timer.Stop()
+	select {
+	case <-timer.C():
+		s.log.Info("The session's deadline passed before this member learned its end; ending it")
+		s.finish(&session.AbortError{Reason: session.ReasonDeadlineExceeded})
+	case <-s.done:
+	case <-s.closing:
+	}
 }
 
 // Done implements Session.

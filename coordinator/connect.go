@@ -20,6 +20,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"k8s.io/utils/clock"
 )
 
 // Config is what a member needs to connect to its session.
@@ -52,6 +53,9 @@ type Config struct {
 	// coordinator being lost. It is never given a key, a value, a barrier
 	// name, or a token. The zero Logger discards everything.
 	Log logr.Logger
+
+	// Clock times the session's deadline. It defaults to the real clock.
+	Clock clock.Clock
 }
 
 // validate reports session.ErrInvalid for a Config that cannot connect.
@@ -99,10 +103,14 @@ func Connect(ctx context.Context, cfg Config) (Session, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	if cfg.Clock == nil {
+		cfg.Clock = clock.RealClock{}
+	}
 	s := &client{
 		attempt:    cfg.Attempt,
 		member:     cfg.Member,
 		log:        cfg.Log.WithValues("attempt", cfg.Attempt, "member", cfg.Member),
+		clock:      cfg.Clock,
 		connected:  make(chan struct{}),
 		verify:     make(chan struct{}, 1),
 		closing:    make(chan struct{}),
@@ -177,8 +185,8 @@ func (s *client) options(cfg Config) []nats.Option {
 }
 
 // join waits until the coordinator admits the connection, binds both buckets,
-// reads Meta, and starts verifying the session when asked and following its
-// end.
+// reads Meta, and starts verifying the session when asked, following its end,
+// and timing its deadline.
 func (s *client) join(ctx context.Context) error {
 	select {
 	case <-s.connected:
@@ -219,9 +227,10 @@ func (s *client) join(ctx context.Context) error {
 	s.settled(target)
 	s.joined = true
 
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go s.verifier()
 	go s.followEnd()
+	go s.expire()
 	return nil
 }
 

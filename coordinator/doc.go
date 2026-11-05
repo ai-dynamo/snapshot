@@ -19,7 +19,10 @@
 // session ends exactly once: it closes when every member has left, or fails
 // with the first reason anyone gives, a member through Fail or the coordinator
 // at the deadline, when a member's connection stays lost past the grace
-// period, when it removes a session still open, and when it shuts down.
+// period, when it removes a session still open, and when it shuts down. A
+// member that cannot reach the coordinator to learn the end ends its session
+// itself, with session.ReasonDeadlineExceeded, DeadlineSlack past the
+// deadline.
 //
 // # Reconnection and the epoch
 //

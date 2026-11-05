@@ -131,7 +131,7 @@ func TestEnsure(t *testing.T) {
 func TestDeadline(t *testing.T) {
 	h := newHarness(t)
 	spec := h.ensure(2)
-	require.Equal(t, time.Hour, h.clock.AwaitTimer(t))
+	h.clock.Await(t, time.Hour)
 	members := h.connectAll(spec)
 	h.clock.Step(time.Hour)
 	for _, m := range members {
@@ -172,12 +172,12 @@ func TestEndAtTheMemoryCap(t *testing.T) {
 
 	t.Run("a grace period that runs out at the cap fails the session once memory frees", func(t *testing.T) {
 		h := newHarness(t, capped)
-		spec := h.ensureForGrace(2)
+		spec := h.ensure(2)
 		members := h.connectAll(spec)
-		filler := h.ensureForGrace(1)
+		filler := h.ensure(1)
 		h.fillCap(h.connect(filler, 0))
 		members[0].nc.Close()
-		require.Equal(t, DefaultGrace, h.clock.AwaitTimer(t))
+		h.clock.Await(t, DefaultGrace)
 		h.clock.Step(DefaultGrace)
 		h.awaitRetry(spec)
 		_, ok := h.ended(spec)
@@ -305,7 +305,7 @@ func TestWatchStopsOnItsOwn(t *testing.T) {
 	h := newHarness(t)
 	ctx := within(t)
 	spec := h.ensure(1)
-	require.Equal(t, time.Hour, h.clock.AwaitTimer(t))
+	h.clock.Await(t, time.Hour)
 	m := h.connect(spec, 0)
 	stream := "KV_" + m.snapshot.Bucket()
 	str, err := h.srv.js.Stream(ctx, stream)

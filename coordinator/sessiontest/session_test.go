@@ -342,10 +342,55 @@ func TestConnect(t *testing.T) {
 	}
 }
 
+// TestDeadline covers a member that cannot learn how its session ended: it
+// ends the session itself DeadlineSlack past the deadline, unless the session
+// ended first.
+func TestDeadline(t *testing.T) {
+	t.Run("a member the coordinator refuses ends its session itself", func(t *testing.T) {
+		h := newHarness(t)
+		ses := h.session(t, 1)
+		s := ses.connect(t, 0)
+		h.auth.refuse.Store(true)
+		ses.cut(0)
+		// Nothing bounds the Barrier but the session.
+		wait := barrier(context.Background(), s, "admitted")
+		h.clock.Step(time.Hour)
+		requireWaiting(t, wait)
+		h.clock.Step(coordinator.DeadlineSlack)
+		select {
+		case err := <-wait:
+			require.ErrorIs(t, err, &session.AbortError{Reason: session.ReasonDeadlineExceeded})
+		case <-within(t).Done():
+			t.Fatal("the Barrier did not return")
+		}
+		awaitDone(t, s)
+		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
+	})
+
+	t.Run("a member that joins past the deadline and its slack ends its session at once", func(t *testing.T) {
+		h := newHarness(t)
+		ses := h.session(t, 1)
+		require.NoError(t, h.srv.Remove(within(t), ses.spec.UID))
+		ses.spec.Deadline = h.clock.Now().Add(-2 * coordinator.DeadlineSlack)
+		require.NoError(t, h.srv.Ensure(within(t), ses.spec))
+		s := ses.connect(t, 0)
+		awaitDone(t, s)
+		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
+	})
+
+	t.Run("a session that ended first keeps its end", func(t *testing.T) {
+		h := newHarness(t)
+		s := h.session(t, 1).connect(t, 0)
+		require.NoError(t, s.Fail(within(t), "Refused"))
+		h.clock.Step(time.Hour + coordinator.DeadlineSlack)
+		require.ErrorIs(t, s.Err(), &session.AbortError{Reason: "Refused"})
+	})
+}
+
 // TestClose covers Close: it closes the connection and nothing else, so the
 // coordinator fails the session once the member's grace period runs out.
 func TestClose(t *testing.T) {
-	h := newHarness(t, func(cfg *server.Config) { cfg.Grace = 2 * time.Second })
+	h := newHarness(t)
 	ctx := within(t)
 	ses := h.session(t, 2)
 	sessions := ses.connectAll(t)
@@ -362,6 +407,8 @@ func TestClose(t *testing.T) {
 	}
 	assert.Equal(t, []string{"opened"}, h.observer.of(ses.spec.UID), "closing must not end the session")
 	require.NoError(t, sessions[1].Err())
+	h.clock.Await(t, server.DefaultGrace)
+	h.clock.Step(server.DefaultGrace)
 	awaitDone(t, sessions[1])
 	require.ErrorIs(t, sessions[1].Err(), &session.AbortError{Reason: session.ReasonMemberFailed})
 }

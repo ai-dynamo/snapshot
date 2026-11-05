@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testclock"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
@@ -41,7 +42,7 @@ const agentToken = "agent-token"
 type harness struct {
 	t        *testing.T
 	srv      *Server
-	clock    *testClock
+	clock    *testclock.Clock
 	auth     *testAuthorizer
 	observer *recorder
 	logs     *logLines
@@ -66,7 +67,7 @@ func startHarness(t *testing.T, modify ...func(*Config)) *harness {
 	ca, cert := testCertificates(t)
 	h := &harness{
 		t:        t,
-		clock:    newTestClock(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
+		clock:    testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
 		auth:     &testAuthorizer{},
 		observer: &recorder{},
 		logs:     &logLines{},

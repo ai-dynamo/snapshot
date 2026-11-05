@@ -13,15 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ensureForGrace ensures an attempt with n members, and consumes the report of
-// its deadline timer, so the next timer the clock reports is a grace period.
-func (h *harness) ensureForGrace(n int) Spec {
-	h.t.Helper()
-	spec := h.ensure(n)
-	require.Equal(h.t, time.Hour, h.clock.AwaitTimer(h.t))
-	return spec
-}
-
 // requireNoGrace checks that no member of spec has a grace period running.
 func (h *harness) requireNoGrace(spec Spec) {
 	h.t.Helper()
@@ -38,10 +29,10 @@ func (h *harness) requireNoGrace(spec Spec) {
 func TestGrace(t *testing.T) {
 	t.Run("a member that reconnects within its grace period keeps the session", func(t *testing.T) {
 		h := newHarness(t)
-		spec := h.ensureForGrace(2)
+		spec := h.ensure(2)
 		members := h.connectAll(spec)
 		h.kick(spec, 0)
-		require.Equal(t, DefaultGrace, h.clock.AwaitTimer(t))
+		h.clock.Await(t, DefaultGrace)
 		h.connect(spec, 0)
 		h.awaitGrace(spec, 0, false)
 		h.clock.Step(DefaultGrace)
@@ -55,10 +46,10 @@ func TestGrace(t *testing.T) {
 
 	t.Run("a member that does not reconnect fails the session", func(t *testing.T) {
 		h := newHarness(t)
-		spec := h.ensureForGrace(2)
+		spec := h.ensure(2)
 		members := h.connectAll(spec)
 		members[0].nc.Close()
-		require.Equal(t, DefaultGrace, h.clock.AwaitTimer(t))
+		h.clock.Await(t, DefaultGrace)
 		h.clock.Step(DefaultGrace - time.Millisecond)
 		time.Sleep(pending)
 		require.NoError(t, members[1].Err(), "the grace period has not run out yet")
@@ -71,18 +62,18 @@ func TestGrace(t *testing.T) {
 
 	t.Run("a member that left still gets a grace period", func(t *testing.T) {
 		h := newHarness(t)
-		spec := h.ensureForGrace(2)
+		spec := h.ensure(2)
 		members := h.connectAll(spec)
 		require.NoError(t, members[0].leave(within(t)))
 		members[0].nc.Close()
-		require.Equal(t, DefaultGrace, h.clock.AwaitTimer(t))
+		h.clock.Await(t, DefaultGrace)
 		h.clock.Step(DefaultGrace)
 		require.ErrorIs(t, awaitEnd(t, members[1]), &session.AbortError{Reason: session.ReasonMemberFailed})
 	})
 
 	t.Run("a session that ended starts none", func(t *testing.T) {
 		h := newHarness(t)
-		spec := h.ensureForGrace(2)
+		spec := h.ensure(2)
 		members := h.connectAll(spec)
 		require.NoError(t, members[0].fail(within(t), "Refused"))
 		for _, m := range members {
@@ -93,7 +84,7 @@ func TestGrace(t *testing.T) {
 
 	t.Run("a member keeps its session while one of its connections is open", func(t *testing.T) {
 		h := newHarness(t)
-		spec := h.ensureForGrace(1)
+		spec := h.ensure(1)
 		m := h.connect(spec, 0)
 		extra, _ := h.raw(spec, 0)
 		extra.Close()
@@ -103,7 +94,7 @@ func TestGrace(t *testing.T) {
 
 	t.Run("a refused client cannot pose as a member", func(t *testing.T) {
 		h := newHarness(t)
-		spec := h.ensureForGrace(1)
+		spec := h.ensure(1)
 		h.connect(spec, 0)
 		_, err := h.dial(spec, spec.Members[0].ID, "stolen", 0)
 		require.ErrorIs(t, err, nats.ErrAuthorization)

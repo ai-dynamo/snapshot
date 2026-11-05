@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testclock"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/nats-io/nats.go"
@@ -41,13 +42,15 @@ import (
 const memberToken = "member-token"
 
 // harness is a coordinator under test, with an Authorizer the test controls,
-// and the proxies its members connect through.
+// the proxies its members connect through, and a fake clock that times both
+// the coordinator's deadlines and grace periods and its members' deadlines.
 type harness struct {
-	t    *testing.T
-	cfg  server.Config
-	srv  *server.Server
-	ca   *x509.CertPool
-	auth *authorizer
+	t     *testing.T
+	cfg   server.Config
+	srv   *server.Server
+	ca    *x509.CertPool
+	auth  *authorizer
+	clock *testclock.Clock
 	// observer records what the current coordinator sees of sessions.
 	observer *recorder
 	proxies  []*proxy
@@ -60,13 +63,17 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 	ignore := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, ignore) })
 	ca, cert := testCertificates(t)
-	h := &harness{t: t, ca: ca, auth: &authorizer{}}
+	h := &harness{
+		t: t, ca: ca, auth: &authorizer{},
+		clock: testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
+	}
 	h.cfg = server.Config{
 		Host: "127.0.0.1",
 		// Any free port, as nats-server's RANDOM_PORT picks.
 		Port:       -1,
 		TLS:        &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		Authorizer: h.auth,
+		Clock:      h.clock,
 	}
 	for _, m := range modify {
 		m(&h.cfg)
@@ -123,7 +130,7 @@ func (h *harness) session(t *testing.T, n int) *testSession {
 	t.Helper()
 	ses := &testSession{h: h, spec: server.Spec{
 		UID:      types.UID(fmt.Sprintf("attempt-%d", time.Now().UnixNano())),
-		Deadline: time.Now().Add(time.Hour),
+		Deadline: h.clock.Now().Add(time.Hour),
 	}}
 	for i := range n {
 		ses.spec.Members = append(ses.spec.Members, session.Member{ID: fmt.Sprintf("member-%d", i), Rank: i})
@@ -145,6 +152,7 @@ func (ses *testSession) config(member int) coordinator.Config {
 		Attempt:    string(ses.spec.UID),
 		Member:     ses.spec.Members[member].ID,
 		Token:      func() (string, error) { return memberToken, nil },
+		Clock:      ses.h.clock,
 	}
 }
 

@@ -26,3 +26,10 @@ const (
 	// authentication, which answers within it.
 	ClientConnectTimeout = 5 * time.Second
 )
+
+// DeadlineSlack is how long past Meta.Deadline a member waits to learn how its
+// session ended before it ends the session itself, with
+// session.ReasonDeadlineExceeded. The coordinator fails the session at the
+// deadline, by its own clock, which may run behind the member's, so a member
+// that has not learned the end by then cannot reach the coordinator.
+const DeadlineSlack = 5 * time.Second
