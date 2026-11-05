@@ -94,6 +94,21 @@ comes from a nonfatal TUN capability probe and can appear on successful
 restores. Workloads that do not use TUN devices do not need a `/dev/net/tun`
 mount. For a failed restore, look past this line to the final CRIU errors and
 the agent's `CRIU restore tail` diagnostics.
+## A restore is refused with `mount: source <path>, target missing`
+
+The checkpoint recorded a volume mounted at that path in the source pod, and
+the restore pod has nothing there. The agent refuses the restore before CRIU
+runs, with reason `RestoreIncompatible`; nothing was restored and the pod can
+be recreated. Every missing path is listed, so a restore pod that dropped
+several volumes shows them all in one message.
+
+```bash
+kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="nvidia.com/Restored")].message}'
+```
+
+Add the volume to the restore pod at the same `mountPath`. The volume's
+backing store can differ; only the path inside the container has to match.
+
 ## Reading a failure message
 
 Every checkpoint and restore failure names the step it came from, in the form
