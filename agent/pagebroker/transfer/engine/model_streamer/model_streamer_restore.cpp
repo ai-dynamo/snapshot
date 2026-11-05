@@ -353,9 +353,10 @@ ModelStreamerRestore::TakeInterruptedSubmission(std::exception_ptr& error)
 {
   std::lock_guard lock(pending_mutex_);
   for (auto entry = pending_.begin(); entry != pending_.end(); ++entry) {
-    error = (*entry)->restore_state ? (*entry)->restore_state->error : nullptr;
     if (const auto reason = (*entry)->cancellation.Reason())
       error = std::make_exception_ptr(CancellationError(*reason));
+    else
+      error = (*entry)->restore_state ? (*entry)->restore_state->error : nullptr;
     if (error) {
       auto interrupted = std::move(*entry);
       pending_.erase(entry);
@@ -640,7 +641,7 @@ ModelStreamerRestore::StreamerEntry::Withdraw() noexcept
 }
 
 void
-ModelStreamerRestore::StreamerEntry::Drain() noexcept
+ModelStreamerRestore::StreamerEntry::Wait() noexcept
 {
   if (completion_state != CompletionState::Published)
     return;
@@ -669,7 +670,7 @@ ModelStreamerRestore::CheckRestoreProgress(RestoreProgress& progress)
   for (auto& entry : progress.submissions) {
     if (entry->completion_state == StreamerEntry::CompletionState::Published &&
         entry->completion_future.wait_for(std::chrono::milliseconds::zero()) == std::future_status::ready)
-      entry->Drain();
+      entry->Wait();
     if (entry->completion_error)
       std::rethrow_exception(entry->completion_error);
   }
@@ -732,7 +733,7 @@ ModelStreamerRestore::CancelAndDrain(RestoreProgress& progress) noexcept
   for (auto& entry : progress.submissions)
     entry->Withdraw();
   while (!progress.submissions.empty()) {
-    progress.submissions.front()->Drain();
+    progress.submissions.front()->Wait();
     progress.submissions.front()->ReleaseMappings();
     progress.submissions.pop_front();
   }

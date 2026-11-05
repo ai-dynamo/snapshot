@@ -89,7 +89,7 @@ class ModelStreamerRestore {
     // Caller-only: fence pending native admission before releasing mappings.
     void Withdraw() noexcept;
     // Caller-only: wait for published, non-withdrawn work before release.
-    void Drain() noexcept;
+    void Wait() noexcept;
 
     // Collects the parallel argument arrays passed to the Model Streamer API.
     struct Request {
