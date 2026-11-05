@@ -37,6 +37,13 @@ func TestMemberPermissions(t *testing.T) {
 	assert.Equal(t, []string{"_INBOX.uid.m0.>"}, p.Subscribe)
 }
 
+// TestValidateAttempt covers the longest attempt UID.
+func TestValidateAttempt(t *testing.T) {
+	require.NoError(t, ValidateAttempt(strings.Repeat("u", MaxAttemptLength)))
+	require.ErrorIs(t, ValidateAttempt(strings.Repeat("u", MaxAttemptLength+1)), ErrInvalid)
+	require.Len(t, "KV_"+SnapshotBucket(strings.Repeat("u", MaxAttemptLength)), maxStreamName)
+}
+
 // TestUserName round-trips a member's user name, and refuses any other.
 func TestUserName(t *testing.T) {
 	attempt, member, ok := ParseUserName(UserName("0b7e-uid", "worker-1"))

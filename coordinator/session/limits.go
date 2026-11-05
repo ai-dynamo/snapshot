@@ -43,5 +43,13 @@ const (
 // communicator identifiers.
 const MaxConsumersPerMember = 8
 
-// MaxNameLength bounds an attempt UID, a member ID, and a barrier name.
+// MaxNameLength bounds a member ID and a barrier name.
 const MaxNameLength = 253
+
+// maxStreamName is the longest name JetStream gives a stream.
+const maxStreamName = 255
+
+// MaxAttemptLength bounds an attempt UID, so the longest name JetStream gives
+// one of the attempt's buckets, the stream that holds it, stays within
+// JetStream's limit. Kubernetes UIDs take 36 bytes.
+const MaxAttemptLength = maxStreamName - len("KV_"+bucketPrefix+"-s")

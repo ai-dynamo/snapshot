@@ -79,15 +79,25 @@ const (
 // subject too.
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// ValidateName reports ErrInvalid unless s can name an attempt, a member, or a
-// barrier: a single key token of letters, digits, '-' and '_', of at most
-// MaxNameLength bytes. Kubernetes UIDs, and object names without dots, qualify.
+// ValidateName reports ErrInvalid unless s can name a member or a barrier: a
+// single key token of letters, digits, '-' and '_', of at most MaxNameLength
+// bytes. Object names without dots qualify.
 func ValidateName(s string) error {
 	if len(s) > MaxNameLength || !nameRE.MatchString(s) {
 		return fmt.Errorf("%q is not a name of letters, digits, '-' and '_', of at most %d bytes: %w",
 			s, MaxNameLength, ErrInvalid)
 	}
 	return nil
+}
+
+// ValidateAttempt reports ErrInvalid unless s can name an attempt: a name, as
+// ValidateName defines it, of at most MaxAttemptLength bytes. Kubernetes UIDs
+// qualify.
+func ValidateAttempt(s string) error {
+	if len(s) > MaxAttemptLength {
+		return fmt.Errorf("an attempt of %d bytes is over the %d-byte limit: %w", len(s), MaxAttemptLength, ErrInvalid)
+	}
+	return ValidateName(s)
 }
 
 // UserName is the user name a member's connection presents and is registered

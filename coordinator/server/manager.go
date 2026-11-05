@@ -53,7 +53,7 @@ type Spec struct {
 
 // validate reports whether the spec describes an attempt a session can run.
 func (s Spec) validate() error {
-	if err := session.ValidateName(string(s.UID)); err != nil {
+	if err := session.ValidateAttempt(string(s.UID)); err != nil {
 		return fmt.Errorf("UID: %w", err)
 	}
 	if len(s.Members) == 0 {

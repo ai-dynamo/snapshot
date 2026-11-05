@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,6 +376,9 @@ func TestConnect(t *testing.T) {
 		{"no CA pool", func(c *coordinator.Config) { c.RootCAs = nil }},
 		{"no token source", func(c *coordinator.Config) { c.Token = nil }},
 		{"an attempt that is not a name", func(c *coordinator.Config) { c.Attempt = "a.b" }},
+		{"an attempt too long for its buckets", func(c *coordinator.Config) {
+			c.Attempt = strings.Repeat("u", session.MaxAttemptLength+1)
+		}},
 		{"a member that is not a name", func(c *coordinator.Config) { c.Member = "a/b" }},
 	} {
 		t.Run("refuses a config with "+tt.name, func(t *testing.T) {

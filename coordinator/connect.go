@@ -67,7 +67,7 @@ func (c Config) validate() error {
 	case c.Token == nil:
 		return fmt.Errorf("no token source: %w", session.ErrInvalid)
 	}
-	if err := session.ValidateName(c.Attempt); err != nil {
+	if err := session.ValidateAttempt(c.Attempt); err != nil {
 		return fmt.Errorf("attempt: %w", err)
 	}
 	if err := session.ValidateName(c.Member); err != nil {

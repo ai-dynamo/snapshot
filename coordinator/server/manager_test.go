@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // TestSpecValidation covers the specs Ensure refuses.
@@ -37,6 +38,8 @@ func TestSpecValidation(t *testing.T) {
 	}{
 		{"no UID", Spec{Members: members("a"), Deadline: deadline}},
 		{"a UID that is not one token", Spec{UID: "a.b", Members: members("a"), Deadline: deadline}},
+		{"a UID too long for its buckets", Spec{UID: types.UID(strings.Repeat("u", session.MaxAttemptLength+1)),
+			Members: members("a"), Deadline: deadline}},
 		{"no members", Spec{UID: "u", Deadline: deadline}},
 		{"no deadline", Spec{UID: "u", Members: members("a")}},
 		{"a member without an ID", Spec{UID: "u", Members: members(""), Deadline: deadline}},
@@ -110,6 +113,13 @@ func TestEnsure(t *testing.T) {
 		renamed := spec
 		renamed.Members = []session.Member{{ID: "member-0", Rank: 0}, {ID: "other", Rank: 1}}
 		require.ErrorIs(t, h.srv.Ensure(within(t), renamed), ErrInvalid)
+	})
+
+	t.Run("the longest attempt UID", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.spec(1)
+		spec.UID = types.UID(strings.Repeat("u", session.MaxAttemptLength))
+		require.NoError(t, h.srv.Ensure(within(t), spec))
 	})
 
 	t.Run("a session past its deadline starts failed", func(t *testing.T) {
