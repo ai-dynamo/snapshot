@@ -23,6 +23,10 @@ preflight does. Clusters with one GPU pool do not expose
 `nvidia.com/mig.config` at all, and selecting on a label the nodes lack leaves
 every workload pod unschedulable — so this stays off by default.
 
+Set `SNAPSHOT_E2E_NODE_HOSTNAME` to a node's `kubernetes.io/hostname` when a
+run must stay on that node. Workload pods then select that hostname. Leave it
+unset to let the scheduler choose.
+
 Pass `--helm-set KEY=VALUE` to `setup.py` (repeatable, or
 `SNAPSHOT_E2E_HELM_SET` with one assignment per line) to override chart values
 the installer does not set itself, such as image repositories for images that
