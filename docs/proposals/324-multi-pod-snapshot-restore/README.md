@@ -367,7 +367,7 @@ session's patterns rather than added to them:
 | Broadcast | The cuInterpose leader sends each round's command to every relay | One `Insert`, read with a waiting `Get` by every relay |
 | Gather to one rank | Relays return records, results, and new fabric handles to the leader | One key per rank, read by the leader |
 | All-gather | Agents exchange new Pod IPs, capture IDs, fabric domains, versions, and whether each member runs a relay at admission | One key per rank, read by every agent after a `Barrier` |
-| Phase synchronization | Agents synchronize `admitted`, `net-freeze`, `sockets-restored`, `resume`, and `release` | One `Barrier` per phase |
+| Phase synchronization | Agents synchronize `admitted`, `net-freeze`, `sockets-restored`, and `release`, and `resume` once CUDA Checkpoint's resume phase is released | One `Barrier` per phase |
 | Publish by key | The owner of a communicator or listening endpoint gives its peers a new identifier | `Insert` by the owner, waiting `Get` by each peer |
 | Failure | Any agent or relay, or the coordinator, ends the attempt | `Fail`, which ends every member's pending wait |
 
@@ -436,12 +436,13 @@ windows that differ in what its threads may do.
 | Window | CUDA | What Snapshot does | What the workload may do |
 | --- | --- | --- | --- |
 | From CRIU restore to CUDA unlock | Locked, so a CUDA call blocks until the unlock | Restores and unlocks CUDA inside the Pod without any coordination, exactly as for a single Pod | Nothing; a thread that calls CUDA simply blocks |
-| From CUDA unlock to release | Usable | Rebuilds shared memory through the cuInterpose rounds, lifts the TCP hold, and runs CUDA's resume phase, in which libraries reconnect | Wait: no access to memory shared across Pods, no use of a communicator, and no traffic on a preserved connection |
+| From CUDA unlock to release | Usable | Rebuilds shared memory through the cuInterpose rounds, lifts the TCP hold, and, once CUDA Checkpoint releases it, runs CUDA's resume phase, in which libraries reconnect | Wait: no access to memory shared across Pods, no use of a communicator, and no traffic on a preserved connection |
 
 The second window is the one that a group lengthens, since it now spans cross-node
-rounds and two barriers, and it is also the one in which a running thread could
-observe a half-rebuilt state, such as an imported allocation that does not yet
-map its creator's memory or a communicator whose peers are still reconnecting.
+rounds and the barriers after them, and it is also the one in which a running
+thread could observe a half-rebuilt state, such as an imported allocation that
+does not yet map its creator's memory or a communicator whose peers are still
+reconnecting.
 Waiting therefore applies to every thread that could touch such state,
 including background threads such as communicator watchdogs and progress
 threads, and not only to the application's main loop. A library that Snapshot
@@ -557,9 +558,17 @@ resumes while application traffic does not. In parallel, `nsrestore` restores
 and unlocks CUDA and runs the relays, whose rounds first match the restored
 processes to the saved records and then rebuild shared memory in lockstep,
 carrying the table of old and new fabric handles from one round to the next.
-Only then do the agents write the rendezvous endpoint, pass a `resume` barrier,
-and invoke CUDA Checkpoint's resume phase on every process, so that libraries
-reconnect on top of memory that is already back at its original addresses.
+Only then do the agents write the rendezvous endpoint.
+
+Once CUDA Checkpoint's resume phase is released, the agents also pass a
+`resume` barrier and invoke that phase on every process, so that libraries
+reconnect on top of memory that is already back at its original addresses. The
+barrier is what makes that safe: a member that runs no relay takes part in no
+round, and even when every member runs one, a member that finishes the last
+round does not know whether its peers have finished theirs, so without it a
+library could reconnect to a peer that is still rebuilding. Until then nothing
+runs between the rounds and release, so alpha has no `resume` barrier, and the
+`release` barrier alone orders the members.
 
 A final `release` barrier guarantees that no workload resumes before every
 member has been reconstructed, after which each agent writes `restore-complete`
@@ -1128,7 +1137,8 @@ first.
 
 Coordination is cheap relative to the data that capture and restore move. A
 capture adds five cuInterpose rounds and three barriers, and a restore eight
-rounds and five barriers, each costing a few in-cluster round trips. The session
+rounds and four barriers, five once CUDA Checkpoint's resume phase adds `resume`,
+each costing a few in-cluster round trips. The session
 carries only metadata, never allocation bytes, which stay on their creator's
 node. The largest payloads are cuInterpose's records, which consist mostly of
 64-byte fabric handles, so with the thousand or so shared allocations of a
@@ -1233,7 +1243,8 @@ member; measured limits for how long preserved connections survive a hold;
 measured durations of both restore windows, with fail-stop verified in each;
 and an unchanged result for the existing single-Pod suite.
 
-**Beta** requires integration with CUDA Checkpoint's prepare and resume phases;
+**Beta** requires integration with CUDA Checkpoint's prepare and resume phases,
+including the `resume` barrier that orders the resume phase across members;
 a released driver with the cross-node import fix and a public way to identify
 FABRIC handle kinds; scale measured beyond 16 Pods; decisions on IPv6, on the
 coordinator's availability model, on isolating sessions' memory and limits, and
