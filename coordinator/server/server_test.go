@@ -6,7 +6,6 @@ package server
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -275,8 +274,7 @@ func slicesContain(lines []string, s string) bool {
 	return false
 }
 
-// TestConfig covers the configurations New refuses, and a replica count
-// the embedded server cannot honor.
+// TestConfig covers the configurations New refuses.
 func TestConfig(t *testing.T) {
 	_, cert := testCertificates(t)
 	valid := Config{
@@ -296,14 +294,8 @@ func TestConfig(t *testing.T) {
 			cfg := valid
 			tt.modify(&cfg)
 			_, err := New(cfg)
-			require.ErrorIs(t, err, ErrInvalid)
+			require.ErrorIs(t, err, session.ErrInvalid)
 		})
 	}
 
-	t.Run("more replicas than a server without a cluster has", func(t *testing.T) {
-		h := newHarness(t, func(cfg *Config) { cfg.Replicas = 3 })
-		err := h.srv.Ensure(within(t), h.spec(1))
-		require.Error(t, err)
-		require.False(t, errors.Is(err, ErrInvalid))
-	})
 }

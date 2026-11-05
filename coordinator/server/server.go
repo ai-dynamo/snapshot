@@ -128,10 +128,6 @@ type Config struct {
 	// It defaults to session.MaxLibraryKeys.
 	MaxLibraryKeys int
 
-	// Replicas is how many replicas each bucket has. It defaults to 1, the
-	// only count a server without a cluster supports.
-	Replicas int
-
 	// Grace is how long a member whose connection closed has to connect
 	// again. It defaults to DefaultGrace.
 	Grace time.Duration
@@ -153,23 +149,22 @@ type Config struct {
 func (cfg Config) withDefaults() (Config, error) {
 	switch {
 	case cfg.TLS == nil:
-		return cfg, fmt.Errorf("a coordinator needs a TLS configuration: %w", ErrInvalid)
+		return cfg, fmt.Errorf("a coordinator needs a TLS configuration: %w", session.ErrInvalid)
 	case cfg.Authorizer == nil:
-		return cfg, fmt.Errorf("a coordinator needs an authorizer: %w", ErrInvalid)
+		return cfg, fmt.Errorf("a coordinator needs an authorizer: %w", session.ErrInvalid)
 	}
 	setDefault(&cfg.MaxBytes, DefaultMaxBytes)
 	setDefault(&cfg.MaxValue, session.MaxValue)
 	setDefault(&cfg.MaxLibraryValue, session.MaxLibraryValue)
 	setDefault(&cfg.MaxLibraryKeys, session.MaxLibraryKeys)
-	setDefault(&cfg.Replicas, 1)
 	setDefault(&cfg.Grace, DefaultGrace)
 	switch {
 	case cfg.MaxBytes < 0, cfg.MaxValue < 0, cfg.MaxLibraryValue < 0, cfg.MaxLibraryKeys < 0,
-		cfg.Replicas < 0, cfg.Grace < 0:
-		return cfg, fmt.Errorf("a coordinator's limits cannot be negative: %w", ErrInvalid)
+		cfg.Grace < 0:
+		return cfg, fmt.Errorf("a coordinator's limits cannot be negative: %w", session.ErrInvalid)
 	case cfg.MaxValue > 1<<30, cfg.MaxLibraryValue > cfg.MaxValue:
 		return cfg, fmt.Errorf("the largest values must not exceed 1 GiB, nor the library's the Snapshot's: %w",
-			ErrInvalid)
+			session.ErrInvalid)
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = clock.RealClock{}
@@ -328,11 +323,24 @@ func (s *Server) start() error {
 // connect opens one of the coordinator's in-process connections.
 func (s *Server) connect(user string, opts ...nats.Option) (*nats.Conn, error) {
 	nc, err := nats.Connect("", append([]nats.Option{nats.InProcessServer(s.ns), nats.UserInfo(user, ""),
-		nats.Token(s.token), nats.Name(user)}, opts...)...)
+		nats.Token(s.token), nats.Name(user), nats.ErrorHandler(s.natsError)}, opts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("open the coordinator's %s connection: %w", user, err)
 	}
 	return nc, nil
+}
+
+// natsError logs an error that nats.go reports on one of the coordinator's
+// own connections, such as a watch whose consumer it could not recreate,
+// which it would otherwise print to standard error. A refused publish or
+// subscription names its subject, which can hold a key, so its text is never
+// logged.
+func (s *Server) natsError(_ *nats.Conn, _ *nats.Subscription, err error) {
+	if errors.Is(err, nats.ErrPermissionViolation) {
+		s.log.Info("The embedded server refused a publish or a subscription of the coordinator's")
+		return
+	}
+	s.log.Error(err, "A connection of the coordinator's reported an error")
 }
 
 // MarkReady starts admitting clients. The host calls it once it has ensured

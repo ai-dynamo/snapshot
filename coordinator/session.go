@@ -33,9 +33,16 @@ type Session interface {
 	// the deadline, the epoch, and the value limits.
 	Meta() session.Meta
 
-	// Namespace returns the Store of one namespace. An unknown namespace
-	// returns a Store whose every operation reports session.ErrInvalid.
-	Namespace(ns session.Namespace) Store
+	// Snapshot returns the Store of the agents' keys.
+	Snapshot() Store
+
+	// CuInterpose returns the Store of the cuInterpose relays' keys, which the
+	// agent hands its relay.
+	CuInterpose() Store
+
+	// Library returns the Store of workload libraries' keys, which the agent's
+	// library endpoint serves.
+	Library() Store
 
 	// Barrier records that this member has arrived at the barrier name, then
 	// returns nil once every member in Meta has arrived. A barrier needs no
@@ -230,9 +237,6 @@ func (s *client) Barrier(ctx context.Context, name string) error {
 	if err := session.ValidateName(name); err != nil {
 		return fmt.Errorf("barrier: %w", err)
 	}
-	if err := s.alive(); err != nil {
-		return err
-	}
 	arrival := session.BarrierKey(name, s.member)
 	if err := s.do(ctx, func(ctx context.Context) error {
 		_, err := s.snapshot.Put(ctx, arrival, nil)
@@ -275,20 +279,17 @@ func (s *client) Fail(ctx context.Context, reason string) error {
 	if err := session.ValidateReason(reason); err != nil {
 		return err
 	}
-	err := s.alive()
-	if err == nil {
-		err = s.do(ctx, func(ctx context.Context) error {
-			_, err := s.snapshot.Create(ctx, session.KeyEnded, []byte(reason))
-			if !errors.Is(err, jetstream.ErrKeyExists) {
-				return err
-			}
-			entry, err := s.snapshot.Get(ctx, session.KeyEnded)
-			if err != nil {
-				return err
-			}
-			return session.EndedError(entry.Value())
-		})
-	}
+	err := s.do(ctx, func(ctx context.Context) error {
+		_, err := s.snapshot.Create(ctx, session.KeyEnded, []byte(reason))
+		if !errors.Is(err, jetstream.ErrKeyExists) {
+			return err
+		}
+		entry, err := s.snapshot.Get(ctx, session.KeyEnded)
+		if err != nil {
+			return err
+		}
+		return session.EndedError(entry.Value())
+	})
 	if err == nil {
 		s.finish(&session.AbortError{Reason: reason})
 		return nil

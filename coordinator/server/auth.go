@@ -39,7 +39,7 @@ var (
 //
 //   - ErrUnauthenticated or ErrPermissionDenied: a refusal;
 //   - ErrUnavailable: a transient failure;
-//   - ErrNotFound: the attempt is not known yet, including when the
+//   - session.ErrNotFound: the attempt is not known yet, including when the
 //     Authorizer's own cache lags.
 //
 // Any other error counts as ErrUnavailable, and is logged as a failure of the
@@ -144,7 +144,7 @@ func (s *Server) authorize(ctx context.Context, log logr.Logger, uid types.UID, 
 		return true
 	case errors.Is(err, ErrUnauthenticated), errors.Is(err, ErrPermissionDenied):
 		log.Info("Refused a member the Authorizer refused", "reason", err.Error())
-	case errors.Is(err, ErrUnavailable), errors.Is(err, ErrNotFound):
+	case errors.Is(err, ErrUnavailable), errors.Is(err, session.ErrNotFound):
 		log.V(1).Info("Could not authorize a member yet", "reason", err.Error())
 	default:
 		log.Error(err, "The Authorizer failed outside its contract; the member will retry")

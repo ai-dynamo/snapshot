@@ -29,14 +29,14 @@ func TestReconnect(t *testing.T) {
 		}
 		got := make(chan result, 1)
 		go func() {
-			value, err := sessions[0].Namespace(session.NamespaceCuInterpose).Get(ctx, "command", time.Minute)
+			value, err := sessions[0].CuInterpose().Get(ctx, "command", time.Minute)
 			got <- result{value, err}
 		}()
 		time.Sleep(pending)
 		ses.cut(0)
 		// Inserted while the waiting member is most likely still away: its
 		// watch resumes from the revision it had reached.
-		require.NoError(t, sessions[1].Namespace(session.NamespaceCuInterpose).Insert(ctx, "command", []byte("dump")))
+		require.NoError(t, sessions[1].CuInterpose().Insert(ctx, "command", []byte("dump")))
 		r := <-got
 		require.NoError(t, r.err)
 		assert.Equal(t, "dump", string(r.value))
@@ -58,9 +58,9 @@ func TestReconnect(t *testing.T) {
 		ses := h.session(t, 2)
 		sessions := ses.connectAll(t)
 		ses.cut(0)
-		require.NoError(t, sessions[0].Namespace(session.NamespaceSnapshot).Insert(ctx, "ip.0", []byte("10.0.0.1")))
+		require.NoError(t, sessions[0].Snapshot().Insert(ctx, "ip.0", []byte("10.0.0.1")))
 		require.NoError(t, sessions[0].Leave(ctx))
-		got, err := sessions[1].Namespace(session.NamespaceSnapshot).Get(ctx, "ip.0", time.Minute)
+		got, err := sessions[1].Snapshot().Get(ctx, "ip.0", time.Minute)
 		require.NoError(t, err)
 		assert.Equal(t, "10.0.0.1", string(got))
 	})
@@ -75,7 +75,7 @@ func TestReconnect(t *testing.T) {
 			ses.cut(0)
 			value := make([]byte, 20<<20)
 			inserted := make(chan error, 1)
-			go func() { inserted <- sessions[0].Namespace(session.NamespaceSnapshot).Insert(ctx, "big", value) }()
+			go func() { inserted <- sessions[0].Snapshot().Insert(ctx, "big", value) }()
 			// Longer than the round trip the client gives an operation before
 			// sending it again.
 			requireWaitingFor(t, inserted, 4*time.Second)
@@ -87,7 +87,7 @@ func TestReconnect(t *testing.T) {
 				t.Fatal("the Insert did not return once the member was admitted")
 			}
 			require.NoError(t, sessions[0].Leave(ctx), "the next write")
-			got, err := sessions[1].Namespace(session.NamespaceSnapshot).Get(ctx, "big", 0)
+			got, err := sessions[1].Snapshot().Get(ctx, "big", 0)
 			require.NoError(t, err)
 			assert.Len(t, got, len(value))
 		})
@@ -117,7 +117,7 @@ func TestReconnect(t *testing.T) {
 			get := func(ns session.Namespace, key string) <-chan error {
 				out := make(chan error, 1)
 				go func() {
-					_, err := sessions[0].Namespace(ns).Get(ctx, key, time.Minute)
+					_, err := in(sessions[0], ns).Get(ctx, key, time.Minute)
 					out <- err
 				}()
 				return out
@@ -138,13 +138,13 @@ func TestReconnect(t *testing.T) {
 			// completes only once the member has reconnected.
 			for i := range 2 {
 				ses.cut(0)
-				require.NoError(t, sessions[0].Namespace(session.NamespaceSnapshot).Insert(ctx,
+				require.NoError(t, sessions[0].Snapshot().Insert(ctx,
 					fmt.Sprintf("break.%d", i), nil))
 			}
 			require.NoError(t, sessions[1].Barrier(ctx, "admitted"))
 			for ns, key := range map[session.Namespace]string{session.NamespaceSnapshot: "ip.1",
 				session.NamespaceCuInterpose: "command", session.NamespaceLibrary: "comm"} {
-				require.NoError(t, sessions[1].Namespace(ns).Insert(ctx, key, []byte("v")))
+				require.NoError(t, in(sessions[1], ns).Insert(ctx, key, []byte("v")))
 			}
 			for _, wait := range waits {
 				require.NoError(t, <-wait)
@@ -163,7 +163,7 @@ func TestCoordinatorLost(t *testing.T) {
 		sessions := ses.connectAll(t)
 		got := make(chan error, 1)
 		go func() {
-			_, err := sessions[0].Namespace(session.NamespaceSnapshot).Get(ctx, "k", time.Minute)
+			_, err := sessions[0].Snapshot().Get(ctx, "k", time.Minute)
 			got <- err
 		}()
 		time.Sleep(pending)
@@ -217,7 +217,7 @@ func TestRemoved(t *testing.T) {
 		awaitKey(t, ses.raw(t, 2), session.BarrierKey("admitted", ses.spec.Members[0].ID))
 		got := make(chan error, 1)
 		go func() {
-			_, err := sessions[1].Namespace(session.NamespaceLibrary).Get(ctx, "comm", time.Minute)
+			_, err := sessions[1].Library().Get(ctx, "comm", time.Minute)
 			got <- err
 		}()
 		require.NoError(t, h.srv.Remove(ctx, ses.spec.UID))
@@ -243,7 +243,7 @@ func TestRemoved(t *testing.T) {
 		sessions := ses.connectAll(t)
 		// Large values, then empty ones, until neither fits: the ended key is
 		// no smaller than an empty value under a longer key.
-		store := sessions[0].Namespace(session.NamespaceSnapshot)
+		store := sessions[0].Snapshot()
 		for i, size := 0, 60<<10; size >= 0; size -= 60 << 10 {
 			for ; ; i++ {
 				err := store.Insert(ctx, fmt.Sprintf("fill-%d", i), make([]byte, size))

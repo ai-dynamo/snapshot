@@ -54,7 +54,7 @@ func TestSpecValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.ErrorIs(t, tt.spec.validate(), ErrInvalid)
+			require.ErrorIs(t, tt.spec.validate(), session.ErrInvalid)
 		})
 	}
 	require.NoError(t, Spec{UID: "u", Members: []session.Member{{ID: "b", Rank: 1}, {ID: "a", Rank: 0}},
@@ -109,10 +109,10 @@ func TestEnsure(t *testing.T) {
 		spec := h.ensure(2)
 		later := spec
 		later.Deadline = spec.Deadline.Add(time.Minute)
-		require.ErrorIs(t, h.srv.Ensure(within(t), later), ErrInvalid)
+		require.ErrorIs(t, h.srv.Ensure(within(t), later), session.ErrInvalid)
 		renamed := spec
 		renamed.Members = []session.Member{{ID: "member-0", Rank: 0}, {ID: "other", Rank: 1}}
-		require.ErrorIs(t, h.srv.Ensure(within(t), renamed), ErrInvalid)
+		require.ErrorIs(t, h.srv.Ensure(within(t), renamed), session.ErrInvalid)
 	})
 
 	t.Run("the longest attempt UID", func(t *testing.T) {
@@ -348,6 +348,8 @@ func TestWatchStopsOnItsOwn(t *testing.T) {
 	hold(last)
 
 	h.awaitLog(spec, "The session's watch stopped; watching again", 30*time.Second)
+	require.Eventually(t, func() bool { return slicesContain(h.logs.all(), "recreating ordered consumer") },
+		5*time.Second, 5*time.Millisecond, "nats.go's error must reach the coordinator's log")
 	h.clock.Step(time.Hour)
 	require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
 	reason, ok := h.ended(spec)
@@ -405,7 +407,7 @@ func TestFail(t *testing.T) {
 	ctx := within(t)
 	spec := h.ensure(2)
 	members := h.connectAll(spec)
-	require.ErrorIs(t, h.srv.Fail(ctx, spec.UID, "not a reason"), ErrInvalid)
+	require.ErrorIs(t, h.srv.Fail(ctx, spec.UID, "not a reason"), session.ErrInvalid)
 	require.NoError(t, h.srv.Fail(ctx, spec.UID, session.ReasonMemberFailed))
 	require.NoError(t, h.srv.Fail(ctx, spec.UID, session.ReasonMemberFailed), "failing again with the same reason")
 	require.ErrorIs(t, h.srv.Fail(ctx, spec.UID, "Other"), &session.AbortError{Reason: session.ReasonMemberFailed},
@@ -413,7 +415,7 @@ func TestFail(t *testing.T) {
 	for _, m := range members {
 		require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonMemberFailed})
 	}
-	require.ErrorIs(t, h.srv.Fail(ctx, "unknown", "Refused"), ErrNotFound)
+	require.ErrorIs(t, h.srv.Fail(ctx, "unknown", "Refused"), session.ErrNotFound)
 	assert.Equal(t, []string{"opened " + string(spec.UID), "failed " + string(spec.UID) + " MemberFailed"},
 		h.observer.of(spec.UID))
 }

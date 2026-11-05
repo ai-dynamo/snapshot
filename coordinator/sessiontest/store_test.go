@@ -44,14 +44,14 @@ func TestInsert(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := within(t)
 			sessions := h.session(t, 2).connectAll(t)
-			require.NoError(t, sessions[0].Namespace(tt.ns).Insert(ctx, tt.key, tt.first))
-			err := sessions[1].Namespace(tt.ns).Insert(ctx, tt.key, tt.second)
+			require.NoError(t, in(sessions[0], tt.ns).Insert(ctx, tt.key, tt.first))
+			err := in(sessions[1], tt.ns).Insert(ctx, tt.key, tt.second)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 			} else {
 				require.NoError(t, err)
 			}
-			got, err := sessions[1].Namespace(tt.ns).Get(ctx, tt.key, 0)
+			got, err := in(sessions[1], tt.ns).Get(ctx, tt.key, 0)
 			require.NoError(t, err)
 			assert.Equal(t, string(tt.first), string(got), "the first value must stay")
 		})
@@ -70,7 +70,7 @@ func TestInsertRaceHasOneWinner(t *testing.T) {
 		var wg sync.WaitGroup
 		for m := range 2 {
 			wg.Go(func() {
-				errs[m] = sessions[m].Namespace(session.NamespaceSnapshot).Insert(ctx, key, fmt.Appendf(nil, "%d", m))
+				errs[m] = sessions[m].Snapshot().Insert(ctx, key, fmt.Appendf(nil, "%d", m))
 			})
 		}
 		wg.Wait()
@@ -83,9 +83,9 @@ func TestInsertRaceHasOneWinner(t *testing.T) {
 			}
 		}
 		require.Equal(t, 1, winners, "key %s", key)
-		a, err := sessions[0].Namespace(session.NamespaceSnapshot).Get(ctx, key, 0)
+		a, err := sessions[0].Snapshot().Get(ctx, key, 0)
 		require.NoError(t, err)
-		b, err := sessions[1].Namespace(session.NamespaceSnapshot).Get(ctx, key, 0)
+		b, err := sessions[1].Snapshot().Get(ctx, key, 0)
 		require.NoError(t, err)
 		require.Equal(t, a, b)
 	}
@@ -98,10 +98,10 @@ func TestNamespacesAreSeparate(t *testing.T) {
 	s := h.session(t, 1).connect(t, 0)
 	namespaces := []session.Namespace{session.NamespaceSnapshot, session.NamespaceCuInterpose, session.NamespaceLibrary}
 	for _, ns := range namespaces {
-		require.NoError(t, s.Namespace(ns).Insert(ctx, "k", []byte(ns)))
+		require.NoError(t, in(s, ns).Insert(ctx, "k", []byte(ns)))
 	}
 	for _, ns := range namespaces {
-		got, err := s.Namespace(ns).Get(ctx, "k", 0)
+		got, err := in(s, ns).Get(ctx, "k", 0)
 		require.NoError(t, err)
 		assert.Equal(t, string(ns), string(got))
 	}
@@ -129,20 +129,19 @@ func TestKeys(t *testing.T) {
 		{name: "the longest library key", ns: session.NamespaceLibrary,
 			key: strings.Repeat("\xff", coordinator.MaxKeyLength)},
 		{name: "the longest key", ns: session.NamespaceSnapshot, key: strings.Repeat("k", coordinator.MaxKeyLength)},
-		{name: "an unknown namespace", ns: session.Namespace("barrier"), key: "a", wantErr: session.ErrInvalid},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := within(t)
-			err := s.Namespace(tt.ns).Insert(ctx, tt.key, []byte("v"))
+			err := in(s, tt.ns).Insert(ctx, tt.key, []byte("v"))
 			if tt.wantErr == nil {
 				require.NoError(t, err)
 				return
 			}
 			require.ErrorIs(t, err, tt.wantErr)
-			_, err = s.Namespace(tt.ns).Get(ctx, tt.key, 0)
+			_, err = in(s, tt.ns).Get(ctx, tt.key, 0)
 			require.ErrorIs(t, err, tt.wantErr)
-			require.ErrorIs(t, s.Namespace(tt.ns).Delete(ctx, tt.key), tt.wantErr)
+			require.ErrorIs(t, in(s, tt.ns).Delete(ctx, tt.key), tt.wantErr)
 		})
 	}
 }
@@ -182,7 +181,7 @@ func TestGet(t *testing.T) {
 		{name: "a key deleted, then inserted again, during the wait", ns: session.NamespaceCuInterpose, wait: time.Minute,
 			before: insert(session.NamespaceCuInterpose, "old"),
 			during: func(t *testing.T, sessions []coordinator.Session) {
-				require.NoError(t, sessions[1].Namespace(session.NamespaceCuInterpose).Delete(within(t), "k"))
+				require.NoError(t, sessions[1].CuInterpose().Delete(within(t), "k"))
 				insert(session.NamespaceCuInterpose, "new")(t, sessions)
 			}, want: "old"},
 		{name: "the session fails during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
@@ -216,7 +215,7 @@ func TestGet(t *testing.T) {
 			}
 			got := make(chan result, 1)
 			go func() {
-				value, err := sessions[0].Namespace(tt.ns).Get(ctx, "k", tt.wait)
+				value, err := in(sessions[0], tt.ns).Get(ctx, "k", tt.wait)
 				got <- result{value, err}
 			}()
 			if tt.during != nil || tt.cancel {
@@ -244,7 +243,7 @@ func TestGet(t *testing.T) {
 // member.
 func insert(ns session.Namespace, value string) func(*testing.T, []coordinator.Session) {
 	return func(t *testing.T, sessions []coordinator.Session) {
-		require.NoError(t, sessions[1].Namespace(ns).Insert(within(t), "k", []byte(value)))
+		require.NoError(t, in(sessions[1], ns).Insert(within(t), "k", []byte(value)))
 	}
 }
 
@@ -256,7 +255,7 @@ func TestDelete(t *testing.T) {
 	s := h.session(t, 1).connect(t, 0)
 	namespaces := []session.Namespace{session.NamespaceSnapshot, session.NamespaceCuInterpose, session.NamespaceLibrary}
 	for _, ns := range namespaces {
-		store := s.Namespace(ns)
+		store := in(s, ns)
 		require.NoError(t, store.Delete(ctx, "never-inserted"), "deleting an absent key")
 		require.NoError(t, store.Insert(ctx, "k", []byte("first")))
 		require.NoError(t, store.Delete(ctx, "k"))
@@ -296,7 +295,7 @@ func TestStoreLimits(t *testing.T) {
 			value := make([]byte, tt.value)
 			var err error
 			for i := 0; err == nil; i++ {
-				err = s.Namespace(tt.ns).Insert(ctx, fmt.Sprintf("k%d", i), value)
+				err = in(s, tt.ns).Insert(ctx, fmt.Sprintf("k%d", i), value)
 				if !tt.repeat {
 					break
 				}
@@ -307,7 +306,7 @@ func TestStoreLimits(t *testing.T) {
 
 	t.Run("deleting from a full library bucket", func(t *testing.T) {
 		ctx := within(t)
-		store := newHarness(t, small).session(t, 1).connect(t, 0).Namespace(session.NamespaceLibrary)
+		store := newHarness(t, small).session(t, 1).connect(t, 0).Library()
 		for i := range 8 {
 			require.NoError(t, store.Insert(ctx, fmt.Sprintf("k%d", i), nil))
 		}

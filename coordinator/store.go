@@ -44,16 +44,19 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// Namespace implements Session.
-func (s *client) Namespace(ns session.Namespace) Store {
-	switch ns {
-	case session.NamespaceSnapshot, session.NamespaceCuInterpose:
-		return &store{s: s, kv: s.snapshot, ns: ns, maxValue: s.meta.MaxValue}
-	case session.NamespaceLibrary:
-		return &store{s: s, kv: s.library, ns: ns, maxValue: s.meta.MaxLibraryValue}
-	default:
-		return invalidStore{ns: ns}
-	}
+// Snapshot implements Session.
+func (s *client) Snapshot() Store {
+	return &store{s: s, kv: s.snapshot, ns: session.NamespaceSnapshot, maxValue: s.meta.MaxValue}
+}
+
+// CuInterpose implements Session.
+func (s *client) CuInterpose() Store {
+	return &store{s: s, kv: s.snapshot, ns: session.NamespaceCuInterpose, maxValue: s.meta.MaxValue}
+}
+
+// Library implements Session.
+func (s *client) Library() Store {
+	return &store{s: s, kv: s.library, ns: session.NamespaceLibrary, maxValue: s.meta.MaxLibraryValue}
 }
 
 // store is one namespace of a session.
@@ -111,9 +114,6 @@ func (st *store) Insert(ctx context.Context, key string, value []byte) error {
 		return fmt.Errorf("a value of %d bytes is over the %d-byte limit: %w", len(value), st.maxValue,
 			session.ErrTooLarge)
 	}
-	if err := st.s.alive(); err != nil {
-		return err
-	}
 	return st.s.do(ctx, func(ctx context.Context) error {
 		_, err := st.kv.Create(ctx, k, value)
 		if !errors.Is(err, jetstream.ErrKeyExists) {
@@ -138,9 +138,6 @@ func (st *store) Insert(ctx context.Context, key string, value []byte) error {
 func (st *store) Get(ctx context.Context, key string, wait time.Duration) ([]byte, error) {
 	k, err := st.key(key)
 	if err != nil {
-		return nil, err
-	}
-	if err := st.s.alive(); err != nil {
 		return nil, err
 	}
 	var value []byte
@@ -180,9 +177,6 @@ func (st *store) Delete(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	if err := st.s.alive(); err != nil {
-		return err
-	}
 	return st.s.do(ctx, func(ctx context.Context) error {
 		// An absent key needs no delete marker, which would take one of the
 		// library bucket's keys.
@@ -196,21 +190,3 @@ func (st *store) Delete(ctx context.Context, key string) error {
 		return st.kv.Delete(ctx, k)
 	})
 }
-
-// invalidStore is the Store of an unknown namespace.
-type invalidStore struct{ ns session.Namespace }
-
-func (i invalidStore) err() error {
-	return fmt.Errorf("unknown namespace %q: %w", i.ns, session.ErrInvalid)
-}
-
-// Insert implements Store.
-func (i invalidStore) Insert(context.Context, string, []byte) error { return i.err() }
-
-// Get implements Store.
-func (i invalidStore) Get(context.Context, string, time.Duration) ([]byte, error) {
-	return nil, i.err()
-}
-
-// Delete implements Store.
-func (i invalidStore) Delete(context.Context, string) error { return i.err() }

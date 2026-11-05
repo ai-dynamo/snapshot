@@ -175,6 +175,17 @@ func (ses *testSession) connectAll(t *testing.T) []coordinator.Session {
 	return sessions
 }
 
+// in returns a member's Store of a namespace.
+func in(s coordinator.Session, ns session.Namespace) coordinator.Store {
+	switch ns {
+	case session.NamespaceCuInterpose:
+		return s.CuInterpose()
+	case session.NamespaceLibrary:
+		return s.Library()
+	}
+	return s.Snapshot()
+}
+
 // cut breaks every connection of a member, as a broken network would, so its
 // client reconnects.
 func (ses *testSession) cut(member int) { ses.proxies[member].cut() }

@@ -171,7 +171,7 @@ func TestWaitsShareTheConsumerLimit(t *testing.T) {
 	ctx := within(t)
 	ses := h.session(t, 2)
 	sessions := ses.connectAll(t)
-	snapshot := sessions[0].Namespace(session.NamespaceSnapshot)
+	snapshot := sessions[0].Snapshot()
 	gets := make([]<-chan error, 2*session.MaxConsumersPerMember)
 	for i := range gets {
 		got := make(chan error, 1)
@@ -185,7 +185,7 @@ func TestWaitsShareTheConsumerLimit(t *testing.T) {
 	wait := barrier(ctx, sessions[1], "admitted")
 	requireWaiting(t, wait)
 	for i := range gets {
-		require.NoError(t, sessions[1].Namespace(session.NamespaceSnapshot).Insert(ctx, fmt.Sprintf("peer.%d", i), nil))
+		require.NoError(t, sessions[1].Snapshot().Insert(ctx, fmt.Sprintf("peer.%d", i), nil))
 	}
 	for i, got := range gets {
 		select {
@@ -209,7 +209,7 @@ func TestLeave(t *testing.T) {
 	sessions := ses.connectAll(t)
 	require.NoError(t, sessions[0].Leave(ctx))
 	require.NoError(t, sessions[0].Leave(ctx), "leaving twice")
-	require.NoError(t, sessions[0].Namespace(session.NamespaceLibrary).Insert(ctx, "after", []byte("left")),
+	require.NoError(t, sessions[0].Library().Insert(ctx, "after", []byte("left")),
 		"a member that left keeps its connection")
 	require.NoError(t, sessions[0].Err())
 	require.NoError(t, sessions[1].Leave(ctx))
@@ -273,8 +273,8 @@ func TestSessionFail(t *testing.T) {
 		require.NoError(t, sessions[0].Fail(ctx, "Refused"))
 		awaitDone(t, sessions[1])
 		abort := &session.AbortError{Reason: "Refused"}
-		require.ErrorIs(t, sessions[1].Namespace(session.NamespaceSnapshot).Insert(ctx, "k", nil), abort)
-		_, err := sessions[1].Namespace(session.NamespaceLibrary).Get(ctx, "k", time.Minute)
+		require.ErrorIs(t, sessions[1].Snapshot().Insert(ctx, "k", nil), abort)
+		_, err := sessions[1].Library().Get(ctx, "k", time.Minute)
 		require.ErrorIs(t, err, abort)
 		require.ErrorIs(t, sessions[1].Barrier(ctx, "admitted"), abort)
 		require.ErrorIs(t, sessions[1].Leave(ctx), abort)
@@ -446,7 +446,7 @@ func TestClose(t *testing.T) {
 	requireWaiting(t, wait)
 	require.NoError(t, sessions[0].Close())
 	require.ErrorIs(t, <-wait, net.ErrClosed)
-	require.ErrorIs(t, sessions[0].Namespace(session.NamespaceSnapshot).Insert(ctx, "k", nil), net.ErrClosed)
+	require.ErrorIs(t, sessions[0].Snapshot().Insert(ctx, "k", nil), net.ErrClosed)
 	require.NoError(t, sessions[0].Close(), "closing twice")
 	select {
 	case <-sessions[0].Done():

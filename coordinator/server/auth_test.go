@@ -81,7 +81,7 @@ func TestAuthentication(t *testing.T) {
 		})
 	}
 
-	for _, transient := range []error{ErrUnavailable, ErrNotFound, errors.New("outside the contract")} {
+	for _, transient := range []error{ErrUnavailable, session.ErrNotFound, errors.New("outside the contract")} {
 		t.Run("admits a member once the Authorizer recovers from "+transient.Error(), func(t *testing.T) {
 			h := h.sub(t)
 			spec := h.ensure(1)

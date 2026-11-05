@@ -21,18 +21,6 @@ import (
 	"k8s.io/utils/clock"
 )
 
-// The errors a Server reports. They are the session package's, so a caller
-// matches one set of sentinels on both sides.
-var (
-	// ErrInvalid reports a malformed argument, or a spec that contradicts the
-	// one a session was ensured with.
-	ErrInvalid = session.ErrInvalid
-
-	// ErrNotFound reports an attempt the server holds no session for, and,
-	// from an Authorizer, an attempt it cannot place yet.
-	ErrNotFound = session.ErrNotFound
-)
-
 // errShutdown reports a call after Shutdown.
 var errShutdown = errors.New("the coordinator has shut down")
 
@@ -57,10 +45,10 @@ func (s Spec) validate() error {
 		return fmt.Errorf("UID: %w", err)
 	}
 	if len(s.Members) == 0 {
-		return fmt.Errorf("no members: %w", ErrInvalid)
+		return fmt.Errorf("no members: %w", session.ErrInvalid)
 	}
 	if s.Deadline.IsZero() {
-		return fmt.Errorf("no deadline: %w", ErrInvalid)
+		return fmt.Errorf("no deadline: %w", session.ErrInvalid)
 	}
 	byID := make(map[string]struct{}, len(s.Members))
 	byRank := make(map[int]struct{}, len(s.Members))
@@ -69,13 +57,13 @@ func (s Spec) validate() error {
 			return fmt.Errorf("member: %w", err)
 		}
 		if _, dup := byID[m.ID]; dup {
-			return fmt.Errorf("member %q named twice: %w", m.ID, ErrInvalid)
+			return fmt.Errorf("member %q named twice: %w", m.ID, session.ErrInvalid)
 		}
 		if m.Rank < 0 || m.Rank >= len(s.Members) {
-			return fmt.Errorf("member %q has rank %d outside 0..%d: %w", m.ID, m.Rank, len(s.Members)-1, ErrInvalid)
+			return fmt.Errorf("member %q has rank %d outside 0..%d: %w", m.ID, m.Rank, len(s.Members)-1, session.ErrInvalid)
 		}
 		if _, dup := byRank[m.Rank]; dup {
-			return fmt.Errorf("rank %d taken twice: %w", m.Rank, ErrInvalid)
+			return fmt.Errorf("rank %d taken twice: %w", m.Rank, session.ErrInvalid)
 		}
 		byID[m.ID] = struct{}{}
 		byRank[m.Rank] = struct{}{}
@@ -127,7 +115,7 @@ func (a *attempt) has(member string) bool {
 // meta, with a new random epoch. It arms the deadline, and starts following the
 // members' departures and the session's end. Ensuring an attempt again with the same
 // spec, whatever order it lists the members in, does nothing; a spec that
-// differs reports ErrInvalid, since an attempt's membership and deadline never
+// differs reports session.ErrInvalid, since an attempt's membership and deadline never
 // change. A session whose deadline has already passed is created already
 // failed with session.ReasonDeadlineExceeded, so a member that connects learns
 // why at once.
@@ -148,7 +136,7 @@ func (s *Server) Ensure(ctx context.Context, spec Spec) error {
 	}
 	if a := s.lookup(spec.UID); a != nil {
 		if !slices.Equal(a.members, spec.byRank()) || !a.spec.Deadline.Equal(spec.Deadline) {
-			return fmt.Errorf("attempt %s was ensured with another membership or deadline: %w", spec.UID, ErrInvalid)
+			return fmt.Errorf("attempt %s was ensured with another membership or deadline: %w", spec.UID, session.ErrInvalid)
 		}
 		return nil
 	}
@@ -264,7 +252,6 @@ func (s *Server) createBucket(ctx context.Context, bucket string, maxKeys, maxVa
 	kv, err := s.js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:       bucket,
 		Storage:      jetstream.MemoryStorage,
-		Replicas:     s.cfg.Replicas,
 		MaxValueSize: int32(maxValue + valueHeadroom),
 	})
 	if err != nil {
@@ -503,7 +490,7 @@ func (s *Server) Remove(ctx context.Context, uid types.UID) error {
 // Fail fails the session of an attempt on the coordinator's own authority,
 // with no member asking, as a member's Fail does: the reason must be a valid
 // condition reason, the first reason wins, and Fail returns nil if the session
-// failed with this reason, and how it ended otherwise. It reports ErrNotFound
+// failed with this reason, and how it ended otherwise. It reports session.ErrNotFound
 // for an attempt with no session.
 func (s *Server) Fail(ctx context.Context, uid types.UID, reason string) error {
 	if err := session.ValidateReason(reason); err != nil {
@@ -511,7 +498,7 @@ func (s *Server) Fail(ctx context.Context, uid types.UID, reason string) error {
 	}
 	a := s.lookup(uid)
 	if a == nil {
-		return fmt.Errorf("attempt %s: %w", uid, ErrNotFound)
+		return fmt.Errorf("attempt %s: %w", uid, session.ErrNotFound)
 	}
 	err := s.endWith(ctx, a, []byte(reason))
 	if errors.Is(err, &session.AbortError{Reason: reason}) {
