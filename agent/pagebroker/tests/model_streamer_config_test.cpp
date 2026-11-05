@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "model_streamer_config.hpp"
+#include "s3_config.hpp"
 #include "daemon.hpp"
 
 #include <gtest/gtest.h>

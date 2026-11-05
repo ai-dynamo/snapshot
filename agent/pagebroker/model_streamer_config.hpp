@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -10,7 +12,17 @@
 #include <string>
 #include <string_view>
 
-#include "s3_config.hpp"
+namespace snapshot::pagebroker {
+struct S3Config;
+
+// Limit elapsed time per native submission; an earlier transaction deadline wins.
+inline constexpr std::chrono::minutes kDefaultModelStreamerSubmissionTimeout{20};
+// Target bytes per batch and shared native admission budget. A file exceeding
+// the budget runs alone. This does not bound total checkpoint staging memory.
+inline constexpr std::uint64_t kDefaultRestoreBatchBytes = 10'000'000'000;
+inline constexpr std::size_t kDefaultRestorePreparationSlots = 3;
+inline constexpr std::size_t kMaxRestorePreparationSlots = 20;
+}  // namespace snapshot::pagebroker
 
 namespace snapshot::pagebroker::model_streamer::settings {
 // Optional values distinguish omission (inherit the startup environment or

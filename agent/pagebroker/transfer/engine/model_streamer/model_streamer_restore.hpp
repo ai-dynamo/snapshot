@@ -20,16 +20,9 @@
 
 #include "transfer/checkpoint_inventory.hpp"
 #include "cancellation.hpp"
+#include "model_streamer_config.hpp"
 
 namespace snapshot::pagebroker {
-// Limit elapsed time per native submission; an earlier transaction deadline wins.
-inline constexpr std::chrono::minutes kDefaultModelStreamerSubmissionTimeout{20};
-// Target bytes per batch and shared native admission budget. A file exceeding
-// the budget runs alone. This does not bound total checkpoint staging memory.
-inline constexpr std::uint64_t kDefaultRestoreBatchBytes = 10'000'000'000;
-inline constexpr std::size_t kDefaultRestorePreparationSlots = 3;
-inline constexpr std::size_t kMaxRestorePreparationSlots = 20;
-
 // Explicit values are fixed for one native session. Empty credentials select
 // the native AWS provider chain. Addressing, TLS/CA and worker configuration use
 // the pinned library's process environment, set before constructing sessions.

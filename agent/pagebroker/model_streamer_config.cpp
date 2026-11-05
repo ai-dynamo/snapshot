@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "transfer/engine/model_streamer/model_streamer_restore.hpp"
+#include "s3_config.hpp"
 #include "utils/config.hpp"
 #include "utils/json.hpp"
 
