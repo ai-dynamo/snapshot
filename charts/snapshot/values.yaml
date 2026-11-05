@@ -322,6 +322,9 @@ config:
   checkpoint:
     # Maximum seconds before the agent marks a checkpoint failed.
     timeoutSeconds: 3600
+    # Times a failed checkpoint may be retried, beyond the first attempt. 0 keeps
+    # retry opt-in, so upgrading changes no existing checkpoint's behaviour.
+    retryLimit: 0
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed

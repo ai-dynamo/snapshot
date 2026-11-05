@@ -48,6 +48,9 @@ type CheckpointParams struct {
 	StartedAt time.Time
 	// CuInterposeRequested is the source Pod's explicit opt-in, already preflighted.
 	CuInterposeRequested bool
+	// DumpRetryLimit is how many times the dump may be repeated against the suspended
+	// workload.
+	DumpRetryLimit int
 	// StoreID binds this capture to a configured store; empty means legacy.
 	StoreID string
 }
@@ -304,6 +307,8 @@ func (w *NodeController) attemptCheckpoint(
 		StartedAt:            time.Now(),
 		CuInterposeRequested: cuInterposeRequested,
 		StoreID:              storeID,
+		// Read only once a dump has failed, so a capture that succeeds never reads it.
+		DumpRetryLimit:        w.config.Checkpoint.ResolveRetryLimit(),
 	}
 	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
 	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
@@ -613,18 +618,19 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	log := logr.FromContextOrDiscard(ctx)
 
 	req := executor.CheckpointRequest{
-		ContainerID:          params.ContainerID,
-		ContainerName:        params.ContainerName,
-		ContentUID:           params.ContentUID,
-		StartedAt:            params.StartedAt,
-		NodeName:             w.config.NodeName,
-		PodName:              params.Pod.Name,
-		PodNamespace:         params.Pod.Namespace,
-		PodIP:                params.Pod.Status.PodIP,
-		Pod:                  podEnvironment(params.Pod, params.ContainerName),
-		Clientset:            w.clientset,
-		CuInterposeRequested: params.CuInterposeRequested,
-		StoreID:              params.StoreID,
+		ContainerID:           params.ContainerID,
+		ContainerName:         params.ContainerName,
+		ContentUID:            params.ContentUID,
+		StartedAt:             params.StartedAt,
+		NodeName:              w.config.NodeName,
+		PodName:               params.Pod.Name,
+		PodNamespace:          params.Pod.Namespace,
+		PodIP:                 params.Pod.Status.PodIP,
+		Pod:                   podEnvironment(params.Pod, params.ContainerName),
+		Clientset:             w.clientset,
+		CuInterposeRequested:  params.CuInterposeRequested,
+		StoreID:               params.StoreID,
+		DumpRetryLimit:        params.DumpRetryLimit,
 	}
 	artifact, err := executor.Checkpoint(ctx, w.runtime, log, req, w.config)
 	if err != nil {
