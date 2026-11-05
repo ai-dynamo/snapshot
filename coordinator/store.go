@@ -30,7 +30,9 @@ type Store interface {
 
 	// Get returns the value of key. If key is absent, with no wait it reports
 	// session.ErrNotFound at once, and with a wait it returns the value as soon
-	// as it is inserted, or reports session.ErrNotYet when the wait expires.
+	// as it is inserted, or reports session.ErrNotYet when the wait expires. The
+	// wait starts once the coordinator has answered that key is absent, so
+	// however short it is, Get returns the value of a key that exists.
 	// It returns early, with how the session ended, if the session ends first,
 	// and with ctx's error if ctx is done first. A wait past its bucket's most
 	// consumers reports session.ErrTooMany.
@@ -141,18 +143,17 @@ func (st *store) Get(ctx context.Context, key string, wait time.Duration) ([]byt
 		return nil, err
 	}
 	var value []byte
-	if wait <= 0 {
-		err = st.s.do(ctx, func(ctx context.Context) error {
-			entry, err := st.kv.Get(ctx, k)
-			if errors.Is(err, jetstream.ErrKeyNotFound) {
-				return session.ErrNotFound
-			}
-			if err == nil {
-				value = entry.Value()
-			}
-			return err
-		})
-	} else {
+	err = st.s.do(ctx, func(ctx context.Context) error {
+		entry, err := st.kv.Get(ctx, k)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return session.ErrNotFound
+		}
+		if err == nil {
+			value = entry.Value()
+		}
+		return err
+	})
+	if errors.Is(err, session.ErrNotFound) && wait > 0 {
 		waitCtx, cancel := context.WithTimeout(ctx, wait)
 		defer cancel()
 		err = st.s.await(waitCtx, st.kv, []string{k}, func(_ string, v []byte, present bool) bool {
