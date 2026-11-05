@@ -17,8 +17,8 @@ struct S3Config;
 
 // Limit elapsed time per native submission; an earlier transaction deadline wins.
 inline constexpr std::chrono::minutes kDefaultModelStreamerSubmissionTimeout{20};
-// Target bytes per batch and shared native admission budget. A file exceeding
-// the budget runs alone. This does not bound total checkpoint staging memory.
+// Maximum requested bytes per batch and shared native admission budget. Large
+// files use bounded ranges. This does not bound total checkpoint staging memory.
 inline constexpr std::uint64_t kDefaultRestoreBatchBytes = 10'000'000'000;
 inline constexpr std::size_t kDefaultRestorePreparationSlots = 3;
 inline constexpr std::size_t kMaxRestorePreparationSlots = 20;

@@ -9,6 +9,7 @@
 #include <iterator>
 #include <string>
 #include <stdexcept>
+#include <unistd.h>
 
 #include "tests/temporary_directory.hpp"
 
@@ -46,14 +47,18 @@ TEST(ModelStreamerRestoreTest, ReadsOnlyTheRecordedPrefix)
 {
   test::TemporaryDirectory root;
   const auto source = root.path() / "source";
-  std::ofstream(source) << "checkpoint-extra";
-  ModelStreamerRestore restore;
+  const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+  const std::string contents = std::string(page, 'a') + std::string(page, 'b') + "checkpoint";
+  std::ofstream(source) << contents << "-extra";
+  model_streamer::settings::Options tuning;
+  tuning.restore_batch_bytes = page;
+  ModelStreamerRestore restore({}, kDefaultModelStreamerSubmissionTimeout, tuning);
   CheckpointInventory inventory;
-  inventory.files.push_back({source.string(), "data", 10});
+  inventory.files.push_back({source.string(), "data", contents.size()});
   const auto destination = root.path() / "restored";
   ASSERT_NO_THROW(restore.Stage(inventory, destination));
   std::ifstream restored(destination / "data");
-  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(restored), {}), "checkpoint");
+  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(restored), {}), contents);
 }
 
 TEST(ModelStreamerRestoreTest, RejectsMissingAndShortNonemptySources)

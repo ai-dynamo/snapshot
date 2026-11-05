@@ -96,7 +96,12 @@ commit-level history for each release is on its
   `pageBroker.transferEngine.modelStreamer.restorePreparationSlots` in Helm
   values, or `restorePreparationSlots` in the tuning JSON (1–20, default 3),
   to bound retained batches per restore. Restart PageBroker after changing it.
-  Shared native admission limits remain unchanged; oversized files run alone.
+  Shared native admission limits remain unchanged.
+- S3 restores allocate and download large files in bounded ranges, allowing
+  allocation of the next range to overlap with downloading. Checkpoint files and
+  S3 objects are unchanged; staging still requires capacity for the full
+  checkpoint. `restoreBatchBytes` must be at least the system page size.
+  See [restore batching](agent/pagebroker/MODEL_STREAMER.md#restore-batching).
 - PageBroker defaults to a 512 MiB S3 read window per client, increased from
   128 MiB. Explicit `s3Reader.maxInflightMiB` and
   `RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB` overrides still take precedence.

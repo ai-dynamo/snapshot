@@ -57,7 +57,7 @@ Native variable names below omit the common `RUNAI_STREAMER_` prefix.
 
 | JSON field | Native setting | Accepted values |
 | --- | --- | --- |
-| `restoreBatchBytes` | PageBroker batch/admission budget; no native variable | Positive unsigned 64-bit integer in bytes; default 10000000000 (10 GB) |
+| `restoreBatchBytes` | PageBroker batch/admission budget; no native variable | Unsigned 64-bit integer in bytes, at least the system page size; default 10000000000 (10 GB) |
 | `restorePreparationSlots` | PageBroker preparation capacity; no native variable | Integer, 1–20; default 3, per restore |
 | `readChunkBytes` | `CHUNK_BYTESIZE` | Integer, 2 MiB–1 GiB; native S3 reads floor it to 5 MiB |
 | `processGroupSize` | `PROCESS_GROUP_SIZE` | Positive unsigned 32-bit integer |
@@ -104,8 +104,9 @@ Reader tuning does not change SDK upload limits.
 
 ## Restore batching
 
-`restoreBatchBytes` controls the target download batch size (default: 10 GB).
-Files larger than this value are downloaded whole.
+`restoreBatchBytes` controls the maximum download batch size (default: 10 GB).
+Large files are downloaded in bounded ranges, allowing preparation and download
+to overlap. Checkpoint files and S3 objects are unchanged.
 
 `restorePreparationSlots` controls how many batches each restore can prepare
 ahead, including the active batch (default: 3). Higher values may improve
