@@ -226,12 +226,79 @@ func (h *harness) fillCap(m *member) {
 // spec's session, and is trying again.
 func (h *harness) awaitRetry(spec Spec) {
 	h.t.Helper()
+	h.awaitLog(spec, "retrying until its end is recorded", 10*time.Second)
+}
+
+// awaitLog waits, for at most wait, until the coordinator has logged a line
+// about spec's session that holds text.
+func (h *harness) awaitLog(spec Spec, text string, wait time.Duration) {
+	h.t.Helper()
 	require.Eventually(h.t, func() bool {
 		return slices.ContainsFunc(h.logs.all(), func(line string) bool {
-			return strings.Contains(line, "retrying until its end is recorded") &&
-				strings.Contains(line, string(spec.UID))
+			return strings.Contains(line, text) && strings.Contains(line, string(spec.UID))
 		})
-	}, 10*time.Second, 5*time.Millisecond)
+	}, wait, 5*time.Millisecond, "the coordinator did not log %q", text)
+}
+
+// TestWatchStopsOnItsOwn covers the coordinator's watch of a session stopping
+// while the session is open. A member deletes the watch's consumer, which its
+// permissions allow on its own buckets, and takes the freed slot, so the
+// bucket is at its consumer limit when nats.go, missing the consumer's
+// heartbeats, recreates it, and nats.go stops the watch. The deadline still
+// fails the session, and once a slot frees, the coordinator watches again and
+// sees the end, which ends the session's life. nats.go misses two heartbeats
+// first, so the test waits about ten seconds.
+func TestWatchStopsOnItsOwn(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	spec := h.ensure(1)
+	require.Equal(t, time.Hour, h.clock.AwaitTimer(t))
+	m := h.connect(spec, 0)
+	stream := "KV_" + m.snapshot.Bucket()
+	str, err := h.srv.js.Stream(ctx, stream)
+	require.NoError(t, err)
+	var watched string
+	list := str.ListConsumers(ctx)
+	for c := range list.Info() {
+		if !strings.HasPrefix(c.Config.DeliverSubject, session.InboxPrefix(string(spec.UID), m.id)+".") {
+			watched = c.Name
+		}
+	}
+	require.NoError(t, list.Err())
+	require.NotEmpty(t, watched, "the coordinator must watch the session")
+
+	// The member holds every consumer its share allows, its watch of the end
+	// included, then deletes the coordinator's consumer and takes its slot.
+	life, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	hold := func(ctx context.Context) {
+		_, err := m.snapshot.Watch(ctx, "snapshot.x")
+		require.NoError(t, err)
+	}
+	for range session.MaxConsumersPerMember - 1 {
+		hold(life)
+	}
+	reply, err := m.nc.Request("$JS.API.CONSUMER.DELETE."+stream+"."+watched, nil, 2*time.Second)
+	require.NoError(t, err)
+	require.Contains(t, string(reply.Data), `"success":true`)
+	last, free := context.WithCancel(life)
+	hold(last)
+
+	h.awaitLog(spec, "The session's watch stopped; watching again", 30*time.Second)
+	h.clock.Step(time.Hour)
+	require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonDeadlineExceeded})
+	reason, ok := h.ended(spec)
+	require.True(t, ok)
+	assert.Equal(t, session.ReasonDeadlineExceeded, reason)
+
+	a := h.srv.lookup(spec.UID)
+	require.NoError(t, a.life.Err(), "the session's life must outlast its watch")
+	free()
+	select {
+	case <-a.life.Done():
+	case <-ctx.Done():
+		t.Fatal("the coordinator did not watch the session again once a slot freed")
+	}
 }
 
 // endsSoon checks that m sees its session fail with reason within twice the

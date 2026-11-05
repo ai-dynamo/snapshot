@@ -100,7 +100,7 @@ type attempt struct {
 	snapshot jetstream.KeyValue
 	// life lasts until the session is removed or the coordinator shuts down,
 	// which call cancel, or until follow has seen the session end. It bounds
-	// following the session's keys and retrying its end.
+	// following the session's keys and retrying its end, and no watch ends it.
 	life   context.Context
 	cancel context.CancelFunc
 
@@ -198,6 +198,8 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 		conns:   make(map[string]map[uint64]struct{}),
 		grace:   make(map[string]clock.Timer),
 	}
+	life, cancel := context.WithCancel(context.Background())
+	a.life, a.cancel = life, cancel
 	meta, err := json.Marshal(session.Meta{
 		Members:         a.members,
 		Deadline:        spec.Deadline,
@@ -213,6 +215,7 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 		if err == nil {
 			return
 		}
+		cancel()
 		if err := s.deleteBuckets(context.WithoutCancel(ctx), spec.UID); err != nil {
 			s.log.Error(err, "Deleting the buckets of a session that failed to open failed", "attempt", uid)
 		}
@@ -284,12 +287,65 @@ func (s *Server) deleteBuckets(ctx context.Context, uid types.UID) error {
 	return errors.Join(errs...)
 }
 
-// follow watches an attempt's departures and its end. Once every member has
-// left, it closes the session; once the session has ended, however it ended,
-// it records the outcome and stops.
+// follow watches an attempt's departures and its end for as long as the
+// session's life lasts, while ctx bounds only starting the first watch. Once
+// every member has left, it closes the session; once the session has ended,
+// however it ended, it records the outcome and ends the session's life. A
+// watch can stop on its own: nats.go stops one whose consumer it cannot
+// recreate, such as at the bucket's consumer limit. follow then watches again,
+// so the session's life never depends on one watch.
 func (s *Server) follow(ctx context.Context, a *attempt) error {
-	life, cancel := context.WithCancel(context.Background())
-	// The watch lives until cancel, while ctx bounds only its creation.
+	w, stop, err := s.watch(ctx, a)
+	if err != nil {
+		return err
+	}
+	// Ensure holds Server.control, so Shutdown is not waiting for wg yet.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		left := make(map[string]bool, len(a.members))
+		for w != nil {
+			if s.track(a, w, left) {
+				a.cancel()
+			}
+			stop()
+			w, stop = s.rewatch(a)
+		}
+	}()
+	return nil
+}
+
+// track passes the departures and the end a watch delivers to the session,
+// until the session has ended, which it reports, or the watch stops. left
+// holds the members that have left, across watches, so a watch that delivers
+// the departures again closes the session once only.
+func (s *Server) track(a *attempt, w jetstream.KeyWatcher, left map[string]bool) bool {
+	leftPrefix := session.LeftKey("")
+	for e := range w.Updates() {
+		if e == nil || e.Operation() != jetstream.KeyValuePut {
+			continue
+		}
+		if e.Key() == session.KeyEnded {
+			s.end(a, e.Value())
+			return true
+		}
+		member := strings.TrimPrefix(e.Key(), leftPrefix)
+		if !a.has(member) || left[member] {
+			continue
+		}
+		left[member] = true
+		if len(left) == len(a.members) {
+			s.closeSession(a.life, a)
+		}
+	}
+	return false
+}
+
+// watch starts watching a session's departures and its end. The watch lasts
+// until stop, or until the session's life ends, while ctx bounds only its
+// creation. stop ends the watch and drains it.
+func (s *Server) watch(ctx context.Context, a *attempt) (jetstream.KeyWatcher, func(), error) {
+	life, cancel := context.WithCancel(a.life)
 	bounded := context.AfterFunc(ctx, cancel)
 	w, err := a.snapshot.WatchFiltered(life, []string{session.LeftKey("*"), session.KeyEnded})
 	if !bounded() {
@@ -302,39 +358,57 @@ func (s *Server) follow(ctx context.Context, a *attempt) error {
 			// close its channel (nats-io/nats.go#2223). Only the connection's
 			// close, in Shutdown, then ends drain, and Shutdown waits for
 			// control, which Ensure holds, so the watch drains on its own
-			// instead of here.
+			// instead of holding up its caller. Either Ensure, holding
+			// control, or follow, counted in wg, calls watch, so Shutdown is
+			// not waiting for wg yet.
 			s.wg.Add(1)
 			go func() {
 				defer s.wg.Done()
 				s.drain(w)
 			}()
 		}
-		return fmt.Errorf("watch the session: %w", err)
+		return nil, nil, fmt.Errorf("watch the session: %w", err)
 	}
-	a.life, a.cancel = life, cancel
-	leftPrefix := session.LeftKey("")
-	// Ensure holds Server.control, so Shutdown is not waiting for wg yet.
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		defer s.drain(w)
-		defer cancel()
-		left := make(map[string]bool, len(a.members))
-		for e := range w.Updates() {
-			switch {
-			case e == nil || e.Operation() != jetstream.KeyValuePut:
-			case e.Key() == session.KeyEnded:
-				s.end(a, e.Value())
-				return
-			case a.has(strings.TrimPrefix(e.Key(), leftPrefix)):
-				left[strings.TrimPrefix(e.Key(), leftPrefix)] = true
-				if len(left) == len(a.members) {
-					s.closeSession(life, a)
-				}
-			}
+	return w, func() {
+		cancel()
+		s.drain(w)
+	}, nil
+}
+
+// rewatch watches a session again once its watch has stopped, waiting from
+// firstEndRetry up to maxEndRetry before each try, until a watch starts. It
+// returns a nil watch once the session's life has ended, or the coordinator's
+// connection has closed, which a coordinator that stops without shutting down
+// does, and which leaves nothing to watch with.
+func (s *Server) rewatch(a *attempt) (jetstream.KeyWatcher, func()) {
+	select {
+	case <-a.life.Done():
+		return nil, nil
+	case <-s.connClosed:
+		return nil, nil
+	default:
+	}
+	s.log.Info("The session's watch stopped; watching again", "attempt", a.spec.UID)
+	for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
+		select {
+		case <-time.After(wait):
+		case <-a.life.Done():
+			return nil, nil
+		case <-s.connClosed:
+			return nil, nil
 		}
-	}()
-	return nil
+		ctx, cancel := context.WithTimeout(a.life, tryTimeout)
+		w, stop, err := s.watch(ctx, a)
+		cancel()
+		switch {
+		case err == nil:
+			return w, stop
+		case a.life.Err() != nil:
+			return nil, nil
+		case wait == firstEndRetry:
+			s.log.Error(err, "Watching the session again failed; retrying", "attempt", a.spec.UID)
+		}
+	}
 }
 
 // drain consumes a cancelled watch until its channel closes, which happens once
@@ -436,13 +510,13 @@ func (s *Server) Fail(ctx context.Context, uid types.UID, reason string) error {
 	return err
 }
 
-// expireTimeout bounds each try to fail a session when its deadline or a
-// member's grace period runs out.
-const expireTimeout = 5 * time.Second
+// tryTimeout bounds each try to fail a session when its deadline or a
+// member's grace period runs out, and each try to watch a session again.
+const tryTimeout = 5 * time.Second
 
 // The wait between tries to record the end of a session whose deadline or
-// grace period ran out: it starts at firstEndRetry and doubles up to
-// maxEndRetry.
+// grace period ran out, or to watch a session again: it starts at
+// firstEndRetry and doubles up to maxEndRetry.
 const (
 	firstEndRetry = 100 * time.Millisecond
 	maxEndRetry   = time.Second
@@ -478,7 +552,7 @@ func (s *Server) expire(a *attempt, reason string, armed func() bool) {
 	}
 	defer s.wg.Done()
 	for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
-		ctx, cancel := context.WithTimeout(a.life, expireTimeout)
+		ctx, cancel := context.WithTimeout(a.life, tryTimeout)
 		err := s.endWith(ctx, a, []byte(reason))
 		cancel()
 		if err == nil || ended(err) || a.life.Err() != nil {
