@@ -154,15 +154,18 @@ type HTTPGetAction struct {
 	// +optional
 	Path string `json:"path,omitempty"`
 
-	// Port's MaxLength repeats the rule's 15-character limit on port names, so
-	// the API server can bound the rule's cost; it refuses no valid port.
+	// Port names use MaxLength and Pattern because Kubernetes 1.32 ignores
+	// MaxLength when estimating CEL on IntOrString. Name checks repeated per
+	// group member then exceed the budget. Use `in` for the type check because
+	// 1.32 also overestimates `type(self) == string`.
 
 	// Port on the Pod IP: a number from 1 to 65535, or the name of a port of
 	// the container, resolved when the request is sent.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:validation:MaxLength=15
-	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
+	// +kubebuilder:validation:Pattern=`^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$`
+	// +kubebuilder:validation:XValidation:rule="type(self) in [string] || (self >= 1 && self <= 65535)",message="port must be 1-65535 or a valid port name"
 	Port intstr.IntOrString `json:"port"`
 }
 
@@ -176,14 +179,17 @@ type HTTPPostAction struct {
 	// +optional
 	Path string `json:"path,omitempty"`
 
-	// Port's MaxLength repeats the rule's 15-character limit on port names, so
-	// the API server can bound the rule's cost; it refuses no valid port.
+	// Port names use MaxLength and Pattern because Kubernetes 1.32 ignores
+	// MaxLength when estimating CEL on IntOrString. Name checks repeated per
+	// group member then exceed the budget. Use `in` for the type check because
+	// 1.32 also overestimates `type(self) == string`.
 
 	// Port on the Pod IP: a number from 1 to 65535, or the name of a port of
 	// the container, resolved when the request is sent.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:validation:MaxLength=15
-	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
+	// +kubebuilder:validation:Pattern=`^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$`
+	// +kubebuilder:validation:XValidation:rule="type(self) in [string] || (self >= 1 && self <= 65535)",message="port must be 1-65535 or a valid port name"
 	Port intstr.IntOrString `json:"port"`
 }
