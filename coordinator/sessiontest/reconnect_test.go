@@ -122,10 +122,9 @@ func TestReconnect(t *testing.T) {
 				}()
 				return out
 			}
-			// What session.MaxConsumersPerMember and
-			// session.MaxLibraryConsumersPerMember allow besides the end the client
-			// always watches: three waits on the Snapshot bucket and one on the
-			// library bucket.
+			// What session.MaxConsumersPerMember allows besides the end the
+			// client always watches: three waits on the Snapshot bucket, and
+			// one on the library bucket.
 			waits := []<-chan error{
 				barrier(ctx, sessions[0], "admitted"),
 				get(session.NamespaceSnapshot, "ip.1"),

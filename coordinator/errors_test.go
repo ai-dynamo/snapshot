@@ -31,8 +31,6 @@ func TestMapError(t *testing.T) {
 		{"a value over the bucket's maximum", &jetstream.APIError{ErrorCode: jsMessageTooLarge}, session.ErrTooLarge},
 		{"a full bucket", &jetstream.APIError{ErrorCode: jsStoreFailed}, session.ErrTooMany},
 		{"a server out of memory", &jetstream.APIError{ErrorCode: jsInsufficientResources}, session.ErrTooMany},
-		{"a bucket at its most consumers", &jetstream.APIError{ErrorCode: jsMaximumConsumers}, session.ErrTooMany},
-		{"a watch's bucket at its most consumers", &nats.APIError{ErrorCode: jsMaximumConsumers}, session.ErrTooMany},
 		{"a closed connection", nats.ErrConnectionClosed, net.ErrClosed},
 		{"a deadline", context.DeadlineExceeded, context.DeadlineExceeded},
 		{"an error of package session", session.ErrNotYet, session.ErrNotYet},
@@ -53,11 +51,14 @@ func TestMapError(t *testing.T) {
 }
 
 // TestTransient covers the errors an operation is sent again after, which
-// include a write that a broken connection fails.
+// include a write that a broken connection fails, and a watch refused at its
+// bucket's consumer limit: a key-value watch creates its consumer through
+// nats.go's older API, which reports a *nats.APIError.
 func TestTransient(t *testing.T) {
 	for _, err := range []error{nats.ErrTimeout, nats.ErrReconnectBufExceeded, context.DeadlineExceeded,
 		&net.OpError{Op: "write", Net: "tcp", Err: os.NewSyscallError("write", syscall.EPIPE)},
-		&net.OpError{Op: "write", Net: "tcp", Err: net.ErrClosed}} {
+		&net.OpError{Op: "write", Net: "tcp", Err: net.ErrClosed},
+		&nats.APIError{ErrorCode: jsMaximumConsumers}, &jetstream.APIError{ErrorCode: jsMaximumConsumers}} {
 		assert.True(t, transient(err), "%v", err)
 	}
 	for _, err := range []error{&jetstream.APIError{ErrorCode: jsStoreFailed}, nats.ErrBadSubject} {

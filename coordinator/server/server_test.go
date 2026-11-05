@@ -82,39 +82,50 @@ func TestLimits(t *testing.T) {
 			"another session is not affected")
 	})
 
-	t.Run("a bucket refuses a member's consumers past its limit, in its session only", func(t *testing.T) {
-		h := newHarness(t)
-		ctx := within(t)
-		spec, other := h.ensure(1), h.ensure(1)
-		m := h.connect(spec, 0)
-		js, err := jetstream.New(m.nc)
-		require.NoError(t, err)
-		for _, ns := range []session.Namespace{session.NamespaceSnapshot, session.NamespaceLibrary} {
-			bucket := m.bucket(ns).Bucket()
-			stream, err := js.Stream(ctx, "KV_"+bucket)
+	t.Run("a bucket refuses consumers past its limit, in its session only, until abandoned ones expire",
+		func(t *testing.T) {
+			h := newHarness(t)
+			ctx := within(t)
+			spec, other := h.ensure(1), h.ensure(1)
+			m := h.connect(spec, 0)
+			js, err := jetstream.New(m.nc)
 			require.NoError(t, err)
-			info, err := stream.Info(ctx)
-			require.NoError(t, err)
-			// Durable consumers outlive their creator's connection, so only the
-			// limit bounds them.
-			durable := func(i int) error {
-				_, err := stream.CreateConsumer(ctx, jetstream.ConsumerConfig{Durable: fmt.Sprintf("durable-%d", i),
-					AckPolicy: jetstream.AckExplicitPolicy})
-				return err
+			namespaces := []session.Namespace{session.NamespaceSnapshot, session.NamespaceLibrary}
+			for _, ns := range namespaces {
+				bucket := m.bucket(ns).Bucket()
+				stream, err := js.Stream(ctx, "KV_"+bucket)
+				require.NoError(t, err)
+				info, err := stream.Info(ctx)
+				require.NoError(t, err)
+				// Durable consumers outlive their creator's connection, which
+				// abandons them here.
+				durable := func(i int) error {
+					_, err := stream.CreateConsumer(ctx, jetstream.ConsumerConfig{Durable: fmt.Sprintf("durable-%d", i),
+						AckPolicy: jetstream.AckExplicitPolicy})
+					return err
+				}
+				for i := info.State.Consumers; i < info.Config.MaxConsumers; i++ {
+					require.NoError(t, durable(i), "bucket %s", bucket)
+				}
+				requireCode(t, durable(info.Config.MaxConsumers), codeMaximumConsumers, "bucket %s", bucket)
+				// A watch, which is how the client creates its consumers, is
+				// refused with the same code, through nats.go's older API.
+				_, err = m.bucket(ns).Watch(ctx, string(ns)+".k")
+				var apiErr *nats.APIError
+				require.ErrorAs(t, err, &apiErr, "bucket %s", bucket)
+				assert.Equal(t, codeMaximumConsumers, int(apiErr.ErrorCode), "bucket %s", bucket)
 			}
-			for i := info.State.Consumers; i < info.Config.MaxConsumers; i++ {
-				require.NoError(t, durable(i), "bucket %s", bucket)
+			h.connect(other, 0) // which watches another session's Snapshot bucket
+
+			// Nothing pulls from the durable consumers, which free their slots
+			// once they have been unused for consumerInactiveThreshold.
+			for _, ns := range namespaces {
+				require.Eventually(t, func() bool {
+					_, err := m.bucket(ns).Watch(ctx, string(ns)+".k")
+					return err == nil
+				}, 3*consumerInactiveThreshold, 100*time.Millisecond, "namespace %s", ns)
 			}
-			requireCode(t, durable(info.Config.MaxConsumers), codeMaximumConsumers, "bucket %s", bucket)
-			// A watch, which is how the client creates its consumers, is
-			// refused with the same code, through nats.go's older API.
-			_, err = m.bucket(ns).Watch(ctx, string(ns)+".k")
-			var apiErr *nats.APIError
-			require.ErrorAs(t, err, &apiErr, "bucket %s", bucket)
-			assert.Equal(t, codeMaximumConsumers, int(apiErr.ErrorCode), "bucket %s", bucket)
-		}
-		h.connect(other, 0) // which watches another session's Snapshot bucket
-	})
+		})
 
 	t.Run("a value over each cap", func(t *testing.T) {
 		h := newHarness(t, func(cfg *Config) { cfg.MaxValue = 64 << 10 })

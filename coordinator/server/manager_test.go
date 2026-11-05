@@ -75,7 +75,7 @@ func TestEnsure(t *testing.T) {
 			session.SnapshotBucket(string(spec.UID)): {-1, session.MaxValue,
 				3*session.MaxConsumersPerMember + coordinatorConsumers},
 			session.LibraryBucket(string(spec.UID)): {session.MaxLibraryKeys, session.MaxLibraryValue,
-				3 * session.MaxLibraryConsumersPerMember},
+				3 * session.MaxConsumersPerMember},
 		} {
 			stream, err := h.srv.js.Stream(within(t), "KV_"+bucket)
 			require.NoError(t, err)

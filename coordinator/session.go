@@ -44,8 +44,8 @@ type Session interface {
 	// stays recorded: cancelling ctx stops the wait and never undoes the
 	// arrival. A call whose ctx is already done returns its error and records
 	// nothing. The wait returns early, with how the session ended, if it ends
-	// first, and a wait past the Snapshot bucket's most consumers reports
-	// session.ErrTooMany. Only agents use barriers.
+	// first. A wait whose bucket holds its most consumers waits for one to
+	// free. Only agents use barriers.
 	Barrier(ctx context.Context, name string) error
 
 	// Leave records that this member's agent is done. The session closes once

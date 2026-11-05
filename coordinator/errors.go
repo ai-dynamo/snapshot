@@ -25,7 +25,7 @@ const (
 	// jsInsufficientResources: the coordinator's memory cap is reached.
 	jsInsufficientResources = 10023
 	// jsMaximumConsumers: a watch would take its bucket past its most
-	// consumers.
+	// consumers, which the client waits out.
 	jsMaximumConsumers = 10026
 )
 
@@ -45,7 +45,7 @@ func mapError(err error) error {
 	switch code, description := apiError(err); code {
 	case jsMessageTooLarge:
 		return fmt.Errorf("the value is over its bucket's maximum: %w", session.ErrTooLarge)
-	case jsStoreFailed, jsInsufficientResources, jsMaximumConsumers:
+	case jsStoreFailed, jsInsufficientResources:
 		return fmt.Errorf("%s: %w", description, session.ErrTooMany)
 	}
 	return errors.New("coordinator: " + err.Error())
@@ -82,10 +82,14 @@ func ours(err error) bool {
 // transient reports whether an operation that failed with err may succeed if
 // sent again: the connection broke, including under a write in progress, which
 // fails with a *net.OpError, or is reconnecting, which refuses every publish
-// since the client buffers none, or the server did not answer in time. An
+// since the client buffers none, the server did not answer in time, or a watch
+// found its bucket at its most consumers, which free up as other waits end. An
 // operation is sent again only while the session is alive, so a
 // *net.OpError that wraps net.ErrClosed never reports a closed session.
 func transient(err error) bool {
+	if code, _ := apiError(err); code == jsMaximumConsumers {
+		return true
+	}
 	if _, ok := errors.AsType[*net.OpError](err); ok {
 		return true
 	}

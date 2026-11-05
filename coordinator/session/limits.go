@@ -25,27 +25,23 @@ const (
 	MaxLibraryKeys = 4096
 )
 
-// The consumers each member may hold on its session's buckets, which bound the
-// memory consumers take, since a consumer, even a durable one, otherwise lives
-// as long as its bucket. Every watch is an ordered consumer, and a reconnect
-// replaces each one with a new consumer while the old one is still being
-// deleted, so each limit is twice what a member watches at once.
-const (
-	// MaxConsumersPerMember is how many consumers a member may hold on the
-	// Snapshot bucket. The client watches the session's end, and also watches
-	// for each Get with a wait and each Barrier in progress; the limit allows
-	// three at once, such as a Barrier, and a Get by the agent and one by its
-	// cuInterpose relay, so four watches, doubled. In sessiontest, two members
-	// peak at five consumers together, during a reconnect.
-	MaxConsumersPerMember = 8
-
-	// MaxLibraryConsumersPerMember is how many consumers a member may hold on
-	// the library bucket: one watch of the whole bucket by the agent's library
-	// endpoint, which watches once per node and never once per key, which
-	// would take up to MaxLibraryKeys consumers, and one Get with a wait, so two
-	// watches, doubled.
-	MaxLibraryConsumersPerMember = 4
-)
+// MaxConsumersPerMember sizes how many consumers each of a session's buckets
+// holds: one limit per bucket, of this many for each member, which the
+// session's members share, so one member may hold more than its share while
+// others hold less. The limit bounds the memory consumers take. A member past
+// it waits for a consumer to free: the client retries a watch the limit
+// refuses until its caller's context or wait ends.
+//
+// Every watch is an ordered consumer, and a reconnect replaces each one with a
+// new consumer while the old one is still being deleted, so each member's
+// share is twice what it watches at once. On the Snapshot bucket, the client
+// watches the session's end, and also for each Barrier in progress and each
+// Get with a wait of a key that is absent: four watches at once allow a
+// Barrier, and a Get by the agent and one by its cuInterpose relay. On the
+// library bucket, the agent's library endpoint waits through Get once per key
+// per node, for the keys its Pod's libraries ask for at once, such as NCCL's
+// communicator identifiers.
+const MaxConsumersPerMember = 8
 
 // MaxNameLength bounds an attempt UID, a member ID, and a barrier name.
 const MaxNameLength = 253

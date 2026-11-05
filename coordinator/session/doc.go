@@ -30,8 +30,8 @@
 // # Limits
 //
 // Each bucket limits the size of its values and how many consumers it holds,
-// which grows with the number of members, and the library bucket also its
-// number of keys. No bucket reserves memory. Every session shares the
+// which grows with the number of members and which the session's members
+// share, and the library bucket also its number of keys. No bucket reserves memory. Every session shares the
 // coordinator's memory cap, so a session that fills it makes other sessions'
 // writes fail with ErrTooMany until it is removed. Meta carries the value
 // limits a session actually has.

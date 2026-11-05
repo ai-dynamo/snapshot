@@ -34,8 +34,8 @@ type Store interface {
 	// wait starts once the coordinator has answered that key is absent, so
 	// however short it is, Get returns the value of a key that exists.
 	// It returns early, with how the session ended, if the session ends first,
-	// and with ctx's error if ctx is done first. A wait past its bucket's most
-	// consumers reports session.ErrTooMany.
+	// and with ctx's error if ctx is done first. A wait whose bucket holds its
+	// most consumers waits for one to free, within the wait.
 	Get(ctx context.Context, key string, wait time.Duration) ([]byte, error)
 
 	// Delete removes key whether or not it exists, and writes nothing if it

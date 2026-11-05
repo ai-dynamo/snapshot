@@ -5,6 +5,7 @@ package sessiontest
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -158,6 +159,43 @@ func TestBarrier(t *testing.T) {
 		require.ErrorIs(t, s.Barrier(within(t), "a.b"), session.ErrInvalid)
 		require.ErrorIs(t, s.Barrier(within(t), "*"), session.ErrInvalid)
 	})
+}
+
+// TestWaitsShareTheConsumerLimit covers a bucket's consumer limit, which a
+// session's members share: one member's waits that take every consumer delay
+// another member's Barrier, and their own waits past the limit, and fail none
+// of them; each completes once a consumer frees.
+func TestWaitsShareTheConsumerLimit(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	ses := h.session(t, 2)
+	sessions := ses.connectAll(t)
+	snapshot := sessions[0].Namespace(session.NamespaceSnapshot)
+	gets := make([]<-chan error, 2*session.MaxConsumersPerMember)
+	for i := range gets {
+		got := make(chan error, 1)
+		go func() {
+			_, err := snapshot.Get(ctx, fmt.Sprintf("peer.%d", i), time.Minute)
+			got <- err
+		}()
+		gets[i] = got
+	}
+	ses.awaitMostConsumers(t)
+	wait := barrier(ctx, sessions[1], "admitted")
+	requireWaiting(t, wait)
+	for i := range gets {
+		require.NoError(t, sessions[1].Namespace(session.NamespaceSnapshot).Insert(ctx, fmt.Sprintf("peer.%d", i), nil))
+	}
+	for i, got := range gets {
+		select {
+		case err := <-got:
+			require.NoError(t, err, "Get %d", i)
+		case <-ctx.Done():
+			t.Fatalf("Get %d did not return", i)
+		}
+	}
+	require.NoError(t, sessions[0].Barrier(ctx, "admitted"))
+	require.NoError(t, <-wait)
 }
 
 // TestLeave covers Leave: leaving twice changes nothing, a member that has left

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/jetstream"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/clock"
@@ -226,7 +227,7 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 		return nil, err
 	}
 	if _, err = s.createBucket(ctx, session.LibraryBucket(uid), s.cfg.MaxLibraryKeys, s.cfg.MaxLibraryValue,
-		members*session.MaxLibraryConsumersPerMember); err != nil {
+		members*session.MaxConsumersPerMember); err != nil {
 		return nil, err
 	}
 	if _, err = a.snapshot.Put(ctx, session.KeyMeta, meta); err != nil {
@@ -243,11 +244,21 @@ func (s *Server) create(ctx context.Context, spec Spec) (a *attempt, err error) 
 // Its connection is in-process and never reconnects.
 const coordinatorConsumers = 1
 
+// consumerInactiveThreshold is how long a consumer of a session's buckets
+// lasts once nothing uses it: once no subscription takes a watch's
+// deliveries, or nothing pulls from a durable consumer. It is each bucket's
+// default and the most any consumer may ask for, so a durable consumer that a
+// member creates and abandons frees its slot. It is the embedded server's own
+// default for a consumer that is not durable, so the client's watches, which
+// ask for none and take the bucket's, keep the threshold they would have.
+const consumerInactiveThreshold = natsserver.JsDeleteWaitTimeDefault
+
 // createBucket creates one in-memory bucket, bounded by its largest value, by
-// how many consumers it may have, and, unless maxKeys is zero, by its number of
-// keys, none of which reserves memory. JetStream's key-value configuration has
-// neither a consumer nor a key limit, so both are set on the bucket's stream,
-// before any member can reach the bucket.
+// how many consumers it may have and how long an unused one lasts, and, unless
+// maxKeys is zero, by its number of keys, none of which reserves memory.
+// JetStream's key-value configuration has none of the consumer limits nor a
+// key limit, so they are set on the bucket's stream, before any member can
+// reach the bucket.
 func (s *Server) createBucket(ctx context.Context, bucket string, maxKeys, maxValue, maxConsumers int) (
 	jetstream.KeyValue, error) {
 	kv, err := s.js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
@@ -265,6 +276,7 @@ func (s *Server) createBucket(ctx context.Context, bucket string, maxKeys, maxVa
 	}
 	cfg := stream.CachedInfo().Config
 	cfg.MaxConsumers = maxConsumers
+	cfg.ConsumerLimits.InactiveThreshold = consumerInactiveThreshold
 	if maxKeys != 0 {
 		cfg.MaxMsgs = int64(maxKeys)
 	}

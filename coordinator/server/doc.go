@@ -22,8 +22,9 @@
 // in-process connections authenticate with a token drawn at startup, which
 // never leaves the process's memory. The client listener uses TLS.
 //
-// Each bucket limits the size of its values and how many consumers it holds,
-// which grows with the number of members, and the library bucket also its
+// Each bucket limits the size of its values, how many consumers it holds,
+// which grows with the number of members and which the session's members
+// share, and how long an unused consumer lasts, and the library bucket also its
 // number of keys. No bucket reserves memory. Every session shares the memory
 // cap, Config.MaxBytes, so a session that fills it makes other sessions' writes
 // fail with session.ErrTooMany until it is removed.

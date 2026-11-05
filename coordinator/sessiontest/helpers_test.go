@@ -200,6 +200,22 @@ func (ses *testSession) raw(t *testing.T, member int) jetstream.KeyValue {
 	return kv
 }
 
+// awaitMostConsumers waits until the session's Snapshot bucket holds its most
+// consumers, which it reads over a plain connection that holds none.
+func (ses *testSession) awaitMostConsumers(t *testing.T) {
+	t.Helper()
+	ctx := within(t)
+	kv := ses.raw(t, 1)
+	require.Eventually(t, func() bool {
+		status, err := kv.Status(ctx)
+		if err != nil {
+			return false
+		}
+		info := status.(*jetstream.KeyValueBucketStatus).StreamInfo()
+		return info.State.Consumers >= info.Config.MaxConsumers
+	}, 10*time.Second, 5*time.Millisecond, "the Snapshot bucket must reach its most consumers")
+}
+
 // awaitKey waits until kv holds key, and fails the test if it does not within
 // the test's bound.
 func awaitKey(t *testing.T, kv jetstream.KeyValue, key string) {
