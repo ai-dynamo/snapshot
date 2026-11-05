@@ -171,7 +171,7 @@ func TestAuthentication(t *testing.T) {
 }
 
 // TestReadiness covers the gate: until MarkReady, every client is refused, and
-// the Authorizer is not even asked.
+// the Authorizer is not even asked, and Ready reports it, until Shutdown.
 func TestReadiness(t *testing.T) {
 	ignore := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, ignore) })
@@ -180,8 +180,12 @@ func TestReadiness(t *testing.T) {
 	connected := connectLater(h, spec, 0)
 	requirePending(t, connected)
 	assert.Zero(t, h.auth.calls.Load(), "the Authorizer must not be asked before the coordinator is ready")
+	assert.False(t, h.srv.Ready())
 	h.srv.MarkReady()
 	require.NoError(t, <-connected)
+	assert.True(t, h.srv.Ready())
+	require.NoError(t, h.srv.Shutdown(within(t)))
+	assert.False(t, h.srv.Ready(), "a coordinator that shut down is not ready")
 }
 
 // TestInternalToken checks that the coordinator's own token admits nothing

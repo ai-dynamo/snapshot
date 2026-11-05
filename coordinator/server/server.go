@@ -357,6 +357,14 @@ func (s *Server) MarkReady() {
 	}
 }
 
+// Ready reports whether the coordinator admits clients: from MarkReady until
+// Shutdown begins. The host reports its readiness from it, through its own
+// health endpoint, not by probing the client listener, which accepts
+// connections from New on and refuses every client until MarkReady. A probe
+// that connects and closes before the TLS handshake also makes the embedded
+// server log an error.
+func (s *Server) Ready() bool { return s.ready.Load() }
+
 // Addr returns the address the client listener listens on.
 func (s *Server) Addr() net.Addr { return s.ns.Addr() }
 
