@@ -55,6 +55,38 @@ If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
 in `podSnapshotTemplate.containers` instead: the `SnapshotJob` copies its
 template into the `PodSnapshot` it creates.
 
+## A checkpoint fails with `RetriesExhausted`
+
+The checkpoint was retried as often as `config.checkpoint.retryLimit` allows and
+failed every time. The message names how many retries were spent and the last
+cause: `after 2 of 2 retries: <cause>`. Treat the cause as the failure; the
+retries only say it did not clear on its own.
+
+```bash
+kubectl get podsnapshotcontent <name> -o jsonpath='{.status.conditions[?(@.type=="Failed")].message}'
+kubectl get events -n <ns> --field-selector involvedObject.name=<source-pod> | grep CheckpointAttemptFailed
+```
+
+Each failed attempt also emits a `CheckpointAttemptFailed` event on the source
+pod, including the repeats of the dump, so the events show what each attempt hit
+rather than only how the checkpoint ended. A reason other than
+`RetriesExhausted` means the failure was settled on the first attempt and no
+retry could have helped.
+
+## A checkpoint fails with `ImageTooLarge`, `StagingUnavailable`, or `StoreExhausted`
+
+Three different shortages, which need different fixes:
+
+| Reason | What ran out | What to do |
+| --- | --- | --- |
+| `StagingUnavailable` | The node's staging volume was occupied when the checkpoint needed it. Retried automatically | Nothing, unless it repeats: then stagger the checkpoints sharing that node |
+| `ImageTooLarge` | The image cannot fit the staging volume however empty it is. The message gives the shortfall in bytes | Raise `pageBroker.staging.sizeLimit`, and the agent memory limit with it. See [staging](storage.md#how-the-cap-is-chosen) |
+| `StoreExhausted` | The destination store is full. No retry on this node frees room there | Free space in the store, or point the checkpoint at one with room |
+
+`ImageTooLarge` is reported two ways: refused before the dump starts, from an
+estimate of the image, or after a dump has run out of room part-written. Both
+name the same shortfall.
+
 ## The agent or a restore pod will not start
 
 The `snapshot-agent` runs privileged with `hostPID`, `hostIPC`, and `hostNetwork`.

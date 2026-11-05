@@ -57,6 +57,20 @@ commit-level history for each release is on its
   already `Ready` before it is not backfilled.
 - `config.checkpoint.timeoutSeconds` (default `3600`) fails a
   checkpoint that outruns it.
+- Checkpoint retries, off by default. `config.checkpoint.retryLimit` (default
+  `0`) sets how many times a failed checkpoint is retried beyond the first
+  attempt. A dump that fails against a workload CRIU can still seize is written
+  again without suspending it twice; one that cannot be is retried from a fresh
+  suspend, with the source Pod left running in between. The limit is
+  cluster-wide. Each failed attempt emits a `CheckpointAttemptFailed` event on
+  the source Pod, and a checkpoint that uses up its retries fails with
+  `RetriesExhausted` rather than reading like a first-attempt failure. See
+  [Checkpoint retries](docs/operations/troubleshooting.md#a-checkpoint-fails-with-retriesexhausted).
+- Storage shortages on a checkpoint now read distinctly: `StagingUnavailable`
+  for a node's staging volume being occupied, `ImageTooLarge` for an image that
+  cannot fit it at all, and `StoreExhausted` for a full destination store.
+- A failed CRIU dump records the CRIU version that produced it, which the agent
+  also logs at startup.
 - S3 connection and transfer settings for `storage.type: s3`:
   `storage.s3.addressing`, `storage.s3.allowHttp`, a CA bundle
   (`storage.s3.caBundleConfigMapRef`), `pageBroker.s3.limits` and
