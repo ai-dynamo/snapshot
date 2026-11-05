@@ -434,6 +434,11 @@ func (in *PodSnapshotContentSpec) DeepCopyInto(out *PodSnapshotContentSpec) {
 		*out = new(CheckpointStorageBinding)
 		**out = **in
 	}
+	if in.CheckpointRetryLimit != nil {
+		in, out := &in.CheckpointRetryLimit, &out.CheckpointRetryLimit
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Containers != nil {
 		in, out := &in.Containers, &out.Containers
 		*out = make([]ContainerSnapshotConfig, len(*in))
@@ -552,6 +557,11 @@ func (in *PodSnapshotSource) DeepCopy() *PodSnapshotSource {
 func (in *PodSnapshotSpec) DeepCopyInto(out *PodSnapshotSpec) {
 	*out = *in
 	in.Source.DeepCopyInto(&out.Source)
+	if in.CheckpointRetryLimit != nil {
+		in, out := &in.CheckpointRetryLimit, &out.CheckpointRetryLimit
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Containers != nil {
 		in, out := &in.Containers, &out.Containers
 		*out = make([]ContainerSnapshotConfig, len(*in))
@@ -610,6 +620,11 @@ func (in *PodSnapshotTemplate) DeepCopyInto(out *PodSnapshotTemplate) {
 		in, out := &in.TargetContainers, &out.TargetContainers
 		*out = make([]string, len(*in))
 		copy(*out, *in)
+	}
+	if in.CheckpointRetryLimit != nil {
+		in, out := &in.CheckpointRetryLimit, &out.CheckpointRetryLimit
+		*out = new(int32)
+		**out = **in
 	}
 	if in.Containers != nil {
 		in, out := &in.Containers, &out.Containers
