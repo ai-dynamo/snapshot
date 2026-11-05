@@ -16,4 +16,14 @@ const (
 	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
 	CheckpointVolumeName = "checkpoint-storage"
+
+	// MaxCheckpointRetryLimit bounds every way a retry limit is asked for: the
+	// three spec fields and the agent's cluster default. Retries are for
+	// conditions that clear on their own, so a number past this one buys nothing
+	// and holds the node's staging and its agent for every attempt.
+	//
+	// The spec fields enforce it with a kubebuilder Maximum marker, which has to
+	// be a literal. TestCheckpointRetryLimitMarkerMatchesTheConstant keeps the
+	// two from drifting.
+	MaxCheckpointRetryLimit = 10
 )

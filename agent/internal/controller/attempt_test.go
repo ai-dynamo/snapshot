@@ -212,7 +212,7 @@ func TestRunCheckpointRetriesUntilTheBudgetRuns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			content := makeWorkOrder("content-a", "node-a", "a")
 			w := makeNodeController(t, &fakeCheckpointer{}, content)
-			w.config.Checkpoint.RetryLimit = ptr.To(tc.limit)
+			w.config.Checkpoint.DefaultRetryLimit = ptr.To(tc.limit)
 			attempts := 0
 			w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 				attempts++
@@ -245,7 +245,7 @@ func TestRunCheckpointRetriesUntilTheBudgetRuns(t *testing.T) {
 func TestRunCheckpointCountsDumpRepeatsAgainstTheBudget(t *testing.T) {
 	content := makeWorkOrder("content-a", "node-a", "a")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint.RetryLimit = ptr.To(2)
+	w.config.Checkpoint.DefaultRetryLimit = ptr.To(2)
 	attempts := 0
 	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		attempts++
@@ -286,7 +286,7 @@ func TestRunCheckpointDoesNotRetryAnUnrecoverableSource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			content := makeWorkOrder("content-a", "node-a", "a")
 			w := makeNodeController(t, &fakeCheckpointer{}, content)
-			w.config.Checkpoint.RetryLimit = ptr.To(2)
+			w.config.Checkpoint.DefaultRetryLimit = ptr.To(2)
 			attempts := 0
 			w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 				attempts++
@@ -317,7 +317,7 @@ func TestRunCheckpointDoesNotRetryAnUnrecoverableSource(t *testing.T) {
 func TestRunCheckpointLeavesASourceItNeverSuspendedAlone(t *testing.T) {
 	content := makeWorkOrder("content-a", "node-a", "a")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint.RetryLimit = ptr.To(0)
+	w.config.Checkpoint.DefaultRetryLimit = ptr.To(0)
 	signalled := 0
 	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
 		signalled++
@@ -358,7 +358,7 @@ func TestRunCheckpointSharesOneBudgetAcrossAttempts(t *testing.T) {
 
 	content := makeWorkOrder("content-a", "node-a", "a")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint.RetryLimit = ptr.To(2)
+	w.config.Checkpoint.DefaultRetryLimit = ptr.To(2)
 
 	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
 	var offered []int
@@ -390,7 +390,7 @@ func TestRunCheckpointReportsTheFailureThatEndedIt(t *testing.T) {
 
 	content := makeWorkOrder("content-a", "node-a", "a")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint.RetryLimit = ptr.To(1)
+	w.config.Checkpoint.DefaultRetryLimit = ptr.To(1)
 
 	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
 	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
@@ -419,7 +419,7 @@ func TestRunCheckpointDoesNotSpendARetryTheDeadlineCancels(t *testing.T) {
 
 	content := makeWorkOrder("content-a", "node-a", "a")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint.RetryLimit = ptr.To(3)
+	w.config.Checkpoint.DefaultRetryLimit = ptr.To(3)
 	w.config.Checkpoint.TimeoutSeconds = ptr.To(1)
 
 	attempts := 0
@@ -480,7 +480,7 @@ func TestRunCheckpointReportsEveryRepeatAndAttempt(t *testing.T) {
 
 	content := makeWorkOrder("content-a", "node-a", "a")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint.RetryLimit = ptr.To(3)
+	w.config.Checkpoint.DefaultRetryLimit = ptr.To(3)
 
 	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
 	attempts := 0
@@ -508,12 +508,53 @@ func TestRunCheckpointReportsEveryRepeatAndAttempt(t *testing.T) {
 	assert.Contains(t, events[2].Message, "3 of 3 retries used")
 }
 
+// The request's limit rides on the work order, so the agent acts on what was
+// asked for without reading the request — and an explicit 0 is a request for no
+// retry, not the absence of one.
+func TestRunCheckpointHonoursTheRequestedLimit(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	for _, tc := range []struct {
+		name         string
+		clusterLimit int
+		requested    *int32
+		wantAttempts int
+	}{
+		{name: "the request's limit wins over the cluster default", clusterLimit: 0, requested: ptr.To(int32(1)), wantAttempts: 2},
+		{name: "an explicit zero refuses the cluster default", clusterLimit: 5, requested: ptr.To(int32(0)), wantAttempts: 1},
+		{name: "a silent request takes the cluster default", clusterLimit: 1, wantAttempts: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := makeWorkOrder("content-a", "node-a", "a")
+			content.Spec.CheckpointRetryLimit = tc.requested
+			w := makeNodeController(t, &fakeCheckpointer{}, content)
+			w.config.Checkpoint.DefaultRetryLimit = ptr.To(tc.clusterLimit)
+			attempts := 0
+			w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+				attempts++
+				if attempts > 1 {
+					return nil, nil
+				}
+				return nil, executor.SuspendedSourceFailure(retryable, executor.SuspendedSource{})
+			}
+
+			require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+				"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+			assert.Equal(t, tc.wantAttempts, attempts, "number of attempts")
+		})
+	}
+}
+
 // The dump kills the source, so a commit that failed after it has nothing left
 // to capture; another attempt would bury the cause under "no running task".
 func TestRunCheckpointDoesNotRetryAfterTheCommitFailed(t *testing.T) {
 	content := makeWorkOrder("content-a", "node-a", "a")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint.RetryLimit = ptr.To(2)
+	w.config.Checkpoint.DefaultRetryLimit = ptr.To(2)
 	attempts := 0
 	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 		attempts++
@@ -558,7 +599,7 @@ func TestRunCheckpointEndsASourceRevivedForARetryThatDidNotCome(t *testing.T) {
 
 	content := makeWorkOrder("content-a", "node-a", "a")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint.RetryLimit = ptr.To(1)
+	w.config.Checkpoint.DefaultRetryLimit = ptr.To(1)
 	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
 
 	attempts := 0
@@ -593,7 +634,7 @@ func TestRunCheckpointDoesNotRetryAFullStagingDumpWhoseAbortFailed(t *testing.T)
 	staging := t.TempDir()
 	content := makeWorkOrder("content-a", "node-a", "a")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint.RetryLimit = ptr.To(2)
+	w.config.Checkpoint.DefaultRetryLimit = ptr.To(2)
 	w.config.PageBroker.StagingPath = staging
 	w.stagingCapacityFn = func(string) (int64, error) { return 8 << 30, nil }
 	w.minimumImageSizeFn = func(string, []int) (int64, error) { return 1 << 30, nil }

@@ -59,7 +59,10 @@ template into the `PodSnapshot` it creates.
 ## A Checkpoint Fails with `RetriesExhausted`
 
 The checkpoint was retried as often as its retry limit allows and failed every
-time. The limit is `config.checkpoint.retryLimit`.
+time. The limit comes from the request: `spec.checkpointRetryLimit` on a
+`PodSnapshot`, or `spec.podSnapshotTemplate.checkpointRetryLimit` on a
+`SnapshotJob`. When neither sets one, `config.checkpoint.defaultRetryLimit`
+applies.
 
 Only a failure another attempt could have cleared ends under this reason. One
 that settled on its own terms keeps its own reason however many retries ran
@@ -88,7 +91,7 @@ Three different shortages, which need different fixes:
 
 | Reason | What ran out | What to do |
 | --- | --- | --- |
-| `StagingUnavailable` | The node's staging volume was occupied when the checkpoint needed it. An image the size check could not prove too large lands here too, since that check reads a floor rather than the final size. Retried only when `config.checkpoint.retryLimit` allows one, which by default it does not | Take the checkpoint again once staging frees. If it keeps happening, stagger the checkpoints sharing that node, or raise `config.checkpoint.retryLimit` so the agent waits for them. If it keeps happening against an empty volume, treat it as `ImageTooLarge`: the image does not fit after all |
+| `StagingUnavailable` | The node's staging volume was occupied when the checkpoint needed it. An image the size check could not prove too large lands here too, since that check reads a floor rather than the final size. Retried only when the retry limit allows one, which by default it does not | Take the checkpoint again once staging frees. If it keeps happening, stagger the checkpoints sharing that node, or raise the retry limit so the agent waits for them: `spec.checkpointRetryLimit` on the `PodSnapshot` or `SnapshotJob`'s `podSnapshotTemplate`, or `config.checkpoint.defaultRetryLimit` for requests that set none. If it keeps happening against an empty volume, treat it as `ImageTooLarge`: the image does not fit after all |
 | `ImageTooLarge` | The image cannot fit the node's staging volume, however empty it is. The message gives the shortfall in bytes | Raise `pageBroker.staging.sizeLimit`. The chart lowers a cap its writers have no room under, to the smaller of `daemonset.resources.limits.memory` and `pageBroker.resources.limits.memory` less a reserve, so raise both of those with it. See [How the Cap Is Chosen](../operate/configure-storage.md#how-the-cap-is-chosen) |
 | `StoreExhausted` | The destination store is full. No retry on this node frees room there | Free space in the store, or point the checkpoint at one with room |
 
