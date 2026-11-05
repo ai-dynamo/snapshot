@@ -35,14 +35,15 @@ const (
 	// PodGroupReasonPodIPChanged means a restore Pod's IP or admitted container
 	// changed after the operator pinned it.
 	PodGroupReasonPodIPChanged = "PodIPChanged"
-	// PodGroupReasonTargetInUse means the target's restore-group annotation names
-	// another unfinished PodGroupRestore, or that another one has already pinned
-	// the target's UID.
+	// PodGroupReasonTargetInUse means the target is bound, by name and UID, to
+	// another unfinished PodGroupRestore, or that another unfinished one has
+	// already pinned the target's UID.
 	PodGroupReasonTargetInUse = "TargetInUse"
 	// PodGroupReasonTargetPodPending means admission is waiting for a restore
-	// target's Pod: it does not exist yet, is not scheduled to a node, has no
-	// IP address yet, or its destination container has no ID yet. The
-	// condition's message names each target and what it waits for.
+	// target's Pod: it does not exist yet, is not yet bound to the attempt by
+	// name and UID, is not scheduled to a node, has no IP address yet, or its
+	// destination container has no ID yet. The condition's message names each
+	// target and what it waits for.
 	PodGroupReasonTargetPodPending = "TargetPodPending"
 	// PodGroupReasonTargetPodDeleted fails a restore member whose pinned Pod is
 	// gone or was replaced. Like a deleted member PodSnapshot, it may hide the

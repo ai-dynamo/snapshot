@@ -24,11 +24,18 @@ const (
 	// uses the captured container name as the destination.
 	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
 
-	// RestoreGroupAnnotation names the PodGroupRestore, in the Pod's namespace,
-	// that the restore Pod is a target of. A group target carries it instead of
-	// RestoreFromAnnotation and RestoreContainerMapAnnotation, and must carry
-	// the restore startup probe.
+	// RestoreGroupAnnotation marks a restore Pod as a target of the
+	// PodGroupRestore it names, in the Pod's namespace. The owner sets it when
+	// it creates the Pod. On group targets it replaces RestoreFromAnnotation and
+	// RestoreContainerMapAnnotation, and it requires the restore startup probe.
 	RestoreGroupAnnotation = "nvidia.com/restore-group"
+
+	// RestoreGroupUIDAnnotation holds the UID of the PodGroupRestore that
+	// RestoreGroupAnnotation names. The owner sets it once that PodGroupRestore
+	// exists. The exact pair of name and UID is the attempt that may act on the
+	// Pod: admission waits until a target is bound to its own attempt, and every
+	// agent write checks the binding. RestoreGroupBinding reads the pair.
+	RestoreGroupUIDAnnotation = "nvidia.com/restore-group-uid"
 
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
 	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
