@@ -14,7 +14,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -72,6 +72,9 @@ class AgentTimingSummary:
     duration_seconds: float
     phases_seconds: dict[str, float]
     started_to_complete_seconds: float | None
+    # Durations nested under cuda/criu. They split a phase; they are not
+    # additional phases and must not be added to the phase total.
+    nested_seconds: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -722,6 +725,27 @@ def parse_go_duration(value: str) -> float:
     )
 
 
+def _flatten_go_durations(prefix: str, value: object) -> dict[str, float]:
+    """Collects Go duration strings from a nested summary object.
+
+    Non-duration values (page counts, byte totals, growth samples) are skipped.
+    """
+    if not isinstance(value, dict):
+        return {}
+    found: dict[str, float] = {}
+    for key, item in value.items():
+        name = f"{prefix}.{key}"
+        if isinstance(item, dict):
+            found.update(_flatten_go_durations(name, item))
+            continue
+        if isinstance(item, str):
+            try:
+                found[name] = parse_go_duration(item)
+            except ValueError:
+                continue
+    return found
+
+
 def parse_agent_timing_summary(
     logs: str,
     *,
@@ -753,6 +777,9 @@ def parse_agent_timing_summary(
         if not isinstance(phases, dict):
             raise ValueError(f"agent {message!r} payload has no phases object")
         started_to_complete = summary.get("started_to_complete")
+        nested: dict[str, float] = {}
+        for key in ("cuda", "criu"):
+            nested.update(_flatten_go_durations(key, summary.get(key)))
         return AgentTimingSummary(
             completed_at=_parse_rfc3339(timestamp_match.group(0)),
             duration_seconds=parse_go_duration(str(summary["duration"])),
@@ -765,6 +792,7 @@ def parse_agent_timing_summary(
                 if started_to_complete is not None
                 else None
             ),
+            nested_seconds=nested,
         )
     match_text = ", ".join(f"{key}={value!r}" for key, value in matches.items())
     raise ValueError(f"no {message!r} agent timing summary matched {match_text}")
