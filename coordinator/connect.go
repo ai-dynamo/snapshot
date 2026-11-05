@@ -92,7 +92,8 @@ const (
 )
 
 // Connect connects to the coordinator as cfg.Member of the attempt cfg.Attempt,
-// and reads the session's Meta. It waits while the coordinator refuses the
+// and reads the session's Meta. An agent connects once for each member it
+// hosts. It waits while the coordinator refuses the
 // connection, which it does until it holds the session and has checked the
 // token, and reports session.ErrForbidden, together with ctx's error, if ctx
 // is done before it is admitted. Since the coordinator admits a joining member

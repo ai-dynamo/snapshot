@@ -26,8 +26,18 @@ func SnapshotBucket(attempt string) string { return bucketPrefix + attempt + "-s
 // through the agent's per-Pod endpoint.
 func LibraryBucket(attempt string) string { return bucketPrefix + attempt + "-l" }
 
-// The keys of the Snapshot bucket that the session itself uses. Every other key
-// of that bucket starts with a namespace.
+// The keys of the Snapshot bucket that the session itself uses. The Snapshot
+// bucket, SnapshotBucket(attempt), serves Snapshot's components:
+//
+//	meta                     the Meta, written by the coordinator only
+//	ended                    how the session ended, created once
+//	barrier.<name>.<member>  a member's arrival, written by its own connection
+//	left.<member>            a member's departure, written by its own connection
+//	snapshot.<key>           the agents' keys
+//	cuinterpose.<key>        the cuInterpose relays' keys
+//
+// The library bucket, LibraryBucket(attempt), holds library.<key> keys, which
+// any workload library writes through the agent's library endpoint.
 const (
 	// KeyMeta holds the session's Meta, as JSON. Only the coordinator writes it.
 	KeyMeta = "meta"
@@ -131,13 +141,20 @@ type Permissions struct {
 }
 
 // MemberPermissions returns the permissions of a member's connection: both of
-// its attempt's buckets and nothing else. In the Snapshot bucket it may write
-// the snapshot and cuinterpose namespaces, the ended key, and its own arrivals
-// and its own departure, never meta or another member's barrier or left key; in
-// the library bucket it may write anything. Its JetStream API requests are
-// limited to what a client needs to bind a bucket, Get a key, and Watch keys,
-// and the only subscriptions it may make are on its own inbox, where replies
-// and watched entries arrive.
+// its attempt's buckets and nothing else, never another attempt's buckets, the
+// system account, or the API that creates and deletes buckets. In the Snapshot
+// bucket it may write the snapshot and cuinterpose namespaces, the ended key,
+// and its own arrivals and its own departure, never meta or another member's
+// barrier or left key; in the library bucket it may write anything. Its
+// JetStream API requests are limited to what a client needs to bind a bucket,
+// Get a key, and Watch keys, and the only subscriptions it may make are on its
+// own inbox, where replies and watched entries arrive.
+//
+// The permissions do not bound where a consumer the member creates delivers
+// (nats-server#8274), so a member can add messages to another attempt's
+// buckets under its own subjects, which count against that attempt's limits
+// but never change its keys. SNEP-324 lists this with the memory cap every
+// session shares.
 func MemberPermissions(attempt, member string) Permissions {
 	snapshot, library := SnapshotBucket(attempt), LibraryBucket(attempt)
 	publish := make([]string, 0, 16)
