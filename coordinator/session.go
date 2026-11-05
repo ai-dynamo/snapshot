@@ -33,6 +33,9 @@ type Session interface {
 	// the deadline, the epoch, and the value limits.
 	Meta() session.Meta
 
+	// Rank returns this member's rank, its position in Meta's membership.
+	Rank() int
+
 	// Snapshot returns the Store of the agents' keys.
 	Snapshot() Store
 

@@ -357,6 +357,13 @@ func TestConnect(t *testing.T) {
 		assert.Equal(t, session.MaxLibraryValue, meta.MaxLibraryValue)
 	})
 
+	t.Run("knows its member's rank", func(t *testing.T) {
+		ses := h.session(t, 3)
+		for _, rank := range []int{2, 0, 1} {
+			assert.Equal(t, rank, ses.connect(t, rank).Rank(), "member-%d", rank)
+		}
+	})
+
 	t.Run("waits while the coordinator refuses it", func(t *testing.T) {
 		ses := h.session(t, 1)
 		h.auth.refuse.Store(true)

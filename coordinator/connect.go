@@ -266,6 +266,9 @@ func readMeta(ctx context.Context, kv jetstream.KeyValue) (session.Meta, error) 
 	return meta, nil
 }
 
+// Rank implements Session.
+func (s *client) Rank() int { return s.ranks[s.member] }
+
 // Meta implements Session.
 func (s *client) Meta() session.Meta {
 	meta := s.meta
