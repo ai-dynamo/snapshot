@@ -98,7 +98,7 @@ func (s *Server) disconnected(c natsserver.ClientInfo) {
 	}
 	var timer clock.Timer
 	timer = s.cfg.Clock.AfterFunc(s.cfg.Grace, func() {
-		s.expire(a, session.ReasonMemberFailed, func() bool {
+		s.recordEnd(a, []byte(session.ReasonMemberFailed), func() bool {
 			if a.grace[member] != timer {
 				return false
 			}

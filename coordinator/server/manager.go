@@ -111,7 +111,7 @@ type attempt struct {
 	// grace holds the grace timer of each member with no connection, and of a
 	// member whose grace period ran out until the session's end is recorded.
 	grace map[string]clock.Timer
-	// ending is set once an expiry has started recording the session's end.
+	// ending is set once recordEnd has started recording the session's end.
 	ending bool
 	ended  bool
 }
@@ -176,7 +176,7 @@ func (s *Server) Ensure(ctx context.Context, spec Spec) error {
 	if !a.ended {
 		var timer clock.Timer
 		timer = s.cfg.Clock.AfterFunc(remaining, func() {
-			s.expire(a, session.ReasonDeadlineExceeded, func() bool { return a.deadline == timer })
+			s.recordEnd(a, []byte(session.ReasonDeadlineExceeded), func() bool { return a.deadline == timer })
 		})
 		a.deadline = timer
 	}
@@ -335,7 +335,7 @@ func (s *Server) track(a *attempt, w jetstream.KeyWatcher, left map[string]bool)
 		}
 		left[member] = true
 		if len(left) == len(a.members) {
-			s.closeSession(a.life, a)
+			s.recordEnd(a, nil, always)
 		}
 	}
 	return false
@@ -440,13 +440,6 @@ func (s *Server) drain(w jetstream.KeyWatcher) {
 	}
 }
 
-// closeSession closes a session every member has left.
-func (s *Server) closeSession(ctx context.Context, a *attempt) {
-	if err := s.endWith(ctx, a, nil); err != nil && !ended(err) && ctx.Err() == nil {
-		s.log.Error(err, "Closing a session every member left failed", "attempt", a.spec.UID)
-	}
-}
-
 // Remove discards the session of an attempt the host is done with: it
 // fails the session first with session.ReasonCancelled if it is still open,
 // recording the end when the memory cap allows, then deletes both buckets and
@@ -510,36 +503,40 @@ func (s *Server) Fail(ctx context.Context, uid types.UID, reason string) error {
 	return err
 }
 
-// tryTimeout bounds each try to fail a session when its deadline or a
-// member's grace period runs out, and each try to watch a session again.
+// tryTimeout bounds each try to record a session's end, and each try to watch
+// a session again.
 const tryTimeout = 5 * time.Second
 
-// The wait between tries to record the end of a session whose deadline or
-// grace period ran out, or to watch a session again: it starts at
-// firstEndRetry and doubles up to maxEndRetry.
+// The wait between tries to record a session's end, or to watch a session
+// again: it starts at firstEndRetry and doubles up to maxEndRetry.
 const (
 	firstEndRetry = 100 * time.Millisecond
 	maxEndRetry   = time.Second
 )
 
-// expire fails a session when its deadline or a member's grace period runs
-// out. A timer that was stopped or replaced may fire all the same, so armed,
-// which expire calls under Server.mu, reports whether the timer that fired is
-// still the one armed. A session that has ended is left alone, and so is every
-// session once Shutdown has begun, which records its own end and waits for an
-// expiry under way.
+// always arms recordEnd whatever calls it: closing a session every member has
+// left.
+func always() bool { return true }
+
+// recordEnd ends a session with value, which becomes its ended key: a reason,
+// such as when the deadline or a member's grace period runs out, or nothing,
+// to close the session once every member has left. A timer that was stopped
+// or replaced may fire all the same, so armed, which recordEnd calls under
+// Server.mu, reports whether the timer that fired is still the one armed. A
+// session that has ended is left alone, and so is every session once Shutdown
+// has begun, which records its own end and waits for an end being recorded.
 //
 // Recording the end can fail, such as at the memory cap, which no write is
 // exempt from and nothing reserves room under. A session that has to end must
-// not stay open once memory frees, so expire tries again, waiting from
-// firstEndRetry up to maxEndRetry, until the end is recorded, by expire or
-// anything else, or the session's life ends because it is removed or the
-// coordinator shuts down. It never holds Server.control. The timer that fired
-// stays armed meanwhile, so a member that reconnects after its grace period
-// ran out does not keep the session, and one that disconnects again starts no
-// second grace period. One expiry at a time records a session's end: the first
-// reason recorded wins anyway.
-func (s *Server) expire(a *attempt, reason string, armed func() bool) {
+// not stay open once memory frees, so recordEnd keeps trying in the
+// background, waiting from firstEndRetry up to maxEndRetry, until the end is
+// recorded, by recordEnd or anything else, or the session's life ends because
+// it is removed or the coordinator shuts down. It never holds Server.control.
+// The timer that fired stays armed meanwhile, so a member that reconnects
+// after its grace period ran out does not keep the session, and one that
+// disconnects again starts no second grace period. One end at a time is
+// recorded, the first one asked for: the first one recorded wins anyway.
+func (s *Server) recordEnd(a *attempt, value []byte, armed func() bool) {
 	s.mu.Lock()
 	run := !a.ended && !a.ending && !s.shutdown && armed()
 	if run {
@@ -550,24 +547,30 @@ func (s *Server) expire(a *attempt, reason string, armed func() bool) {
 	if !run {
 		return
 	}
-	defer s.wg.Done()
-	for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
-		ctx, cancel := context.WithTimeout(a.life, tryTimeout)
-		err := s.endWith(ctx, a, []byte(reason))
-		cancel()
-		if err == nil || ended(err) || a.life.Err() != nil {
-			return
-		}
-		if wait == firstEndRetry {
-			s.log.Error(err, "Failing a session failed; retrying until its end is recorded", "attempt", a.spec.UID,
-				"reason", reason)
-		}
-		select {
-		case <-time.After(wait):
-		case <-a.life.Done():
-			return
-		}
+	outcome := "closed"
+	if len(value) > 0 {
+		outcome = string(value)
 	}
+	go func() {
+		defer s.wg.Done()
+		for wait := firstEndRetry; ; wait = min(2*wait, maxEndRetry) {
+			ctx, cancel := context.WithTimeout(a.life, tryTimeout)
+			err := s.endWith(ctx, a, value)
+			cancel()
+			if err == nil || ended(err) || a.life.Err() != nil {
+				return
+			}
+			if wait == firstEndRetry {
+				s.log.Error(err, "Ending a session failed; retrying until its end is recorded", "attempt", a.spec.UID,
+					"outcome", outcome)
+			}
+			select {
+			case <-time.After(wait):
+			case <-a.life.Done():
+				return
+			}
+		}
+	}()
 }
 
 // endWith ends a session with the value of its ended key: a reason, or nothing

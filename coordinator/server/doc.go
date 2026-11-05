@@ -53,9 +53,10 @@
 // coordinator when every member has left, when the deadline passes, when a
 // member's grace period runs out, when it removes a session still open, and
 // when it shuts down; or by a member that finds the coordinator lost the
-// session it joined. Once the deadline passes or a grace period runs out, the
-// coordinator keeps trying to record the end, which the memory cap may refuse,
-// until it is recorded, the session is removed, or the coordinator shuts down.
+// session it joined. Once every member has left, the deadline passes, or a
+// grace period runs out, the coordinator keeps trying to record the end, which
+// the memory cap may refuse, until it is recorded, the session is removed, or
+// the coordinator shuts down.
 //
 // # The grace period
 //

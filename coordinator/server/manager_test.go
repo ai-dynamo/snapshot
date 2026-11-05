@@ -162,7 +162,7 @@ func TestEndAtTheMemoryCap(t *testing.T) {
 		_, ok := h.ended(spec)
 		require.False(t, ok, "the cap must refuse the end")
 		require.NoError(t, h.srv.Remove(ctx, filler.UID))
-		endsSoon(t, m, session.ReasonDeadlineExceeded)
+		endsSoon(t, m, &session.AbortError{Reason: session.ReasonDeadlineExceeded})
 		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
 			5*time.Millisecond)
 		assert.Equal(t, "failed "+string(spec.UID)+" DeadlineExceeded", h.observer.of(spec.UID)[1])
@@ -182,8 +182,32 @@ func TestEndAtTheMemoryCap(t *testing.T) {
 		require.False(t, ok, "the cap must refuse the end")
 		back := h.connect(spec, 0)
 		require.NoError(t, h.srv.Remove(within(t), filler.UID))
-		endsSoon(t, members[1], session.ReasonMemberFailed)
-		endsSoon(t, back, session.ReasonMemberFailed)
+		endsSoon(t, members[1], &session.AbortError{Reason: session.ReasonMemberFailed})
+		endsSoon(t, back, &session.AbortError{Reason: session.ReasonMemberFailed})
+	})
+
+	t.Run("a session every member left at the cap closes once memory frees", func(t *testing.T) {
+		h := newHarness(t, capped)
+		spec := h.ensure(1)
+		m := h.connect(spec, 0)
+		filler := h.spec(1)
+		filler.Deadline = spec.Deadline.Add(time.Hour)
+		require.NoError(t, h.srv.Ensure(within(t), filler))
+		// The member's departure takes the session past the cap, which then
+		// refuses the coordinator's write that closes it.
+		h.fillTo(h.connect(filler, 0), h.srv.cfg.MaxBytes)
+		require.NoError(t, m.leave(within(t)))
+		h.awaitRetry(spec)
+		_, ok := h.ended(spec)
+		require.False(t, ok, "the cap must refuse the end")
+		// The deadline that passes meanwhile does not fail a session that is
+		// closing.
+		h.clock.Step(time.Hour)
+		require.NoError(t, h.srv.Remove(within(t), filler.UID))
+		endsSoon(t, m, session.ErrClosed)
+		require.Eventually(t, func() bool { return len(h.observer.of(spec.UID)) == 2 }, 5*time.Second,
+			5*time.Millisecond)
+		assert.Equal(t, "closed "+string(spec.UID), h.observer.of(spec.UID)[1])
 	})
 
 	t.Run("removing the session stops the retries", func(t *testing.T) {
@@ -219,6 +243,27 @@ func (h *harness) fillCap(m *member) {
 			err = m.insert(ctx, session.NamespaceSnapshot, fmt.Sprintf("%c%d", 'a'+pass, i), make([]byte, size))
 		}
 		requireCode(h.t, err, codeInsufficientResources)
+	}
+}
+
+// fillTo writes through m until the memory every session holds together is
+// used bytes. The cap refuses a write only once that memory is past it, so the
+// next write fits whatever its size, and no other does. Each write takes its
+// subject, its headers, which a Put has none of, and its value, and 16 bytes
+// more.
+func (h *harness) fillTo(m *member, used int64) {
+	h.t.Helper()
+	ctx := within(h.t)
+	for i := 0; ; i++ {
+		key := fmt.Sprintf("snapshot.f%d", i)
+		room := used - int64(h.srv.account.JetStreamUsage().Memory)
+		size := min(room-int64(len("$KV."+m.snapshot.Bucket()+"."+key))-16, int64(h.srv.cfg.MaxValue))
+		require.GreaterOrEqual(h.t, size, int64(0), "the memory in use must stop short of %d bytes", used)
+		_, err := m.snapshot.Put(ctx, key, make([]byte, size))
+		require.NoError(h.t, err)
+		if int64(h.srv.account.JetStreamUsage().Memory) == used {
+			return
+		}
 	}
 }
 
@@ -301,15 +346,15 @@ func TestWatchStopsOnItsOwn(t *testing.T) {
 	}
 }
 
-// endsSoon checks that m sees its session fail with reason within twice the
+// endsSoon checks that m sees its session end as want says within twice the
 // longest wait between tries to record the end.
-func endsSoon(t *testing.T, m *member, reason string) {
+func endsSoon(t *testing.T, m *member, want error) {
 	t.Helper()
 	select {
 	case <-m.done:
-		require.ErrorIs(t, m.err, &session.AbortError{Reason: reason})
+		require.ErrorIs(t, m.err, want)
 	case <-time.After(2 * maxEndRetry):
-		t.Fatalf("the session did not fail with %s within %v", reason, 2*maxEndRetry)
+		t.Fatalf("the session did not end with %v within %v", want, 2*maxEndRetry)
 	}
 }
 
