@@ -104,39 +104,16 @@ Reader tuning does not change SDK upload limits.
 
 ## Restore batching
 
-`restoreBatchBytes` bounds each submission and the total bytes admitted to the
-shared native session. A file larger than the budget runs alone; files are not
-split at batch boundaries. Each restore retains up to `restorePreparationSlots`
-batches, including preparation in progress and completed work awaiting cleanup.
-The default of three prepares up to two batches ahead while earlier reads run.
-One slot waits for each batch to complete before preparing the next. Native
-admission uses the shared byte and submission limits. Larger batches can reduce submission
-barriers and let small files share workers with larger files, but prepare more
-staging data before the first download.
+`restoreBatchBytes` controls the target download batch size (default: 10 GB).
+Files larger than this value are downloaded whole.
 
-The retained batches can exceed `restorePreparationSlots * restoreBatchBytes`
-when files are oversized.
-This per-restore mapping bound does not cap total staging memory: unmapping
-leaves the files' backing storage allocated, and the staging volume must hold
-the entire snapshot. Concurrent restores retain the existing transaction and
-staging limits. Preparation ahead can change peak memory and contention.
-Worker count and per-client inflight windows still control download concurrency.
-With eight clients, the default 512 MiB window per client allows 4 GiB of inflight
-data in aggregate; this is not a bound on total process memory.
-Changing either setting requires a PageBroker restart. More preparation slots
-can increase memory use and contention; they do not increase native admission
-limits or guarantee faster restores.
+`restorePreparationSlots` controls how many batches each restore can prepare
+ahead, including the active batch (default: 3). Higher values may improve
+throughput but can increase memory use and contention.
 
-Set it through `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` in
-Helm values, or the tuning JSON shown above. For example, `200000000000` is
-200 decimal GB. Keep reader settings fixed when comparing batch budgets.
-
-Set `restorePreparationSlots` through
-`pageBroker.transferEngine.modelStreamer.restorePreparationSlots` in Helm
-values, or the tuning JSON shown above. It is fixed for the coordinator's
-lifetime and preserved when a failed coordinator is replaced.
-Start with three; compare other values with the same batch budget and reader
-settings before changing it.
+Configure both under `pageBroker.transferEngine.modelStreamer` in Helm values
+or through the tuning JSON above. Changes require a PageBroker restart.
+The staging volume must hold the entire snapshot regardless of these settings.
 
 ## Native behavior
 
