@@ -62,8 +62,9 @@ spec:
               PodGroupSnapshot to restore, and the Pod that receives each of its members.
               The API server checks its shape. The operator checks the rest before it
               admits the restore: that the targets match the snapshot's members one to
-              one and name distinct Pods, that each target Pod exists, and that each
-              target's startup probe allows for what remains of the deadline.
+              one and name distinct Pods, and that each target Pod exists and is bound to
+              this PodGroupRestore. The node agents then check that each target's startup
+              probe allows for what remains of the deadline.
             properties:
               deadlineSeconds:
                 description: |-

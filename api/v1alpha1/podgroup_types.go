@@ -39,6 +39,16 @@ const (
 	// another unfinished PodGroupRestore, or that another one has already pinned
 	// the target's UID.
 	PodGroupReasonTargetInUse = "TargetInUse"
+	// PodGroupReasonTargetPodPending means admission is waiting for a restore
+	// target's Pod: it does not exist yet, is not scheduled to a node, has no
+	// IP address yet, or its destination container has no ID yet. The
+	// condition's message names each target and what it waits for.
+	PodGroupReasonTargetPodPending = "TargetPodPending"
+	// PodGroupReasonTargetPodDeleted fails a restore member whose pinned Pod is
+	// gone or was replaced. Like a deleted member PodSnapshot, it may hide the
+	// member's start, since the Pod's nvidia.com/RestoreStarted condition went
+	// with it.
+	PodGroupReasonTargetPodDeleted = "TargetPodDeleted"
 	// PodGroupReasonArtifactUnavailable means a member's snapshot cannot be
 	// restored.
 	PodGroupReasonArtifactUnavailable = "ArtifactUnavailable"

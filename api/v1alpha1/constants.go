@@ -33,8 +33,8 @@ const (
 	// compatible version.
 	PodGroupProtocolsAnnotation = "nvidia.com/snapshot-podgroup-protocols"
 
-	// PodGroupSnapshotInUseFinalizer keeps a PodGroupSnapshot, and the
-	// snapshots of its members, while any unfinished PodGroupRestore references
-	// its UID.
-	PodGroupSnapshotInUseFinalizer = "nvidia.com/snapshot-podgroup-in-use"
+	// PodGroupInUseFinalizer keeps a group resource, of either kind, while its
+	// own attempt runs, and a PodGroupSnapshot, with the snapshots of its
+	// members, also while any unfinished PodGroupRestore references its UID.
+	PodGroupInUseFinalizer = "nvidia.com/snapshot-podgroup-in-use"
 )
