@@ -44,6 +44,11 @@ commit-level history for each release is on its
   node agent together. See
   [Lifecycle hooks](docs/reference/workload-contract.md#lifecycle-hooks).
 
+- S3 restore tuning accepts
+  `pageBroker.transferEngine.modelStreamer.restoreBatchBytes` to control batch
+  and shared admission bytes. The default remains 10 GB; restart PageBroker
+  after changing it.
+
 - `SnapshotJob.spec.nonTargetArtifacts` lets callers declare shared-PVC writers
   and opt into cleanup after failure; omission or `Retain` preserves output.
   CRD change: deploy the matching CRD and operator together.
@@ -87,6 +92,16 @@ commit-level history for each release is on its
   a **checkpoint** (the verb) and what it writes is a **snapshot** (the noun).
   No condition type, reason or label changed, so nothing that matches on those
   strings needs updating; only the two values above were renamed.
+- S3 restores prepare up to two batches ahead of downloads by default. Configure
+  `pageBroker.transferEngine.modelStreamer.restorePreparationSlots` in Helm
+  values, or `restorePreparationSlots` in the tuning JSON (1–20, default 3),
+  to bound retained batches per restore. Restart PageBroker after changing it.
+  Shared native admission limits remain unchanged; oversized files run alone.
+- PageBroker defaults to a 512 MiB S3 read window per client, increased from
+  128 MiB. Explicit `s3Reader.maxInflightMiB` and
+  `RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB` overrides still take precedence.
+  See [Model Streamer configuration](agent/pagebroker/MODEL_STREAMER.md).
+
 - Checkpoint and restore failure messages open with the step they came from,
   as `while <step>: <cause>`, on the pod's `nvidia.com/Restored` condition, the
   `PodSnapshotContent` `Failed` condition, the restore events and the agent
