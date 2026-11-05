@@ -37,7 +37,8 @@ type Config struct {
 	// defaults to each URL's host.
 	ServerName string
 
-	// Attempt is the UID of the set resource, which identifies the attempt.
+	// Attempt is the UID of the group resource, a PodGroupSnapshot or a
+	// PodGroupRestore, which identifies the attempt.
 	Attempt string
 
 	// Member is the member the connection acts for.

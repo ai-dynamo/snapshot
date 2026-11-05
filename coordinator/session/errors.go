@@ -74,7 +74,7 @@ func (e *AbortError) Is(target error) bool {
 // The reasons a session fails with besides those a member supplies to Fail:
 // the coordinator's, and the one that replaces an ended key that holds no
 // reason. They match the condition
-// reasons the operator reports on the set resource.
+// reasons the operator reports on the group resource.
 const (
 	// ReasonDeadlineExceeded is the reason the coordinator fails a session
 	// with when its deadline passes.
@@ -89,7 +89,7 @@ const (
 	ReasonCoordinatorLost = "CoordinatorLost"
 
 	// ReasonCancelled is the reason the coordinator fails a session still open
-	// when it removes it, which means the set resource was deleted.
+	// when it removes it, which means the group resource was deleted.
 	ReasonCancelled = "Cancelled"
 
 	// ReasonInvalid is the reason EndedError reports for a session whose ended

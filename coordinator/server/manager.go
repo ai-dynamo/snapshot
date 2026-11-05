@@ -24,10 +24,11 @@ import (
 // errShutdown reports a call after Shutdown.
 var errShutdown = errors.New("the coordinator has shut down")
 
-// Spec is the fixed membership of one attempt, read from its set resource. A
+// Spec is the fixed membership of one attempt, read from its group resource. A
 // session never changes it.
 type Spec struct {
-	// UID is the set resource's UID, which identifies the attempt.
+	// UID is the group resource's UID, a PodGroupSnapshot's or a
+	// PodGroupRestore's, which identifies the attempt.
 	UID types.UID
 
 	// Members is the whole membership. It must name at least one member, with
@@ -120,7 +121,7 @@ func (a *attempt) has(member string) bool {
 // failed with session.ReasonDeadlineExceeded, so a member that connects learns
 // why at once.
 //
-// The host ensures an attempt only while its set resource is unfinished.
+// The host ensures an attempt only while its group resource is unfinished.
 // It never ensures one whose resource is final, which would open a session for
 // an attempt that is over, and so never one it has removed either, since a UID
 // names one attempt. Nothing here enforces that; it is the host's half of
@@ -447,10 +448,10 @@ func (s *Server) drain(w jetstream.KeyWatcher) {
 // recording the end when the memory cap allows, then deletes both buckets and
 // forgets the session. A member that has not received the end by then learns
 // from finding its session gone, with session.ErrCoordinatorLost. The rule is
-// to remove a session once its set resource is deleted, or once the resource
+// to remove a session once its group resource is deleted, or once the resource
 // is final and the session has ended or its deadline has passed.
 //
-// A final state alone is not enough. A PodSetRestore is final once every
+// A final state alone is not enough. A PodGroupRestore is final once every
 // member is released, yet its session stays open until the members leave,
 // because NCCL may still be rebuilding its communicators through it, and
 // removing it then would abort that. The rule never leaves a session behind,

@@ -185,8 +185,8 @@ type Member struct {
 	// ID identifies the member. It is a name, as ValidateName defines.
 	ID string `json:"id"`
 
-	// Rank is the member's position in the set. The ranks of an attempt are a
-	// permutation of 0 to len(members)-1.
+	// Rank is the member's position among the attempt's members. The ranks of
+	// an attempt are a permutation of 0 to len(members)-1.
 	Rank int `json:"rank"`
 }
 
