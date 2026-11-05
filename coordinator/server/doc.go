@@ -48,8 +48,9 @@
 //
 // The host drives sessions, level-triggered: Ensure while an attempt's
 // set resource is unfinished, and Remove once it is deleted, or once it is
-// final and its session has ended. A session ends exactly once, through the
-// ended key, which is only ever created: by a member's Fail; by the
+// final and its session has ended or its deadline has passed. A session ends
+// exactly once, through the ended key, which is only ever created: by a
+// member's Fail; by the
 // coordinator when every member has left, when the deadline passes, when a
 // member's grace period runs out, when it removes a session still open, and
 // when it shuts down; or by a member that finds the coordinator lost the

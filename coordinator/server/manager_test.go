@@ -141,10 +141,12 @@ func TestDeadline(t *testing.T) {
 	assert.Equal(t, "failed "+string(spec.UID)+" DeadlineExceeded", h.observer.of(spec.UID)[1])
 }
 
-// TestEndAtTheMemoryCap covers a session whose deadline or grace period runs
-// out while the memory cap refuses the write that records its end: the
-// coordinator keeps trying, so the session fails once memory frees, and stops
-// once the session is removed or the coordinator shuts down.
+// TestEndAtTheMemoryCap covers a session that every member left, or whose
+// deadline or grace period runs out, while the memory cap refuses the write
+// that records its end: the coordinator keeps trying, so the session ends once
+// memory frees, and stops once the session is removed or the coordinator shuts
+// down. A session whose own keys fill the cap never ends, and the host removes
+// it once its deadline has passed, which frees the cap.
 func TestEndAtTheMemoryCap(t *testing.T) {
 	capped := func(cfg *Config) { cfg.MaxBytes, cfg.MaxValue = 2<<20, 64<<10 }
 
@@ -210,14 +212,20 @@ func TestEndAtTheMemoryCap(t *testing.T) {
 		assert.Equal(t, "closed "+string(spec.UID), h.observer.of(spec.UID)[1])
 	})
 
-	t.Run("removing the session stops the retries", func(t *testing.T) {
+	t.Run("a session whose own keys fill the cap is removed past its deadline, which frees the cap", func(t *testing.T) {
 		h := newHarness(t, capped)
-		spec := h.ensure(1)
+		ctx := within(t)
+		spec, other := h.ensure(1), h.spec(1)
+		other.Deadline = spec.Deadline.Add(time.Hour)
+		require.NoError(t, h.srv.Ensure(ctx, other))
+		o := h.connect(other, 0)
 		h.fillCap(h.connect(spec, 0))
 		h.clock.Step(time.Hour)
 		h.awaitRetry(spec)
-		require.NoError(t, h.srv.Remove(within(t), spec.UID))
-		// Shutdown waits for every expiry under way.
+		requireCode(t, o.insert(ctx, session.NamespaceSnapshot, "k", nil), codeInsufficientResources)
+		require.NoError(t, h.srv.Remove(ctx, spec.UID))
+		require.NoError(t, o.insert(ctx, session.NamespaceSnapshot, "k", nil), "removing the session frees the cap")
+		// Removing the session stops the retries, which Shutdown waits for.
 		require.NoError(t, returns(t, "Shutdown", func() error { return h.srv.Shutdown(within(t)) }))
 	})
 

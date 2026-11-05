@@ -446,13 +446,15 @@ func (s *Server) drain(w jetstream.KeyWatcher) {
 // forgets the session. A member that has not received the end by then learns
 // from finding its session gone, with session.ErrCoordinatorLost. The rule is
 // to remove a session once its set resource is deleted, or once the resource
-// is final and the session has ended.
+// is final and the session has ended or its deadline has passed.
 //
 // A final state alone is not enough. A PodSetRestore is final once every
 // member is released, yet its session stays open until the members leave,
 // because NCCL may still be rebuilding its communicators through it, and
-// removing it then would abort that. The rule never leaves a session behind: a
-// session whose agents never come back ends at its deadline.
+// removing it then would abort that. The rule never leaves a session behind,
+// even one whose end cannot be recorded: a session whose own keys fill the
+// memory cap leaves no room for its ended key, and is removed once its
+// deadline has passed.
 //
 // A session that cannot be failed first, such as when the memory cap leaves no
 // room for the ended key, is removed all the same, since removing it frees what
