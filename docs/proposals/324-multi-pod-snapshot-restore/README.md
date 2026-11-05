@@ -210,7 +210,7 @@ Redis-compatible server.
 | CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
 | At capture, CRIU's network lock covers a member's IP traffic only from the moment CRIU freezes it, and never covers RDMA, shared volumes, or external services, while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
 | The coordinator is a single point of failure for attempts in flight, because sessions live only in its memory. | Failure is fail-stop and reported as `CoordinatorLost`, a standby replica serves new attempts, and a broken connection that reconnects does not fail an attempt; every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
-| Sessions share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts fail until its own attempt ends at its deadline. A compromised agent can also add messages to another attempt's buckets, which count against that attempt's limits, because JetStream does not bound a consumer's deliveries by its creator's permissions ([nats-server#8274](https://github.com/nats-io/nats-server/issues/8274)). | Sessions stay isolated otherwise: no client can read another session or change its keys, since a delivered message keeps its original subject, libraries are bounded per session, and the cap protects the coordinator itself. A byte limit per session would reserve that memory whether a session uses it or not, so alpha shares it, and beta revisits both limitations together, for example with one NATS account per attempt, once cuInterpose's largest records are measured. |
+| Sessions share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts fail until its own attempt ends at its deadline. A compromised agent can also add messages to another attempt's buckets, which count against that attempt's limits, because JetStream does not bound a consumer's deliveries by its creator's permissions ([nats-server#8274](https://github.com/nats-io/nats-server/issues/8274)). | Sessions stay isolated otherwise: no client can read another session or change its keys, since a delivered message keeps its original subject, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A byte limit per session would reserve that memory whether a session uses it or not, so alpha shares it, and beta revisits both limitations together, for example with one NATS account per attempt, once cuInterpose's largest records are measured. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
 | Importing GPU memory shared from another node after a native CUDA restore depends on a driver fix, and cuInterpose currently infers the kind of an imported FABRIC handle from its opaque contents. | Cross-node sharing in alpha requires a driver with the fix, and a public query for the handle kind is a beta prerequisite. |
 | CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, the application calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. |
@@ -275,9 +275,10 @@ group resources through a read-only watch and creates the session of every
 unfinished attempt, so sessions need no creation API and the resource remains
 the single source of truth; when the attempt has ended and its resource is final
 or deleted, the coordinator removes the session and all of its keys. Once a
-resource's deletion has started, its session never completes the `admitted`
-barrier, so a deleted attempt either committed before its deletion or never
-commits.
+resource's deletion has started, the coordinator fails its session with
+`Cancelled` unless every member has already arrived at the `admitted` barrier.
+Members decide on their own that a barrier is complete, so a member that saw it
+complete just before can still start, which its `startedAt` records.
 
 A session is two key-value buckets in the coordinator's embedded NATS server,
 both held in memory. One serves Snapshot's own components, the agents and
@@ -886,7 +887,7 @@ released members are unaffected.
 
 | Bound | Value | Enforced by |
 | --- | --- | --- |
-| Attempt deadline | `spec.deadlineSeconds` from creation | The coordinator and the operator, with reason `DeadlineExceeded` |
+| Attempt deadline | `spec.deadlineSeconds` from creation, at most a day | The coordinator and the operator, with reason `DeadlineExceeded` |
 | Phase timeout | The operation's own timeout plus a margin, never beyond the attempt deadline | Each barrier and each cuInterpose round |
 | Startup-probe budget | Each restore Pod's remaining probe time must cover the remaining deadline | Restore admission, with reason `GateBudgetTooShort` |
 | Post-release rendezvous | NCCL Checkpoint's own timeout, 300 seconds by default | Only libraries that restore after release |
@@ -1132,8 +1133,8 @@ typical workload a member's records stay well under a MiB, far below the 32 MiB
 cap on Snapshot's values, and they are gathered only to the leader; the handle table
 grows by 128 bytes per recreated handle, one old and one new, and NCCL
 identifiers take 128 bytes per communicator.
-Pushed waits and per-node coalescing keep library traffic to about one upstream
-request per key per node, which comfortably supports at least 100
+One watch of the library bucket per node, which fills a per-node cache, keeps
+library traffic to one delivery per key per node, which comfortably supports at least 100
 concurrent library clients per session with per-operation latency well under 100
 milliseconds. Because sessions are independent, one coordinator replica serves
 many concurrent attempts and can later be sharded by attempt; alpha qualifies
@@ -1462,8 +1463,10 @@ type PodGroupSnapshotMember struct {
 // compares 256 Pod names exceeds the API server's cost budget.
 // +kubebuilder:validation:XValidation:rule="self.members.all(m, self.members.exists_one(n, n.id == m.id))",message="member IDs must be unique"
 type PodGroupSnapshotSpec struct {
-	// DeadlineSeconds bounds the capture, counted from creation.
+	// DeadlineSeconds bounds the capture, counted from creation, to at most
+	// a day.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=86400
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
 	// Members in rank order: list order is the rank. The list is atomic, so
 	// CEL compares it in order and the spec's immutability rule also refuses
@@ -1516,8 +1519,10 @@ type PodGroupSnapshotMemberStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=1024
 	Reason string `json:"reason,omitempty"`
+	// Message is at most 1024 characters, so the messages of 256 members fit
+	// in one object; the group's conditions hold longer explanations.
 	// +optional
-	// +kubebuilder:validation:MaxLength=32768
+	// +kubebuilder:validation:MaxLength=1024
 	Message string `json:"message,omitempty"`
 }
 
@@ -1595,9 +1600,11 @@ type PodGroupRestoreTarget struct {
 // as for members.
 type PodGroupRestoreSpec struct {
 	SnapshotRef ObjectIdentity `json:"snapshotRef"`
-	// DeadlineSeconds bounds the restore, counted from creation. Admission
-	// refuses targets whose startup probe cannot cover what remains of it.
+	// DeadlineSeconds bounds the restore, counted from creation, to at most
+	// a day. Admission refuses targets whose startup probe cannot cover what
+	// remains of it.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=86400
 	DeadlineSeconds int64 `json:"deadlineSeconds"`
 	// Targets are keyed by ID and their order carries no meaning: each takes
 	// the rank of the snapshot member with the same ID.
@@ -1658,8 +1665,10 @@ type PodGroupRestoreMemberStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=1024
 	Reason string `json:"reason,omitempty"`
+	// Message is at most 1024 characters, so the messages of 256 members fit
+	// in one object; the group's conditions hold longer explanations.
 	// +optional
-	// +kubebuilder:validation:MaxLength=32768
+	// +kubebuilder:validation:MaxLength=1024
 	Message string `json:"message,omitempty"`
 }
 
