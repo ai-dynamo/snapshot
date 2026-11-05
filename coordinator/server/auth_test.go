@@ -110,6 +110,29 @@ func TestAuthentication(t *testing.T) {
 		require.ErrorIs(t, err, nats.ErrAuthorization)
 	})
 
+	t.Run("logs the Authorizer's refusals at Info only for a member of a session", func(t *testing.T) {
+		h := h.sub(t)
+		held, unheld := h.ensure(1), h.spec(1)
+		for _, spec := range []Spec{held, unheld} {
+			_, err := h.dial(spec, spec.Members[0].ID, "stolen", 1)
+			require.ErrorIs(t, err, nats.ErrAuthorization)
+		}
+		const refused = `"msg"="Refused a member the Authorizer refused"`
+		h.awaitLog(held, `"level"=0 `+refused, time.Second)
+		h.awaitLog(unheld, `"level"=1 `+refused, time.Second)
+	})
+
+	t.Run("refuses a client no session could admit without asking the Authorizer", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.ensure(1)
+		asked := h.auth.calls.Load()
+		_, err := h.dial(spec, "stranger", agentToken, 1)
+		require.ErrorIs(t, err, nats.ErrAuthorization, "a client that is not a member")
+		_, err = h.dial(h.spec(1), "member-0", agentToken, 0)
+		require.ErrorIs(t, err, nats.ErrAuthorization, "a client joining an attempt with no session")
+		assert.Equal(t, asked, h.auth.calls.Load(), "the Authorizer must not be asked")
+	})
+
 	t.Run("refuses a client that is not a member", func(t *testing.T) {
 		h := h.sub(t)
 		_, err := h.dial(h.ensure(1), "stranger", agentToken, 0)
