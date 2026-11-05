@@ -39,3 +39,16 @@ func TestWithFullDiskErrno(t *testing.T) {
 		})
 	}
 }
+
+// CRIU packs its version into one integer, and a bug report quoting "40100" is
+// no more use than one quoting nothing.
+func TestFormatCriuVersion(t *testing.T) {
+	for encoded, want := range map[int]string{
+		40000:  "4.0.0",
+		40100:  "4.1.0",
+		301502: "30.15.2",
+		31207:  "3.12.7",
+	} {
+		assert.Equal(t, want, formatCriuVersion(encoded))
+	}
+}
