@@ -68,6 +68,9 @@ jobs:
         working-directory: operator
         run: go test -tags snapshot_e2e ./...
       - run: make test-integration
+      # Match the oldest Kubernetes minor in e2e-cpu.yaml (k3s 1.32.13).
+      - name: Test CRD admission on Kubernetes 1.32
+        run: make test-integration ENVTEST_K8S_VERSION=1.32.0
 
   build:
     runs-on: ubuntu-24.04
