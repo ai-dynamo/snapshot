@@ -34,6 +34,7 @@ import (
 // +kubebuilder:rbac:groups=nvidia.com,resources=podgroupsnapshots/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=create;get;list;watch
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=podgrouprestores,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
@@ -59,6 +60,11 @@ type PodGroupSnapshotReconciler struct {
 	AgentNamespace string
 	AgentSelector  labels.Selector
 }
+
+// podGroupRestoreSnapshotUIDField indexes PodGroupRestores by the UID of the
+// PodGroupSnapshot they restore, which holds its finalizer while any of them
+// is unfinished.
+const podGroupRestoreSnapshotUIDField = "spec.snapshotRef.uid"
 
 // Reconcile is a thin sequence: observe the members and, while no member work
 // exists, run admission; derive the status; record it; then act on it, by
@@ -91,7 +97,7 @@ func (r *PodGroupSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if deleting {
-		if podGroupSnapshotReleasable(&group.Status) {
+		if podGroupSnapshotReleasable(observed, &group.Status) {
 			// Garbage collection then deletes the members' PodSnapshots.
 			return ctrl.Result{}, removePodGroupFinalizer(ctx, r.Client, group)
 		}
@@ -102,7 +108,8 @@ func (r *PodGroupSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Req
 }
 
 // observe reads each member's PodSnapshot, its bound content and its source
-// Pod's node, then runs admission if no member work exists yet. Once any
+// Pod's node, and, for a group being deleted, the PodGroupRestores that
+// reference it, then runs admission if no member work exists yet. Once any
 // member's PodSnapshot exists, admission never runs again, so an attempt with
 // some members already created is never refused halfway.
 func (r *PodGroupSnapshotReconciler) observe(ctx context.Context, group *snapshotv1alpha1.PodGroupSnapshot, now time.Time) (podGroupSnapshotObservation, error) {
@@ -125,6 +132,15 @@ func (r *PodGroupSnapshotReconciler) observe(ctx context.Context, group *snapsho
 		}
 		observed.members[rank] = member
 		memberWorkExists = memberWorkExists || member.podSnapshot != nil
+	}
+
+	if observed.deleting {
+		restores := &snapshotv1alpha1.PodGroupRestoreList{}
+		if err := r.List(ctx, restores, client.InNamespace(group.Namespace),
+			client.MatchingFields{podGroupRestoreSnapshotUIDField: string(group.UID)}); err != nil {
+			return podGroupSnapshotObservation{}, fmt.Errorf("list the PodGroupRestores of PodGroupSnapshot %q: %w", group.Name, err)
+		}
+		observed.restores = restores.Items
 	}
 
 	if memberWorkExists || observed.deleting || !now.Before(observed.deadline) ||
@@ -356,16 +372,21 @@ func podGroupSnapshotRequeue(observed podGroupSnapshotObservation, status *snaps
 	return podGroupRequeue(observed.admission, observed.deadline, now, podGroupSnapshotMemberViews(status.Members))
 }
 
-// SetupWithManager watches the group, the PodSnapshots it owns, and every
+// SetupWithManager watches the group, the PodSnapshots it owns, every
 // PodSnapshotContent, because the agent's Started condition lives on the
-// content: a content maps to its PodSnapshot, and from there to the group that
-// controls it.
+// content, and every PodGroupRestore, which may hold the group's finalizer: a
+// content maps to its PodSnapshot, and from there to the group that controls
+// it, and a restore maps to the group it restores.
 func (r *PodGroupSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NonCacheReadClient == nil {
 		return errors.New("pod group snapshot reconciler requires a non-cache read client")
 	}
 	if err := validatePodGroupAgents(r.AgentNamespace, r.AgentSelector); err != nil {
 		return err
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &snapshotv1alpha1.PodGroupRestore{},
+		podGroupRestoreSnapshotUIDField, podGroupRestoreSnapshotUID); err != nil {
+		return fmt.Errorf("index PodGroupRestores by PodGroupSnapshot UID: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&snapshotv1alpha1.PodGroupSnapshot{}).
@@ -374,7 +395,32 @@ func (r *PodGroupSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&snapshotv1alpha1.PodSnapshotContent{},
 			handler.EnqueueRequestsFromMapFunc(r.podSnapshotContentToPodGroupSnapshot),
 		).
+		Watches(
+			&snapshotv1alpha1.PodGroupRestore{},
+			handler.EnqueueRequestsFromMapFunc(podGroupRestoreToPodGroupSnapshot),
+		).
 		Complete(r)
+}
+
+// podGroupRestoreSnapshotUID is the podGroupRestoreSnapshotUIDField index's
+// value of a PodGroupRestore.
+func podGroupRestoreSnapshotUID(obj client.Object) []string {
+	restore, ok := obj.(*snapshotv1alpha1.PodGroupRestore)
+	if !ok {
+		return nil
+	}
+	return []string{string(restore.Spec.SnapshotRef.UID)}
+}
+
+// podGroupRestoreToPodGroupSnapshot maps a PodGroupRestore to the
+// PodGroupSnapshot it restores, so a snapshot being deleted drops its
+// finalizer as soon as its last unfinished restore ends.
+func podGroupRestoreToPodGroupSnapshot(_ context.Context, obj client.Object) []reconcile.Request {
+	restore, ok := obj.(*snapshotv1alpha1.PodGroupRestore)
+	if !ok {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: restore.Namespace, Name: restore.Spec.SnapshotRef.Name}}}
 }
 
 // podSnapshotContentToPodGroupSnapshot maps a PodSnapshotContent to the group

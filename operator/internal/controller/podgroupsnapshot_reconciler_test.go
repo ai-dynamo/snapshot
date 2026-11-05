@@ -41,7 +41,9 @@ var pgAgentLabels = labels.Set{"app.kubernetes.io/component": "snapshot-agent", 
 func makePodGroupReconciler(t *testing.T, objs ...client.Object) (*PodGroupSnapshotReconciler, *record.FakeRecorder) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(snapshotReconcilerScheme()).WithObjects(objs...).
-		WithStatusSubresource(&snapshotv1alpha1.PodGroupSnapshot{}, &snapshotv1alpha1.PodSnapshot{}, &snapshotv1alpha1.PodSnapshotContent{}).
+		WithStatusSubresource(&snapshotv1alpha1.PodGroupSnapshot{}, &snapshotv1alpha1.PodSnapshot{}, &snapshotv1alpha1.PodSnapshotContent{},
+			&snapshotv1alpha1.PodGroupRestore{}).
+		WithIndex(&snapshotv1alpha1.PodGroupRestore{}, podGroupRestoreSnapshotUIDField, podGroupRestoreSnapshotUID).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetUID() == "" {
@@ -920,4 +922,46 @@ func TestPodGroupSnapshotReconciler_MapsContentToGroup(t *testing.T) {
 		r.podSnapshotContentToPodGroupSnapshot(ctx, content("group-a")))
 	assert.Empty(t, r.podSnapshotContentToPodGroupSnapshot(ctx, content("standalone")))
 	assert.Empty(t, r.podSnapshotContentToPodGroupSnapshot(ctx, content("missing")))
+}
+
+func TestPodGroupSnapshotReconciler_HeldByUnfinishedRestores(t *testing.T) {
+	ready := pgCondition(snapshotv1alpha1.PodSnapshotConditionReady, "Ready")
+	r, _ := makePodGroupReconciler(t, append(pgReadyCluster("a"), pgGroup("a"))...)
+	reconcileGroup(t, r)
+	reconcileGroup(t, r)
+	pgReport(t, r, "a", []metav1.Condition{pgStarted, ready}, []metav1.Condition{ready})
+	reconcileGroup(t, r)
+	require.True(t, meta.IsStatusConditionTrue(getGroup(t, r).Status.Conditions, snapshotv1alpha1.PodGroupConditionReady))
+
+	ctx := context.Background()
+	failed := metav1.Condition{Type: snapshotv1alpha1.PodGroupConditionFailed, Status: metav1.ConditionTrue,
+		Reason: "Refused", LastTransitionTime: metav1.Now()}
+	restoreOf := func(name string, snapshotUID types.UID, conditions ...metav1.Condition) *snapshotv1alpha1.PodGroupRestore {
+		restore := rgRestore("a")
+		restore.Name, restore.UID, restore.ResourceVersion = name, types.UID(name+"-uid"), ""
+		restore.Spec.SnapshotRef.UID = snapshotUID
+		require.NoError(t, r.Create(ctx, restore))
+		restore.Status.Conditions = conditions
+		require.NoError(t, r.Status().Update(ctx, restore))
+		return restore
+	}
+	running := restoreOf("running", "group-uid")
+	restoreOf("finished", "group-uid", failed)
+	restoreOf("of-an-earlier-group", "earlier-group-uid")
+	require.NoError(t, r.Delete(ctx, getGroup(t, r)))
+	gone := func() bool {
+		err := r.Get(ctx, types.NamespacedName{Namespace: pgNamespace, Name: "group"}, &snapshotv1alpha1.PodGroupSnapshot{})
+		return apierrors.IsNotFound(err)
+	}
+
+	reconcileGroup(t, r)
+	require.False(t, gone(), "an unfinished PodGroupRestore holds the snapshot")
+	assert.Len(t, listMemberPodSnapshots(t, r), 1)
+
+	running.Status.Conditions = []metav1.Condition{failed}
+	require.NoError(t, r.Status().Update(ctx, running))
+	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: pgNamespace, Name: "group"}}},
+		podGroupRestoreToPodGroupSnapshot(ctx, running), "the restore's event reconciles its snapshot")
+	reconcileGroup(t, r)
+	assert.True(t, gone(), "released once its last unfinished restore has finished")
 }
