@@ -109,8 +109,8 @@ RestoreRangeLength(std::size_t remaining, uintmax_t budget, std::size_t page_siz
 {
   if (remaining <= budget)
     return remaining;
-  // Keep ordinary chunk boundaries aligned, without rejecting sub-page budgets.
-  return static_cast<std::size_t>(budget >= page_size ? budget - budget % page_size : budget);
+  // Non-final ranges end on a page boundary so the next mapping starts aligned.
+  return static_cast<std::size_t>(budget - budget % page_size);
 }
 
 FileDescriptor
@@ -177,30 +177,28 @@ ModelStreamerRestore::StreamerEntry::AddRange(
     throw std::runtime_error("invalid restore file range");
   if (request.paths.size() == std::numeric_limits<unsigned>::max())
     throw std::runtime_error("too many files in one Model Streamer submission");
-  const auto mapping_offset = offset - offset % page_size;
-  const auto prefix = offset - mapping_offset;
-  const auto mapping_length = prefix + length;
-  // Allocate all metadata before acquiring a mapping. Cleanup owns envelopes
-  // independently of ABI arrays, including a partially constructed request.
+  if (offset % page_size != 0)
+    throw std::invalid_argument("restore file range offset must be page-aligned");
+  // Allocate all metadata before acquiring a mapping.
   request.paths.push_back(file.source_locator.c_str());
   request.range_counts.push_back(1);
   request.offsets.push_back(offset);
   request.sizes.push_back(length);
   request.destinations.push_back(MAP_FAILED);
   completed.push_back(false);
-  auto& mapping = mappings.emplace_back(Mapping{MAP_FAILED, mapping_length});
+  auto& mapping = mappings.emplace_back(Mapping{MAP_FAILED, length});
 
   // Reserve only this range before native writes; sparse mappings can SIGBUS on ENOSPC.
   const int allocation_error = posix_fallocate(descriptor, static_cast<off_t>(offset), static_cast<off_t>(length));
   if (allocation_error != 0)
     throw std::system_error(allocation_error, std::generic_category(), "allocate restore staging file");
   cancellation.ThrowIfCancelled();
-  void* address = mmap(nullptr, mapping_length, PROT_READ | PROT_WRITE, MAP_SHARED,
-                       descriptor, static_cast<off_t>(mapping_offset));
+  void* address = mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED,
+                       descriptor, static_cast<off_t>(offset));
   if (address == MAP_FAILED)
     throw SystemError("map restore staging file");
   mapping.base = address;
-  request.destinations.back() = static_cast<char*>(address) + prefix;
+  request.destinations.back() = address;
   cancellation.ThrowIfCancelled();
   bytes += length;
 }
@@ -231,8 +229,8 @@ ModelStreamerRestore::ModelStreamerRestore(
       options_(std::move(options)),
       stopped_error_(std::make_exception_ptr(std::runtime_error("Model Streamer restore stopped")))
 {
-  if (restore_batch_bytes_ == 0)
-    throw std::invalid_argument("restore batch bytes must be positive");
+  if (restore_batch_bytes_ < RestorePageSize())
+    throw std::invalid_argument("restore batch bytes must be at least the system page size");
   if (restore_preparation_slots_ == 0 || restore_preparation_slots_ > kMaxRestorePreparationSlots)
     throw std::invalid_argument("restore preparation slots must be between 1 and " +
                                 std::to_string(kMaxRestorePreparationSlots));

@@ -101,7 +101,7 @@ class ModelStreamerRestore {
       std::vector<void*> destinations;
     } request;
 
-    // Mapping envelopes can start before the ABI destination for sub-page ranges.
+    // Owns mappings independently of the native request arrays.
     struct Mapping {
       void* base;
       std::size_t length;
