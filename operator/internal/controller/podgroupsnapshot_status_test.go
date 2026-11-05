@@ -895,7 +895,7 @@ func TestPodGroupSnapshotTransitions(t *testing.T) {
 		{"never ready is not withdrawn", []metav1.Condition{committed}, []metav1.Condition{committed, withdrawn}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, podGroupSnapshotTransitions(tc.previous, tc.next))
+			assert.Equal(t, tc.want, podGroupTransitions(tc.previous, tc.next))
 		})
 	}
 }
