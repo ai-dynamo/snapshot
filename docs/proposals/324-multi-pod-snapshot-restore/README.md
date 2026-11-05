@@ -539,11 +539,17 @@ artifact, its fabric domain, its GPU count, and whether its artifact holds
 cuInterpose state. Every agent therefore ends
 admission holding the complete IP map, built from the member table in its own
 artifact and the new IPs, together with the assurance that all members restore
-the same capture onto a placement that can work. When the operator records a
-member as Admitted, it also pins the target's Pod UID, container IDs, and Pod IP
-from the Pod's own status, and an agent whose Pod or validated container no
-longer matches what was pinned fails the member with `PodIPChanged` instead of
-restoring with a stale map.
+the same capture onto a placement that can work. The agents' admission waits
+for the operator's, which pins nothing until it passes. The operator refuses a
+restore with `Refused` if its `PodGroupSnapshot` is missing, has another UID,
+or is being deleted, and with `ArtifactUnavailable` if it is not Ready, so a
+restore never waits for its snapshot; it waits, with `TargetPodPending`, until
+every target Pod exists, is scheduled, and has an IPv4 address and a
+destination container ID. It then records every member as Admitted in one
+update, pinning the target's Pod UID,
+container IDs, and Pod IP from the Pod's own status, and an agent whose Pod or
+validated container no longer matches what was pinned fails the member with
+`PodIPChanged` instead of restoring with a stale map.
 
 Each agent then posts to the `admitted` barrier once its own checks pass. When
 the barrier completes, the attempt commits, and each agent records the
@@ -980,13 +986,22 @@ artifacts, storage, and cleanup reuse the per-Pod pipeline, and deleting the gro
 deletes its members, but not under a restore that reads them: a finalizer keeps
 the `PodGroupSnapshot` and its members while any unfinished `PodGroupRestore`
 references its UID, and once its deletion has started, new restores of it are
-refused. A `PodGroupSnapshot` can be restored many times, and each
+refused. The same finalizer keeps each group resource, of either kind, while its
+own attempt runs, so a group deleted after its commit goes only once its
+attempt has ended. A `PodGroupSnapshot` can be restored many times, and each
 `PodGroupRestore` is one attempt with its own session, so every restore starts
 from an empty rendezvous store. Agents keep reporting where they
 report today, on each member's `PodSnapshotContent` and on each restore Pod's
 `nvidia.com/Restored` condition, which keeps its public reasons so that
 `ClassifyRestoreOutcome` reads a group restore exactly like a single one, and the
-operator alone aggregates those results into the group's status. Member phases
+operator alone aggregates those results into the group's status. Because those
+public reasons cannot carry a reason of the group, a restore member that fails
+for one, the session's reason or one of the agent's group checks such as
+`PodIPChanged` or `GateBudgetTooShort`, also sets the Pod condition
+`nvidia.com/GroupRestoreFailed` to True with that reason, in the same status
+update as `nvidia.com/Restored`. `Restored` remains the only signal that the
+member failed; `GroupRestoreFailed` only says why, and a member that fails on
+its own sets `Restored` alone, exactly as a single restore does. Member phases
 progress through `Pending`, `Admitted`, `Checkpointing`, and `Checkpointed`
 during capture, and through `Pending`, `Admitted`, `Restoring`, and `Released` during
 restore, with `Failed` and a reason otherwise. A restore is `Released` once its
@@ -1010,13 +1025,16 @@ first `startedAt`, since agents record their start only after the `admitted`
 barrier, and `Failed` keeps the first reason it receives:
 
 - `MemberFailed`, or the session's `CoordinatorLost`, `DeadlineExceeded`, or
-  `Cancelled`, as soon as a member has failed and some member has started;
-- `Refused` only once every member has reported its end and none has started,
-  so `Refused` always means that no source was changed;
+  `Cancelled`, or a restore member's `PodIPChanged`, as soon as a member has
+  failed and some member has started;
+- `Refused`, or a restore member's `GateBudgetTooShort` or `PodIPChanged`, only
+  once every member has reported its end and none has started, so these reasons
+  always mean that no workload was changed;
 - `DeadlineExceeded` at the deadline, and `Cancelled` when the group is deleted
   before any member started;
 - `MemberFailed` when every member has ended in any other way, for instance
-  after a member's `PodSnapshot` was deleted, which may hide its start.
+  after a member's `PodSnapshot` or pinned restore Pod was deleted
+  (`PodSnapshotDeleted` or `TargetPodDeleted`), which may hide its start.
 
 Members need not be configured alike. Each member may carry a
 `podSnapshotTemplate` with the settings that its `PodSnapshot` receives: labels
@@ -1043,7 +1061,7 @@ remain a compatible addition.
 | Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs, plus each process's rendezvous file path | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
 | Restore Pod contract | New annotation `nvidia.com/restore-group: <PodGroupRestore>`, used instead of `restore-from` and `restore-container-map`, which decides the attempt a Pod belongs to; group targets must carry the restore startup probe, and the NRI plugin never runs the original command while the group context is missing | One source of truth, and no race with standalone restore |
 | `restore-complete` file | Adds an `attempt` key holding the `PodGroupRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
-| Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before CRIU under a field manager of its own and never removed; `nvidia.com/Restored` keeps its public reasons and gains only `GroupPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety and an exact `startedAt`, with `ClassifyRestoreOutcome` unchanged |
+| Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before CRIU under a field manager of its own and never removed; new condition `nvidia.com/GroupRestoreFailed`, set to True with the group's reason when a member fails for one, in the same update as `nvidia.com/Restored`; `nvidia.com/Restored` keeps its public reasons and gains only `GroupPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety, an exact `startedAt`, and the group's reasons, with `ClassifyRestoreOutcome` unchanged |
 | Control volume | Reserves `coordination/` for rendezvous endpoints | Gives every Pod a private and stable endpoint path |
 | Agent DaemonSet | The chart annotates the agent's Pod template with the group protocol versions it supports | Group controllers create member work only on nodes whose agent Pod is Ready and group-capable |
 | `SnapshotJob` and single-Pod restore | Unchanged | Not applicable |
@@ -1367,13 +1385,16 @@ const PodSnapshotConditionStarted = "Started"
 
 // Reasons used on conditions and on member results. TargetInUse means that the
 // target's restore-group annotation names another unfinished PodGroupRestore, or
-// that another one has already pinned the target's UID.
+// that another one has already pinned the target's UID. TargetPodDeleted fails
+// a restore member whose pinned Pod is gone or was replaced; like a deleted
+// member PodSnapshot, it may hide the member's start.
 const (
 	PodGroupReasonRefused             = "Refused"
 	PodGroupReasonDeadlineExceeded    = "DeadlineExceeded"
 	PodGroupReasonGateBudgetTooShort  = "GateBudgetTooShort"
 	PodGroupReasonPodIPChanged        = "PodIPChanged"
 	PodGroupReasonTargetInUse         = "TargetInUse"
+	PodGroupReasonTargetPodDeleted    = "TargetPodDeleted"
 	PodGroupReasonArtifactUnavailable = "ArtifactUnavailable"
 	PodGroupReasonMemberFailed        = "MemberFailed"
 	PodGroupReasonCoordinatorLost     = "CoordinatorLost"
@@ -1381,11 +1402,14 @@ const (
 )
 
 // Reasons on the Admitted condition while the attempt has not committed: the
-// operator waits for a source Pod to be scheduled, for the agent on a member's
-// node, or for the members of an earlier group of the same name to be deleted,
-// then for the members to pass admission. Committed marks the first startedAt.
+// operator waits for a source Pod to be scheduled, for a target Pod to exist,
+// be scheduled, and have an address and a destination container, for the agent
+// on a member's node, or for the members of an earlier group of the same name
+// to be deleted, then for the members to pass admission. Committed marks the
+// first startedAt.
 const (
 	PodGroupReasonSourcePodUnscheduled = "SourcePodUnscheduled"
+	PodGroupReasonTargetPodPending     = "TargetPodPending"
 	PodGroupReasonAgentNotReady        = "AgentNotReady"
 	PodGroupReasonPreviousGroupCleanup = "PreviousGroupCleanup"
 	PodGroupReasonAdmitting            = "Admitting"
@@ -1404,10 +1428,10 @@ const (
 	// the agent supports, comma-separated, for example "v1" or "v1,v2".
 	PodGroupProtocolsAnnotation = "nvidia.com/snapshot-podgroup-protocols"
 
-	// PodGroupSnapshotInUseFinalizer keeps a PodGroupSnapshot, and the
-	// snapshots of its members, while any unfinished PodGroupRestore
-	// references its UID.
-	PodGroupSnapshotInUseFinalizer = "nvidia.com/snapshot-podgroup-in-use"
+	// PodGroupInUseFinalizer keeps a group resource, of either kind, while its
+	// own attempt runs, and a PodGroupSnapshot, with the snapshots of its
+	// members, also while any unfinished PodGroupRestore references its UID.
+	PodGroupInUseFinalizer = "nvidia.com/snapshot-podgroup-in-use"
 )
 
 // ObjectIdentity names an exact object, in the operation's namespace or at
@@ -1787,6 +1811,14 @@ const (
 	// on the agent never replays CRIU into the Pod. Its lastTransitionTime is
 	// the member's startedAt.
 	RestoreStartedCondition = "nvidia.com/RestoreStarted"
+
+	// GroupRestoreFailedCondition is set to True on a group restore Pod whose
+	// member fails for a reason of the group: the session's reason, or one of
+	// the agent's group checks such as PodIPChanged or GateBudgetTooShort. The
+	// agent sets it in the same status update as nvidia.com/Restored, which
+	// stays the only signal that the member failed, and never removes it. A
+	// member that fails on its own leaves it unset.
+	GroupRestoreFailedCondition = "nvidia.com/GroupRestoreFailed"
 
 	// RestoreGroupPending is an agent-internal wait reason on nvidia.com/Restored
 	// while a group restore Pod waits for its PodGroupRestore, like SnapshotPending.
