@@ -19,12 +19,18 @@ class NixlTransferEngine final : public TransferEngine {
   enum class Fault { DrainTimeout, RequestRelease, FileRelease, BufferRelease };
   // Optional per-instance control for exceptional-path tests. Normal callers omit it.
   using FaultInjector = std::function<bool(Fault)>;
-  NixlTransferEngine(std::span<void* const> buffers, size_t capacity, FaultInjector inject = {});
+  NixlTransferEngine(std::span<void* const> buffers, size_t capacity, FaultInjector inject = {},
+                     size_t queue_size = 0);
   ~NixlTransferEngine() override;
   IoEngine type() const override { return IoEngine::NIXL; }
 
   void Open(int descriptor, size_t size) override;
   void Submit(size_t slot, io::Operation operation, size_t offset, size_t size) override;
+  // Pooled lanes may have requests for several files in flight. Files remain
+  // registered until their requests drain. The caller owns every descriptor.
+  void RegisterFile(int descriptor, size_t size);
+  void UnregisterFile(int descriptor);
+  void Submit(size_t slot, int descriptor, io::Operation operation, size_t offset, size_t size);
   void Wait(size_t slot) override;
   void Close() override;
 

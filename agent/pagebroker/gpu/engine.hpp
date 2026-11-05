@@ -14,7 +14,7 @@
 #include "errors.hpp"
 
 namespace snapshot::pagebroker::gpu {
-// Wait for exclusive access to a device ring while honoring cancellation.
+// Serialize transfers for one GPU while honoring cancellation.
 std::unique_lock<std::timed_mutex> AcquireDevice(std::timed_mutex& mutex, const Cancellation& cancellation);
 
 enum class Direction { Checkpoint, Restore };
@@ -40,10 +40,12 @@ void ValidateParticipants(std::span<const uint32_t> captured_pids, std::span<con
 // data. Each group keeps its input order.
 std::vector<size_t> RestoreSetupOrder(std::span<const size_t> extent_counts);
 
+// Tuning for the current CPU-staged POSIX GPU transfer path.
 struct EngineOptions {
   size_t buffer_count = 32;
   size_t chunk_bytes = 128ULL * 1024 * 1024;
   size_t max_pinned_bytes = 0;
+  size_t pooled_lanes = 0;
 };
 struct ParticipantResult {
   uint32_t captured_pid = 0;

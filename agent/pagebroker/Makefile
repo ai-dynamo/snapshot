@@ -37,7 +37,7 @@ BROKER_TEST_WRAP_FLAGS := -Wl,--wrap=mkdir \
 	-Wl,--wrap=_ZN8snapshot10pagebroker3gpu9GpuEngine7RestoreERNS1_8ArtifactERKSt6vectorINS1_11ParticipantESaIS6_EERNS0_12CancellationE
 COMMON_SOURCES := file_descriptor.cpp $(FILESYSTEM_SOURCES)
 IO_SOURCES := io_engine.cpp
-GPU_SOURCES := gpu/engine.cpp gpu/checkpoint.cpp gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp
+GPU_SOURCES := gpu/engine.cpp gpu/checkpoint.cpp transfer/engine/posix/gpu_transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp
 PAGEBROKER_SOURCES := $(BROKER_SOURCES) $(COMMON_SOURCES) $(IO_SOURCES) $(GPU_SOURCES) $(STREAMER_SOURCES) $(S3_SOURCES) transfer/engine/model_streamer/model_streamer_transfer_engine.cpp
 DAEMON_SOURCES := $(PAGEBROKER_SOURCES) daemon.cpp main.cpp
 # Real-driver tests resolve CUDA symbols from libcuda instead of the optional loader.
@@ -85,24 +85,25 @@ build/gpu-cuda-driver.o: gpu/cuda_driver.cpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 # These tests use real files and validate the engine without initializing CUDA.
-build/gpu-engine-test: generate transfer/engine/transfer_engine.cpp gpu/engine_test.cpp gpu/engine.cpp gpu/engine.hpp gpu/checkpoint.cpp gpu/checkpoint.hpp gpu/transfer.cpp gpu/transfer.hpp gpu/storage_manifest.cpp gpu/storage_manifest.hpp gpu/cuda_driver.cpp gpu/errors.hpp $(COMMON_SOURCES) $(IO_SOURCES) io_engine.hpp file_descriptor.hpp cancellation.hpp | build
+build/gpu-engine-test: generate transfer/engine/transfer_engine.cpp gpu/engine_test.cpp gpu/engine.cpp gpu/engine.hpp gpu/checkpoint.cpp gpu/checkpoint.hpp transfer/engine/posix/gpu_transfer.cpp transfer/engine/posix/gpu_transfer.hpp gpu/storage_manifest.cpp gpu/storage_manifest.hpp gpu/cuda_driver.cpp gpu/errors.hpp $(COMMON_SOURCES) $(IO_SOURCES) io_engine.hpp file_descriptor.hpp cancellation.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/engine_test.cpp gpu/engine.cpp gpu/checkpoint.cpp \
-		gpu/transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer/engine/transfer_engine.cpp v1/pagebroker.pb.cc \
+		transfer/engine/posix/gpu_transfer.cpp gpu/storage_manifest.cpp gpu/cuda_driver.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer/engine/transfer_engine.cpp v1/pagebroker.pb.cc \
 		$(GTEST_FLAGS) -lprotobuf $(NIXL_FLAGS) $(TRANSFER_FLAGS) -ldl -o $@
 
 # Run manually with the host driver and one visible GPU.
 # No checked-in GPU CI job invokes this target.
 test-gpu: build/gpu-checkpoint-test build/gpu-transfer-test
 	timeout 120 ./build/gpu-checkpoint-test
+	PAGEBROKER_TEST_POOLED_TRANSFERS=1 timeout 120 ./build/gpu-checkpoint-test
 	timeout 120 ./build/gpu-transfer-test
 
 build/gpu-checkpoint-test: generate $(GPU_TEST_SOURCES) gpu/checkpoint_test.cpp io_engine.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(GPU_TEST_SOURCES) \
 		gpu/checkpoint_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) $(NIXL_FLAGS) $(TRANSFER_FLAGS) \
-		-Wl,--wrap=cuMemcpyHtoDAsync_v2,--wrap=cuCheckpointProcessUnlock -L$(CUDA_LIBRARY_DIR) -lcuda -ldl -o $@
+		-Wl,--wrap=cuMemcpyHtoDAsync_v2,--wrap=cuCheckpointProcessUnlock,--wrap=cuStreamCreate,--wrap=cuMemCreate,--wrap=cuMemSetAccess -L$(CUDA_LIBRARY_DIR) -lcuda -ldl -o $@
 
-build/gpu-transfer-test: generate transfer/engine/transfer_engine.cpp gpu/transfer.cpp gpu/transfer.hpp gpu/transfer_test.cpp cancellation.hpp $(COMMON_SOURCES) $(IO_SOURCES) file_descriptor.hpp io_engine.hpp | build
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu/transfer.cpp gpu/transfer_test.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer/engine/transfer_engine.cpp v1/pagebroker.pb.cc \
+build/gpu-transfer-test: generate transfer/engine/transfer_engine.cpp transfer/engine/posix/gpu_transfer.cpp transfer/engine/posix/gpu_transfer.hpp transfer/engine/posix/tests/gpu_transfer_test.cpp gpu/storage_manifest.cpp gpu/storage_manifest.hpp cancellation.hpp $(COMMON_SOURCES) $(IO_SOURCES) file_descriptor.hpp io_engine.hpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) transfer/engine/posix/gpu_transfer.cpp transfer/engine/posix/tests/gpu_transfer_test.cpp gpu/storage_manifest.cpp $(COMMON_SOURCES) $(IO_SOURCES) transfer/engine/transfer_engine.cpp v1/pagebroker.pb.cc \
 		$(GTEST_FLAGS) -lprotobuf $(NIXL_FLAGS) -L$(CUDA_LIBRARY_DIR) -lcuda -ldl -o $@
 
 # Test fork/exec with a compiled child, never a shell script or real credentials.

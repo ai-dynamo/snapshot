@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -37,6 +38,16 @@
 namespace {
 using snapshot::pagebroker::gpu::driver::CheckpointAPI;
 using snapshot::pagebroker::gpu::driver::Operation;
+
+std::atomic<int> setup_failure{0};
+CUdevice setup_failure_device = -1;
+
+bool FailSetup(int step)
+{
+  CUdevice device;
+  if (cuCtxGetDevice(&device) != CUDA_SUCCESS || device != setup_failure_device) return false;
+  return setup_failure.compare_exchange_strong(step, 0);
+}
 
 constexpr auto kGpuTestWait = std::chrono::seconds{30};
 constexpr auto kAbortResponseWait = std::chrono::seconds{35};
@@ -294,7 +305,10 @@ class BrokerGpuTest {
     EXPECT_EQ(poll(&target_state, 1, 0), 0) << "target exited before CUDA drained";
     const auto rejected = broker_.HandleRequest(finish);
     ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
-    EXPECT_EQ(rejected.failure().message(), "transaction is aborting");
+    EXPECT_EQ(rejected.failure().code(), interruption == Interruption::Expiry
+        ? Failure::TRANSACTION_EXPIRED : Failure::TRANSACTION_CONFLICT);
+    EXPECT_EQ(rejected.failure().message(), interruption == Interruption::Expiry
+        ? "transaction expired" : "transaction is aborting");
 
     copy_pause.Release();
     ASSERT_EQ(work.wait_for(kGpuTestWait), std::future_status::ready);
@@ -333,7 +347,8 @@ class BrokerGpuTest {
     commit.mutable_commit();
     const auto rejected = broker_.HandleRequest(commit);
     ASSERT_TRUE(rejected.has_failure()) << rejected.DebugString();
-    EXPECT_EQ(rejected.failure().message(), "transaction is aborting");
+    EXPECT_EQ(rejected.failure().code(), Failure::TRANSACTION_EXPIRED);
+    EXPECT_EQ(rejected.failure().message(), "transaction expired");
     EXPECT_TRUE(fs::exists(restore.staging / "image"));
     broker_.ReapExpiredTransactions(std::chrono::steady_clock::now() + kExpiryAdvance);
     EXPECT_FALSE(fs::exists(restore.staging));
@@ -559,8 +574,42 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
   const auto visible_device = gpu::storage::FormatGPUUUID(uuid_bytes);
   constexpr size_t kTestBufferCount = 2;
   constexpr size_t kTestChunkBytes = 1024 * 1024;
-  const gpu::EngineOptions options{kTestBufferCount, kTestChunkBytes, 0};
-  gpu::GpuEnginePtr engine = std::make_shared<gpu::GpuEngine>(options);
+  const size_t pooled_lanes = std::getenv("PAGEBROKER_TEST_POOLED_TRANSFERS") ? 2 : 0;
+  const gpu::EngineOptions options{kTestBufferCount, kTestChunkBytes, 0, pooled_lanes};
+  gpu::GpuEnginePtr engine;
+  int count = 0;
+  Check(cuDeviceGetCount(&count), "get test GPU count");
+  if (pooled_lanes && count > 1) {
+    Check(cuDeviceGet(&setup_failure_device, count - 1), "get failing test GPU");
+    CUuuid failed_uuid;
+    Check(cuDeviceGetUuid(&failed_uuid, setup_failure_device), "get failing GPU UUID");
+    std::copy(std::begin(failed_uuid.bytes), std::end(failed_uuid.bytes), uuid_bytes.begin());
+    const auto failed_device = gpu::storage::FormatGPUUUID(uuid_bytes);
+    // Exercise partial stream/allocation setup and cross-device access failure.
+    // Also request more lanes than the surviving slots to test graceful shrink.
+    for (int step : {1, 2, 3}) {
+      setup_failure.store(step);
+      engine = std::make_shared<gpu::GpuEngine>(gpu::EngineOptions{
+          kTestBufferCount, kTestChunkBytes, 0, kTestBufferCount * static_cast<size_t>(count)});
+      EXPECT_EQ(setup_failure.exchange(0), 0) << "setup fault was not reached";
+      ASSERT_TRUE(engine->Available());
+      const auto failed_root = root / ("failed-" + std::to_string(step));
+      fs::create_directories(failed_root);
+      FileDescriptor directory(open(failed_root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+      gpu::Artifact artifact(directory.get(), gpu::Direction::Checkpoint, {1}, {failed_device});
+      Cancellation cancellation;
+      try {
+        engine->Checkpoint(artifact, {{1, static_cast<uint32_t>(target.pid)}}, cancellation);
+        FAIL() << "failed GPU remained available";
+      } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "target GPU is unavailable");
+      }
+      if (step != 3) engine.reset();
+    }
+    // The real checkpoint/restore cases below use the surviving GPUs.
+  } else {
+    engine = std::make_shared<gpu::GpuEngine>(options);
+  }
   ASSERT_TRUE(engine->Available());
   {
     BrokerGpuTest broker(root, visible_device, engine);
@@ -586,6 +635,27 @@ TEST(GpuCheckpoint, RestoresAllocationThroughRealCustomStorage)
   Check(cuDevicePrimaryCtxRelease(device), "release checkpoint context");
 }
 }  // namespace
+
+extern "C" CUresult CUDAAPI __real_cuStreamCreate(CUstream*, unsigned int);
+extern "C" CUresult CUDAAPI __real_cuMemCreate(CUmemGenericAllocationHandle*, size_t,
+                                              const CUmemAllocationProp*, unsigned long long);
+extern "C" CUresult CUDAAPI __real_cuMemSetAccess(CUdeviceptr, size_t, const CUmemAccessDesc*, size_t);
+
+extern "C" CUresult CUDAAPI __wrap_cuStreamCreate(CUstream* stream, unsigned int flags)
+{
+  return FailSetup(1) ? CUDA_ERROR_OUT_OF_MEMORY : __real_cuStreamCreate(stream, flags);
+}
+extern "C" CUresult CUDAAPI __wrap_cuMemCreate(CUmemGenericAllocationHandle* handle, size_t bytes,
+                                              const CUmemAllocationProp* properties, unsigned long long flags)
+{
+  return FailSetup(2) ? CUDA_ERROR_OUT_OF_MEMORY : __real_cuMemCreate(handle, bytes, properties, flags);
+}
+extern "C" CUresult CUDAAPI __wrap_cuMemSetAccess(CUdeviceptr pointer, size_t bytes,
+                                                const CUmemAccessDesc* descriptors, size_t count)
+{
+  return count == 1 && FailSetup(3) ? CUDA_ERROR_NOT_SUPPORTED
+      : __real_cuMemSetAccess(pointer, bytes, descriptors, count);
+}
 
 extern "C" CUresult CUDAAPI __real_cuMemcpyHtoDAsync_v2(CUdeviceptr, const void*, size_t, CUstream);
 extern "C" CUresult CUDAAPI __real_cuCheckpointProcessUnlock(int, CUcheckpointUnlockArgs*);
