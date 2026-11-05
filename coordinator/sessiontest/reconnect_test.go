@@ -65,6 +65,33 @@ func TestReconnect(t *testing.T) {
 		assert.Equal(t, "10.0.0.1", string(got))
 	})
 
+	t.Run("a large write sent while the coordinator refuses the member completes once it is admitted",
+		func(t *testing.T) {
+			ctx := within(t)
+			ses := h.session(t, 2)
+			sessions := ses.connectAll(t)
+			h.auth.refuse.Store(true)
+			defer h.auth.refuse.Store(false)
+			ses.cut(0)
+			value := make([]byte, 20<<20)
+			inserted := make(chan error, 1)
+			go func() { inserted <- sessions[0].Namespace(session.NamespaceSnapshot).Insert(ctx, "big", value) }()
+			// Longer than the round trip the client gives an operation before
+			// sending it again.
+			requireWaitingFor(t, inserted, 4*time.Second)
+			h.auth.refuse.Store(false)
+			select {
+			case err := <-inserted:
+				require.NoError(t, err)
+			case <-ctx.Done():
+				t.Fatal("the Insert did not return once the member was admitted")
+			}
+			require.NoError(t, sessions[0].Leave(ctx), "the next write")
+			got, err := sessions[1].Namespace(session.NamespaceSnapshot).Get(ctx, "big", 0)
+			require.NoError(t, err)
+			assert.Len(t, got, len(value))
+		})
+
 	t.Run("the session survives repeated breaks", func(t *testing.T) {
 		ctx := within(t)
 		ses := h.session(t, 2)

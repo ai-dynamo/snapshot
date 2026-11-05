@@ -155,6 +155,10 @@ func (s *client) options(cfg Config) []nats.Option {
 		nats.RetryOnFailedConnect(true),
 		nats.IgnoreAuthErrorAbort(),
 		nats.MaxReconnects(-1),
+		// Nothing is buffered while reconnecting: a publish then fails at
+		// once, and the session sends it again once the connection is back,
+		// so a write never reports a failure and lands later.
+		nats.ReconnectBufSize(-1),
 		nats.ReconnectWait(reconnectWait),
 		nats.ReconnectJitter(reconnectJitter, reconnectJitter),
 		nats.Timeout(ClientConnectTimeout),

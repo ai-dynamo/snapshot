@@ -80,13 +80,20 @@ func ours(err error) bool {
 }
 
 // transient reports whether an operation that failed with err may succeed if
-// sent again: the connection broke or is reconnecting, or the server did not
-// answer in time.
+// sent again: the connection broke, including under a write in progress, which
+// fails with a *net.OpError, or is reconnecting, which refuses every publish
+// since the client buffers none, or the server did not answer in time. An
+// operation is sent again only while the session is alive, so a
+// *net.OpError that wraps net.ErrClosed never reports a closed session.
 func transient(err error) bool {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
+		return true
+	}
 	return errors.Is(err, errRetry) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, nats.ErrTimeout) ||
 		errors.Is(err, nats.ErrConnectionReconnecting) ||
+		errors.Is(err, nats.ErrReconnectBufExceeded) ||
 		errors.Is(err, nats.ErrDisconnected)
 }
 

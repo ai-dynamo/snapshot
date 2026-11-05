@@ -30,10 +30,16 @@ func barrier(ctx context.Context, s coordinator.Session, name string) <-chan err
 // requireWaiting fails the test if the wait has returned.
 func requireWaiting(t *testing.T, wait <-chan error) {
 	t.Helper()
+	requireWaitingFor(t, wait, pending)
+}
+
+// requireWaitingFor fails the test if the wait returns within d.
+func requireWaitingFor(t *testing.T, wait <-chan error, d time.Duration) {
+	t.Helper()
 	select {
 	case err := <-wait:
 		t.Fatalf("the wait returned early: %v", err)
-	case <-time.After(pending):
+	case <-time.After(d):
 	}
 }
 
