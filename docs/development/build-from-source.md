@@ -71,8 +71,8 @@ See [Installation](../operations/install.md) for storage and uninstall options.
 
 Common `make` targets from the repo root:
 
-- `make build` — compile the agent and operator
-- `make test` — run unit tests across the `api`, `agent`, and `operator` modules
+- `make build` — compile the agent, the operator, and the coordinator module
+- `make test` — run unit tests across every Go module
 - `make lint` — run linters
 - `make helm-lint` — lint the Helm chart
 - `make check` — the full pre-merge gate (generate, license headers, fmt, tidy, lint, and more)

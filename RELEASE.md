@@ -53,18 +53,19 @@ that line's maintenance branch, such as `release/0.1`. Only the most recent line
 receives security fixes; see
 [Supported versions](SECURITY.md#supported-versions).
 
-Every release produces four tags. You create one — the rest are automatic:
+Every release produces five tags. You create one — the rest are automatic:
 
 | Tag | Created by | Why |
 | --- | --- | --- |
 | `vX.Y.Z` | the maintainer, when publishing the release | The release itself |
 | `api/vX.Y.Z` | the `Release` workflow | Go module proxy resolution |
+| `coordinator/vX.Y.Z` | the `Release` workflow | Go module proxy resolution |
 | `operator/vX.Y.Z` | the `Release` workflow | Go module proxy resolution |
 | `agent/vX.Y.Z` | the `Release` workflow | Go module proxy resolution |
 
-The sub-path tags are required because `api`, `operator`, and `agent` are
-separate Go modules that do not live at the repository root. Without them,
-`go get` of any submodule at a version fails. They are created only after
+The sub-path tags are required because `api`, `coordinator`, `operator`, and
+`agent` are separate Go modules that do not live at the repository root. Without
+them, `go get` of any submodule at a version fails. They are created only after
 artifact publication succeeds, and published module versions are immutable — the
 workflow validates every existing tag before pushing any new one, and refuses to
 move a tag that already points elsewhere.
@@ -91,7 +92,7 @@ has landed there since.
    - signs both images and the chart by digest with cosign keyless signing,
    - attaches an SPDX and a CycloneDX SBOM per image, the chart tarball, and a
      signed `SHA256SUMS` to the GitHub release,
-   - creates the three Go module sub-path tags.
+   - creates a sub-path tag for every Go module.
 4. Verify the workflow succeeded and that the images and chart are pullable at
    the new version.
 

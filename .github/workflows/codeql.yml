@@ -51,8 +51,8 @@ jobs:
         uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           languages: go
-          # autobuild does not resolve the api/agent/operator modules behind
-          # go.work, so the build below is the same one the CI workflow runs.
+          # autobuild does not resolve the modules behind go.work, so the
+          # build below is the same one the CI workflow runs.
           build-mode: manual
 
       - name: Build

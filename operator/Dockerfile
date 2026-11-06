@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Build context is the repository root so the Go workspace can resolve the
-# api/ and agent/ modules used by the operator.
-# Tracks the toolchain pinned in go.work, the three go.mod files, hack/tools.mk,
+# api/ and agent/ modules used by the operator. Every module go.work lists is
+# copied, used or not, or the workspace fails to load.
+# Tracks the toolchain pinned in go.work, every go.mod file, hack/tools.mk,
 # agent/Dockerfile, and the workflows. Move them together, never this one alone.
 FROM golang:1.27-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS builder
 ARG GO_BUILD_TAGS
 WORKDIR /workspace
 COPY go.work go.work.sum ./
 COPY api/ api/
+COPY coordinator/ coordinator/
 COPY agent/ agent/
 COPY operator/ operator/
 WORKDIR /workspace/operator
