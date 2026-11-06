@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -553,6 +554,29 @@ func TestPodGroupSnapshotReconciler_NeverRefusesAGroupWhoseMemberWorkExists(t *t
 	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseAdmitted, got.Status.Members[0].Phase)
 	assert.Equal(t, &snapshotv1alpha1.ObjectIdentity{Name: "group-a", UID: "group-a-uid"}, got.Status.Members[0].PodSnapshot)
 	assert.Len(t, listMemberPodSnapshots(t, r), 2, "the other member's PodSnapshot is created")
+}
+
+func TestPodGroupSnapshotReconciler_KeepsTheReadErrorAfterANameRace(t *testing.T) {
+	group := pgGroup("a")
+	r, _ := makePodGroupReconciler(t, append(pgReadyCluster("a"), group)...)
+	resource := snapshotv1alpha1.GroupVersion.WithResource("podsnapshots").GroupResource()
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
+			return apierrors.NewAlreadyExists(resource, obj.GetName())
+		},
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*snapshotv1alpha1.PodSnapshot); ok {
+				return apierrors.NewForbidden(resource, key.Name, errors.New("denied"))
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+
+	err := r.createMemberPodSnapshot(context.Background(), group, 0)
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsForbidden(err), "the read's error is kept: %v", err)
+	assert.False(t, apierrors.IsAlreadyExists(err), "the create's AlreadyExists is not: %v", err)
 }
 
 func TestPodGroupSnapshotReconciler_DeletedPodSnapshotFailsItsMember(t *testing.T) {

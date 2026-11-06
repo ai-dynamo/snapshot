@@ -278,7 +278,7 @@ func (r *PodGroupSnapshotReconciler) createMemberPodSnapshot(ctx context.Context
 	}
 	existing := &snapshotv1alpha1.PodSnapshot{}
 	if getErr := r.Get(ctx, client.ObjectKeyFromObject(desired), existing); getErr != nil {
-		return fmt.Errorf("PodSnapshot %q already exists but cannot be read yet, requeueing: %w", desired.Name, err)
+		return fmt.Errorf("PodSnapshot %q already exists but cannot be read yet, requeueing: %w", desired.Name, getErr)
 	}
 	if !isMemberPodSnapshot(group, rank, existing) {
 		r.Recorder.Eventf(group, corev1.EventTypeWarning, snapshotv1alpha1.ReasonPodSnapshotNameConflict,
