@@ -2,20 +2,21 @@
 
 For backend tuning and examples, see [Storage best practices](storage/README.md).
 
-Snapshot keeps every checkpoint in one store that all node agents reach: a
-checkpoint volume by default, or an S3-compatible bucket with `storage.type: s3`.
-Each agent's PageBroker sidecar publishes checkpoint artifacts there and reads
-them back for restore; workload pods never mount checkpoint storage.
+Snapshot keeps every snapshot in one store that all node agents reach: a
+snapshot volume by default, or an S3-compatible bucket with `storage.type: s3`.
+Each agent's PageBroker sidecar publishes snapshots there and reads them back
+for restore. Snapshot does not mount the store into workload pods; a non-target
+artifact writer mounts it itself.
 
-The checkpoint store must prevent unauthorized modification of artifacts through
+The snapshot store must prevent unauthorized modification of artifacts through
 filesystem permissions or the storage server's access controls. PageBroker requests
 owner-only permissions for new GPU files and directories, but does not reject
 directory modes that allow group or other users to write. Network filesystems such
 as SMB can report these modes from mount settings rather than per-directory permissions.
 
-## The checkpoint volume
+## The snapshot volume
 
-With `storage.type: pvc`, the default, the checkpoint store is a Kubernetes
+With `storage.type: pvc`, the default, the snapshot store is a Kubernetes
 PersistentVolumeClaim (PVC). Because
 agents on multiple GPU nodes mount it concurrently, it must support
 `ReadWriteMany` (RWX). The chart provisions one PVC per cluster by default and
@@ -50,7 +51,7 @@ caller-supplied store ID nor an additional PVC namespace setting is required.
 `storage.pvc.basePath` retains its existing mount-path meaning.
 
 The operator validates this resolved identity at startup and uses it to check
-artifact cleanup against each content's recorded store. New captures use the
+artifact cleanup against each content's recorded store. New snapshots use the
 legacy filesystem flow by default. Artifact addressing requires a compatible
 PageBroker image and the separate activation steps below; see
 [Other backends](#other-backends) for `storage.type: s3`.
@@ -66,22 +67,22 @@ installation:
    contract, including the PageBroker PVC backend. Set
    `pageBroker.artifactAddressing=true` and keep
    `operator.bindNewContents=false`. This configures compatible brokers while
-   allowing legacy captures throughout the rollout. Wait for the agent DaemonSet
+   allowing legacy snapshots throughout the rollout. Wait for the agent DaemonSet
    rollout to complete on every node before continuing.
 2. Set `operator.bindNewContents=true`, keeping
-   `pageBroker.artifactAddressing=true`. This changes only the operator's capture
-   activation; it does not roll the agents again. New contents now record the
+   `pageBroker.artifactAddressing=true`. This changes only what the operator
+   binds; it does not roll the agents again. New contents now record the
    configured store and require publication descriptors.
 
 Both settings default to `false`, so the chart adds no artifact-backend
 arguments until explicitly enabled. Agent and PageBroker images must still
 match. A fresh installation with compatible images may enable both settings
-together, provided no captures are submitted until all agents are ready.
+together, provided no checkpoints are submitted until all agents are ready.
 Existing unbound contents remain readable through the legacy path.
 
 Once bound content exists, keep a compatible broker with artifact addressing
 enabled for its reads and restores. Turning off `operator.bindNewContents` stops
-new bound captures while preserving support for existing ones; it does not
+new bound snapshots while preserving support for existing ones; it does not
 convert their storage format or permit downgrading the agents to a legacy build.
 
 If the cluster has no default storage class that can provision RWX, set one:
@@ -122,13 +123,13 @@ the sidecar:
 
 - **Checkpoint.** By default, CRIU dumps the image into a staging directory on
   that volume. When the dump succeeds, PageBroker publishes it to the PVC: it
-  renames any previous artifact for the same checkpoint aside, then renames
+  renames any previous artifact for the same snapshot aside, then renames
   the new one into place. The destination path is briefly absent between those
   two renames. A failed dump is aborted and never touches the PVC. GPU
-  CustomStorage capture instead writes directly to a temporary directory
-  beside the destination on the PVC; a failed capture removes that temporary
-  directory without promoting it, so it still never publishes a completed
-  checkpoint, but it does touch the PVC along the way.
+  A GPU CustomStorage checkpoint instead writes directly to a temporary
+  directory beside the destination on the PVC; a failed one removes that
+  temporary directory without promoting it, so it still never publishes a
+  completed snapshot, but it does touch the PVC along the way.
 - **Restore.** By default (`pageBroker.restoreMode: direct`), CRIU restores
   directly from the artifact already on the PVC; nothing is copied into
   staging. Setting `pageBroker.restoreMode: staged` has PageBroker copy the
@@ -157,15 +158,15 @@ Because the staging volume is RAM, size the agent pod for it:
 | Value                                | Purpose                                                                                        | Default      |
 |---------------------------------------|--------------------------------------------------------------------------------------------------|--------------|
 | `pageBroker.staging.sizeLimit`       | Cap on the RAM-backed staging volume shared by checkpoint and staged restore; unbounded without it | `56Gi`       |
-| `daemonset.resources.limits.memory`  | Bounds the largest checkpoint image, since CRIU writes staging from the agent container         | `64Gi`       |
+| `daemonset.resources.limits.memory`  | Bounds the largest CRIU image, since CRIU writes staging from the agent container         | `64Gi`       |
 | `pageBroker.resources.limits.memory` | Bounds staged-restore prefetch, since PageBroker fills staging only in staged restore mode       | `256Gi`      |
 | `pageBroker.resources.requests`      | GPU transfer rings and process memory; added to the agent's requests when scheduling            | 8 CPU / 32Gi |
 
 ### Why the staging volume needs a cap
 
 Staging is an `emptyDir` with `medium: Memory`: a tmpfs living in the node's
-RAM, where a checkpoint is written before it is committed to the checkpoint
-store, and where an artifact is prefetched before CRIU restores from it. It is
+RAM, where a snapshot is written before it is committed to the snapshot
+store, and where it is prefetched before CRIU restores from it. It is
 not accounted like a disk. A memory-backed `emptyDir` has no size of its own,
 so **without a `sizeLimit` it grows until the node runs out of memory**, and
 its pages are charged to the cgroup of whichever container wrote them — not to
@@ -180,7 +181,7 @@ Two containers write it, each against its own limit:
 
 So one oversized request is enough to exceed a container's limit, and the
 kernel OOM-kills **that container**, not the request. The agent or PageBroker
-restarts, and every other capture and restore in flight on that node dies with
+restarts, and every other checkpoint and restore in flight on that node dies with
 it — including other tenants'. A single workload too large to stage therefore
 takes checkpointing and restore off the whole node rather than failing its own
 request.
@@ -206,7 +207,7 @@ today, so the cap is made safe instead.
 The defaults already fit, so a release on chart defaults renders `56Gi`
 unchanged, as does any configuration that leaves its own headroom. A lowered
 cap appears in the rendered manifest as a byte count, which is where to look if
-a capture fails with less staging than expected.
+a checkpoint fails with less staging than expected.
 
 Configurations the chart lowers, all of which could otherwise OOM-kill a
 container:
@@ -220,8 +221,8 @@ rather than raising the cap alone — the cap follows whichever is smaller.
 
 The staging-space check (`INSUFFICIENT_STORAGE`) only rejects a transfer that
 would exceed `sizeLimit`; it does not guarantee protection from an OOM kill,
-and it has no way to know the size of a checkpoint before CRIU writes it — the
-headroom above is what makes an oversized checkpoint fail the capture instead
+and it has no way to know the size of a snapshot before CRIU writes it — the
+headroom above is what makes an oversized snapshot fail the checkpoint instead
 of the agent. Leaving `sizeLimit` missing, null, or empty falls back to the
 chart's `56Gi` default, not the node's allocatable memory.
 
@@ -266,7 +267,7 @@ survive an uninstall.
 future use and is not supported today.
 
 `storage.type: s3` requires `operator.bindNewContents: true`, because S3 has no
-legacy local-path capture mode; the chart fails the render without it. See
+legacy local-path checkpoint mode; the chart fails the render without it. See
 [Enable artifact addressing](#enable-artifact-addressing) for the rollout order.
 
 ### S3 settings PageBroker reads
@@ -299,8 +300,8 @@ the volume.
 `pageBroker.restoreMode` selects the restore source for every restore:
 
 - `direct` (default) prepares a PageBroker transaction and mounts the original
-  checkpoint directory read-only for CRIU. It does not copy CPU images into staging.
-- `staged` copies checkpoint files into PageBroker staging before CRIU runs.
+  snapshot directory read-only for CRIU. It does not copy CPU images into staging.
+- `staged` copies snapshot files into PageBroker staging before CRIU runs.
 
 When testing a build, set `image.agent.tag` for both the agent and PageBroker,
 and verify the running containers' image digests. A separate

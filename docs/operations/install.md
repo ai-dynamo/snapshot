@@ -13,11 +13,11 @@ Install the published chart (see the
 
 ```bash
 helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
-  --version 0.2.0 \
+  --version 0.3.0 \
   --namespace snapshot --create-namespace
 ```
 
-By default the chart provisions its own `ReadWriteMany` checkpoint volume, shared
+By default the chart provisions its own `ReadWriteMany` snapshot volume, shared
 by every checkpoint. See [Storage](storage.md) for the volume model and options,
 including reusing an existing claim.
 
@@ -44,5 +44,5 @@ and its PageBroker sidecar are running on each GPU node. Each agent pod reports
 helm uninstall snapshot --namespace snapshot
 ```
 
-Chart-created checkpoint volumes are retained on uninstall, so checkpoints survive
+Chart-created snapshot volumes are retained on uninstall, so snapshots survive
 removal — see [Storage](storage.md#retention).

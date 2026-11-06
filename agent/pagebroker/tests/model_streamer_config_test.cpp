@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "model_streamer_config.hpp"
+#include "s3_config.hpp"
 #include "daemon.hpp"
 
 #include <gtest/gtest.h>
@@ -45,7 +46,7 @@ class ModelStreamerConfigTest : public ::testing::Test {
   std::map<std::string, std::optional<std::string>> previous_;
 };
 
-TEST_F(ModelStreamerConfigTest, OmissionPreservesLibraryAndLegacyDaemonDefaults)
+TEST_F(ModelStreamerConfigTest, OmissionUsesLibraryAndPageBrokerDefaults)
 {
   auto options = ResolveOptions(ParseConfig("{}"));
   EXPECT_TRUE(options.NativeEnvironment().empty());
@@ -55,7 +56,7 @@ TEST_F(ModelStreamerConfigTest, OmissionPreservesLibraryAndLegacyDaemonDefaults)
   EXPECT_EQ(env.at("RUNAI_STREAMER_S3_MAX_RETRIES"), "3");
   EXPECT_EQ(env.at("RUNAI_STREAMER_S3_TIMEOUT"), "0");
   EXPECT_EQ(env.at("RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS"), "60000");
-  EXPECT_EQ(env.at("RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB"), "128");
+  EXPECT_EQ(env.at("RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB"), "512");
   EXPECT_EQ(env.at("RUNAI_STREAMER_CHUNK_BYTESIZE"), "16777216");
   EXPECT_EQ(env.at("RUNAI_STREAMER_S3_MAX_CONNECTIONS"), "4");
   EXPECT_FALSE(env.contains("RUNAI_STREAMER_FS_QUEUE_DEPTH"));
@@ -67,7 +68,7 @@ TEST_F(ModelStreamerConfigTest, UploadTuningDoesNotChangeReaderMemoryOrConnectio
   storage.transfer.upload_limits.buffer_budget = 2ULL * 1024 * 1024 * 1024;
   storage.transfer.upload_limits.active_files = 4;
   const auto options = ResolveOptions({}, &storage);
-  EXPECT_EQ(options.s3_max_inflight_mib, 128);
+  EXPECT_EQ(options.s3_max_inflight_mib, 512);
   EXPECT_EQ(options.s3_max_connections, 4);
 }
 
@@ -130,10 +131,46 @@ TEST_F(ModelStreamerConfigTest, AppliesAllNativeSettingsAndSharedConnection)
   EXPECT_THROW(options.ValidateEnvironment(), std::invalid_argument);
 }
 
+TEST_F(ModelStreamerConfigTest, RestoreBatchBudgetIsLocalAndPreservedDuringResolution)
+{
+  EXPECT_FALSE(ParseConfig("{}").restore_batch_bytes);
+  const auto options = ResolveOptions(ParseConfig(R"({"restoreBatchBytes":200000000000})"));
+  EXPECT_EQ(options.restore_batch_bytes, 200'000'000'000ULL);
+  EXPECT_TRUE(options.NativeEnvironment().empty());
+  EXPECT_NO_THROW(options.ValidateEnvironment());
+  auto invalid = options;
+  invalid.restore_batch_bytes = 0;
+  EXPECT_THROW(invalid.Validate(), std::invalid_argument);
+}
+
+TEST_F(ModelStreamerConfigTest, RestorePreparationSlotsAreLocalAndBounded)
+{
+  EXPECT_FALSE(ParseConfig("{}").restore_preparation_slots);
+  for (unsigned slots : {1U, 2U, 3U, 4U, 5U, 20U}) {
+    const auto options = ResolveOptions(ParseConfig("{\"restorePreparationSlots\":" + std::to_string(slots) + "}"));
+    EXPECT_EQ(options.restore_preparation_slots, slots);
+    EXPECT_TRUE(options.NativeEnvironment().empty());
+    EXPECT_NO_THROW(options.ValidateEnvironment());
+  }
+  for (unsigned slots : {0U, 21U}) {
+    Options invalid;
+    invalid.restore_preparation_slots = slots;
+    EXPECT_THROW(invalid.Validate(), std::invalid_argument);
+  }
+}
+
 TEST_F(ModelStreamerConfigTest, RejectsMalformedConfigurationWithoutEchoingValues)
 {
   for (const auto* text : {
       "[]", "null", "{", R"({"unknown-secret":"do-not-print"})", R"({"readChunkBytes":1,"readChunkBytes":2})",
+      R"({"restoreBatchBytes":0})", R"({"restoreBatchBytes":-1})", R"({"restoreBatchBytes":1.5})",
+      R"({"restoreBatchBytes":"64GB"})", R"({"restoreBatchBytes":null})", R"({"restoreBatchBytes":true})",
+      R"({"restoreBatchBytes":18446744073709551616})", R"({"restoreBatchBytes":1,"restoreBatchBytes":2})",
+      R"({"restorePreparationSlots":0})", R"({"restorePreparationSlots":21})", R"({"restorePreparationSlots":-1})",
+      R"({"restorePreparationSlots":2.0})", R"({"restorePreparationSlots":"do-not-print"})",
+      R"({"restorePreparationSlots":true})", R"({"restorePreparationSlots":null})",
+      R"({"restorePreparationSlots":18446744073709551616})",
+      R"({"restorePreparationSlots":1,"restorePreparationSlots":2})",
       R"({"filesystem":{}})", R"({"filesystem":{"strategies":["sync_buffered"]}})",
       R"({"s3Reader":{"concurrency":-1}})", R"({"s3Reader":{"concurrency":1.0}})",
       R"({"s3Reader":{"concurrency":"2"}})", R"({"s3Reader":{"concurrency":1025}})",

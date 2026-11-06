@@ -91,7 +91,7 @@ func TestAttemptCheckpointInheritsTheCallersBudget(t *testing.T) {
 	w := &NodeController{
 		// Far shorter than the caller's budget, so an attempt imposing its own
 		// deadline is visible rather than masked by the earlier parent deadline.
-		config: &types.AgentConfig{Checkpoint: types.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}},
+		config: &types.AgentConfig{Checkpoint: types.CheckpointSpec{TimeoutSeconds: ptr.To(1)}},
 		checkpointFn: func(ctx context.Context, _ CheckpointParams) (*pagebroker.PublishedArtifact, error) {
 			dumpDeadline, dumpHasDeadline = ctx.Deadline()
 			return nil, nil

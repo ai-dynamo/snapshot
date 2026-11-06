@@ -194,7 +194,12 @@ def test_framework_workflow_requires_pass_before_upload_without_hiding_failures(
         (repository_root / ".github/workflows/e2e-frameworks.yaml").read_text()
     )
     job = workflow["jobs"]["e2e"]
-    assert set(job["strategy"]["matrix"]["framework"]) == {"vllm", "sglang", "tensorrt-llm"}
+    assert {entry["case"] for entry in job["strategy"]["matrix"]["include"]} == {
+        "vllm",
+        "sglang",
+        "tensorrt-llm",
+        "vllm-s3",
+    }
     steps = job["steps"]
     index = next(i for i, step in enumerate(steps) if step["name"].startswith("Require passing"))
     gate = steps[index]
@@ -204,7 +209,7 @@ def test_framework_workflow_requires_pass_before_upload_without_hiding_failures(
     assert "continue-on-error" not in gate
     assert "benchmark_history require-pass" in gate["run"]
     assert '--artifacts-dir "${SNAPSHOT_E2E_BENCHMARK_DIR}"' in gate["run"]
-    assert '--case "${{ matrix.framework }}"' in gate["run"]
+    assert '--case "${{ matrix.case }}"' in gate["run"]
     assert "always()" in steps[index + 1]["if"]
 
 
@@ -223,10 +228,8 @@ def test_framework_workflow_checks_repository_before_using_gpu_cluster() -> None
     assert "continue-on-error" not in check
     assert all("continue-on-error" not in step for step in check["steps"])
     assert "if" not in check
-    assert framework_jobs["datadog-gate"]["needs"] == "check"
-    assert set(framework_jobs["e2e"]["needs"]) == {"check", "datadog-gate"}
+    assert framework_jobs["e2e"]["needs"] == "check"
     # Default job conditions block failed or skipped prerequisites.
-    assert "if" not in framework_jobs["datadog-gate"]
     assert "if" not in framework_jobs["e2e"]
 
 

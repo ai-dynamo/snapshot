@@ -9,9 +9,9 @@ hand.
 ## Requirements
 
 - The Snapshot Helm chart is installed in the target namespace, with the
-  `snapshot-agent` DaemonSet running and the checkpoint PVC mounted.
+  `snapshot-agent` DaemonSet running and the snapshot volume mounted.
 - `checkpoint` requires the operator (it resolves the `PodSnapshot` into a
-  checkpoint). `restore` is handled by the agent directly from pod annotations.
+  snapshot). `restore` is handled by the agent directly from pod annotations.
 
 ## Checkpoint
 

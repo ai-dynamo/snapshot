@@ -29,7 +29,7 @@ type PodSnapshotContentSpec struct {
 	// +kubebuilder:validation:Required
 	PodSnapshotRef PodSnapshotReference `json:"snapshotRef"`
 
-	// Source describes what to capture: the source pod and the node it runs on.
+	// Source describes what to checkpoint: the source pod and the node it runs on.
 	// +kubebuilder:validation:Required
 	Source PodSnapshotContentSource `json:"source"`
 
@@ -40,7 +40,7 @@ type PodSnapshotContentSpec struct {
 	Storage *CheckpointStorageBinding `json:"storage,omitempty"`
 
 	// Containers is the PodSnapshot's container settings, with defaults
-	// applied, saved at creation. Every restore of this checkpoint uses them,
+	// applied, saved at creation. Every restore of this snapshot uses them,
 	// even if the PodSnapshot or SnapshotJob that asked for it changes or is
 	// gone.
 	// +optional
@@ -89,8 +89,8 @@ type PodSnapshotContentStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Source publishes what the checkpoint was captured on, written when the
-	// capture goes Ready.
+	// Source publishes where the snapshot was taken, written when the content
+	// goes Ready.
 	// +optional
 	Source *CheckpointSource `json:"source,omitempty"`
 
@@ -104,14 +104,14 @@ type PodSnapshotContentStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=podsnapcontent
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.storage) || has(self.spec.storage)",message="publication descriptors require a storage binding"
-// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.storage) || self.status.storage.artifacts.all(a, self.spec.source.podRef.containers.exists(c, c == a.containerName))",message="publication descriptors must name captured containers"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.storage) || self.status.storage.artifacts.all(a, self.spec.source.podRef.containers.exists(c, c == a.containerName))",message="publication descriptors must name checkpointed containers"
 // +kubebuilder:printcolumn:name="PodSnapshot",type="string",JSONPath=".spec.snapshotRef.name",description="Bound PodSnapshot"
 // +kubebuilder:printcolumn:name="Namespace",type="string",JSONPath=".spec.snapshotRef.namespace",description="PodSnapshot namespace"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready condition"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // PodSnapshotContent is the Schema for the snapshotcontents API. It is the
-// cluster-scoped artifact-of-record for a captured container checkpoint.
+// cluster-scoped record of one container's snapshot.
 //
 // No conversion: this type exists only in v1alpha1 (no other API version), so it
 // is not part of any conversion scheme.

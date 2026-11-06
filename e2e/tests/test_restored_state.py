@@ -105,6 +105,9 @@ def test_restored_state_requires_every_remote_assertion_to_pass(
         "empty-dir-only-as-root",
         "empty-dir-missing",
         "empty-dir-not-empty",
+        "procfs-entry-missing",
+        "procfs-entry-of-another-process",
+        "proc-sys-writable",
     ],
 )
 def test_restored_mounts_require_every_remote_assertion_to_pass(
@@ -120,8 +123,24 @@ def test_restored_mounts_require_every_remote_assertion_to_pass(
         (proc / "42" / "root" / "own").mkdir()
     if failure == "empty-dir-not-empty":
         (proc / "42" / "root" / "own" / "apparmor").mkdir()
+
+    # The workload is PID 42 in the container's namespace and PID 7 in its own.
+    # Its own procfs must list it as 7 with the same start time (stat field 22).
+    def stat(start_time: int) -> str:
+        return "7 (sh -c) S " + " ".join(["0"] * 18) + f" {start_time} 0\n"
+
+    (proc / "42" / "status").write_text("Name:\tsh\nNSpid:\t42\t7\n")
+    (proc / "42" / "stat").write_text(stat(1234))
+    if failure != "procfs-entry-missing":
+        own_entry = proc / "42" / "root" / "proc" / "7"
+        own_entry.mkdir(parents=True)
+        own_entry.joinpath("stat").write_text(
+            stat(99 if failure == "procfs-entry-of-another-process" else 1234)
+        )
     # Field 4 is the mount's root in its filesystem, field 5 its mount point.
     mounts = ["36 25 0:30 / / rw - overlay overlay rw"]
+    proc_sys = "rw,nosuid" if failure == "proc-sys-writable" else "ro,nosuid"
+    mounts.append(f"37 36 0:5 /sys /proc/sys {proc_sys} - proc proc rw")
     if failure == "empty-dir-only-as-root":
         mounts.append("40 36 8:1 /own /other rw - ext4 /dev/sda1 rw")
     elif failure != "empty-dir-not-mounted":
@@ -131,7 +150,7 @@ def test_restored_mounts_require_every_remote_assertion_to_pass(
     if failure != "no-mountinfo":
         (proc / "42" / "mountinfo").write_text("\n".join(mounts) + "\n")
     # A missing mountinfo must fail even without the empty_dir checks.
-    empty_dir = None if failure in (None, "securityfs", "no-mountinfo") else "/own"
+    empty_dir = None if failure is None or not failure.startswith("empty-dir") else "/own"
 
     def exec_command(namespace: str, pod: str, command: str, *, container: str | None = None) -> str:
         assert (namespace, pod, container) == ("test-ns", "restored-pod", "main")

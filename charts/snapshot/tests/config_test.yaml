@@ -17,6 +17,36 @@ tests:
           path: data["config.yaml"]
           pattern: "cudaCheckpoint|enableChecksumDigest|transferBufferCount|storageMode"
 
+  - it: renders both the new and the pre-rename timeout keys
+    set:
+      config.checkpoint.timeoutSeconds: 1200
+      config.restore.timeoutSeconds: 2400
+    asserts:
+      # A v0.2.0 agent that restarts before the DaemonSet roll reaches its node
+      # reads this ConfigMap and dies at validation without the old restore key.
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'timeoutSeconds: 1200\n  checkpointTimeoutSeconds: 1200'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'timeoutSeconds: 2400\n  restoreTimeoutSeconds: 2400'
+
+  - it: refuses a value still set under a pre-rename timeout key
+    set:
+      config.checkpoint.checkpointTimeoutSeconds: 7200
+    asserts:
+      # Helm drops an unknown value silently, so without this the operator would
+      # believe they raised the timeout while the agent ran on the default.
+      - failedTemplate:
+          errorPattern: "config.checkpoint.checkpointTimeoutSeconds was renamed"
+
+  - it: refuses a value still set under the pre-rename restore timeout key
+    set:
+      config.restore.restoreTimeoutSeconds: 9000
+    asserts:
+      - failedTemplate:
+          errorPattern: "config.restore.restoreTimeoutSeconds was renamed"
+
   - it: rejects a caller-selected checkpoint mount path
     set:
       storage.pvc.basePath: /other
