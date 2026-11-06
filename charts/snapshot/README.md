@@ -140,10 +140,12 @@ kubectl logs deployment/snapshot-operator -n ${NAMESPACE} -c crd-installer
 ```
 
 ```text
-Applied CRD  {"name": "podsnapshots.nvidia.com", "action": "unchanged"}
+Applied CRD  {"name": "podgrouprestores.nvidia.com", "action": "unchanged"}
+Applied CRD  {"name": "podgroupsnapshots.nvidia.com", "action": "unchanged"}
 Applied CRD  {"name": "podsnapshotcontents.nvidia.com", "action": "unchanged"}
+Applied CRD  {"name": "podsnapshots.nvidia.com", "action": "unchanged"}
 Applied CRD  {"name": "snapshotjobs.nvidia.com", "action": "unchanged"}
-CRDs already up to date, no changes applied  {"count": 3}
+CRDs already up to date, no changes applied  {"count": 5}
 ```
 
 The installer runs whenever the operator pod is recreated, which a `helm upgrade`
@@ -153,8 +155,8 @@ you pin a mutable tag such as `latest`, rebuilding it does not change the pod
 spec and nothing rolls; restart the Deployment yourself to pick up new
 definitions.
 
-`rbac.create=true` grants the operator ServiceAccount `get`/`patch` on the three
-CRDs in [crds/](./crds) by name, plus an unscoped `create` — RBAC cannot match
+`rbac.create=true` grants the operator ServiceAccount `get`/`patch` on the CRDs
+in [crds/](./crds) by name, plus an unscoped `create` — RBAC cannot match
 `resourceNames` on create, so that verb only ever lets the operator add a CRD,
 never modify one it does not own.
 
