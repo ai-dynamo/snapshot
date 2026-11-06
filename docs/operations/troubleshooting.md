@@ -502,3 +502,37 @@ PageBroker restarted (`TRANSACTION_NOT_FOUND`); the transaction expired.
 ```bash
 kubectl logs $agent -n <snapshot-ns> -c pagebroker
 ```
+
+## A pod group member fails at a step
+
+A member of a pod group, at capture or at restore, can also fail at these
+steps. A member that fails at any step fails the attempt for every other
+member. Each of them then fails at the step it was waiting in, with the reason
+the first member gave, such as `Refused` or `MemberFailed`.
+
+### admitting the pod group
+
+The member publishes its Pod IP, and at restore the capture its artifact
+belongs to, then waits for every other member's, and for every member to
+accept. Nothing has changed in any workload yet, so the attempt ends as
+`Refused` and every member is left as Snapshot found it.
+
+Likely causes: the Pod has no IP yet, or another member refused first, or the
+attempt's deadline passed before every member arrived. At restore, the
+member's artifact may also have been captured on its own or by another member
+of the group, or the members may restore different captures.
+
+### waiting for the pod group's other members
+
+The member waits at one of the group's barriers (`net-freeze` before the CRIU
+dump, `release` after a restore) until every other member arrives. This step
+fails when the attempt ends first. At capture, the source has stopped by then.
+At restore, the agent terminates the restored processes.
+
+Likely causes: another member failed, and its agent's log carries the step.
+Or the attempt's deadline passed, or the coordinator was lost
+(`CoordinatorLost`).
+
+```bash
+kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'pod group'
+```

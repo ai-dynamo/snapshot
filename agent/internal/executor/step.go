@@ -44,6 +44,10 @@ const (
 	StepDumpCRIU              Step = "dumping with CRIU"
 	StepCaptureOverlay        Step = "capturing rootfs diff"
 	StepCommitCheckpoint      Step = "committing PageBroker checkpoint"
+
+	// A member of a pod group, at capture and at restore.
+	StepAdmitGroup   Step = "admitting the pod group"
+	StepGroupBarrier Step = "waiting for the pod group's other members"
 )
 
 // StepError carries the step a failure came from. Unwrap keeps the cause
