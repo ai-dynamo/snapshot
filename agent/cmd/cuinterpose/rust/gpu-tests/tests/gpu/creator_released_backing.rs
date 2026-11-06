@@ -10,8 +10,12 @@ use cuinterpose_gpu_tests::sys::{
     CUdeviceptr, CUmemAllocationProp, CUmemAllocationType, CUmemGenericAllocationHandle,
 };
 use cuinterpose_gpu_tests::{cu, cuda, shim};
-use cuinterpose_protocol::Record;
+use cuinterpose_protocol::{
+    Record, Request, VIRTUAL_SHAREABLE_HANDLE_BYTES, decode_virtual_shareable_handle,
+};
+use rustix::net::{RecvFlags, recv};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 const HEAD: &[u8] = b"full backing starts here";
 const TAIL: &[u8] = b"full backing ends here";
@@ -121,6 +125,19 @@ fn ticket_imports_after_its_creator_releases_the_allocation() {
         let importer = spawn("late-importer");
         importer.send_fd(&size, &ticket);
         importer.wait();
+    }
+    // Closing the last copy ends the export, though the creator makes no further calls.
+    let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES];
+    recv(&ticket, &mut bytes, RecvFlags::PEEK).unwrap();
+    let export = Request::Export {
+        namespace_pid: creator.pid(),
+        allocation: decode_virtual_shareable_handle(&bytes).unwrap(),
+    };
+    drop(ticket);
+    let deadline = Instant::now() + process::TIMEOUT;
+    while shim::request(creator.pid(), &export).is_ok() {
+        assert!(Instant::now() < deadline, "the creator kept its export");
+        std::thread::sleep(Duration::from_millis(10));
     }
     creator.send(&"stop");
     creator.wait();

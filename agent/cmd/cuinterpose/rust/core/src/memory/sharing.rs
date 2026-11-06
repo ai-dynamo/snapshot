@@ -18,7 +18,7 @@ use cuinterpose_protocol::{
     self as protocol, AllocationId, AllocationReference, Error, NamespacePid, Reply, Request,
     Response, VIRTUAL_SHAREABLE_HANDLE_BYTES, VIRTUAL_SHAREABLE_HANDLE_MAGIC,
 };
-use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::event::{PollFd, PollFlags, Timespec, epoll, poll};
 use rustix::fs::{FileType, fstat};
 use rustix::net::{
     AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType, recv, send, socketpair, sockopt,
@@ -165,9 +165,17 @@ pub(crate) struct Exports {
 
 impl Exports {
     /// Drop the ends of closed tickets, then the released exports they kept alive.
-    fn sweep(&mut self) {
+    fn sweep(&mut self, hangups: &OwnedFd) {
         self.tickets.retain(|_, ends| {
-            ends.retain(|end| !closed(end));
+            ends.retain(|end| {
+                let open = !closed(end);
+                // A forked child can share the end's file description, which would
+                // keep it registered after this process closes its descriptor.
+                if !open {
+                    let _ = epoll::delete(hangups, end);
+                }
+                open
+            });
             !ends.is_empty()
         });
         let Self {
@@ -191,12 +199,38 @@ fn closed(end: &OwnedFd) -> bool {
     poll(&mut events, Some(&now)).is_ok() && events[0].revents().contains(PollFlags::HUP)
 }
 
-#[derive(Default)]
 pub struct ExportCache {
     exports: Mutex<Exports>,
+    // Becomes readable when a ticket end reports a hangup, so the peer worker can reap
+    // closed tickets without waiting for another CUDA call.
+    hangups: OwnedFd,
 }
 
 impl ExportCache {
+    pub fn new() -> Result<Self> {
+        let hangups = epoll::create(epoll::CreateFlags::CLOEXEC)
+            .map_err(|error| CoreError::io("create ticket hangup monitor", error))?;
+        Ok(Self {
+            exports: Mutex::default(),
+            hangups,
+        })
+    }
+
+    pub fn hangups(&self) -> Result<OwnedFd> {
+        self.hangups
+            .try_clone()
+            .map_err(|error| CoreError::io("duplicate ticket hangup monitor", error))
+    }
+
+    /// Drop closed tickets and the released exports they kept alive.
+    pub fn reap(&self) -> Result<()> {
+        self.exports
+            .lock()
+            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .sweep(&self.hangups);
+        Ok(())
+    }
+
     pub fn contains(&self, reference: &AllocationReference) -> Result<bool> {
         Ok(self
             .exports
@@ -228,9 +262,20 @@ impl ExportCache {
                 std::io::Error::other(error),
             )
         })?;
-        let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        exports.sweep();
-        exports.tickets.entry(reference.id).or_default().push(end);
+        epoll::add(
+            &self.hangups,
+            &end,
+            epoll::EventData::new_u64(0),
+            epoll::EventFlags::empty(),
+        )
+        .map_err(|error| CoreError::io("monitor shareable handle ticket", error))?;
+        self.exports
+            .lock()
+            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .tickets
+            .entry(reference.id)
+            .or_default()
+            .push(end);
         Ok(ticket)
     }
 
@@ -239,7 +284,7 @@ impl ExportCache {
     /// open. Exports without tickets, such as legacy IPC handles, end here.
     pub fn release(&self, id: &AllocationId) -> Result<()> {
         let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        exports.sweep();
+        exports.sweep(&self.hangups);
         if exports.tickets.contains_key(id) {
             exports.released.insert(*id);
         } else {
@@ -484,7 +529,7 @@ mod codec_tests {
             creator_pid: 1,
             id: [4; 16],
         };
-        let ticket = ExportCache::default().issue(reference).unwrap();
+        let ticket = ExportCache::new().unwrap().issue(reference).unwrap();
         // Decoding peeks, so a ticket imports more than once.
         for _ in 0..2 {
             assert_eq!(decode(ticket.as_raw_fd()).unwrap(), Some(reference));
@@ -549,7 +594,7 @@ mod codec_tests {
 
     #[test]
     fn export_cache_checks_identity_and_serves_full_size_from_another_pid() {
-        let cache = ExportCache::default();
+        let cache = ExportCache::new().unwrap();
         let reference = AllocationReference {
             creator_pid: 1,
             id: [4; 16],
@@ -662,7 +707,7 @@ mod cache_tests {
 
     #[test]
     fn open_tickets_keep_a_released_export() {
-        let cache = ExportCache::default();
+        let cache = ExportCache::new().unwrap();
         let reference = AllocationReference {
             creator_pid: 7,
             id: [3; 16],
@@ -679,6 +724,11 @@ mod cache_tests {
                 )
                 .unwrap()
         };
+        // The peer worker reaps when the hangup monitor becomes readable.
+        let hangup = || {
+            let mut events = [PollFd::new(&cache.hangups, PollFlags::IN)];
+            poll(&mut events, Some(&Timespec::default())).unwrap() == 1
+        };
         // Without a ticket, such as for a legacy IPC handle, release ends the export.
         insert();
         cache.release(&reference.id).unwrap();
@@ -689,14 +739,14 @@ mod cache_tests {
         let ticket = cache.issue(reference).unwrap();
         let copy = ticket.try_clone().unwrap();
         cache.release(&reference.id).unwrap();
-        // Any later release sweeps closed tickets.
-        let sweep = || cache.release(&[9; 16]).unwrap();
         drop(ticket);
-        sweep();
+        assert!(!hangup());
         assert!(cache.contains(&reference).unwrap());
         assert_eq!(decode(copy.as_raw_fd()).unwrap(), Some(reference));
         drop(copy);
-        sweep();
+        assert!(hangup());
+        cache.reap().unwrap();
+        assert!(!hangup());
         assert!(!cache.contains(&reference).unwrap());
         assert!(cache.exports.lock().unwrap().tickets.is_empty());
 
@@ -706,13 +756,13 @@ mod cache_tests {
         cache.release(&reference.id).unwrap();
         insert();
         drop(ticket);
-        sweep();
+        cache.reap().unwrap();
         assert!(cache.contains(&reference).unwrap());
     }
 
     #[test]
     fn multicast_exports_send_descriptor_and_properties() {
-        let cache = ExportCache::default();
+        let cache = ExportCache::new().unwrap();
         let reference = AllocationReference {
             creator_pid: 7,
             id: [1; 16],
@@ -749,7 +799,7 @@ mod cache_tests {
     #[test]
     fn teardown_and_replacement_wait_for_socket_send() {
         for replace in [false, true] {
-            let cache = Arc::new(ExportCache::default());
+            let cache = Arc::new(ExportCache::new().unwrap());
             let reference = AllocationReference {
                 creator_pid: 7,
                 id: [2; 16],

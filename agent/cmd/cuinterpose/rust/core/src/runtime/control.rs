@@ -11,6 +11,7 @@ use crate::runtime as state;
 use cuinterpose_protocol::{self as protocol, NamespacePid, Operation, Request, Response};
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, socket_with};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::Ordering;
@@ -37,7 +38,8 @@ pub struct PreparedWorkers {
 }
 
 impl PreparedWorkers {
-    pub fn prepare(namespace_pid: NamespacePid) -> Result<Option<Self>> {
+    /// The peer worker also watches `hangups`, the export cache's ticket hangup monitor.
+    pub fn prepare(namespace_pid: NamespacePid, hangups: OwnedFd) -> Result<Option<Self>> {
         let (sender, receiver) =
             mpsc::sync_channel::<(UnixStream, ControlRequest)>(CONTROL_QUEUE_CAPACITY);
         let (activation, parked) = mpsc::sync_channel::<UnixListener>(1);
@@ -61,24 +63,37 @@ impl PreparedWorkers {
                     return;
                 };
                 loop {
-                    let mut events = [PollFd::new(&listener, PollFlags::IN)];
+                    let mut events = [
+                        PollFd::new(&listener, PollFlags::IN),
+                        PollFd::new(&hangups, PollFlags::IN),
+                    ];
                     match poll(&mut events, None) {
                         Err(rustix::io::Errno::INTR) => continue,
                         Err(rustix::io::Errno::NOMEM) => {
                             std::thread::sleep(std::time::Duration::from_millis(50));
                             continue;
                         }
-                        Ok(_) if events[0].revents() == PollFlags::IN => {}
                         Err(error) => {
                             eprintln!("cuinterpose: listener poll failed: {error}");
                             super::RUNTIME_FAILED.store(true, Ordering::Release);
                             break;
                         }
-                        Ok(_) => {
-                            eprintln!(
-                                "cuinterpose: unexpected listener poll events: {:?}",
-                                events[0].revents()
-                            );
+                        Ok(_) => {}
+                    }
+                    // Closing a ticket can end an export the process already released,
+                    // so reap it even if the process makes no further CUDA calls.
+                    if !events[1].revents().is_empty()
+                        && let Err(error) = state::export_cache().and_then(|cache| cache.reap())
+                    {
+                        eprintln!("cuinterpose: ticket reap failed: {error}");
+                        super::RUNTIME_FAILED.store(true, Ordering::Release);
+                        break;
+                    }
+                    match events[0].revents() {
+                        revents if revents.is_empty() => continue,
+                        PollFlags::IN => {}
+                        revents => {
+                            eprintln!("cuinterpose: unexpected listener poll events: {revents:?}");
                             super::RUNTIME_FAILED.store(true, Ordering::Release);
                             break;
                         }
