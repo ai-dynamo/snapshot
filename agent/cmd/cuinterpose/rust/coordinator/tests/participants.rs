@@ -3,6 +3,8 @@
 
 //! Run the coordinator against scripted participants on real Unix sockets.
 
+#[path = "../src/fake_agent.rs"]
+mod fake_agent;
 #[path = "../src/test_records.rs"]
 mod test_records;
 
@@ -48,6 +50,9 @@ const HANG_TIMEOUT: Duration = Duration::from_secs(60);
 /// The agent passes the mount namespace, binary, and root descriptors before the
 /// checkpoint directory, so the coordinator inherits the directory as descriptor 6.
 const CHECKPOINT_FD: RawFd = 6;
+
+/// The agent passes the session socket of a group member's relay as this descriptor.
+const SESSION_FD: RawFd = 7;
 
 /// SaveAllocations owners expected by participants 1 and 2.
 type Owners = [Vec<AllocationOwner>; 2];
@@ -98,14 +103,21 @@ fn reply(connection: UnixStream, namespace_pid: NamespacePid, result: Result<Rep
 /// Pass `directory` to the coordinator as descriptor `CHECKPOINT_FD` and return the path
 /// that names it there, as the agent does.
 fn inherit(command: &mut Command, directory: &OwnedFd) -> PathBuf {
-    let directory = directory.try_clone().unwrap();
+    pass(command, directory, CHECKPOINT_FD);
+    PathBuf::from(format!("/proc/self/fd/{CHECKPOINT_FD}"))
+}
+
+/// Pass `descriptor` to the coordinator as descriptor `number`.
+fn pass(command: &mut Command, descriptor: &OwnedFd, number: RawFd) {
+    // A number above every descriptor that the coordinator receives keeps one dup2 from
+    // replacing the source of another.
+    let descriptor = rustix::io::fcntl_dupfd_cloexec(descriptor, 64).unwrap();
     let duplicate = move || {
         // SAFETY: `target` only names the descriptor that dup2 replaces. It is forgotten,
         // so it never closes anything.
-        let mut target = unsafe { OwnedFd::from_raw_fd(CHECKPOINT_FD) };
-        // The coordinator inherits the descriptor only without close-on-exec. dup2 does
-        // not clear it if `directory` already has this number.
-        let result = rustix::io::dup2(&directory, &mut target)
+        let mut target = unsafe { OwnedFd::from_raw_fd(number) };
+        // The coordinator inherits the descriptor only without close-on-exec.
+        let result = rustix::io::dup2(&descriptor, &mut target)
             .and_then(|()| rustix::io::fcntl_setfd(&target, FdFlags::empty()));
         std::mem::forget(target);
         result.map_err(Into::into)
@@ -113,7 +125,6 @@ fn inherit(command: &mut Command, directory: &OwnedFd) -> PathBuf {
     // SAFETY: The child calls only dup2 and fcntl, which are async-signal-safe, between
     // fork and exec.
     unsafe { command.pre_exec(duplicate) };
-    PathBuf::from(format!("/proc/self/fd/{CHECKPOINT_FD}"))
 }
 
 /// Coordinator process, killed on drop. A panic before `finish` returns also prints its stderr.
@@ -175,6 +186,8 @@ struct Harness {
     inherited: Option<OwnedFd>,
     /// The coordinator's wait for a SaveAllocations or LoadAllocations reply.
     carrier_timeout: Duration,
+    /// If set, the coordinator runs as the only relay of a group, through this agent.
+    agent: Option<fake_agent::FakeAgent>,
 }
 
 impl Harness {
@@ -194,6 +207,7 @@ impl Harness {
             listeners,
             inherited: None,
             carrier_timeout: HANG_TIMEOUT,
+            agent: None,
         }
     }
 
@@ -228,6 +242,19 @@ impl Harness {
                 None => self.state.parent().unwrap().to_owned(),
             };
             command.arg("--checkpoint-dir").arg(checkpoint_dir);
+        }
+        if let Some(agent) = &self.agent {
+            pass(&mut command, &OwnedFd::from(agent.attach(0)), SESSION_FD);
+            let deadline = std::time::SystemTime::now() + 2 * HANG_TIMEOUT;
+            let deadline = deadline.duration_since(std::time::UNIX_EPOCH).unwrap();
+            command
+                .args(["--session-fd", &SESSION_FD.to_string()])
+                .args(["--rank", "0", "--relay-ranks", "0"])
+                .args([
+                    "--round-timeout-seconds",
+                    &HANG_TIMEOUT.as_secs().to_string(),
+                ])
+                .args(["--deadline", &deadline.as_secs().to_string()]);
         }
         // The coordinator runs in the workload's root, where TMPDIR may be missing or on
         // another filesystem, so publication must create its temporary file in the
@@ -671,11 +698,8 @@ fn carrier_size_overflow_fails_before_save_allocations() {
             Allocation.size = size
         )
     });
-    let error = format!(
-        "SaveAllocations: {}: allocation size overflow",
-        harness.participant(2)
-    );
-    harness.coordinator("--prepare", &[&error], |_| {
+    let error = "SaveAllocations: rank 0 participant 2: allocation size overflow";
+    harness.coordinator("--prepare", &[error], |_| {
         harness.answer(RecordRequest::BeginCheckpoint, &[vec![], records.to_vec()]);
         harness.phase(Operation::PrepareMulticast);
     });
@@ -876,4 +900,97 @@ fn fabric_importer_imports_the_handle_that_its_creator_exported_at_restore() {
         }
         harness.answer(RecordRequest::Inspect, &records(new));
     });
+}
+
+// Relay mode.
+
+#[test]
+fn relay_alone_in_its_group_runs_every_mode_through_the_session() {
+    let mut harness = Harness::new();
+    harness.agent = Some(fake_agent::FakeAgent::default());
+    let participants = [vec![shared(), mapping()], vec![shared()]];
+    harness.coordinator("--inspect", &[], |_| {
+        harness.answer(RecordRequest::Inspect, &participants);
+    });
+    let owners = [vec![owner(1, A)], vec![owner(1, A)]];
+    harness.prepare(&participants, &owners, [4096, 0]);
+    harness.restore(&participants, [4096, 0], &participants, &[]);
+    let agent = harness.agent.as_ref().unwrap();
+    assert!(agent.fails().is_empty());
+    assert_eq!(
+        agent.keys(),
+        ["inspect.2.cmd", "prepare.5.cmd", "restore.9.cmd"]
+    );
+}
+
+#[test]
+fn relay_refusal_fails_the_session_before_any_phase() {
+    let mut harness = Harness::new();
+    harness.agent = Some(fake_agent::FakeAgent::default());
+    let error = "participant 1: invalid mapping or mapping out of bounds";
+    let participants = [
+        vec![allocation(), with!(mapping(), Mapping.size = 8192)],
+        vec![],
+    ];
+    harness.coordinator("--prepare", &[error], |_| {
+        harness.answer(RecordRequest::BeginCheckpoint, &participants);
+    });
+    let agent = harness.agent.as_ref().unwrap();
+    assert_eq!(agent.fails(), [(0, "Refused".to_owned())]);
+}
+
+#[test]
+fn session_arguments_are_all_or_nothing() {
+    let harness = Harness::new();
+    let dir = harness.directory.path().to_str().unwrap();
+    let inspect = ["--inspect", "--socket-dir", dir, "--process", "1"];
+    let session = [
+        "--session-fd",
+        "0",
+        "--rank",
+        "1",
+        "--relay-ranks",
+        "0,1",
+        "--round-timeout-seconds",
+        "60",
+        "--deadline",
+        "1",
+    ];
+    let cases: [(Vec<&str>, &[&str]); 4] = [
+        ([&inspect[..], &["--rank", "1"]].concat(), &["--session-fd"]),
+        (
+            [&inspect[..], &session[..2]].concat(),
+            &["required arguments", "--rank"],
+        ),
+        (
+            [
+                &inspect[..],
+                &session[..4],
+                &["--relay-ranks", "0,2"],
+                &session[6..],
+            ]
+            .concat(),
+            &["--relay-ranks does not contain --rank 1"],
+        ),
+        // Descriptor 0 is the coordinator's standard input, which is not a socket.
+        (
+            [&inspect[..], &session[..]].concat(),
+            &["--session-fd 0 is not a socket"],
+        ),
+    ];
+    for (args, errors) in cases {
+        let (status, stderr) = Coordinator::spawn(
+            Command::new(BINARY).args(&args).stdin(Stdio::null()),
+            HANG_TIMEOUT,
+        )
+        .finish();
+        assert!(!status.success(), "{args:?}: {stderr}");
+        for error in errors {
+            assert!(
+                stderr.contains(error),
+                "{args:?}: {error:?} not in {stderr:?}"
+            );
+        }
+        harness.assert_no_request("invalid arguments contacted a participant", Duration::ZERO);
+    }
 }
