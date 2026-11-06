@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::AllocationReference;
+use crate::{AllocationReference, FabricHandle};
 use serde::{Deserialize, Serialize};
 
 /// CUDA memory location (`CUmemLocation`).
@@ -111,5 +111,18 @@ pub enum Record {
         flags: u64,
         /// `CUmemAccessDesc` values.
         access: Vec<MemoryAccess>,
+    },
+    /// The creator of `allocation` exported it as `handle`.
+    FabricExport {
+        allocation: AllocationReference,
+        handle: FabricHandle,
+    },
+    /// This process imported `handle` as `allocation`, whose creator namespace PID is 0
+    /// because a fabric handle does not name its creator. The importer's other records
+    /// hold only what it can observe: allocation size 0, the importing device, and no
+    /// multicast properties. The coordinator finds the creator by the handle.
+    FabricImport {
+        allocation: AllocationReference,
+        handle: FabricHandle,
     },
 }

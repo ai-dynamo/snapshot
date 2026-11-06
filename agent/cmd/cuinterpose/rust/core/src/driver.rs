@@ -15,6 +15,7 @@ use cudarc::driver::sys::{
     CUmemGenericAllocationHandle, CUmulticastObjectProp, CUpointer_attribute, CUresult,
     CUstream_flags,
 };
+use cuinterpose_protocol::{FABRIC_HANDLE_BYTES, FabricHandle};
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
@@ -48,6 +49,32 @@ pub fn export_posix(handle: CUmemGenericAllocationHandle) -> Result<OwnedFd> {
     rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)
         .map_err(|error| Error::io("mark CUDA export close-on-exec", error))?;
     Ok(fd)
+}
+
+pub fn import_fabric(handle: &FabricHandle) -> Result<CUmemGenericAllocationHandle> {
+    let mut imported = 0;
+    let mut bytes = handle.0;
+    unsafe {
+        cuMemImportFromShareableHandle(
+            &mut imported,
+            bytes.as_mut_ptr().cast(),
+            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC,
+        )
+    }?;
+    Ok(imported)
+}
+
+pub fn export_fabric(handle: CUmemGenericAllocationHandle) -> Result<FabricHandle> {
+    let mut bytes = [0; FABRIC_HANDLE_BYTES];
+    unsafe {
+        cuMemExportToShareableHandle(
+            bytes.as_mut_ptr().cast(),
+            handle,
+            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC,
+            0,
+        )
+    }?;
+    Ok(FabricHandle(bytes))
 }
 pub fn result(code: CUresult) -> Result<()> {
     if code == CUDA_SUCCESS {
