@@ -5,23 +5,18 @@ package server
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
-	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testclock"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
@@ -64,7 +59,7 @@ func newHarness(t *testing.T, modify ...func(*Config)) *harness {
 // startHarness starts a coordinator that is not ready yet.
 func startHarness(t *testing.T, modify ...func(*Config)) *harness {
 	t.Helper()
-	ca, cert := testCertificates(t)
+	ca, cert := testcert.New(t)
 	h := &harness{
 		t:        t,
 		clock:    testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
@@ -439,43 +434,4 @@ func (l *logLines) all() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.lines...)
-}
-
-// testCertificates returns a CA pool and a serving certificate it signed for
-// localhost and 127.0.0.1.
-func testCertificates(t *testing.T) (*x509.CertPool, tls.Certificate) {
-	t.Helper()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	caTemplate := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "test CA"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	require.NoError(t, err)
-	caCert, err := x509.ParseCertificate(caDER)
-	require.NoError(t, err)
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "localhost"},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
-	require.NoError(t, err)
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
-	return pool, tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }

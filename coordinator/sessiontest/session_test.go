@@ -366,8 +366,8 @@ func TestConnect(t *testing.T) {
 
 	t.Run("waits while the coordinator refuses it", func(t *testing.T) {
 		ses := h.session(t, 1)
-		h.auth.refuse.Store(true)
-		defer h.auth.refuse.Store(false)
+		h.auth.Unavailable.Store(true)
+		defer h.auth.Unavailable.Store(false)
 		connected := make(chan error, 1)
 		go func() {
 			s, err := coordinator.Connect(within(t), ses.config(0))
@@ -377,14 +377,14 @@ func TestConnect(t *testing.T) {
 			connected <- err
 		}()
 		requireWaiting(t, connected)
-		h.auth.refuse.Store(false)
+		h.auth.Unavailable.Store(false)
 		require.NoError(t, <-connected)
 	})
 
 	t.Run("reports a refusal that lasts", func(t *testing.T) {
 		ses := h.session(t, 1)
-		h.auth.refuse.Store(true)
-		defer h.auth.refuse.Store(false)
+		h.auth.Unavailable.Store(true)
+		defer h.auth.Unavailable.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_, err := coordinator.Connect(ctx, ses.config(0))

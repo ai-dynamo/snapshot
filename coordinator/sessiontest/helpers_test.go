@@ -14,28 +14,25 @@ package sessiontest
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/coordinatortest"
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/internal/testclock"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -43,9 +40,6 @@ import (
 	"go.uber.org/goleak"
 	"k8s.io/apimachinery/pkg/types"
 )
-
-// memberToken is the token the test Authorizer admits.
-const memberToken = "member-token"
 
 // harness is a coordinator under test, with an Authorizer the test controls,
 // the proxies its members connect through, and a fake clock that times both
@@ -55,7 +49,7 @@ type harness struct {
 	cfg   server.Config
 	srv   *server.Server
 	ca    *x509.CertPool
-	auth  *authorizer
+	auth  *coordinatortest.Authorizer
 	clock *testclock.Clock
 	// logs records what every member's client logs.
 	logs *logLines
@@ -70,9 +64,9 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 	t.Helper()
 	ignore := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, ignore) })
-	ca, cert := testCertificates(t)
+	ca, cert := testcert.New(t)
 	h := &harness{
-		t: t, ca: ca, auth: &authorizer{},
+		t: t, ca: ca, auth: &coordinatortest.Authorizer{},
 		clock: testclock.New(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)),
 		logs:  &logLines{},
 	}
@@ -87,9 +81,8 @@ func newHarness(t *testing.T, modify ...func(*server.Config)) *harness {
 		}
 	})
 	h.cfg = server.Config{
-		Host: "127.0.0.1",
-		// Any free port, as nats-server's RANDOM_PORT picks.
-		Port:       -1,
+		Host:       "127.0.0.1",
+		Port:       natsserver.RANDOM_PORT,
 		TLS:        &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		Authorizer: h.auth,
 		Clock:      h.clock,
@@ -176,7 +169,7 @@ func (ses *testSession) config(member int) coordinator.Config {
 		ServerName: "localhost",
 		Attempt:    string(ses.spec.UID),
 		Member:     ses.spec.Members[member].ID,
-		Token:      func() (string, error) { return memberToken, nil },
+		Token:      func() (string, error) { return coordinatortest.Token, nil },
 		Clock:      ses.h.clock,
 		Log:        ses.h.logs.logger(),
 	}
@@ -232,7 +225,7 @@ func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetst
 	nc, err := nats.Connect("tls://"+ses.h.srv.Addr().String(),
 		nats.Secure(&tls.Config{RootCAs: ses.h.ca, ServerName: "localhost", MinVersion: tls.VersionTLS12}),
 		nats.UserInfo(session.UserName(uid, id), ""),
-		nats.Token(memberToken),
+		nats.Token(coordinatortest.Token),
 		nats.CustomInboxPrefix(session.InboxPrefix(uid, id)),
 		nats.NoReconnect())
 	require.NoError(t, err)
@@ -372,20 +365,6 @@ func (l *logLines) all() []string {
 	return slices.Clone(l.lines)
 }
 
-// authorizer admits memberToken, unless refuse is set, and refuses any other.
-type authorizer struct{ refuse atomic.Bool }
-
-// Authorize implements server.Authorizer.
-func (a *authorizer) Authorize(_ context.Context, _ types.UID, _, token string) error {
-	switch {
-	case a.refuse.Load():
-		return server.ErrUnavailable
-	case token != memberToken:
-		return server.ErrUnauthenticated
-	}
-	return nil
-}
-
 // recorder is an Observer that records what it sees of each attempt.
 type recorder struct {
 	mu     sync.Mutex
@@ -516,43 +495,4 @@ func (p *proxy) stop() {
 	<-p.accepted
 	p.cut()
 	p.wg.Wait()
-}
-
-// testCertificates returns a CA pool and a serving certificate it signed for
-// localhost and 127.0.0.1.
-func testCertificates(t *testing.T) (*x509.CertPool, tls.Certificate) {
-	t.Helper()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	caTemplate := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "test CA"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	require.NoError(t, err)
-	caCert, err := x509.ParseCertificate(caDER)
-	require.NoError(t, err)
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "localhost"},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
-	require.NoError(t, err)
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
-	return pool, tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }

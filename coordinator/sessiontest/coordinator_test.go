@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/snapshot/coordinator"
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
 	"github.com/go-logr/logr"
@@ -55,7 +56,7 @@ func TestDeadline(t *testing.T) {
 		h := newHarness(t)
 		ses := h.session(t, 1)
 		s := ses.connect(t, 0)
-		h.auth.refuse.Store(true)
+		h.auth.Unavailable.Store(true)
 		ses.cut(0)
 		// Nothing bounds the Barrier but the session.
 		wait := barrier(context.Background(), s, "admitted")
@@ -118,7 +119,7 @@ func TestGrace(t *testing.T) {
 		h := newHarness(t)
 		ses := h.session(t, 2)
 		sessions := ses.connectAll(t)
-		h.auth.refuse.Store(true)
+		h.auth.Unavailable.Store(true)
 		ses.cut(0)
 		h.clock.Await(t, server.DefaultGrace)
 		h.clock.Step(server.DefaultGrace - time.Millisecond)
@@ -232,8 +233,8 @@ func TestShutdown(t *testing.T) {
 // TestTLSRotation serves a rotated certificate to new connections without
 // restarting anything.
 func TestTLSRotation(t *testing.T) {
-	oldCA, oldCert := testCertificates(t)
-	newCA, newCert := testCertificates(t)
+	oldCA, oldCert := testcert.New(t)
+	newCA, newCert := testcert.New(t)
 	var current atomic.Pointer[tls.Certificate]
 	current.Store(&oldCert)
 	h := newHarness(t, func(cfg *server.Config) {

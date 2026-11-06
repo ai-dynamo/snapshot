@@ -70,8 +70,8 @@ func TestReconnect(t *testing.T) {
 			ctx := within(t)
 			ses := h.session(t, 2)
 			sessions := ses.connectAll(t)
-			h.auth.refuse.Store(true)
-			defer h.auth.refuse.Store(false)
+			h.auth.Unavailable.Store(true)
+			defer h.auth.Unavailable.Store(false)
 			ses.cut(0)
 			value := make([]byte, 20<<20)
 			inserted := make(chan error, 1)
@@ -79,7 +79,7 @@ func TestReconnect(t *testing.T) {
 			// Longer than the round trip the client gives an operation before
 			// sending it again.
 			requireWaitingFor(t, inserted, 4*time.Second)
-			h.auth.refuse.Store(false)
+			h.auth.Unavailable.Store(false)
 			select {
 			case err := <-inserted:
 				require.NoError(t, err)

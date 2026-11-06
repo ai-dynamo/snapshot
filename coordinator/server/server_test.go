@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/coordinator/internal/testcert"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -235,9 +237,9 @@ func slicesContain(lines []string, s string) bool {
 
 // TestConfig covers the configurations New refuses.
 func TestConfig(t *testing.T) {
-	_, cert := testCertificates(t)
+	_, cert := testcert.New(t)
 	valid := Config{
-		Host: "127.0.0.1", Port: -1, Authorizer: &testAuthorizer{},
+		Host: "127.0.0.1", Port: natsserver.RANDOM_PORT, Authorizer: &testAuthorizer{},
 		TLS: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 	}
 	for _, tt := range []struct {
