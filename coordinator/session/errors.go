@@ -88,8 +88,10 @@ const (
 	// coordinator holding it goes away.
 	ReasonCoordinatorLost = "CoordinatorLost"
 
-	// ReasonCancelled is the reason the coordinator fails a session still open
-	// when it removes it, which means the group resource was deleted.
+	// ReasonCancelled is the reason the coordinator fails a session with when
+	// its group resource's deletion starts before every member has arrived at
+	// BarrierAdmitted, and a session still open when it removes it, which means
+	// the group resource was deleted.
 	ReasonCancelled = "Cancelled"
 
 	// ReasonInvalid is the reason EndedError reports for a session whose ended
