@@ -522,15 +522,24 @@ without ever recapturing.
 Restore starts from Pods that the owner has already placed. Each restore Pod
 carries `nvidia.com/restore-group`, which tells the NRI plugin and the agent to
 take the container mapping from the `PodGroupRestore` and to wait for the group
-rather than restore the Pod on its own. The annotation is the Pod's side of the
-binding, and it wins: a target is admitted only if its annotation names this
-`PodGroupRestore`, and it fails with `TargetInUse` if the annotation names another
-unfinished attempt or if another unfinished attempt has already pinned the
-Pod's UID, so a Pod can be the target of only one unfinished attempt. A target
-whose annotation names a `PodGroupRestore` that has finished or no longer exists
-is not in use but not bound to this attempt either, so it is refused with
-`Refused`. Because a refusal leaves a Pod as Snapshot found it, the owner reuses the Pod for a new
-attempt by pointing its annotation at the new `PodGroupRestore`. Admission again
+rather than restore the Pod on its own, and, once that `PodGroupRestore` exists,
+`nvidia.com/restore-group-uid` with its UID. Together they are the Pod's side of
+the binding: the exact pair of name and UID says which attempt may act on the
+Pod, so a `PodGroupRestore` recreated under the same name never inherits its
+predecessor's Pods. The binding wins: a target is admitted only once it is bound
+to this `PodGroupRestore`, and it fails with `TargetInUse` if it is bound to
+another unfinished attempt or if another unfinished attempt has already pinned
+the Pod's UID, so a Pod can be the target of only one unfinished attempt. The
+UID exists only once the `PodGroupRestore` is created, so the owner binds its
+Pods afterwards, and admission waits, with `TargetPodPending`, while a target is
+not yet bound to this attempt, because its binding has no UID yet or still names
+an attempt that has finished or no longer exists. A Pod without
+`nvidia.com/restore-group` is refused with `Refused`: the NRI plugin decides when
+it creates the Pod's containers whether they wait for a group, so such a Pod can
+never become a target. A refusal leaves a Pod as Snapshot found it, so the owner
+reuses the Pod for a new attempt by binding it to the new `PodGroupRestore`,
+whereas a Pod that carries the `nvidia.com/RestoreStarted` condition, from any
+attempt, has been changed and is refused with `Refused`. Admission again
 comes first and again changes nothing: each
 agent resolves its member's artifact, runs the existing compatibility checks,
 verifies that the restore Pod's remaining startup-probe time covers the
@@ -544,8 +553,8 @@ for the operator's, which pins nothing until it passes. The operator refuses a
 restore with `Refused` if its `PodGroupSnapshot` is missing, has another UID,
 or is being deleted, and with `ArtifactUnavailable` if it is not Ready, so a
 restore never waits for its snapshot; it waits, with `TargetPodPending`, until
-every target Pod exists, is scheduled, and has an IPv4 address and a
-destination container ID. It then records every member as Admitted in one
+every target Pod exists, is bound to it, is scheduled, and has an IPv4 address
+and a destination container ID. It then records every member as Admitted in one
 update, pinning the target's Pod UID,
 container IDs, and Pod IP from the Pod's own status, and an agent whose Pod or
 validated container no longer matches what was pinned fails the member with
@@ -961,6 +970,16 @@ status:
   - {id: worker-0, pod: {name: llm-worker-0-r1, uid: <uid>}, nodeName: node-c, targetPodIP: 10.1.9.2, startedAt: "2026-10-16T18:20:40Z", phase: Released}
   - {id: worker-1, pod: {name: llm-worker-1-r1, uid: <uid>}, nodeName: node-d, targetPodIP: 10.1.2.8, startedAt: "2026-10-16T18:20:40Z", phase: Released}
   conditions: []                        # Admitted, Released, Ready, Failed
+---
+apiVersion: v1
+kind: Pod                               # a target, placed by the owner
+metadata:
+  name: llm-worker-0-r1
+  namespace: serving
+  annotations:
+    nvidia.com/restore-group: llm-tp8-r1         # set when the Pod is created
+    nvidia.com/restore-group-uid: <uid>          # set once llm-tp8-r1 exists
+    nvidia.com/restore-group-report-uid: <uid>   # written by the agent with its conditions
 ```
 
 The specs follow the shape of the existing resources. A member's `source` is the
@@ -1001,7 +1020,25 @@ for one, the session's reason or one of the agent's group checks such as
 `nvidia.com/GroupRestoreFailed` to True with that reason, in the same status
 update as `nvidia.com/Restored`. `Restored` remains the only signal that the
 member failed; `GroupRestoreFailed` only says why, and a member that fails on
-its own sets `Restored` alone, exactly as a single restore does. Member phases
+its own sets `Restored` alone, exactly as a single restore does. A restore Pod
+can serve several attempts in turn, so each report on it also says which attempt
+produced it. The agent publishes `nvidia.com/RestoreStarted`,
+`nvidia.com/Restored`, and `nvidia.com/GroupRestoreFailed` only together with the
+annotation `nvidia.com/restore-group-report-uid`, which holds the UID of their
+attempt, in one conditional update of the Pod's `status` subresource, which also
+accepts annotations, and the operator reads them only when that annotation holds
+its own attempt's UID. The binding and the report identity answer different
+questions, which attempt may act and which attempt produced the conditions, so
+rebinding a Pod never makes an old report look current. The agent's first
+report for a new attempt replaces the whole report of the earlier one, so that
+attempt's `Restored` and `GroupRestoreFailed` never survive under the new UID,
+but it never relabels `RestoreStarted`: a Pod that carries that condition under
+another attempt's UID, or under none, gets no report for a new attempt. Every
+agent write to a target Pod, the one that records `RestoreStarted` included, is
+fenced: the agent checks the Pod's UID and its binding to the attempt, by name
+and UID, and makes the write conditional on the `resourceVersion` it read,
+checking again after a conflict, so rebinding the Pod invalidates any write
+still outstanding from the previous attempt. Member phases
 progress through `Pending`, `Admitted`, `Checkpointing`, and `Checkpointed`
 during capture, and through `Pending`, `Admitted`, `Restoring`, and `Released` during
 restore, with `Failed` and a reason otherwise. A restore is `Released` once its
@@ -1059,9 +1096,9 @@ remain a compatible addition.
 | --- | --- | --- |
 | `PodSnapshot` and `PodSnapshotContent` | No schema change; group-owned children carry an owner reference and a member-ID label, take their settings from the member's template, and cannot be restored on their own, and the agent sets a new `Started` condition on a member's `PodSnapshotContent` before its first irreversible step | The agent reads group parameters from the parent group, each member keeps its own settings, and the operator learns which sources Snapshot changed |
 | Artifact manifest | Adds an optional `podGroup` section with the capture ID, the member's own ID, and the ordered member table of Pod UIDs, containers, and Pod IPs, plus each process's rendezvous file path | Restore admission checks that all members come from one capture and builds the IP map from the artifacts |
-| Restore Pod contract | New annotation `nvidia.com/restore-group: <PodGroupRestore>`, used instead of `restore-from` and `restore-container-map`, which decides the attempt a Pod belongs to; group targets must carry the restore startup probe, and the NRI plugin never runs the original command while the group context is missing | One source of truth, and no race with standalone restore |
+| Restore Pod contract | New annotations `nvidia.com/restore-group: <PodGroupRestore>`, used instead of `restore-from` and `restore-container-map`, and `nvidia.com/restore-group-uid: <its UID>`, both set by the owner, whose exact pair decides the attempt that may act on a Pod; group targets must carry the restore startup probe, and the NRI plugin never runs the original command while the group context is missing | One source of truth, no race with standalone restore, and no attempt inheriting a Pod through a reused name |
 | `restore-complete` file | Adds an `attempt` key holding the `PodGroupRestore` UID next to `pid`, keeping the existing format | Lets a restarted agent prove release for this attempt |
-| Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before CRIU under a field manager of its own and never removed; new condition `nvidia.com/GroupRestoreFailed`, set to True with the group's reason when a member fails for one, in the same update as `nvidia.com/Restored`; `nvidia.com/Restored` keeps its public reasons and gains only `GroupPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety, an exact `startedAt`, and the group's reasons, with `ClassifyRestoreOutcome` unchanged |
+| Restore Pod conditions | New condition `nvidia.com/RestoreStarted`, set to True before the agent first changes the Pod, under a field manager of its own, and never removed or relabelled; new condition `nvidia.com/GroupRestoreFailed`, set to True with the group's reason when a member fails for one, in the same update as `nvidia.com/Restored`; new annotation `nvidia.com/restore-group-report-uid`, which the agent writes with these conditions, in one conditional update, to name the attempt that produced them; `nvidia.com/Restored` keeps its public reasons and gains only `GroupPending`, an agent-internal wait reason like today's `SnapshotPending` | Restart safety, an exact `startedAt`, the group's reasons with `ClassifyRestoreOutcome` unchanged, and reports that a later attempt on the same Pod cannot take for its own |
 | Control volume | Reserves `coordination/` for rendezvous endpoints | Gives every Pod a private and stable endpoint path |
 | Agent DaemonSet | The chart annotates the agent's Pod template with the group protocol versions it supports | Group controllers create member work only on nodes whose agent Pod is Ready and group-capable |
 | `SnapshotJob` and single-Pod restore | Unchanged | Not applicable |
@@ -1214,13 +1251,19 @@ and permissions that refuse another attempt's buckets; the group
 controllers' validation, including member templates that set a reserved label
 or name a container outside their source, the copy of each member's settings
 to its `PodSnapshot`, a check that fails when SNEP-411's settings gain a field,
-identity pinning, target binding and `TargetInUse`,
+identity pinning, target binding by name and UID and `TargetInUse`,
 aggregation, including a restore that fails before the operator ever sees it in
-progress, artifact withdrawal, cancellation, and the finalizer that keeps a
+progress and a reused Pod that still carries an earlier attempt's report,
+artifact withdrawal, cancellation, and the finalizer that keeps a
 snapshot while a restore reads it; the agents' phase sequencing, including concurrent members on one
 node, members without cuInterpose, a failed write of the member's record, and a
 restart at every phase, in particular during CRIU, between reconstruction and
-release, and between `restore-complete` and the status update; and cuInterpose's validation
+release, and between `restore-complete` and the status update; the agents'
+fenced report writes against a real API server on the oldest and the newest
+supported Kubernetes, including a change of attempt, a conflicting write, a
+rebinding or a same-name recreation while a write is outstanding, a Pod already
+started by another attempt, and the kubelet's conditions, which every write
+keeps; and cuInterpose's validation
 of multi-rank topologies with teams that span Pods, importers resolved by
 handle, missing ranks, duplicated creators, and a leader other than rank 0.
 
@@ -1384,7 +1427,7 @@ const (
 const PodSnapshotConditionStarted = "Started"
 
 // Reasons used on conditions and on member results. TargetInUse means that the
-// target's restore-group annotation names another unfinished PodGroupRestore, or
+// target is bound to another unfinished PodGroupRestore, by name and UID, or
 // that another one has already pinned the target's UID. TargetPodDeleted fails
 // a restore member whose pinned Pod is gone or was replaced; like a deleted
 // member PodSnapshot, it may hide the member's start.
@@ -1403,7 +1446,8 @@ const (
 
 // Reasons on the Admitted condition while the attempt has not committed: the
 // operator waits for a source Pod to be scheduled, for a target Pod to exist,
-// be scheduled, and have an address and a destination container, for the agent
+// be bound to the attempt, be scheduled, and have an address and a destination
+// container, for the agent
 // on a member's node, or for the members of an earlier group of the same name
 // to be deleted, then for the members to pass admission. Committed marks the
 // first startedAt.
@@ -1585,7 +1629,7 @@ type PodGroupSnapshotStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Failed")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be no more than 63 characters because member PodSnapshots carry it as a label value"
-// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, self.spec.members.exists(s, s.id == m.id))",message="status must refer to declared members"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.members) || self.status.members.all(m, m.rank < size(self.spec.members) && self.spec.members[m.rank].id == m.id)",message="status.members rank must be the member's position in spec.members"
 type PodGroupSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -1801,23 +1845,40 @@ Finally, the Pod contract gains a few constants and one key in the
 package podcontract
 
 const (
-	// RestoreGroupAnnotation marks a restore Pod as a target of a PodGroupRestore.
-	// On group targets it replaces the restore-from and restore-container-map
+	// RestoreGroupAnnotation marks a restore Pod as a target of the
+	// PodGroupRestore it names. The owner sets it when it creates the Pod. On
+	// group targets it replaces the restore-from and restore-container-map
 	// annotations, and it requires the restore startup probe.
 	RestoreGroupAnnotation = "nvidia.com/restore-group"
 
-	// RestoreStartedCondition is set to True on a group restore Pod before CRIU
-	// starts, under a field manager of its own, and never removed; from then
-	// on the agent never replays CRIU into the Pod. Its lastTransitionTime is
-	// the member's startedAt.
+	// RestoreGroupUIDAnnotation holds the UID of the PodGroupRestore that
+	// RestoreGroupAnnotation names. The owner sets it once that PodGroupRestore
+	// exists. The exact pair of name and UID is the attempt that may act on the
+	// Pod: admission waits until a target is bound to its own attempt, and every
+	// agent write checks the binding.
+	RestoreGroupUIDAnnotation = "nvidia.com/restore-group-uid"
+
+	// RestoreGroupReportUIDAnnotation holds the UID of the PodGroupRestore whose
+	// attempt produced the Pod's RestoreStarted, Restored and GroupRestoreFailed
+	// conditions. The agent writes it together with them, in one update of the
+	// Pod's status conditional on its resourceVersion, and the operator reads
+	// them only when it holds its own attempt's UID.
+	RestoreGroupReportUIDAnnotation = "nvidia.com/restore-group-report-uid"
+
+	// RestoreStartedCondition is set to True on a group restore Pod before the
+	// agent first changes it, under a field manager of its own, and never
+	// removed; from then on the agent never replays CRIU into the Pod, and
+	// never reports for another attempt on it. Its lastTransitionTime is the
+	// member's startedAt.
 	RestoreStartedCondition = "nvidia.com/RestoreStarted"
 
 	// GroupRestoreFailedCondition is set to True on a group restore Pod whose
 	// member fails for a reason of the group: the session's reason, or one of
 	// the agent's group checks such as PodIPChanged or GateBudgetTooShort. The
 	// agent sets it in the same status update as nvidia.com/Restored, which
-	// stays the only signal that the member failed, and never removes it. A
-	// member that fails on its own leaves it unset.
+	// stays the only signal that the member failed. A member that fails on its
+	// own leaves it unset, and the agent's first report for a later attempt
+	// removes it.
 	GroupRestoreFailedCondition = "nvidia.com/GroupRestoreFailed"
 
 	// RestoreGroupPending is an agent-internal wait reason on nvidia.com/Restored
