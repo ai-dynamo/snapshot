@@ -311,6 +311,39 @@ func TestPodGroupSnapshotReconciler_RefusesBeforeCreatingAnything(t *testing.T) 
 			wantInMsg:  `PodSnapshot "group-b" already exists`,
 		},
 		{
+			name: "a template that sets the group label",
+			mutate: func(group *snapshotv1alpha1.PodGroupSnapshot) []client.Object {
+				group.Spec.Members[1].PodSnapshotTemplate = &snapshotv1alpha1.PodGroupMemberTemplate{
+					Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{Labels: map[string]string{snapshotv1alpha1.PodGroupLabel: "x"}},
+				}
+				return nil
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantInMsg:  "spec.members[1].podSnapshotTemplate.metadata.labels[" + snapshotv1alpha1.PodGroupLabel + "]: Forbidden: label is controller-owned",
+		},
+		{
+			name: "a template that sets the SnapshotJob label",
+			mutate: func(group *snapshotv1alpha1.PodGroupSnapshot) []client.Object {
+				group.Spec.Members[1].PodSnapshotTemplate = &snapshotv1alpha1.PodGroupMemberTemplate{
+					Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerLabel: "x"}},
+				}
+				return nil
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantInMsg:  "spec.members[1].podSnapshotTemplate.metadata.labels[" + snapshotv1alpha1.SnapshotJobOwnerLabel + "]: Forbidden: label is controller-owned",
+		},
+		{
+			name: "a template that sets the SnapshotJob UID label",
+			mutate: func(group *snapshotv1alpha1.PodGroupSnapshot) []client.Object {
+				group.Spec.Members[1].PodSnapshotTemplate = &snapshotv1alpha1.PodGroupMemberTemplate{
+					Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerUIDLabel: "x"}},
+				}
+				return nil
+			},
+			wantReason: snapshotv1alpha1.PodGroupReasonRefused,
+			wantInMsg:  "spec.members[1].podSnapshotTemplate.metadata.labels[" + snapshotv1alpha1.SnapshotJobOwnerUIDLabel + "]: Forbidden: label is controller-owned",
+		},
+		{
 			name: "a template label the PodSnapshot cannot carry",
 			mutate: func(group *snapshotv1alpha1.PodGroupSnapshot) []client.Object {
 				group.Spec.Members[1].PodSnapshotTemplate = &snapshotv1alpha1.PodGroupMemberTemplate{

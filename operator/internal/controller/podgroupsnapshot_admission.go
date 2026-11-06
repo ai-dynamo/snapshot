@@ -129,8 +129,7 @@ func podGroupSnapshotSpecRefusal(group *snapshotv1alpha1.PodGroupSnapshot) *podG
 			continue
 		}
 		path := field.NewPath("spec", "members").Index(rank).Child("podSnapshotTemplate", "metadata")
-		if err := validateTemplateMetadata(member.PodSnapshotTemplate.Metadata, path,
-			snapshotv1alpha1.PodGroupLabel, snapshotv1alpha1.PodGroupMemberLabel); err != nil {
+		if err := validateTemplateMetadata(member.PodSnapshotTemplate.Metadata, path); err != nil {
 			return ptr.To(podGroupRefusal(fmt.Sprintf("member %q: %v", member.ID, err)))
 		}
 	}

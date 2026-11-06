@@ -45,21 +45,31 @@ func newPodSnapshot(
 	}
 }
 
+// controllerOwnedLabels are the labels by which the SnapshotJob and
+// PodGroupSnapshot controllers find the PodSnapshots they own. A template of
+// either kind may set none of them, as the CRDs also refuse, so neither
+// controller can count or adopt the other's PodSnapshot.
+var controllerOwnedLabels = []string{
+	snapshotv1alpha1.SnapshotJobOwnerLabel,
+	snapshotv1alpha1.SnapshotJobOwnerUIDLabel,
+	snapshotv1alpha1.PodGroupLabel,
+	snapshotv1alpha1.PodGroupMemberLabel,
+}
+
 // validateTemplateMetadata rejects template labels and annotations that the
-// API server would refuse on the PodSnapshot built from them, and labels
-// reserved for the controller that builds it. The CRDs check label keys and
-// value lengths, but not label value syntax or the total annotation size, so a
-// template that passes admission can still produce a PodSnapshot that cannot
-// be created. path names the template's metadata, so errors point at the field
-// the user wrote.
-func validateTemplateMetadata(metadata *snapshotv1alpha1.PodSnapshotTemplateMetadata, path *field.Path, reservedLabels ...string) error {
+// API server would refuse on the PodSnapshot built from them, and the
+// controllerOwnedLabels. The CRDs check label keys and value lengths, but not
+// label value syntax or the total annotation size, so a template that passes
+// admission can still produce a PodSnapshot that cannot be created. path names
+// the template's metadata, so errors point at the field the user wrote.
+func validateTemplateMetadata(metadata *snapshotv1alpha1.PodSnapshotTemplateMetadata, path *field.Path) error {
 	if metadata == nil {
 		return nil
 	}
 	labelsPath := path.Child("labels")
 	errs := metav1validation.ValidateLabels(metadata.Labels, labelsPath)
 	errs = append(errs, apivalidation.ValidateAnnotations(metadata.Annotations, path.Child("annotations"))...)
-	for _, reserved := range reservedLabels {
+	for _, reserved := range controllerOwnedLabels {
 		if _, found := metadata.Labels[reserved]; found {
 			errs = append(errs, field.Forbidden(labelsPath.Key(reserved), "label is controller-owned"))
 		}
