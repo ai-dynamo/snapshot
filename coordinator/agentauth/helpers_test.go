@@ -78,6 +78,10 @@ type issuer struct {
 
 	mu   sync.Mutex
 	keys map[string]*ecdsa.PrivateKey // by key ID; signs with "key-0"
+	// hold, when set, holds each request for the key set until it is closed,
+	// and respond, when set, answers it in place of the key set.
+	hold    chan struct{}
+	respond func(http.ResponseWriter, jose.JSONWebKeySet)
 
 	// keyFetches counts the requests for the key set.
 	keyFetches atomic.Int32
@@ -98,13 +102,25 @@ func newIssuer(t *testing.T) *issuer {
 			"id_token_signing_alg_values_supported": []string{"ES256"},
 		})
 	})
-	mux.HandleFunc("GET "+keysPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET "+keysPath, func(w http.ResponseWriter, r *http.Request) {
 		is.keyFetches.Add(1)
 		is.mu.Lock()
-		defer is.mu.Unlock()
+		hold, respond := is.hold, is.respond
 		var set jose.JSONWebKeySet
 		for id, k := range is.keys {
 			set.Keys = append(set.Keys, jose.JSONWebKey{Key: &k.PublicKey, KeyID: id, Algorithm: "ES256", Use: "sig"})
+		}
+		is.mu.Unlock()
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		if respond != nil {
+			respond(w, set)
+			return
 		}
 		writeJSON(w, set)
 	})
@@ -129,6 +145,37 @@ func (is *issuer) addKey(t *testing.T, id string) {
 	is.mu.Lock()
 	defer is.mu.Unlock()
 	is.keys[id] = k
+}
+
+// holdKeys holds every request for the key set until release is called, which
+// the test's cleanup also does.
+func (is *issuer) holdKeys(t *testing.T) (release func()) {
+	t.Helper()
+	hold := make(chan struct{})
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	is.hold = hold
+	release = sync.OnceFunc(func() {
+		is.mu.Lock()
+		defer is.mu.Unlock()
+		is.hold = nil
+		close(hold)
+	})
+	t.Cleanup(release)
+	return release
+}
+
+// respondWith answers every request for the key set with respond, or with the
+// key set again when respond is nil.
+func (is *issuer) respondWith(respond func(http.ResponseWriter, jose.JSONWebKeySet)) {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	is.respond = respond
+}
+
+// unavailable answers a request as an API server that cannot serve it does.
+func unavailable(w http.ResponseWriter, _ jose.JSONWebKeySet) {
+	http.Error(w, "the server is currently unable to handle the request", http.StatusServiceUnavailable)
 }
 
 // tokenClaims are the claims of a token, as JSON; modifiers change them.
@@ -161,17 +208,31 @@ func (is *issuer) claims(now time.Time) tokenClaims {
 	}
 }
 
-// sign signs c with the key under id, which need not be published.
+// sign signs c with the issuer's key under id, or, when it has none, with a
+// key it never publishes.
 func (is *issuer) sign(t *testing.T, id string, c tokenClaims) string {
 	t.Helper()
 	is.mu.Lock()
 	k, ok := is.keys[id]
 	is.mu.Unlock()
 	if !ok {
-		var err error
-		k, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		require.NoError(t, err)
+		return forge(t, id, c)
 	}
+	return signWith(t, k, id, c)
+}
+
+// forge signs c with a new key, which no issuer publishes, under the key ID
+// id, which may be the ID of a key the issuer does publish.
+func forge(t *testing.T, id string, c tokenClaims) string {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	return signWith(t, k, id, c)
+}
+
+// signWith signs c with k, under the key ID id.
+func signWith(t *testing.T, k *ecdsa.PrivateKey, id string, c tokenClaims) string {
+	t.Helper()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: jose.JSONWebKey{Key: k, KeyID: id}},
 		(&jose.SignerOptions{}).WithType("JWT"))
 	require.NoError(t, err)
@@ -325,6 +386,14 @@ func (h *harness) token(modify ...func(tokenClaims)) string {
 		m(c)
 	}
 	return h.issuer.sign(h.t, "key-0", c)
+}
+
+// signedWith returns a valid token of the agents' ServiceAccount, signed with
+// the issuer's key under id, or, when it has none, with a key it never
+// publishes.
+func (h *harness) signedWith(id string) string {
+	h.t.Helper()
+	return h.issuer.sign(h.t, id, h.issuer.claims(h.clock.Now()))
 }
 
 // authorize asks the Authorizer, within server.AuthorizeTimeout as the

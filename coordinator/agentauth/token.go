@@ -24,9 +24,9 @@ const (
 	keysPath      = "/openid/v1/jwks"
 )
 
-// maxDiscovery bounds the discovery document read, which is a few hundred
-// bytes.
-const maxDiscovery = 1 << 20
+// maxDocument bounds a document read from the API server: the discovery
+// document is a few hundred bytes, and the key set a few kilobytes.
+const maxDocument = 1 << 20
 
 // identity is what a verified token says about the agent that presents it.
 type identity struct {
@@ -58,59 +58,57 @@ type discovery struct {
 }
 
 // newVerifier returns a verifier of the API server's ServiceAccount tokens for
-// audience. It reads the issuer from the API server's discovery document,
-// within ctx, and fetches the issuer's keys from the API server, again for a
-// key it does not hold yet. Both come from the API server itself, through the
-// client cfg configures, rather than from the document's jwks_uri, which may
-// name a public endpoint the agents cannot reach.
-func newVerifier(ctx context.Context, cfg *rest.Config, audience string,
-	now func() time.Time) (*oidc.IDTokenVerifier, error) {
-	cfg = rest.CopyConfig(cfg)
-	// A fetch of the keys runs apart from the Authorize calls that wait for
-	// it, so only the client's timeout bounds it.
-	cfg.Timeout = server.AuthorizeTimeout
-	client, err := rest.HTTPClientFor(cfg)
+// cfg's audience. Within ctx, it reads the issuer from the API server's
+// discovery document, and then the issuer's keys. Both come from the API
+// server itself, through the client cfg.RESTConfig configures, rather than
+// from the document's jwks_uri, which may name a public endpoint the agents
+// cannot reach.
+func newVerifier(ctx context.Context, cfg Config) (*oidc.IDTokenVerifier, error) {
+	client, err := rest.HTTPClientFor(cfg.RESTConfig)
 	if err != nil {
 		return nil, fmt.Errorf("build a client of the API server: %w", err)
 	}
-	host, _, err := rest.DefaultServerUrlFor(cfg)
+	host, _, err := rest.DefaultServerUrlFor(cfg.RESTConfig)
 	if err != nil {
 		return nil, fmt.Errorf("find the API server: %w", err)
 	}
-	d, err := readDiscovery(ctx, client, host.JoinPath(discoveryPath).String())
-	if err != nil {
+	var d discovery
+	if err := getJSON(ctx, client, host.JoinPath(discoveryPath).String(), &d); err != nil {
 		return nil, fmt.Errorf("read the ServiceAccount token issuer: %w", err)
 	}
-	keys := oidc.NewRemoteKeySet(oidc.ClientContext(ctx, client), host.JoinPath(keysPath).String())
+	if d.Issuer == "" {
+		return nil, errors.New("read the ServiceAccount token issuer: the discovery document names no issuer")
+	}
+	keys, err := newKeySet(ctx, client, host.JoinPath(keysPath).String(), cfg)
+	if err != nil {
+		return nil, fmt.Errorf("read the ServiceAccount token issuer's keys: %w", err)
+	}
 	return oidc.NewVerifier(d.Issuer, keys, &oidc.Config{
-		ClientID:             audience,
+		ClientID:             cfg.Audience,
 		SupportedSigningAlgs: d.Algorithms,
-		Now:                  now,
+		Now:                  cfg.Clock.Now,
 	}), nil
 }
 
-// readDiscovery gets the discovery document at url.
-func readDiscovery(ctx context.Context, client *http.Client, url string) (discovery, error) {
-	var d discovery
+// getJSON gets the JSON document at url through client, within ctx, and
+// decodes it into v.
+func getJSON(ctx context.Context, client *http.Client, url string, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return d, err
+		return err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return d, err
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return d, fmt.Errorf("GET %s: %s", url, resp.Status)
+		return fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxDiscovery)).Decode(&d); err != nil {
-		return d, fmt.Errorf("GET %s: %w", url, err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxDocument)).Decode(v); err != nil {
+		return fmt.Errorf("GET %s: %w", url, err)
 	}
-	if d.Issuer == "" {
-		return d, errors.New("the discovery document names no issuer")
-	}
-	return d, nil
+	return nil
 }
 
 // verify checks the token's signature, issuer, audience, and lifetime, and
@@ -119,7 +117,7 @@ func (a *Authorizer) verify(ctx context.Context, token string) (identity, error)
 	t, err := a.verifier.Verify(ctx, token)
 	switch {
 	case err != nil && ctx.Err() != nil:
-		// The keys the token needs could not be fetched in time.
+		// The caller gave up waiting for a fetch of the issuer's keys.
 		return identity{}, fmt.Errorf("%w: %v", server.ErrUnavailable, err)
 	case err != nil:
 		return identity{}, fmt.Errorf("%w: %v", server.ErrUnauthenticated, err)

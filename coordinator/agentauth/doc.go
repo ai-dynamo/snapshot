@@ -15,5 +15,5 @@
 //
 // The Authorizer says why it refuses a member in the error it returns, which
 // the coordinator logs and which never holds the token. It logs only failed
-// TokenReviews itself.
+// fetches of the issuer's keys and failed TokenReviews itself.
 package agentauth

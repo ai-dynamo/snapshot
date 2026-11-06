@@ -15,6 +15,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/coordinator/server"
 	"github.com/ai-dynamo/snapshot/coordinator/session"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -49,19 +50,39 @@ func TestNewValidatesConfig(t *testing.T) {
 	})
 }
 
-func TestNewReadsTheIssuer(t *testing.T) {
+func TestNewReadsTheIssuerAndItsKeys(t *testing.T) {
 	h := newHarness(t)
-	for name, host := range map[string]string{
-		"a malformed host":                    "http://[::1",
-		"no API server":                       "http://127.0.0.1:1",
-		"no discovery document":               notFound(t),
-		"a discovery document with no issuer": noIssuer(t),
+	for name, tc := range map[string]struct {
+		host func(*testing.T) string
+		says string
+	}{
+		"a malformed host": {host: func(*testing.T) string { return "http://[::1" }},
+		"no API server": {
+			host: func(*testing.T) string { return "http://127.0.0.1:1" },
+			says: "read the ServiceAccount token issuer",
+		},
+		"no discovery document": {host: notFound, says: "read the ServiceAccount token issuer"},
+		"a discovery document with no issuer": {
+			host: noIssuer,
+			says: "the discovery document names no issuer",
+		},
+		"no key set": {
+			host: keySetAnswering(unavailable),
+			says: "read the ServiceAccount token issuer's keys",
+		},
+		"no key that can verify a signature": {
+			host: keySetAnswering(func(w http.ResponseWriter, _ jose.JSONWebKeySet) {
+				writeJSON(w, map[string]any{"keys": []any{}})
+			}),
+			says: "read the ServiceAccount token issuer's keys",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := h.config()
-			cfg.RESTConfig = &rest.Config{Host: host}
+			cfg.RESTConfig = &rest.Config{Host: tc.host(t)}
 			_, err := New(t.Context(), cfg)
 			require.Error(t, err)
+			assert.ErrorContains(t, err, tc.says)
 			assert.NotErrorIs(t, err, session.ErrInvalid)
 		})
 	}
@@ -81,6 +102,16 @@ func notFound(t *testing.T) string {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+// keySetAnswering returns an issuer that answers every request for its key set
+// with respond.
+func keySetAnswering(respond func(http.ResponseWriter, jose.JSONWebKeySet)) func(*testing.T) string {
+	return func(t *testing.T) string {
+		is := newIssuer(t)
+		is.respondWith(respond)
+		return is.url()
+	}
 }
 
 func TestAuthorizeAdmits(t *testing.T) {
@@ -386,23 +417,10 @@ func TestAReviewOutlivesTheCallThatStartedIt(t *testing.T) {
 	assert.EqualValues(t, 1, h.reviewer.calls.Load())
 }
 
-func TestAuthorizeFetchesNewKeys(t *testing.T) {
-	h := newHarness(t)
-	require.NoError(t, h.authorize(member, h.token()))
-	require.EqualValues(t, 1, h.issuer.keyFetches.Load())
-
-	h.issuer.addKey(t, "key-1")
-	token := h.issuer.sign(t, "key-1", h.issuer.claims(h.clock.Now()))
-	require.NoError(t, h.authorize(member, token))
-	assert.EqualValues(t, 2, h.issuer.keyFetches.Load())
-	require.NoError(t, h.authorize(member, h.token()))
-	assert.EqualValues(t, 2, h.issuer.keyFetches.Load())
-}
-
 // The harness checks, in every test, that no error Authorize returns, which
 // the coordinator logs, and no log line holds any part of a token. This test
 // returns every kind of refusal and failure, and checks that the Authorizer
-// logs only the failed TokenReview.
+// logs only the failed key fetch and the failed TokenReview.
 func TestNoErrorOrLogHoldsTheToken(t *testing.T) {
 	h := newHarness(t)
 	now := h.clock.Now()
@@ -450,8 +468,23 @@ func TestNoErrorOrLogHoldsTheToken(t *testing.T) {
 	require.ErrorIs(t, h.authorizeWithin(ctx, member, h.token()), server.ErrUnavailable)
 	close(h.reviewer.release)
 
+	// The keys: a caller gives up waiting for a fetch, another is refused
+	// within the cooldown, after the fetch if it is still in flight, and
+	// another after a failed fetch.
+	h.clock.Step(minKeyFetchInterval)
+	release := h.issuer.holdKeys(t)
+	ctx, cancel = context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, h.authorizeWithin(ctx, member, h.signedWith("key-unknown")), server.ErrUnavailable)
+	release()
+	require.ErrorIs(t, h.authorize(member, h.signedWith("key-unknown")), server.ErrUnauthenticated)
+	h.issuer.respondWith(unavailable)
+	h.clock.Step(minKeyFetchInterval)
+	require.ErrorIs(t, h.authorize(member, h.signedWith("key-unknown")), server.ErrUnauthenticated)
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	require.Len(t, h.logs, 1)
+	require.Len(t, h.logs, 2)
 	assert.Contains(t, h.logs[0], `"msg"="A TokenReview failed"`)
+	assert.Contains(t, h.logs[1], `"msg"="A fetch of the issuer's keys failed"`)
 }
