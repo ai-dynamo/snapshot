@@ -1,0 +1,634 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: podgroupsnapshots.nvidia.com
+spec:
+  group: nvidia.com
+  names:
+    kind: PodGroupSnapshot
+    listKind: PodGroupSnapshotList
+    plural: podgroupsnapshots
+    shortNames:
+    - podgroupsnap
+    singular: podgroupsnapshot
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Ready condition
+      jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - description: Failure reason
+      jsonPath: .status.conditions[?(@.type=='Failed')].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PodGroupSnapshot checkpoints a fixed group of cooperating Pods together, so
+          that a PodGroupRestore can restore them together. It owns one PodSnapshot
+          per member, so each member's snapshot is stored and cleaned up like a
+          standalone one.
+
+          No conversion: this type exists only in v1alpha1 (no other API version), so
+          it is not part of any conversion scheme.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PodGroupSnapshotSpec defines the desired state of PodGroupSnapshot: the Pods
+              that are checkpointed together, in rank order. The API server checks its
+              shape. The operator checks the rest before admission: that the members name
+              distinct Pods, and that each source Pod exists with the named UID.
+            properties:
+              deadlineSeconds:
+                description: |-
+                  DeadlineSeconds bounds the whole checkpoint, counted from the
+                  PodGroupSnapshot's creation, and is at most a day. Members still being
+                  checkpointed when it expires fail with DeadlineExceeded; members already
+                  checkpointed keep their snapshots.
+                format: int64
+                maximum: 86400
+                minimum: 1
+                type: integer
+              members:
+                description: |-
+                  Members are the Pods to checkpoint together, 1 to 256 of them. A
+                  member's position in the list is its rank, which every restore of the
+                  group reuses, so the list is ordered: like the rest of the spec, the
+                  order cannot change.
+                items:
+                  description: PodGroupSnapshotMember is one Pod of a PodGroupSnapshot.
+                  properties:
+                    id:
+                      description: |-
+                        ID names the member from checkpoint to restore: the PodGroupRestore
+                        target with the same ID restores this member. It must be a DNS label.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    podSnapshotTemplate:
+                      description: |-
+                        PodSnapshotTemplate holds the settings that this member's PodSnapshot
+                        receives. A member without one gets the default settings of a
+                        PodSnapshot. Settings never change the member's rank or its part in the
+                        group's checkpoint and restore.
+                      properties:
+                        containers:
+                          description: |-
+                            Containers holds the settings of the member's checkpointed container,
+                            matched by name to source.podRef.containers.
+                          items:
+                            description: |-
+                              ContainerSnapshotConfig holds the settings for one checkpointed container,
+                              matched to it by name. Snapshot copies them into the PodSnapshotContent at
+                              checkpoint time, and every restore of that snapshot uses that copy.
+                            properties:
+                              checkpointReadinessProbe:
+                                description: |-
+                                  CheckpointReadinessProbe tells when the application is safe to
+                                  checkpoint. When it is set, Snapshot waits for it instead of the
+                                  container's Ready condition. When it is omitted, Snapshot waits for the
+                                  container to be Ready, as before.
+                                properties:
+                                  file:
+                                    description: |-
+                                      File succeeds when a regular file exists at the path, inside the
+                                      container. Like an exec probe, Snapshot checks it by running a shell
+                                      in the container, as the container's user, so the image needs a shell.
+                                    properties:
+                                      path:
+                                        description: |-
+                                          Path is an absolute, clean path inside the container: no empty, "." or
+                                          ".." parts and no trailing slash, so two paths name the same file only
+                                          if they are equal. Any path the container's user can reach works,
+                                          volumes included, except the files Snapshot itself writes in the
+                                          snapshot-control volume. A file on a volume that outlives the Pod stays
+                                          there for the next checkpoint or restore unless the application
+                                          removes it.
+                                        maxLength: 4096
+                                        minLength: 2
+                                        type: string
+                                        x-kubernetes-validations:
+                                        - message: 'path must be absolute and clean:
+                                            no empty, . or .. parts and no trailing
+                                            slash'
+                                          rule: self.startsWith('/') && !self.endsWith('/')
+                                            && !self.contains('//') && !self.contains('/./')
+                                            && !self.endsWith('/.') && !self.contains('/../')
+                                            && !self.endsWith('/..')
+                                    required:
+                                    - path
+                                    type: object
+                                  httpGet:
+                                    description: |-
+                                      HTTPGet succeeds when a GET to the Pod IP returns a 2xx status.
+                                      Snapshot does not follow redirects, so a 3xx fails.
+                                    properties:
+                                      path:
+                                        description: Path of the request. Empty means
+                                          "/".
+                                        type: string
+                                      port:
+                                        anyOf:
+                                        - type: integer
+                                        - type: string
+                                        description: |-
+                                          Port on the Pod IP: a number from 1 to 65535, or the name of a port of
+                                          the container, resolved when the request is sent.
+                                        maxLength: 15
+                                        pattern: ^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$
+                                        x-kubernetes-int-or-string: true
+                                        x-kubernetes-validations:
+                                        - message: port must be 1-65535 or a valid
+                                            port name
+                                          rule: type(self) in [string] || (self >=
+                                            1 && self <= 65535)
+                                    required:
+                                    - port
+                                    type: object
+                                  initialDelaySeconds:
+                                    default: 0
+                                    description: |-
+                                      InitialDelaySeconds is how long to wait after the container starts
+                                      before the first check.
+                                    format: int32
+                                    minimum: 0
+                                    type: integer
+                                  periodSeconds:
+                                    default: 1
+                                    description: PeriodSeconds is the time between
+                                      checks.
+                                    format: int32
+                                    minimum: 1
+                                    type: integer
+                                  successThreshold:
+                                    default: 1
+                                    description: SuccessThreshold is how many checks
+                                      in a row must succeed.
+                                    format: int32
+                                    minimum: 1
+                                    type: integer
+                                  timeoutSeconds:
+                                    default: 1
+                                    description: TimeoutSeconds limits each check.
+                                    format: int32
+                                    minimum: 1
+                                    type: integer
+                                type: object
+                                x-kubernetes-validations:
+                                - message: set exactly one of file or httpGet
+                                  rule: has(self.file) != has(self.httpGet)
+                              lifecycle:
+                                description: |-
+                                  Lifecycle holds actions Snapshot runs at points in the checkpoint and
+                                  restore lifecycle.
+                                properties:
+                                  postRestore:
+                                    description: |-
+                                      PostRestore tells the application, after Snapshot restored its process
+                                      and GPU state, that it may resume.
+                                    properties:
+                                      file:
+                                        description: |-
+                                          File creates an empty regular file at the path, inside the container.
+                                          Like an exec probe, Snapshot creates it by running a shell in the
+                                          container, as the container's user, so the image needs a shell. The
+                                          parent directory must exist. The file must not exist before the
+                                          restore: Snapshot takes an existing file as the notification.
+                                        properties:
+                                          path:
+                                            description: |-
+                                              Path is an absolute, clean path inside the container: no empty, "." or
+                                              ".." parts and no trailing slash, so two paths name the same file only
+                                              if they are equal. Any path the container's user can reach works,
+                                              volumes included, except the files Snapshot itself writes in the
+                                              snapshot-control volume. A file on a volume that outlives the Pod stays
+                                              there for the next checkpoint or restore unless the application
+                                              removes it.
+                                            maxLength: 4096
+                                            minLength: 2
+                                            type: string
+                                            x-kubernetes-validations:
+                                            - message: 'path must be absolute and
+                                                clean: no empty, . or .. parts and
+                                                no trailing slash'
+                                              rule: self.startsWith('/') && !self.endsWith('/')
+                                                && !self.contains('//') && !self.contains('/./')
+                                                && !self.endsWith('/.') && !self.contains('/../')
+                                                && !self.endsWith('/..')
+                                        required:
+                                        - path
+                                        type: object
+                                      httpPost:
+                                        description: |-
+                                          HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
+                                          means the application accepted the notification. Snapshot does not
+                                          follow redirects, so a 3xx fails.
+                                        properties:
+                                          path:
+                                            description: Path of the request. Empty
+                                              means "/".
+                                            type: string
+                                          port:
+                                            anyOf:
+                                            - type: integer
+                                            - type: string
+                                            description: |-
+                                              Port on the Pod IP: a number from 1 to 65535, or the name of a port of
+                                              the container, resolved when the request is sent.
+                                            maxLength: 15
+                                            pattern: ^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$
+                                            x-kubernetes-int-or-string: true
+                                            x-kubernetes-validations:
+                                            - message: port must be 1-65535 or a valid
+                                                port name
+                                              rule: type(self) in [string] || (self
+                                                >= 1 && self <= 65535)
+                                        required:
+                                        - port
+                                        type: object
+                                      periodSeconds:
+                                        default: 1
+                                        description: PeriodSeconds is the time between
+                                          attempts.
+                                        format: int32
+                                        minimum: 1
+                                        type: integer
+                                      timeoutSeconds:
+                                        default: 1
+                                        description: TimeoutSeconds limits each attempt.
+                                        format: int32
+                                        minimum: 1
+                                        type: integer
+                                    type: object
+                                    x-kubernetes-validations:
+                                    - message: set exactly one of file or httpPost
+                                      rule: has(self.file) != has(self.httpPost)
+                                type: object
+                              name:
+                                description: Name of the checkpointed container these
+                                  settings apply to.
+                                maxLength: 63
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                            required:
+                            - name
+                            type: object
+                            x-kubernetes-validations:
+                            - message: checkpointReadinessProbe and lifecycle.postRestore
+                                must use different file paths
+                              rule: '!has(self.checkpointReadinessProbe) || !has(self.checkpointReadinessProbe.file)
+                                || !has(self.lifecycle) || !has(self.lifecycle.postRestore)
+                                || !has(self.lifecycle.postRestore.file) || self.checkpointReadinessProbe.file.path
+                                != self.lifecycle.postRestore.file.path'
+                          maxItems: 1
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
+                        metadata:
+                          description: |-
+                            Metadata holds labels and annotations copied to the member's
+                            PodSnapshot. The group's own labels are reserved for the controller.
+                          properties:
+                            annotations:
+                              additionalProperties:
+                                type: string
+                              description: Annotations are copied to the generated
+                                PodSnapshot.
+                              maxProperties: 4096
+                              type: object
+                            labels:
+                              additionalProperties:
+                                type: string
+                              description: Labels are copied to the generated PodSnapshot.
+                              maxProperties: 4096
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: metadata.labels keys must be valid Kubernetes
+                              qualified names
+                            rule: '!has(self.labels) || self.labels.all(k, !format.qualifiedName().validate(k).hasValue())'
+                          - message: metadata.labels values must be no more than 63
+                              characters
+                            rule: '!has(self.labels) || self.labels.all(k, size(self.labels[k])
+                              <= 63)'
+                          - message: metadata.annotations keys must be valid Kubernetes
+                              qualified names
+                            rule: '!has(self.annotations) || self.annotations.all(k,
+                              !format.qualifiedName().validate(k).hasValue())'
+                      type: object
+                      x-kubernetes-validations:
+                      - message: metadata.labels must not set controller-owned label
+                          nvidia.com/snapshot-podgroup
+                        rule: '!has(self.metadata) || !has(self.metadata.labels) ||
+                          !(''nvidia.com/snapshot-podgroup'' in self.metadata.labels)'
+                      - message: metadata.labels must not set controller-owned label
+                          nvidia.com/snapshot-podgroup-member
+                        rule: '!has(self.metadata) || !has(self.metadata.labels) ||
+                          !(''nvidia.com/snapshot-podgroup-member'' in self.metadata.labels)'
+                      - message: metadata.labels must not set controller-owned label
+                          nvidia.com/snapshot-job
+                        rule: '!has(self.metadata) || !has(self.metadata.labels) ||
+                          !(''nvidia.com/snapshot-job'' in self.metadata.labels)'
+                      - message: metadata.labels must not set controller-owned label
+                          nvidia.com/snapshot-job-uid
+                        rule: '!has(self.metadata) || !has(self.metadata.labels) ||
+                          !(''nvidia.com/snapshot-job-uid'' in self.metadata.labels)'
+                    source:
+                      description: |-
+                        Source identifies the Pod to checkpoint, as for a standalone
+                        PodSnapshot, except that the Pod's UID is required, so a recreated Pod
+                        with the same name is never checkpointed in its place.
+                      properties:
+                        podRef:
+                          description: |-
+                            PodRef references the pod, in the PodSnapshot's namespace, that is checkpointed.
+                            The operator prepares the pod (the snapshot-control volume) before creating
+                            the PodSnapshot; the snapshot store is mounted by the node agent, not the
+                            pod. The target container is carried on PodRef.Containers, not a pod
+                            annotation.
+                          properties:
+                            containers:
+                              description: |-
+                                Containers narrows the checkpoint to these containers of the source pod. The
+                                node agent reads this instead of the source pod's target-container
+                                annotation. v1alpha1 supports exactly one container; the cap is lifted when
+                                the runtime supports more than one.
+                              items:
+                                maxLength: 63
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                              maxItems: 1
+                              minItems: 1
+                              type: array
+                            name:
+                              description: Name of the source pod.
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID of the source pod, recorded so the node agent dumps that specific
+                                pod and not a same-named recreation.
+                              type: string
+                          required:
+                          - containers
+                          - name
+                          type: object
+                      required:
+                      - podRef
+                      type: object
+                      x-kubernetes-validations:
+                      - message: member sources must name the Pod UID
+                        rule: has(self.podRef.uid) && size(self.podRef.uid) > 0
+                  required:
+                  - id
+                  - source
+                  type: object
+                  x-kubernetes-validations:
+                  - message: podSnapshotTemplate.containers must name containers in
+                      source.podRef.containers
+                    rule: '!has(self.podSnapshotTemplate) || !has(self.podSnapshotTemplate.containers)
+                      || self.podSnapshotTemplate.containers.all(c, c.name in self.source.podRef.containers)'
+                maxItems: 256
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+            required:
+            - deadlineSeconds
+            - members
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
+            - message: member IDs must be unique
+              rule: self.members.all(m, self.members.exists_one(n, n.id == m.id))
+          status:
+            description: |-
+              PodGroupSnapshotStatus defines the observed state of PodGroupSnapshot. Only
+              the operator writes it.
+            properties:
+              conditions:
+                description: |-
+                  Conditions reflect the latest observations of the PodGroupSnapshot's
+                  state. Types: Admitted, Ready, Failed.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              members:
+                description: |-
+                  Members reports each member's progress, keyed by ID. An entry names a
+                  member of spec.members and, once written, is never removed.
+                items:
+                  description: |-
+                    PodGroupSnapshotMemberStatus is the observed state of one member. Its
+                    bindings and startedAt are write-once, and its phase stops changing once
+                    final.
+                  properties:
+                    content:
+                      description: Content is the member's PodSnapshotContent, which
+                        records its snapshot.
+                      properties:
+                        name:
+                          description: Name of the object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        uid:
+                          description: UID of the object.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - uid
+                      type: object
+                    id:
+                      description: ID is the member's ID in spec.members.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    message:
+                      description: |-
+                        Message is a human-readable explanation of the phase, in at most 1024
+                        characters, so that the messages of 256 members fit in one object.
+                        Longer explanations belong in the group's conditions.
+                      maxLength: 1024
+                      type: string
+                    nodeName:
+                      description: NodeName is the node the source Pod runs on.
+                      maxLength: 253
+                      type: string
+                    phase:
+                      default: Pending
+                      description: Phase is the member's progress through the checkpoint.
+                      enum:
+                      - Pending
+                      - Admitted
+                      - Checkpointing
+                      - Checkpointed
+                      - Failed
+                      type: string
+                    podSnapshot:
+                      description: |-
+                        PodSnapshot is the PodSnapshot that the PodGroupSnapshot owns for this
+                        member.
+                      properties:
+                        name:
+                          description: Name of the object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        uid:
+                          description: UID of the object.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - uid
+                      type: object
+                    rank:
+                      description: Rank is the member's position in spec.members.
+                      format: int32
+                      maximum: 255
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        Reason is a CamelCase word that explains the phase, such as
+                        DeadlineExceeded for a Failed member.
+                      maxLength: 1024
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    startedAt:
+                      description: |-
+                        StartedAt is when Snapshot began changing the source Pod: the time of
+                        the Started condition that the node agent sets on the member's
+                        PodSnapshotContent before its first irreversible step. Absent means
+                        Snapshot never changed the source Pod.
+                      format: date-time
+                      type: string
+                  required:
+                  - id
+                  - rank
+                  type: object
+                  x-kubernetes-validations:
+                  - message: podSnapshot is write-once
+                    rule: '!has(oldSelf.podSnapshot) || (has(self.podSnapshot) &&
+                      self.podSnapshot == oldSelf.podSnapshot)'
+                  - message: content is write-once
+                    rule: '!has(oldSelf.content) || (has(self.content) && self.content
+                      == oldSelf.content)'
+                  - message: startedAt is write-once
+                    rule: '!has(oldSelf.startedAt) || (has(self.startedAt) && self.startedAt
+                      == oldSelf.startedAt)'
+                  - message: Checkpointed and Failed are final phases
+                    rule: '!(oldSelf.phase in [''Checkpointed'', ''Failed'']) || self.phase
+                      == oldSelf.phase'
+                maxItems: 256
+                type: array
+                x-kubernetes-list-map-keys:
+                - id
+                x-kubernetes-list-type: map
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be no more than 63 characters because member
+            PodSnapshots carry it as a label value
+          rule: size(self.metadata.name) <= 63
+        - message: status.members rank must be the member's position in spec.members
+          rule: '!has(self.status) || !has(self.status.members) || self.status.members.all(m,
+            m.rank < size(self.spec.members) && self.spec.members[m.rank].id == m.id)'
+        - message: status.members entries cannot be removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.members) || (has(self.status)
+            && has(self.status.members) && oldSelf.status.members.all(o, self.status.members.exists(n,
+            n.id == o.id)))'
+    served: true
+    storage: true
+    subresources:
+      status: {}

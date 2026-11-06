@@ -154,7 +154,19 @@ func TestRestoreCompleteRoundTrip(t *testing.T) {
 		t.Fatalf("FormatRestoreComplete() = %q", data)
 	}
 	got, err := ParseRestoreComplete(data)
-	if err != nil || got.PID != 4242 {
+	if err != nil || got != (RestoreComplete{PID: 4242}) {
+		t.Fatalf("ParseRestoreComplete() = %+v, %v", got, err)
+	}
+}
+
+func TestRestoreCompleteRoundTripsAnAttempt(t *testing.T) {
+	want := RestoreComplete{PID: 4242, Attempt: "5f0c2a9e-7d1b-4c3a-9e8f-2b6d4a1c0e37"}
+	data := FormatRestoreComplete(want)
+	if string(data) != "pid=4242\nattempt=5f0c2a9e-7d1b-4c3a-9e8f-2b6d4a1c0e37\n" {
+		t.Fatalf("FormatRestoreComplete() = %q", data)
+	}
+	got, err := ParseRestoreComplete(data)
+	if err != nil || got != want {
 		t.Fatalf("ParseRestoreComplete() = %+v, %v", got, err)
 	}
 }
@@ -162,24 +174,48 @@ func TestRestoreCompleteRoundTrip(t *testing.T) {
 func TestParseRestoreComplete(t *testing.T) {
 	t.Run("ignores unknown keys and blank lines", func(t *testing.T) {
 		got, err := ParseRestoreComplete([]byte("future=x\n\n pid=7 \n"))
-		if err != nil || got.PID != 7 {
+		if err != nil || got != (RestoreComplete{PID: 7}) {
+			t.Fatalf("ParseRestoreComplete() = %+v, %v", got, err)
+		}
+	})
+
+	t.Run("ignores unknown keys next to an attempt", func(t *testing.T) {
+		got, err := ParseRestoreComplete([]byte("attempt=uid-1\nfuture=x\npid=7\n"))
+		if err != nil || got != (RestoreComplete{PID: 7, Attempt: "uid-1"}) {
 			t.Fatalf("ParseRestoreComplete() = %+v, %v", got, err)
 		}
 	})
 
 	for name, data := range map[string]string{
-		"empty":         "",
-		"legacy done":   "done\n",
-		"missing pid":   "future=x\n",
-		"non-numeric":   "pid=abc\n",
-		"zero":          "pid=0\n",
-		"negative":      "pid=-1\n",
-		"duplicate pid": "pid=1\npid=2\n",
+		"empty":             "",
+		"legacy done":       "done\n",
+		"missing pid":       "future=x\n",
+		"attempt only":      "attempt=uid-1\n",
+		"non-numeric":       "pid=abc\n",
+		"zero":              "pid=0\n",
+		"negative":          "pid=-1\n",
+		"duplicate pid":     "pid=1\npid=2\n",
+		"empty attempt":     "pid=1\nattempt=\n",
+		"duplicate attempt": "pid=1\nattempt=uid-1\nattempt=uid-2\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got, err := ParseRestoreComplete([]byte(data)); err == nil {
 				t.Fatalf("ParseRestoreComplete(%q) = %+v, want error", data, got)
 			}
 		})
+	}
+}
+
+func TestIsReservedControlFile(t *testing.T) {
+	for _, name := range []string{RestoreCompleteFile, RestoreFailedFile, RestoreProxyBinaryName, CUDAJobFileName} {
+		if !IsReservedControlFile(name) {
+			t.Errorf("IsReservedControlFile(%q) = false, want true", name)
+		}
+	}
+	// The workload writes ready-for-snapshot itself, so a probe may read it.
+	for _, name := range []string{ReadyForSnapshotFile, "released", ""} {
+		if IsReservedControlFile(name) {
+			t.Errorf("IsReservedControlFile(%q) = true, want false", name)
+		}
 	}
 }

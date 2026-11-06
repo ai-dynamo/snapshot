@@ -87,12 +87,16 @@ func TestContainerConfigAdmission(t *testing.T) {
 		{"http-path-with-query", config(nil, httpPostRestore("/resume?now=1", intstr.FromInt32(8000))), true},
 		{"named-port", config(httpProbe("/status", intstr.FromString("hooks")), nil), true},
 		{"named-port-with-dash", config(nil, httpPostRestore("/resume", intstr.FromString("app-hooks"))), true},
+		{"named-port-starting-with-digits", config(httpProbe("/status", intstr.FromString("01-2hooks")), nil), true},
+		{"named-port-ending-with-digits", config(nil, httpPostRestore("/resume", intstr.FromString("hooks-0"))), true},
 		{"port-zero", config(httpProbe("/status", intstr.FromInt32(0)), nil), false},
 		{"port-too-high", config(nil, httpPostRestore("/resume", intstr.FromInt32(65536))), false},
 		{"port-name-empty", config(httpProbe("/status", intstr.FromString("")), nil), false},
 		{"port-name-uppercase", config(httpProbe("/status", intstr.FromString("Hooks")), nil), false},
 		{"port-name-digits-only", config(httpProbe("/status", intstr.FromString("8000")), nil), false},
 		{"port-name-double-dash", config(nil, httpPostRestore("/resume", intstr.FromString("app--hooks"))), false},
+		{"port-name-leading-dash", config(httpProbe("/status", intstr.FromString("-hooks")), nil), false},
+		{"port-name-trailing-dash", config(nil, httpPostRestore("/resume", intstr.FromString("hooks-"))), false},
 		{"port-name-too-long", config(httpProbe("/status", intstr.FromString("abcdefghijklmnop")), nil), false},
 		{"negative-period", config(func() *snapshotv1.CheckpointReadinessProbe {
 			p := fileProbe("/tmp/ready")
@@ -113,6 +117,55 @@ func TestContainerConfigAdmission(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+		})
+	}
+
+	// These cases pin clean paths, the schema's port-name pattern and length
+	// bound, and the numeric port range checked by CEL.
+	const unclean = "path must be absolute and clean"
+	const badPort = "port must be 1-65535 or a valid port name"
+	const badPortName = "should match"
+	const longPortName = "may not be more than 15 bytes"
+	type pinnedCase struct {
+		name    string
+		config  snapshotv1.ContainerSnapshotConfig
+		refusal string
+	}
+	var pinned []pinnedCase
+	for _, path := range []string{"/.", "/..", "/a/./b", "/a/../b", "/a/.", "/a/.."} {
+		pinned = append(pinned, pinnedCase{"path " + path, config(fileProbe(path), nil), unclean})
+	}
+	for _, path := range []string{"/.a", "/..a", "/a.", "/a..", "/..."} {
+		pinned = append(pinned, pinnedCase{"path " + path, config(nil, filePostRestore(path)), ""})
+	}
+	for _, port := range []struct {
+		value   intstr.IntOrString
+		refusal string
+	}{
+		{intstr.FromString("app--hooks"), badPortName},
+		{intstr.FromString("8000"), badPortName},
+		{intstr.FromString("abcdefghijklmno"), ""},
+		{intstr.FromString("abcdefghijklmnop"), longPortName},
+		{intstr.FromInt32(1), ""},
+		{intstr.FromInt32(65535), ""},
+		{intstr.FromInt32(0), badPort},
+		{intstr.FromInt32(65536), badPort},
+	} {
+		probe := config(httpProbe("/status", port.value), nil)
+		postRestore := config(nil, httpPostRestore("/resume", port.value))
+		pinned = append(pinned,
+			pinnedCase{"httpGet port " + port.value.String(), probe, port.refusal},
+			pinnedCase{"httpPost port " + port.value.String(), postRestore, port.refusal})
+	}
+	for i, tc := range pinned {
+		t.Run("podsnapshot-bounded-"+tc.name, func(t *testing.T) {
+			err := cl.Create(ctx, newSettingsSnapshot(fmt.Sprintf("bounded-%d", i), tc.config))
+			if tc.refusal == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.True(t, apierrors.IsInvalid(err), "invalid settings accepted: %v", err)
+			assert.Contains(t, err.Error(), tc.refusal)
 		})
 	}
 
@@ -211,6 +264,42 @@ func TestContainerConfigAdmission(t *testing.T) {
 			require.True(t, apierrors.IsInvalid(err), "removing saved settings accepted: %v", err)
 		})
 	}
+}
+
+// TestContainerConfigCostAt256Members checks the schema's cost when the same
+// container settings appear once per group member, without depending on group
+// kinds. Kubernetes 1.32 must accept this as well as newer API servers.
+func TestContainerConfigCostAt256Members(t *testing.T) {
+	var source apiextensionsv1.CustomResourceDefinition
+	require.NoError(t, yaml.Unmarshal([]byte(crds.PodSnapshotCRD()), &source))
+	containers := source.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["containers"]
+	maxMembers := int64(256)
+	schema := &apiextensionsv1.JSONSchemaProps{
+		Type: "object",
+		Properties: map[string]apiextensionsv1.JSONSchemaProps{
+			"members": {
+				Type: "array", MaxItems: &maxMembers,
+				Items: &apiextensionsv1.JSONSchemaPropsOrArray{Schema: &apiextensionsv1.JSONSchemaProps{
+					Type: "object", Properties: map[string]apiextensionsv1.JSONSchemaProps{"containers": containers},
+				}},
+			},
+		},
+	}
+	costCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "containerconfigcosts.snapshot.test"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "snapshot.test", Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{Plural: "containerconfigcosts", Kind: "ContainerConfigCost"},
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+				Name: "v1", Served: true, Storage: true,
+				Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: schema},
+			}},
+		},
+	}
+	env := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{costCRD}}
+	t.Cleanup(func() { assert.NoError(t, env.Stop()) })
+	_, err := env.Start()
+	require.NoError(t, err, "container settings repeated for 256 members must fit the CEL cost budget")
 }
 
 func config(probe *snapshotv1.CheckpointReadinessProbe, postRestore *snapshotv1.PostRestoreAction) snapshotv1.ContainerSnapshotConfig {

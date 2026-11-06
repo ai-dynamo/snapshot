@@ -394,10 +394,6 @@ def snapshot_helm_overrides(
         # Other clusters may share the vCluster's nodes: restore only this
         # vCluster's Pods. First, so the user's overrides still win.
         overrides.insert(0, f"daemonset.nriHostNamespace={host_namespace}")
-    # The operator rejects container settings (SNEP-411) until the agent fully
-    # supports them; e2e turns them on to test each step as it lands. Temporary,
-    # removed with the chart value. First, so the user's overrides still win.
-    overrides.insert(0, "operator.lifecycleHooks=true")
     return overrides
 
 

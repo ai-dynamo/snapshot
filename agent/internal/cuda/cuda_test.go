@@ -12,11 +12,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -52,14 +54,16 @@ func TestResolveVisibleGPUsPreservesCompatibilityMetadata(t *testing.T) {
 
 func TestDisabledLegacySelectionUsesOnlyContainerVisibility(t *testing.T) {
 	for _, value := range []string{"", "none", "void"} {
-		for _, visible := range []string{"", "GPU-cdi, NVIDIA B200, 595.58.03"} {
+		for _, visible := range []string{"", "GPU 0: NVIDIA B200 (UUID: GPU-cdi)"} {
 			t.Run(value+"/"+visible, func(t *testing.T) {
 				installFakeNSenter(t, fmt.Sprintf("printf '%%s\\n' '%s'\n", visible))
+				hostProc := t.TempDir()
+				writeHostGPUs(t, hostProc, "GPU-cdi")
 				// No Kubernetes or PodResources client: an allocation fallback
 				// would fail instead of returning the container's actual view.
-				got, err := DiscoverGPUs(context.Background(), nil, "", "", "", "/host/proc", 42,
-					[]string{"NVIDIA_VISIBLE_DEVICES=" + value}, logr.Discard())
-				if err != nil || !reflect.DeepEqual(got, parseNvidiaSmiGPUs(visible)) {
+				got, err := DiscoverGPUs(context.Background(), nil, "", "", "",
+					[]string{"NVIDIA_VISIBLE_DEVICES=" + value}, ListVisibleGPUs(context.Background(), hostProc, 42, nil), logr.Discard())
+				if err != nil || !reflect.DeepEqual(got, parseNvidiaSmiList(visible).GPUs) {
 					t.Fatalf("container discovery = %#v, %v", got, err)
 				}
 			})
@@ -273,80 +277,187 @@ func TestNsenterNvidiaSMIReturnsCommandFailure(t *testing.T) {
 	}
 }
 
-func TestDiscoverVisibleGPUs(t *testing.T) {
-	installFakeNSenter(t, `
-test "$#" = 6
-test "$1" = "--mount=/host/proc/42/ns/mnt"
-test "$2" = "--pid=/host/proc/42/ns/pid"
+// writeHostGPUs lists cards in a host procfs's driver directory, the first in
+// the lowest PCI bus slot.
+func writeHostGPUs(t *testing.T, hostProc string, uuids ...string) {
+	t.Helper()
+	for i, uuid := range uuids {
+		dir := filepath.Join(hostProc, "driver", "nvidia", "gpus", fmt.Sprintf("0000:%02x:00.0", 0x10*(i+1)))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "information"), []byte("GPU UUID: \t "+uuid+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// fakeHostProc returns a host procfs holding only the NVIDIA kernel module's
+// version file.
+func fakeHostProc(t *testing.T, driverVersion string) string {
+	t.Helper()
+	hostProc := t.TempDir()
+	dir := filepath.Join(hostProc, "driver", "nvidia")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	banner := "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  " + driverVersion +
+		"  Release Build  (dvs-builder@U22-I3-F05-2-4)  Fri Sep  4 22:33:33 UTC 2026\nGCC version:  gcc version 12.3.0\n"
+	if err := os.WriteFile(filepath.Join(dir, "version"), []byte(banner), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return hostProc
+}
+
+func TestListVisibleGPUs(t *testing.T) {
+	hostProc := fakeHostProc(t, "615.71.09")
+	writeHostGPUs(t, hostProc, "GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f")
+	calls := filepath.Join(t.TempDir(), "calls")
+	installFakeNSenter(t, fmt.Sprintf(`
+echo call >> %s
+test "$#" = 5
+test "$1" = "--mount=%s/42/ns/mnt"
+test "$2" = "--pid=%s/42/ns/pid"
 test "$3" = "--"
 test "$4" = "nvidia-smi"
-test "$5" = "--query-gpu=gpu_uuid,name,driver_version"
-test "$6" = "--format=csv,noheader"
-printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
-`)
+test "$5" = "-L"
+printf '%%s\n' 'GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)'
+printf '%%s\n' '  MIG 1g.5gb      Device  0: (UUID: MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f)'
+`, calls, hostProc, hostProc))
 
-	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc/", 42, nvidiaSMITimeout)
-	if err != nil {
-		t.Fatalf("DiscoverVisibleGPUs: %v", err)
+	visible := ListVisibleGPUs(context.Background(), hostProc+"/", 42, nil)
+	want := VisibleGPUs{
+		GPUs: compat.GPUInfo{
+			DriverVersion: "615.71.09",
+			Devices: []compat.GPUDevice{{
+				UUID:        "GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f",
+				ProductName: "NVIDIA A100-SXM4-40GB",
+			}},
+		},
+		MIGSlices: []string{"1g.5gb MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f"},
 	}
-	want := compat.GPUInfo{
-		DriverVersion: "580.65.06",
-		Devices:       []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA L4"}},
+	// The MIG check and GPU discovery both ask, and nvidia-smi runs once.
+	for range 2 {
+		got, err := visible()
+		if err != nil {
+			t.Fatalf("ListVisibleGPUs: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("ListVisibleGPUs() = %#v, want %#v", got, want)
+		}
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DiscoverVisibleGPUs() = %#v, want %#v", got, want)
+	if recorded, err := os.ReadFile(calls); err != nil || string(recorded) != "call\n" {
+		t.Fatalf("nvidia-smi ran %q times, want once (%v)", recorded, err)
 	}
 }
 
-func TestDiscoverVisibleGPUsReturnCommandFailure(t *testing.T) {
+func TestListVisibleGPUsReturnsCommandFailure(t *testing.T) {
 	installFakeNSenter(t, "exit 17\n")
 
-	_, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
-	if err == nil {
-		t.Fatal("DiscoverVisibleGPUs succeeded after nsenter failed")
-	}
-	if !strings.Contains(err.Error(), "pid 42") {
-		t.Fatalf("DiscoverVisibleGPUs error = %q, want pid", err)
+	if _, err := ListVisibleGPUs(context.Background(), "/host/proc", 42, nil)(); err == nil || !strings.Contains(err.Error(), "pid 42") {
+		t.Fatalf("ListVisibleGPUs error = %v, want the nsenter failure for pid 42", err)
 	}
 }
 
-func TestParseNvidiaSmiMIGSlices(t *testing.T) {
+// Without the module's version file, the GPUs are still listed and the
+// driver version is unknown.
+func TestListVisibleGPUsWithoutDriverVersion(t *testing.T) {
+	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)'\n")
+	hostProc := t.TempDir()
+	writeHostGPUs(t, hostProc, "GPU-a")
+
+	got, err := ListVisibleGPUs(context.Background(), hostProc, 42, nil)()
+	want := VisibleGPUs{GPUs: compat.GPUInfo{Devices: []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA L4"}}}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListVisibleGPUs() = %#v, %v, want %#v", got, err, want)
+	}
+}
+
+func TestParseDriverVersion(t *testing.T) {
+	tests := []struct {
+		name   string
+		banner string
+		want   string
+	}{
+		{
+			name:   "open kernel module",
+			banner: "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  615.71.09  Release Build  (dvs-builder@U22-I3-F05-2-4)  Fri Sep  4 22:33:33 UTC 2026\n",
+			want:   "615.71.09",
+		},
+		{
+			name:   "open kernel module on Arm",
+			banner: "NVRM version: NVIDIA UNIX Open Kernel Module for aarch64  580.65.06  Release Build  (dvs-builder@U16-I2-C03-12-2)  Sun Jul 27 06:54:38 UTC 2025\n",
+			want:   "580.65.06",
+		},
+		{
+			name:   "proprietary kernel module",
+			banner: "NVRM version: NVIDIA UNIX x86_64 Kernel Module  550.54.15  Tue Mar  5 22:23:56 UTC 2024\nGCC version:  gcc version 12.3.0\n",
+			want:   "550.54.15",
+		},
+		{name: "not a banner", banner: "garbage\n"},
+		{name: "empty"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseDriverVersion(tc.banner); got != tc.want {
+				t.Fatalf("parseDriverVersion() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseNvidiaSmiList(t *testing.T) {
+	const (
+		card0 = "GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f"
+		card1 = "GPU-0d1a5b2c-3e4f-5a6b-7c8d-9e0f1a2b3c4d"
+	)
 	tests := []struct {
 		name   string
 		output string
-		want   []string
+		want   VisibleGPUs
 	}{
 		{
 			name:   "a whole GPU is no slice",
-			output: "GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)\n",
+			output: "GPU 0: NVIDIA H100 80GB HBM3 (UUID: " + card0 + ")\n",
+			want: VisibleGPUs{GPUs: compat.GPUInfo{Devices: []compat.GPUDevice{
+				{UUID: card0, ProductName: "NVIDIA H100 80GB HBM3"},
+			}}},
 		},
 		{
-			name: "a slice nested under its card",
-			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)\n" +
-				"  MIG 1g.5gb      Device  0: (UUID: MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f)\n",
-			want: []string{"1g.5gb MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f"},
-		},
-		{
-			name: "every slice of every card",
-			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)\n" +
+			name: "every card in order and every slice of every card",
+			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: " + card0 + ")\n" +
 				"  MIG 3g.20gb     Device  0: (UUID: MIG-11111111-2222-3333-4444-555555555555)\n" +
 				"  MIG 1g.5gb      Device  1: (UUID: MIG-66666666-7777-8888-9999-000000000000)\n" +
-				"GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-0d1a5b2c-3e4f-5a6b-7c8d-9e0f1a2b3c4d)\n",
-			want: []string{
-				"3g.20gb MIG-11111111-2222-3333-4444-555555555555",
-				"1g.5gb MIG-66666666-7777-8888-9999-000000000000",
+				"GPU 1: NVIDIA A100-SXM4-40GB (UUID: " + card1 + ")\n",
+			want: VisibleGPUs{
+				GPUs: compat.GPUInfo{Devices: []compat.GPUDevice{
+					{UUID: card0, ProductName: "NVIDIA A100-SXM4-40GB"},
+					{UUID: card1, ProductName: "NVIDIA A100-SXM4-40GB"},
+				}},
+				MIGSlices: []string{
+					"3g.20gb MIG-11111111-2222-3333-4444-555555555555",
+					"1g.5gb MIG-66666666-7777-8888-9999-000000000000",
+				},
 			},
 		},
 		{
 			name: "the R450 UUID form",
-			output: "GPU 0: A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)\n" +
-				"  MIG 1g.5gb Device 0: (UUID: MIG-GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f/7/0)\n",
-			want: []string{"1g.5gb MIG-GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f/7/0"},
+			output: "GPU 0: A100-SXM4-40GB (UUID: " + card0 + ")\n" +
+				"  MIG 1g.5gb Device 0: (UUID: MIG-" + card0 + "/7/0)\n",
+			want: VisibleGPUs{
+				GPUs:      compat.GPUInfo{Devices: []compat.GPUDevice{{UUID: card0, ProductName: "A100-SXM4-40GB"}}},
+				MIGSlices: []string{"1g.5gb MIG-" + card0 + "/7/0"},
+			},
+		},
+		{
+			// The device map is built from UUIDs, so a card without one is no GPU.
+			name:   "a card line without a UUID is not a GPU",
+			output: "GPU 0: NVIDIA L4\n",
 		},
 		{
 			name:   "a slice line without a UUID is still a slice",
 			output: "  MIG 1g.5gb      Device  0:\n",
-			want:   []string{"MIG 1g.5gb Device 0:"},
+			want:   VisibleGPUs{MIGSlices: []string{"MIG 1g.5gb Device 0:"}},
 		},
 		{
 			name:   "no devices",
@@ -355,40 +466,10 @@ func TestParseNvidiaSmiMIGSlices(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := parseNvidiaSmiMIGSlices(tc.output); !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("parseNvidiaSmiMIGSlices() = %#v, want %#v", got, tc.want)
+			if got := parseNvidiaSmiList(tc.output); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseNvidiaSmiList() = %#v, want %#v", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestDiscoverMIGSlices(t *testing.T) {
-	installFakeNSenter(t, `
-test "$#" = 5
-test "$1" = "--mount=/host/proc/42/ns/mnt"
-test "$2" = "--pid=/host/proc/42/ns/pid"
-test "$3" = "--"
-test "$4" = "nvidia-smi"
-test "$5" = "-L"
-printf '%s\n' 'GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-5c89852c-d268-c3f3-1b07-005d5ae1dc3f)'
-printf '%s\n' '  MIG 1g.5gb      Device  0: (UUID: MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f)'
-`)
-
-	got, err := DiscoverMIGSlices(context.Background(), "/host/proc/", 42)
-	if err != nil {
-		t.Fatalf("DiscoverMIGSlices: %v", err)
-	}
-	want := []string{"1g.5gb MIG-c6d4f1ef-42e4-5de3-91c7-45d71c87eb3f"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DiscoverMIGSlices() = %#v, want %#v", got, want)
-	}
-}
-
-func TestDiscoverMIGSlicesReturnsCommandFailure(t *testing.T) {
-	installFakeNSenter(t, "exit 17\n")
-
-	if _, err := DiscoverMIGSlices(context.Background(), "/host/proc", 42); err == nil || !strings.Contains(err.Error(), "pid 42") {
-		t.Fatalf("DiscoverMIGSlices error = %v, want the nsenter failure for pid 42", err)
 	}
 }
 
@@ -423,6 +504,20 @@ func TestBuildDeviceMap(t *testing.T) {
 			source: []string{"GPU-aaa", "GPU-bbb"},
 			target: []string{"GPU-bbb", "GPU-aaa"},
 			want:   "",
+		},
+		{
+			// A TP4 restore onto GPUs 2-5 of a node, checkpointed on GPUs 0-3:
+			// every process keeps its position, so GPUs 2 and 3 move too.
+			name:   "overlapping GPUs pair by position",
+			source: []string{"GPU-0", "GPU-1", "GPU-2", "GPU-3"},
+			target: []string{"GPU-2", "GPU-3", "GPU-4", "GPU-5"},
+			want:   "GPU-0=GPU-2,GPU-1=GPU-3,GPU-2=GPU-4,GPU-3=GPU-5",
+		},
+		{
+			name:   "a GPU at the same position stays",
+			source: []string{"GPU-aaa", "GPU-bbb"},
+			target: []string{"GPU-aaa", "GPU-ccc"},
+			want:   "GPU-aaa=GPU-aaa,GPU-bbb=GPU-ccc",
 		},
 		{
 			name:    "mismatched lengths",
@@ -607,6 +702,9 @@ func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
 		},
 	})
 
+	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)' 'GPU 1: NVIDIA L4 (UUID: GPU-b)'\n")
+	hostProc := t.TempDir()
+	writeHostGPUs(t, hostProc, "GPU-a", "GPU-b")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -616,7 +714,7 @@ func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
 		"test-pod",
 		"default",
 		"main",
-		"/proc",
+		hostProc,
 		123,
 		logr.Discard(),
 	)
@@ -671,6 +769,9 @@ func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testin
 		},
 	})
 
+	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)'\n")
+	hostProc := t.TempDir()
+	writeHostGPUs(t, hostProc, "GPU-a")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -680,7 +781,7 @@ func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testin
 		"test-pod",
 		"default",
 		"main",
-		"/proc",
+		hostProc,
 		123,
 		logr.Discard(),
 	)
@@ -774,17 +875,14 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 		podName,
 		namespace,
 		"main",
-		"/proc",
-		123,
-		nvidiaSMITimeout,
-		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
-			return compat.GPUInfo{
+		func() (VisibleGPUs, error) {
+			return VisibleGPUs{GPUs: compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices: []compat.GPUDevice{
 					{UUID: uuid0, ProductName: "NVIDIA A100-SXM4-40GB"},
 					{UUID: uuid1, ProductName: "NVIDIA A100-SXM4-40GB"},
 				},
-			}, nil
+			}}, nil
 		},
 		logr.Discard(),
 	)
@@ -831,49 +929,45 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		visible func(context.Context, string, int, time.Duration) (compat.GPUInfo, error)
+		visible VisibleGPULister
 		want    compat.GPUInfo
+		wantErr string
 	}{
 		{
-			name: "described in the kubelet's order",
-			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
-				return compat.GPUInfo{
+			name: "described in the container's bus order, not the kubelet's",
+			visible: func() (VisibleGPUs, error) {
+				return VisibleGPUs{GPUs: compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices: []compat.GPUDevice{
 						{UUID: "GPU-b", ProductName: "NVIDIA L4"},
 						{UUID: "GPU-a", ProductName: "NVIDIA L4"},
 					},
-				}, nil
+				}}, nil
 			},
 			want: compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices: []compat.GPUDevice{
-					{UUID: "GPU-a", ProductName: "NVIDIA L4"},
 					{UUID: "GPU-b", ProductName: "NVIDIA L4"},
+					{UUID: "GPU-a", ProductName: "NVIDIA L4"},
 				},
 			},
 		},
 		{
-			name: "undescribed when nvidia-smi cannot be reached",
-			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
-				return compat.GPUInfo{}, errors.New("nsenter unavailable")
+			name: "fails when the container cannot list its GPUs",
+			visible: func() (VisibleGPUs, error) {
+				return VisibleGPUs{}, errors.New("nsenter unavailable")
 			},
-			want: compat.GPUInfo{
-				Devices: []compat.GPUDevice{{UUID: "GPU-a"}, {UUID: "GPU-b"}},
-			},
+			wantErr: "nsenter unavailable",
 		},
 		{
-			name: "undescribed when nvidia-smi reports other GPUs",
-			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
-				return compat.GPUInfo{
+			name: "fails when the container lists other GPUs",
+			visible: func() (VisibleGPUs, error) {
+				return VisibleGPUs{GPUs: compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices:       []compat.GPUDevice{{UUID: "GPU-z", ProductName: "NVIDIA L4"}},
-				}, nil
+				}}, nil
 			},
-			want: compat.GPUInfo{
-				DriverVersion: "580.65.06",
-				Devices:       []compat.GPUDevice{{UUID: "GPU-a"}, {UUID: "GPU-b"}},
-			},
+			wantErr: "does not list allocated GPUs [GPU-a GPU-b]",
 		},
 	}
 	for _, tc := range tests {
@@ -882,8 +976,14 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 			defer cancel()
 
 			got, err := discoverGPUs(
-				ctx, nil, "test-pod", "default", "main", "/proc", 123, nvidiaSMITimeout, tc.visible, logr.Discard(),
+				ctx, nil, "test-pod", "default", "main", tc.visible, logr.Discard(),
 			)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("discoverGPUs() error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("discoverGPUs: %v", err)
 			}
@@ -914,10 +1014,12 @@ func TestDiscoverGPUsUseVisibleGPUDescriptions(t *testing.T) {
 			},
 		},
 	})
-	installFakeNSenter(t, "printf '%s\\n' 'GPU-a, NVIDIA L4, 580.65.06'\n")
+	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)'\n")
+	hostProc := fakeHostProc(t, "580.65.06")
+	writeHostGPUs(t, hostProc, "GPU-a")
 
 	got, err := DiscoverGPUs(
-		context.Background(), nil, "test-pod", "default", "main", "/host/proc", 42, nil, logr.Discard(),
+		context.Background(), nil, "test-pod", "default", "main", nil, ListVisibleGPUs(context.Background(), hostProc, 42, nil), logr.Discard(),
 	)
 	if err != nil {
 		t.Fatalf("DiscoverGPUs: %v", err)
@@ -944,11 +1046,8 @@ func TestDiscoverGPUsFallBackToVisibleGPUs(t *testing.T) {
 		"test-pod",
 		"default",
 		"main",
-		"/host/proc",
-		42,
-		nvidiaSMITimeout,
-		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
-			return want, nil
+		func() (VisibleGPUs, error) {
+			return VisibleGPUs{GPUs: want}, nil
 		},
 		logr.Discard(),
 	)
@@ -970,17 +1069,102 @@ func TestDescribeGPUs(t *testing.T) {
 		},
 	}
 
-	got := describeGPUs([]string{"GPU-a", "GPU-b", "GPU-missing"}, visible)
+	// Listing order wins over allocated order, and GPUs not allocated drop out.
+	got, err := describeGPUs([]string{"GPU-a", "GPU-b"}, visible)
 	want := compat.GPUInfo{
 		DriverVersion: "580.65.06",
 		Devices: []compat.GPUDevice{
-			{UUID: "GPU-a", ProductName: "NVIDIA A100"},
 			{UUID: "GPU-b", ProductName: "NVIDIA H100"},
-			{UUID: "GPU-missing"},
+			{UUID: "GPU-a", ProductName: "NVIDIA A100"},
 		},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("describeGPUs() = %#v, want %#v", got, want)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("describeGPUs() = %#v, %v; want %#v", got, err, want)
+	}
+
+	// An allocated GPU the container does not list has no bus position.
+	if _, err := describeGPUs([]string{"GPU-a", "GPU-missing"}, visible); err == nil ||
+		!strings.Contains(err.Error(), "GPU-missing") {
+		t.Fatalf("describeGPUs() with an unlisted GPU: error = %v", err)
+	}
+}
+
+// The case GPU Memory Service depends on: kubelet allocates the checkpoint's and
+// the restore's GPUs in an order other than bus order, and the restore lands on
+// a partly different set. Each process must keep its bus position, because GMS
+// loads the weights saved from the N-th GPU in bus order onto the N-th one.
+func TestDeviceMapKeepsBusPositionWhenAllocationOrderDiffers(t *testing.T) {
+	listing := func(uuids ...string) compat.GPUInfo {
+		var gpus compat.GPUInfo
+		for _, uuid := range uuids {
+			gpus.Devices = append(gpus.Devices, compat.GPUDevice{UUID: uuid})
+		}
+		return gpus
+	}
+	// Bus order 0-7 on the node; the checkpoint ran on GPUs 0-3, the restore on 2-5.
+	source, err := describeGPUs(
+		[]string{"GPU-3", "GPU-1", "GPU-0", "GPU-2"},
+		listing("GPU-0", "GPU-1", "GPU-2", "GPU-3"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := describeGPUs(
+		[]string{"GPU-5", "GPU-2", "GPU-4", "GPU-3"},
+		listing("GPU-2", "GPU-3", "GPU-4", "GPU-5"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := BuildDeviceMap(GPUUUIDs(source), GPUUUIDs(target), logr.Discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "GPU-0=GPU-2,GPU-1=GPU-3,GPU-2=GPU-4,GPU-3=GPU-5"; got != want {
+		t.Fatalf("device map = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoverGPUsListSelectedGPUsInBusOrder(t *testing.T) {
+	const a = "GPU-11111111-1111-1111-1111-111111111111"
+	const b = "GPU-22222222-2222-2222-2222-222222222222"
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$2\" in\n0) echo '" + a + ", NVIDIA B200, 595.58.03';;\n2) echo '" + b + ", NVIDIA B200, 595.58.03';;\n*) exit 1;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// nvidia-smi does not promise bus order, so the listing is sorted by the
+	// host's bus IDs.
+	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA B200 (UUID: "+b+")' 'GPU 1: NVIDIA B200 (UUID: "+a+")'\n")
+	hostProc := fakeHostProc(t, "595.58.03")
+	writeHostGPUs(t, hostProc, a, b)
+
+	got, err := DiscoverGPUs(context.Background(), nil, "", "", "",
+		[]string{"NVIDIA_VISIBLE_DEVICES=2,0"},
+		ListVisibleGPUs(context.Background(), hostProc, 42, nil), logr.Discard())
+	if err != nil {
+		t.Fatalf("DiscoverGPUs: %v", err)
+	}
+	if uuids := GPUUUIDs(got); !reflect.DeepEqual(uuids, []string{a, b}) {
+		t.Fatalf("UUIDs = %v, want bus order [%s %s]", uuids, a, b)
+	}
+}
+
+// A listing that cannot be put in bus order still answers the MIG check, but
+// discovery, which pairs GPUs by bus position, refuses it.
+func TestDiscoverGPUsRefusesGPUsOutsideTheHostBusListing(t *testing.T) {
+	installFakeNSenter(t, "printf '%s\\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)' 'GPU 1: NVIDIA L4 (UUID: GPU-b)'\n")
+	hostProc := t.TempDir()
+	writeHostGPUs(t, hostProc, "GPU-a")
+	visible := ListVisibleGPUs(context.Background(), hostProc, 42, nil)
+
+	if _, err := visible(); err != nil {
+		t.Fatalf("ListVisibleGPUs: %v", err)
+	}
+	_, err := DiscoverGPUs(context.Background(), nil, "", "", "", []string{"NVIDIA_VISIBLE_DEVICES=none"}, visible, logr.Discard())
+	if err == nil || !strings.Contains(err.Error(), "PCI bus order") {
+		t.Fatalf("DiscoverGPUs error = %v, want a bus order refusal", err)
 	}
 }
 
@@ -1048,5 +1232,178 @@ func TestOrderDRAUUIDsByRuntimeRejectsMismatches(t *testing.T) {
 				t.Fatalf("expected error, got %v", got)
 			}
 		})
+	}
+}
+
+func TestListProcfsGPUs(t *testing.T) {
+	writeCard := func(t *testing.T, root, busID, uuid, minor string) {
+		t.Helper()
+		dir := filepath.Join(root, "proc", "driver", "nvidia", "gpus", busID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		information := "Model: \t\t NVIDIA B200\nGPU UUID: \t " + uuid + "\nBus Location: \t " + busID + "\nDevice Minor: \t " + minor + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "information"), []byte(information), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setup := func(t *testing.T) (string, string) {
+		t.Helper()
+		hostProc := t.TempDir()
+		root := filepath.Join(hostProc, "42", "root")
+		if err := os.MkdirAll(filepath.Join(root, "dev"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Minors do not follow bus order, as on real nodes.
+		writeCard(t, root, "0000:29:00.0", "GPU-b", "0")
+		writeCard(t, root, "0000:18:00.0", "GPU-a", "6")
+		writeCard(t, root, "0000:3a:00.0", "GPU-hidden", "3")
+		for _, minor := range []string{"0", "6"} {
+			if err := os.WriteFile(filepath.Join(root, "dev", "nvidia"+minor), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return hostProc, root
+	}
+
+	t.Run("cards the container can open, in bus order", func(t *testing.T) {
+		hostProc, _ := setup(t)
+		visible, ok := listProcfsGPUs(hostProc, 42, gpuRulesSpec(0, 3, 6))
+		if !ok {
+			t.Fatal("expected a procfs answer")
+		}
+		var uuids []string
+		for _, device := range visible.GPUs.Devices {
+			uuids = append(uuids, device.UUID)
+			if device.ProductName != "NVIDIA B200" {
+				t.Fatalf("product name = %q", device.ProductName)
+			}
+		}
+		if strings.Join(uuids, ",") != "GPU-a,GPU-b" {
+			t.Fatalf("uuids = %v", uuids)
+		}
+	})
+
+	t.Run("MIG capability nodes defer to nvidia-smi", func(t *testing.T) {
+		hostProc, root := setup(t)
+		if err := os.MkdirAll(filepath.Join(root, "dev", "nvidia-caps"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "dev", "nvidia-caps", "nvidia-cap1"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := listProcfsGPUs(hostProc, 42, gpuRulesSpec(0, 3, 6)); ok {
+			t.Fatal("expected no procfs answer with MIG capability nodes")
+		}
+	})
+
+	t.Run("no readable procfs defers to nvidia-smi", func(t *testing.T) {
+		if _, ok := listProcfsGPUs(t.TempDir(), 42, gpuRulesSpec(0, 3, 6)); ok {
+			t.Fatal("expected no procfs answer")
+		}
+	})
+
+	t.Run("a node the device cgroup denies is not listed", func(t *testing.T) {
+		hostProc, _ := setup(t)
+		visible, ok := listProcfsGPUs(hostProc, 42, gpuRulesSpec(0))
+		if !ok {
+			t.Fatal("expected a procfs answer")
+		}
+		if len(visible.GPUs.Devices) != 1 || visible.GPUs.Devices[0].UUID != "GPU-b" {
+			t.Fatalf("devices = %#v, want only GPU-b", visible.GPUs.Devices)
+		}
+	})
+
+	t.Run("no device cgroup rules defers to nvidia-smi", func(t *testing.T) {
+		hostProc, _ := setup(t)
+		if _, ok := listProcfsGPUs(hostProc, 42, &specs.Spec{}); ok {
+			t.Fatal("expected no procfs answer without device cgroup rules")
+		}
+		if _, ok := listProcfsGPUs(hostProc, 42, nil); ok {
+			t.Fatal("expected no procfs answer without a spec")
+		}
+	})
+}
+
+// gpuRulesSpec returns an OCI spec whose device cgroup, as containerd writes
+// it, denies every device and then allows /dev/nvidia<minor> for each minor.
+func gpuRulesSpec(minors ...int64) *specs.Spec {
+	rules := []specs.LinuxDeviceCgroup{{Allow: false, Access: "rwm"}}
+	for _, minor := range minors {
+		rules = append(rules, specs.LinuxDeviceCgroup{
+			Allow: true, Type: "c", Major: int64Ptr(nvidiaMajor), Minor: int64Ptr(minor), Access: "rwm",
+		})
+	}
+	return &specs.Spec{Linux: &specs.Linux{Resources: &specs.LinuxResources{Devices: rules}}}
+}
+
+func int64Ptr(value int64) *int64 { return &value }
+
+func TestDeviceRulesAllowReadWrite(t *testing.T) {
+	gpu := func(minor int64, allow bool, access string) specs.LinuxDeviceCgroup {
+		return specs.LinuxDeviceCgroup{Allow: allow, Type: "c", Major: int64Ptr(nvidiaMajor), Minor: int64Ptr(minor), Access: access}
+	}
+	denyAll := specs.LinuxDeviceCgroup{Allow: false, Access: "rwm"}
+	tests := []struct {
+		name  string
+		rules []specs.LinuxDeviceCgroup
+		want  bool
+	}{
+		{"allowed after deny all", []specs.LinuxDeviceCgroup{denyAll, gpu(2, true, "rwm")}, true},
+		{"another minor only", []specs.LinuxDeviceCgroup{denyAll, gpu(3, true, "rwm")}, false},
+		{"read only", []specs.LinuxDeviceCgroup{denyAll, gpu(2, true, "r")}, false},
+		{"privileged", []specs.LinuxDeviceCgroup{{Allow: true, Access: "rwm"}}, true},
+		{"later deny wins", []specs.LinuxDeviceCgroup{{Allow: true, Access: "rwm"}, gpu(2, false, "w")}, false},
+		{"block device rule does not match", []specs.LinuxDeviceCgroup{denyAll, {Allow: true, Type: "b", Access: "rwm"}}, false},
+		{"no rules", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deviceRulesAllowReadWrite(tc.rules, nvidiaMajor, 2); got != tc.want {
+				t.Fatalf("deviceRulesAllowReadWrite() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeConcurrency(t *testing.T) {
+	pids := []int{11, 12, 13, 14}
+	concurrency := len(pids)
+	dir := t.TempDir()
+	t.Setenv("FAKE_HELPER_DIR", dir)
+	installFakeCUDAHelper(t, fmt.Sprintf(`
+dir="$FAKE_HELPER_DIR"
+limit=%d
+case " $* " in
+	*" --action restore "*)
+		touch "$dir/running.$$" "$dir/started.$$"
+		for _ in $(seq 200); do
+			[ "$(ls "$dir" | grep -c '^started\.')" -ge "$limit" ] && break
+			sleep 0.01
+		done
+		ls "$dir" | grep -c '^running\.' >> "$dir/counts"
+		rm "$dir/running.$$"
+		;;
+esac
+`, concurrency))
+
+	if _, err := RestoreAndUnlockProcessTree(context.Background(), pids, "", cudaCheckpointHelperBinary, concurrency, logr.Discard()); err != nil {
+		t.Fatalf("RestoreAndUnlockProcessTree() error = %v", err)
+	}
+
+	counts, err := os.ReadFile(filepath.Join(dir, "counts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	peak := 0
+	for _, count := range strings.Fields(string(counts)) {
+		n, err := strconv.Atoi(count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peak = max(peak, n)
+	}
+	if peak != concurrency {
+		t.Fatalf("peak concurrent restores = %d, want %d", peak, concurrency)
 	}
 }

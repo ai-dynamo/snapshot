@@ -85,15 +85,18 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		}
-		log.Error(err, "cuda-checkpoint-helper command failed",
-			"pid", pid,
-			"outermost_pid", details.OutermostPID,
-			"innermost_pid", details.InnermostPID,
-			"cmdline", details.Cmdline,
-			"action", action,
-			"duration", duration,
-			"output", out,
-		)
+		// Skip restores cancelled by a failed sibling, so the real failure stands out.
+		if !(action == actionRestore && err == context.Canceled) {
+			log.Error(err, "cuda-checkpoint-helper command failed",
+				"pid", pid,
+				"outermost_pid", details.OutermostPID,
+				"innermost_pid", details.InnermostPID,
+				"cmdline", details.Cmdline,
+				"action", action,
+				"duration", duration,
+				"output", out,
+			)
+		}
 		return fmt.Errorf("cuda-checkpoint-helper %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
 	}
 	log.V(1).Info("cuda-checkpoint-helper command succeeded",

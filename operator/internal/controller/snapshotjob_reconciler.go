@@ -60,9 +60,6 @@ type SnapshotJobReconciler struct {
 	NonCacheReadClient   client.Reader
 	Recorder             record.EventRecorder
 	CuInterposeContainer operatortypes.CuInterposeContainerConfiguration
-	// EnableLifecycleHooks accepts container settings that need agent
-	// support. Temporary: see errLifecycleHooksDisabled.
-	EnableLifecycleHooks bool
 }
 
 type snapshotJobFailure struct {
@@ -164,10 +161,6 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 			}
 			return r.reconcileAcceptedSourceJob(ctx, sj, authoritativeJob)
 		}
-		// Rejected before the source Job exists, so the workload never starts for a request that would fail.
-		if !r.EnableLifecycleHooks && usesLifecycleHooks(sj.Spec.PodSnapshotTemplate.Containers) {
-			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, errLifecycleHooksDisabled), ctrl.Result{}, nil
-		}
 		cuInterposeEnabled, err := podcontract.ParseCuInterposeAnnotation(sj.Spec.PodTemplate.Annotations)
 		if err != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
@@ -240,7 +233,7 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 		case apierrors.IsNotFound(err):
 			observed.failure = &snapshotJobFailure{
 				reason: snapshotv1alpha1.ReasonSourceCompletedWithoutCapture,
-				cause:  fmt.Errorf("source Job completed before a PodSnapshot capture was created"),
+				cause:  fmt.Errorf("source Job completed before a PodSnapshot was created"),
 			}
 			return observed, ctrl.Result{}, nil
 		case errors.Is(err, errPodSnapshotNameConflict):
@@ -382,7 +375,7 @@ func classifyHelperPod(pod *corev1.Pod, helpers, sidecars []string) (failure *sn
 		if terminated.ExitCode != 0 {
 			return &snapshotJobFailure{
 				reason: snapshotv1alpha1.ReasonJobFailed,
-				cause: fmt.Errorf("helper container %q exited with code %d after the capture succeeded",
+				cause: fmt.Errorf("helper container %q exited with code %d after the checkpoint succeeded",
 					name, terminated.ExitCode),
 			}, false
 		}
@@ -459,8 +452,8 @@ func initializeConditions(next *snapshotv1alpha1.SnapshotJob, reconciliationTime
 		message       string
 	}{
 		{snapshotv1alpha1.SnapshotJobConditionRunning, snapshotv1alpha1.ReasonPodPending, "waiting for the source pod to become ready"},
-		{snapshotv1alpha1.SnapshotJobConditionCaptured, snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the checkpoint capture to start"},
-		{snapshotv1alpha1.SnapshotJobConditionCompleted, snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the checkpoint capture to complete"},
+		{snapshotv1alpha1.SnapshotJobConditionCaptured, snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the checkpoint to start"},
+		{snapshotv1alpha1.SnapshotJobConditionCompleted, snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the checkpoint to complete"},
 		{snapshotv1alpha1.SnapshotJobConditionFailed, snapshotv1alpha1.ReasonNoFailure, "no failure observed"},
 	}
 	for _, def := range defaults {
@@ -528,7 +521,7 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 	if observed.podSnapshot == nil {
 		if failure != nil && !meta.IsStatusConditionTrue(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured) {
 			setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse, reconciliationTime,
-				failure.reason, "capture did not complete: "+failure.cause.Error())
+				failure.reason, "checkpoint did not complete: "+failure.cause.Error())
 		}
 		return failure
 	}
@@ -547,10 +540,10 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 		}
 	case snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot):
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionTrue, reconciliationTime,
-			snapshotv1alpha1.ReasonCaptureCompleted, "CRIU dump of the target container is complete")
+			snapshotv1alpha1.ReasonCaptureCompleted, "the target container's state is saved to the snapshot store")
 	default:
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse, reconciliationTime,
-			snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the node agent to capture the checkpoint")
+			snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the node agent to take the snapshot")
 	}
 	return failure
 }
@@ -592,16 +585,16 @@ func deriveCompletionStatus(next *snapshotv1alpha1.SnapshotJob, observed snapsho
 		// failed") misdescribes this phase; say what is actually happening.
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 			snapshotv1alpha1.ReasonWaitingForPodCompletion,
-			"checkpoint captured; the source pod's remaining containers are finishing")
+			"snapshot taken; the source pod's remaining containers are finishing")
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse, reconciliationTime,
 			snapshotv1alpha1.ReasonWaitingForPodCompletion,
-			"checkpoint captured; waiting for the source pod's remaining containers to finish")
+			"snapshot taken; waiting for the source pod's remaining containers to finish")
 		return
 	}
 	setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 		snapshotv1alpha1.ReasonJobCompleted, "source Job finished")
 	setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionTrue, reconciliationTime,
-		snapshotv1alpha1.ReasonJobCompleted, "checkpoint captured and source workload finished; source Job cleanup initiated")
+		snapshotv1alpha1.ReasonJobCompleted, "snapshot taken and source workload finished; source Job cleanup initiated")
 	if next.Status.CompletedAt == nil {
 		next.Status.CompletedAt = &reconciliationTime
 	}

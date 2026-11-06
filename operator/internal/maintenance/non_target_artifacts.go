@@ -121,7 +121,7 @@ func (q *Queue) processNonTargetArtifactSweep(ctx context.Context, backend Backe
 		logger.Info("Reclaimed failed SnapshotJob non-target artifacts", "snapshot_job_uid", uid, "namespace", sj.Namespace, "name", sj.Name)
 		delete(q.nonTargetRetentionWarned, sj.UID)
 		q.recorder.Event(sj, corev1.EventTypeNormal, "NonTargetArtifactsReclaimed",
-			"Reclaimed this failed attempt's managed non-target artifacts after all source containers stopped; source Job and capture failure evidence retained")
+			"Reclaimed this failed attempt's managed non-target artifacts after all source containers stopped; source Job and checkpoint failure evidence retained")
 	}
 	return errors.Join(cleanupErrors...)
 }

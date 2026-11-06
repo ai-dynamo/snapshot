@@ -7,10 +7,7 @@ import "k8s.io/apimachinery/pkg/util/intstr"
 
 // ContainerSnapshotConfig holds the settings for one checkpointed container,
 // matched to it by name. Snapshot copies them into the PodSnapshotContent at
-// checkpoint time, and every restore of that checkpoint uses that copy.
-//
-// Not enabled yet: the operator rejects a checkpointReadinessProbe or a
-// lifecycle until support is complete.
+// checkpoint time, and every restore of that snapshot uses that copy.
 // +kubebuilder:validation:XValidation:rule="!has(self.checkpointReadinessProbe) || !has(self.checkpointReadinessProbe.file) || !has(self.lifecycle) || !has(self.lifecycle.postRestore) || !has(self.lifecycle.postRestore.file) || self.checkpointReadinessProbe.file.path != self.lifecycle.postRestore.file.path",message="checkpointReadinessProbe and lifecycle.postRestore must use different file paths"
 type ContainerSnapshotConfig struct {
 	// Name of the checkpointed container these settings apply to.
@@ -70,11 +67,13 @@ type CheckpointReadinessProbe struct {
 // CheckpointReadinessProbeHandler is how the probe checks the application.
 type CheckpointReadinessProbeHandler struct {
 	// File succeeds when a regular file exists at the path, inside the
-	// container.
+	// container. Like an exec probe, Snapshot checks it by running a shell
+	// in the container, as the container's user, so the image needs a shell.
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 
-	// HTTPGet succeeds when a GET to the Pod IP returns 200.
+	// HTTPGet succeeds when a GET to the Pod IP returns a 2xx status.
+	// Snapshot does not follow redirects, so a 3xx fails.
 	// +optional
 	HTTPGet *HTTPGetAction `json:"httpGet,omitempty"`
 }
@@ -111,61 +110,86 @@ type PostRestoreAction struct {
 
 // PostRestoreHandler is how Snapshot notifies the restored application.
 type PostRestoreHandler struct {
-	// File creates a regular file at the path, inside the container. The
-	// parent directory must exist. If the file already exists before the
-	// restore, the restore fails.
+	// File creates an empty regular file at the path, inside the container.
+	// Like an exec probe, Snapshot creates it by running a shell in the
+	// container, as the container's user, so the image needs a shell. The
+	// parent directory must exist. The file must not exist before the
+	// restore: Snapshot takes an existing file as the notification.
 	// +optional
 	File *ControlFileAction `json:"file,omitempty"`
 
-	// HTTPPost sends a POST with an empty body to the Pod IP. A 200 or 204
-	// response means the application accepted the notification.
+	// HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
+	// means the application accepted the notification. Snapshot does not
+	// follow redirects, so a 3xx fails.
 	// +optional
 	HTTPPost *HTTPPostAction `json:"httpPost,omitempty"`
 }
 
 // ControlFileAction names a file inside the container's filesystem.
 type ControlFileAction struct {
+	// The path rule finds "." and ".." parts with contains rather than split.
+	// It accepts the same paths, at a cost that the API server can bound
+	// tightly enough for settings repeated per member of a PodGroupSnapshot.
+
 	// Path is an absolute, clean path inside the container: no empty, "." or
 	// ".." parts and no trailing slash, so two paths name the same file only
-	// if they are equal. It must be on the container's own filesystem or an
-	// emptyDir volume; paths on hostPath and PersistentVolumeClaim volumes are
-	// refused.
+	// if they are equal. Any path the container's user can reach works,
+	// volumes included, except the files Snapshot itself writes in the
+	// snapshot-control volume. A file on a volume that outlives the Pod stays
+	// there for the next checkpoint or restore unless the application
+	// removes it.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=2
 	// +kubebuilder:validation:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.endsWith('/') && !self.contains('//') && self.split('/').all(p, p != '.' && p != '..')",message="path must be absolute and clean: no empty, . or .. parts and no trailing slash"
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.endsWith('/') && !self.contains('//') && !self.contains('/./') && !self.endsWith('/.') && !self.contains('/../') && !self.endsWith('/..')",message="path must be absolute and clean: no empty, . or .. parts and no trailing slash"
 	Path string `json:"path"`
 }
 
 // HTTPGetAction is a GET to a port on the Pod IP. Like Kubernetes' own
-// httpGet, it has a path and a port. Snapshot does not follow redirects, and
-// does not support Pods on the host network.
+// httpGet, it has a path and a port. Snapshot does not follow redirects, so a
+// 3xx fails. As with a Kubernetes probe, the Pod IP of a Pod on the host
+// network is the node's IP.
 type HTTPGetAction struct {
 	// Path of the request. Empty means "/".
 	// +optional
 	Path string `json:"path,omitempty"`
 
+	// Port names use MaxLength and Pattern because Kubernetes 1.32 ignores
+	// MaxLength when estimating CEL on IntOrString. Name checks repeated per
+	// group member then exceed the budget. Use `in` for the type check because
+	// 1.32 also overestimates `type(self) == string`.
+
 	// Port on the Pod IP: a number from 1 to 65535, or the name of a port of
 	// the container, resolved when the request is sent.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XIntOrString
-	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
+	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:Pattern=`^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$`
+	// +kubebuilder:validation:XValidation:rule="type(self) in [string] || (self >= 1 && self <= 65535)",message="port must be 1-65535 or a valid port name"
 	Port intstr.IntOrString `json:"port"`
 }
 
 // HTTPPostAction is a POST with an empty body to a port on the Pod IP. Like
 // Kubernetes' own httpGet, it has a path and a port. Snapshot does not follow
-// redirects, and does not support Pods on the host network. It is a separate
-// type from HTTPGetAction so either can grow fields of its own.
+// redirects, so a 3xx fails. As with a Kubernetes probe, the Pod IP of a Pod
+// on the host network is the node's IP. It is a separate type from
+// HTTPGetAction so either can grow fields of its own.
 type HTTPPostAction struct {
 	// Path of the request. Empty means "/".
 	// +optional
 	Path string `json:"path,omitempty"`
 
+	// Port names use MaxLength and Pattern because Kubernetes 1.32 ignores
+	// MaxLength when estimating CEL on IntOrString. Name checks repeated per
+	// group member then exceed the budget. Use `in` for the type check because
+	// 1.32 also overestimates `type(self) == string`.
+
 	// Port on the Pod IP: a number from 1 to 65535, or the name of a port of
 	// the container, resolved when the request is sent.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XIntOrString
-	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 && self <= 65535 : self.size() > 0 && self.size() <= 15 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && self.matches('[a-z]') && !self.contains('--')",message="port must be 1-65535 or a valid port name"
+	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:Pattern=`^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$`
+	// +kubebuilder:validation:XValidation:rule="type(self) in [string] || (self >= 1 && self <= 65535)",message="port must be 1-65535 or a valid port name"
 	Port intstr.IntOrString `json:"port"`
 }

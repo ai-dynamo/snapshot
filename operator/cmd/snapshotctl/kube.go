@@ -159,7 +159,7 @@ func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, s
 	}
 	if err := crClient.Create(ctx, snap); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("PodSnapshot %s/%s already exists; another capture may be in progress", namespace, snapName)
+			return nil, fmt.Errorf("PodSnapshot %s/%s already exists; another checkpoint may be in progress", namespace, snapName)
 		}
 		if apierrors.IsForbidden(err) {
 			return nil, fmt.Errorf("RBAC error creating PodSnapshot %s/%s: missing verb 'create' on podsnapshots; grant it to the snapshotctl caller", namespace, snapName)

@@ -38,8 +38,8 @@ the sum of the logical sizes of saved container files. It includes CPU state, GP
 and the root filesystem archive. Both sizes use decimal GB. File size can differ from
 GPU memory use and the disk space used.
 
-Before capture, we asked each engine to release KV cache memory. For vLLM, model
-weights are resident on the GPU at capture time.
+Before the checkpoint, we asked each engine to release KV cache memory. For vLLM,
+model weights are resident on the GPU at checkpoint time.
 
 ## Measurement boundaries
 
@@ -53,8 +53,8 @@ application completes its wake and resume calls. The destination container alrea
 exists. We then check inference and the saved process token. These checks are outside
 the measured time.
 
-**Checkpoint time** is the time the agent takes to capture the process. It excludes the
-application's sleep or memory-release call before capture.
+**Checkpoint time** is the time the agent takes to checkpoint the process. It excludes
+the application's sleep or memory-release call beforehand.
 
 ### Cold-start stages
 
@@ -157,7 +157,7 @@ Figures 1–3 compare cold start with restore time for each engine.
 | DeepSeek-V4-Pro-NVFP4 | SGLang | TEP8 | 58.80 | 87.68 | 42.55 | 432.52 | 621.55 |
 
 Cold-start phases may not sum to the total because logging and instrumentation do not
-capture every interval. Each run saves the raw timings.
+record every interval. Each run saves the raw timings.
 
 ### Where the restore time goes
 

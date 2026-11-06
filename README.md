@@ -86,7 +86,7 @@ Before installing Snapshot, make sure the following are in place:
 - containerd or CRI-O as the container runtime
 - [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with MIG disabled
 - NVIDIA kernel-mode driver 580 or newer
-- A `ReadWriteMany` (RWX) storage class
+- A shared snapshot store: an RWX storage class or an S3 bucket — see [Storage](docs/operations/storage.md)
 - The [Helm](https://helm.sh/docs/intro/install) CLI
 - A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
 
@@ -110,11 +110,11 @@ for other versions):
 
 ```bash
 helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
-  --version 0.2.0 \
+  --version 0.3.0 \
   --namespace snapshot --create-namespace
 ```
 
-By default the chart provisions its own RWX checkpoint volume, shared by every
+By default the chart provisions its own RWX snapshot volume, shared by every
 checkpoint. See [Storage](docs/operations/storage.md) for the volume model and options
 (including reusing an existing claim), and [Installation](docs/operations/install.md)
 for install and uninstall.
@@ -176,7 +176,7 @@ operations, indexed below.
 **Operations**
 
 - [Installation](docs/operations/install.md) — Helm install and uninstall.
-- [Storage](docs/operations/storage.md) — the shared checkpoint volume and how to configure it.
+- [Storage](docs/operations/storage.md) — the shared snapshot volume and how to configure it.
 - [Storage best practices](docs/operations/storage/README.md) — backend tuning and examples.
 - [Why is my restore slow?](docs/operations/storage/slow-restore.md) — check timings, NFS clients, mount options, and fio results.
 - [Troubleshooting](docs/operations/troubleshooting.md) — common failures and where to look.
