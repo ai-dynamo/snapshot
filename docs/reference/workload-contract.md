@@ -228,6 +228,10 @@ carries depends on what creates it:
             - /usr/local/lib/snapshot/libcuinterpose_core.so
             - /usr/local/bin/cuinterpose-launch
             - /tmp/snapshot-cuda/
+          env:
+            # The CUDA-based agent image requests every GPU, which this copy does not need.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
           volumeMounts:
             - name: snapshot-cuda
               mountPath: /tmp/snapshot-cuda
