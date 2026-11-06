@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/group"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
@@ -20,18 +21,45 @@ import (
 // restore failed, which may have to wait for the coordinator.
 const groupFailTimeout = 30 * time.Second
 
-// admitCapture runs a capture's admission: the member publishes its Pod IP,
-// reads every other member's, and passes the admitted barrier, after which the
-// attempt commits.
-func admitCapture(ctx context.Context, g *group.Member, podIP string) error {
+// admitCapture runs a capture's admission: the member publishes its Pod IP and
+// whether it runs a cuInterpose relay, reads every other member's, inspects with
+// the other relays, whose leader validates the group's topology, and passes the
+// admitted barrier, after which the attempt commits.
+func admitCapture(ctx context.Context, g *group.Member, podIP string, state *types.CheckpointContainerSnapshot) error {
 	ip, err := netip.ParseAddr(podIP)
 	if err != nil {
 		return fmt.Errorf("the Pod's IP: %w", err)
 	}
-	if err := g.Admit(ctx, group.Admission{PodIP: ip}); err != nil {
+	runsRelay := state.CuInterpose.UsesCoordinator()
+	if err := g.Admit(ctx, group.Admission{PodIP: ip, RunsRelay: runsRelay}); err != nil {
 		return err
 	}
+	if runsRelay {
+		err := withRelay(ctx, g, func(relay *cuda.CuInterposeRelay) error {
+			return cuda.InspectCuInterpose(ctx, coordinatorTarget(state.PID, state.CuInterpose.PIDs, relay))
+		})
+		if err != nil {
+			return fmt.Errorf("inspect cuinterpose: %w", err)
+		}
+	}
 	return g.Barrier(ctx, group.Admitted)
+}
+
+// withRelay runs a cuInterpose coordinator through run, as g's relay when g is
+// set, while the agent serves the relay's session socket.
+func withRelay(ctx context.Context, g *group.Member, run func(*cuda.CuInterposeRelay) error) error {
+	if g == nil {
+		return run(nil)
+	}
+	relay, err := g.OpenRelay(ctx)
+	if err != nil {
+		return err
+	}
+	if relay == nil {
+		return run(nil)
+	}
+	err = run(&cuda.CuInterposeRelay{Session: relay.File, Args: relay.Args})
+	return errors.Join(err, relay.Close())
 }
 
 // groupManifest records g's part in the capture, once it has been admitted.
@@ -44,10 +72,11 @@ func groupManifest(g *group.Member) *types.GroupManifest {
 }
 
 // admitRestore runs a restore's admission: the member checks that its artifact
-// is its own part of a group capture, publishes its new Pod IP and the capture
-// it restores, reads every other member's, and passes the admitted barrier,
-// after which the attempt commits.
-func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, captured *types.GroupManifest) error {
+// is its own part of a group capture, publishes its new Pod IP, the capture it
+// restores and whether it runs a cuInterpose relay, reads every other member's,
+// and passes the admitted barrier, after which the attempt commits.
+func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, manifest *types.CheckpointManifest) error {
+	captured := manifest.Group
 	if err := checkGroupArtifact(captured, g.ID(), g.Rank()); err != nil {
 		return err
 	}
@@ -55,7 +84,8 @@ func admitRestore(ctx context.Context, g *group.Member, targetPodIP string, capt
 	if err != nil {
 		return fmt.Errorf("the restore Pod's IP: %w", err)
 	}
-	if err := g.Admit(ctx, group.Admission{PodIP: ip, CaptureID: captured.CaptureID}); err != nil {
+	admission := group.Admission{PodIP: ip, CaptureID: captured.CaptureID, RunsRelay: manifest.CuInterpose.UsesCoordinator()}
+	if err := g.Admit(ctx, admission); err != nil {
 		return err
 	}
 	return g.Barrier(ctx, group.Admitted)
