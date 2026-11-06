@@ -862,7 +862,42 @@ func TestPodGroupSnapshotReleasable(t *testing.T) {
 			for _, phase := range tc.phases {
 				status.Members = append(status.Members, snapshotv1alpha1.PodGroupSnapshotMemberStatus{Phase: phase})
 			}
-			assert.Equal(t, tc.want, podGroupSnapshotReleasable(status))
+			assert.Equal(t, tc.want, podGroupSnapshotReleasable(podGroupSnapshotObservation{}, status))
+		})
+	}
+}
+
+func TestPodGroupSnapshotReleasableWaitsForRestores(t *testing.T) {
+	ready := snapshotv1alpha1.PodGroupSnapshotStatus{
+		Conditions: []metav1.Condition{{Type: snapshotv1alpha1.PodGroupConditionReady, Status: metav1.ConditionTrue}},
+		Members:    []snapshotv1alpha1.PodGroupSnapshotMemberStatus{{Phase: snapshotv1alpha1.CheckpointPhaseCheckpointed}},
+	}
+	restore := func(conditionType string, phases ...snapshotv1alpha1.RestorePhase) snapshotv1alpha1.PodGroupRestore {
+		r := snapshotv1alpha1.PodGroupRestore{}
+		if conditionType != "" {
+			r.Status.Conditions = []metav1.Condition{{Type: conditionType, Status: metav1.ConditionTrue}}
+		}
+		for _, phase := range phases {
+			r.Status.Members = append(r.Status.Members, snapshotv1alpha1.PodGroupRestoreMemberStatus{Phase: phase})
+		}
+		return r
+	}
+	finished := restore(snapshotv1alpha1.PodGroupConditionReady, "Released")
+	for _, tc := range []struct {
+		name     string
+		restores []snapshotv1alpha1.PodGroupRestore
+		want     bool
+	}{
+		{"no restore", nil, true},
+		{"finished restores", []snapshotv1alpha1.PodGroupRestore{finished, restore(snapshotv1alpha1.PodGroupConditionFailed, "Failed")}, true},
+		{"a restore not yet admitted", []snapshotv1alpha1.PodGroupRestore{finished, restore("", "Pending")}, false},
+		{"a restore that runs", []snapshotv1alpha1.PodGroupRestore{restore("", "Restoring")}, false},
+		{"a failed restore with a member still Restoring", []snapshotv1alpha1.PodGroupRestore{
+			restore(snapshotv1alpha1.PodGroupConditionFailed, "Failed", "Restoring"),
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, podGroupSnapshotReleasable(podGroupSnapshotObservation{restores: tc.restores}, &ready))
 		})
 	}
 }

@@ -5,12 +5,16 @@ package controller
 
 import (
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 // TrimPodForCache keeps only the Pod fields the controllers read from the
 // cache. The operator watches every Pod in the cluster but never writes one.
-// Of the Pod's conditions it keeps only Ready, which PodGroupSnapshot
-// admission reads from the snapshot agent Pods.
+// Of the Pod's status it keeps the phase, the address and the container
+// statuses, and of its conditions only those a pod-group controller reads:
+// Ready, which admission reads from the snapshot agent Pods, and the restore
+// conditions that a PodGroupRestore aggregates from its restore Pods.
 func TrimPodForCache(obj any) (any, error) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
@@ -18,7 +22,11 @@ func TrimPodForCache(obj any) (any, error) {
 	}
 	var conditions []corev1.PodCondition
 	for _, c := range pod.Status.Conditions {
-		if c.Type == corev1.PodReady {
+		switch c.Type {
+		case corev1.PodReady,
+			podcontract.RestoreStartedCondition,
+			podcontract.RestoredCondition,
+			podcontract.GroupRestoreFailedCondition:
 			conditions = append(conditions, c)
 		}
 	}
@@ -27,6 +35,7 @@ func TrimPodForCache(obj any) (any, error) {
 	pod.Status = corev1.PodStatus{
 		Phase:                 pod.Status.Phase,
 		Conditions:            conditions,
+		PodIP:                 pod.Status.PodIP,
 		ContainerStatuses:     pod.Status.ContainerStatuses,
 		InitContainerStatuses: pod.Status.InitContainerStatuses,
 	}
