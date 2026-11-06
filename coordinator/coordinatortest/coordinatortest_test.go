@@ -49,3 +49,25 @@ func TestStart(t *testing.T) {
 	_, err := coordinator.Connect(unavailable, c.Config(spec.UID, "worker"))
 	require.ErrorIs(t, err, session.ErrForbidden)
 }
+
+// TestStartUnready starts a coordinator that refuses members until MarkReady.
+func TestStartUnready(t *testing.T) {
+	ignore := goleak.IgnoreCurrent()
+	t.Cleanup(func() { goleak.VerifyNone(t, ignore) })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c := coordinatortest.StartUnready(t)
+	spec := server.Spec{UID: "attempt", Deadline: time.Now().Add(time.Hour),
+		Members: []session.Member{{ID: "member", Rank: 0}}}
+	require.NoError(t, c.Ensure(ctx, spec))
+	assert.False(t, c.Ready())
+	refused, cancelRefused := context.WithTimeout(ctx, time.Second)
+	defer cancelRefused()
+	_, err := coordinator.Connect(refused, c.Config(spec.UID, "member"))
+	require.ErrorIs(t, err, session.ErrForbidden)
+
+	c.MarkReady()
+	s, err := coordinator.Connect(ctx, c.Config(spec.UID, "member"))
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+}
