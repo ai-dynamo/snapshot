@@ -24,7 +24,8 @@
 #          same workflow in read mode, because a tag never recurs and so a
 #          cache published under one is a cache nothing ever reads.
 #
-# Reads CACHE_REF_PREFIX, and CACHE_TAG_SUFFIX if set — any unused value there
+# Reads CACHE_REF_PREFIX, derived from GITHUB_REPOSITORY_OWNER when unset, and
+# CACHE_TAG_SUFFIX if set — any unused value there
 # points every flag at a tag that does not exist, which is how a cold build is
 # measured without disturbing the cache other runs are reading.
 
@@ -34,7 +35,15 @@ MODE=${1:?usage: ci-cache-flags.sh <read|write> <image> <branch>}
 IMAGE=${2:?usage: ci-cache-flags.sh <read|write> <image> <branch>}
 BRANCH=${3:?usage: ci-cache-flags.sh <read|write> <image> <branch>}
 
-: "${CACHE_REF_PREFIX:?CACHE_REF_PREFIX must name the cache repository}"
+# Unless told otherwise, the cache lives beside the images, in the namespace of
+# whichever account owns the repository this runs in: ai-dynamo upstream, a
+# fork's owner in a fork, whose token can write nowhere else. GHCR refuses upper
+# case, which an account name may have. push-artifacts.yaml derives REGISTRY the
+# same way.
+if [ -z "${CACHE_REF_PREFIX:-}" ]; then
+    : "${GITHUB_REPOSITORY_OWNER:?set CACHE_REF_PREFIX, or GITHUB_REPOSITORY_OWNER to derive it}"
+    CACHE_REF_PREFIX="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/snapshot/cache"
+fi
 SUFFIX=${CACHE_TAG_SUFFIX:-}
 
 # Validated here rather than trusted, because it arrives from a
