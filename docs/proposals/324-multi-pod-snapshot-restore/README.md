@@ -209,8 +209,8 @@ Redis-compatible server.
 | Between CRIU restore and CUDA unlock, a thread that calls CUDA blocks on the lock, which is not a recommended use of CUDA Checkpoint, and a failure in that window could leave such a thread stuck. | The locked window involves no coordination and lasts as long as for a single Pod, failing a restore terminates every restored process, and qualification measures both restore windows and injects failures into each. |
 | CRIU's network lock at capture and the agent's hold at restore pause the traffic of preserved connections while keepalive, retransmission, and user timeouts keep running, so a long dump or a slow peer can break them ([snapshot#577](https://github.com/ai-dynamo/snapshot/issues/577)). | Holds are taken as late and lifted as early as possible, and qualification measures the whole interruption, including staggered dumps, to document the supported limits. |
 | At capture, CRIU's network lock covers a member's IP traffic only from the moment CRIU freezes it, and never covers RDMA, shared volumes, or external services, while dumps finish at different times. | Members must stop such traffic before reporting `ready-for-snapshot`, as the workload contract requires, and libraries tear down RDMA transports before the dump, which for NCCL means the application calling NCCL Checkpoint's prepare until CUDA's prepare phase does it. |
-| The coordinator is a single point of failure for attempts in flight, because sessions live only in its memory. | Failure is fail-stop and reported as `CoordinatorLost`, a standby replica serves new attempts, and a broken connection that reconnects does not fail an attempt; every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
-| Sessions share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts fail until its own attempt ends at its deadline. A compromised agent can also add messages to another attempt's buckets, which count against that attempt's limits, because JetStream does not bound a consumer's deliveries by its creator's permissions ([nats-server#8274](https://github.com/nats-io/nats-server/issues/8274)). | Sessions stay isolated otherwise: no client can read another session or change its keys, since a delivered message keeps its original subject, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A byte limit per session would reserve that memory whether a session uses it or not, so alpha shares it, and beta revisits both limitations together, for example with one NATS account per attempt, once cuInterpose's largest records are measured. |
+| Sessions live only in the coordinator's memory, so an attempt in flight ends if the agent that hosts its session restarts. | Each session lives in the agent on the node of the attempt's rank-0 member, which the attempt depends on anyway, since a restarted agent fails its own member; losing it is fail-stop and reported as `CoordinatorLost`, sessions on other nodes are unaffected, and a broken connection that reconnects does not fail an attempt. Every session pattern is safe to repeat, so replicating sessions later changes only the coordinator. |
+| Sessions hosted on the same node share the coordinator's memory, so a compromised workload can fill it with records forged through its relay and make concurrent attempts fail until its own attempt ends at its deadline. A compromised agent can also add messages to another attempt's buckets, which count against that attempt's limits, because JetStream does not bound a consumer's deliveries by its creator's permissions ([nats-server#8274](https://github.com/nats-io/nats-server/issues/8274)). | Sessions stay isolated otherwise: no client can read another session or change its keys, since a delivered message keeps its original subject, libraries are bounded per session, each bucket bounds how many watches its members open, and the cap protects the coordinator itself. A byte limit per session would reserve that memory whether a session uses it or not, so alpha shares it, and beta revisits both limitations together, for example with one NATS account per attempt, once cuInterpose's largest records are measured. |
 | The agent sits on every coordination path, and an agent can restart in the middle of a restore. | The agent records its intent before CRIU starts and treats `restore-complete` as proof of release, so a restarted agent never replays CRIU and never kills a released workload. |
 | Importing GPU memory shared from another node after a native CUDA restore depends on a driver fix, and cuInterpose currently infers the kind of an imported FABRIC handle from its opaque contents. | Cross-node sharing in alpha requires a driver with the fix, and a public query for the handle kind is a beta prerequisite. |
 | CUDA Checkpoint's prepare and resume phases are not released yet. | Until they are, the application calls NCCL Checkpoint's prepare and restore itself, and NCCL restores after release through the library endpoint. |
@@ -260,7 +260,7 @@ coordinator stays small, and new participants integrate without changing it.
 | Component | Runs as | Responsibility |
 | --- | --- | --- |
 | Group controllers | Snapshot operator | Validate groups, pin identities, create member `PodSnapshot`s, enforce the deadline, and aggregate member results into one outcome. |
-| Snapshot coordinator | Deployment with one active replica, elected through a Lease, and a standby | Embed a NATS server with in-memory JetStream, create two buckets per attempt, authenticate every connection and scope it to its attempt, enforce the deadline and the grace period, and fail every member when one fails. |
+| Snapshot coordinator | Snapshot agent; the agent on the node of an attempt's rank-0 member serves its session | Embed a NATS server with in-memory JetStream, create two buckets per attempt, authenticate every connection and scope it to its attempt, enforce the deadline and the grace period, and fail every member when one fails. |
 | Group executor | Snapshot agent | Run each member's capture or restore as session phases around the existing CUDA and CRIU steps, and record its intent before destructive work. |
 | Session proxy | Snapshot agent | Hold one NATS connection per hosted member, serve the relay's socket and the Pod's endpoint, and confine each to its namespace. |
 | cuInterpose relay | Short-lived process in each Pod that uses cuInterpose | Fan commands out to the Pod's processes as in SNEP-295 and, in the lowest rank that runs one, also lead the group. |
@@ -270,10 +270,13 @@ coordinator stays small, and new participants integrate without changing it.
 
 A session corresponds to exactly one attempt, that is, one capture of a
 `PodGroupSnapshot` or one `PodGroupRestore`, and it is identified by that resource's
-UID, because each resource is exactly one attempt. The coordinator follows the
+UID, because each resource is exactly one attempt. The coordinator is a logical
+component that Snapshot runs in every agent: an attempt's session lives in the
+agent on the node of its rank-0 member, which the group's status records, so
+every member finds it there and no election is needed. That agent follows the
 group resources through a read-only watch and creates the session of every
-unfinished attempt, so sessions need no creation API and the resource remains
-the single source of truth. The coordinator removes a session and all of its
+unfinished attempt whose rank-0 member runs on its node, so sessions need no
+creation API and the resource remains the single source of truth. The coordinator removes a session and all of its
 keys once its resource is deleted, or once the resource is final and the
 session has ended or its deadline has passed, so a session whose end cannot be
 recorded, for instance at the memory cap, is still removed. Once a
@@ -353,7 +356,7 @@ and no participant ever needs to send a message to one specific rank.
 | Path | Transport | Identity |
 | --- | --- | --- |
 | Operator, agents, and coordinator to the API server | Kubernetes API, read-only for the coordinator | RBAC |
-| Agent to coordinator | One NATS connection per session and hosted member, over TLS, to the server the coordinator embeds | Pod-bound ServiceAccount token checked with TokenReview when the connection opens; the member's Pod must run on the agent's node, and the connection may reach only its attempt's buckets |
+| Agent to coordinator | One NATS connection per session and hosted member, over TLS, to the server that the coordinator embeds, in the agent hosting the session | Pod-bound ServiceAccount token checked with TokenReview when the connection opens; the member's Pod must run on the agent's node, and the connection may reach only its attempt's buckets |
 | Agent to cuInterpose relay | Socket pair inherited through `nsenter` or `nsrestore` | Implicit, because the agent created it |
 | Workload processes to agent | Per-Pod endpoint: a Unix socket in the control volume, or a loopback listener inside the Pod's network namespace | Implicit, because the endpoint belongs to one Pod |
 | Relay to shims | Per-process Unix sockets from SNEP-295 | File permissions |
@@ -819,21 +822,21 @@ fails the attempt with `MemberFailed`, after which the owner retries with a new
 attempt.
 
 The coordinator, by contrast, keeps sessions only in memory. In alpha its
-embedded server holds every bucket in memory, as a single replica, so a
-coordinator restart loses every session in flight. When the coordinator creates
+embedded server holds every bucket in memory, without replicas, so restarting
+the agent that hosts a session loses it. When the coordinator creates
 a session, it writes an epoch, drawn at random, into the session's `meta` key,
 and every agent presents the epoch it read whenever it reconnects. If the
 coordinator has recreated the session since, it fails the session with
 `CoordinatorLost` before admitting the agent, and an agent that finds no
 session at all reports `CoordinatorLost` as well. The owner then retries with a
 new attempt, which for a restore means fresh Pods. For this to be prompt, the coordinator opens its client listener only after it has
-recreated the session of every unfinished attempt; otherwise an agent that
+recreated the session of every unfinished attempt it hosts; otherwise an agent that
 reconnects early would find no session and fail nothing, members that had not
 connected yet would join the recreated session, and the attempt would wait for
 its deadline. The design does not depend on this choice, however, because every
 session pattern is safe to repeat: keeping attempts alive across a restart
-needs only replicated buckets, which JetStream provides by running the
-coordinator's embedded server as a small cluster, and no client changes. That
+needs only replicated buckets, which JetStream provides by clustering the
+embedded servers of several agents, and no client changes. That
 costs replicas and their placement, and it helps only when a takeover completes
 well within the hold, probe, and library timeouts that keep running meanwhile,
 so this SNEP leaves the choice to operational evidence
@@ -892,19 +895,18 @@ progress, every wait ends at its phase timeout, when the session ends, or at the
 attempt deadline, which an agent that cannot reach the coordinator enforces on
 its own, a few seconds late to allow for clock skew. A lost member fails the
 attempt one grace period after its connection is seen closing. Nothing orders operations by clock, although
-deadline accuracy and leader election depend on timing assumptions: the
-deadline counts from the creation time that the API server records, measured
-against the coordinator's clock, and Lease renewal assumes bounded drift and
-pauses.
+deadline accuracy depends on timing assumptions: the deadline counts from the
+creation time that the API server records, measured against the clock of the
+node that hosts the session.
 
-Alpha assumes one serving coordinator per attempt. Lease election provides
-best-effort ownership, and losing leadership must stop the client listener and
-close existing connections. Epoch checks detect a recreated session; they do
-not fence an earlier instance. The contract extends by version and by
+Alpha assumes one serving coordinator per attempt, which its rank-0 member's
+node determines without an election. Epoch checks detect a recreated session;
+they do not fence an earlier instance. The contract extends by version and by
 namespace: bucket names and the key layout carry a version, agents advertise
 the group protocol versions they support, which the group controllers check before
-creating any member work, and a new kind of participant receives a namespace of
-its own.
+creating any member work and which, since every agent also runs the coordinator,
+cover the session protocol as well, and a new kind of participant receives a
+namespace of its own.
 
 ### Deadlines
 
@@ -1108,10 +1110,9 @@ validation rules, the artifact metadata, and the Pod-contract constants. The
 session's bucket names and key layout and the framing between agents and relays
 are internal and versioned, so a version mismatch fails admission rather than
 surfacing later. The operator needs full
-access to the new kinds and read access to the agent Pods, the agents need
-read access to the new kinds, and the
-coordinator needs read access to the new kinds and to Pods, plus permission to
-create TokenReviews.
+access to the new kinds and read access to the agent Pods, and the agents need
+read access to the new kinds and, for the coordinator they run, read access to
+Pods and permission to create TokenReviews.
 
 ### Security
 
@@ -1166,8 +1167,8 @@ their loopback interface is shared with the node.
 
 Multi-Pod support is enabled the way Snapshot enables its other features: by
 installing the `PodGroupSnapshot` and `PodGroupRestore` CRDs and setting one chart
-value, off by default in alpha, that deploys the coordinator and turns on the
-group controllers. The chart gains the coordinator's TLS, resource, and replica
+value, off by default in alpha, that turns on the group controllers and the
+coordinator in every agent. The chart gains the coordinator's TLS and resource
 settings, together with the limits of its embedded NATS server, namely total
 memory, maximum message size, the value limits of each session's buckets, and
 the key limit of its library bucket, while the agent gains a switch for the
@@ -1204,8 +1205,8 @@ identifiers take 128 bytes per communicator.
 Pushed waits and per-node coalescing keep library traffic to about one upstream
 request per key per node, which comfortably supports at least 100
 concurrent library clients per session with per-operation latency well under 100
-milliseconds. Because sessions are independent, one coordinator replica serves
-many concurrent attempts and can later be sharded by attempt; alpha qualifies
+milliseconds. Because sessions are independent and each lives on its rank-0
+member's node, concurrent attempts spread across the nodes; alpha qualifies
 groups of 2 to 16 Pods, and larger groups are measured before beta.
 
 ### Monitoring
@@ -1334,7 +1335,7 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 | Coordination inside rank 0's cuInterpose coordinator, as prototyped | It exits before libraries restore, listens on the Pod network behind a shared secret, collides with the TCP hold, and serves only cuInterpose. |
 | Coordination inside the operator | It saves a component, but operator upgrades and leader changes would fail restores in flight and data-plane traffic would cross the control plane; building the coordinator as a library keeps this option open. |
 | The CRIU project's [criu-coordinator](https://github.com/checkpoint-restore/criu-coordinator) | It synchronizes CRIU's dump and restore hooks across processes, containers, or Pods through a server that every participant reaches over TCP, which matches the `net-freeze` and dump barriers, but it sees only CRIU's steps, not CUDA's phases, cuInterpose's rounds, or library rendezvous, and it would add a second coordination server; the session's barriers provide the same synchronization at points the agents already control, while its hook points remain a useful reference. |
-| Coordination hosted by an elected agent | It ties every attempt to one node's health and requires agent-to-agent TLS on the host network as well as an election. |
+| A coordinator Deployment, with one replica elected through a Lease and a standby | It adds a component and an election that every attempt depends on, and a takeover still loses the sessions in flight; running the coordinator in every agent, with each session on its rank-0 member's node, ties an attempt only to a node it already depends on and spreads sessions across nodes. |
 | A separately deployed Redis, etcd, or NATS | It adds a stateful service to secure and operate, still leaves membership and failure handling to Snapshot, and stores fabric handles where any client of the store can read them; embedding NATS in the coordinator keeps the store off the shelf without another deployment. |
 | A purpose-built protocol and in-memory store | It would let Snapshot shape every message, but it reimplements what JetStream already provides, namely transport, waits, flow control, and memory limits, at several times the code to maintain. |
 | Pods connect to the coordinator directly | It requires credentials inside Pods and possibly inside CRIU images, NetworkPolicy changes in every workload namespace, and exemptions from the TCP hold. |
@@ -1368,14 +1369,13 @@ review that settles the open questions in [Appendix A](#a-open-questions).
 6. **Availability.** Which evidence, such as the observed rate of
    `CoordinatorLost` and the measured takeover time against the hold and probe
    budgets, would justify keeping attempts alive across a coordinator restart,
-   by running the coordinator's embedded server as a small cluster with
-   replicated buckets?
+   by clustering several agents' embedded servers with replicated buckets?
 
 ### B. Changes from the prototype
 
 The prototype validated the shim and coordinator mechanics on hardware, and this
 SNEP keeps them while changing how members find each other. The brain moves out
-of rank 0's coordinator into the coordinator service, leaving rank 0's relay
+of rank 0's Pod into the coordinator, which the agent on rank 0's node runs, leaving rank 0's relay
 with only cuInterpose's leader logic, and its commands become a generic, pure
 broadcast of a step and its arguments. Group parameters come from the resources
 instead of Pod annotations, which removes the shared secret, and the per-Pod
