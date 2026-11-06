@@ -23,13 +23,9 @@ func snapshotJobTargetContainer(sj *snapshotv1alpha1.SnapshotJob) (string, error
 }
 
 // validatePodSnapshotTemplateMetadata rejects invalid Kubernetes metadata and
-// labels reserved for the SnapshotJob controller before the source workload is
-// started. The generated PodSnapshot remains the final API-server validation
-// boundary; this check turns malformed immutable input into InvalidSpec early.
+// controller-owned labels before the source workload is started. The
+// generated PodSnapshot remains the final API-server validation boundary; this
+// check turns malformed immutable input into InvalidSpec early.
 func validatePodSnapshotTemplateMetadata(sj *snapshotv1alpha1.SnapshotJob) error {
-	return validateTemplateMetadata(sj.Spec.PodSnapshotTemplate.Metadata,
-		field.NewPath("spec", "podSnapshotTemplate", "metadata"),
-		snapshotv1alpha1.SnapshotJobOwnerLabel,
-		snapshotv1alpha1.SnapshotJobOwnerUIDLabel,
-	)
+	return validateTemplateMetadata(sj.Spec.PodSnapshotTemplate.Metadata, field.NewPath("spec", "podSnapshotTemplate", "metadata"))
 }
