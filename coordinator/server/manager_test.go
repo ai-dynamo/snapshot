@@ -383,6 +383,97 @@ func TestRemove(t *testing.T) {
 	})
 }
 
+// TestCancel covers cancelling a session, as the host does once its group
+// resource's deletion starts: the session fails with Cancelled unless every
+// member has arrived at the admitted barrier, and a session that ended keeps
+// its end. What a member makes of it is sessiontest's to test.
+func TestCancel(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+
+	t.Run("a session not every member has arrived in fails", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.ensure(3)
+		members := h.connectAll(spec)
+		require.NoError(t, members[0].arrive(ctx, session.BarrierAdmitted))
+		require.NoError(t, members[1].arrive(ctx, "other"), "another barrier does not count")
+		require.NoError(t, members[2].arrive(ctx, session.BarrierAdmitted))
+		require.NoError(t, members[2].snapshot.Delete(ctx, session.BarrierKey(session.BarrierAdmitted, members[2].id)),
+			"an arrival deleted does not count")
+		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
+		for _, m := range members {
+			require.ErrorIs(t, awaitEnd(t, m), &session.AbortError{Reason: session.ReasonCancelled})
+		}
+		value, ok := h.ended(spec)
+		require.True(t, ok)
+		assert.Equal(t, session.ReasonCancelled, value)
+	})
+
+	t.Run("a session every member has arrived in stays open", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.ensure(2)
+		members := h.connectAll(spec)
+		for _, m := range members {
+			require.NoError(t, m.arrive(ctx, session.BarrierAdmitted))
+		}
+		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
+		_, ok := h.ended(spec)
+		assert.False(t, ok)
+		assert.Equal(t, []string{"opened " + string(spec.UID)}, h.observer.of(spec.UID))
+	})
+
+	t.Run("a session that ended keeps its end", func(t *testing.T) {
+		h := h.sub(t)
+		spec := h.ensure(1)
+		m := h.connect(spec, 0)
+		require.NoError(t, m.fail(ctx, "Refused"))
+		require.NoError(t, h.srv.Cancel(ctx, spec.UID))
+		value, _ := h.ended(spec)
+		assert.Equal(t, "Refused", value)
+	})
+
+	t.Run("an unknown attempt", func(t *testing.T) {
+		require.ErrorIs(t, h.srv.Cancel(ctx, "unknown"), session.ErrNotFound)
+	})
+}
+
+// TestEnded covers what the host reads of a session: whether the coordinator
+// holds it, from Ensure until Remove, and whether it has ended, however it
+// ended.
+func TestEnded(t *testing.T) {
+	h := newHarness(t)
+	ctx := within(t)
+	requireEnded := func(t *testing.T, uid types.UID, wantEnded, wantHeld bool) {
+		t.Helper()
+		ended, held := h.srv.Ended(uid)
+		assert.Equal(t, wantEnded, ended, "ended")
+		assert.Equal(t, wantHeld, held, "held")
+	}
+
+	t.Run("from Ensure until Remove", func(t *testing.T) {
+		spec := h.spec(1)
+		requireEnded(t, spec.UID, false, false)
+		require.NoError(t, h.srv.Ensure(ctx, spec))
+		requireEnded(t, spec.UID, false, true)
+		require.NoError(t, h.srv.Fail(ctx, spec.UID, "Refused"))
+		requireEnded(t, spec.UID, true, true)
+		require.NoError(t, h.srv.Remove(ctx, spec.UID))
+		requireEnded(t, spec.UID, false, false)
+	})
+
+	t.Run("a member's end, once the coordinator has seen it", func(t *testing.T) {
+		spec := h.ensure(2)
+		members := h.connectAll(spec)
+		for _, m := range members {
+			require.NoError(t, m.leave(ctx))
+		}
+		require.Eventually(t, func() bool {
+			ended, _ := h.srv.Ended(spec.UID)
+			return ended
+		}, 5*time.Second, 5*time.Millisecond)
+	})
+}
+
 // TestEnsureCancelledWhileWatching is a stress test. It ends Ensure's context
 // while follow may still be creating the session's watch: as soon as the
 // session's Snapshot bucket reports the watch's consumer. nats.go may never
