@@ -32,7 +32,7 @@ description.
 | How do the pieces fit together? | The [architecture overview](../reference/architecture/README.md) |
 | How does one subsystem or flow work inside? | A detailed page in [`docs/reference/architecture/`](../reference/architecture), such as [Multi-GPU](../reference/architecture/multi-gpu.md) |
 | Why was it designed this way? | A [SNEP](../proposals/README.md) |
-| What changed in this release? | [CHANGELOG.md](../../CHANGELOG.md) |
+| What changed in this release? | [CHANGELOG.md](../../CHANGELOG.md), and for someone upgrading, the [release notes](../release-notes/), written per [Writing release notes](writing-release-notes.md) |
 
 Two sets of facts are listed twice, so a change updates both: Helm values (the
 API reference and the chart README) and the baseline prerequisites (the README
