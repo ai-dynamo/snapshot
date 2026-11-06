@@ -286,13 +286,13 @@ impl ProcessState {
                 if handle_live || mapped {
                     return Ok(());
                 }
-                export_cache()?.remove(&id)?;
+                export_cache()?.release(&id)?;
             }
             Memblock::Multicast(object) => {
                 if handle_live || mapped {
                     return Ok(());
                 }
-                export_cache()?.remove(&id)?;
+                export_cache()?.release(&id)?;
                 if let Some(driver) = object.driver {
                     unsafe { crate::driver::cuMemRelease(driver) }?;
                 }

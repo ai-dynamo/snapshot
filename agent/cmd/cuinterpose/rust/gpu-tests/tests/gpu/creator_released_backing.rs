@@ -2,15 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Importers keep shared backing restorable after its creator drops every local reference,
-//! and backing that every holder released leaves no record.
+//! an open ticket still imports after its creator released the allocation, and backing
+//! that every holder released leaves no record.
 
 use cuinterpose_gpu_tests::process::{self, Child, channel, spawn};
 use cuinterpose_gpu_tests::sys::{
     CUdeviceptr, CUmemAllocationProp, CUmemAllocationType, CUmemGenericAllocationHandle,
 };
 use cuinterpose_gpu_tests::{cu, cuda, shim};
-use cuinterpose_protocol::Record;
+use cuinterpose_protocol::{
+    Record, Request, VIRTUAL_SHAREABLE_HANDLE_BYTES, decode_virtual_shareable_handle,
+};
+use rustix::net::{RecvFlags, recv};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 const HEAD: &[u8] = b"full backing starts here";
 const TAIL: &[u8] = b"full backing ends here";
@@ -103,6 +108,65 @@ fn restore_after_creator_releases(host_numa: bool) {
         importer.send(&Command::Stop);
         importer.wait();
     }
+}
+
+#[test]
+fn ticket_imports_after_its_creator_releases_the_allocation() {
+    match process::role().as_deref() {
+        Some("releasing-creator") => return releasing_creator(),
+        Some("late-importer") => return late_importer(),
+        _ => {}
+    }
+    let creator = spawn("releasing-creator");
+    let (size, ticket) = creator.recv_fd::<usize>();
+    // Like a CUDA export FD, the open ticket keeps the backing after its creator
+    // released it, so every importer of the ticket still finds it.
+    for _ in 0..2 {
+        let importer = spawn("late-importer");
+        importer.send_fd(&size, &ticket);
+        importer.wait();
+    }
+    // Closing the last copy ends the export, though the creator makes no further calls.
+    let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES];
+    recv(&ticket, &mut bytes, RecvFlags::PEEK).unwrap();
+    let export = Request::Export {
+        namespace_pid: creator.pid(),
+        allocation: decode_virtual_shareable_handle(&bytes).unwrap(),
+    };
+    drop(ticket);
+    let deadline = Instant::now() + process::TIMEOUT;
+    while shim::request(creator.pid(), &export).is_ok() {
+        assert!(Instant::now() < deadline, "the creator kept its export");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    creator.send(&"stop");
+    creator.wait();
+}
+
+/// Releases its allocation before sending the ticket, like a process that hands off
+/// memory and exits.
+fn releasing_creator() {
+    cuda::primary_contexts(1);
+    let properties = cuda::allocation_properties(0, false);
+    let (handle, address, size) = cuda::create_mapped(&properties, None);
+    cuda::write_bytes(address, HEAD);
+    let ticket = cuda::export_fd(handle);
+    cuda::unmap(address, size);
+    cu!(cuMemRelease(handle));
+    channel().send_fd(&size, &ticket);
+    drop(ticket);
+    assert_eq!(channel().recv::<String>(), "stop");
+}
+
+fn late_importer() {
+    let (size, ticket) = channel().recv_fd::<usize>();
+    cuda::primary_contexts(1);
+    let handle = cuda::import_fd(&ticket);
+    drop(ticket);
+    let address = cuda::map(handle, size, cuda::device(0));
+    cuda::assert_bytes(address, HEAD, "import after creator release");
+    cuda::unmap(address, size);
+    cu!(cuMemRelease(handle));
 }
 
 #[test]

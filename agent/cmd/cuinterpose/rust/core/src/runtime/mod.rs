@@ -150,7 +150,8 @@ impl RuntimeCandidate {
             .get_mut()
             .map_err(|_| Error::Startup("CUDA state mutex poisoned"))?
             .namespace_pid;
-        let Some(workers) = control::PreparedWorkers::prepare(namespace_pid)? else {
+        let hangups = runtime.export_cache.hangups()?;
+        let Some(workers) = control::PreparedWorkers::prepare(namespace_pid, hangups)? else {
             return Ok(None);
         };
         Ok(Some(Self {
@@ -188,7 +189,7 @@ fn prepare_runtime() -> Result<Box<ProcessRuntime>> {
     Ok(Box::new(ProcessRuntime {
         pid,
         state: Mutex::new(state),
-        export_cache: sharing::ExportCache::default(),
+        export_cache: sharing::ExportCache::new()?,
         socket_dir,
         socket_path,
     }))

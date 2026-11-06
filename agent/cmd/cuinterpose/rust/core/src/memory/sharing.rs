@@ -18,22 +18,15 @@ use cuinterpose_protocol::{
     self as protocol, AllocationId, AllocationReference, Error, NamespacePid, Reply, Request,
     Response, VIRTUAL_SHAREABLE_HANDLE_BYTES, VIRTUAL_SHAREABLE_HANDLE_MAGIC,
 };
-use rustix::fs::{MemfdFlags, memfd_create};
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::Write;
+use rustix::event::{PollFd, PollFlags, Timespec, epoll, poll};
+use rustix::fs::{FileType, fstat};
+use rustix::net::{
+    AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType, recv, send, socketpair, sockopt,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::os::unix::{fs::FileExt, net::UnixStream};
+use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, MutexGuard};
-
-pub fn create(reference: AllocationReference) -> protocol::Result<OwnedFd> {
-    let bytes = protocol::encode_virtual_shareable_handle(reference)?;
-    let fd = memfd_create(c"cuinterpose-virtual-shareable-handle", MemfdFlags::CLOEXEC)
-        .map_err(std::io::Error::from)?;
-    let mut file = File::from(fd);
-    file.write_all(&bytes)?;
-    Ok(file.into())
-}
 
 /// Return None for foreign FDs so the caller imports them natively. Return
 /// an invalid handle error for malformed virtual handles.
@@ -41,36 +34,36 @@ pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
     if fd < 0 {
         return Err(Error::Invalid("negative import descriptor"));
     }
-    // Duplicate the caller's borrowed FD into an owned File for positional reads, so
-    // RAII closes only the duplicate and never the application's descriptor.
-    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    let file = File::from(borrowed.try_clone_to_owned()?);
-    // Virtual handles use regular memfds, so other descriptor types, including pipes
-    // and sockets, are foreign. A regular file that is too short is an invalid virtual
-    // handle.
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
+    let ticket = unsafe { BorrowedFd::borrow_raw(fd) };
+    // Virtual handles are Unix sequenced-packet sockets, so other descriptor types,
+    // including CUDA export FDs, are foreign.
+    let io = |error: rustix::io::Errno| Error::Io(error.into());
+    if FileType::from_raw_mode(fstat(ticket).map_err(io)?.st_mode) != FileType::Socket
+        || sockopt::socket_domain(ticket).map_err(io)? != AddressFamily::UNIX
+        || sockopt::socket_type(ticket).map_err(io)? != SocketType::SEQPACKET
+    {
         return Ok(None);
     }
-    let mut magic = [0; 4];
-    file.read_exact_at(&mut magic, 0)?;
-    if magic[..3] != VIRTUAL_SHAREABLE_HANDLE_MAGIC[..3] {
+    // Peeking leaves the packet queued, so every copy of the ticket can be imported.
+    let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES + 1];
+    let length = match recv(ticket, &mut bytes, RecvFlags::PEEK | RecvFlags::DONTWAIT) {
+        Ok((_, length)) => length,
+        Err(rustix::io::Errno::AGAIN) => return Ok(None),
+        Err(error) => return Err(io(error)),
+    };
+    if length < 3 || bytes[..3] != VIRTUAL_SHAREABLE_HANDLE_MAGIC[..3] {
         return Ok(None);
     }
-    if magic[3] != protocol::VERSION {
+    if bytes[3] != protocol::VERSION {
         return Err(Error::Invalid(
             "unsupported virtual shareable handle version",
         ));
     }
-    if metadata.len() != VIRTUAL_SHAREABLE_HANDLE_BYTES as u64 {
+    if length != VIRTUAL_SHAREABLE_HANDLE_BYTES {
         return Err(Error::Invalid("invalid virtual shareable handle size"));
     }
-    let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES];
-    bytes[..VIRTUAL_SHAREABLE_HANDLE_MAGIC.len()].copy_from_slice(&magic);
-    file.read_exact_at(
-        &mut bytes[VIRTUAL_SHAREABLE_HANDLE_MAGIC.len()..],
-        VIRTUAL_SHAREABLE_HANDLE_MAGIC.len() as u64,
-    )?;
+    let bytes: [u8; VIRTUAL_SHAREABLE_HANDLE_BYTES] =
+        bytes[..VIRTUAL_SHAREABLE_HANDLE_BYTES].try_into().unwrap();
     Ok(Some(protocol::decode_virtual_shareable_handle(&bytes)?))
 }
 
@@ -160,21 +153,144 @@ fn decode_multicast_properties(
 
 // Cache complete backing metadata with the FD so an importer can preserve it after
 // the creator drops its local references. Serving exports never locks CUDA state.
-pub(crate) type Exports = BTreeMap<AllocationId, (AllocationReference, OwnedFd, Reply)>;
-
 #[derive(Default)]
+pub(crate) struct Exports {
+    cached: BTreeMap<AllocationId, (AllocationReference, OwnedFd, Reply)>,
+    // The cache's end of each ticket's socket pair. It reports a hangup once the
+    // application has closed every copy of the ticket.
+    tickets: BTreeMap<AllocationId, Vec<OwnedFd>>,
+    // Exports whose creator dropped every local reference while a ticket was open.
+    released: BTreeSet<AllocationId>,
+}
+
+impl Exports {
+    /// Drop the ends of closed tickets, then the released exports they kept alive.
+    fn sweep(&mut self, hangups: &OwnedFd) {
+        self.tickets.retain(|_, ends| {
+            ends.retain(|end| {
+                let open = !closed(end);
+                // A forked child can share the end's file description, which would
+                // keep it registered after this process closes its descriptor.
+                if !open {
+                    let _ = epoll::delete(hangups, end);
+                }
+                open
+            });
+            !ends.is_empty()
+        });
+        let Self {
+            cached,
+            tickets,
+            released,
+        } = self;
+        released.retain(|id| {
+            let open = tickets.contains_key(id);
+            if !open {
+                cached.remove(id);
+            }
+            open
+        });
+    }
+}
+
+fn closed(end: &OwnedFd) -> bool {
+    let mut events = [PollFd::new(end, PollFlags::empty())];
+    let now = Timespec::default();
+    poll(&mut events, Some(&now)).is_ok() && events[0].revents().contains(PollFlags::HUP)
+}
+
 pub struct ExportCache {
     exports: Mutex<Exports>,
+    // Becomes readable when a ticket end reports a hangup, so the peer worker can reap
+    // closed tickets without waiting for another CUDA call.
+    hangups: OwnedFd,
 }
 
 impl ExportCache {
+    pub fn new() -> Result<Self> {
+        let hangups = epoll::create(epoll::CreateFlags::CLOEXEC)
+            .map_err(|error| CoreError::io("create ticket hangup monitor", error))?;
+        Ok(Self {
+            exports: Mutex::default(),
+            hangups,
+        })
+    }
+
+    pub fn hangups(&self) -> Result<OwnedFd> {
+        self.hangups
+            .try_clone()
+            .map_err(|error| CoreError::io("duplicate ticket hangup monitor", error))
+    }
+
+    /// Drop closed tickets and the released exports they kept alive.
+    pub fn reap(&self) -> Result<()> {
+        self.exports
+            .lock()
+            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .sweep(&self.hangups);
+        Ok(())
+    }
+
     pub fn contains(&self, reference: &AllocationReference) -> Result<bool> {
         Ok(self
             .exports
             .lock()
             .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .cached
             .get(&reference.id)
             .is_some_and(|(known, _, _)| known == reference))
+    }
+
+    /// Issue a shareable handle for `reference`. The application receives one end of a
+    /// socket pair carrying the encoded reference, and the cache keeps the other end.
+    pub fn issue(&self, reference: AllocationReference) -> Result<OwnedFd> {
+        let pair = || -> protocol::Result<(OwnedFd, OwnedFd)> {
+            let bytes = protocol::encode_virtual_shareable_handle(reference)?;
+            let (ticket, end) = socketpair(
+                AddressFamily::UNIX,
+                SocketType::SEQPACKET,
+                SocketFlags::CLOEXEC,
+                None,
+            )
+            .map_err(std::io::Error::from)?;
+            send(&end, &bytes, SendFlags::empty()).map_err(std::io::Error::from)?;
+            Ok((ticket, end))
+        };
+        let (ticket, end) = pair().map_err(|error| {
+            CoreError::io(
+                "create shareable handle ticket",
+                std::io::Error::other(error),
+            )
+        })?;
+        epoll::add(
+            &self.hangups,
+            &end,
+            epoll::EventData::new_u64(0),
+            epoll::EventFlags::empty(),
+        )
+        .map_err(|error| CoreError::io("monitor shareable handle ticket", error))?;
+        self.exports
+            .lock()
+            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .tickets
+            .entry(reference.id)
+            .or_default()
+            .push(end);
+        Ok(ticket)
+    }
+
+    /// The creator dropped its last local reference. An exported CUDA FD keeps its
+    /// backing alive until every copy is closed, so keep the export while a ticket is
+    /// open. Exports without tickets, such as legacy IPC handles, end here.
+    pub fn release(&self, id: &AllocationId) -> Result<()> {
+        let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+        exports.sweep(&self.hangups);
+        if exports.tickets.contains_key(id) {
+            exports.released.insert(*id);
+        } else {
+            exports.cached.remove(id);
+        }
+        Ok(())
     }
 
     pub fn insert(
@@ -204,25 +320,32 @@ impl ExportCache {
         };
         let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
         if exports
+            .cached
             .get(&reference.id)
             .is_some_and(|(known, _, _)| *known != reference)
         {
             return Err(CUDA_ERROR_INVALID_HANDLE.into());
         }
-        exports.insert(reference.id, (reference, descriptor, reply));
+        exports
+            .cached
+            .insert(reference.id, (reference, descriptor, reply));
+        exports.released.remove(&reference.id);
         Ok(())
     }
 
     pub fn remove(&self, id: &AllocationId) -> Result<()> {
-        self.exports
-            .lock()
-            .map_err(|_| CUDA_ERROR_UNKNOWN)?
-            .remove(id);
+        let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+        exports.cached.remove(id);
+        exports.released.remove(id);
         Ok(())
     }
 
+    /// Drop every cached export before checkpoint. Ticket ends stay, so the checkpoint
+    /// sees each ticket as a whole socket pair.
     pub fn clear(&self) -> Result<()> {
-        self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?.clear();
+        let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+        exports.cached.clear();
+        exports.released.clear();
         Ok(())
     }
 
@@ -236,7 +359,7 @@ impl ExportCache {
             .exports
             .lock()
             .map_err(|_| protocol::Error::Invalid("export cache poisoned"))?;
-        let (result, descriptor) = match exports.get(&reference.id) {
+        let (result, descriptor) = match exports.cached.get(&reference.id) {
             Some((known, fd, reply)) if known == reference => (Ok(reply.clone()), Some(fd)),
             _ => (Err("allocation resource is unavailable".into()), None),
         };
@@ -374,7 +497,11 @@ const DEVICE_LOCATION: protocol::MemoryLocation = protocol::MemoryLocation {
 #[cfg(test)]
 mod codec_tests {
     use super::*;
+    use rustix::fs::{MemfdFlags, memfd_create};
+    use std::fs::File;
+    use std::io::Write;
     use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileExt;
 
     fn handle_file(bytes: &[u8]) -> File {
         let fd = memfd_create(c"test-shareable-handle", MemfdFlags::CLOEXEC).unwrap();
@@ -383,18 +510,30 @@ mod codec_tests {
         file
     }
 
+    /// A socket queued with one packet, shaped like a ticket.
+    fn packet(bytes: &[u8]) -> OwnedFd {
+        let (socket, end) = socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        send(&end, bytes, SendFlags::empty()).unwrap();
+        socket
+    }
+
     #[test]
     fn virtual_shareable_handle_round_trip() {
         let reference = AllocationReference {
             creator_pid: 1,
             id: [4; 16],
         };
-        let file = File::from(create(reference).unwrap());
-        assert_eq!(decode(file.as_raw_fd()).unwrap(), Some(reference));
-        assert_eq!(
-            file.metadata().unwrap().len(),
-            VIRTUAL_SHAREABLE_HANDLE_BYTES as u64
-        );
+        let ticket = ExportCache::new().unwrap().issue(reference).unwrap();
+        // Decoding peeks, so a ticket imports more than once.
+        for _ in 0..2 {
+            assert_eq!(decode(ticket.as_raw_fd()).unwrap(), Some(reference));
+        }
     }
 
     #[test]
@@ -403,8 +542,24 @@ mod codec_tests {
         assert_eq!(decode(foreign.as_raw_fd()).unwrap(), None);
         let (socket, _peer) = UnixStream::pair().unwrap();
         assert_eq!(decode(socket.as_raw_fd()).unwrap(), None);
-        let file = handle_file(b"foreign handle");
-        assert_eq!(decode(file.as_raw_fd()).unwrap(), None);
+        let (empty, _peer) = socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        assert_eq!(decode(empty.as_raw_fd()).unwrap(), None);
+        for bytes in [&b"foreign handle"[..], b"CU"] {
+            assert_eq!(decode(packet(bytes).as_raw_fd()).unwrap(), None);
+        }
+        // A regular file is foreign even when it holds an encoded reference.
+        let encoded = protocol::encode_virtual_shareable_handle(AllocationReference {
+            creator_pid: 1,
+            id: [4; 16],
+        })
+        .unwrap();
+        assert_eq!(decode(handle_file(&encoded).as_raw_fd()).unwrap(), None);
     }
 
     #[test]
@@ -414,14 +569,13 @@ mod codec_tests {
             id: [4; 16],
         })
         .unwrap();
-        for size in 0..bytes.len() {
-            let file = handle_file(&bytes[..size]);
-            assert!(decode(file.as_raw_fd()).is_err(), "accepted size {size}");
+        for size in 3..bytes.len() {
+            let ticket = packet(&bytes[..size]);
+            assert!(decode(ticket.as_raw_fd()).is_err(), "accepted size {size}");
         }
         let mut oversized = bytes.to_vec();
         oversized.push(0);
-        let file = handle_file(&oversized);
-        assert!(decode(file.as_raw_fd()).is_err());
+        assert!(decode(packet(&oversized).as_raw_fd()).is_err());
     }
 
     #[test]
@@ -433,14 +587,14 @@ mod codec_tests {
         .unwrap();
         for version in [0, protocol::VERSION + 1] {
             bytes[3] = version;
-            let file = handle_file(&bytes);
-            assert!(matches!(decode(file.as_raw_fd()), Err(Error::Invalid(_))));
+            let ticket = packet(&bytes);
+            assert!(matches!(decode(ticket.as_raw_fd()), Err(Error::Invalid(_))));
         }
     }
 
     #[test]
     fn export_cache_checks_identity_and_serves_full_size_from_another_pid() {
-        let cache = ExportCache::default();
+        let cache = ExportCache::new().unwrap();
         let reference = AllocationReference {
             creator_pid: 1,
             id: [4; 16],
@@ -545,13 +699,70 @@ mod codec_tests {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
-    use std::io::Read;
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
 
     #[test]
+    fn open_tickets_keep_a_released_export() {
+        let cache = ExportCache::new().unwrap();
+        let reference = AllocationReference {
+            creator_pid: 7,
+            id: [3; 16],
+        };
+        let insert = || {
+            cache
+                .insert(
+                    reference,
+                    File::open("/dev/zero").unwrap().into(),
+                    ExportMetadata::Unicast {
+                        size: 8192,
+                        location: DEVICE_LOCATION,
+                    },
+                )
+                .unwrap()
+        };
+        // The peer worker reaps when the hangup monitor becomes readable.
+        let hangup = || {
+            let mut events = [PollFd::new(&cache.hangups, PollFlags::IN)];
+            poll(&mut events, Some(&Timespec::default())).unwrap() == 1
+        };
+        // Without a ticket, such as for a legacy IPC handle, release ends the export.
+        insert();
+        cache.release(&reference.id).unwrap();
+        assert!(!cache.contains(&reference).unwrap());
+
+        // A creator may release before its peer imports the ticket.
+        insert();
+        let ticket = cache.issue(reference).unwrap();
+        let copy = ticket.try_clone().unwrap();
+        cache.release(&reference.id).unwrap();
+        drop(ticket);
+        assert!(!hangup());
+        assert!(cache.contains(&reference).unwrap());
+        assert_eq!(decode(copy.as_raw_fd()).unwrap(), Some(reference));
+        drop(copy);
+        assert!(hangup());
+        cache.reap().unwrap();
+        assert!(!hangup());
+        assert!(!cache.contains(&reference).unwrap());
+        assert!(cache.exports.lock().unwrap().tickets.is_empty());
+
+        // Restoring the export makes it live again.
+        insert();
+        let ticket = cache.issue(reference).unwrap();
+        cache.release(&reference.id).unwrap();
+        insert();
+        drop(ticket);
+        cache.reap().unwrap();
+        assert!(cache.contains(&reference).unwrap());
+    }
+
+    #[test]
     fn multicast_exports_send_descriptor_and_properties() {
-        let cache = ExportCache::default();
+        let cache = ExportCache::new().unwrap();
         let reference = AllocationReference {
             creator_pid: 7,
             id: [1; 16],
@@ -588,7 +799,7 @@ mod cache_tests {
     #[test]
     fn teardown_and_replacement_wait_for_socket_send() {
         for replace in [false, true] {
-            let cache = Arc::new(ExportCache::default());
+            let cache = Arc::new(ExportCache::new().unwrap());
             let reference = AllocationReference {
                 creator_pid: 7,
                 id: [2; 16],
