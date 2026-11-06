@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -679,6 +680,49 @@ func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 	}
 }
 
+func TestRestoreInNamespaceMapsPeerIPs(t *testing.T) {
+	checkpointDir := t.TempDir()
+	manifest := types.NewCheckpointManifest(
+		"content-uid-123", "main", types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.OverlayManifest{}, types.HostManifest{},
+	)
+	manifest.CRIUDump.CRIU.TcpEstablished = true
+	t.Setenv(criu.InetRemapEnvVar, "")
+	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+	sync, _, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sync.Close()
+	// Either stops the restore before anything runs in the namespace.
+	for _, tc := range []struct {
+		name     string
+		peerSync *os.File
+		peerIPs  criu.IPMap
+		want     string
+	}{
+		{"a peer moves onto this Pod's new IP", sync,
+			criu.IPMap{netip.MustParseAddr("10.0.0.12"): netip.MustParseAddr("10.1.4.21")}, "both move to 10.1.4.21"},
+		{"peers without the peer sync socket", nil,
+			criu.IPMap{netip.MustParseAddr("10.0.0.12"): netip.MustParseAddr("10.1.4.22")}, "peer sync socket"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := RestoreInNamespace(context.Background(), RestoreOptions{
+				CheckpointPath: checkpointDir,
+				TargetPodIP:    "10.1.4.21",
+				PeerIPs:        tc.peerIPs,
+				PeerSync:       tc.peerSync,
+			}, testr.New(t))
+			if err == nil || !strings.Contains(err.Error(), tc.want) || StepOf(err) != StepPrepareCRIURestore {
+				t.Fatalf("RestoreInNamespace() = %v, want %q while preparing CRIU restore", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestRemainingDuration(t *testing.T) {
 	got := remainingDuration(10*time.Second, 4*time.Second, 3*time.Second)
 	if got != 3*time.Second {
@@ -1218,7 +1262,7 @@ func TestRestoreKeepsTheStepNSRestoreNamed(t *testing.T) {
 			}
 			originalExec := execNSRestoreFunc
 			t.Cleanup(func() { execNSRestoreFunc = originalExec })
-			execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+			execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution, *keptConnections) (*RestoreInNamespaceResult, error) {
 				return nil, tt.nsErr
 			}
 
@@ -1311,7 +1355,7 @@ func TestRestoreCommitFailureIsACleanupError(t *testing.T) {
 
 	originalExec := execNSRestoreFunc
 	t.Cleanup(func() { execNSRestoreFunc = originalExec })
-	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution, *keptConnections) (*RestoreInNamespaceResult, error) {
 		return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
 	}
 	originalValidate := validateRestoredProcessFunc
@@ -1409,7 +1453,7 @@ func TestRestoreSuccessfulCPURestoreUnmountsBeforeCommitAndSkipsAbort(t *testing
 	events := make(chan string, 8)
 	originalExec := execNSRestoreFunc
 	t.Cleanup(func() { execNSRestoreFunc = originalExec })
-	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution, *keptConnections) (*RestoreInNamespaceResult, error) {
 		return &RestoreInNamespaceResult{
 			RestoredPID:  4242,
 			CleanupError: &CleanupError{Action: "unmount something", Message: "fake cleanup failure"},
@@ -1513,7 +1557,7 @@ func TestRestoreFailedSourceUnmountSkipsCommitAndKeepsRetrying(t *testing.T) {
 	events := make(chan string, 8)
 	originalExec := execNSRestoreFunc
 	t.Cleanup(func() { execNSRestoreFunc = originalExec })
-	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution, *keptConnections) (*RestoreInNamespaceResult, error) {
 		return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
 	}
 	originalValidate := validateRestoredProcessFunc
@@ -1599,7 +1643,7 @@ func TestRestoreCommitFailureAfterSuccessfulUnmountReturnsCleanupError(t *testin
 	events := make(chan string, 8)
 	originalExec := execNSRestoreFunc
 	t.Cleanup(func() { execNSRestoreFunc = originalExec })
-	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+	execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution, *keptConnections) (*RestoreInNamespaceResult, error) {
 		return &RestoreInNamespaceResult{RestoredPID: 4242}, nil
 	}
 	originalValidate := validateRestoredProcessFunc
