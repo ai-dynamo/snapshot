@@ -113,13 +113,15 @@ func TestFlowControlReplies(t *testing.T) {
 				_, err := m.bucket(ns).Put(ctx, key, bytes.Repeat([]byte{fill}, 3<<20))
 				require.NoError(t, err)
 			}
+			timeout := time.After(10 * time.Second)
 			for {
 				select {
-				case e := <-w.Updates():
-					if e != nil && e.Value()[0] == 'b' {
+				case e, ok := <-w.Updates():
+					require.True(t, ok, "the watch of namespace %s stopped", ns)
+					if e != nil && bytes.HasPrefix(e.Value(), []byte("b")) {
 						return
 					}
-				case <-time.After(10 * time.Second):
+				case <-timeout:
 					t.Fatalf("the second value never reached the watch of namespace %s", ns)
 				}
 			}

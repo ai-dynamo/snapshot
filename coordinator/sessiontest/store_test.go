@@ -186,12 +186,13 @@ func TestGet(t *testing.T) {
 			want: strings.Repeat("v", 4<<20)},
 		{name: "a library key inserted during the wait", ns: session.NamespaceLibrary, wait: time.Minute,
 			during: insert(session.NamespaceLibrary, "late"), want: "late"},
-		{name: "a key deleted, then inserted again, during the wait", ns: session.NamespaceCuInterpose, wait: time.Minute,
-			before: insert(session.NamespaceCuInterpose, "old"),
-			during: func(t *testing.T, sessions []coordinator.Session) {
+		{name: "a key deleted before the wait, then inserted again during it", ns: session.NamespaceCuInterpose,
+			wait: time.Minute,
+			before: func(t *testing.T, sessions []coordinator.Session) {
+				insert(session.NamespaceCuInterpose, "old")(t, sessions)
 				require.NoError(t, sessions[1].CuInterpose().Delete(within(t), "k"))
-				insert(session.NamespaceCuInterpose, "new")(t, sessions)
-			}, want: "old"},
+			},
+			during: insert(session.NamespaceCuInterpose, "new"), want: "new"},
 		{name: "the session fails during the wait", ns: session.NamespaceSnapshot, wait: time.Minute,
 			during: func(t *testing.T, sessions []coordinator.Session) {
 				require.NoError(t, sessions[1].Fail(within(t), "PeerFailed"))
@@ -211,7 +212,8 @@ func TestGet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sessions := h.session(t, 2).connectAll(t)
+			ses := h.session(t, 2)
+			sessions := ses.connectAll(t)
 			if tt.before != nil {
 				tt.before(t, sessions)
 			}
@@ -227,8 +229,7 @@ func TestGet(t *testing.T) {
 				got <- result{value, err}
 			}()
 			if tt.during != nil || tt.cancel {
-				// Let the Get start waiting first.
-				time.Sleep(100 * time.Millisecond)
+				ses.awaitWait(t, tt.ns)
 			}
 			if tt.during != nil {
 				tt.during(t, sessions)

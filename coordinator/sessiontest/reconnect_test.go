@@ -32,7 +32,7 @@ func TestReconnect(t *testing.T) {
 			value, err := sessions[0].CuInterpose().Get(ctx, "command", time.Minute)
 			got <- result{value, err}
 		}()
-		time.Sleep(pending)
+		ses.awaitWait(t, session.NamespaceCuInterpose)
 		ses.cut(0)
 		// Inserted while the waiting member is most likely still away: its
 		// watch resumes from the revision it had reached.
@@ -166,7 +166,7 @@ func TestCoordinatorLost(t *testing.T) {
 			_, err := sessions[0].Snapshot().Get(ctx, "k", time.Minute)
 			got <- err
 		}()
-		time.Sleep(pending)
+		ses.awaitWait(t, session.NamespaceSnapshot)
 		h.restart(ses.spec)
 
 		require.ErrorIs(t, <-got, session.ErrCoordinatorLost)

@@ -244,6 +244,20 @@ func (ses *testSession) rawBucket(t *testing.T, member int, bucket string) jetst
 	return kv
 }
 
+// awaitWait waits until a wait of one member in namespace ns watches its keys:
+// until the namespace's bucket holds one consumer more than at rest, when the
+// coordinator watches the departures and each member, every one connected,
+// the session's end.
+func (ses *testSession) awaitWait(t *testing.T, ns session.Namespace) {
+	t.Helper()
+	uid := string(ses.spec.UID)
+	bucket, rest := session.SnapshotBucket(uid), len(ses.spec.Members)+1
+	if ns == session.NamespaceLibrary {
+		bucket, rest = session.LibraryBucket(uid), 0
+	}
+	ses.awaitConsumers(t, bucket, rest+1)
+}
+
 // awaitMostConsumers waits until the session's Snapshot bucket holds its most
 // consumers.
 func (ses *testSession) awaitMostConsumers(t *testing.T) {
