@@ -54,6 +54,7 @@ test:
 # Only the operator has envtest-backed admission tests today.
 test-integration:
 	$(MAKE) -C operator test-integration
+	$(MAKE) -C coordinator test-integration
 
 build:
 	$(MAKE) -C coordinator build
