@@ -302,6 +302,7 @@ On export, the shim retains the real CUDA file descriptor and returns one end of
 This *virtual shareable FD* passes through the application's existing IPC mechanism.
 When the receiving application calls `cuMemImportFromShareableHandle`, its shim peeks the reference without consuming it and requests the real CUDA descriptor from the creator's socket.
 The shim keeps the other end of the pair, which reports a hangup once the application has closed every copy of the virtual shareable FD.
+Its peer thread watches these ends, so a released export ends as soon as the last copy closes.
 Like a CUDA export FD, an open virtual shareable FD keeps the backing importable after the creator releases its own handles and mappings.
 
 ```mermaid
