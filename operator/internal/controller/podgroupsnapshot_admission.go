@@ -25,15 +25,47 @@ import (
 // are ready:
 //
 //  1. the spec checks the CRD cannot make (podGroupSnapshotSpecRefusal);
-//  2. every source Pod exists with the pinned UID;
-//  3. no PodSnapshot holds a member's name, except this group's own, or one an
+//  2. no PodSnapshot holds a member's name, except this group's own, or one an
 //     earlier PodGroupSnapshot of the same name left, which admission waits
 //     for garbage collection to remove;
+//  3. every source Pod exists with the pinned UID;
 //  4. every source Pod is scheduled, or admission waits;
 //  5. the agent on every member's node is ready for groups, or admission waits.
+//
+// A PodSnapshot this group controls at a member's name is member work that the
+// cache may not show yet. Step 2 runs before the source Pods are read, and when
+// it finds one, admit returns no result at all, as if the cache had shown it:
+// a group whose member work exists is never refused, and the next reconcile
+// adopts it and creates the rest. The spec checks may run first, since a group
+// whose immutable spec fails them was refused before any member work existed.
 func (r *PodGroupSnapshotReconciler) admit(ctx context.Context, reader client.Reader, group *snapshotv1alpha1.PodGroupSnapshot) (podGroupAdmission, error) {
 	if refusal := podGroupSnapshotSpecRefusal(group); refusal != nil {
 		return *refusal, nil
+	}
+
+	var leftovers []string
+	var collision *podGroupAdmission
+	for rank := range group.Spec.Members {
+		member := &group.Spec.Members[rank]
+		snap := &snapshotv1alpha1.PodSnapshot{}
+		name := podGroupMemberPodSnapshotName(group, member)
+		switch err := reader.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: name}, snap); {
+		case apierrors.IsNotFound(err):
+		case err != nil:
+			return podGroupAdmission{}, fmt.Errorf("get PodSnapshot %q of member %q: %w", name, member.ID, err)
+		case isMemberPodSnapshot(group, rank, snap):
+			return podGroupAdmission{}, nil
+		case isPreviousIncarnationPodSnapshot(group, snap):
+			owner := metav1.GetControllerOf(snap)
+			leftovers = append(leftovers, fmt.Sprintf("member %q: PodSnapshot %q of an earlier PodGroupSnapshot %q (uid %q) is being deleted",
+				member.ID, name, owner.Name, owner.UID))
+		case collision == nil:
+			collision = ptr.To(podGroupRefusal(fmt.Sprintf("member %q: PodSnapshot %q already exists and does not belong to this PodGroupSnapshot",
+				member.ID, name)))
+		}
+	}
+	if collision != nil {
+		return *collision, nil
 	}
 
 	var unscheduled []string
@@ -57,25 +89,6 @@ func (r *PodGroupSnapshotReconciler) admit(ctx context.Context, reader client.Re
 			return podGroupAdmission{}, fmt.Errorf("validate source Pod of member %q: %w", member.ID, err)
 		default:
 			nodes[pod.Spec.NodeName] = struct{}{}
-		}
-	}
-
-	var leftovers []string
-	for rank := range group.Spec.Members {
-		member := &group.Spec.Members[rank]
-		snap := &snapshotv1alpha1.PodSnapshot{}
-		name := podGroupMemberPodSnapshotName(group, member)
-		switch err := reader.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: name}, snap); {
-		case apierrors.IsNotFound(err), err == nil && isMemberPodSnapshot(group, rank, snap):
-		case err != nil:
-			return podGroupAdmission{}, fmt.Errorf("get PodSnapshot %q of member %q: %w", name, member.ID, err)
-		case isPreviousIncarnationPodSnapshot(group, snap):
-			owner := metav1.GetControllerOf(snap)
-			leftovers = append(leftovers, fmt.Sprintf("member %q: PodSnapshot %q of an earlier PodGroupSnapshot %q (uid %q) is being deleted",
-				member.ID, name, owner.Name, owner.UID))
-		default:
-			return podGroupRefusal(fmt.Sprintf("member %q: PodSnapshot %q already exists and does not belong to this PodGroupSnapshot",
-				member.ID, name)), nil
 		}
 	}
 

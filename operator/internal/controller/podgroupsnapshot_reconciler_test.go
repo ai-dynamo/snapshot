@@ -519,6 +519,42 @@ func TestPodGroupSnapshotReconciler_RestartMidwayCreatesTheRest(t *testing.T) {
 	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseAdmitted, got.Status.Members[0].Phase)
 }
 
+// TestPodGroupSnapshotReconciler_NeverRefusesAGroupWhoseMemberWorkExists
+// confirms a refusal against member work first. The cache has not seen member
+// a's PodSnapshot yet, and shows a's source Pod recreated, which alone would
+// refuse the group; the API server has the PodSnapshot, and no source Pod.
+func TestPodGroupSnapshotReconciler_NeverRefusesAGroupWhoseMemberWorkExists(t *testing.T) {
+	group := pgGroup("a", "b")
+	memberA := buildMemberPodSnapshot(group, 0)
+	memberA.UID = "group-a-uid"
+	recreated := pgSourcePod("a", "node-1")
+	recreated.UID = "recreated"
+	r, recorder := makePodGroupReconciler(t, group.DeepCopy(), recreated, pgSourcePod("b", "node-1"),
+		pgAgent("node-1", true, ptr.To("v1")))
+	live, _ := makePodGroupReconciler(t, group.DeepCopy(), memberA.DeepCopy(), pgSourcePod("b", "node-1"),
+		pgAgent("node-1", true, ptr.To("v1")))
+	r.NonCacheReadClient = live.Client
+
+	reconcileGroup(t, r)
+
+	got := getGroup(t, r)
+	assert.Nil(t, groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed), "member work exists")
+	for _, m := range got.Status.Members {
+		assert.NotEqual(t, snapshotv1alpha1.CheckpointPhaseFailed, m.Phase, m.ID)
+	}
+	assert.Empty(t, listMemberPodSnapshots(t, r), "nothing is created before the cache shows member work")
+	assert.Empty(t, drainEvents(recorder))
+
+	// The cache catches up: the PodSnapshot is adopted, and the rest created.
+	require.NoError(t, r.Create(context.Background(), memberA.DeepCopy()))
+	reconcileGroup(t, r)
+	got = getGroup(t, r)
+	assert.Nil(t, groupCondition(t, got, snapshotv1alpha1.PodGroupConditionFailed))
+	assert.Equal(t, snapshotv1alpha1.CheckpointPhaseAdmitted, got.Status.Members[0].Phase)
+	assert.Equal(t, &snapshotv1alpha1.ObjectIdentity{Name: "group-a", UID: "group-a-uid"}, got.Status.Members[0].PodSnapshot)
+	assert.Len(t, listMemberPodSnapshots(t, r), 2, "the other member's PodSnapshot is created")
+}
+
 func TestPodGroupSnapshotReconciler_DeletedPodSnapshotFailsItsMember(t *testing.T) {
 	r, recorder := makePodGroupReconciler(t, append(pgReadyCluster("a", "b"), pgGroup("a", "b"))...)
 	reconcileGroup(t, r)

@@ -134,7 +134,9 @@ func (r *PodGroupSnapshotReconciler) observe(ctx context.Context, group *snapsho
 	admission, err := r.admit(ctx, r.Client, group)
 	if err == nil && admission.state == podGroupAdmissionRefused {
 		// A refusal is final, so confirm it against the API server: the cache
-		// may lag behind a new source Pod or a deleted PodSnapshot.
+		// may lag behind a new source Pod, a deleted PodSnapshot, or a member
+		// PodSnapshot just created, which admit finds first and which turns the
+		// refusal into no result.
 		admission, err = r.admit(ctx, r.NonCacheReadClient, group)
 	}
 	if err != nil {
