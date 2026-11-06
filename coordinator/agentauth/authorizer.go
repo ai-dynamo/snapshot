@@ -46,12 +46,12 @@ type Config struct {
 	// ServiceAccount is the agents' ServiceAccount.
 	ServiceAccount types.NamespacedName
 
-	// Clock tells the time tokens and cached reviews expire by. It defaults to
-	// the real clock.
+	// Clock tells the time tokens and cached reviews expire by, and times the
+	// cooldown on fetching the issuer's keys. It defaults to the real clock.
 	Clock clock.PassiveClock
 
-	// Log receives failed TokenReviews, never a token. The zero Logger
-	// discards everything.
+	// Log receives failed fetches of the issuer's keys and failed
+	// TokenReviews, never a token. The zero Logger discards everything.
 	Log logr.Logger
 }
 
@@ -92,9 +92,9 @@ type Authorizer struct {
 
 var _ server.Authorizer = (*Authorizer)(nil)
 
-// New validates cfg and returns an Authorizer. It reads the API server's
-// ServiceAccount token issuer within ctx, and fetches the issuer's keys when a
-// token first needs them.
+// New validates cfg and returns an Authorizer. Within ctx, it reads the API
+// server's ServiceAccount token issuer and the issuer's keys, and fails if it
+// cannot read either.
 func New(ctx context.Context, cfg Config) (*Authorizer, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -102,7 +102,7 @@ func New(ctx context.Context, cfg Config) (*Authorizer, error) {
 	if cfg.Clock == nil {
 		cfg.Clock = clock.RealClock{}
 	}
-	verifier, err := newVerifier(ctx, cfg.RESTConfig, cfg.Audience, cfg.Clock.Now)
+	verifier, err := newVerifier(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
