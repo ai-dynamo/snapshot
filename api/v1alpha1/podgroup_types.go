@@ -39,12 +39,6 @@ const (
 	// another unfinished PodGroupRestore, or that another unfinished one has
 	// already pinned the target's UID.
 	PodGroupReasonTargetInUse = "TargetInUse"
-	// PodGroupReasonTargetPodPending means admission is waiting for a restore
-	// target's Pod: it does not exist yet, is not yet bound to the attempt by
-	// name and UID, is not scheduled to a node, has no IP address yet, or its
-	// destination container has no ID yet. The condition's message names each
-	// target and what it waits for.
-	PodGroupReasonTargetPodPending = "TargetPodPending"
 	// PodGroupReasonTargetPodDeleted fails a restore member whose pinned Pod is
 	// gone or was replaced. Like a deleted member PodSnapshot, it may hide the
 	// member's start, since the Pod's nvidia.com/RestoreStarted condition went
@@ -63,6 +57,33 @@ const (
 	// was deleted. A group reports it only when no member started; a member can
 	// report it after starting, when the deletion raced the commit.
 	PodGroupReasonCancelled = "Cancelled"
+	// PodGroupReasonAgentNotReady means admission is waiting for the node agent
+	// of a member's node: no agent Pod runs there, it is not Ready, or it does
+	// not support a compatible group protocol. The condition's message names
+	// each node and why. The attempt waits until the agent is ready or the
+	// deadline expires.
+	PodGroupReasonAgentNotReady = "AgentNotReady"
+	// PodGroupReasonSourcePodUnscheduled means admission is waiting for a
+	// member's source Pod to be scheduled to a node.
+	PodGroupReasonSourcePodUnscheduled = "SourcePodUnscheduled"
+	// PodGroupReasonTargetPodPending means admission is waiting for a restore
+	// target's Pod: it does not exist yet, is not yet bound to the attempt by
+	// name and UID, is not scheduled to a node, has no IP address yet, or its
+	// destination container has no ID yet. The condition's message names each
+	// target and what it waits for.
+	PodGroupReasonTargetPodPending = "TargetPodPending"
+	// PodGroupReasonPreviousGroupCleanup means admission is waiting for a
+	// PodSnapshot at a member's name to be deleted: it belongs to an earlier
+	// PodGroupSnapshot of the same name, whose PodSnapshots garbage collection
+	// is removing. The condition's message names each one.
+	PodGroupReasonPreviousGroupCleanup = "PreviousGroupCleanup"
+	// PodGroupReasonAdmitting means the operator has started creating the
+	// members' work, and the attempt is waiting for every member to pass
+	// admission.
+	PodGroupReasonAdmitting = "Admitting"
+	// PodGroupReasonCommitted means every member passed admission, so the
+	// attempt is committed: a member's agent has started changing its source.
+	PodGroupReasonCommitted = "Committed"
 )
 
 // ObjectIdentity names one exact object: the object with this name and UID,

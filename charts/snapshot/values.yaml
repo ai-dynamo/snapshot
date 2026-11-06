@@ -28,6 +28,14 @@ operator:
 
   # Enable only after the compatible agent/PageBroker rollout completes; see docs/operations/storage.md.
   bindNewContents: false
+
+  # Alpha: run the PodGroupSnapshot controller, which checkpoints a group of
+  # cooperating Pods together (SNEP-324), and grant the operator access to
+  # PodGroupSnapshots. Inert for now: the node agent does not support pod
+  # groups yet, so this chart does not mark its Pods as group-capable, and
+  # every PodGroupSnapshot waits with Admitted=False, reason AgentNotReady,
+  # until its deadline. No PodSnapshot is created for it meanwhile.
+  podGroups: false
   resources:
     limits:
       cpu: 500m

@@ -50,6 +50,19 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  {{- if .Values.operator.podGroups }}
+  - apiGroups: ["nvidia.com"]
+    resources: ["podgroupsnapshots"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["podgroupsnapshots/status"]
+    verbs: ["get", "update", "patch"]
+  # Owner references on member PodSnapshots block their owner's deletion,
+  # which needs update on the owner's finalizers.
+  - apiGroups: ["nvidia.com"]
+    resources: ["podgroupsnapshots/finalizers"]
+    verbs: ["update"]
+  {{- end }}
   {{- if .Values.crdUpgrade.enabled }}
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]

@@ -29,8 +29,12 @@ func TestTrimPodForCacheKeepsWhatControllersRead(t *testing.T) {
 			Volumes:    []corev1.Volume{{Name: "v"}},
 		},
 		Status: corev1.PodStatus{
-			Phase:                 corev1.PodRunning,
-			Conditions:            []corev1.PodCondition{{Type: corev1.PodReady}},
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "r"},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+			},
 			ContainerStatuses:     []corev1.ContainerStatus{{Name: "main", Ready: true}},
 			InitContainerStatuses: []corev1.ContainerStatus{{Name: "init"}},
 		},
@@ -53,8 +57,32 @@ func TestTrimPodForCacheKeepsWhatControllersRead(t *testing.T) {
 		t.Fatalf("spec = %+v, want only nodeName", got.Spec)
 	}
 	if got.Status.Phase != corev1.PodRunning || !containerReady(got, "main") ||
-		len(got.Status.InitContainerStatuses) != 1 || got.Status.Conditions != nil {
+		len(got.Status.InitContainerStatuses) != 1 {
 		t.Fatalf("status = %+v", got.Status)
+	}
+	// Only the Ready condition survives, for the agent gate of PodGroupSnapshot admission.
+	if len(got.Status.Conditions) != 1 || got.Status.Conditions[0].Type != corev1.PodReady || !isPodReady(got) {
+		t.Fatalf("conditions = %+v, want only Ready", got.Status.Conditions)
+	}
+}
+
+func TestIsPodReady(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		conditions []corev1.PodCondition
+		want       bool
+	}{
+		{"no conditions", nil, false},
+		{"ready", []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}, true},
+		{"not ready", []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}, false},
+		{"only other conditions", []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionTrue}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{Status: corev1.PodStatus{Conditions: tc.conditions}}
+			if got := isPodReady(pod); got != tc.want {
+				t.Fatalf("isPodReady = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
