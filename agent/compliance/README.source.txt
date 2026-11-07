@@ -11,8 +11,11 @@ Upstream source for the third-party components redistributed in this image.
                a package published without source by an NVIDIA repository; any
                other fetch failure fails the build.
   criu/        CRIU source at the commit this image was built from.
-  go/vendor/   Source for the Go modules linked into the binaries in this
-               image; modules.txt records the exact module set.
+  go/vendor/   Source for the Go modules linked into the binaries the agent
+               module builds; modules.txt records the exact module set.
+  go/coordinator/vendor/
+               The same for snapshot-coordinator, which the coordinator
+               module builds.
 
 CuInterpose frontend, core, coordinator, and launcher sources are in
 /legal/cuinterpose/source. Every vendored Rust dependency, the standard-library
