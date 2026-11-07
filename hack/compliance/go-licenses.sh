@@ -3,20 +3,23 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Emits the Go-module section of a THIRD-PARTY attribution file: the module set
-# the build actually used, followed by each module's upstream license text.
+# the build actually used, followed by each module's upstream license text. An
+# image with binaries built from another module too has a section for each,
+# and the second argument names the binaries the section covers.
 #
 # Shared by the agent and operator attribution generators, which differ only in
 # the sections around this one.
 
 set -eu
 
-VENDOR=${1:?usage: go-licenses.sh <vendor-dir>}
+VENDOR=${1:?usage: go-licenses.sh <vendor-dir> [<binaries>]}
+BINARIES=${2:-}
 
 [ -d "$VENDOR" ] || exit 0
 
 echo
 echo "================================================================================"
-echo "GO MODULES (STATICALLY LINKED)"
+echo "GO MODULES (STATICALLY LINKED${BINARIES:+ INTO $BINARIES})"
 echo "--------------------------------------------------------------------------------"
 echo
 
@@ -27,7 +30,7 @@ fi
 
 echo
 echo "--------------------------------------------------------------------------------"
-echo "FULL LICENSE TEXT — GO MODULES"
+echo "FULL LICENSE TEXT — GO MODULES${BINARIES:+ OF $BINARIES}"
 echo "--------------------------------------------------------------------------------"
 find "$VENDOR" -type f \
     \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) \

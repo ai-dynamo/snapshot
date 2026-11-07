@@ -8,10 +8,12 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .PHONY: build fmt lint tidy test test-integration
 
-# The module has no binary; make build compiles it so CodeQL, which analyzes
-# only what the build compiles, covers it.
+# Builds snapshot-coordinator, and compiles every other package too, such as
+# the session client, so CodeQL, which analyzes only what the build compiles,
+# covers the whole module.
 build:
 	go build ./...
+	go build -o bin/snapshot-coordinator ./cmd/snapshot-coordinator
 
 fmt:
 	gofmt -w .
