@@ -9,10 +9,10 @@ Check whether CPU restore, CUDA restore, or staging takes the most time. Follow
 [Why is my restore slow?](storage/slow-restore.md) for the next check and
 backend-specific tuning.
 
-## A checkpoint never becomes Ready
+## A snapshot never becomes Ready
 
 A `PodSnapshot` becomes Ready only after the `snapshot-agent` confirms the
-checkpoint contents — writing the checkpoint is not enough on its own. Check the
+snapshot contents — writing the snapshot is not enough on its own. Check the
 status and the agent logs:
 
 ```bash
@@ -31,6 +31,29 @@ A common cause is a replica manifest that does not follow the [framework
 guides](../guides/README.md) -- missing the control volume, seccomp profile,
 or readiness gate Snapshot relies on -- or that omits mounts or secrets the
 replica needs to start.
+
+When the container has a `checkpointReadinessProbe`, the agent waits for that
+probe, not for Ready, and the source pod has a `WaitingForCheckpointReadiness`
+event. The agent logs each failed check at debug level. Check a file probe from
+inside the source container. Check an HTTP probe against the pod's IP and port
+from another pod or the node, not against `localhost` inside the container: the
+agent sends the request from the node to the pod's IP. The wait has no deadline
+of its own, so a probe that never passes waits until you delete the
+`PodSnapshot`, or until the source Pod ends: it fails, exits or is deleted, or
+a `SnapshotJob`'s `activeDeadlineSeconds` stops it. The `PodSnapshot` then
+fails at most five minutes after the Pod ended.
+
+## A checkpoint fails with `InvalidCheckpointReadinessProbe`
+
+The agent refused the container's `checkpointReadinessProbe` before running it,
+because it can never pass: the container has no port with the probe's port
+name, or the probe's HTTP path doesn't parse as a URL path. The source pod also
+gets a Warning event with this reason.
+
+The `PodSnapshot`'s spec can't change, so create a new one with a fixed probe.
+If a `SnapshotJob` created it, create a new `SnapshotJob` with the probe fixed
+in `podSnapshotTemplate.containers` instead: the `SnapshotJob` copies its
+template into the `PodSnapshot` it creates.
 
 ## The agent or a restore pod will not start
 
@@ -71,6 +94,21 @@ comes from a nonfatal TUN capability probe and can appear on successful
 restores. Workloads that do not use TUN devices do not need a `/dev/net/tun`
 mount. For a failed restore, look past this line to the final CRIU errors and
 the agent's `CRIU restore tail` diagnostics.
+## A restore is refused with `mount: source <path>, target missing`
+
+The checkpoint recorded a volume mounted at that path in the source pod, and
+the restore pod has nothing there. The agent refuses the restore before CRIU
+runs, with reason `RestoreIncompatible`; nothing was restored and the pod can
+be recreated. Every missing path is listed, so a restore pod that dropped
+several volumes shows them all in one message.
+
+```bash
+kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="nvidia.com/Restored")].message}'
+```
+
+Add the volume to the restore pod at the same `mountPath`. The volume's
+backing store can differ; only the path inside the container has to match.
+
 ## Reading a failure message
 
 Every checkpoint and restore failure names the step it came from, in the form
@@ -124,13 +162,13 @@ lines of CRIU's `restore.log` in the agent log.
 
 ### resolving checkpoint artifact
 
-The agent locates the checkpoint directory for the referenced `PodSnapshot` on
-this node's checkpoint storage mount and refuses a path that passes through a
+The agent locates the snapshot directory for the referenced `PodSnapshot` on
+this node's snapshot store mount and refuses a path that passes through a
 symlink.
 
-Likely causes: checkpoint storage is not mounted on this node's agent; the
+Likely causes: the snapshot store is not mounted on this node's agent; the
 `PodSnapshot` is not Ready yet or its content was deleted; the storage backing
-the checkpoint is not reachable from this node.
+the snapshot is not reachable from this node.
 
 ```bash
 kubectl get podsnapshot <name> -n <ns>
@@ -204,7 +242,7 @@ Check `NVIDIA_VISIBLE_DEVICES` and the GPU resource request on the restore pod.
 A checkpoint reports the same step when the agent builds the context from the
 source container's CUDA processes and GPUs. Check that the source pod still
 holds its GPU allocation and that its CUDA processes are running; a process
-that exited between the capture request and the dump leaves nothing to map.
+that exited between the checkpoint request and the dump leaves nothing to map.
 
 ### mounting agent bundle into placeholder
 
@@ -260,7 +298,7 @@ ended from outside:
 - `nsrestore was killed (signal: killed)`: nsrestore ended by signal before it
   could report. The agent log holds its last lines.
 - `...; the restore timeout expired`: the restore ran past
-  `config.restore.restoreTimeoutSeconds`. The cause before the semicolon is
+  `config.restore.timeoutSeconds`. The cause before the semicolon is
   what was running when time ran out, and it may carry one of the steps
   below. Raise the timeout, or find what stalled in the agent log.
 - `...; the restore was cancelled`: the restore was withdrawn or the agent
@@ -281,7 +319,7 @@ Likely causes: the staged checkpoint is not the one the agent validated,
 usually a storage mount that changed under it; an agent and nsrestore from
 different builds.
 
-Compare the checkpoint directory on the node with the artifact PageBroker
+Compare the snapshot directory on the node with the artifact PageBroker
 reports, and check that the agent and nsrestore come from the same image.
 
 ### preparing CRIU restore
@@ -296,7 +334,7 @@ Compare the restore pod's volumes with the source pod's.
 
 ### applying rootfs diff
 
-nsrestore extracts the rootfs diff captured at checkpoint over the
+nsrestore extracts the rootfs diff saved at checkpoint over the
 placeholder's root filesystem, so files the workload wrote or changed are back
 before CRIU recreates the process. The cause carries tar's first message.
 
@@ -382,8 +420,53 @@ because something it had open at checkpoint is not there now: a file, a
 listening port, a peer, or GPU state.
 
 The agent log carries the process diagnostics and the `restore.log` lines
-captured at the failure. The workload's own output is in the restore pod's
+recorded at the failure. The workload's own output is in the restore pod's
 container logs.
+
+### checking the post-restore action
+
+When the checkpoint's container has a `lifecycle.postRestore` action, the agent
+checks its settings against the restore Pod's spec before restoring anything.
+The Pod's `nvidia.com/Restored` condition becomes `False` with reason
+`RestoreFailed`, and nothing is restored.
+
+Likely causes:
+- **The path is one of Snapshot's own files** in the snapshot-control volume.
+- **The port name is not one of the destination container's ports.**
+- **The HTTP path doesn't parse** as a URL path.
+
+### running the post-restore action
+
+After writing `restore-complete`, the agent notifies the restored application:
+it creates the file, or sends the HTTP POST, every `periodSeconds` until it
+succeeds or the restore deadline (`config.restore.timeoutSeconds`) passes. The
+restore fails, and the restored container is stopped, when no attempt
+succeeded.
+
+Likely causes:
+- **The file can't be created.** Its directory does not exist in the restore
+  container, or the container's user can't write it, for example on a
+  read-only mount or with `readOnlyRootFilesystem`. File actions run as the
+  container's user.
+- **The image has no shell.** File actions run a shell command in the
+  container, so the image needs one of the shells the
+  [workload contract](../reference/workload-contract.md#lifecycle-hooks)
+  lists.
+- **The application does not listen on the port at the restore Pod's IP**, for
+  example because it bound only to the source Pod's IP.
+- **The endpoint returns a status other than 2xx**, including a redirect, which
+  the agent does not follow.
+- **A NetworkPolicy blocks the agent.**
+
+The message carries the last attempt's error. The agent log shows every attempt
+at debug level.
+
+A file that already exists before the restore doesn't fail it: the agent takes
+it as the notification, so the restore succeeds and the application is never
+notified. Use a path that only Snapshot writes, such as one on an `emptyDir`
+that the restore Pod mounts for this purpose. A file on a volume that outlives
+the Pod, such as a `PersistentVolumeClaim`, stays there from an earlier restore
+until the application removes it.
 
 ## Checkpoint fails at a step
 
@@ -415,7 +498,7 @@ The agent asks PageBroker to open a transaction and provide the staging or
 destination directory. The cause carries PageBroker's failure code, such as
 `INSUFFICIENT_STORAGE` or `STORAGE_ERROR`, or a connection error.
 
-Likely causes: the `pagebroker` container is not ready; the checkpoint volume
+Likely causes: the `pagebroker` container is not ready; the snapshot volume
 is full or unavailable.
 
 ```bash
@@ -427,7 +510,7 @@ kubectl get pvc -n <snapshot-ns>
 
 When the workload opted into the cuinterpose shim, every CUDA process must have
 loaded it, its delivery mount must be read-only, and the coordinator must
-answer before capture becomes destructive.
+answer before the checkpoint becomes destructive.
 
 Likely causes: a CUDA process started without the shim; the delivery mount is
 writable; the coordinator is not running.
@@ -484,7 +567,7 @@ re-taking the checkpoint from a fresh replica.
 
 Likely causes: the dump's image files cannot be read back from the staging
 directory; a file the dump references is missing from the upper directory, for
-example one deleted or replaced between the dump and the capture.
+example one deleted or replaced between the dump and the diff.
 
 ```bash
 kubectl logs $agent -n <snapshot-ns> -c agent | grep -i 'rootfs diff'

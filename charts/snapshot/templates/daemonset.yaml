@@ -65,22 +65,8 @@ spec:
         {{- with .Values.daemonset.tolerations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if and .Values.daemonset.affinity (hasKey .Values.daemonset.affinity "nodeAffinity") }}
-      {{- fail "daemonset.affinity.nodeAffinity is not supported because the chart already restricts kubernetes.io/arch to amd64 and arm64; use daemonset.nodeSelector or daemonset.affinity.podAffinity/podAntiAffinity instead" }}
-      {{- end }}
       affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/arch
-                    operator: In
-                    values:
-                      - amd64
-                      - arm64
-        {{- with .Values.daemonset.affinity }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "snapshot.agentAffinity" . | nindent 8 }}
       {{- with .Values.daemonset.runtimeClassName }}
       # CUDA checkpoint/restore requires the nvidia container runtime. Left out
       # when empty, for nodes where that runtime is containerd's default.

@@ -1,12 +1,12 @@
 # Usage guides
 
-Snapshot saves a running inference replica as a checkpoint, so a new replica
+Snapshot saves a running inference replica as a snapshot, so a new replica
 starts from it in seconds instead of loading the model from scratch. These
 guides take you through it once, end to end:
 
 1. **Prepare** the workload.
 2. **Checkpoint** a running replica.
-3. **Restore** a new replica from the checkpoint.
+3. **Restore** a new replica from the snapshot.
 
 The commands are the same for every inference engine (vLLM, SGLang and
 TensorRT-LLM) and every recipe. You choose your recipe once, [below](#choose-your-recipe),
@@ -55,7 +55,7 @@ files. An init container downloads the model from Hugging Face into it on first
 use, so the pods need network access to `huggingface.co`. The first run downloads
 about 1.5 GB for Qwen3 0.6B, 465 GB for GLM 5.3 NVFP4 and 510 GB for DeepSeek
 V4.1 Flash, and later runs reuse the files. The model cache is a plain Kubernetes
-volume, separate from the [checkpoint volume](../operations/storage.md) that
+volume, separate from the [snapshot volume](../operations/storage.md) that
 Snapshot installs.
 
 The PVC requests 2 TiB with `ReadWriteMany` access from the default storage class,
@@ -107,7 +107,7 @@ export WAIT=$([ "$GPUS" = 1 ] && echo 30m || echo 120m)
 
 If you chose a recipe with eight GPUs, also read the agent image from the
 installed Snapshot agent. The source replica needs it to prepare itself for
-multi-GPU capture, and you use it in step 2, Option A. A `SnapshotJob` needs
+multi-GPU checkpoints, and you use it in step 2, Option A. A `SnapshotJob` needs
 nothing. Use the namespace Snapshot is installed in (`snapshot` in the README's
 install command):
 
@@ -141,7 +141,7 @@ The engine guides explain how each program works and how to change the model:
 
 ## 2. Checkpoint
 
-There are two ways to take the checkpoint. Pick one:
+There are two ways to checkpoint the replica. Pick one:
 
 | | Choose it when… |
 |---|---|
@@ -179,7 +179,7 @@ kubectl rollout status \
   --timeout="$WAIT"
 ```
 
-Then ask Snapshot to checkpoint that replica, and wait until the checkpoint is
+Then ask Snapshot to checkpoint that replica, and wait until the snapshot is
 ready:
 
 ```bash
@@ -217,16 +217,16 @@ kubectl wait --namespace "$WORKLOAD_NAMESPACE" \
 ```
 
 Snapshot runs the replica, checkpoints it and removes it, so every replica,
-including the first, comes up by restore. The checkpoint is a `PodSnapshot` with
+including the first, comes up by restore. The snapshot is a `PodSnapshot` with
 the same name as the job.
 
-If the checkpoint does not become Ready, see
-[Troubleshooting](../operations/troubleshooting.md#a-checkpoint-never-becomes-ready).
+If the snapshot does not become Ready, see
+[Troubleshooting](../operations/troubleshooting.md#a-snapshot-never-becomes-ready).
 
 ## 3. Restore
 
-Start a new replica from the checkpoint. It is a new Deployment whose pods carry
-the `nvidia.com/restore-from` annotation naming your checkpoint, and it starts in
+Start a new replica from the snapshot. It is a new Deployment whose pods carry
+the `nvidia.com/restore-from` annotation naming your snapshot, and it starts in
 seconds, because the node agent restores the saved state into it instead of
 loading the model.
 

@@ -11,7 +11,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 )
 
-// Reasons recorded on a work order whose dump failed. They separate the
+// Reasons recorded on a failed work order. The dump ones separate the
 // conditions an operator acts on differently: waiting for node staging to free
 // up, fixing a request the broker refuses, and a capture whose staged data is
 // already gone.
@@ -21,6 +21,10 @@ const (
 	reasonStagingUnavailable = "StagingUnavailable"
 	reasonStagedDataLost     = "StagedDataLost"
 	reasonBrokerRejected     = "BrokerRejected"
+	// reasonInvalidCheckpointReadinessProbe fails a work order before the
+	// dump: its probe can never run, such as an HTTP probe on a port name the
+	// container doesn't have.
+	reasonInvalidCheckpointReadinessProbe = "InvalidCheckpointReadinessProbe"
 )
 
 // captureFailure is how a failed attempt reads: the reason recorded on the work

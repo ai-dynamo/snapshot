@@ -81,17 +81,9 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 	if err != nil {
 		return err
 	}
-	if content == nil {
-		return nil
-	}
-
-	if content.Spec.Source.NodeName != w.config.NodeName {
-		return nil
-	}
-	if !content.DeletionTimestamp.IsZero() {
-		return nil
-	}
-	if isContentTerminal(content) {
+	if content == nil || content.Spec.Source.NodeName != w.config.NodeName ||
+		!content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
+		w.checkpointGates.Delete(name)
 		return nil
 	}
 
@@ -177,10 +169,22 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return fmt.Errorf("mark source pod %s capture-eligible: %w", podKey.String(), err)
 	}
 
-	if !isContainerReady(pod, containerName) {
-		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName)
+	gate, err := w.getCheckpointGate(ctx, content, pod, containerName)
+	if gate == nil {
+		return err
+	}
+	now := w.nowFn()
+	ready, next := gate.runProbeIfDue(ctx, pod, containerStatus(pod, containerName), now)
+	if !ready {
+		// Pod events wake the work order more often than the period, so the
+		// gate paces the checks and says when the next one is due.
+		if !next.IsZero() {
+			w.requeueCaptureFn(name, next.Sub(now))
+		}
 		return nil
 	}
+	w.checkpointGates.Delete(name)
+	logger.Info("Source container is ready for checkpoint", "pod", pod.Name, "container", containerName)
 
 	containerID := containerIDForName(pod, containerName)
 	if containerID == "" {
@@ -624,10 +628,11 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	}
 	artifact, err := executor.Checkpoint(ctx, w.runtime, log, req, w.config)
 	if err != nil {
-		if executor.CheckpointNeedsSourceKill(err) {
-			if killErr := w.killCheckpointProcess(log, params.ContainerPID, "checkpoint failed"); killErr != nil {
-				log.Error(killErr, "Failed to kill target after checkpoint failure")
-			}
+		if suspended, needsRecovery := executor.SuspendedSourceOf(err); needsRecovery {
+			// Nothing retries a capture yet, so no further attempt follows and the
+			// source is ended rather than left waiting. SNEP-394's retry loop is
+			// what will ask for it to be kept.
+			w.recoverSourceAfterFailedDump(ctx, log, params.Pod, params.ContainerPID, suspended, false)
 		}
 		return nil, fmt.Errorf("checkpoint: %w", err)
 	}
@@ -656,7 +661,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 // killCheckpointProcess SIGKILLs the CUDA-locked process so it does not hang after a failed dump.
 // ESRCH (already exited) is success. Any other signal error is returned so callers can fail closed.
 func (w *NodeController) killCheckpointProcess(log logr.Logger, pid int, reason string) error {
-	if err := snapshotruntime.SendSignalToPID(log, pid, syscall.SIGKILL, reason); err != nil {
+	if err := w.sendSignalFn(log, pid, syscall.SIGKILL, reason); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}

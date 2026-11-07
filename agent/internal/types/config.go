@@ -100,9 +100,6 @@ type PageBrokerSpec struct {
 // DefaultCheckpointTimeoutSeconds bounds a dump for a config written before the field existed.
 const DefaultCheckpointTimeoutSeconds = 3600
 
-// DefaultCheckpointRetryLimit keeps retry opt-in, so upgrading changes no existing capture.
-const DefaultCheckpointRetryLimit = 0
-
 // maxTimeoutSeconds is the largest value that survives conversion to a time.Duration, which counts
 // nanoseconds in an int64. Past it the multiplication wraps negative, and a negative timeout reads
 // as "no timeout" at every call site — so an absurd value would silently remove the bound it asked
@@ -111,50 +108,31 @@ const maxTimeoutSeconds = int64(math.MaxInt64) / int64(time.Second)
 
 // CheckpointSpec holds settings for the CRIU dump.
 type CheckpointSpec struct {
-	// A pointer so absent and zero are distinguishable: every config predating this field omits
-	// it, and an agent upgraded ahead of its ConfigMap has to start — with the guard on.
-	CheckpointTimeoutSeconds *int `yaml:"checkpointTimeoutSeconds"`
-
-	// RetryLimit is the cluster-wide default number of in-place retries for a failed capture,
-	// used when the capture request names none. Absent is read as DefaultCheckpointRetryLimit.
-	RetryLimit *int `yaml:"retryLimit"`
+	// A pointer so absent and zero are distinguishable: a config predating this field omits it,
+	// as does one still spelling it checkpointTimeoutSeconds, and an agent upgraded ahead of its
+	// ConfigMap has to start — with the guard on.
+	TimeoutSeconds *int `yaml:"timeoutSeconds"`
 }
 
 // CheckpointTimeout bounds one dump, defaulting when the config omits it.
 func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
-	if c.CheckpointTimeoutSeconds == nil {
+	if c.TimeoutSeconds == nil {
 		return DefaultCheckpointTimeoutSeconds * time.Second
 	}
-	return time.Duration(*c.CheckpointTimeoutSeconds) * time.Second
-}
-
-// ResolveRetryLimit returns the retries a capture may take. The request's own value wins when it
-// has one — including an explicit 0, which asks for no retry — and absent falls back to the
-// cluster default.
-func (c *CheckpointSpec) ResolveRetryLimit(requested *int32) int {
-	if requested != nil {
-		return int(*requested)
-	}
-	if c.RetryLimit != nil {
-		return *c.RetryLimit
-	}
-	return DefaultCheckpointRetryLimit
+	return time.Duration(*c.TimeoutSeconds) * time.Second
 }
 
 func (c *CheckpointSpec) Validate() error {
-	if c.RetryLimit != nil && *c.RetryLimit < 0 {
-		return &ConfigError{Field: "retryLimit", Message: "retryLimit must not be negative"}
-	}
-	if c.CheckpointTimeoutSeconds == nil {
+	if c.TimeoutSeconds == nil {
 		return nil
 	}
-	if *c.CheckpointTimeoutSeconds <= 0 {
-		return &ConfigError{Field: "checkpointTimeoutSeconds", Message: "checkpointTimeoutSeconds must be greater than zero"}
+	if *c.TimeoutSeconds <= 0 {
+		return &ConfigError{Field: "checkpoint.timeoutSeconds", Message: "checkpoint.timeoutSeconds must be greater than zero"}
 	}
-	if int64(*c.CheckpointTimeoutSeconds) > maxTimeoutSeconds {
+	if int64(*c.TimeoutSeconds) > maxTimeoutSeconds {
 		return &ConfigError{
-			Field:   "checkpointTimeoutSeconds",
-			Message: fmt.Sprintf("checkpointTimeoutSeconds must not exceed %d", maxTimeoutSeconds),
+			Field:   "checkpoint.timeoutSeconds",
+			Message: fmt.Sprintf("checkpoint.timeoutSeconds must not exceed %d", maxTimeoutSeconds),
 		}
 	}
 	return nil
@@ -162,7 +140,7 @@ func (c *CheckpointSpec) Validate() error {
 
 // RestoreSpec holds settings for the CRIU restore process.
 type RestoreSpec struct {
-	RestoreTimeoutSeconds int `yaml:"restoreTimeoutSeconds"`
+	TimeoutSeconds int `yaml:"timeoutSeconds"`
 
 	// SkipCompatCheck turns the restore compatibility gate off for every
 	// restore this agent handles. It is the per-node escape hatch, for a
@@ -171,20 +149,20 @@ type RestoreSpec struct {
 }
 
 func (c *RestoreSpec) RestoreTimeout() time.Duration {
-	if c.RestoreTimeoutSeconds <= 0 {
+	if c.TimeoutSeconds <= 0 {
 		return 0
 	}
-	return time.Duration(c.RestoreTimeoutSeconds) * time.Second
+	return time.Duration(c.TimeoutSeconds) * time.Second
 }
 
 func (c *RestoreSpec) Validate() error {
-	if c.RestoreTimeoutSeconds <= 0 {
-		return &ConfigError{Field: "restoreTimeoutSeconds", Message: "restoreTimeoutSeconds must be greater than zero"}
+	if c.TimeoutSeconds <= 0 {
+		return &ConfigError{Field: "restore.timeoutSeconds", Message: "restore.timeoutSeconds must be greater than zero"}
 	}
-	if int64(c.RestoreTimeoutSeconds) > maxTimeoutSeconds {
+	if int64(c.TimeoutSeconds) > maxTimeoutSeconds {
 		return &ConfigError{
-			Field:   "restoreTimeoutSeconds",
-			Message: fmt.Sprintf("restoreTimeoutSeconds must not exceed %d", maxTimeoutSeconds),
+			Field:   "restore.timeoutSeconds",
+			Message: fmt.Sprintf("restore.timeoutSeconds must not exceed %d", maxTimeoutSeconds),
 		}
 	}
 	return nil

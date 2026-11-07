@@ -16,7 +16,13 @@ kind: ConfigMap
 {{- fail "storage.s3.credentialsSecretRef is required when storage.type=s3" }}
 {{- end }}
 {{- if and (eq .Values.storage.type "s3") (not .Values.operator.bindNewContents) }}
-{{- fail "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path capture mode" }}
+{{- fail "storage.type=s3 requires operator.bindNewContents: S3 has no legacy local-path checkpoint mode" }}
+{{- end }}
+{{- if hasKey .Values.config.checkpoint "checkpointTimeoutSeconds" }}
+{{- fail "config.checkpoint.checkpointTimeoutSeconds was renamed to config.checkpoint.timeoutSeconds" }}
+{{- end }}
+{{- if hasKey .Values.config.restore "restoreTimeoutSeconds" }}
+{{- fail "config.restore.restoreTimeoutSeconds was renamed to config.restore.timeoutSeconds" }}
 {{- end }}
 {{- include "snapshot.validateS3Settings" . }}
 metadata:
@@ -82,12 +88,17 @@ data:
       controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}
       stagingPath: {{ include "snapshot.pageBrokerStagingPath" . | quote }}
 
+    # DEPRECATED keys, remove in v0.3.0+. The ConfigMap updates at once but the
+    # DaemonSet rolls node by node, and an agent reads its config only at startup:
+    # a v0.2.0 pod that restarts before the roll reaches it would read this file
+    # and find no restoreTimeoutSeconds, which is fatal at validation.
     checkpoint:
-      checkpointTimeoutSeconds: {{ .Values.config.checkpoint.checkpointTimeoutSeconds }}
-      retryLimit: {{ .Values.config.checkpoint.retryLimit | default 0 }}
+      timeoutSeconds: {{ .Values.config.checkpoint.timeoutSeconds }}
+      checkpointTimeoutSeconds: {{ .Values.config.checkpoint.timeoutSeconds }}
 
     restore:
-      restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
+      timeoutSeconds: {{ .Values.config.restore.timeoutSeconds }}
+      restoreTimeoutSeconds: {{ .Values.config.restore.timeoutSeconds }}
       skipCompatCheck: {{ .Values.config.restore.skipCompatCheck }}
 
     criu:

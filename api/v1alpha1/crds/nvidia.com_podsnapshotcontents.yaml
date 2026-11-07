@@ -37,7 +37,7 @@ spec:
       openAPIV3Schema:
         description: |-
           PodSnapshotContent is the Schema for the snapshotcontents API. It is the
-          cluster-scoped artifact-of-record for a captured container checkpoint.
+          cluster-scoped record of one container's snapshot.
 
           No conversion: this type exists only in v1alpha1 (no other API version), so it
           is not part of any conversion scheme.
@@ -68,17 +68,14 @@ spec:
               containers:
                 description: |-
                   Containers is the PodSnapshot's container settings, with defaults
-                  applied, saved at creation. Every restore of this checkpoint uses them,
+                  applied, saved at creation. Every restore of this snapshot uses them,
                   even if the PodSnapshot or SnapshotJob that asked for it changes or is
                   gone.
                 items:
                   description: |-
                     ContainerSnapshotConfig holds the settings for one checkpointed container,
                     matched to it by name. Snapshot copies them into the PodSnapshotContent at
-                    checkpoint time, and every restore of that checkpoint uses that copy.
-
-                    Not enabled yet: the operator rejects a checkpointReadinessProbe or a
-                    lifecycle until support is complete.
+                    checkpoint time, and every restore of that snapshot uses that copy.
                   properties:
                     checkpointReadinessProbe:
                       description: |-
@@ -90,15 +87,18 @@ spec:
                         file:
                           description: |-
                             File succeeds when a regular file exists at the path, inside the
-                            container.
+                            container. Like an exec probe, Snapshot checks it by running a shell
+                            in the container, as the container's user, so the image needs a shell.
                           properties:
                             path:
                               description: |-
                                 Path is an absolute, clean path inside the container: no empty, "." or
                                 ".." parts and no trailing slash, so two paths name the same file only
-                                if they are equal. It must be on the container's own filesystem or an
-                                emptyDir volume; paths on hostPath and PersistentVolumeClaim volumes are
-                                refused.
+                                if they are equal. Any path the container's user can reach works,
+                                volumes included, except the files Snapshot itself writes in the
+                                snapshot-control volume. A file on a volume that outlives the Pod stays
+                                there for the next checkpoint or restore unless the application
+                                removes it.
                               maxLength: 4096
                               minLength: 2
                               type: string
@@ -106,14 +106,16 @@ spec:
                               - message: 'path must be absolute and clean: no empty,
                                   . or .. parts and no trailing slash'
                                 rule: self.startsWith('/') && !self.endsWith('/')
-                                  && !self.contains('//') && self.split('/').all(p,
-                                  p != '.' && p != '..')
+                                  && !self.contains('//') && !self.contains('/./')
+                                  && !self.endsWith('/.') && !self.contains('/../')
+                                  && !self.endsWith('/..')
                           required:
                           - path
                           type: object
                         httpGet:
-                          description: HTTPGet succeeds when a GET to the Pod IP returns
-                            200.
+                          description: |-
+                            HTTPGet succeeds when a GET to the Pod IP returns a 2xx status.
+                            Snapshot does not follow redirects, so a 3xx fails.
                           properties:
                             path:
                               description: Path of the request. Empty means "/".
@@ -125,12 +127,13 @@ spec:
                               description: |-
                                 Port on the Pod IP: a number from 1 to 65535, or the name of a port of
                                 the container, resolved when the request is sent.
+                              maxLength: 15
+                              pattern: ^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$
                               x-kubernetes-int-or-string: true
                               x-kubernetes-validations:
                               - message: port must be 1-65535 or a valid port name
-                                rule: 'type(self) == int ? self >= 1 && self <= 65535
-                                  : self.size() > 0 && self.size() <= 15 && self.matches(''^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'')
-                                  && self.matches(''[a-z]'') && !self.contains(''--'')'
+                                rule: type(self) in [string] || (self >= 1 && self
+                                  <= 65535)
                           required:
                           - port
                           type: object
@@ -177,17 +180,21 @@ spec:
                           properties:
                             file:
                               description: |-
-                                File creates a regular file at the path, inside the container. The
-                                parent directory must exist. If the file already exists before the
-                                restore, the restore fails.
+                                File creates an empty regular file at the path, inside the container.
+                                Like an exec probe, Snapshot creates it by running a shell in the
+                                container, as the container's user, so the image needs a shell. The
+                                parent directory must exist. The file must not exist before the
+                                restore: Snapshot takes an existing file as the notification.
                               properties:
                                 path:
                                   description: |-
                                     Path is an absolute, clean path inside the container: no empty, "." or
                                     ".." parts and no trailing slash, so two paths name the same file only
-                                    if they are equal. It must be on the container's own filesystem or an
-                                    emptyDir volume; paths on hostPath and PersistentVolumeClaim volumes are
-                                    refused.
+                                    if they are equal. Any path the container's user can reach works,
+                                    volumes included, except the files Snapshot itself writes in the
+                                    snapshot-control volume. A file on a volume that outlives the Pod stays
+                                    there for the next checkpoint or restore unless the application
+                                    removes it.
                                   maxLength: 4096
                                   minLength: 2
                                   type: string
@@ -195,15 +202,17 @@ spec:
                                   - message: 'path must be absolute and clean: no
                                       empty, . or .. parts and no trailing slash'
                                     rule: self.startsWith('/') && !self.endsWith('/')
-                                      && !self.contains('//') && self.split('/').all(p,
-                                      p != '.' && p != '..')
+                                      && !self.contains('//') && !self.contains('/./')
+                                      && !self.endsWith('/.') && !self.contains('/../')
+                                      && !self.endsWith('/..')
                               required:
                               - path
                               type: object
                             httpPost:
                               description: |-
-                                HTTPPost sends a POST with an empty body to the Pod IP. A 200 or 204
-                                response means the application accepted the notification.
+                                HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
+                                means the application accepted the notification. Snapshot does not
+                                follow redirects, so a 3xx fails.
                               properties:
                                 path:
                                   description: Path of the request. Empty means "/".
@@ -215,14 +224,14 @@ spec:
                                   description: |-
                                     Port on the Pod IP: a number from 1 to 65535, or the name of a port of
                                     the container, resolved when the request is sent.
+                                  maxLength: 15
+                                  pattern: ^([0-9]+-)*[0-9]*[a-z][a-z0-9]*(-[a-z0-9]+)*$
                                   x-kubernetes-int-or-string: true
                                   x-kubernetes-validations:
                                   - message: port must be 1-65535 or a valid port
                                       name
-                                    rule: 'type(self) == int ? self >= 1 && self <=
-                                      65535 : self.size() > 0 && self.size() <= 15
-                                      && self.matches(''^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'')
-                                      && self.matches(''[a-z]'') && !self.contains(''--'')'
+                                    rule: type(self) in [string] || (self >= 1 &&
+                                      self <= 65535)
                               required:
                               - port
                               type: object
@@ -286,8 +295,8 @@ spec:
                 - namespace
                 type: object
               source:
-                description: 'Source describes what to capture: the source pod and
-                  the node it runs on.'
+                description: 'Source describes what to checkpoint: the source pod
+                  and the node it runs on.'
                 properties:
                   nodeName:
                     description: |-
@@ -303,10 +312,10 @@ spec:
                     properties:
                       containers:
                         description: |-
-                          Containers narrows the capture to these containers of the source pod. The
+                          Containers narrows the checkpoint to these containers of the source pod. The
                           node agent reads this instead of the source pod's target-container
                           annotation. v1alpha1 supports exactly one container; the cap is lifted when
-                          the runtime supports multi-container capture.
+                          the runtime supports more than one.
                         items:
                           maxLength: 63
                           minLength: 1
@@ -420,24 +429,24 @@ spec:
                 type: array
               source:
                 description: |-
-                  Source publishes what the checkpoint was captured on, written when the
-                  capture goes Ready.
+                  Source publishes where the snapshot was taken, written when the content
+                  goes Ready.
                 properties:
                   devices:
-                    description: Devices records the devices the capture could see,
-                      grouped by vendor.
+                    description: Devices records the devices the checkpoint could
+                      see, grouped by vendor.
                     properties:
                       nvidia:
-                        description: Nvidia records the NVIDIA GPUs the capture could
-                          see.
+                        description: Nvidia records the NVIDIA GPUs the checkpoint
+                          could see.
                         properties:
                           driverVersion:
-                            description: DriverVersion is the NVIDIA driver the capture
+                            description: DriverVersion is the NVIDIA driver the checkpoint
                               ran against.
                             type: string
                           instances:
                             description: |-
-                              Instances lists one entry per GPU the captured container could see, so
+                              Instances lists one entry per GPU the checkpointed container could see, so
                               the count is the length of this list.
                             items:
                               description: |-
@@ -455,8 +464,7 @@ spec:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
                   node:
-                    description: Node records the machine the checkpoint was captured
-                      on.
+                    description: Node records the machine the snapshot was taken on.
                     properties:
                       architecture:
                         description: Architecture is the node's CPU architecture,
@@ -478,7 +486,7 @@ spec:
                         type: string
                     type: object
                   pod:
-                    description: Pod records the container the checkpoint was captured
+                    description: Pod records the container the snapshot was taken
                       from.
                     properties:
                       cpu:
@@ -486,12 +494,12 @@ spec:
                           had none.
                         type: string
                       image:
-                        description: Image is the container image reference the capture
+                        description: Image is the container image reference the checkpoint
                           ran.
                         type: string
                       imageDigest:
                         description: |-
-                          ImageDigest identifies which build of the container image the capture
+                          ImageDigest identifies which build of the container image the checkpoint
                           ran, which a mutable tag does not.
                         type: string
                       memory:
@@ -508,11 +516,11 @@ spec:
                   artifacts:
                     description: |-
                       Artifacts contains one descriptor per confirmed container. It can be
-                      partial during capture/recovery; Ready still requires all captures to finish.
+                      partial during a checkpoint or recovery; Ready still requires every container to finish.
                     items:
                       description: |-
                         PublishedContainerArtifact is the persisted part of PageBroker's
-                        PublishedArtifact, associated with a captured container. Readers pass the
+                        PublishedArtifact, associated with a checkpointed container. Readers pass the
                         handle back unchanged; they must not construct filesystem paths.
                       properties:
                         artifactHandle:
@@ -523,7 +531,7 @@ spec:
                           pattern: \S
                           type: string
                         containerName:
-                          description: ContainerName selects the captured container
+                          description: ContainerName selects the checkpointed container
                             within the content.
                           maxLength: 63
                           minLength: 1
@@ -549,7 +557,7 @@ spec:
         x-kubernetes-validations:
         - message: publication descriptors require a storage binding
           rule: '!has(self.status) || !has(self.status.storage) || has(self.spec.storage)'
-        - message: publication descriptors must name captured containers
+        - message: publication descriptors must name checkpointed containers
           rule: '!has(self.status) || !has(self.status.storage) || self.status.storage.artifacts.all(a,
             self.spec.source.podRef.containers.exists(c, c == a.containerName))'
     served: true

@@ -5,7 +5,7 @@
 
 #include <string_view>
 
-#include "transfer/engine/model_streamer/model_streamer_restore.hpp"
+#include "model_streamer_config.hpp"
 #include "transfer/s3/s3_client.hpp"
 
 namespace snapshot::pagebroker {

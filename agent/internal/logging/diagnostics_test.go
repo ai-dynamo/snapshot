@@ -26,6 +26,22 @@ func TestLastCRIUError(t *testing.T) {
 			want: "mnt-v2: Can't stat mountpoint /tmp/.criu.mntns.x/mnt-0000011107/cache/vllm: No such file or directory",
 		},
 		{
+			name: "ignores teardown errors logged after the summary",
+			log: `(00.004280) Error (criu/tun.c:85): tun: Unable to create tun: No such file or directory
+(00.035584)      1: Error (criu/mount-v2.c:634): mnt-v2: Can't stat mountpoint /tmp/.criu.mntns.31gkOS/mnt-0000001303/cache/volume-9: No such file or directory
+(00.035998) Error (criu/cr-restore.c:2419): Restoring FAILED.
+(00.036618) Error (criu/cgroup.c:2247): cg: cgroupd: recv req error: No such file or directory
+`,
+			want: "mnt-v2: Can't stat mountpoint /tmp/.criu.mntns.31gkOS/mnt-0000001303/cache/volume-9: No such file or directory",
+		},
+		{
+			name: "reports a teardown error when nothing before the summary failed",
+			log: `(00.035998) Error (criu/cr-restore.c:2419): Restoring FAILED.
+(00.036618) Error (criu/cgroup.c:2247): cg: cgroupd: recv req error: No such file or directory
+`,
+			want: "cg: cgroupd: recv req error: No such file or directory",
+		},
+		{
 			name: "falls back to a task exit when nothing else failed",
 			log: `(00.083100) Error (criu/cr-restore.c:1277): 7 killed by signal 9: Killed
 (00.083487) Error (criu/cr-restore.c:2390): Restoring FAILED.

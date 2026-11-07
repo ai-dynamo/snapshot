@@ -52,10 +52,14 @@ const (
 	// sourcePodTerminalGrace, because a checkpoint that terminates its source produces exactly this
 	// pod state shortly before the agent writes content Ready.
 	podSnapshotReasonSourcePodGone = "SourcePodGone"
+
+	// podSnapshotReasonSourcePodUnscheduled is the Pending reason while the source pod waits for a
+	// node. The pod watch re-enqueues on spec.nodeName changes, so no requeue is needed.
+	podSnapshotReasonSourcePodUnscheduled = "SourcePodUnscheduled"
 )
 
-// errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled to a node; the
-// reconcile returns it so controller-runtime requeues with backoff rather than failing the snapshot.
+// errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled to a node — expected
+// pending state, not a failure.
 var errPodSnapshotPodUnscheduled = errors.New("source pod is not yet scheduled to a node")
 
 // errPodSnapshotStalePodRef signals the live pod is a same-named recreation (UID mismatch) — a
@@ -76,10 +80,6 @@ type PodSnapshotReconciler struct {
 	// StoreID binds every new PodSnapshotContent to the configured store. Empty
 	// keeps producing legacy, path-addressed content.
 	StoreID string
-	// EnableLifecycleHooks accepts container settings that need agent
-	// support (a checkpoint readiness probe, a post-restore action). Temporary:
-	// see errLifecycleHooksDisabled.
-	EnableLifecycleHooks bool
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -196,7 +196,7 @@ func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Conte
 	if apierrors.IsNotFound(podErr) {
 		key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
 		return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
-			fmt.Errorf("source pod %q disappeared before capture success or failure was recorded", key.String()))
+			fmt.Errorf("source pod %q disappeared before checkpoint success or failure was recorded", key.String()))
 	}
 
 	reason, cause := pendingCaptureSourceFailure(snap, content, pod)
@@ -278,16 +278,16 @@ func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *sn
 	}
 	if wantUID != "" && pod.UID != wantUID {
 		return "StalePodReference",
-			fmt.Errorf("source pod %q UID %q does not match capture UID %q", key.String(), pod.UID, wantUID)
+			fmt.Errorf("source pod %q UID %q does not match the checkpointed pod UID %q", key.String(), pod.UID, wantUID)
 	}
 
 	switch {
 	case pod.Status.Phase == corev1.PodSucceeded:
 		return snapshotv1alpha1.ReasonSourceCompletedWithoutCapture,
-			fmt.Errorf("source pod %q completed before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
+			fmt.Errorf("source pod %q completed before PodSnapshotContent %q reported checkpoint success or failure", key.String(), content.Name)
 	case pod.Status.Phase == corev1.PodFailed || pod.DeletionTimestamp != nil:
 		return podSnapshotReasonSourcePodGone,
-			fmt.Errorf("source pod %q became unavailable before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
+			fmt.Errorf("source pod %q became unavailable before PodSnapshotContent %q reported checkpoint success or failure", key.String(), content.Name)
 	default:
 		return "", nil
 	}
@@ -296,10 +296,6 @@ func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *sn
 // captureFromSourcePod is the no-content path: it resolves and validates the live source pod, then
 // creates the PodSnapshotContent and records the binding.
 func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (ctrl.Result, error) {
-	// Checked before the source pod, so the request fails the same way whatever state the pod is in.
-	if !sr.EnableLifecycleHooks && usesLifecycleHooks(snap.Spec.Containers) {
-		return sr.failPodSnapshot(ctx, snap, podSnapshotReasonLifecycleHooksDisabled, errLifecycleHooksDisabled)
-	}
 	pod, err := sr.getSourcePod(ctx, snap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -310,7 +306,8 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 	}
 	if err = validateSourcePod(snap, pod); err != nil {
 		if errors.Is(err, errPodSnapshotPodUnscheduled) {
-			return ctrl.Result{}, err // controller-runtime backs off and requeues on a returned error
+			return sr.recordPendingReason(ctx, snap, podSnapshotReasonSourcePodUnscheduled,
+				fmt.Sprintf("waiting for source pod %q to be scheduled to a node", pod.Name))
 		}
 		if errors.Is(err, errPodSnapshotStalePodRef) {
 			return sr.failPodSnapshot(ctx, snap, "StalePodReference", err)
@@ -323,7 +320,7 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 			return ctrl.Result{RequeueAfter: testCaptureFailureReadyRequeue}, nil
 		}
 		return sr.failPodSnapshot(ctx, snap, "TestCaptureFailure",
-			fmt.Errorf("test-only capture failure requested by source pod annotation %q", annotation))
+			fmt.Errorf("test-only checkpoint failure requested by source pod annotation %q", annotation))
 	}
 	content, err := sr.ensurePodSnapshotContent(ctx, snap, podSnapshotContentName(snap), pod)
 	if err != nil {
@@ -366,15 +363,16 @@ func (sr *PodSnapshotReconciler) getSourcePod(ctx context.Context, snap *snapsho
 	return pod, nil
 }
 
-// validateSourcePod requires the pod to be scheduled and, when the PodSnapshot pins a source pod UID,
-// to match it (rejecting a same-named recreation). It returns one of two sentinels:
-// errPodSnapshotPodUnscheduled (retryable) or errPodSnapshotStalePodRef (terminal).
+// validateSourcePod requires the pod, when the PodSnapshot pins a source pod UID, to match it
+// (rejecting a same-named recreation), and to be scheduled. It returns one of two sentinels:
+// errPodSnapshotStalePodRef (terminal) or errPodSnapshotPodUnscheduled (pending). The UID check
+// comes first: a stale reference is terminal whether or not the replacement ever schedules.
 func validateSourcePod(snap *snapshotv1alpha1.PodSnapshot, pod *corev1.Pod) error {
-	if pod.Spec.NodeName == "" {
-		return errPodSnapshotPodUnscheduled
-	}
 	if wantUID := snap.Spec.Source.PodRef.UID; wantUID != "" && pod.UID != wantUID {
 		return fmt.Errorf("%w: live pod %q UID %q, want %q", errPodSnapshotStalePodRef, pod.Name, pod.UID, wantUID)
+	}
+	if pod.Spec.NodeName == "" {
+		return errPodSnapshotPodUnscheduled
 	}
 	return nil
 }
@@ -462,7 +460,7 @@ func (sr *PodSnapshotReconciler) propagateStatus(ctx context.Context, snap *snap
 		cond := meta.FindStatusCondition(content.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 		changed = sr.markFailed(snap, cond.Reason, cond.Message)
 	default:
-		changed = sr.markPending(snap, "Pending", "Waiting for node agent to capture the checkpoint")
+		changed = sr.markPending(snap, "Pending", "Waiting for the node agent to take the snapshot")
 	}
 
 	if !changed {
@@ -506,6 +504,17 @@ func (sr *PodSnapshotReconciler) markFailed(snap *snapshotv1alpha1.PodSnapshot, 
 // before reaching here once Failed is set, so this is only hit while Failed is absent or False.
 func (sr *PodSnapshotReconciler) markPending(snap *snapshotv1alpha1.PodSnapshot, reason, message string) bool {
 	return sr.setCondition(snap, snapshotv1alpha1.PodSnapshotConditionReady, metav1.ConditionFalse, reason, message)
+}
+
+// recordPendingReason persists a Pending reason, writing status only when it changed.
+func (sr *PodSnapshotReconciler) recordPendingReason(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, reason, message string) (ctrl.Result, error) {
+	if !sr.markPending(snap, reason, message) {
+		return ctrl.Result{}, nil
+	}
+	if err := sr.Status().Update(ctx, snap); err != nil {
+		return ctrl.Result{}, fmt.Errorf("record pending reason %s: %w", reason, err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // failPodSnapshot marks the PodSnapshot Failed terminally (Failed=True, Ready=False) and records

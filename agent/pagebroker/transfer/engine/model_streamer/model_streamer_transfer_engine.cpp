@@ -58,7 +58,7 @@ ModelStreamerTransferEngine::CreateRestore() const
   return std::make_shared<ModelStreamerRestore>(
       ModelStreamerSessionOptions{connection.region, connection.endpoint, connection.access_key_id,
                                   connection.secret_access_key, connection.session_token},
-      options.restore_timeout);
+      options.restore_timeout, model_streamer_);
 }
 
 // Reuse a healthy coordinator; replace it after a terminal native failure.

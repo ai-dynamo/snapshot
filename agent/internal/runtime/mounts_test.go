@@ -174,11 +174,45 @@ func TestBuildMountPolicy(t *testing.T) {
 			wantNotInExt: []string{"/run/some-daemon"},
 		},
 		{
+			name: "OCI-managed device plugin allocation markers are skipped",
+			mounts: []types.MountInfo{
+				{MountPoint: "/run/nvidia-container-devices/GPU-d36ed66d-d1b8-d6b8-d277-e02d9d7b04c8", IsOCIManaged: true},
+				{MountPoint: "/var/run/nvidia-container-devices/GPU-52f3de69-3398-5340-e8f4-515fe3aa2ba5", IsOCIManaged: true},
+			},
+			wantSkipped: []string{
+				"/run/nvidia-container-devices/GPU-d36ed66d-d1b8-d6b8-d277-e02d9d7b04c8",
+				"/var/run/nvidia-container-devices/GPU-52f3de69-3398-5340-e8f4-515fe3aa2ba5",
+			},
+			wantNotInExt: []string{
+				"/run/nvidia-container-devices/GPU-d36ed66d-d1b8-d6b8-d277-e02d9d7b04c8",
+				"/var/run/nvidia-container-devices/GPU-52f3de69-3398-5340-e8f4-515fe3aa2ba5",
+			},
+		},
+		{
 			name: "OCI-managed /proc submount is externalized, not skipped",
 			mounts: []types.MountInfo{
 				{MountPoint: "/proc/acpi", IsOCIManaged: true},
 			},
 			wantExt: map[string]string{"/proc/acpi": "/proc/acpi"},
+		},
+		{
+			name: "the container's procfs and its read-only binds are left to CRIU",
+			mounts: []types.MountInfo{
+				{MountPoint: "/proc", FSType: "proc", Device: "0:61", IsOCIManaged: true},
+				{MountPoint: "/proc/sys", FSType: "proc", Device: "0:61", IsOCIManaged: true, ReadOnly: true},
+				{MountPoint: "/proc/acpi", FSType: "tmpfs", Device: "0:70", IsOCIManaged: true, ReadOnly: true},
+			},
+			wantExt:      map[string]string{"/proc/acpi": "/proc/acpi"},
+			wantNotInExt: []string{"/proc", "/proc/sys"},
+		},
+		{
+			name: "another procfs bound into the container stays external",
+			mounts: []types.MountInfo{
+				{MountPoint: "/proc", FSType: "proc", Device: "0:61", IsOCIManaged: true},
+				{MountPoint: "/host/proc", FSType: "proc", Device: "0:22", IsOCIManaged: true, ReadOnly: true},
+			},
+			wantExt:      map[string]string{"/host/proc": "/host/proc"},
+			wantNotInExt: []string{"/proc"},
 		},
 		{
 			name: "/dev/shm tmpfs is not externalized",

@@ -22,7 +22,7 @@ while keeping model weights on the GPU. It writes `ready-for-snapshot` only afte
 both operations succeed.
 
 The program enables SGLang's memory saver and disables CPU weight backup.
-Weights are captured directly from GPU memory without a CPU backup copy. An init
+Weights are saved directly from GPU memory without a CPU backup copy. An init
 container downloads the selected model into the persistent
 [model cache](README.md#model-cache). The source application then loads that
 cache with `HF_HUB_OFFLINE=1` so the checkpointed process has no open Hugging
