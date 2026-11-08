@@ -326,7 +326,7 @@ An agent that is shutting down will leave its attempt as it is, without recordin
 
 ### Deadline
 
-`restoreTimeoutSeconds` will be one deadline for all attempts of a destination container, counted from the first attempt's start. Waits between attempts and container restarts count toward it. A restore whose next attempt cannot start before the deadline will end as one that ran out of retries. Today each restore run gets its own timeout, and an agent restart starts it again ([controller.go](https://github.com/ai-dynamo/snapshot/blob/b6343d0641aac414c9b51876ee579723f63e1801/agent/internal/controller/controller.go#L1074-L1079)).
+`restore.timeoutSeconds` will be one deadline for all attempts of a destination container, counted from the first attempt's start. Waits between attempts and container restarts count toward it. A restore whose next attempt cannot start before the deadline will end as one that ran out of retries. Today each restore run gets its own timeout, and an agent restart starts it again ([controller.go](https://github.com/ai-dynamo/snapshot/blob/b6343d0641aac414c9b51876ee579723f63e1801/agent/internal/controller/controller.go#L1074-L1079)).
 
 ```go
 restoreCtx, cancel := context.WithDeadline(ctx, record.Deadline)
