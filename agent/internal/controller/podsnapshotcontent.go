@@ -292,7 +292,9 @@ func (w *NodeController) runCheckpoint(
 		if executor.StepOf(err) == executor.StepCommitCheckpoint {
 			failure.retryable = false
 		}
-		suspended, _ := executor.SuspendedSourceOf(err)
+		// Recovery ends a source it cannot revive, so running it on a failure that
+		// never suspended one would kill a workload this capture never took.
+		suspended, needsRecovery := executor.SuspendedSourceOf(err)
 		// Repeats of the dump come out of the same budget as fresh attempts, so a
 		// caller asking for two retries gets two, however they were spent.
 		spent += suspended.DumpRetriesUsed
@@ -301,7 +303,10 @@ func (w *NodeController) runCheckpoint(
 			w.workOrderStillCapturable(ctx, content)
 		// The recovery has the last word: a source it could not put back has
 		// nothing left to capture, so the retry is abandoned rather than spent.
-		retryWillFollow := w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, wantRetry)
+		retryWillFollow := wantRetry
+		if needsRecovery {
+			retryWillFollow = w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, wantRetry)
+		}
 		if !retryWillFollow {
 			recorded := err
 			if spent > 0 {
@@ -317,7 +322,9 @@ func (w *NodeController) runCheckpoint(
 				failure.reason, spent, budget, err))
 		select {
 		case <-captureCtx.Done():
-			w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, false)
+			if needsRecovery {
+				w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, false)
+			}
 			return w.failCheckpoint(ctx, logger, content, pod, failure.reason, err)
 		case <-time.After(attemptRetryDelay(spent)):
 		}
