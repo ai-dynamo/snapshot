@@ -307,7 +307,7 @@ func (w *NodeController) runCheckpoint(
 			if spent > 0 {
 				recorded = fmt.Errorf("after %d of %d retries: %w", spent, budget, err)
 			}
-			return w.markCheckpointFailed(ctx, content, terminalReason(failure, spent, budget), recorded)
+			return w.failCheckpoint(ctx, logger, content, pod, terminalReason(failure, spent, budget), recorded)
 		}
 
 		spent++
@@ -318,10 +318,23 @@ func (w *NodeController) runCheckpoint(
 		select {
 		case <-captureCtx.Done():
 			w.recoverSourceAfterFailedDump(ctx, logger, pod, containerPID, suspended, false)
-			return w.markCheckpointFailed(ctx, content, failure.reason, err)
+			return w.failCheckpoint(ctx, logger, content, pod, failure.reason, err)
 		case <-time.After(attemptRetryDelay(spent)):
 		}
 	}
+}
+
+// failCheckpoint ends the capture: the work order records the outcome, and the
+// source Pod's owner gets the failure that ended it as an event. Only a failure
+// another attempt follows reports as an attempt, so without this the last cause
+// — the one to act on — would be the only one the events leave out.
+func (w *NodeController) failCheckpoint(
+	ctx context.Context, logger logr.Logger, content *snapshotv1alpha1.PodSnapshotContent,
+	pod *corev1.Pod, reason string, cause error,
+) error {
+	emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning,
+		reason, fmt.Sprintf("Checkpoint failed: %v", cause))
+	return w.markCheckpointFailed(ctx, content, reason, cause)
 }
 
 // terminalReason separates a checkpoint that used up its retries from one that
