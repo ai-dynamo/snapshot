@@ -7,9 +7,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -306,6 +308,33 @@ func TestRunCheckpointDoesNotRetryAnUnrecoverableSource(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A capture that failed before the suspend left the source running, and recovery
+// ends a source it cannot revive — so reaching recovery at all would kill a
+// workload this capture never took.
+func TestRunCheckpointLeavesASourceItNeverSuspendedAlone(t *testing.T) {
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(0)
+	signalled := 0
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		signalled++
+		return nil
+	}
+	// Refused before the workload was ever suspended, so the error carries no
+	// suspended source.
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		return nil, pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	assert.Zero(t, signalled, "a source that was never suspended must not be signalled")
+	assert.False(t, sawEventReason(w.clientset.(*fake.Clientset), reasonSourcePodTerminated))
+	assert.Len(t, eventsForReason(w.clientset.(*fake.Clientset), reasonCheckpointFailed), 1,
+		"the failure that ended the capture still reaches the source Pod's owner")
 }
 
 // Repeats and fresh attempts come out of one budget, so each attempt may only
