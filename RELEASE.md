@@ -250,3 +250,7 @@ operating Snapshot — new capabilities, behavior changes, breaking changes, and
 required upgrade actions — not a raw commit log. Call out CRD changes and any
 change to checkpoint or restore semantics explicitly, since those affect
 existing stored checkpoints.
+
+Write them in `docs/release-notes/vX.Y.Z.md`, following
+[Writing release notes](docs/development/writing-release-notes.md), review them in
+a PR before the release, and publish the same text as the release body.

@@ -188,6 +188,7 @@ operations, indexed below.
 - [Benchmarks](docs/development/benchmarks.md) — how startup performance is measured.
 - [Writing documentation](docs/development/writing-docs.md) — where a change goes and how to write it.
 - [Naming conventions](docs/development/naming.md) — terms and naming patterns for the API, chart, and docs.
+- [Writing release notes](docs/development/writing-release-notes.md) — how a release's notes are gathered, ordered, and written.
 
 **More**
 
