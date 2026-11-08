@@ -360,8 +360,10 @@ func terminalReason(failure captureFailure, spent, budget int) string {
 // attemptRetryDelay spaces fresh attempts, each of which suspends the workload
 // again, so a node that is briefly unable to take one is not hammered.
 func attemptRetryDelay(attempt int) time.Duration {
+	// Far enough out the shift overflows int64, and a delay that lands on zero or
+	// negative makes time.After fire at once — attempts with no backoff at all.
 	delay := attemptRetryInitialDelay << (attempt - 1)
-	if delay > attemptRetryDelayCeiling {
+	if delay <= 0 || delay > attemptRetryDelayCeiling {
 		return attemptRetryDelayCeiling
 	}
 	return delay
