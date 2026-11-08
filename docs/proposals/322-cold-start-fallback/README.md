@@ -57,9 +57,11 @@ another attempt. When retry exists, fallback runs after the retries are exhauste
 
 ### Goals
 
-1. A restore that failed for good ends with the Pod running exactly as its Pod
-   spec describes (image, command, arguments, environment, mounts, probes),
-   with no action from the caller after it opts in.
+1. A restore that failed for good, on a Pod that meets the
+   [eligibility rules](#what-fallback-does) (a restartable Pod on a node with the
+   restore proxy), ends with the Pod running exactly as its Pod spec describes
+   (image, command, arguments, environment, mounts, probes), with no action from
+   the caller after it opts in.
 2. The Pod behaves as if started without Snapshot, except for the record of the
    failed restore: the `Restored=False` condition, an event, and the restart count.
 3. A restore that succeeds, or is still in progress, behaves as it does today.
@@ -79,10 +81,9 @@ that has failed for good (`Restored=False` with reason `RestoreFailed`, or
 
 1. The **node agent** publishes `Restored=False` with the failure message
    extended by `Falling back to the container command.`
-2. The agent sets the **cold-start trigger** for that container (how it is
-   carried is an [implementation detail](#implementation-detail-carrying-the-trigger)),
-   then kills the destination container. The kill is the only thing that ends the
-   container.
+2. The agent sets the **cold-start trigger** for each destination container (how
+   it is carried is an [implementation detail](#implementation-detail-carrying-the-trigger)),
+   then kills them. The kill is the only thing that ends a container.
 3. The **kubelet** restarts the container, if the Pod's `restartPolicy` allows.
 4. The **NRI plugin**, when the kubelet creates that container, finds the
    trigger and lets the container run as the Pod spec defines it, so the Pod
@@ -153,15 +154,21 @@ A team that wants failed restores to stay failed leaves the annotation unset.
 
 ### What fallback does
 
-A restore Pod has a destination container, the one the agent restores into.
-After a failed restore with fallback opt-in, the agent stops that container
-and nothing else; sidecars are left alone.
+A restore Pod has one or more destination containers, the ones the agent
+restores into (several when the Pod maps the captured container to many).
+Fallback is per Pod: the restore outcome is one condition, and `RestoreFailed`
+means every destination failed, so every destination container falls back
+together, each with its own trigger, kill, and `Once` budget. After a failed
+restore with fallback opt-in, the agent stops the destination containers and
+nothing else; sidecars are left alone.
 
 **When fallback applies.** All four must hold:
 
 - The annotation is `Always` or `Once`.
-- The restore failed for good: `RestoreFailed` or `RestoreIncompatible`. A `Ready`
-  snapshot whose artifact is gone is a `RestoreFailed` like any other.
+- The restore failed for good: `RestoreFailed` (every destination failed) or
+  `RestoreIncompatible`. A `Ready` snapshot whose artifact is gone is a
+  `RestoreFailed` like any other. A `RestorePartiallySucceeded` Pod, where some
+  destinations restored, does not fall back and ends as today.
 - `restartPolicy` is `OnFailure` or `Always`.
 - The node has the restore proxy.
 
@@ -176,14 +183,19 @@ Otherwise the restore ends as today, and the condition message says why.
    text and ends with the fallback sentence; the Pod event carries the same
    message. It is a server-side apply on the status subresource, so conditions
    owned by the kubelet are untouched.
-2. **Set the trigger.** The agent records, for the Pod's next container, that it
-   must start cold, with the policy as its value. The proxy does not watch it, so
-   setting it ends nothing. It must be set before the kill, or the restarted
-   container would get the proxy and wait for a restore that never comes. If it
-   cannot be set, the agent ends the restore as it does today (`restore-failed`,
-   then the kill), so the Pod fails instead of hanging.
-3. **Kill the destination container.** The agent sends SIGKILL to its PID 1. The
-   container ends with exit 137, so it counts as a failure for `OnFailure`.
+2. **Set the trigger.** For each destination container, the agent records that
+   its next container must start cold, with the policy as its value. The proxy
+   does not watch it, so setting it ends nothing, and setting it twice changes
+   nothing. It must be set before the kill, or the restarted container would get
+   the proxy and wait for a restore that never comes. If it still cannot be set
+   after a few attempts, fallback cannot be committed. The agent then replaces
+   the condition's message with the failure text and `Fallback could not be
+   prepared: <cause>.` (same reason, still terminal), so the condition never
+   promises a fallback that does not happen, and ends the restore as it does
+   today (`restore-failed`, then the kill). The Pod fails instead of hanging.
+3. **Kill the destination containers.** The agent sends SIGKILL to the PID 1 of
+   each. A container ends with exit 137, so it counts as a failure for
+   `OnFailure`.
 
 **What changes from today.** Today a failed restore the agent writes `restore-failed`,
 kills PID 1, and only then publishes the condition. `restore-failed` makes the
@@ -192,18 +204,26 @@ kill does. For fallback the condition comes first and `restore-failed` is not
 written, so the agent's kill is the only thing that ends the container and cannot
 land on a cold container the kubelet already started.
 
-**Starting the command.** When the kubelet creates the container (after its
-normal back-off), the NRI plugin looks for the trigger. If it is set, the plugin
-does not modify the container and lets it run as the Pod spec defines it, so the
-Pod spec's command is PID 1 (there is no restore proxy). The trigger's value
-decides what happens next:
+**Starting the command.** When the kubelet creates a container (after its normal
+back-off) of a restore Pod, the NRI plugin looks for that container's trigger
+first, before it works out which containers are destinations. A destination
+match must not win: it would install the proxy, and working out the destinations
+reads the `PodSnapshot`, which Story 1 says may be gone. A trigger covers only
+the container it was set for. If the container has one, the plugin does not
+modify it and lets it run as the Pod spec defines it, so the Pod spec's command
+is PID 1 (there is no restore proxy), and emits the cold-start event. The
+trigger's value decides what happens next:
 
 - **`Always`:** the trigger stays, so every container created after the failure
   starts cold.
-- **`Once`:** the plugin marks the trigger as used, so only this container starts
-  cold. The next restart finds it used, and that restart is refused (exit 112, as
-  the proxy already does for `restore-complete` and `restore-failed`), so the Pod
-  shows `CrashLoopBackOff`.
+- **`Once`:** the plugin consumes the trigger in one atomic step before it
+  returns, so two creations can never both start cold. If it cannot, it fails the
+  creation and the kubelet retries, instead of starting cold with the trigger
+  still set. The next restart finds the trigger used, goes to the proxy, and that
+  restart is refused (exit 112, as the proxy already does for `restore-complete`
+  and `restore-failed`), so the Pod shows `CrashLoopBackOff`. The cold start is
+  spent when the plugin returns, so a creation that then fails for another reason
+  has spent it too.
 
 **Not restoring again.** The new container is created in the same Pod, which the
 agent still watches. It does not restore into it, because the Pod already has the
@@ -211,14 +231,20 @@ terminal `Restored=False` condition and the agent does no restore work on such a
 Pod. The condition lives on the Pod, so this also holds after an agent restart.
 Fallback relies on this existing rule and does not change it.
 
-**If the agent restarts midway.** The agent can crash after publishing the
-condition and before the kill. The Pod then says `Restored=False` with the
-fallback sentence while the original container still runs with the proxy waiting,
-and the rule above would leave it that way. So when the agent sees a Pod with the
-terminal condition and the trigger, it also kills the destination container if it
-is still the original one (for example by its restart count), and never the cold
-workload. This needs the agent to resume interrupted work, which #247 also needs,
-so it may land after the first change (Maybe mark this as P1).
+**If the agent restarts midway.** The agent can stop at any point after step 1.
+The Pod then says `Restored=False` with the fallback sentence while the original
+containers still run with the proxy waiting, with the trigger set (stopped before
+step 3), or not yet set (stopped before step 2, or the write kept failing). The
+rule above would leave either state waiting forever. The condition is the one
+record needed: its message has the fallback sentence only when fallback was
+chosen. So when the agent sees a Pod with a terminal failure whose message has
+the sentence, it repeats steps 2 and 3 for every destination that is still the
+original container (for example by its restart count). A trigger that is already
+set stays as it is, and a container already killed is no longer the original, so
+the cold workload is never killed. If the trigger still cannot be set, the agent
+falls back to the "could not be prepared" path of step 2. This needs the agent to
+resume interrupted work, which #247 also needs, so it may land after the first
+change (P1).
 
 ### Implementation detail: carrying the trigger
 
@@ -227,11 +253,12 @@ ways. This is for the design review to decide; the rest of the proposal only
 says "trigger".
 
 **Option A: a file in the control directory.** The agent writes
-`trigger-cold-start` (content: the policy) into the container's control
-directory, the volume mounted at `/snapshot-control`. The plugin checks for it on
-disk when it creates the container. For `Once` it replaces it with
-`cold-start-used`, and the proxy exits 112 when it finds that file (a one-line
-proxy change). The restore Pod contract gains the two files.
+`trigger-cold-start` (content: the policy) into each destination container's
+control directory, the volume mounted at `/snapshot-control` (each destination
+has its own subpath). The plugin checks for it on disk when it creates the
+container. For `Once` it renames it to `cold-start-used`, which is atomic, and the
+proxy exits 112 when it finds that file (a one-line proxy change). The restore
+Pod contract gains the two files.
 
 - Plus: no API call on the container-creation path, so it works when the API
   server is slow. It is the mechanism the agent, plugin and proxy already use
@@ -253,9 +280,12 @@ controller, as `RestoreDestinations` already does for the terminal condition.
 - Minus: an API read on the container-creation path (a failure fails the
   creation and the kubelet retries), which must be a direct read, not a cache
   that can lag behind the agent's patch. `Once` needs a second write to the Pod to
-  mark it used, and the refusal of the next restart still needs the proxy to know
-  (an argument from the plugin, or the plugin failing the creation). It adds
-  annotation names to the API surface that follow `docs/development/naming.md`.
+  mark it used, which must be a conditional patch (a `resourceVersion`
+  precondition) to be atomic, and with several destinations the annotation must
+  carry one state per container. The refusal of the next restart still needs the
+  proxy to know (an argument from the plugin, or the plugin failing the creation).
+  It adds annotation names to the API surface that follow
+  `docs/development/naming.md`.
 
 ### Restart policy
 
@@ -335,7 +365,8 @@ kubelet's back-off, the restart policy, and `Once`.
     `restartPolicy: Never`, or a node without the proxy). The agent emits it when
     the restore starts, so it shows before any failure.
   - A Normal event each time a container is created without the restore proxy,
-    emitted where `RestoreDestinations` returns no destinations.
+    emitted by the plugin where it finds the trigger, not where
+    `RestoreDestinations` returns no destinations.
 - **Logs.** The agent logs each step, and logs the "wanted but cannot happen" case
   as a warning too. The NRI plugin logs that the command stays.
 - **Metrics.** A counter of fallbacks by reason, following #665.
@@ -357,18 +388,25 @@ Tracking: #322 (design), #689 (implementation), #244 (feature).
 
 - The annotation: `Always`, `Once`, `Never`, absent, and an unrecognised value.
 - The controller, per outcome, restart policy, and annotation value: the
-  condition is published, then the trigger set, then the container killed; no
-  `restore-failed` is written for a Pod that falls back; if the trigger cannot be
-  set the restore ends as today; and a Pod that cannot fall back (including
-  `restartPolicy: Never`) is reported when the restore starts.
+  condition is published, then the trigger set, then the containers killed; no
+  `restore-failed` is written for a Pod that falls back; with a container map of
+  several destinations, each gets its own trigger and kill; a
+  `RestorePartiallySucceeded` Pod does not fall back; and a Pod that cannot fall
+  back (including `restartPolicy: Never`) is reported when the restore starts.
+- Trigger-write failure: after the retries the condition message says fallback
+  could not be prepared, and the restore ends as today.
 - After a fallback, reconciling the Pod again (also after an agent restart)
   starts no restore, and the cold-start event is emitted, but not for a restored
-  Pod. After an agent restart between the condition and the kill, the original
-  container is still killed, and the cold one never is.
-- The NRI plugin: with the trigger it leaves the container unmodified (`Always`:
-  every later container; `Once`: the first, then it marks the trigger used);
-  without it, it installs the proxy. A used `Once` trigger refuses the next
-  restart (exit 112).
+  Pod. An agent restart is tested at each point after the condition: before the
+  trigger is set, and after it is set but before the kill. In both the original
+  containers are still killed, and a cold one never is.
+- The NRI plugin: the trigger is checked before the destinations are resolved, so
+  a destination that has it gets no proxy, also when the `PodSnapshot` is gone;
+  it covers only the container it was set for; and with it the plugin leaves the
+  container unmodified (`Always`: every later container; `Once`: the first, then
+  it consumes the trigger atomically, so concurrent creations start one cold
+  container, and if it cannot, the creation fails). Without a trigger it installs
+  the proxy, and a used `Once` trigger refuses the next restart (exit 112).
 
 **End to end, on a GPU node**, extending the PoC, one scenario per cell of the
 [restart policy table](#restart-policy):
