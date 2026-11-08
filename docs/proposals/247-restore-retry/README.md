@@ -289,7 +289,7 @@ type restoreAttempts struct {
 
 The agent will write the record before each attempt, with the new `Attempt` and `ContainerID` and both retry fields cleared, and after each failure, with its `LastFailure` and the retry field of the chosen recovery. It sets `RetryAt` for an in-place retry, and `RetryInFreshContainer` for a fresh-container retry.
 
-After each pass with a failed attempt, the agent will also write the `nvidia.com/restore-retry-status` annotation on the restore Pod, so a user or a controller can read which attempt a restore is on and why the last one failed, without parsing messages. It holds one entry per restored container. The containers of a Pod restore in parallel within a pass, so the pass will write the annotation once, from the `LastFailure` in every container's record, and no container's write will drop another's entry.
+After each pass with a failed attempt, the agent will also write the `nvidia.com/restore-retry-status` annotation on the restore Pod, so a user or a controller can read which attempt a restore is on and why the last one failed, without parsing messages. It holds one entry per container with a failed attempt. The containers of a Pod restore in parallel within a pass, so the pass will write the annotation once, from the `LastFailure` in every container's record, and no container's write will drop another's entry.
 
 The agent never reads the annotation back. A restore that succeeds on its first attempt gets none, and the outcome leaves it on the Pod. `podcontract` gains the annotation's name, its type, and a parser.
 
