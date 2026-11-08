@@ -43,7 +43,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Summary
 
-A restore that passes the compatibility checks and then fails will be retried in the same Pod. Each attempt will start from a clean container. If the failed attempt left the container untouched, the agent will retry in place. Otherwise it will restart the container first. The retry limit will be set cluster-wide and per restore Pod, with a default of 0. Failures a retry cannot fix, including compatibility refusals, will end the restore immediately, and a restore that exhausts its retries will be reported as exhausted. All attempts will share one restore timeout, and the Pod will show each failed attempt and its cause.
+A restore that passes the compatibility checks and then fails will be retried in the same Pod. Each attempt will start from a clean container. If the failed attempt left the container untouched, the agent will retry in place. Otherwise it will restart the container first. The retry limit will be set cluster-wide and per restore Pod, with a default of 0. Failures known to be final, including compatibility refusals, will end the restore immediately, and a restore that exhausts its retries will be reported as exhausted. All attempts will share one restore timeout, and the Pod will show each failed attempt and its cause.
 
 ## Motivation
 
@@ -54,7 +54,7 @@ Some failures are transient by design and come with load, so they peak during a 
 ### Goals
 
 - **Restores succeed more often.** A failure that does not recur costs an attempt, not the Pod.
-- **Retriable failures are told apart from final ones.** Only a failure another attempt can fix is retried.
+- **Retriable failures are told apart from final ones.** A failure known to be final ends the restore at once.
 - **Users choose how much to retry.** Each workload sets its own limit, and one that sets none behaves as today.
 - **Retries are visible.** An operator can see that a restore was retried and why.
 
