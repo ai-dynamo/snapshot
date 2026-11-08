@@ -213,6 +213,8 @@ class ModelStreamerRestore {
   const std::chrono::milliseconds submission_timeout_;
   const uintmax_t restore_batch_bytes_;
   const std::size_t restore_preparation_slots_;
+  const std::size_t active_submission_limit_;
+  const uintmax_t active_byte_budget_;
   const ModelStreamerSessionOptions options_;
   const std::exception_ptr stopped_error_;
   std::thread worker_;

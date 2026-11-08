@@ -104,6 +104,31 @@ RestorePageSize()
   return static_cast<std::size_t>(page_size);
 }
 
+uintmax_t
+CheckedRestoreBatchBytes(std::uint64_t batch_bytes)
+{
+  if (batch_bytes < RestorePageSize())
+    throw std::invalid_argument("restore batch bytes must be at least the system page size");
+  return batch_bytes;
+}
+
+std::size_t
+CheckedRestorePreparationSlots(std::uint64_t slots)
+{
+  if (slots == 0 || slots > kMaxRestorePreparationSlots)
+    throw std::invalid_argument("restore preparation slots must be between 1 and " +
+                                std::to_string(kMaxRestorePreparationSlots));
+  return static_cast<std::size_t>(slots);
+}
+
+uintmax_t
+CheckedActiveByteBudget(uintmax_t batch_bytes, std::size_t active_limit)
+{
+  if (batch_bytes > std::numeric_limits<uintmax_t>::max() / active_limit)
+    throw std::invalid_argument("restore active byte budget exceeds the supported size");
+  return batch_bytes * active_limit;
+}
+
 std::size_t
 RestoreRangeLength(std::size_t remaining, uintmax_t budget, std::size_t page_size)
 {
@@ -224,16 +249,14 @@ ModelStreamerRestore::ModelStreamerRestore(
     std::chrono::milliseconds submission_timeout,
     const model_streamer::settings::Options& settings)
     : submission_timeout_(submission_timeout),
-      restore_batch_bytes_(settings.restore_batch_bytes.value_or(kDefaultRestoreBatchBytes)),
-      restore_preparation_slots_(settings.restore_preparation_slots.value_or(kDefaultRestorePreparationSlots)),
+      restore_batch_bytes_(CheckedRestoreBatchBytes(settings.restore_batch_bytes.value_or(kDefaultRestoreBatchBytes))),
+      restore_preparation_slots_(CheckedRestorePreparationSlots(
+          settings.restore_preparation_slots.value_or(kDefaultRestorePreparationSlots))),
+      active_submission_limit_(std::min(kActiveSubmissionLimit, std::max<std::size_t>(1, restore_preparation_slots_ - 1))),
+      active_byte_budget_(CheckedActiveByteBudget(restore_batch_bytes_, active_submission_limit_)),
       options_(std::move(options)),
       stopped_error_(std::make_exception_ptr(std::runtime_error("Model Streamer restore stopped")))
 {
-  if (restore_batch_bytes_ < RestorePageSize())
-    throw std::invalid_argument("restore batch bytes must be at least the system page size");
-  if (restore_preparation_slots_ == 0 || restore_preparation_slots_ > kMaxRestorePreparationSlots)
-    throw std::invalid_argument("restore preparation slots must be between 1 and " +
-                                std::to_string(kMaxRestorePreparationSlots));
   if (submission_timeout_ <= std::chrono::milliseconds::zero())
     throw std::invalid_argument("Model Streamer submission timeout must be positive");
   if (!HasCompleteCredentials(options_))
@@ -428,12 +451,12 @@ ModelStreamerRestore::CanAdmit(const StreamerEntry& entry) const
 {
   // Stop admission on the first storage error so existing work can drain and
   // failed mappings can be released after native teardown.
-  if (active_.size() >= kActiveSubmissionLimit ||
+  if (active_.size() >= active_submission_limit_ ||
       std::any_of(active_.begin(), active_.end(), [](const auto& item) { return !item.second->first_error.empty(); }))
     return false;
-  if (active_bytes_ >= restore_batch_bytes_)
+  if (active_bytes_ >= active_byte_budget_)
     return false;
-  return entry.bytes <= restore_batch_bytes_ - active_bytes_;
+  return entry.bytes <= active_byte_budget_ - active_bytes_;
 }
 
 void

@@ -43,7 +43,7 @@ struct FakeStreamer {
   bool stall_responses;
   std::vector<FakeResponse> responses = {};
   std::size_t next_response = 0;
-  void* stalled_destination = nullptr;
+  std::vector<void*> stalled_destinations = {};
 };
 
 std::atomic<unsigned> starts = 0;
@@ -164,7 +164,7 @@ runai_file_streamer_end(void* streamer)
     native_changed.notify_all();
     EXPECT_TRUE(native_changed.wait_for(lock, std::chrono::seconds(5), [] { return !hold_end; }));
     // Native access remains legal until runai_file_streamer_end returns.
-    if (auto* destination = static_cast<FakeStreamer*>(streamer)->stalled_destination)
+    for (auto* destination : static_cast<FakeStreamer*>(streamer)->stalled_destinations)
       *static_cast<char*>(destination) = 'x';
   }
   ++ends;
@@ -194,7 +194,7 @@ runai_file_streamer_request(
   }
   *out_submission_id = submission_id;
   if (streamer.stall_responses) {
-    streamer.stalled_destination = range_destinations[0];
+    streamer.stalled_destinations.push_back(range_destinations[0]);
     return 0;
   }
   if (streamer.fail_responses) {
@@ -672,7 +672,7 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
   });
   {
     std::unique_lock lock(native_mutex);
-    EXPECT_TRUE(native_changed.wait_for(lock, std::chrono::seconds(2), [] { return next_submission_id != 0; }));
+    EXPECT_TRUE(native_changed.wait_for(lock, std::chrono::seconds(2), [] { return next_submission_id == 2; }));
   }
   cancellation.Cancel();
   {
@@ -695,9 +695,13 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
     EXPECT_EQ(error.code, Failure::INTERNAL_ERROR);
   }
   EXPECT_EQ(ends, 1U);
+  // Teardown can still write to either accepted batch before the caller returns.
+  for (const auto& file : inventory.files) {
+    char byte = 0;
+    std::ifstream(root_.path() / "cancelled" / file.relative_path).get(byte);
+    EXPECT_EQ(byte, 'x');
+  }
   char byte = 0;
-  std::ifstream(root_.path() / "cancelled/data").get(byte);
-  EXPECT_EQ(byte, 'x');  // Teardown could still write before the cancelled caller returned.
   EXPECT_NO_THROW(engine.StageRestore(prepare(), root_.path() / "recovered"));
   EXPECT_EQ(starts, 2U);
   std::ifstream(root_.path() / "recovered/data").get(byte);
