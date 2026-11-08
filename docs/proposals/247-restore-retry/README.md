@@ -388,7 +388,7 @@ N/A
 - A pass that still finds the old container, which kills it only if it runs, and reports no failed attempt.
 - Two containers of one Pod that fail in the same pass, each keeping its entry in the annotation.
 
-**End to end.** In the restore failure suite ([restore_failure_qualification.py](../../../e2e/snapshot_e2e/restore_failure_qualification.py)), on a GPU node, a restore Pod with `restartPolicy: Always` whose staged checkpoint is damaged, as the existing damaged-checkpoint case does, and repaired after the first attempt fails. The container restarts once, the next attempt starts with the failed attempt's GPU memory released and restores into the new container, and inference matches the source.
+**End-to-end.** In the restore failure suite ([restore_failure_qualification.py](../../../e2e/snapshot_e2e/restore_failure_qualification.py)), on a GPU node, a restore Pod with `restartPolicy: Always` whose staged checkpoint is damaged, as the existing damaged-checkpoint case does, and repaired after the first attempt fails. The container restarts once, the next attempt starts with the failed attempt's GPU memory released and restores into the new container, and inference matches the source.
 
 ### Graduation Criteria
 
