@@ -337,6 +337,16 @@ func TestRunCheckpointLeavesASourceItNeverSuspendedAlone(t *testing.T) {
 		"the failure that ended the capture still reaches the source Pod's owner")
 }
 
+// The shift overflows int64 far enough out, and a zero or negative delay would
+// let fresh attempts run back to back with no backoff.
+func TestAttemptRetryDelayStaysWithinTheBackoff(t *testing.T) {
+	for _, attempt := range []int{1, 2, 5, 34, 65, 1000} {
+		delay := attemptRetryDelay(attempt)
+		assert.Positive(t, delay, "attempt %d", attempt)
+		assert.LessOrEqual(t, delay, attemptRetryDelayCeiling, "attempt %d", attempt)
+	}
+}
+
 // Repeats and fresh attempts come out of one budget, so each attempt may only
 // repeat what is left of it. Handing every attempt the full limit again let a
 // capture report "3 of 2 retries used" on a node.
