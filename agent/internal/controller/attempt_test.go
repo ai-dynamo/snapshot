@@ -340,6 +340,34 @@ func TestRunCheckpointSharesOneBudgetAcrossAttempts(t *testing.T) {
 			snapshotv1alpha1.PodSnapshotConditionFailed).Reason)
 }
 
+// The attempt that ends the capture fails like any other, and its cause is the
+// one to act on. Reporting only the attempts a retry follows left that last one
+// out of the events entirely.
+func TestRunCheckpointReportsTheFailureThatEndedIt(t *testing.T) {
+	attemptRetryInitialDelayOriginal := attemptRetryInitialDelay
+	t.Cleanup(func() { attemptRetryInitialDelay = attemptRetryInitialDelayOriginal })
+	attemptRetryInitialDelay = time.Millisecond
+
+	content := makeWorkOrder("content-a", "node-a", "a")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint.RetryLimit = ptr.To(1)
+
+	retryable := pagebroker.NewFailureError(pagebroker.Failure_UNAVAILABLE, "broker restarting")
+	w.checkpointFn = func(context.Context, CheckpointParams) (*pagebroker.PublishedArtifact, error) {
+		return nil, executor.SuspendedSourceFailure(retryable, executor.SuspendedSource{})
+	}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, makeSourcePod(),
+		"main", "cid", os.Getpid(), false, string(content.UID), t.TempDir()))
+
+	assert.Len(t, eventsForReason(w.clientset.(*fake.Clientset), reasonCheckpointAttemptFailed), 1,
+		"only the attempt a retry followed reports as an attempt")
+	events := eventsForReason(w.clientset.(*fake.Clientset), reasonRetriesExhausted)
+	require.Len(t, events, 1, "the attempt that ended the capture reports under the terminal reason")
+	assert.Contains(t, events[0].Message, "after 1 of 1 retries")
+	assert.Contains(t, events[0].Message, "broker restarting", "the cause to act on, not just the count")
+}
+
 // A settled failure ended the checkpoint on its own terms. Reporting that the
 // retries ran out would bury the thing an operator has to act on.
 func TestTerminalReasonKeepsASettledReason(t *testing.T) {
