@@ -36,13 +36,15 @@ per model, so they run manually, outside the e2e CI suite.
   to those guide pods
 - `instrumentation/` — timers projected alongside the guide application;
   used with `docs/guides/<engine>/app.py`
-- `snapshot_benchmarks/logs.py` — parses the node agent's "Restore timing
-  summary" log line for sub-second-precision phase timing
+- `snapshot_benchmarks/logs.py` — parses the node agent's restore and checkpoint
+  timing summaries, including the CUDA lock/copy split and the CRIU memdump/memwrite split
 - `snapshot_benchmarks/metadata.py` — collects GPU/driver/storage/placement
   metadata for every run
 - `snapshot_benchmarks/cli.py` — `run` / `sweep` / `metadata` / `report`
   subcommands
 - `models.yaml` — an example model list for sweeps
+- `models-qwen3-scale.yaml` — five Qwen3 sizes with fixed runtime settings
+  for a single-GPU size-scaling experiment
 - `results/` — gitignored, per-invocation raw JSON output
 
 ## Running a benchmark
