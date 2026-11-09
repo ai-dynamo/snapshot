@@ -67,7 +67,10 @@ func makeSnapshotForReconcile() *snapshotv1alpha1.PodSnapshot {
 			Finalizers: []string{podSnapshotFinalizer},
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0"}},
+			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{
+				Name:       "worker-0",
+				Containers: []string{"main"},
+			}},
 		},
 	}
 }
@@ -88,7 +91,10 @@ func pendingBoundSnapshotContent() (*snapshotv1alpha1.PodSnapshot, *snapshotv1al
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
 			Source: snapshotv1alpha1.PodSnapshotContentSource{
-				PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a",
+				PodRef: snapshotv1alpha1.PodReference{
+					Name: "worker-0", UID: "pod-uid-9", Containers: []string{"main"},
+				},
+				NodeName: "node-a",
 			},
 		},
 	}
@@ -101,6 +107,60 @@ func reconcileSnapshot(t *testing.T, r *PodSnapshotReconciler, name string) ctrl
 		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: name}})
 	require.NoError(t, err)
 	return res
+}
+
+func TestPodTerminalTimeUsesOnlyTargetContainers(t *testing.T) {
+	now := time.Date(2026, time.November, 9, 12, 0, 0, 0, time.UTC)
+	targetFinishedAt := metav1.NewTime(now.Add(-10 * time.Minute))
+	unrelatedFinishedAt := metav1.NewTime(now.Add(-time.Minute))
+	deletionTimestamp := metav1.NewTime(now.Add(-5 * time.Minute))
+
+	tests := []struct {
+		name             string
+		pod              *corev1.Pod
+		targetContainers []string
+		want             time.Time
+	}{
+		{
+			name: "ignores unrelated regular and init containers",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "main", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{FinishedAt: targetFinishedAt}}},
+					{Name: "sidecar", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{FinishedAt: unrelatedFinishedAt}}},
+				},
+				InitContainerStatuses: []corev1.ContainerStatus{
+					{Name: "setup", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{FinishedAt: unrelatedFinishedAt}}},
+				},
+			}},
+			targetContainers: []string{"main"},
+			want:             targetFinishedAt.Time,
+		},
+		{
+			name: "uses deletion timestamp when target termination is unavailable",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &deletionTimestamp},
+				Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "sidecar", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{FinishedAt: unrelatedFinishedAt}}},
+				}},
+			},
+			targetContainers: []string{"main"},
+			want:             deletionTimestamp.Time,
+		},
+		{
+			name: "returns zero when target terminal time is unobservable",
+			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "sidecar", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{FinishedAt: unrelatedFinishedAt}}},
+			}}},
+			targetContainers: []string{"main"},
+			want:             time.Time{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, podTerminalTime(tt.pod, tt.targetContainers))
+		})
+	}
 }
 
 func TestSnapshotReconciler_PodUnscheduledWaitsPending(t *testing.T) {
@@ -480,10 +540,26 @@ func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *test
 	snap, content := pendingBoundSnapshotContent()
 	pod := scheduledPod()
 	pod.Status.Phase = corev1.PodFailed
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name: "main",
+	expiredTargetFinishedAt := metav1.NewTime(time.Now().Add(-sourcePodTerminalGrace - time.Minute))
+	recentUnrelatedFinishedAt := metav1.Now()
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: "main",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 137, FinishedAt: expiredTargetFinishedAt,
+			}},
+		},
+		{
+			Name: "sidecar",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 0, FinishedAt: recentUnrelatedFinishedAt,
+			}},
+		},
+	}
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+		Name: "setup",
 		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-			ExitCode: 137, FinishedAt: metav1.NewTime(time.Now().Add(-sourcePodTerminalGrace - time.Minute)),
+			ExitCode: 0, FinishedAt: recentUnrelatedFinishedAt,
 		}},
 	}}
 	r := makeSnapshotReconciler(s, snap, content, pod)

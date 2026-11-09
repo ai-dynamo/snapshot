@@ -206,7 +206,11 @@ func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Conte
 	if reason == podSnapshotReasonSourcePodGone {
 		// A checkpoint that terminates its source fails the pod before the agent
 		// writes content Ready; wait out the grace window instead of racing it.
-		if wait := sourcePodTerminalGraceRemaining(pod, time.Now()); wait > 0 {
+		if wait := sourcePodTerminalGraceRemaining(
+			pod,
+			snap.Spec.Source.PodRef.Containers,
+			time.Now(),
+		); wait > 0 {
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 	}
@@ -221,24 +225,37 @@ const sourcePodTerminalGrace = 5 * time.Minute
 // sourcePodTerminalGraceRemaining returns how much of the grace window is left
 // for a terminal source pod. An unknown transition time returns zero — failing
 // immediately — rather than requeueing on a clock that can never expire.
-func sourcePodTerminalGraceRemaining(pod *corev1.Pod, now time.Time) time.Duration {
-	terminalAt := podTerminalTime(pod)
+func sourcePodTerminalGraceRemaining(
+	pod *corev1.Pod,
+	targetContainers []string,
+	now time.Time,
+) time.Duration {
+	terminalAt := podTerminalTime(pod, targetContainers)
 	if terminalAt.IsZero() {
 		return 0
 	}
 	return sourcePodTerminalGrace - now.Sub(terminalAt)
 }
 
-// podTerminalTime returns the latest observable time at which the source pod
-// turned terminal: the newest container termination, else the deletion stamp.
+// podTerminalTime returns the latest observable time at which a selected target
+// container terminated, falling back to the pod deletion stamp. Unrelated
+// regular and init containers must not move the pending-capture grace window.
 // Zero means the transition time is not observable from pod status.
-func podTerminalTime(pod *corev1.Pod) time.Time {
+func podTerminalTime(pod *corev1.Pod, targetContainers []string) time.Time {
+	targets := make(map[string]struct{}, len(targetContainers))
+	for _, name := range targetContainers {
+		targets[name] = struct{}{}
+	}
 	var latest time.Time
-	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
-		for i := range statuses {
-			if terminated := statuses[i].State.Terminated; terminated != nil && terminated.FinishedAt.Time.After(latest) {
-				latest = terminated.FinishedAt.Time
-			}
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if _, selected := targets[status.Name]; !selected {
+			continue
+		}
+
+		terminated := status.State.Terminated
+		if terminated != nil && terminated.FinishedAt.Time.After(latest) {
+			latest = terminated.FinishedAt.Time
 		}
 	}
 	if latest.IsZero() && pod.DeletionTimestamp != nil {
