@@ -268,6 +268,7 @@ type restoreFakeRuntime struct {
 	imageIDHit             bool
 	env                    []string
 	apparmorProfile        string
+	events                 chan<- string
 }
 
 func (r *restoreFakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
@@ -294,8 +295,12 @@ func (r *restoreFakeRuntime) ResolveContainerPodUID(context.Context, string) (st
 	return "", errors.New("not implemented")
 }
 
-func (r *restoreFakeRuntime) TerminateContainer(context.Context, string) error {
-	return errors.New("not implemented")
+func (r *restoreFakeRuntime) TerminateContainer(_ context.Context, id string) error {
+	if r.events == nil {
+		return errors.New("not implemented")
+	}
+	r.events <- "terminate " + id
+	return nil
 }
 
 func (r *restoreFakeRuntime) ExecSync(context.Context, string, []string, time.Duration) ([]byte, []byte, error) {
@@ -1730,8 +1735,9 @@ func TestRestoreCommitFailureAfterSuccessfulUnmountReturnsCleanupError(t *testin
 
 func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 	const gpuUUID = "GPU-11111111-1111-1111-1111-111111111111"
-	for _, mode := range []string{"cpu", "invalid-context", "custom-storage"} {
+	for _, mode := range []string{"cpu", "invalid-context", "custom-storage", "custom-storage-changed", "custom-storage-abort-refused"} {
 		t.Run(mode, func(t *testing.T) {
+			customStorage := strings.HasPrefix(mode, "custom-storage")
 			base := t.TempDir()
 			directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
 			if err != nil {
@@ -1744,7 +1750,7 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 				types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
 			manifest.CUDA.CustomStorage = mode != "cpu"
 			runtime := &restoreFakeRuntime{}
-			if mode == "custom-storage" {
+			if customStorage {
 				manifest.CUDA.PIDs = []int{12}
 				manifest.CUDA.SourceGPUUUIDs = []string{gpuUUID}
 				runtime.env = []string{"NVIDIA_VISIBLE_DEVICES=" + gpuUUID}
@@ -1776,6 +1782,14 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 			server := make(chan error, 1)
 			// Leave room for duplicate cleanup events so the order assertion reports them.
 			events := make(chan string, 8)
+			runtime.events = events
+			if mode == "custom-storage-changed" {
+				originalExec := execNSRestoreFunc
+				t.Cleanup(func() { execNSRestoreFunc = originalExec })
+				execNSRestoreFunc = func(context.Context, logr.Logger, RestoreRequest, *types.RestoreContainerSnapshot, nsmount.MountPoint, string, *pagebroker.CustomStorageExecution) (*RestoreInNamespaceResult, error) {
+					return nil, &changedContainerError{err: errors.New("nsrestore was killed (signal: killed)")}
+				}
+			}
 			go func() {
 				steps := []string{"stage", "abort"}
 				if mode == "invalid-context" {
@@ -1806,6 +1820,11 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 						}
 						events <- "abort"
 						response.Result = &pagebroker.Response_AbortComplete{AbortComplete: &pagebroker.AbortComplete{}}
+						if mode == "custom-storage-abort-refused" {
+							response.Result = &pagebroker.Response_Failure{Failure: &pagebroker.Failure{
+								Code: pagebroker.Failure_STORAGE_ERROR.Enum(), Message: proto.String("imports still mapped"),
+							}}
+						}
 					}
 					if err == nil {
 						err = replyPageBrokerTest(connection, request, response)
@@ -1836,8 +1855,16 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 			if mode == "invalid-context" && !strings.Contains(err.Error(), "GPU context requires captured PIDs") {
 				t.Fatalf("expected GPU context failure before staging: %v", err)
 			}
-			if mode == "custom-storage" && !strings.Contains(err.Error(), "while running nsrestore") {
+			if customStorage && !strings.Contains(err.Error(), "while running nsrestore") {
 				t.Fatalf("expected failure after staging mount: %v", err)
+			}
+			var failure *RestoreFailure
+			abortRefused := mode == "custom-storage-abort-refused"
+			if !errors.As(err, &failure) || failure.ContainerChanged != (mode == "custom-storage-changed") || failure.Final != abortRefused {
+				t.Fatalf("restore failure = %+v, want ContainerChanged only for a changed container and Final only when the abort was refused", failure)
+			}
+			if abortRefused && (failure.Cleanup == nil || !strings.Contains(failure.Cleanup.Error(), "abort PageBroker restore")) {
+				t.Fatalf("cleanup = %v, want the refused abort", failure.Cleanup)
 			}
 			if mounts.mounted != 2*wantCleanup || mounts.bundle != wantCleanup || mounts.staging != wantCleanup {
 				t.Fatalf("mount cleanup: %+v; restore: %v", mounts, err)
@@ -1852,8 +1879,10 @@ func TestStagedRestoreFailureOrdersMountCleanupAndAbort(t *testing.T) {
 			switch mode {
 			case "cpu":
 				want = []string{"unmount staging", "unmount bundle", "abort"}
-			case "custom-storage":
+			case "custom-storage", "custom-storage-abort-refused":
 				want = []string{"abort", "unmount staging", "unmount bundle"}
+			case "custom-storage-changed":
+				want = []string{"abort", "terminate placeholder", "unmount staging", "unmount bundle"}
 			}
 			if !reflect.DeepEqual(observed, want) {
 				t.Fatalf("cleanup order = %v, want %v", observed, want)
@@ -1924,13 +1953,18 @@ func TestFailedRestoreWaitsForAbortBeforeTermination(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			go func() {
-				finished <- abortRestoreTransaction(ctx, gpu, func(context.Context) error {
+				abortErr, stopErr := abortRestoreTransaction(ctx, gpu, func(context.Context) error {
 					terminated <- struct{}{}
 					if outcome == "termination-error" {
 						return stopError
 					}
 					return nil
 				})
+				if abortErr != nil {
+					finished <- fmt.Errorf("abort failed: %w", abortErr)
+					return
+				}
+				finished <- stopErr
 			}()
 			select {
 			case <-abortReceived:
