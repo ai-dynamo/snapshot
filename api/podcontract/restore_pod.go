@@ -8,6 +8,7 @@ import (
 	"path"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +37,10 @@ type Options struct {
 	// with a restore-completion gate. Workload owners opt in when Kubernetes
 	// must withhold readiness and liveness until restore completes.
 	EnableStartupGate bool
+
+	// RetryLimit sets RestoreRetryLimitAnnotation. Nil leaves the node agent's
+	// restore.retryLimit in effect, and 0 means one attempt.
+	RetryLimit *int
 }
 
 // Build returns a restore-shaped deep copy of pod. The caller's Pod
@@ -53,6 +58,9 @@ func Build(pod *corev1.Pod, request Request, options Options) (*corev1.Pod, erro
 	}
 	result := pod.DeepCopy()
 	if err := ensureRestoreAnnotations(result, request); err != nil {
+		return nil, err
+	}
+	if err := ensureRetryLimitAnnotation(result, options.RetryLimit); err != nil {
 		return nil, err
 	}
 	if err := ensureRestorePodSpec(&result.Spec, request.Mappings, options); err != nil {
@@ -201,6 +209,25 @@ func validateRestoreAnnotations(annotations map[string]string, request Request) 
 	if !sameContainerMappings(annotatedMappings, request.Mappings) {
 		return fmt.Errorf("%s does not match the requested restore mappings", RestoreContainerMapAnnotation)
 	}
+	if _, _, err := RestoreRetryLimitFromAnnotations(annotations); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureRetryLimitAnnotation(pod *corev1.Pod, limit *int) error {
+	existing, found, err := RestoreRetryLimitFromAnnotations(pod.Annotations)
+	if err != nil {
+		return err
+	}
+	if limit == nil {
+		return nil
+	}
+	if found && existing != *limit {
+		return fmt.Errorf("%s is %d, conflicting with requested retry limit %d",
+			RestoreRetryLimitAnnotation, existing, *limit)
+	}
+	pod.Annotations[RestoreRetryLimitAnnotation] = strconv.Itoa(*limit)
 	return nil
 }
 

@@ -399,6 +399,76 @@ func TestValidateRejectsMinimumContractDrift(t *testing.T) {
 	}
 }
 
+func TestBuildSetsRetryLimit(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing *string
+		limit    *int
+		want     *string
+		wantErr  bool
+	}{
+		{name: "unset leaves the agent default"},
+		{name: "zero", limit: ptr(0), want: ptr("0")},
+		{name: "positive", limit: ptr(4), want: ptr("4")},
+		{name: "matching annotation", existing: ptr("4"), limit: ptr(4), want: ptr("4")},
+		{name: "annotation without option is kept", existing: ptr("2"), want: ptr("2")},
+		{name: "negative", limit: ptr(-1), wantErr: true},
+		{name: "conflicting annotation", existing: ptr("2"), limit: ptr(4), wantErr: true},
+		{name: "invalid annotation", existing: ptr("many"), wantErr: true},
+		{name: "invalid annotation with option", existing: ptr("many"), limit: ptr(1), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pod := restorePodFixture()
+			if test.existing != nil {
+				pod.Annotations[RestoreRetryLimitAnnotation] = *test.existing
+			}
+			before := pod.DeepCopy()
+
+			shaped, err := Build(pod, restoreRequest(), Options{RetryLimit: test.limit})
+			if !reflect.DeepEqual(pod, before) {
+				t.Fatal("Build() mutated its input")
+			}
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("Build() unexpectedly succeeded")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Build() failed: %v", err)
+			}
+			got, found := shaped.Annotations[RestoreRetryLimitAnnotation]
+			if test.want == nil {
+				if found {
+					t.Fatalf("%s = %q, want absent", RestoreRetryLimitAnnotation, got)
+				}
+				return
+			}
+			if !found || got != *test.want {
+				t.Fatalf("%s = %q (found %v), want %q", RestoreRetryLimitAnnotation, got, found, *test.want)
+			}
+			if err := Validate(shaped, restoreRequest()); err != nil {
+				t.Fatalf("Validate() rejected the built Pod: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsInvalidRetryLimit(t *testing.T) {
+	valid, err := Build(restorePodFixture(), restoreRequest(), Options{RetryLimit: ptr(1)})
+	if err != nil {
+		t.Fatalf("Build() failed: %v", err)
+	}
+	for _, value := range []string{"", "-2", "one", "2x"} {
+		pod := valid.DeepCopy()
+		pod.Annotations[RestoreRetryLimitAnnotation] = value
+		if err := Validate(pod, restoreRequest()); err == nil {
+			t.Errorf("Validate() accepted %s=%q", RestoreRetryLimitAnnotation, value)
+		}
+	}
+}
+
 func TestBuildAllowsUnmanagedSeccomp(t *testing.T) {
 	pod := restorePodFixture()
 	shaped, err := Build(pod, restoreRequest(), Options{})

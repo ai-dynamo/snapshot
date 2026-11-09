@@ -23,6 +23,12 @@ const (
 	// uses the captured container name as the destination.
 	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
 
+	// RestoreRetryLimitAnnotation overrides the node agent's restore.retryLimit
+	// for one restore Pod: how many more attempts a destination container gets
+	// after its first restore attempt fails. Its value is a non-negative
+	// integer, and 0 means one attempt.
+	RestoreRetryLimitAnnotation = "nvidia.com/restore-retry-limit"
+
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
 	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
 
@@ -265,6 +271,29 @@ func ValidateContainerMappings(mappings []ContainerMapping, capturedSource strin
 		destinations[destination] = struct{}{}
 	}
 	return nil
+}
+
+// RestoreRetryLimitFromAnnotations returns the retry limit a restore Pod sets.
+// found is false when the annotation is absent, so the caller applies its
+// default. A value that is not a non-negative integer is an error.
+func RestoreRetryLimitFromAnnotations(annotations map[string]string) (limit int, found bool, err error) {
+	raw, found := annotations[RestoreRetryLimitAnnotation]
+	if !found {
+		return 0, false, nil
+	}
+	limit, err = parseRestoreRetryLimit(raw)
+	if err != nil {
+		return 0, true, err
+	}
+	return limit, true, nil
+}
+
+func parseRestoreRetryLimit(raw string) (int, error) {
+	limit, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || limit < 0 {
+		return 0, fmt.Errorf("%s value %q must be a non-negative integer", RestoreRetryLimitAnnotation, raw)
+	}
+	return limit, nil
 }
 
 // SkipCompatCheckFromAnnotations reports whether compatibility checks are disabled.
