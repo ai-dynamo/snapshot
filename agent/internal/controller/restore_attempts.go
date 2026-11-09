@@ -17,7 +17,8 @@ import (
 )
 
 // restoreAttemptsMaxBytes bounds the read of a record the Pod can rewrite.
-const restoreAttemptsMaxBytes = 4 << 10
+// It holds a LastFailure whose cause JSON escapes to six times its size.
+const restoreAttemptsMaxBytes = 8 << 10
 
 // restoreAttempts is a destination container's record of its restore
 // attempts, kept in its directory of the Pod's snapshot-control volume. The
@@ -35,6 +36,9 @@ type restoreAttempts struct {
 	ContainerID string `json:"containerID"`
 	// RetryAt is when an in-place retry falls due, and zero otherwise.
 	RetryAt time.Time `json:"retryAt"`
+	// LastFailure is the last failed attempt, the source of the retry status
+	// annotation.
+	LastFailure *podcontract.FailureSummary `json:"lastFailure,omitempty"`
 }
 
 func parseRestoreAttempts(data []byte) (*restoreAttempts, error) {
@@ -57,7 +61,11 @@ func parseRestoreAttempts(data []byte) (*restoreAttempts, error) {
 // it has none yet. A record that cannot be read or parsed is an error: the
 // restore ends rather than grant attempts it cannot count.
 func (op *restoreOperation) readRestoreAttempts(nodeUID string) (*restoreAttempts, bool, error) {
-	data, err := op.controller.readPodControlFileFn(nodeUID, op.destination, podcontract.RestoreAttemptsFile, restoreAttemptsMaxBytes)
+	return op.controller.readRestoreAttempts(nodeUID, op.destination)
+}
+
+func (w *NodeController) readRestoreAttempts(nodeUID, destination string) (*restoreAttempts, bool, error) {
+	data, err := w.readPodControlFileFn(nodeUID, destination, podcontract.RestoreAttemptsFile, restoreAttemptsMaxBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}
@@ -75,6 +83,9 @@ func (op *restoreOperation) writeRestoreAttempts(nodeUID string, record *restore
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
+	}
+	if len(data) > restoreAttemptsMaxBytes {
+		return fmt.Errorf("save restore attempt record: %d bytes is more than the %d a pass reads", len(data), restoreAttemptsMaxBytes)
 	}
 	if err := op.controller.writePodControlSentinelFn(nodeUID, op.destination, podcontract.RestoreAttemptsFile, data); err != nil {
 		return fmt.Errorf("save restore attempt record: %w", err)
