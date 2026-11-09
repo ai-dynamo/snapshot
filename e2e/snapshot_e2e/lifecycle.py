@@ -18,17 +18,25 @@ from kubernetes import client
 from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
+from snapshot_e2e.workloads import CHECKPOINT_DIR
+from snapshot_e2e.workloads import CHECKPOINT_READY
 from snapshot_e2e.workloads import CONTAINER
 from snapshot_e2e.workloads import CONTROL_DIR
 from snapshot_e2e.workloads import CUDA_HOLD
 from snapshot_e2e.workloads import EXIT_REQUEST
 from snapshot_e2e.workloads import FILE_TOKEN
+from snapshot_e2e.workloads import HOOKS_PORT
+from snapshot_e2e.workloads import HOOKS_PORT_NAME
+from snapshot_e2e.workloads import HOOKS_RESUME_PATH
+from snapshot_e2e.workloads import HOOKS_STATUS_PATH
 from snapshot_e2e.workloads import OBSERVATIONS
+from snapshot_e2e.workloads import RELEASE_MARKER
 from snapshot_e2e.workloads import RESTORE_DONE
 from snapshot_e2e.workloads import RESTORE_PROXY
 from snapshot_e2e.workloads import SIGTERM_EXIT
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
+from snapshot_e2e.workloads import add_release_dir
 from snapshot_e2e.workloads import multi_restore_pod
 from snapshot_e2e.workloads import restore_pod
 from snapshot_e2e.workloads import restore_proxy
@@ -79,6 +87,8 @@ def create_podsnapshot(
     pod_name: str,
     pod_uid: str,
     container: str = CONTAINER,
+    *,
+    containers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
@@ -94,6 +104,8 @@ def create_podsnapshot(
             }
         },
     }
+    if containers is not None:
+        body["spec"]["containers"] = containers
     return client.CustomObjectsApi().create_namespaced_custom_object(
         GROUP,
         VERSION,
@@ -1297,8 +1309,10 @@ def assert_restored_workload_mounts(
     """Check the restored workload's mount table, not the container's.
 
     The agent mounts securityfs for CRIU while it restores, and the restored
-    workload must not see it. With empty_dir, the workload must also still
-    have its own empty mount at that path.
+    workload must not see it. The workload runs in a PID namespace nested in
+    the container's, and must see a procfs of that namespace, with /proc/sys
+    still read-only. With empty_dir, the workload must also still have its own
+    empty mount at that path.
     """
     success_marker = "__snapshot_restored_mounts_verified__"
     # Each read is its own assignment, so set -e stops the script when the
@@ -1318,6 +1332,16 @@ def assert_restored_workload_mounts(
       echo "the restored workload sees securityfs"
       exit 1
     fi
+    # Look the workload up in its own /proc by the PID it has in its own
+    # namespace, as software such as UCX does with getpid(). The entry must be
+    # the workload itself, so its start time (stat field 22) must match.
+    inner_pid="$(awk '/^NSpid:/ {{print $NF}}' {PROC_ROOT}/$restored_pid/status)"
+    started="$(sed 's/.*) //' {PROC_ROOT}/$restored_pid/stat | cut -d' ' -f20)"
+    seen="$(sed 's/.*) //' {PROC_ROOT}/$restored_pid/root/proc/$inner_pid/stat | cut -d' ' -f20)"
+    test -n "$started"
+    test "$seen" = "$started"
+    printf '%s\\n' "$mounts" | awk \\
+      '$5 == "/proc/sys" && $6 ~ /^ro(,|$)/ && / - proc / {{ found = 1 }} END {{ exit !found }}'
     {empty_dir_checks if empty_dir else ""}
     echo {success_marker}
     """

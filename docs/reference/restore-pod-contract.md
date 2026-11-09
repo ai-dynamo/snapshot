@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Restore Pod contract
+# Restore Pod Contract
 
 A Pod requests restore by naming a ready `PodSnapshot` in its namespace. The
 Snapshot node agent restores only Pods that implement this contract.
@@ -15,7 +15,7 @@ restored, err := podcontract.Build(
     pod,
     podcontract.Request{
         SnapshotName:    snapshotName,
-        SourceContainer: capturedContainer,
+        SourceContainer: checkpointedContainer,
         Mappings:        mappings,
     },
     podcontract.Options{
@@ -47,16 +47,16 @@ without importing Snapshot's custom-resource API:
 outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
 ```
 
-The package also owns the shared control-volume, environment, capture-sentinel,
+The package also owns the shared control-volume, environment, checkpoint-sentinel,
 and CUDA job-file names used by Snapshot-managed source and restore Pods.
 
 The producer supplies `SourceContainer` from the referenced `PodSnapshot`.
 Empty mappings restore that source into the same-named destination only. The
 builder validates one-source-to-many-destination consistency but deliberately
-performs no API read to discover the captured source.
+performs no API read to discover the checkpointed source.
 
 Non-Go producers can implement the declarative form directly. This fan-out
-example restores the captured `main` process into two destination containers:
+example restores the checkpointed `main` process into two destination containers:
 
 ```yaml
 apiVersion: v1
@@ -127,8 +127,8 @@ the migration window; hand-authored Pods may omit the alias.
 
 The `restore-complete` startup probe shown above is optional workload lifecycle
 policy. Set `Options.EnableStartupGate` when Kubernetes must withhold readiness
-and liveness until restore completes. Because Kubernetes supports only one
-startup probe, the builder then replaces any existing startup probe with the
+and liveness until restore completes. Kubernetes supports only one
+startup probe, so the builder then replaces any existing startup probe with the
 canonical restore-completion gate while preserving workload liveness and
 readiness probes. Its failure threshold allows 1,800 consecutive one-second
 failures; if restoration exceeds that budget, kubelet kills the container, and
@@ -153,11 +153,11 @@ and exits with its exit code, so the container ends when the restored workload
 does. If the proxy is not PID 1, the agent fails the restore. Keep the source's
 command in restore Pods; it never runs. Other containers in the Pod, such as
 sidecars, are left alone. Nodes whose runtime cannot run the proxy restore
-without it; see [Nodes without the restore proxy](#nodes-without-the-restore-proxy).
+without it; see [Nodes Without the Restore Proxy](#nodes-without-the-restore-proxy).
 
 The plugin decides which containers get the proxy when each container is
 created. Without `restore-container-map`, it reads the PodSnapshot that
-`restore-from` names, for the captured container's name. Create the restore Pod
+`restore-from` names, for the checkpointed container's name. Create the restore Pod
 after that PodSnapshot exists; it does not have to be Ready yet. Until it
 exists, container creation fails, and kubelet retries with a backoff of up to 5
 minutes.
@@ -186,7 +186,7 @@ The proxy reserves two exit codes:
 Every other exit code is the restored workload's own, or 128 plus the number of
 the signal that ended it.
 
-## Nodes without the restore proxy
+## Nodes Without the Restore Proxy
 
 On a node whose container runtime has no NRI, or NRI older than v0.10
 (containerd older than 2.2, or NRI disabled), the agent restores without the

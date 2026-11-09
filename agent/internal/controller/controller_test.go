@@ -99,6 +99,10 @@ func (r *fakeRuntime) TerminateContainer(_ context.Context, _ string) error {
 	return errors.New("not implemented")
 }
 
+func (r *fakeRuntime) ExecSync(context.Context, string, []string, time.Duration) ([]byte, []byte, error) {
+	return nil, nil, errors.New("not implemented")
+}
+
 func (r *fakeRuntime) Close() error { return nil }
 
 type noopInjector struct{}
@@ -188,6 +192,9 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		captureQueue:              newTestCaptureQueue(t),
 		stopCh:                    make(chan struct{}),
 	}
+	// Set the clock and requeue as newDefaultController does.
+	w.nowFn = time.Now
+	w.requeueCaptureFn = w.captureQueue.AddAfter
 	t.Cleanup(w.restoreQueue.ShutDown)
 	return w
 }

@@ -33,7 +33,7 @@ spec:
       openAPIV3Schema:
         description: |-
           PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
-          for a captured container checkpoint and is consumed by restore paths.
+          for one container's snapshot and is consumed by restore paths.
 
           No conversion: this type exists only in v1alpha1 (no other API version), so it
           is not part of any conversion scheme.
@@ -58,15 +58,6 @@ spec:
           spec:
             description: PodSnapshotSpec defines the desired state of PodSnapshot.
             properties:
-              checkpointRetryLimit:
-                description: |-
-                  CheckpointRetryLimit is how many times a failed capture may be retried in
-                  place, over and above the first attempt: 0 means one attempt and no retry.
-                  Unset means this request expressed no preference and the agent's
-                  cluster-wide default applies, which is distinct from an explicit 0.
-                format: int32
-                minimum: 0
-                type: integer
               containers:
                 description: |-
                   Containers holds settings for the checkpointed containers, matched by
@@ -76,10 +67,7 @@ spec:
                   description: |-
                     ContainerSnapshotConfig holds the settings for one checkpointed container,
                     matched to it by name. Snapshot copies them into the PodSnapshotContent at
-                    checkpoint time, and every restore of that checkpoint uses that copy.
-
-                    Not enabled yet: the operator rejects a checkpointReadinessProbe or a
-                    lifecycle until support is complete.
+                    checkpoint time, and every restore of that snapshot uses that copy.
                   properties:
                     checkpointReadinessProbe:
                       description: |-
@@ -91,15 +79,18 @@ spec:
                         file:
                           description: |-
                             File succeeds when a regular file exists at the path, inside the
-                            container.
+                            container. Like an exec probe, Snapshot checks it by running a shell
+                            in the container, as the container's user, so the image needs a shell.
                           properties:
                             path:
                               description: |-
                                 Path is an absolute, clean path inside the container: no empty, "." or
                                 ".." parts and no trailing slash, so two paths name the same file only
-                                if they are equal. It must be on the container's own filesystem or an
-                                emptyDir volume; paths on hostPath and PersistentVolumeClaim volumes are
-                                refused.
+                                if they are equal. Any path the container's user can reach works,
+                                volumes included, except the files Snapshot itself writes in the
+                                snapshot-control volume. A file on a volume that outlives the Pod stays
+                                there for the next checkpoint or restore unless the application
+                                removes it.
                               maxLength: 4096
                               minLength: 2
                               type: string
@@ -113,8 +104,9 @@ spec:
                           - path
                           type: object
                         httpGet:
-                          description: HTTPGet succeeds when a GET to the Pod IP returns
-                            200.
+                          description: |-
+                            HTTPGet succeeds when a GET to the Pod IP returns a 2xx status.
+                            Snapshot does not follow redirects, so a 3xx fails.
                           properties:
                             path:
                               description: Path of the request. Empty means "/".
@@ -178,17 +170,21 @@ spec:
                           properties:
                             file:
                               description: |-
-                                File creates a regular file at the path, inside the container. The
-                                parent directory must exist. If the file already exists before the
-                                restore, the restore fails.
+                                File creates an empty regular file at the path, inside the container.
+                                Like an exec probe, Snapshot creates it by running a shell in the
+                                container, as the container's user, so the image needs a shell. The
+                                parent directory must exist. The file must not exist before the
+                                restore: Snapshot takes an existing file as the notification.
                               properties:
                                 path:
                                   description: |-
                                     Path is an absolute, clean path inside the container: no empty, "." or
                                     ".." parts and no trailing slash, so two paths name the same file only
-                                    if they are equal. It must be on the container's own filesystem or an
-                                    emptyDir volume; paths on hostPath and PersistentVolumeClaim volumes are
-                                    refused.
+                                    if they are equal. Any path the container's user can reach works,
+                                    volumes included, except the files Snapshot itself writes in the
+                                    snapshot-control volume. A file on a volume that outlives the Pod stays
+                                    there for the next checkpoint or restore unless the application
+                                    removes it.
                                   maxLength: 4096
                                   minLength: 2
                                   type: string
@@ -203,8 +199,9 @@ spec:
                               type: object
                             httpPost:
                               description: |-
-                                HTTPPost sends a POST with an empty body to the Pod IP. A 200 or 204
-                                response means the application accepted the notification.
+                                HTTPPost sends a POST with an empty body to the Pod IP. A 2xx status
+                                means the application accepted the notification. Snapshot does not
+                                follow redirects, so a 3xx fails.
                               properties:
                                 path:
                                   description: Path of the request. Empty means "/".
@@ -268,22 +265,23 @@ spec:
                 x-kubernetes-list-type: map
               source:
                 description: |-
-                  Source identifies the captured workload. It is a struct (rather than an
+                  Source identifies the checkpointed workload. It is a struct (rather than an
                   inlined reference) so future source variants can be added additively.
                 properties:
                   podRef:
                     description: |-
-                      PodRef references the pod, in the PodSnapshot's namespace, that is captured.
-                      The operator prepares the pod (control volume, checkpoint storage mount)
-                      before creating the PodSnapshot. The capture target container is carried on
-                      PodRef.Containers, not a pod annotation.
+                      PodRef references the pod, in the PodSnapshot's namespace, that is checkpointed.
+                      The operator prepares the pod (the snapshot-control volume) before creating
+                      the PodSnapshot; the snapshot store is mounted by the node agent, not the
+                      pod. The target container is carried on PodRef.Containers, not a pod
+                      annotation.
                     properties:
                       containers:
                         description: |-
-                          Containers narrows the capture to these containers of the source pod. The
+                          Containers narrows the checkpoint to these containers of the source pod. The
                           node agent reads this instead of the source pod's target-container
                           annotation. v1alpha1 supports exactly one container; the cap is lifted when
-                          the runtime supports multi-container capture.
+                          the runtime supports more than one.
                         items:
                           maxLength: 63
                           minLength: 1

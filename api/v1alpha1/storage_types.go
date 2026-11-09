@@ -17,7 +17,7 @@ type CheckpointStorageBinding struct {
 // immutable spec.storage; handles are meaningful only in that bound store.
 type CheckpointStorageStatus struct {
 	// Artifacts contains one descriptor per confirmed container. It can be
-	// partial during capture/recovery; Ready still requires all captures to finish.
+	// partial during a checkpoint or recovery; Ready still requires every container to finish.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=128
@@ -27,10 +27,10 @@ type CheckpointStorageStatus struct {
 }
 
 // PublishedContainerArtifact is the persisted part of PageBroker's
-// PublishedArtifact, associated with a captured container. Readers pass the
+// PublishedArtifact, associated with a checkpointed container. Readers pass the
 // handle back unchanged; they must not construct filesystem paths.
 type PublishedContainerArtifact struct {
-	// ContainerName selects the captured container within the content.
+	// ContainerName selects the checkpointed container within the content.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63

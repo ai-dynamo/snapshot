@@ -18,8 +18,8 @@ const (
 	// SnapshotJobConditionCaptured is True when the CRIU dump of the target
 	// container is complete (PodSnapshot Ready=True).
 	SnapshotJobConditionCaptured = "Captured"
-	// SnapshotJobConditionCompleted is True when the checkpoint artifact is
-	// durably captured (PodSnapshot Ready=True) AND the source Job has
+	// SnapshotJobConditionCompleted is True when the snapshot is durable
+	// (PodSnapshot Ready=True) AND the source Job has
 	// finished. The checkpoint terminates the target container (its exit is
 	// expected and never required to be zero), but every other container must
 	// run to completion and exit 0 before cleanup: deleting the Job earlier
@@ -41,8 +41,8 @@ const (
 	ReasonCaptureInProgress = "CaptureInProgress"
 	ReasonCaptureCompleted  = "CaptureCompleted"
 
-	// Completed. WaitingForPodCompletion covers the window where the capture
-	// artifact is Ready but the source pod's other containers (helpers such as
+	// Completed. WaitingForPodCompletion covers the window where the snapshot
+	// is Ready but the source pod's other containers (helpers such as
 	// a GMS saver) are still running. JobCompleted means the source Job
 	// finished with every non-target container exiting 0; the target
 	// container's own exit is expected to be the checkpoint's kill.
@@ -138,9 +138,9 @@ type NonTargetArtifactPolicy struct {
 // SnapshotJobSpec defines the desired state of SnapshotJob.
 // +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
 // +kubebuilder:validation:XValidation:rule="!has(self.nonTargetArtifacts) || !has(self.podTemplate.metadata) || !has(self.podTemplate.metadata.annotations) || !('nvidia.com/snapshot-non-target-artifact-containers' in self.podTemplate.metadata.annotations)",message="nonTargetArtifacts and the legacy container annotation cannot both be set"
-// +kubebuilder:validation:XValidation:rule="!has(self.nonTargetArtifacts) || self.nonTargetArtifacts.containers.all(c, !(c in self.podSnapshotTemplate.targetContainers))",message="nonTargetArtifacts.containers must not name capture targets"
+// +kubebuilder:validation:XValidation:rule="!has(self.nonTargetArtifacts) || self.nonTargetArtifacts.containers.all(c, !(c in self.podSnapshotTemplate.targetContainers))",message="nonTargetArtifacts.containers must not name target containers"
 type SnapshotJobSpec struct {
-	// PodTemplate defines the workload to run and capture. The controller injects
+	// PodTemplate defines the workload to run and checkpoint. The controller injects
 	// the snapshot contract (control volume, readiness probe, seccomp, sidecar
 	// opt-outs) before creating the batch/v1 Job. Everything else — image,
 	// command, GPU resources, sidecars, DRA claims, shared memory — is the
@@ -158,7 +158,7 @@ type SnapshotJobSpec struct {
 
 	// NonTargetArtifacts declares regular non-target writers and their opt-in
 	// failed-attempt cleanup policy. Omission retains their bytes and does not
-	// change capture-artifact or source-object deletion. The controller derives
+	// change snapshot or source-object deletion. The controller derives
 	// the source Pod annotation from this typed declaration.
 	// +optional
 	NonTargetArtifacts *NonTargetArtifactPolicy `json:"nonTargetArtifacts,omitempty"`
@@ -199,14 +199,6 @@ type PodSnapshotTemplate struct {
 	// +kubebuilder:validation:items:MaxLength=63
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainers []string `json:"targetContainers,omitempty"`
-
-	// CheckpointRetryLimit is copied to the generated PodSnapshot: how many
-	// times a failed capture may be retried in place, over and above the first
-	// attempt. Unset defers to the agent's cluster-wide default, which is
-	// distinct from an explicit 0 asking for no retry.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	CheckpointRetryLimit *int32 `json:"checkpointRetryLimit,omitempty"`
 
 	// Containers is copied to the generated PodSnapshot: settings for the
 	// checkpointed containers, matched by name to targetContainers.
@@ -252,8 +244,8 @@ type SnapshotJobStatus struct {
 	PodSnapshotName string `json:"podSnapshotName,omitempty"`
 
 	// PodSnapshotUID identifies the one PodSnapshot incarnation accepted for
-	// this one-shot capture. Once set, a missing PodSnapshot or a same-name
-	// object with another UID is terminal and must never start another capture.
+	// this one-shot checkpoint. Once set, a missing PodSnapshot or a same-name
+	// object with another UID is terminal and must never start another checkpoint.
 	// +optional
 	PodSnapshotUID types.UID `json:"podSnapshotUID,omitempty"`
 
@@ -286,8 +278,8 @@ type SnapshotJobStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // SnapshotJob is the Schema for the snapshotjobs API. It fuses running a
-// checkpoint-ready workload pod and capturing it into a PodSnapshot into one
-// declarative, capture-only object. SnapshotJob has zero awareness of any
+// checkpoint-ready workload pod and checkpointing it into a PodSnapshot into one
+// declarative, checkpoint-only object. SnapshotJob has zero awareness of any
 // specific consumer (Dynamo, GMS, or otherwise).
 //
 // No conversion: this type exists only in v1alpha1 (no other API version), so

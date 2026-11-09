@@ -46,6 +46,11 @@ type Runtime interface {
 	// runtime container ID. Implementations validate any supplied runtime scheme
 	// before dispatch.
 	TerminateContainer(ctx context.Context, id string) error
+	// ExecSync runs cmd in the container through CRI, the way kubelet runs an
+	// exec probe: as the container's user, with its capabilities, seccomp and
+	// LSM profile, inside its mounts. A non-zero exit is an error with an
+	// ExitStatus method; a timeout wraps remote.ErrCommandTimedOut.
+	ExecSync(ctx context.Context, id string, cmd []string, timeout time.Duration) (stdout, stderr []byte, err error)
 	Close() error
 }
 

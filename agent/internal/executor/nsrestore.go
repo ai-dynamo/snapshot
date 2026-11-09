@@ -314,9 +314,15 @@ func executeRestore(
 			}
 		}
 		if m.CUDA.CustomStorage {
+			// Kept serial: running the CustomStorage restores in parallel slows them.
 			err = restoreCustomStorage(ctx, opts, m.CUDA.PIDs, restorePIDs, log)
 		} else {
-			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+			concurrency := len(restorePIDs)
+			if cudaJobFile != "" {
+				// The launch-job file is not thread safe.
+				concurrency = 1
+			}
+			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, concurrency, log)
 		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {

@@ -28,18 +28,6 @@ func podFromInformerObj(obj interface{}) (*corev1.Pod, bool) {
 	return pod, ok
 }
 
-func isContainerReady(pod *corev1.Pod, containerName string) bool {
-	if pod.Status.Phase != corev1.PodRunning {
-		return false
-	}
-	for _, status := range pod.Status.ContainerStatuses {
-		if status.Name == containerName {
-			return status.Ready
-		}
-	}
-	return false
-}
-
 // core/v1 Event field limits the API server enforces once eventTime is set.
 // A node name may be up to 253 characters, so ReportingInstance needs the cap.
 const (
