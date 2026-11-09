@@ -157,14 +157,31 @@ func (c *CheckpointSpec) Validate() error {
 	return nil
 }
 
+// DefaultRestoreRetryLimit keeps restore retry opt-in, so upgrading changes no existing restore.
+const DefaultRestoreRetryLimit = 0
+
 // RestoreSpec holds settings for the CRIU restore process.
 type RestoreSpec struct {
+	// TimeoutSeconds bounds a destination container's restore, across all of its attempts.
 	TimeoutSeconds int `yaml:"timeoutSeconds"`
+
+	// RetryLimit is how many more attempts a destination container gets after its first restore
+	// attempt fails. Absent is read as DefaultRestoreRetryLimit. A restore Pod can override it with
+	// podcontract.RestoreRetryLimitAnnotation.
+	RetryLimit *int `yaml:"retryLimit"`
 
 	// SkipCompatCheck turns the restore compatibility gate off for every
 	// restore this agent handles. It is the per-node escape hatch, for a
 	// cluster admin who would otherwise be stuck annotating pods one by one.
 	SkipCompatCheck bool `yaml:"skipCompatCheck"`
+}
+
+// ResolveRetryLimit reports the retries a restore may take, defaulting when the config omits it.
+func (c *RestoreSpec) ResolveRetryLimit() int {
+	if c.RetryLimit == nil {
+		return DefaultRestoreRetryLimit
+	}
+	return *c.RetryLimit
 }
 
 func (c *RestoreSpec) RestoreTimeout() time.Duration {
@@ -175,6 +192,9 @@ func (c *RestoreSpec) RestoreTimeout() time.Duration {
 }
 
 func (c *RestoreSpec) Validate() error {
+	if c.RetryLimit != nil && *c.RetryLimit < 0 {
+		return &ConfigError{Field: "restore.retryLimit", Message: "restore.retryLimit must not be negative"}
+	}
 	if c.TimeoutSeconds <= 0 {
 		return &ConfigError{Field: "restore.timeoutSeconds", Message: "restore.timeoutSeconds must be greater than zero"}
 	}

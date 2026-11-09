@@ -329,8 +329,14 @@ config:
     retryLimit: 0
 
   restore:
-    # Maximum seconds to allow a restore attempt before the agent marks it failed
+    # Maximum seconds for a container's restore, across all of its attempts,
+    # before the agent marks it failed.
     timeoutSeconds: 7200
+    # Attempts a destination container gets after its first restore attempt
+    # fails. 0 keeps retry opt-in, so upgrading changes no existing restore. A
+    # restore pod can override it with the nvidia.com/restore-retry-limit
+    # annotation.
+    retryLimit: 0
     # Skip the restore compatibility check on every restore this agent handles.
     # The gate refuses a restore whose snapshot was taken somewhere the
     # target node cannot reproduce; turning it off means those restores are

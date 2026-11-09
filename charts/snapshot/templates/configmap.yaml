@@ -101,6 +101,7 @@ data:
     restore:
       timeoutSeconds: {{ .Values.config.restore.timeoutSeconds }}
       restoreTimeoutSeconds: {{ .Values.config.restore.timeoutSeconds }}
+      retryLimit: {{ .Values.config.restore.retryLimit | default 0 }}
       skipCompatCheck: {{ .Values.config.restore.skipCompatCheck }}
 
     criu:
