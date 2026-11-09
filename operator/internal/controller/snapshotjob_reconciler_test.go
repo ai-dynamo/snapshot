@@ -909,7 +909,7 @@ func TestSnapshotJobCuInterposeAdoptsShapedJob(t *testing.T) {
 	_, err := r.Reconcile(ctx, reconcileRequest(sj))
 	require.NoError(t, err)
 	job := getSourceJob(t, r.Client, sj)
-	require.NoError(t, protocol.ShapeCuInterposeCapture(&job.Spec.Template, "worker", testCuInterposeInstaller()))
+	require.NoError(t, protocol.ShapeCuInterposeCapture(&job.Spec.Template.Spec, []string{"worker"}, testCuInterposeInstaller()))
 	require.NoError(t, podcontract.ValidateCuInterposeTarget(&job.Spec.Template.Spec.Containers[0]))
 	job.UID = "source-job-uid"
 	require.NoError(t, r.Update(ctx, job))
