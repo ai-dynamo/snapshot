@@ -19,6 +19,7 @@ the [Architecture](../../overview/architecture-overview.md#restore-flow).
 - [Waiting for the Next Attempt](#waiting-for-the-next-attempt)
 - [Agent Restarts](#agent-restarts)
 - [Retry Status](#retry-status)
+- [Restoring Again After a Restart](#restoring-again-after-a-restart)
 - [Code Map](#code-map)
 <!-- /toc -->
 
@@ -132,6 +133,32 @@ failed attempt, with the cause cut to 1024 bytes. `snapshotUnusable` marks the
 PageBroker codes that name the snapshot: `ARTIFACT_NOT_FOUND`,
 `ARTIFACT_CORRUPT`, and `UNSUPPORTED_ARTIFACT`.
 
+## Restoring Again After a Restart
+
+With a limit above 0 and the restore proxy, a destination container that
+kubelet starts again after the Pod's restore succeeded gets a new restore. Two
+parts of the agent take part.
+
+The NRI plugin runs when kubelet creates the container. When the Pod's restore
+succeeded, it removes the destination's `restore-complete`, unless
+`restore-failed` is there too. The new container's proxy then waits for a
+restore instead of exiting with code 112. When the plugin cannot remove the
+file, it logs the error, and the proxy exits as before. Container creation
+never fails for it.
+
+The next pass then looks for destinations that started again. A destination
+counts when its container started no earlier than the `nvidia.com/Restored`
+condition last changed, and its directory holds no outcome. Container status
+keeps whole seconds, so a start in the same second as the success counts. Any
+other outcome, such as a `restore-failed`, leaves the Pod alone, so a pass
+never restores over a running workload.
+
+For each destination that started again, the pass removes the attempt record,
+so the restore starts at attempt 1 with a new deadline. It emits
+`RestoreRepeated` and restores only those destinations. The others keep their
+success. The retry status annotation is removed once no destination has a
+failed attempt, since the agent owns that annotation.
+
 ## Code Map
 
 The code that implements restore retry is in these packages and files:
@@ -141,10 +168,11 @@ The code that implements restore retry is in these packages and files:
 | `agent/internal/controller/restore_attempts.go` | The attempt record, the retry limit, the deadline, and the start of each attempt |
 | `agent/internal/controller/restore_recovery.go` | The recovery decision, the backoff, the check that the container stopped, and the events |
 | `agent/internal/controller/restore_retry_status.go` | The retry status annotation |
+| `agent/internal/controller/restore_again.go` | Finding the destinations that started again, and starting their restore over |
 | `agent/internal/controller/controller.go` | `runRestore`, which runs one attempt, and the check of a written outcome |
 | `agent/internal/executor/restore_failure.go` | `RestoreFailure`, which says where an attempt failed and whether it changed the container |
 | `agent/internal/executor/nsrestore_output.go` | Reading nsrestore's progress message and its PageBroker code |
-| `agent/internal/nri/plugin.go` | The report that a destination container stopped |
+| `agent/internal/nri/plugin.go` | The report that a destination container stopped, and the removal of `restore-complete` for a container that starts again |
 | `agent/internal/runtime/container_state.go` | Whether the runtime still runs a container |
 | `api/podcontract/restore_status.go` | The retry status annotation and its type |
 | `api/podcontract/protocol.go` | The retry limit annotation and the `restore-attempts` file name |

@@ -174,12 +174,14 @@ Restore Pods are expected to use `restartPolicy: Never`. A Pod gets one restore:
 a container that starts again in the same Pod finds that restore already used,
 and its proxy exits with code 112. With `restartPolicy: Always` or `OnFailure`,
 as in a Deployment, the container then ends in `CrashLoopBackOff` once the
-restored workload exits. Delete the Pod to restore again.
+restored workload exits. Delete the Pod to restore again, or see
+[Restore Retries](#restore-retries) for a Pod that restores again by itself.
 
 The proxy reserves two exit codes:
 
 - 112 (`RestoreNotRepeatableExitCode`): the Pod's one restore is used up. The
-  restore failed, or an earlier container in the Pod already used it.
+  restore failed, or an earlier container in the Pod already used it and the
+  Pod does not restore again.
 - 113 (`RestoreProxyErrorExitCode`): the proxy could not follow the restored
   process.
 
@@ -200,6 +202,13 @@ restore begins to apply the snapshot to it. Such a failure ends the restore,
 and so does a container that stops during an attempt, since another attempt
 needs a new container. The `restartPolicy` does not change which failures are
 retried, and retries also work on nodes without the restore proxy.
+
+With a retry limit above 0, on a node with the restore proxy, a destination
+container that starts again after its restore succeeded is restored again
+from the same `PodSnapshot`. Its proxy waits for the new restore instead of
+exiting with code 112, and the Pod gets a `RestoreRepeated` event. The new
+restore has its own attempts and deadline. The other destination containers
+keep their restore.
 
 ## Nodes Without the Restore Proxy
 

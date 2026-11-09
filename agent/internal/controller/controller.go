@@ -562,6 +562,16 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		// it has to clear the in-process marker as well as the condition below.
 		w.handledRestores.Delete(string(pod.UID))
 		forgetPodContainers(&w.finishedRestoreDestinations, pod.UID)
+	} else if restart, retry := w.restartedDestinations(ctx, pod); restart != nil || retry {
+		if restart == nil {
+			requeue = true
+			return
+		}
+		if err := w.startRestoreOver(ctx, pod, restart); err != nil {
+			w.log.Error(err, "Failed to start the restore over for a container that started again", "pod", key.String())
+			requeue = true
+			return
+		}
 	} else if w.restoreHandled(pod) {
 		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
 		return

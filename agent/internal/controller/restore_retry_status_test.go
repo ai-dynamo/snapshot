@@ -362,6 +362,30 @@ func TestPublishRetryStatusWritesNothing(t *testing.T) {
 	}
 }
 
+// A restore that starts over removes the status an earlier restore of the Pod
+// published, once no destination's record holds a failure.
+func TestPublishRetryStatusRemovesTheStatusOfAnEarlierRestore(t *testing.T) {
+	h := newRetryStatusHarness(t)
+	h.volume.put(t, "host-uid", "engine-0", failedRecord(1, 2, "criu restore failed"))
+	h.publish()
+	require.Contains(t, h.published(t), "engine-0")
+	live, err := h.w.clientset.CoreV1().Pods(h.pod.Namespace).Get(context.Background(), h.pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	h.pod = live
+	h.volume.put(t, "host-uid", "engine-0", restoreAttempts{Attempt: 1, ContainerID: "ctr"})
+
+	h.publish()
+
+	live, err = h.w.clientset.CoreV1().Pods(h.pod.Namespace).Get(context.Background(), h.pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotContains(t, live.Annotations, podcontract.RestoreRetryStatusAnnotation)
+	assert.Equal(t, "snapshot-a", live.Annotations[podcontract.RestoreFromAnnotation], "the apply dropped another annotation")
+	require.Len(t, h.applies(), 2)
+	h.pod = live
+	h.publish()
+	assert.Len(t, h.applies(), 2, "a Pod without the status got another apply")
+}
+
 func TestPublishRetryStatusReadsUnderThePodsNodeUID(t *testing.T) {
 	for name, tc := range map[string]struct {
 		runtime       *fakeRuntime

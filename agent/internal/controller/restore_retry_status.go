@@ -40,20 +40,24 @@ func (w *NodeController) publishRetryStatus(ctx context.Context, pod *corev1.Pod
 			}
 		}
 	}
-	if len(status) == 0 {
-		return
-	}
-	value, err := podcontract.FormatRestoreRetryStatus(status)
-	if err != nil {
-		log.Error(err, "Not publishing the restore retry status")
-		return
+	value := ""
+	if len(status) != 0 {
+		var err error
+		if value, err = podcontract.FormatRestoreRetryStatus(status); err != nil {
+			log.Error(err, "Not publishing the restore retry status")
+			return
+		}
 	}
 	if pod.Annotations[podcontract.RestoreRetryStatusAnnotation] == value {
 		return
 	}
-	configuration := corev1apply.Pod(pod.Name, pod.Namespace).
-		WithAnnotations(map[string]string{podcontract.RestoreRetryStatusAnnotation: value})
-	_, err = w.clientset.CoreV1().Pods(pod.Namespace).Apply(ctx, configuration, metav1.ApplyOptions{
+	// An apply without the annotation removes the one an earlier restore of
+	// the Pod published, since this field manager owns it.
+	configuration := corev1apply.Pod(pod.Name, pod.Namespace)
+	if value != "" {
+		configuration.WithAnnotations(map[string]string{podcontract.RestoreRetryStatusAnnotation: value})
+	}
+	_, err := w.clientset.CoreV1().Pods(pod.Namespace).Apply(ctx, configuration, metav1.ApplyOptions{
 		FieldManager: restoreStatusFieldManager,
 		Force:        true,
 	})
