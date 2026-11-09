@@ -112,6 +112,11 @@ type NodeController struct {
 	// begins before kubelet publishes the container in the Pod status.
 	startedRestoreContainers sync.Map
 
+	// finishedRestoreDestinations holds, per restoreContainerKey, the result of
+	// a destination whose restore ended in an earlier pass, so a pass that
+	// waits on a sibling neither restores nor notifies it again.
+	finishedRestoreDestinations sync.Map
+
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
 	contentIndexer cache.Indexer
@@ -180,8 +185,10 @@ type restoreOperation struct {
 	skipCompatCheck   bool
 	destination       string
 	containerID       string
-	startedAt         time.Time
-	log               logr.Logger
+	// nodeUID is the Pod's UID on the node, read when the attempt starts.
+	nodeUID   string
+	startedAt time.Time
+	log       logr.Logger
 }
 
 const (
@@ -450,10 +457,16 @@ func (w *NodeController) forgetRestorePod(obj interface{}) {
 		return
 	}
 	w.handledRestores.Delete(string(pod.UID))
-	prefix := string(pod.UID) + "/"
-	w.startedRestoreContainers.Range(func(key, _ any) bool {
+	forgetPodContainers(&w.startedRestoreContainers, pod.UID)
+	forgetPodContainers(&w.finishedRestoreDestinations, pod.UID)
+}
+
+// forgetPodContainers deletes every restoreContainerKey of one Pod.
+func forgetPodContainers(containers *sync.Map, uid ktypes.UID) {
+	prefix := string(uid) + "/"
+	containers.Range(func(key, _ any) bool {
 		if strings.HasPrefix(key.(string), prefix) {
-			w.startedRestoreContainers.Delete(key)
+			containers.Delete(key)
 		}
 		return true
 	})
@@ -538,6 +551,7 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		// The skip request is the way back for a pod the gates turned down, so
 		// it has to clear the in-process marker as well as the condition below.
 		w.handledRestores.Delete(string(pod.UID))
+		forgetPodContainers(&w.finishedRestoreDestinations, pod.UID)
 	} else if w.restoreHandled(pod) {
 		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
 		return
@@ -847,10 +861,14 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	// RestoreInProgress makes each worker check its completion sentinel before
 	// considering a CRIU replay.
 	recovering := restoreInProgress(pod)
-	message := fmt.Sprintf("Restoring %d destination container(s) from PodSnapshot %s", len(plan.mappings), plan.artifact.SnapshotName)
-	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
-		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
-		return true
+	// Every Pod update starts a pass, so a pass that only waits must leave the
+	// condition as the last one wrote it.
+	if !recovering {
+		message := fmt.Sprintf("Restoring %d destination container(s) from PodSnapshot %s", len(plan.mappings), plan.artifact.SnapshotName)
+		if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
+			emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
+			return true
+		}
 	}
 
 	results := make([]restoreResult, len(plan.mappings))
@@ -1007,7 +1025,26 @@ func (t restoreTally) progressMessage(snapshotName string) string {
 
 // restoreDestination resolves and restores one destination independently of
 // its siblings, returning only its worker-local outcome to the coordinator.
+// A destination that ended in an earlier pass reports the same outcome.
 func (w *NodeController) restoreDestination(
+	ctx context.Context,
+	pod *corev1.Pod,
+	plan *restorePlan,
+	destination, podKey string,
+	recovering bool,
+) restoreResult {
+	key := restoreContainerKey(pod.UID, destination)
+	if finished, ok := w.finishedRestoreDestinations.Load(key); ok {
+		return finished.(restoreResult)
+	}
+	result := w.restoreDestinationOnce(ctx, pod, plan, destination, podKey, recovering)
+	if result.state != restoreResultPending {
+		w.finishedRestoreDestinations.Store(key, result)
+	}
+	return result
+}
+
+func (w *NodeController) restoreDestinationOnce(
 	ctx context.Context,
 	pod *corev1.Pod,
 	plan *restorePlan,
@@ -1023,16 +1060,10 @@ func (w *NodeController) restoreDestination(
 
 	startedAt := time.Now()
 	log := w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "destination", destination)
-	log.Info("Restore target detected, triggering external restore",
-		"content_uid", artifact.ContentUID,
-		"source_container", artifact.SourceContainerName,
-		"container_id", containerID,
-	)
-	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", artifact.SnapshotName, destination))
 
 	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, recovering); err != nil {
-		if errors.Is(err, errRestoreInterrupted) {
-			// Not an outcome: the next agent resumes the post-restore action.
+		if errors.Is(err, errRestoreInterrupted) || errors.Is(err, errRetryScheduled) {
+			// Not an outcome: a later pass, or the next agent, carries it on.
 			return result
 		}
 		var incompatible *compat.IncompatibleError
@@ -1137,9 +1168,13 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 	}
 
 	record, err := op.startAttempt(ctx)
+	if errors.Is(err, errRetryScheduled) {
+		return err
+	}
 	if err != nil {
 		return op.failRestore(ctx, err)
 	}
+	op.announceAttempt(ctx, record)
 
 	// One deadline covers every attempt and the post-restore action.
 	restoreCtx := ctx
@@ -1161,7 +1196,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
-			return op.failRestore(ctx, err)
+			return op.attemptFailed(ctx, restoreCtx, record, err)
 		}
 		logWithStep(op.log, err).Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())

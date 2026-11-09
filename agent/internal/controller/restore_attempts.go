@@ -11,6 +11,8 @@ import (
 	"os"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
@@ -31,6 +33,8 @@ type restoreAttempts struct {
 	Deadline time.Time `json:"deadline"`
 	// ContainerID is the container the attempt ran in.
 	ContainerID string `json:"containerID"`
+	// RetryAt is when an in-place retry falls due, and zero otherwise.
+	RetryAt time.Time `json:"retryAt"`
 }
 
 func parseRestoreAttempts(data []byte) (*restoreAttempts, error) {
@@ -78,13 +82,15 @@ func (op *restoreOperation) writeRestoreAttempts(nodeUID string, record *restore
 	return nil
 }
 
-// startAttempt saves the attempt about to start in the destination's record.
-// The first attempt resolves the retry limit and the deadline; an agent that
-// restarted during an attempt repeats it within the same deadline.
+// startAttempt picks the restore up from the destination's record and saves
+// the attempt about to start. It returns errRetryScheduled while an in-place
+// retry is not due. The first attempt resolves the retry limit and the
+// deadline; an agent that restarted during an attempt repeats it within the
+// same deadline.
 func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts, error) {
 	now := op.controller.nowFn()
-	nodeUID := op.nodePodUID(ctx)
-	record, found, err := op.readRestoreAttempts(nodeUID)
+	op.nodeUID = op.nodePodUID(ctx)
+	record, found, err := op.readRestoreAttempts(op.nodeUID)
 	if err != nil {
 		return nil, err
 	}
@@ -97,21 +103,50 @@ func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts,
 		if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
 			record.Deadline = now.Add(timeout)
 		}
-	} else if !record.Deadline.IsZero() && !now.Before(record.Deadline) {
-		return nil, fmt.Errorf("restore timed out at %s, before attempt %d could start",
-			record.Deadline.UTC().Format(time.RFC3339), record.Attempt)
+	} else {
+		if now.Before(record.RetryAt) {
+			op.log.V(1).Info("Restore retry is not due yet", "retry_at", record.RetryAt.UTC().Format(time.RFC3339))
+			return nil, errRetryScheduled
+		}
+		next := record.Attempt
+		if !record.RetryAt.IsZero() {
+			next++
+		}
+		if !record.Deadline.IsZero() && !now.Before(record.Deadline) {
+			return nil, op.retriesExhausted(ctx, record, true, fmt.Errorf("restore timed out at %s, before attempt %d could start",
+				record.Deadline.UTC().Format(time.RFC3339), next))
+		}
+		if next > record.Limit+1 {
+			return nil, op.retriesExhausted(ctx, record, false, fmt.Errorf("attempt %d is over the limit of %d", next, record.Limit+1))
+		}
+		record.Attempt = next
+		record.RetryAt = time.Time{}
 	}
 	record.ContainerID = op.containerID
-	if err := op.writeRestoreAttempts(nodeUID, record); err != nil {
+	if err := op.writeRestoreAttempts(op.nodeUID, record); err != nil {
 		return nil, err
 	}
 	op.log = op.log.WithValues("attempt", record.Attempt, "retry_limit", record.Limit)
-	if record.Deadline.IsZero() {
-		op.log.Info("Starting restore attempt")
-	} else {
-		op.log.Info("Starting restore attempt", "time_left", record.Deadline.Sub(now).Round(time.Second).String())
-	}
 	return record, nil
+}
+
+// announceAttempt emits RestoreRequested for every attempt that starts. A
+// restore that allows retries names the attempt in it.
+func (op *restoreOperation) announceAttempt(ctx context.Context, record *restoreAttempts) {
+	keysAndValues := []any{
+		"content_uid", op.artifact.ContentUID,
+		"source_container", op.artifact.SourceContainerName,
+		"container_id", op.containerID,
+	}
+	if !record.Deadline.IsZero() {
+		keysAndValues = append(keysAndValues, "time_left", record.Deadline.Sub(op.controller.nowFn()).Round(time.Second).String())
+	}
+	op.log.Info("Restore target detected, triggering external restore", keysAndValues...)
+	message := fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", op.artifact.SnapshotName, op.destination)
+	if record.Limit > 0 {
+		message += fmt.Sprintf(" (attempt %d of %d)", record.Attempt, record.Limit+1)
+	}
+	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, message)
 }
 
 // forgetAttempts removes the destination's record after the gates refused
