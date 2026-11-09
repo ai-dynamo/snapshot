@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -144,7 +145,10 @@ func TestParseRestoreAttempts(t *testing.T) {
 // runtime names the Pod "host-uid" on the node, as a vCluster would.
 type attemptHarness struct {
 	w      *NodeController
+	pod    *corev1.Pod
 	volume *fakeControlVolume
+	// containerID is the destination container a pass finds.
+	containerID string
 	// now is the agent's clock. It starts at the real time, since an
 	// attempt's context ends by the real clock at the record's deadline.
 	now      time.Time
@@ -161,7 +165,7 @@ func newAttemptHarness(t *testing.T, annotations map[string]string, restoreErr e
 	w := makeTestController(t, pod)
 	w.config.Restore.TimeoutSeconds = 60
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
-	h := &attemptHarness{w: w, volume: newFakeControlVolume(w), now: time.Now().UTC().Truncate(time.Second)}
+	h := &attemptHarness{w: w, pod: pod, volume: newFakeControlVolume(w), containerID: "ctr-abc", now: time.Now().UTC().Truncate(time.Second)}
 	w.nowFn = func() time.Time { return h.now }
 	w.restoreFn = func(ctx context.Context, _ snapshotruntime.Runtime, _ logr.Logger, _ executor.RestoreRequest, _ executor.RestoreMounter) (executor.RestoreResult, error) {
 		h.restores++
@@ -179,7 +183,7 @@ func newAttemptHarness(t *testing.T, annotations map[string]string, restoreErr e
 	}
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
 	return h, func() error {
-		return w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", h.now, false)
+		return w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", h.containerID, h.now, false)
 	}
 }
 

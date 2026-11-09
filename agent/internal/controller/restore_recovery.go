@@ -29,6 +29,10 @@ const (
 // errRetryScheduled is a restore whose next attempt a later pass starts.
 var errRetryScheduled = errors.New("the restore waits for its next attempt")
 
+// errContainerStopped ends an attempt whose container the NRI hook reported
+// stopped.
+var errContainerStopped = errors.New("the container stopped during the attempt")
+
 type recovery int
 
 const (
@@ -112,6 +116,10 @@ func restoreFailureOf(err error) *executor.RestoreFailure {
 // ends the restore, including a failure that changed the container.
 func (op *restoreOperation) attemptFailed(ctx, restoreCtx context.Context, record *restoreAttempts, err error) error {
 	failure := restoreFailureOf(err)
+	if !failure.ContainerChanged && record.Limit > 0 && op.containerStopped(ctx) {
+		failure = restoreFailureOf(stoppedDuringAttempt(failure))
+		err = failure
+	}
 	now := op.controller.nowFn()
 	left := budgetLeft(record, now)
 	recovery := chooseRecovery(failure, restoreCtx.Err(), left)
@@ -145,6 +153,44 @@ func whyNotRetried(f *executor.RestoreFailure, ctxErr error) string {
 	default:
 		return "another attempt needs a new container"
 	}
+}
+
+// containerStopped reports whether the attempt's container no longer runs,
+// which the attempt's own error may not show.
+func (op *restoreOperation) containerStopped(ctx context.Context) bool {
+	running, err := op.controller.runtime.ContainerRunning(ctx, op.containerID)
+	if err != nil {
+		op.log.V(1).Info("Cannot read the container's state; taking it as running", "error", err.Error())
+		return false
+	}
+	return !running
+}
+
+// watchContainer returns the attempt's context, which RestoreContainerStopped
+// ends so that an attempt does not run on for a container that is gone.
+// endAttempt reports whether that happened. A restore that allows no retries
+// runs as before.
+func (op *restoreOperation) watchContainer(ctx context.Context, record *restoreAttempts) (attemptCtx context.Context, endAttempt func() bool) {
+	if record.Limit == 0 {
+		return ctx, func() bool { return false }
+	}
+	attemptCtx, cancel := context.WithCancelCause(ctx)
+	op.controller.runningAttempts.Store(op.containerID, cancel)
+	return attemptCtx, func() bool {
+		op.controller.runningAttempts.Delete(op.containerID)
+		stopped := errors.Is(context.Cause(attemptCtx), errContainerStopped)
+		cancel(nil)
+		return stopped
+	}
+}
+
+// stoppedDuringAttempt names the stop as the failure's cause, since the
+// attempt itself saw only its context end.
+func stoppedDuringAttempt(err error) error {
+	stopped := *restoreFailureOf(err)
+	stopped.Cause = fmt.Errorf("%w: %w", errContainerStopped, stopped.Cause)
+	stopped.ContainerChanged = true
+	return &stopped
 }
 
 // reportFailedAttempt emits RestoreAttemptFailed for a restore that allows
