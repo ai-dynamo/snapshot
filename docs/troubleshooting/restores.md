@@ -6,10 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # Troubleshoot Restores
 
 Use this page when a restore is slow, is refused, or fails. It starts with a
-restore that is slower than expected and a restore that is refused because a
-mount is missing. Then it lists each step a restore can fail at, with the
-likely causes and what to check. To find which step failed, see
-[Reading a Failure Message](reading-a-failure-message.md).
+restore that is slower than expected, a restore that is refused because a
+mount is missing, and restore attempts that fail and retry. Then it lists each
+step a restore can fail at, with the likely causes and what to check. To find
+which step failed, see [Reading a Failure Message](reading-a-failure-message.md).
 
 ## A Restore Is Slower Than Expected
 
@@ -32,6 +32,40 @@ kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.status.conditions[?(@.type=
 
 Add the volume to the restore Pod at the same `mountPath`. The volume's
 backing store can differ; only the path inside the container has to match.
+
+## Restore Attempts Fail with `RestoreAttemptFailed`
+
+With a retry limit above 0, each failed attempt gets a `RestoreAttemptFailed`
+warning event. It names the attempt, the destination container, the failure,
+and what follows:
+
+- `retrying in place in <backoff>`: the failure left the container untouched,
+  and the same container gets the next attempt.
+- `not retried: another attempt needs a new container`: the failure changed
+  the container, or the container stopped. The restore ends.
+- `no retries left` or another `not retried: <reason>`: the restore ends.
+
+The `nvidia.com/restore-retry-status` annotation holds the last failure:
+
+```bash
+kubectl get events -n <ns> --field-selector involvedObject.name=<restore-pod>,reason=RestoreAttemptFailed
+kubectl get pod <restore-pod> -n <ns> -o jsonpath='{.metadata.annotations.nvidia\.com/restore-retry-status}'
+```
+
+A retry needs no action. When every attempt fails at one step, look up that
+step under [Restore Fails at a Step](#restore-fails-at-a-step). When
+`lastFailure.snapshotUnusable` is `true`, the snapshot is missing, corrupt, or
+unsupported. Restore from another `PodSnapshot`.
+
+## A Restore Ends with `RestoreRetriesExhausted`
+
+The restore used all of its attempts, or `config.restore.timeoutSeconds` ran
+out before the next one. The event says which. The `nvidia.com/Restored`
+condition then ends with `RestoreFailed` and the last attempt's failure.
+
+Look up the last failure's step under
+[Restore Fails at a Step](#restore-fails-at-a-step). Delete the Pod to restore
+again.
 
 ## Restore Fails at a Step
 
@@ -190,8 +224,10 @@ ended from outside:
   `config.restore.timeoutSeconds`. The cause before the semicolon is
   what was running when time ran out, and it may carry one of the steps
   below. Raise the timeout, or find what stalled in the agent log.
-- `...; the restore was cancelled`: the restore was withdrawn or the agent
-  shut down before nsrestore finished.
+- `...; the restore was cancelled`: the restore was withdrawn before nsrestore
+  finished. An agent that shuts down leaves the attempt to the next agent,
+  which runs it again; see
+  [Agent Restarts](../design/restore-retry/README.md#agent-restarts).
 
 During an upgrade, a node whose agent pod has not rolled yet still reports
 every nsrestore failure under this step. `kubectl rollout status
