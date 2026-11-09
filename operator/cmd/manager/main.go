@@ -34,6 +34,7 @@ func main() {
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	artifactCleanupS3CredentialsPath, artifactCleanupS3CABundlePath := bindArtifactCleanupS3Flags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
+	coordinatorTLS := bindCoordinatorTLSFlags(flag.CommandLine)
 	testFailureAnnotation, err := bindTestHookFlags(flag.CommandLine)
 	if err != nil {
 		ctrl.Log.Error(err, "invalid E2E test hook configuration")
@@ -123,6 +124,11 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		ctrl.Log.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+
+	if err := addCoordinatorTLSIssuer(mgr, coordinatorTLS); err != nil {
+		ctrl.Log.Error(err, "unable to set up the coordinator TLS issuer")
 		os.Exit(1)
 	}
 
