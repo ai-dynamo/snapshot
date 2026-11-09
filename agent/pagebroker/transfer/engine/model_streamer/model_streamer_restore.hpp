@@ -82,9 +82,10 @@ class ModelStreamerRestore {
     // Called by the restore caller before admission or after native access ends.
     // Repeated calls are harmless; destruction also releases remaining mappings.
     void ReleaseMappings() noexcept;
-    // Adds a nonempty file, or returns false when it belongs in the next batch.
+    // Allocates and maps a selected range using the retained writable descriptor.
     // On exception, discard the entry; its arrays may be partially populated.
-    bool TryAddFile(const CheckpointFile& file, const Path& destination, uintmax_t batch_bytes);
+    void AddRange(const CheckpointFile& file, int descriptor, std::size_t offset,
+                  std::size_t length, std::size_t page_size);
 
     // Caller-only: fence pending native admission before releasing mappings.
     void Withdraw() noexcept;
@@ -99,6 +100,13 @@ class ModelStreamerRestore {
       std::vector<std::size_t> sizes;
       std::vector<void*> destinations;
     } request;
+
+    // Owns mappings independently of the native request arrays.
+    struct Mapping {
+      void* base;
+      std::size_t length;
+    };
+    std::vector<Mapping> mappings;
 
     std::shared_ptr<RestoreState> restore_state;
     uintmax_t bytes = 0;
@@ -143,8 +151,8 @@ class ModelStreamerRestore {
   std::exception_ptr WaitForWork();
   // Starts a native session on the worker thread.
   void Start();
-  // Restores files in batches using a byte budget; an oversized file forms its
-  // own batch. Retains the configured number of batches, preparing ahead here.
+  // Restores files in bounded range batches. Retains the configured number of
+  // batches, preparing ahead here.
   // Drains all native access before returning or unwinding to the inventory owner.
   void RestoreFiles(const CheckpointInventory& inventory, const Path& destination, Cancellation cancellation);
   // Observe retained outcomes in FIFO order before checking child cancellation.
@@ -205,6 +213,8 @@ class ModelStreamerRestore {
   const std::chrono::milliseconds submission_timeout_;
   const uintmax_t restore_batch_bytes_;
   const std::size_t restore_preparation_slots_;
+  const std::size_t active_submission_limit_;
+  const uintmax_t active_byte_budget_;
   const ModelStreamerSessionOptions options_;
   const std::exception_ptr stopped_error_;
   std::thread worker_;

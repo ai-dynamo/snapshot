@@ -17,8 +17,8 @@ struct S3Config;
 
 // Limit elapsed time per native submission; an earlier transaction deadline wins.
 inline constexpr std::chrono::minutes kDefaultModelStreamerSubmissionTimeout{20};
-// Target bytes per batch and shared native admission budget. A file exceeding
-// the budget runs alone. This does not bound total checkpoint staging memory.
+// Maximum requested bytes per batch; large files use bounded ranges. Shared
+// admission also uses preparation slots. Neither bounds total staging memory.
 inline constexpr std::uint64_t kDefaultRestoreBatchBytes = 10'000'000'000;
 inline constexpr std::size_t kDefaultRestorePreparationSlots = 3;
 inline constexpr std::size_t kMaxRestorePreparationSlots = 20;
@@ -28,7 +28,7 @@ namespace snapshot::pagebroker::model_streamer::settings {
 // Optional values distinguish omission (inherit the startup environment or
 // defaults) from an explicit zero. Native tuning is fixed for the process.
 struct Options {
-  // PageBroker-owned batch/admission budget; not a native environment setting.
+  // PageBroker-owned batch size; not a native environment setting.
   std::optional<std::uint64_t> restore_batch_bytes;
   std::optional<std::uint64_t> restore_preparation_slots;
   std::optional<std::uint64_t> read_chunk_bytes;

@@ -57,8 +57,8 @@ Native variable names below omit the common `RUNAI_STREAMER_` prefix.
 
 | JSON field | Native setting | Accepted values |
 | --- | --- | --- |
-| `restoreBatchBytes` | PageBroker batch/admission budget; no native variable | Positive unsigned 64-bit integer in bytes; default 10000000000 (10 GB) |
-| `restorePreparationSlots` | PageBroker preparation capacity; no native variable | Integer, 1–20; default 3, per restore |
+| `restoreBatchBytes` | PageBroker maximum batch bytes; no native variable | Unsigned 64-bit integer in bytes, at least the system page size; default 10000000000 (10 GB) |
+| `restorePreparationSlots` | PageBroker preparation and download capacity; no native variable | Integer, 1–20; default 3; see [restore batching](#restore-batching) |
 | `readChunkBytes` | `CHUNK_BYTESIZE` | Integer, 2 MiB–1 GiB; native S3 reads floor it to 5 MiB |
 | `processGroupSize` | `PROCESS_GROUP_SIZE` | Positive unsigned 32-bit integer |
 | `s3Reader.concurrency` | `OBJ_CONCURRENCY` | Integer, 1–1024 |
@@ -104,15 +104,19 @@ Reader tuning does not change SDK upload limits.
 
 ## Restore batching
 
-`restoreBatchBytes` controls the target download batch size (default: 10 GB).
-Files larger than this value are downloaded whole.
+`restoreBatchBytes` sets the maximum download batch size (default: 10 GB).
+Large files are split into ranges without changing the snapshot format.
+`restorePreparationSlots` limits batches retained per restore, including
+preparation and downloads. The default of three allows two active batches
+while the next is prepared.
 
-`restorePreparationSlots` controls how many batches each restore can prepare
-ahead, including the active batch (default: 3). Higher values may improve
-throughput but can increase memory use and contention.
+For N slots and B batch bytes, at most `C = min(8, max(1, N - 1))`
+submissions and `C * B` bytes may be active. Concurrent restores share these
+limits. Configurations whose byte budget overflows are rejected. More slots
+can increase contention; they do not add S3 workers or enlarge client windows.
 
-Configure both under `pageBroker.transferEngine.modelStreamer` in Helm values
-or through the tuning JSON above. Changes require a PageBroker restart.
+Configure both settings under `pageBroker.transferEngine.modelStreamer` in Helm
+values or through the tuning JSON above, then restart PageBroker.
 The staging volume must hold the entire snapshot regardless of these settings.
 
 ## Native behavior

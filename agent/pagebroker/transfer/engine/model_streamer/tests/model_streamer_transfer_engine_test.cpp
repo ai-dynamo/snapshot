@@ -43,7 +43,7 @@ struct FakeStreamer {
   bool stall_responses;
   std::vector<FakeResponse> responses = {};
   std::size_t next_response = 0;
-  void* stalled_destination = nullptr;
+  std::vector<void*> stalled_destinations = {};
 };
 
 std::atomic<unsigned> starts = 0;
@@ -117,10 +117,10 @@ class ModelStreamerTransferEngineTest : public ::testing::Test {
     return config;
   }
 
-  PreparedRestore Prepared() const
+  PreparedRestore Prepared(uintmax_t bytes = 9) const
   {
     PreparedRestore result;
-    result.inventory.files.push_back({"s3://local-test-bucket/data", "data", 9});
+    result.inventory.files.push_back({"s3://local-test-bucket/data", "data", bytes});
     return result;
   }
 
@@ -164,7 +164,7 @@ runai_file_streamer_end(void* streamer)
     native_changed.notify_all();
     EXPECT_TRUE(native_changed.wait_for(lock, std::chrono::seconds(5), [] { return !hold_end; }));
     // Native access remains legal until runai_file_streamer_end returns.
-    if (auto* destination = static_cast<FakeStreamer*>(streamer)->stalled_destination)
+    for (auto* destination : static_cast<FakeStreamer*>(streamer)->stalled_destinations)
       *static_cast<char*>(destination) = 'x';
   }
   ++ends;
@@ -194,7 +194,7 @@ runai_file_streamer_request(
   }
   *out_submission_id = submission_id;
   if (streamer.stall_responses) {
-    streamer.stalled_destination = range_destinations[0];
+    streamer.stalled_destinations.push_back(range_destinations[0]);
     return 0;
   }
   if (streamer.fail_responses) {
@@ -268,16 +268,20 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
   const fs::path storage = root / "storage";
   const fs::path source = storage / "source";
   fs::create_directories(source);
-  std::ofstream(source / "data") << "recovered";
+  const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+  const std::string contents = std::string(page, 'a') + std::string(page, 'b') + "recovered";
+  std::ofstream(source / "data") << contents;
 
   fake_s3_root = source;
-  const auto prepare = [] {
+  const auto prepare = [&] {
     PreparedRestore result;
-    result.inventory.files.push_back({"s3://local-test-bucket/data", "data", 9});
+    result.inventory.files.push_back({"s3://local-test-bucket/data", "data", contents.size()});
     return result;
   };
   {
-    ModelStreamerTransferEngine engine(Config());
+    model_streamer::settings::Options tuning;
+    tuning.restore_batch_bytes = page;
+    ModelStreamerTransferEngine engine(Config(), tuning);
     EXPECT_THROW(engine.StageRestore(prepare(), root / "first"), std::runtime_error);
     EXPECT_EQ(starts, 1);
     EXPECT_EQ(ends, 1);
@@ -285,9 +289,12 @@ TEST_F(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
     ASSERT_NO_THROW(engine.StageRestore(prepare(), root / "second"));
     std::ifstream restored(root / "second" / "data");
     ASSERT_TRUE(restored);
-    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(restored), std::istreambuf_iterator<char>()), "recovered");
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(restored), std::istreambuf_iterator<char>()), contents);
     EXPECT_EQ(starts, 2);
     EXPECT_NO_THROW(engine.StageRestore(prepare(), root / "third"));
+    std::ifstream reused(root / "third" / "data");
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(reused), std::istreambuf_iterator<char>()), contents);
+    EXPECT_EQ(fs::file_size(root / "third/data"), contents.size());
     EXPECT_EQ(starts, 2);
     EXPECT_EQ(ends, 1);
   }
@@ -339,13 +346,14 @@ TEST_F(ModelStreamerTransferEngineTest, S3RestoreReturnsOwnedLocalAccess)
 TEST_F(ModelStreamerTransferEngineTest, ConfiguredBatchBudgetSurvivesCoordinatorReplacement)
 {
   fake_s3_root = root_.path();
-  std::ofstream(root_.path() / "data") << "123456789";
+  const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+  std::ofstream(root_.path() / "data") << std::string(page, 'a');
   std::ofstream(root_.path() / "other") << "x";
-  const auto tuning = model_streamer::settings::ParseConfig(R"({"restoreBatchBytes":9})");
+  const auto tuning = model_streamer::settings::ParseConfig("{\"restoreBatchBytes\":" + std::to_string(page) + "}");
   ModelStreamerTransferEngine engine(Config(), tuning);
-  EXPECT_THROW(engine.StageRestore(Prepared(), root_.path() / "failed"), TransferError);
+  EXPECT_THROW(engine.StageRestore(Prepared(page), root_.path() / "failed"), TransferError);
   const auto before = next_submission_id.load();
-  auto prepared = Prepared();
+  auto prepared = Prepared(page);
   prepared.inventory.files.push_back({"s3://local-test-bucket/other", "other", 1});
   EXPECT_NO_THROW(engine.StageRestore(std::move(prepared), root_.path() / "replaced"));
   EXPECT_EQ(next_submission_id.load() - before, 2U);
@@ -355,19 +363,20 @@ TEST_F(ModelStreamerTransferEngineTest, ConfiguredBatchBudgetSurvivesCoordinator
 TEST_F(ModelStreamerTransferEngineTest, ConfiguredPreparationCapacitySurvivesCoordinatorReplacement)
 {
   fake_s3_root = root_.path();
-  std::ofstream(root_.path() / "data") << "123456789";
+  const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+  std::ofstream(root_.path() / "data") << std::string(page, 'a');
   options_.restore_timeout = std::chrono::seconds(10);
   const auto tuning = model_streamer::settings::ParseConfig(
-      R"({"restoreBatchBytes":9,"restorePreparationSlots":3})");
+      "{\"restoreBatchBytes\":" + std::to_string(page) + ",\"restorePreparationSlots\":3}");
   ModelStreamerTransferEngine engine(Config(), tuning);
-  EXPECT_THROW(engine.StageRestore(Prepared(), root_.path() / "failed"), TransferError);
+  EXPECT_THROW(engine.StageRestore(Prepared(page), root_.path() / "failed"), TransferError);
   hold_responses = true;
   const auto destination = root_.path() / "replaced";
   auto restored = std::async(std::launch::async, [&] {
-    auto prepared = Prepared();
+    auto prepared = Prepared(page);
     prepared.inventory.files.clear();
     for (unsigned i = 0; i < 4; ++i)
-      prepared.inventory.files.push_back({"s3://local-test-bucket/data", std::to_string(i), 9});
+      prepared.inventory.files.push_back({"s3://local-test-bucket/data", std::to_string(i), page});
     return engine.StageRestore(std::move(prepared), destination);
   });
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -642,12 +651,15 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
   timeout_first_session = true;
   hold_end = true;
   fake_s3_root = root_.path();
-  std::ofstream(root_.path() / "source") << "a";
+  const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+  std::ofstream(root_.path() / "source") << std::string(page, 'a');
   CheckpointInventory inventory;
-  inventory.files.push_back({"s3://local-test-bucket/source", "data", 1, fs::perms::owner_read});
-  inventory.files.push_back({"s3://local-test-bucket/source", "next", 1, fs::perms::owner_read});
+  inventory.files.push_back({"s3://local-test-bucket/source", "data", page, fs::perms::owner_read});
+  inventory.files.push_back({"s3://local-test-bucket/source", "next", page, fs::perms::owner_read});
   options_.restore_timeout = std::chrono::hours(1);
-  ModelStreamerTransferEngine engine(Config(), model_streamer::settings::ParseConfig(R"({"restoreBatchBytes":1})"));
+  const auto tuning = model_streamer::settings::ParseConfig(
+      "{\"restoreBatchBytes\":" + std::to_string(page) + "}");
+  ModelStreamerTransferEngine engine(Config(), tuning);
   const auto prepare = [&] {
     PreparedRestore prepared;
     prepared.inventory = inventory;
@@ -660,7 +672,7 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
   });
   {
     std::unique_lock lock(native_mutex);
-    EXPECT_TRUE(native_changed.wait_for(lock, std::chrono::seconds(2), [] { return next_submission_id != 0; }));
+    EXPECT_TRUE(native_changed.wait_for(lock, std::chrono::seconds(2), [] { return next_submission_id == 2; }));
   }
   cancellation.Cancel();
   {
@@ -683,9 +695,13 @@ TEST_F(ModelStreamerTransferEngineTest, CancelledRestoreDrainsBeforeEngineReplac
     EXPECT_EQ(error.code, Failure::INTERNAL_ERROR);
   }
   EXPECT_EQ(ends, 1U);
+  // Teardown can still write to either accepted batch before the caller returns.
+  for (const auto& file : inventory.files) {
+    char byte = 0;
+    std::ifstream(root_.path() / "cancelled" / file.relative_path).get(byte);
+    EXPECT_EQ(byte, 'x');
+  }
   char byte = 0;
-  std::ifstream(root_.path() / "cancelled/data").get(byte);
-  EXPECT_EQ(byte, 'x');  // Teardown could still write before the cancelled caller returned.
   EXPECT_NO_THROW(engine.StageRestore(prepare(), root_.path() / "recovered"));
   EXPECT_EQ(starts, 2U);
   std::ifstream(root_.path() / "recovered/data").get(byte);

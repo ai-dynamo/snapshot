@@ -92,11 +92,15 @@ commit-level history for each release is on its
   a **checkpoint** (the verb) and what it writes is a **snapshot** (the noun).
   No condition type, reason or label changed, so nothing that matches on those
   strings needs updating; only the two values above were renamed.
-- S3 restores prepare up to two batches ahead of downloads by default. Configure
+- S3 restores retain three batches by default. Configure
   `pageBroker.transferEngine.modelStreamer.restorePreparationSlots` in Helm
   values, or `restorePreparationSlots` in the tuning JSON (1–20, default 3),
   to bound retained batches per restore. Restart PageBroker after changing it.
-  Shared native admission limits remain unchanged; oversized files run alone.
+- S3 restores allocate and download large files in bounded ranges without
+  changing the snapshot format. The default three slots allow two active
+  submissions, shared across restores, replacing the eight-submission limit
+  for small batches. `restoreBatchBytes` must be at least the system page size.
+  See [restore batching](agent/pagebroker/MODEL_STREAMER.md#restore-batching).
 - PageBroker defaults to a 512 MiB S3 read window per client, increased from
   128 MiB. Explicit `s3Reader.maxInflightMiB` and
   `RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB` overrides still take precedence.
