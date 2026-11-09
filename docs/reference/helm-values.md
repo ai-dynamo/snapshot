@@ -129,6 +129,7 @@ payload checksums.
 
 - `config.overlay.exclusions` - Rootfs-diff tar exclusions. Default: `/proc`, `/sys`, `/dev`, `*/.cache/huggingface`, `*/__pycache__`, `*.pyc`. A file the checkpointed processes hold open or mapped at dump time is archived even when an exclusion matches it, so CRIU can reopen it. Other excluded files are not restored; the workload must recreate them if needed.
 - `config.checkpoint.timeoutSeconds` - Maximum seconds for a checkpoint before the agent marks it failed. Default `3600`.
+- `config.checkpoint.multiGpuPreparation` - How a `SnapshotJob` source Pod that opts into multi-GPU support is prepared. Default `agent`: the node agent prepares it at start, which needs NRI on the node. `initContainer`: the operator adds an init container instead, which works on any runtime and needs `command` on the target container. The operator reads this value, not the agent. See [Multi-GPU Workloads](workload-contract.md#multi-gpu-workloads).
 - `config.restore.timeoutSeconds` - Maximum seconds for a restore before the agent marks it failed. Default `7200`.
 
 `config.criu.*` - CRIU options:

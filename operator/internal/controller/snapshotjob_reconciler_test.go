@@ -28,6 +28,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 func snapshotJobReconcilerScheme() *runtime.Scheme {
@@ -49,9 +50,10 @@ func makeSnapshotJobReconcilerWithInterceptor(s *runtime.Scheme, funcs intercept
 		WithStatusSubresource(&snapshotv1alpha1.SnapshotJob{}).
 		WithInterceptorFuncs(funcs).Build()
 	return &SnapshotJobReconciler{
-		Client:             testClient,
-		NonCacheReadClient: testClient,
-		Recorder:           record.NewFakeRecorder(10),
+		Client:               testClient,
+		NonCacheReadClient:   testClient,
+		Recorder:             record.NewFakeRecorder(10),
+		CuInterposeContainer: operatortypes.CuInterposeContainerConfiguration{Preparation: operatortypes.MultiGPUPreparationAgent},
 	}
 }
 
@@ -821,8 +823,8 @@ func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
 	})
 }
 
-// TestSnapshotJobReconcileCuInterpose proves the operator leaves cuinterpose delivery
-// to the agent. The source Job keeps the opt-in and the workload's own process.
+// TestSnapshotJobReconcileCuInterpose proves that in agent mode the operator leaves
+// cuinterpose delivery to the agent. The source Job keeps the opt-in and the workload's own process.
 // Its target carries what the agent's capture preflight needs to accept it.
 func TestSnapshotJobReconcileCuInterpose(t *testing.T) {
 	for _, tc := range []struct {
@@ -854,9 +856,48 @@ func TestSnapshotJobReconcileCuInterpose(t *testing.T) {
 	}
 }
 
+// TestSnapshotJobReconcileCuInterposeInitContainer proves the initContainer fallback
+// installs the libraries and starts the target under the launcher, so the source
+// needs no NRI. The agent leaves a target shaped this way alone.
+func TestSnapshotJobReconcileCuInterposeInitContainer(t *testing.T) {
+	for _, value := range []string{"disabled", "enabled"} {
+		t.Run(value, func(t *testing.T) {
+			enabled := value == "enabled"
+			sj := minimalSnapshotJob()
+			sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: value}
+			worker := &sj.Spec.PodTemplate.Spec.Containers[0]
+			worker.Command = []string{"python3", "-m", "worker"}
+			r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+			r.CuInterposeContainer = testCuInterposeInstaller()
+			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+			require.NoError(t, err)
+			job := getSourceJob(t, r.Client, sj)
+			container := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+			if !enabled {
+				assert.Equal(t, worker.Command, container.Command)
+				assert.Empty(t, job.Spec.Template.Spec.InitContainers)
+				return
+			}
+			installer := requireContainer(t, job.Spec.Template.Spec.InitContainers, "snapshot-cuda-install")
+			assert.Equal(t, r.CuInterposeContainer.Image, installer.Image)
+			assert.Equal(t, append(podcontract.CuInterposeLauncherPrefix(), worker.Command...), container.Command)
+			require.NoError(t, podcontract.ValidateCuInterposeTarget(container))
+		})
+	}
+}
+
+func testCuInterposeInstaller() operatortypes.CuInterposeContainerConfiguration {
+	return operatortypes.CuInterposeContainerConfiguration{
+		Preparation: operatortypes.MultiGPUPreparationInitContainer,
+		Image:       "registry.example/agent:dev",
+		PullPolicy:  corev1.PullNever,
+	}
+}
+
 // TestSnapshotJobCuInterposeAdoptsShapedJob proves adoption accepts a source Job that
-// an earlier operator shaped with the cuinterpose installer and launcher, without
-// reshaping it. The agent leaves such a Job's target alone.
+// carries the cuinterpose installer and launcher, without reshaping it. An earlier
+// operator, or one switched from initContainer mode, shaped it. The agent leaves
+// such a Job's target alone.
 func TestSnapshotJobCuInterposeAdoptsShapedJob(t *testing.T) {
 	ctx := context.Background()
 	sj := minimalSnapshotJob()
@@ -892,11 +933,14 @@ func TestSnapshotJobCuInterposeAdoptsShapedJob(t *testing.T) {
 
 func TestSnapshotJobCuInterposeInvalidSource(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		annotation string
-		command    []string
-		want       string
+		name          string
+		annotation    string
+		command       []string
+		initContainer bool
+		want          string
 	}{
+		{name: "missing command", annotation: "enabled", initContainer: true, want: "requires container.command"},
+		{name: "empty command", annotation: "enabled", command: []string{""}, initContainer: true, want: "requires container.command"},
 		{name: "invalid annotation", annotation: "invalid", command: []string{"worker"}, want: "expected enabled or disabled"},
 		{name: "empty annotation", annotation: "", command: []string{"worker"}, want: "expected enabled or disabled"},
 	} {
@@ -905,6 +949,9 @@ func TestSnapshotJobCuInterposeInvalidSource(t *testing.T) {
 			sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: tc.annotation}
 			sj.Spec.PodTemplate.Spec.Containers[0].Command = tc.command
 			r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+			if tc.initContainer {
+				r.CuInterposeContainer = testCuInterposeInstaller()
+			}
 			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 			require.NoError(t, err)
 			updated := &snapshotv1alpha1.SnapshotJob{}

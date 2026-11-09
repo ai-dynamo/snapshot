@@ -746,6 +746,8 @@ CuInterpose adds no CRDs or CRD fields.
 The shim must load before the application creates CUDA allocations so it can record their full lifetime.
 The agent's NRI plugin prepares the target container when the container runtime creates it, the same way for a SnapshotJob source and for a Pod the user deploys.
 The Pod object is not changed.
+With `config.checkpoint.multiGpuPreparation: initContainer`, the operator instead shapes a SnapshotJob source in `ShapeCuInterposeCapture` (`operator/internal/protocol/cuinterpose.go`): it adds the `snapshot-cuda-install` init container and an `emptyDir` at the delivery path, and prepends the launcher prefix to the target's `command`.
+The plugin then skips the target, as it skips any container that mounts the delivery path.
 
 The plugin prepares a container when all of these hold:
 

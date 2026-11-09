@@ -111,7 +111,7 @@ answer before the checkpoint becomes destructive.
 
 - A CUDA process started without the shim
 - The source node has no NRI; see
-  [Multi-GPU Workloads](../get-started/prerequisites.md#multi-gpu-workloads)
+  [Without NRI](../reference/workload-contract.md#without-nri)
 - The delivery mount is writable
 - The coordinator is not running
 

@@ -33,6 +33,7 @@ func main() {
 	storageConfigPath := flag.String("snapshot-storage-config", "", "Path to resolved storage configuration shared with PageBroker")
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	artifactCleanupS3CredentialsPath, artifactCleanupS3CABundlePath := bindArtifactCleanupS3Flags(flag.CommandLine)
+	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
 	testFailureAnnotation, err := bindTestHookFlags(flag.CommandLine)
 	if err != nil {
 		ctrl.Log.Error(err, "invalid E2E test hook configuration")
@@ -79,6 +80,10 @@ func main() {
 	artifactCleanupConfig.StoreID = storeID
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
+		os.Exit(1)
+	}
+	if err := cuInterposeConfig.Validate(); err != nil {
+		ctrl.Log.Error(err, "invalid multi-GPU preparation configuration")
 		os.Exit(1)
 	}
 
@@ -174,9 +179,10 @@ func main() {
 	}
 
 	snapshotJobReconciler := &controller.SnapshotJobReconciler{
-		Client:             mgr.GetClient(),
-		NonCacheReadClient: mgr.GetAPIReader(),
-		Recorder:           mgr.GetEventRecorderFor("snapshotjob-controller"),
+		Client:               mgr.GetClient(),
+		NonCacheReadClient:   mgr.GetAPIReader(),
+		Recorder:             mgr.GetEventRecorderFor("snapshotjob-controller"),
+		CuInterposeContainer: *cuInterposeConfig,
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")

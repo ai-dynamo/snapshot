@@ -217,6 +217,59 @@ unchanged. The agent also leaves alone a container that mounts a volume at
 itself keeps working. If the agent cannot prepare a container, the container
 does not start, and kubelet retries it.
 
+### Without NRI
+
+The agent prepares containers through NRI, which needs the runtime in
+[Prerequisites](../get-started/prerequisites.md#multi-gpu-workloads). On nodes
+without it, the source Pod installs the libraries with an init container:
+
+- **A `SnapshotJob`** - Set `config.checkpoint.multiGpuPreparation` to
+  `initContainer` in the Helm values. The operator adds the init container and
+  starts the target through the launcher. The target container must set
+  `command`.
+- **A Pod that Snapshot does not create** - Add the init container, the volume,
+  and the launcher prefix yourself. The init container uses the image of the
+  `snapshot-agent` DaemonSet's `agent` container:
+
+  ```yaml
+  template:
+    metadata:
+      annotations:
+        nvidia.com/snapshot-multi-gpu: enabled
+    spec:
+      initContainers:
+        - name: snapshot-cuda-install
+          image: ${SNAPSHOT_AGENT_IMAGE}
+          command:
+            - /bin/cp
+          args:
+            - --preserve=mode
+            - --
+            - /usr/local/lib/snapshot/libcuinterpose.so
+            - /usr/local/lib/snapshot/libcuinterpose_core.so
+            - /usr/local/bin/cuinterpose-launch
+            - /tmp/snapshot-cuda/
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+      containers:
+        - name: main
+          command:
+            - /tmp/snapshot-cuda/cuinterpose-launch
+            - --library
+            - /tmp/snapshot-cuda/libcuinterpose.so
+            - --
+            - python3
+            - /snapshot-app/app.py
+          volumeMounts:
+            - name: snapshot-cuda
+              mountPath: /tmp/snapshot-cuda
+              readOnly: true
+      volumes:
+        - name: snapshot-cuda
+          emptyDir: {}
+  ```
+
 The eight-GPU recipes in [Using Snapshot](../using-snapshot/README.md#choose-your-recipe)
 are complete examples.
 
