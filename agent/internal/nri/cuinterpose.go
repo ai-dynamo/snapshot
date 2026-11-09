@@ -4,16 +4,14 @@
 package nri
 
 import (
-	"errors"
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/containerd/nri/pkg/api"
-	"golang.org/x/sys/unix"
 
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
@@ -34,6 +32,10 @@ const (
 // An error fails the container's creation: starting without the launcher would
 // run a workload that cannot be checkpointed as requested.
 func (p *Plugin) shapeCuInterposeCapture(pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, error) {
+	// Check the container first, so an invalid annotation logs only for targets.
+	if !needsCuInterposeDelivery(ctr) {
+		return nil, nil
+	}
 	log := p.log.WithValues("pod", pod.GetNamespace()+"/"+pod.GetName(), "container", ctr.GetName())
 	requested, err := podcontract.ParseCuInterposeAnnotation(pod.GetAnnotations())
 	if err != nil {
@@ -42,7 +44,7 @@ func (p *Plugin) shapeCuInterposeCapture(pod *api.PodSandbox, ctr *api.Container
 		log.Info("Ignoring invalid multi-GPU annotation", "error", err.Error())
 		return nil, nil
 	}
-	if !requested || !needsCuInterposeDelivery(ctr) {
+	if !requested {
 		return nil, nil
 	}
 	args := ctr.GetArgs()
@@ -99,23 +101,20 @@ func (p *Plugin) installCuInterpose(podUID, containerName string) (string, error
 		return "", err
 	}
 	defer control.Close()
-	dir, err := openSubdir(control, cuInterposeDeliveryDir)
+	dir, err := snapshotruntime.OpenSubdir(control, cuInterposeDeliveryDir)
 	if err != nil {
 		return "", err
 	}
 	defer dir.Close()
 
-	for _, file := range []struct {
-		src, name string
-		perm      os.FileMode
-	}{
-		{filepath.Join(p.cuInterposeLibDir, types.CuInterposeFrontend), types.CuInterposeFrontend, 0o644},
-		{filepath.Join(p.cuInterposeLibDir, types.CuInterposeCore), types.CuInterposeCore, 0o644},
-		{p.cuInterposeLauncher, path.Base(podcontract.CuInterposeLauncherPath), 0o755},
-	} {
-		if err := copyFile(file.src, dir, file.name, file.perm); err != nil {
-			return "", fmt.Errorf("copy %s: %w", file.name, err)
+	for _, name := range types.CuInterposeLibraries {
+		if err := copyFile(filepath.Join(p.cuInterposeLibDir, name), dir, name, 0o644); err != nil {
+			return "", fmt.Errorf("copy %s: %w", name, err)
 		}
+	}
+	launcher := path.Base(podcontract.CuInterposeLauncherPath)
+	if err := copyFile(p.cuInterposeLauncher, dir, launcher, 0o755); err != nil {
+		return "", fmt.Errorf("copy %s: %w", launcher, err)
 	}
 
 	rel, ok := strings.CutPrefix(dir.Name(), strings.TrimSuffix(p.nodeRoot, "/")+"/")
@@ -123,18 +122,4 @@ func (p *Plugin) installCuInterpose(podUID, containerName string) (string, error
 		return "", fmt.Errorf("delivery directory %s is outside the node root %s", dir.Name(), p.nodeRoot)
 	}
 	return "/" + rel, nil
-}
-
-// openSubdir creates name in parent if needed and opens it without following
-// a symlink, since the container can write to its control directory.
-func openSubdir(parent *os.File, name string) (*os.File, error) {
-	pfd := int(parent.Fd())
-	if err := unix.Mkdirat(pfd, name, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
-		return nil, fmt.Errorf("create %s/%s: %w", parent.Name(), name, err)
-	}
-	fd, err := unix.Openat(pfd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open %s/%s: %w", parent.Name(), name, err)
-	}
-	return os.NewFile(uintptr(fd), filepath.Join(parent.Name(), name)), nil
 }

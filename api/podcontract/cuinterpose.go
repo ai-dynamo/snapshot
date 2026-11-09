@@ -67,8 +67,10 @@ func IsCuInterposeDeliveryPath(mountPath string) bool {
 // ValidateCuInterposeTarget checks that an opted-in target container will start under
 // the launcher. Either the agent delivers it, which needs the snapshot-control mount
 // and no mount on the delivery path, or the container starts the launcher itself.
+// Self-delivery needs command: with only args, the image's entrypoint runs first
+// and may never start the launcher.
 func ValidateCuInterposeTarget(container *corev1.Container) error {
-	if HasCuInterposeLauncher(append(slices.Clone(container.Command), container.Args...)) {
+	if len(container.Command) > 0 && HasCuInterposeLauncher(append(slices.Clone(container.Command), container.Args...)) {
 		return nil
 	}
 	controlMount := false

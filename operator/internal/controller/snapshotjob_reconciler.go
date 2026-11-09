@@ -171,7 +171,7 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 		}
 		// In agent mode the agent's NRI plugin prepares the target when it starts.
 		// The init container is the fallback for nodes without NRI.
-		if cuInterposeEnabled && r.CuInterposeContainer.AddsInitContainer() {
+		if cuInterposeEnabled && r.CuInterposeContainer.Preparation == operatortypes.MultiGPUPreparationInitContainer {
 			// buildSourceJob has already validated the single target.
 			target := sj.Spec.PodSnapshotTemplate.TargetContainers[0]
 			if err := protocol.ShapeCuInterposeCapture(&desiredJob.Spec.Template, target, r.CuInterposeContainer); err != nil {

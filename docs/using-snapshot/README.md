@@ -151,8 +151,8 @@ Before you use an eight-GPU recipe:
   [TensorRT-LLM](supported-frameworks/tensorrt-llm.md#eight-gpu-recipes).
 - **Driver** - Multi-GPU restore needs a minimum CUDA user-mode driver version.
   See [Prerequisites](../get-started/prerequisites.md#multi-gpu-workloads).
-- **Container runtime** - Multi-GPU checkpoints need NRI on the node. See
-  [Prerequisites](../get-started/prerequisites.md#multi-gpu-workloads).
+- **Container runtime** - By default, multi-GPU checkpoints need NRI on the
+  node. See [Prerequisites](../get-started/prerequisites.md#multi-gpu-workloads).
 
 ## Next Steps
 

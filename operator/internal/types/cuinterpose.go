@@ -31,11 +31,6 @@ type CuInterposeContainerConfiguration struct {
 	PullPolicy  corev1.PullPolicy
 }
 
-// AddsInitContainer reports whether the operator shapes opted-in sources itself.
-func (c CuInterposeContainerConfiguration) AddsInitContainer() bool {
-	return c.Preparation == MultiGPUPreparationInitContainer
-}
-
 func (c CuInterposeContainerConfiguration) Validate() error {
 	switch c.Preparation {
 	case MultiGPUPreparationAgent:

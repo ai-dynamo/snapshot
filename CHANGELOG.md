@@ -80,10 +80,14 @@ commit-level history for each release is on its
 - **Breaking:** multi-GPU checkpoints need only the
   `nvidia.com/snapshot-multi-gpu: enabled` annotation, on a `SnapshotJob` and on
   a Pod you deploy yourself. The node agent's NRI plugin now delivers the
-  multi-GPU libraries and launcher, which needs NRI v0.10 or newer
+  multi-GPU libraries and launcher by default, which needs NRI v0.10 or newer
   (containerd 2.2) on the source node. On nodes without it, set
   `config.checkpoint.multiGpuPreparation: initContainer` to keep the previous
-  behavior. Pods that install the libraries themselves keep working. See
+  behavior. Pods you deploy yourself that install the libraries keep working. On
+  upgrade, a `SnapshotJob` source that starts on a node whose agent is not yet
+  upgraded gets no launcher, so wait for the agent DaemonSet rollout before
+  starting multi-GPU `SnapshotJob`s, or set `initContainer` until it
+  completes. See
   [Without NRI](docs/reference/workload-contract.md#without-nri).
 - **Breaking:** the agent timeout values lost their redundant prefixes.
   `config.checkpoint.checkpointTimeoutSeconds` is now

@@ -107,7 +107,7 @@ def cluster():
     )
     boundaries = {
         "load_config": None,
-        "_validate_snapshot_agent_present": "snapshot-agent:test",
+        "_validate_snapshot_agent_present": None,
         "_collect_agent_log_phases": AgentLogPhases(),
         "_wait_for_pod_condition": lambda namespace, name, condition, **kwargs: pods[
             name

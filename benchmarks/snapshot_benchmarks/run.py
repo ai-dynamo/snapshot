@@ -144,8 +144,8 @@ def _container_started_at(pod, container_name: str) -> datetime.datetime | None:
     return None
 
 
-def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> str:
-    """Find the selected node's agent image before deploying the workload."""
+def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> None:
+    """Check that the selected node runs the agent before deploying the workload."""
     snapshot_cfg = cfg.snapshot_e2e_config()
     agents = k8s.list_snapshot_pods(
         snapshot_cfg.namespace, snapshot_cfg.release, "snapshot-agent"
@@ -155,9 +155,8 @@ def _validate_snapshot_agent_present(cfg: BenchmarkConfig) -> str:
             f"no snapshot-agent pod found in namespace {snapshot_cfg.namespace!r} for "
             f"release {snapshot_cfg.release!r} -- check --snapshot-namespace and --release"
         )
-    for pod in agents:
-        if pod.spec.node_name == cfg.node:
-            return next(c.image for c in pod.spec.containers if c.name == "agent")
+    if any(pod.spec.node_name == cfg.node for pod in agents):
+        return
     raise RuntimeError("No snapshot-agent on selected node: " + cfg.node)
 
 
@@ -208,7 +207,7 @@ def run_benchmark(
     folder.mkdir(parents=True, exist_ok=False)
     measurement.save(folder / "settings.json", dataclasses.asdict(cfg))
     if mode == "both" or model.tp > 1:
-        # The agent on the node delivers the multi-GPU libraries at startup.
+        # Checkpointing needs the agent on the selected node.
         _validate_snapshot_agent_present(cfg)
 
     source_name = f"bench-source-{run_id}"
@@ -254,7 +253,7 @@ def run_benchmark(
             tolerations=tolerations,
         )
         source_manifest = instrument_pod(source_manifest, cfg, engine, model, run_id)
-        app =app_configmap(engine, cfg.workload_namespace, "bench-app-" + run_id)
+        app = app_configmap(engine, cfg.workload_namespace, "bench-app-" + run_id)
         measurement.save(folder / "app.json", app)
         measurement.save(folder / "source-manifest.json", source_manifest)
         # A unique name is create-only: never replace another run's ConfigMap.

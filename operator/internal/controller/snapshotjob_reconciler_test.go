@@ -28,6 +28,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/operator/internal/protocol"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
@@ -908,13 +909,8 @@ func TestSnapshotJobCuInterposeAdoptsShapedJob(t *testing.T) {
 	_, err := r.Reconcile(ctx, reconcileRequest(sj))
 	require.NoError(t, err)
 	job := getSourceJob(t, r.Client, sj)
-	template := &job.Spec.Template.Spec
-	template.InitContainers = append(template.InitContainers, corev1.Container{Name: "snapshot-cuda-install", Image: "registry.example/agent:dev"})
-	template.Volumes = append(template.Volumes, corev1.Volume{Name: "snapshot-cuda", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
-	worker := &template.Containers[0]
-	worker.Command = append(podcontract.CuInterposeLauncherPrefix(), worker.Command...)
-	worker.VolumeMounts = append(worker.VolumeMounts, corev1.VolumeMount{Name: "snapshot-cuda", MountPath: podcontract.CuInterposeMountPath, ReadOnly: true})
-	require.NoError(t, podcontract.ValidateCuInterposeTarget(worker))
+	require.NoError(t, protocol.ShapeCuInterposeCapture(&job.Spec.Template, "worker", testCuInterposeInstaller()))
+	require.NoError(t, podcontract.ValidateCuInterposeTarget(&job.Spec.Template.Spec.Containers[0]))
 	job.UID = "source-job-uid"
 	require.NoError(t, r.Update(ctx, job))
 

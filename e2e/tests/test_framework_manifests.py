@@ -37,7 +37,7 @@ CONFIG = k8s.E2EConfig(
     kubeconfig=None,
 )
 IMAGE = "framework-under-test:local"
-AGENT_IMAGE = "snapshot-agent:test"
+WORKLOAD_IMAGE = "snapshot-agent:test"
 CACHE = frameworks.SharedModelCache(
     server="nfs.example.internal", path="/exports/models", pvc_name="shared-model-cache"
 )
@@ -47,7 +47,7 @@ CACHE = frameworks.SharedModelCache(
 def _workload_image(monkeypatch: pytest.MonkeyPatch) -> None:
     # TestRun.new resolves the generic workload image eagerly; these checks
     # never schedule anything, so any value satisfies it.
-    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", AGENT_IMAGE)
+    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", WORKLOAD_IMAGE)
 
 
 @pytest.fixture(params=sorted(frameworks.FRAMEWORKS))

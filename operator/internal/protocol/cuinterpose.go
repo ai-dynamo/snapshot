@@ -5,8 +5,6 @@ package protocol
 
 import (
 	"fmt"
-	"path"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -89,9 +87,7 @@ func cuInterposeTarget(spec *corev1.PodSpec, name string) (*corev1.Container, er
 		return nil, fmt.Errorf("container %q: cuinterpose requires container.command", name)
 	}
 	for _, mount := range target.VolumeMounts {
-		mountPath := path.Clean(mount.MountPath)
-		if mount.Name == cuInterposeVolumeName || mountPath == podcontract.CuInterposeMountPath ||
-			strings.HasPrefix(mountPath, podcontract.CuInterposeMountPath+"/") {
+		if mount.Name == cuInterposeVolumeName || podcontract.IsCuInterposeDeliveryPath(mount.MountPath) {
 			return nil, fmt.Errorf("container %q: mount %q at %q conflicts with cuinterpose delivery", name, mount.Name, mount.MountPath)
 		}
 	}

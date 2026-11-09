@@ -116,15 +116,25 @@ func openPodControlDir(podsDir, podUID, containerName string) (*os.File, error) 
 		return nil, err
 	}
 	defer volume.Close()
-	vfd := int(volume.Fd())
-	if err := unix.Mkdirat(vfd, containerName, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
-		return nil, fmt.Errorf("create control directory %s/%s: %w", volumePath, containerName, err)
-	}
-	fd, err := unix.Openat(vfd, containerName, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	dir, err := OpenSubdir(volume, containerName)
 	if err != nil {
-		return nil, fmt.Errorf("open control directory %s/%s: %w", volumePath, containerName, err)
+		return nil, fmt.Errorf("control directory: %w", err)
 	}
-	return os.NewFile(uintptr(fd), filepath.Join(volumePath, containerName)), nil
+	return dir, nil
+}
+
+// OpenSubdir creates name in parent if needed and opens it without following
+// a symlink, since the Pod can write to parent.
+func OpenSubdir(parent *os.File, name string) (*os.File, error) {
+	pfd := int(parent.Fd())
+	if err := unix.Mkdirat(pfd, name, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
+		return nil, fmt.Errorf("create %s/%s: %w", parent.Name(), name, err)
+	}
+	fd, err := unix.Openat(pfd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s/%s: %w", parent.Name(), name, err)
+	}
+	return os.NewFile(uintptr(fd), filepath.Join(parent.Name(), name)), nil
 }
 
 // WriteFileInDir writes name in dir: write fills a new file under a random

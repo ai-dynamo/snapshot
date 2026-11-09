@@ -90,6 +90,10 @@ func TestValidateCuInterposeTarget(t *testing.T) {
 			name: "self-delivered in args", command: CuInterposeLauncherPrefix(), args: []string{"worker"},
 			mounts: []corev1.VolumeMount{delivery},
 		},
+		{
+			name: "launcher only in args", args: launched,
+			mounts: []corev1.VolumeMount{control, delivery}, wantError: "must start with",
+		},
 		{name: "no control mount", command: []string{"worker"}, wantError: "does not mount"},
 		{
 			name: "delivery mount without launcher", command: []string{"worker"},

@@ -771,7 +771,8 @@ Before waiting for readiness, the agent's capture preflight checks the opted-in 
 It must mount `/snapshot-control` with no mount on the delivery path, or start with the launcher prefix in its `command`.
 Capture then verifies that every CUDA process loaded the shim, which catches a node without NRI.
 Library delivery mounts must be read-only because CRIU reapplies their source mount flags during restore.
-Capture and restore both use the agent's bundle, so their library hashes match when the agent versions match.
+When the agent or the operator's init container delivers the libraries, capture and restore both use the agent's bundle, so their library hashes match when the agent versions match.
+A container that delivers its own libraries must deliver the same files as the restore node's agent bundle, or restore refuses the checkpoint.
 
 #### Launcher CLI
 

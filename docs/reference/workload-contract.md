@@ -214,8 +214,9 @@ Containers without the `/snapshot-control` mount, such as helpers, start
 unchanged. The agent also leaves alone a container that mounts a volume at
 `/tmp/snapshot-cuda` or whose `command` already starts with
 `/tmp/snapshot-cuda/cuinterpose-launch`. A Pod that delivers the libraries
-itself keeps working. If the agent cannot prepare a container, the container
-does not start, and kubelet retries it.
+itself keeps working if its `command` starts with the full launcher prefix,
+as shown in [Without NRI](#without-nri). If the agent cannot prepare a
+container, the container does not start, and kubelet retries it.
 
 ### Without NRI
 
@@ -226,10 +227,13 @@ without it, the source Pod installs the libraries with an init container:
 - **A `SnapshotJob`** - Set `config.checkpoint.multiGpuPreparation` to
   `initContainer` in the Helm values. The operator adds the init container and
   starts the target through the launcher. The target container must set
-  `command`.
+  `command`, and must not mount a volume at `/tmp/snapshot-cuda`: the operator
+  rejects a target that delivers the libraries itself in this mode.
 - **A Pod that Snapshot does not create** - Add the init container, the volume,
   and the launcher prefix yourself. The init container uses the image of the
-  `snapshot-agent` DaemonSet's `agent` container:
+  `snapshot-agent` DaemonSet's `agent` container, and its security context
+  meets the Restricted Pod Security Standard. This example is the Pod template
+  of a controller such as a Deployment:
 
   ```yaml
   template:
@@ -240,6 +244,16 @@ without it, the source Pod installs the libraries with an init container:
       initContainers:
         - name: snapshot-cuda-install
           image: ${SNAPSHOT_AGENT_IMAGE}
+          securityContext:
+            runAsUser: 65532
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           command:
             - /bin/cp
           args:
