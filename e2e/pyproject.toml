@@ -9,7 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
   "kubernetes>=32.0.1,<37.0.0",
   "packaging>=24.2,<26",
-  "pytest>=8.4.0,<9",
+  "pytest>=8.4.0,<10",
   "pytest-xdist>=3.6.1,<4",
   "PyYAML>=6.0.2,<7",
 ]
