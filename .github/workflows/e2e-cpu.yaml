@@ -317,7 +317,7 @@ jobs:
           # deselected or skips, so each execution phase guards the tests it
           # selects. Restart cases mutate the shared operator Deployment and
           # must run alone.
-          parallel_required_tests="test_one_cpu_snapshot_restores_into_two_containers,test_snapshotjob_cpu_captures_and_restore_recovers_state,test_snapshotjob_saves_container_settings_in_the_checkpoint,test_checkpoint_waits_for_the_checkpoint_readiness_probe,test_checkpoint_readiness_probe_that_can_never_run_fails,test_post_restore_notifies_the_restored_application,test_post_restore_runs_for_each_restored_copy,test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot,test_snapshotjob_deadline_removed_pod_retains_non_target_artifacts,test_snapshotjob_deadline_exceeded_when_helper_overruns"
+          parallel_required_tests="test_one_cpu_snapshot_restores_into_two_containers,test_snapshotjob_cpu_captures_and_restore_recovers_state,test_snapshotjob_saves_container_settings_in_the_checkpoint,test_checkpoint_waits_for_the_checkpoint_readiness_probe,test_checkpoint_readiness_probe_that_can_never_run_fails,test_post_restore_notifies_the_restored_application,test_post_restore_runs_for_each_restored_copy,test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot,test_cpu_restore_retries_in_place_once_the_checkpoint_is_repaired,test_restore_from_an_unreadable_manifest_ends_once_its_retries_run_out,test_restore_from_a_damaged_checkpoint_ends_on_the_attempt_that_changed_the_container,test_snapshotjob_deadline_removed_pod_retains_non_target_artifacts,test_snapshotjob_deadline_exceeded_when_helper_overruns"
           serial_required_tests="test_snapshotjob_fails_when_capture_fails_after_helper_succeeds,test_snapshotjob_fails_when_helper_fails_after_capture,test_snapshotjob_restart_preserves_capture_waiting_for_helper,test_snapshotjob_restart_preserves_pending_capture"
           start=$(date +%s)
           # Recorded even when the suite fails, so a slow run is still
@@ -348,9 +348,10 @@ jobs:
 
       # On nodes whose runtime is too old for the restore proxy, the agent
       # restores without it. Check that path on k3s 1.32, whose containerd 2.1
-      # has NRI v0.8, with the images built above and two tests: a restore,
-      # and a failed one. Only after a pass, as it replaces the cluster that
-      # the diagnostics below would read.
+      # has NRI v0.8, with the images built above and four tests: a restore,
+      # a failed one, a retry in place, and a failure a retry limit does not
+      # retry. Only after a pass, as it replaces the cluster that the
+      # diagnostics below would read.
       - name: Run CPU tests without the restore proxy
         if: ${{ steps.cpu_tests.outcome == 'success' }}
         timeout-minutes: 25
@@ -359,7 +360,9 @@ jobs:
           SNAPSHOT_E2E_RESTORE_PROXY: "false"
           SNAPSHOT_E2E_REQUIRED_TESTS: >-
             test_one_cpu_snapshot_restores_into_two_containers,
-            test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot
+            test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot,
+            test_cpu_restore_retries_in_place_once_the_checkpoint_is_repaired,
+            test_restore_from_a_damaged_checkpoint_ends_on_the_attempt_that_changed_the_container
         run: |
           set -euo pipefail
           hack/k3d-cpu-e2e.sh cluster-down-keep-registry
@@ -369,7 +372,7 @@ jobs:
               --phase "${phase}" --skip-host-preflight
           done
           uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv \
-            -k "test_one_cpu_snapshot_restores_into_two_containers or test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot"
+            -k "test_one_cpu_snapshot_restores_into_two_containers or test_restore_from_a_damaged_checkpoint_fails_and_keeps_the_snapshot or test_cpu_restore_retries_in_place_once_the_checkpoint_is_repaired or test_restore_from_a_damaged_checkpoint_ends_on_the_attempt_that_changed_the_container"
 
       # Last, and unconditional: the phases worth comparing are exactly the
       # ones a failing run also pays for.

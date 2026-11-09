@@ -3,6 +3,7 @@
 
 """Run the canonical failure case against observations without a cluster."""
 
+import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,12 +37,22 @@ def exercise_case(monkeypatch, *, probe="false", cpu_only=True, restore_reason="
     monkeypatch.setattr(snap, "debug_dump", lambda *_: None)
     monkeypatch.setattr(cases, "assert_restore_events", lambda *_: None)
     monkeypatch.setattr(cases, "restore_event_reasons", lambda *_: {"RestoreFailed"})
-    failed = SimpleNamespace(status=SimpleNamespace(conditions=[SimpleNamespace(
-        type=snap.RESTORED_CONDITION,
-        status="True" if restore_reason == "RestoreSucceeded" else "False",
-        reason=restore_reason,
-        message="CRIU could not read the damaged inventory",
-    )]))
+    retry_status = {"main": {
+        "attempt": 1,
+        "retryLimit": 0,
+        "lastFailure": {"step": "restoring with CRIU", "cause": "damaged inventory"},
+    }}
+    failed = SimpleNamespace(
+        metadata=SimpleNamespace(namespace="test-ns", name="restore", annotations={
+            snap.RESTORE_RETRY_STATUS_ANNOTATION: json.dumps(retry_status),
+        }),
+        status=SimpleNamespace(conditions=[SimpleNamespace(
+            type=snap.RESTORED_CONDITION,
+            status="True" if restore_reason == "RestoreSucceeded" else "False",
+            reason=restore_reason,
+            message="CRIU could not read the damaged inventory",
+        )]),
+    )
     monkeypatch.setattr(k8s, "read_pod", lambda *_: failed)
     # Keep the real terminal-condition check. No clock wait is necessary: a
     # terminal failure returns or raises on its first observation.
