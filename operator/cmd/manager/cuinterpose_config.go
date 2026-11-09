@@ -18,9 +18,16 @@ type cuInterposeWebhookConfiguration struct {
 	CertDir string
 }
 
-func (c cuInterposeWebhookConfiguration) Validate() error {
+// Validate checks the webhook settings against the preparation mode. The webhook
+// is the no-NRI path for Pods SnapshotJob does not create, so it runs only where
+// SnapshotJob sources get init containers too, and uses the same installer image.
+func (c cuInterposeWebhookConfiguration) Validate(preparation operatortypes.CuInterposeContainerConfiguration) error {
 	if !c.Enabled {
 		return nil
+	}
+	if !preparation.AddsInitContainer() {
+		return fmt.Errorf("cuinterpose-webhook needs --multi-gpu-preparation=%s, got %q",
+			operatortypes.MultiGPUPreparationInitContainer, preparation.Preparation)
 	}
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("cuinterpose-webhook-port must be between 1 and 65535, got %d", c.Port)
@@ -34,7 +41,8 @@ func (c cuInterposeWebhookConfiguration) Validate() error {
 func bindCuInterposeWebhookFlags(flags *flag.FlagSet) *cuInterposeWebhookConfiguration {
 	cfg := &cuInterposeWebhookConfiguration{}
 	flags.BoolVar(&cfg.Enabled, "cuinterpose-webhook", false,
-		"Serve the mutating admission webhook that prepares Pods annotated nvidia.com/snapshot-multi-gpu: enabled for cuinterpose")
+		"Serve the mutating admission webhook that prepares Pods annotated nvidia.com/snapshot-multi-gpu: enabled for cuinterpose; "+
+			"needs --multi-gpu-preparation=initContainer, whose installer image it uses")
 	flags.IntVar(&cfg.Port, "cuinterpose-webhook-port", 9443, "Port the mutating admission webhook listens on")
 	flags.StringVar(&cfg.CertDir, "cuinterpose-webhook-cert-dir", "",
 		"Directory holding the webhook's tls.crt and tls.key, re-read when they change")

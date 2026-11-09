@@ -89,7 +89,7 @@ func main() {
 		ctrl.Log.Error(err, "invalid multi-GPU preparation configuration")
 		os.Exit(1)
 	}
-	if err := cuInterposeWebhookConfig.Validate(); err != nil {
+	if err := cuInterposeWebhookConfig.Validate(*cuInterposeConfig); err != nil {
 		ctrl.Log.Error(err, "invalid cuinterpose webhook configuration")
 		os.Exit(1)
 	}

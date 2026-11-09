@@ -4,13 +4,17 @@
 // Package podwebhook serves the operator's mutating admission webhook for Pods.
 //
 // A Pod that opts into multi-GPU support with the nvidia.com/snapshot-multi-gpu
-// annotation needs the cuInterpose libraries installed and its GPU containers
-// started under the launcher before any CUDA call. SnapshotJob prepares its own
-// source Pod; this webhook prepares every other opted-in Pod, whether created
-// directly or through a Deployment, on clusters whose runtime offers no NRI.
+// annotation needs the cuInterpose libraries installed and its checkpoint targets
+// started under the launcher before any CUDA call. On nodes with NRI the agent's
+// plugin does this when each container starts. Without NRI the operator runs with
+// --multi-gpu-preparation=initContainer and shapes SnapshotJob sources itself;
+// this webhook shapes every other opted-in Pod the same way, whether created
+// directly or through a Deployment.
 //
-// Every GPU container must set an explicit command: admission runs before any
-// runtime resolves the image, so the launcher has nothing to wrap otherwise.
+// It picks targets by the rule the agent's plugin uses: a container that mounts
+// /snapshot-control, unless it delivers the libraries itself. Each target must
+// set an explicit command: admission runs before any runtime resolves the image,
+// so the launcher has nothing to wrap otherwise.
 package podwebhook
 
 import (
@@ -18,8 +22,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path"
 	"slices"
-	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,12 +38,6 @@ import (
 
 // CuInterposePath is where the manager serves the Pod mutation.
 const CuInterposePath = "/mutate-v1-pod"
-
-// gpuResource is the device plugin resource a multi-GPU container requests.
-const gpuResource corev1.ResourceName = "nvidia.com/gpu"
-
-// migResourcePrefix starts the MIG device plugin resources (nvidia.com/mig-1g.5gb).
-const migResourcePrefix = "nvidia.com/mig-"
 
 // CuInterposeInjector shapes opted-in Pods on creation, the way SnapshotJob shapes
 // its source Job template.
@@ -207,16 +205,17 @@ func (i *CuInterposeInjector) shape(ctx context.Context, pod *corev1.Pod) (shape
 	if protocol.CuInterposePrepared(&pod.Spec) {
 		return shapeOutcome{reason: "Pod already carries the cuinterpose delivery"}, nil
 	}
-	gpuContainers, targets := cuInterposeTargets(&pod.Spec)
+	checkpointTargets, targets := cuInterposeTargets(&pod.Spec)
 	switch {
-	case len(gpuContainers) == 0:
+	case len(checkpointTargets) == 0:
 		return shapeOutcome{
-			reason:  "no container requests a GPU",
-			warning: fmt.Sprintf("%s is enabled but no container requests a GPU, so none was prepared for cuinterpose", podcontract.CuInterposeAnnotation),
+			reason: "no container mounts " + podcontract.SnapshotControlMountPath,
+			warning: fmt.Sprintf("%s is enabled but no container mounts %s, so none was prepared for cuinterpose",
+				podcontract.CuInterposeAnnotation, podcontract.SnapshotControlMountPath),
 		}, nil
 	case len(targets) == 0:
-		// The Pod brings the launcher its own way, as the workload contract allows.
-		return shapeOutcome{reason: "every GPU container already starts under the launcher"}, nil
+		// The Pod delivers the libraries its own way, as the workload contract allows.
+		return shapeOutcome{reason: "every checkpoint target delivers cuinterpose itself"}, nil
 	}
 	if err := protocol.ShapeCuInterposeCapture(&pod.Spec, targets, i.Installer); err != nil {
 		return shapeOutcome{}, err
@@ -225,34 +224,37 @@ func (i *CuInterposeInjector) shape(ctx context.Context, pod *corev1.Pod) (shape
 	return shapeOutcome{changed: true, targets: targets}, nil
 }
 
-// cuInterposeTargets names the containers that request a GPU, and among them the
-// ones to start under the launcher: those that do not already do so.
-func cuInterposeTargets(spec *corev1.PodSpec) (gpuContainers, targets []string) {
+// cuInterposeTargets names the checkpoint targets, the containers that mount
+// /snapshot-control, and among them the ones to prepare: those that do not deliver
+// cuinterpose themselves. A container delivers it itself when it already starts
+// the launcher or mounts something at the delivery path. This is the rule the
+// agent's NRI plugin applies, so a container is prepared the same way whichever
+// of the two sees it.
+func cuInterposeTargets(spec *corev1.PodSpec) (checkpointTargets, targets []string) {
 	for i := range spec.Containers {
 		container := &spec.Containers[i]
-		if !requestsGPU(container) {
+		if !mountsControlDir(container) {
 			continue
 		}
-		gpuContainers = append(gpuContainers, container.Name)
-		if !startsWithLauncher(container) {
+		checkpointTargets = append(checkpointTargets, container.Name)
+		if !deliversCuInterpose(container) {
 			targets = append(targets, container.Name)
 		}
 	}
-	return gpuContainers, targets
+	return checkpointTargets, targets
 }
 
-func requestsGPU(container *corev1.Container) bool {
-	for _, resources := range []corev1.ResourceList{container.Resources.Limits, container.Resources.Requests} {
-		for name, quantity := range resources {
-			if (name == gpuResource || strings.HasPrefix(string(name), migResourcePrefix)) && !quantity.IsZero() {
-				return true
-			}
-		}
+func mountsControlDir(container *corev1.Container) bool {
+	return slices.ContainsFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
+		return path.Clean(mount.MountPath) == podcontract.SnapshotControlMountPath
+	})
+}
+
+func deliversCuInterpose(container *corev1.Container) bool {
+	if podcontract.HasCuInterposeLauncher(append(slices.Clone(container.Command), container.Args...)) {
+		return true
 	}
-	return false
-}
-
-func startsWithLauncher(container *corev1.Container) bool {
-	prefix := podcontract.CuInterposeLauncherPrefix()
-	return len(container.Command) >= len(prefix) && slices.Equal(container.Command[:len(prefix)], prefix)
+	return slices.ContainsFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
+		return podcontract.IsCuInterposeDeliveryPath(mount.MountPath)
+	})
 }

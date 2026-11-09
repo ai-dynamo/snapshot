@@ -30,10 +30,15 @@ func testInstaller() operatortypes.CuInterposeContainerConfiguration {
 }
 
 func gpuResources() corev1.ResourceRequirements {
-	return corev1.ResourceRequirements{Limits: corev1.ResourceList{gpuResource: resource.MustParse("8")}}
+	return corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}}
 }
 
-// optedInPod has one GPU container with an explicit command beside a sidecar.
+func controlMount() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: podcontract.SnapshotControlVolumeName, MountPath: podcontract.SnapshotControlMountPath}
+}
+
+// optedInPod has one checkpoint target with an explicit command beside a sidecar.
+// The sidecar has no /snapshot-control mount, so it is not a target.
 func optedInPod() *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -41,16 +46,18 @@ func optedInPod() *corev1.Pod {
 			Annotations: map[string]string{podcontract.CuInterposeAnnotation: "enabled"},
 		},
 		Spec: corev1.PodSpec{
-			ServiceAccountName: "workload",
-			ImagePullSecrets:   []corev1.LocalObjectReference{{Name: "pull"}},
 			Containers: []corev1.Container{
 				{
 					Name: "main", Image: "registry.example/vllm:v1",
 					Command: []string{"python3", "app.py"}, Args: []string{"--tp", "8"},
-					Env:       []corev1.EnvVar{{Name: "LD_PRELOAD", Value: "/opt/other.so"}},
-					Resources: gpuResources(),
+					Env:          []corev1.EnvVar{{Name: "LD_PRELOAD", Value: "/opt/other.so"}},
+					Resources:    gpuResources(),
+					VolumeMounts: []corev1.VolumeMount{controlMount()},
 				},
-				{Name: "metrics", Image: "registry.example/exporter:v1"},
+				{
+					Name: "metrics", Image: "registry.example/exporter:v1", Resources: gpuResources(),
+					VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
+				},
 			},
 		},
 	}
@@ -60,7 +67,7 @@ func newInjector() *CuInterposeInjector {
 	return NewCuInterposeInjector(clientgoscheme.Scheme, testInstaller())
 }
 
-func TestShapeWrapsGPUContainersOnly(t *testing.T) {
+func TestShapeWrapsCheckpointTargetsOnly(t *testing.T) {
 	pod := optedInPod()
 	before := pod.DeepCopy()
 	outcome, err := newInjector().shape(context.Background(), pod)
@@ -70,14 +77,31 @@ func TestShapeWrapsGPUContainersOnly(t *testing.T) {
 
 	main := pod.Spec.Containers[0]
 	assert.Equal(t, append(podcontract.CuInterposeLauncherPrefix(), "python3", "app.py"), main.Command)
-	require.NoError(t, podcontract.ValidateCuInterposeLauncher(&main))
+	require.NoError(t, podcontract.ValidateCuInterposeTarget(&main), "the agent's capture preflight accepts it")
 	assert.Equal(t, before.Spec.Containers[0].Args, main.Args)
 	assert.Equal(t, before.Spec.Containers[0].Env, main.Env)
-	assert.Equal(t, before.Spec.Containers[1], pod.Spec.Containers[1], "the sidecar is untouched")
+	assert.Equal(t, []corev1.VolumeMount{
+		controlMount(),
+		{Name: "snapshot-cuda", MountPath: podcontract.CuInterposeMountPath, ReadOnly: true},
+	}, main.VolumeMounts)
+	assert.Equal(t, before.Spec.Containers[1], pod.Spec.Containers[1], "a GPU sidecar without the control mount is untouched")
 	require.Len(t, pod.Spec.InitContainers, 1)
 	assert.Equal(t, testInstaller().Image, pod.Spec.InitContainers[0].Image)
 	require.Len(t, pod.Spec.Volumes, 1)
 	assert.Equal(t, before.ObjectMeta, pod.ObjectMeta)
+}
+
+func TestShapeWrapsEveryCheckpointTarget(t *testing.T) {
+	pod := optedInPod()
+	pod.Spec.Containers[1].Command = []string{"/bin/exporter"}
+	pod.Spec.Containers[1].VolumeMounts = append(pod.Spec.Containers[1].VolumeMounts, corev1.VolumeMount{
+		Name: podcontract.SnapshotControlVolumeName, MountPath: podcontract.SnapshotControlMountPath + "/", SubPath: "metrics",
+	})
+	outcome, err := newInjector().shape(context.Background(), pod)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"main", "metrics"}, outcome.targets)
+	assert.True(t, podcontract.HasCuInterposeLauncher(pod.Spec.Containers[1].Command))
+	require.Len(t, pod.Spec.InitContainers, 1, "one installer serves every target")
 }
 
 func TestShapeLeavesPodsAlone(t *testing.T) {
@@ -95,13 +119,20 @@ func TestShapeLeavesPodsAlone(t *testing.T) {
 		{"volume present", func(p *corev1.Pod) {
 			p.Spec.Volumes = []corev1.Volume{{Name: "snapshot-cuda"}}
 		}, "already carries", false},
-		{"launcher already wraps the command", func(p *corev1.Pod) {
+		{"launcher already in command", func(p *corev1.Pod) {
 			p.Spec.Containers[0].Command = append(podcontract.CuInterposeLauncherPrefix(), "python3")
-		}, "already starts under the launcher", false},
-		{"no GPU container", func(p *corev1.Pod) { p.Spec.Containers[0].Resources = corev1.ResourceRequirements{} }, "no container requests a GPU", true},
-		{"zero GPUs", func(p *corev1.Pod) {
-			p.Spec.Containers[0].Resources.Limits[gpuResource] = resource.MustParse("0")
-		}, "no container requests a GPU", true},
+		}, "delivers cuinterpose itself", false},
+		{"launcher in args", func(p *corev1.Pod) {
+			p.Spec.Containers[0].Command = nil
+			p.Spec.Containers[0].Args = append(podcontract.CuInterposeLauncherPrefix(), "python3")
+		}, "delivers cuinterpose itself", false},
+		{"something mounted at the delivery path", func(p *corev1.Pod) {
+			p.Spec.Containers[0].VolumeMounts = append(p.Spec.Containers[0].VolumeMounts,
+				corev1.VolumeMount{Name: "own-libs", MountPath: podcontract.CuInterposeMountPath + "/lib"})
+		}, "delivers cuinterpose itself", false},
+		{"no control mount", func(p *corev1.Pod) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/snapshot-data"}}
+		}, "no container mounts /snapshot-control", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := optedInPod()
@@ -113,21 +144,6 @@ func TestShapeLeavesPodsAlone(t *testing.T) {
 			assert.Contains(t, outcome.reason, tc.wantReason)
 			assert.Equal(t, tc.wantWarning, outcome.warning != "")
 			assert.Equal(t, before, pod)
-		})
-	}
-}
-
-func TestShapeCountsMIGAndRequestsAsGPU(t *testing.T) {
-	for name, resources := range map[string]corev1.ResourceRequirements{
-		"mig limit":   {Limits: corev1.ResourceList{"nvidia.com/mig-1g.5gb": resource.MustParse("1")}},
-		"gpu request": {Requests: corev1.ResourceList{gpuResource: resource.MustParse("1")}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			pod := optedInPod()
-			pod.Spec.Containers[0].Resources = resources
-			outcome, err := newInjector().shape(context.Background(), pod)
-			require.NoError(t, err)
-			assert.Equal(t, []string{"main"}, outcome.targets)
 		})
 	}
 }
@@ -149,18 +165,18 @@ func TestShapeDeniesWithoutMutation(t *testing.T) {
 			want:   `container "main": cuinterpose requires container.command`,
 		},
 		{
-			name: "delivery path in use",
+			name: "second target without command",
 			change: func(p *corev1.Pod) {
-				p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "scratch", MountPath: podcontract.CuInterposeMountPath}}
-			},
-			want: "conflicts with cuinterpose delivery",
-		},
-		{
-			name: "second GPU container without command",
-			change: func(p *corev1.Pod) {
-				p.Spec.Containers[1].Resources = gpuResources()
+				p.Spec.Containers[1].VolumeMounts = append(p.Spec.Containers[1].VolumeMounts, controlMount())
 			},
 			want: `container "metrics": cuinterpose requires container.command`,
+		},
+		{
+			name: "reserved container name",
+			change: func(p *corev1.Pod) {
+				p.Spec.Containers[1].Name = "snapshot-cuda-install"
+			},
+			want: "reserved for cuinterpose",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -199,7 +215,7 @@ func TestHandlePatchesOptedInPods(t *testing.T) {
 	paths := patchPaths(response)
 	assert.Contains(t, paths, "/spec/initContainers")
 	assert.Contains(t, paths, "/spec/volumes")
-	assert.Contains(t, paths, "/spec/containers/0/volumeMounts")
+	assert.Contains(t, paths, "/spec/containers/0/volumeMounts/1")
 	assert.True(t, slices.ContainsFunc(paths, func(path string) bool {
 		return strings.HasPrefix(path, "/spec/containers/0/command/")
 	}), paths)
@@ -218,8 +234,7 @@ func TestHandleKeepsFieldsTheOperatorDoesNotKnow(t *testing.T) {
 		`"initContainers":[{"name":"setup","image":"registry.example/setup:v1","futureContainerField":"kept"}],` +
 		`"volumes":[{"name":"data","emptyDir":{},"futureVolumeField":1}],` +
 		`"containers":[{"name":"main","image":"registry.example/vllm:v1","command":["python3"],"args":["app.py"],` +
-		`"futureContainerField":"kept","volumeMounts":[{"name":"data","mountPath":"/data","futureMountField":true}],` +
-		`"resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}`)
+		`"futureContainerField":"kept","volumeMounts":[{"name":"snapshot-control","mountPath":"/snapshot-control","futureMountField":true}]}]}}`)
 	request := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
 		Operation: admissionv1.Create, Namespace: "team", Object: runtime.RawExtension{Raw: raw},
 	}}
@@ -243,8 +258,11 @@ func TestHandleKeepsFieldsTheOperatorDoesNotKnow(t *testing.T) {
 }
 
 func TestApplyShapingAppendsOnly(t *testing.T) {
-	raw := []byte(`{"spec":{"containers":[{"name":"main","command":["python3"],"unknown":1}]}}`)
-	original := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Command: []string{"python3"}}}}
+	raw := []byte(`{"spec":{"containers":[{"name":"main","command":["python3"],"unknown":1,` +
+		`"volumeMounts":[{"name":"snapshot-control","mountPath":"/snapshot-control"}]}]}}`)
+	original := &corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "main", Command: []string{"python3"}, VolumeMounts: []corev1.VolumeMount{controlMount()},
+	}}}
 	shaped := original.DeepCopy()
 	require.NoError(t, protocol.ShapeCuInterposeCapture(shaped, []string{"main"}, testInstaller()))
 
@@ -264,7 +282,7 @@ func TestApplyShapingAppendsOnly(t *testing.T) {
 	main := decoded.Spec.Containers[0]
 	assert.EqualValues(t, 1, main["unknown"])
 	assert.Len(t, main["command"], len(podcontract.CuInterposeLauncherPrefix())+1)
-	assert.Len(t, main["volumeMounts"], 1)
+	assert.Len(t, main["volumeMounts"], 2)
 	_, hasArgs := main["args"]
 	assert.False(t, hasArgs, "args are never written when the Pod set none")
 }
@@ -274,7 +292,7 @@ func TestHandlePatchesOnlyTheSpecOfServerShapedObjects(t *testing.T) {
 	// creationTimestamp and an empty status. The patch must not touch them.
 	raw := []byte(`{"apiVersion":"v1","kind":"Pod","metadata":{"name":"worker","namespace":"team","creationTimestamp":null,` +
 		`"annotations":{"nvidia.com/snapshot-multi-gpu":"enabled"}},"spec":{"containers":[{"name":"main","image":"registry.example/vllm:v1",` +
-		`"command":["python3"],"resources":{"limits":{"nvidia.com/gpu":"1"}}}]},"status":{}}`)
+		`"command":["python3"],"volumeMounts":[{"name":"snapshot-control","mountPath":"/snapshot-control"}]}]},"status":{}}`)
 	request := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
 		Operation: admissionv1.Create, Namespace: "team", Object: runtime.RawExtension{Raw: raw},
 	}}
@@ -294,13 +312,13 @@ func TestHandleAllowsUnchangedPods(t *testing.T) {
 	assert.Empty(t, response.Patches)
 	assert.Empty(t, response.Warnings)
 
-	noGPU := optedInPod()
-	noGPU.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
-	response = newInjector().Handle(context.Background(), admissionRequest(t, admissionv1.Create, noGPU))
+	noTarget := optedInPod()
+	noTarget.Spec.Containers[0].VolumeMounts = nil
+	response = newInjector().Handle(context.Background(), admissionRequest(t, admissionv1.Create, noTarget))
 	assert.True(t, response.Allowed)
 	assert.Empty(t, response.Patches)
 	require.Len(t, response.Warnings, 1)
-	assert.Contains(t, response.Warnings[0], "no container requests a GPU")
+	assert.Contains(t, response.Warnings[0], "no container mounts /snapshot-control")
 }
 
 func TestHandleIgnoresOtherOperations(t *testing.T) {
