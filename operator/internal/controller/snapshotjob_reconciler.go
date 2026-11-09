@@ -174,7 +174,7 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 		if cuInterposeEnabled && r.CuInterposeContainer.AddsInitContainer() {
 			// buildSourceJob has already validated the single target.
 			target := sj.Spec.PodSnapshotTemplate.TargetContainers[0]
-			if err := protocol.ShapeCuInterposeCapture(&desiredJob.Spec.Template, target, r.CuInterposeContainer); err != nil {
+			if err := protocol.ShapeCuInterposeCapture(&desiredJob.Spec.Template.Spec, []string{target}, r.CuInterposeContainer); err != nil {
 				return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
 			}
 		}

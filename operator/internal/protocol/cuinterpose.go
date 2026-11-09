@@ -30,29 +30,57 @@ const (
 	cuInterposeInstallerUID = int64(65532)
 )
 
-// ShapeCuInterposeCapture prepares an opted-in source Pod template once, immediately
-// before Job creation. It installs the libraries and launcher before startup and
-// starts the target under the launcher, which receives the runtime-resolved
-// environment, so Pod environment sources and argument boundaries stay unchanged. It
-// validates everything before changing the template.
-func ShapeCuInterposeCapture(template *corev1.PodTemplateSpec, targetName string, installer operatortypes.CuInterposeContainerConfiguration) error {
-	if err := checkCuInterposeReservedNames(&template.Spec); err != nil {
+// ShapeCuInterposeCapture prepares an opted-in Pod spec once, before the Pod exists:
+// SnapshotJob shapes its source Job template, and the admission webhook shapes Pods
+// that Snapshot does not create. It installs the libraries and launcher before
+// startup and starts each target under the launcher, which receives the
+// runtime-resolved environment, so Pod environment sources and argument boundaries
+// stay unchanged. It validates everything before changing the spec.
+func ShapeCuInterposeCapture(spec *corev1.PodSpec, targetNames []string, installer operatortypes.CuInterposeContainerConfiguration) error {
+	if len(targetNames) == 0 {
+		return fmt.Errorf("cuinterpose requires at least one target container")
+	}
+	if err := checkCuInterposeReservedNames(spec); err != nil {
 		return err
 	}
-	target, err := cuInterposeTarget(&template.Spec, targetName)
-	if err != nil {
-		return err
+	targets := make([]*corev1.Container, 0, len(targetNames))
+	for _, name := range targetNames {
+		target, err := cuInterposeTarget(spec, name)
+		if err != nil {
+			return err
+		}
+		targets = append(targets, target)
 	}
-	target.Command = append(podcontract.CuInterposeLauncherPrefix(), target.Command...)
-	target.VolumeMounts = append(target.VolumeMounts, corev1.VolumeMount{
-		Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: true,
-	})
-	template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
+	for _, target := range targets {
+		target.Command = append(podcontract.CuInterposeLauncherPrefix(), target.Command...)
+		target.VolumeMounts = append(target.VolumeMounts, corev1.VolumeMount{
+			Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: true,
+		})
+	}
+	spec.Volumes = append(spec.Volumes, corev1.Volume{
 		Name:         cuInterposeVolumeName,
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
-	template.Spec.InitContainers = append(template.Spec.InitContainers, cuInterposeInstaller(template.Spec.SecurityContext, installer))
+	spec.InitContainers = append(spec.InitContainers, cuInterposeInstaller(spec.SecurityContext, installer))
 	return nil
+}
+
+// CuInterposePrepared reports whether a Pod spec already carries the cuinterpose
+// delivery: the shared volume or the installer init container. SnapshotJob sources
+// and manually prepared Pods both carry them, so the webhook leaves such Pods alone
+// instead of wrapping them twice.
+func CuInterposePrepared(spec *corev1.PodSpec) bool {
+	for _, volume := range spec.Volumes {
+		if volume.Name == cuInterposeVolumeName {
+			return true
+		}
+	}
+	for _, container := range spec.InitContainers {
+		if container.Name == cuInterposeInitContainerName {
+			return true
+		}
+	}
+	return false
 }
 
 func checkCuInterposeReservedNames(spec *corev1.PodSpec) error {
