@@ -71,6 +71,8 @@ type NodeController struct {
 	restoreFn                 func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
 	writeControlSentinelFn    func(int, string, []byte) error
 	writePodControlSentinelFn func(string, string, string, []byte) error
+	readPodControlFileFn      func(string, string, string, int64) ([]byte, error)
+	removePodControlFileFn    func(string, string, string) error
 	controlSentinelExistsFn   func(int, string) (bool, error)
 	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
 	// hostProcPath is where the agent reads the node's processes; tests point it elsewhere.
@@ -278,6 +280,8 @@ func newDefaultController(
 		restoreFn:                 executor.Restore,
 		writeControlSentinelFn:    snapshotruntime.WriteControlSentinel,
 		writePodControlSentinelFn: snapshotruntime.WritePodControlSentinel,
+		readPodControlFileFn:      snapshotruntime.ReadPodControlFile,
+		removePodControlFileFn:    snapshotruntime.RemovePodControlFile,
 		controlSentinelExistsFn:   snapshotruntime.ControlSentinelExists,
 		sendSignalFn:              snapshotruntime.SendSignalToPID,
 		hostProcPath:              snapshotruntime.HostProcPath,
@@ -1132,11 +1136,16 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		}
 	}
 
-	// One deadline covers the restore and its post-restore action.
+	record, err := op.startAttempt(ctx)
+	if err != nil {
+		return op.failRestore(ctx, err)
+	}
+
+	// One deadline covers every attempt and the post-restore action.
 	restoreCtx := ctx
-	if timeout := w.config.Restore.RestoreTimeout(); timeout > 0 {
+	if !record.Deadline.IsZero() {
 		var cancel context.CancelFunc
-		restoreCtx, cancel = context.WithTimeout(ctx, timeout)
+		restoreCtx, cancel = context.WithDeadline(ctx, record.Deadline)
 		defer cancel()
 	}
 
@@ -1146,6 +1155,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 		if errors.As(err, &incompatible) {
 			// The placeholder is left running: killing it restarts the container
 			// straight back into the same refusal.
+			op.forgetAttempts(ctx)
 			return incompatible
 		}
 
@@ -1169,14 +1179,25 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 // after restore-complete: only the post-restore action can be left, and CRIU
 // must never run again. This pass's preflight already checked its settings.
 //
-// The interrupted run's deadline is gone with it, so the action gets a full
-// config.restore.timeoutSeconds again: a restart can extend it by one timeout.
+// The action keeps the deadline in the attempt record. A restore that an
+// agent without the record started gets a full config.restore.timeoutSeconds.
 func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 	postCtx := ctx
-	if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
+	record, found, err := op.readRestoreAttempts(op.nodePodUID(ctx))
+	if err != nil {
+		op.log.Error(err, "Ignoring the attempt record; the post-restore action gets a full restore timeout")
+	}
+	switch {
+	case found && !record.Deadline.IsZero():
 		var cancel context.CancelFunc
-		postCtx, cancel = context.WithTimeout(ctx, timeout)
+		postCtx, cancel = context.WithDeadline(ctx, record.Deadline)
 		defer cancel()
+	case !found:
+		if timeout := op.controller.config.Restore.RestoreTimeout(); timeout > 0 {
+			var cancel context.CancelFunc
+			postCtx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
 	}
 	if err := op.notifyPostRestore(postCtx); err != nil {
 		return op.failPostRestore(ctx, err)
@@ -1303,18 +1324,9 @@ func (op *restoreOperation) markRestoreFailed(ctx context.Context, placeholderHo
 
 // markRestoreFailedThroughNode writes the restore-failed sentinel for a
 // container with no process to write through, using the node's path of the
-// control volume. kubelet names that path after the Pod's UID on the node,
-// which in a vCluster differs from this Pod's; the runtime knows it while the
-// container exists.
+// control volume.
 func (op *restoreOperation) markRestoreFailedThroughNode(ctx context.Context) {
-	w := op.controller
-	podUID := string(op.pod.UID)
-	if nodeUID, uidErr := w.runtime.ResolveContainerPodUID(ctx, op.containerID); uidErr == nil {
-		podUID = nodeUID
-	} else {
-		op.log.V(1).Info("Cannot read the Pod's UID on the node; using its own", "error", uidErr.Error())
-	}
-	if markErr := w.writePodControlSentinelFn(podUID, op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
+	if markErr := op.controller.writePodControlSentinelFn(op.nodePodUID(ctx), op.destination, podcontract.RestoreFailedFile, restoreFailedSentinelContents); markErr != nil {
 		op.log.Error(markErr, "Failed to write restore-failed sentinel through the host path")
 	}
 }

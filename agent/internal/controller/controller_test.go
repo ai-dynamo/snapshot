@@ -142,7 +142,7 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		testr.New(t),
 	)
 	t.Cleanup(w.restoreQueue.ShutDown)
-	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.writePodControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
+	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.writePodControlSentinelFn == nil || w.readPodControlFileFn == nil || w.removePodControlFileFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
 		t.Fatal("default controller operations must be initialized")
 	}
 	if w.compareFn == nil {
@@ -184,6 +184,8 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		restoreFn:                 executor.Restore,
 		writeControlSentinelFn:    func(int, string, []byte) error { return nil },
 		writePodControlSentinelFn: func(string, string, string, []byte) error { return nil },
+		readPodControlFileFn:      func(string, string, string, int64) ([]byte, error) { return nil, os.ErrNotExist },
+		removePodControlFileFn:    func(string, string, string) error { return nil },
 		controlSentinelExistsFn:   func(int, string) (bool, error) { return false, nil },
 		sendSignalFn:              func(logr.Logger, int, syscall.Signal, string) error { return nil },
 		restoreQueue:              workqueue.NewTypedDelayingQueue[client.ObjectKey](),
@@ -1958,7 +1960,10 @@ func TestRunRestoreFailureMarksUnresolvedContainerThroughHostPath(t *testing.T) 
 			err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
 
 			require.Error(t, err)
-			assert.Equal(t, []string{tc.want + "/main/" + podcontract.RestoreFailedFile}, written)
+			assert.Equal(t, []string{
+				tc.want + "/main/" + podcontract.RestoreAttemptsFile,
+				tc.want + "/main/" + podcontract.RestoreFailedFile,
+			}, written)
 		})
 	}
 }
@@ -1991,6 +1996,7 @@ func TestRunRestoreFailureMarksAStoppedContainerThroughHostPath(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, []string{
+		"write host-uid/main/" + podcontract.RestoreAttemptsFile,
 		"write 4242 " + podcontract.RestoreFailedFile,
 		"write host-uid/main/" + podcontract.RestoreFailedFile,
 		"kill",
