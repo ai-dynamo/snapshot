@@ -3,7 +3,7 @@
 
 """Pods for the framework e2e tests, derived from the framework guide manifests.
 
-docs/guides/<name>/ ships Deployments. The tests need plain Pods they can
+docs/using-snapshot/<name>/ ships Deployments. The tests need plain Pods they can
 name, label, pin to a node, and delete individually, so the Deployment's Pod
 template is lifted into a Pod with the minimum of edits: test identity, the
 image under test, e2e scheduling, and — for the restore pod — the PodSnapshot
