@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
 
@@ -27,10 +28,36 @@ func newNSRestoreOutput(mirror io.Writer) *nsrestoreOutput {
 	return &nsrestoreOutput{ProcessOutput: snapshotruntime.NewProcessOutput(mirror, "nsenter:", "panic:", "fatal error:")}
 }
 
+// stdoutLines splits nsrestore's stdout into its progress messages and the
+// other lines, the last of which is the result.
+func (o *nsrestoreOutput) stdoutLines() (changingContainer bool, other []string) {
+	for _, line := range strings.Split(string(o.Stdout()), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var progress RestoreInNamespaceProgress
+		if json.Unmarshal([]byte(line), &progress) == nil && progress.ChangingContainer {
+			changingContainer = true
+			continue
+		}
+		other = append(other, line)
+	}
+	return changingContainer, other
+}
+
+func (o *nsrestoreOutput) resultLine() string {
+	_, other := o.stdoutLines()
+	if len(other) == 0 {
+		return ""
+	}
+	return other[len(other)-1]
+}
+
 func (o *nsrestoreOutput) result() (*RestoreInNamespaceResult, error) {
 	var result RestoreInNamespaceResult
-	if err := json.Unmarshal(o.Stdout(), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, o.Stdout())
+	if err := json.Unmarshal([]byte(o.resultLine()), &result); err != nil {
+		_, other := o.stdoutLines()
+		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, strings.Join(other, "\n"))
 	}
 	if result.RestoredPID <= 0 {
 		return nil, fmt.Errorf("nsrestore returned invalid PID %d", result.RestoredPID)
@@ -44,20 +71,44 @@ func (o *nsrestoreOutput) result() (*RestoreInNamespaceResult, error) {
 // context that ended during the run is named whatever the exit looked like:
 // on the GPU path cancellation is cooperative and nsrestore exits with a
 // status and a reported cause of its own, not a signal.
+//
+// A failure after nsrestore reported that it was changing the container is
+// marked, for containerChanged.
 func (o *nsrestoreOutput) failure(runErr, ctxErr error) error {
 	err := o.cause(runErr)
 	switch {
 	case errors.Is(ctxErr, context.DeadlineExceeded):
-		return fmt.Errorf("%w; the restore timeout expired", err)
+		err = fmt.Errorf("%w; the restore timeout expired", err)
 	case errors.Is(ctxErr, context.Canceled):
-		return fmt.Errorf("%w; the restore was cancelled", err)
+		err = fmt.Errorf("%w; the restore was cancelled", err)
+	}
+	if changingContainer, _ := o.stdoutLines(); changingContainer {
+		return &changedContainerError{err: err}
 	}
 	return err
 }
 
+// changedContainerError marks a failure that came after the restore began
+// changing the destination container, so the container is no longer the one
+// Kubernetes started.
+type changedContainerError struct {
+	err error
+}
+
+func (e *changedContainerError) Error() string { return e.err.Error() }
+
+func (e *changedContainerError) Unwrap() error { return e.err }
+
+// containerChanged reports whether err came after the restore began changing
+// the destination container.
+func containerChanged(err error) bool {
+	var changed *changedContainerError
+	return errors.As(err, &changed)
+}
+
 func (o *nsrestoreOutput) cause(runErr error) error {
 	var result RestoreInNamespaceResult
-	if err := json.Unmarshal(o.Stdout(), &result); err == nil && result.Error != "" {
+	if err := json.Unmarshal([]byte(o.resultLine()), &result); err == nil && result.Error != "" {
 		return reportedCause(result)
 	}
 	detail := o.detail()
@@ -80,14 +131,33 @@ func (o *nsrestoreOutput) cause(runErr error) error {
 // reportedCause rebuilds the step nsrestore named, if any, so the host side
 // reports the same step and does not prefix it again with its own. nsrestore
 // renders the step into the error text as well, so that prefix is dropped
-// before the step is reattached.
+// before the step is reattached. A PageBroker code is rebuilt beneath the
+// text, which already names it.
 func reportedCause(result RestoreInNamespaceResult) error {
-	if result.Step == "" {
-		return errors.New(result.Error)
+	message := result.Error
+	if result.Step != "" {
+		message = strings.TrimPrefix(message, stepPrefix(Step(result.Step)))
 	}
-	step := Step(result.Step)
-	return failStep(step, errors.New(strings.TrimPrefix(result.Error, stepPrefix(step))))
+	cause := errors.New(message)
+	if code, ok := pagebroker.Failure_Code_value[result.Code]; ok {
+		cause = &reportedFailure{message: message, failure: pagebroker.NewFailureError(pagebroker.Failure_Code(code), message)}
+	}
+	if result.Step == "" {
+		return cause
+	}
+	return failStep(Step(result.Step), cause)
 }
+
+// reportedFailure is a PageBroker failure nsrestore reported: its message is
+// nsrestore's text, and errors.As still finds the code.
+type reportedFailure struct {
+	message string
+	failure *pagebroker.FailureError
+}
+
+func (e *reportedFailure) Error() string { return e.message }
+
+func (e *reportedFailure) Unwrap() error { return e.failure }
 
 // detail prefers a cause line (nsenter, panic) and otherwise the last line
 // nsrestore logged at error level or above. nsrestore's stderr is its log, so
@@ -99,7 +169,8 @@ func (o *nsrestoreOutput) detail() string {
 	if line == "" {
 		line = lastErrorLogLine(o.Stderr())
 	}
-	return o.DetailFrom(line)
+	_, other := o.stdoutLines()
+	return snapshotruntime.JoinDetail(line, strings.Join(other, "\n"))
 }
 
 // lastErrorLogLine reads zap's console encoding, which the agent and
