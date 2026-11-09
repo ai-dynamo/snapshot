@@ -41,6 +41,7 @@ func newFakeControlVolume(w *NodeController) *fakeControlVolume {
 	w.readPodControlFileFn = v.read
 	w.writePodControlSentinelFn = v.write
 	w.removePodControlFileFn = v.remove
+	w.podControlSentinelExistsFn = v.exists
 	return v
 }
 
@@ -49,6 +50,19 @@ func (v *fakeControlVolume) remove(uid, container, name string) error {
 	defer v.mu.Unlock()
 	delete(v.files, uid+"/"+container+"/"+name)
 	return nil
+}
+
+func (v *fakeControlVolume) exists(uid, container, name string) (bool, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	_, ok := v.files[uid+"/"+container+"/"+name]
+	return ok, nil
+}
+
+func (v *fakeControlVolume) putSentinel(uid, container, name string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.files[uid+"/"+container+"/"+name] = nil
 }
 
 func (v *fakeControlVolume) read(uid, container, name string, maxBytes int64) ([]byte, error) {
@@ -149,6 +163,9 @@ type attemptHarness struct {
 	volume *fakeControlVolume
 	// containerID is the destination container a pass finds.
 	containerID string
+	// recovering is whether a pass finds the restore in progress, as every
+	// pass after the first does.
+	recovering bool
 	// now is the agent's clock. It starts at the real time, since an
 	// attempt's context ends by the real clock at the record's deadline.
 	now      time.Time
@@ -183,7 +200,7 @@ func newAttemptHarness(t *testing.T, annotations map[string]string, restoreErr e
 	}
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
 	return h, func() error {
-		return w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", h.containerID, h.now, false)
+		return w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", h.containerID, h.now, h.recovering)
 	}
 }
 
@@ -235,6 +252,7 @@ func TestRunRestoreRepeatsAnInterruptedAttemptWithinItsDeadline(t *testing.T) {
 	require.Equal(t, 1, h.restores)
 	assert.True(t, first.Equal(h.deadline), "the attempt's context ends at %s, want the first attempt's %s", h.deadline, first)
 	assert.Equal(t, 2, h.seen.Limit, "the limit is resolved once")
+	assert.Empty(t, h.events(restoreAttemptFailedReason))
 	assert.Equal(t, 1, h.seen.Attempt)
 	assert.True(t, first.Equal(h.seen.Deadline))
 }
@@ -357,6 +375,7 @@ func TestRecoveredPostRestoreKeepsTheRecordsDeadline(t *testing.T) {
 			recoveringPod(h)
 			h.w.runtime = &fakeRuntime{resolveContainerPID: 4242, podUID: "host-uid"}
 			volume := newFakeControlVolume(h.w)
+			volume.putSentinel("host-uid", "main", podcontract.RestoreCompleteFile)
 			deadline := time.Now().Add(2 * time.Second)
 			if tc.record {
 				volume.put(t, "host-uid", "main", restoreAttempts{Limit: 1, Attempt: 1, Deadline: deadline, ContainerID: "ctr-abc"})

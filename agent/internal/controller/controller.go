@@ -59,22 +59,22 @@ import (
 // snapshot execution for checkpoint and restore requests. Both paths are workqueue
 // driven, with typed reads/writes via an uncached controller-runtime client.
 type NodeController struct {
-	config                    *types.AgentConfig
-	clientset                 kubernetes.Interface
-	client                    client.Client
-	dynClient                 dynamic.Interface
-	runtime                   snapshotruntime.Runtime
-	injector                  executor.RestoreMounter
-	log                       logr.Logger
-	checkpointFn              func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error)
-	fetchManifestFn           func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error)
-	restoreFn                 func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
-	writeControlSentinelFn    func(int, string, []byte) error
-	writePodControlSentinelFn func(string, string, string, []byte) error
-	readPodControlFileFn      func(string, string, string, int64) ([]byte, error)
-	removePodControlFileFn    func(string, string, string) error
-	controlSentinelExistsFn   func(int, string) (bool, error)
-	sendSignalFn              func(logr.Logger, int, syscall.Signal, string) error
+	config                     *types.AgentConfig
+	clientset                  kubernetes.Interface
+	client                     client.Client
+	dynClient                  dynamic.Interface
+	runtime                    snapshotruntime.Runtime
+	injector                   executor.RestoreMounter
+	log                        logr.Logger
+	checkpointFn               func(ctx context.Context, params CheckpointParams) (*pagebroker.PublishedArtifact, error)
+	fetchManifestFn            func(ctx context.Context, artifact *pagebroker.PublishedArtifact) (*types.CheckpointManifest, error)
+	restoreFn                  func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (executor.RestoreResult, error)
+	writeControlSentinelFn     func(int, string, []byte) error
+	writePodControlSentinelFn  func(string, string, string, []byte) error
+	readPodControlFileFn       func(string, string, string, int64) ([]byte, error)
+	removePodControlFileFn     func(string, string, string) error
+	podControlSentinelExistsFn func(string, string, string) (bool, error)
+	sendSignalFn               func(logr.Logger, int, syscall.Signal, string) error
 	// hostProcPath is where the agent reads the node's processes; tests point it elsewhere.
 	hostProcPath         string
 	stagingCapacityFn    func(string) (int64, error)
@@ -189,7 +189,7 @@ type restoreOperation struct {
 	skipCompatCheck   bool
 	destination       string
 	containerID       string
-	// nodeUID is the Pod's UID on the node, read when the attempt starts.
+	// nodeUID is the Pod's UID on the node, read when the pass starts.
 	nodeUID   string
 	startedAt time.Time
 	log       logr.Logger
@@ -288,22 +288,22 @@ func newDefaultController(
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "capture-contents"},
 		),
 
-		restoreFn:                 executor.Restore,
-		writeControlSentinelFn:    snapshotruntime.WriteControlSentinel,
-		writePodControlSentinelFn: snapshotruntime.WritePodControlSentinel,
-		readPodControlFileFn:      snapshotruntime.ReadPodControlFile,
-		removePodControlFileFn:    snapshotruntime.RemovePodControlFile,
-		controlSentinelExistsFn:   snapshotruntime.ControlSentinelExists,
-		sendSignalFn:              snapshotruntime.SendSignalToPID,
-		hostProcPath:              snapshotruntime.HostProcPath,
-		stagingCapacityFn:         snapshotruntime.StagingCapacity,
-		minimumImageSizeFn:        snapshotruntime.MinimumImageSize,
-		reviveGPUProcessesFn:      cuda.ReviveProcessTree,
-		compareFn:                 compat.Compare,
-		hookExec:                  rt,
-		hookHTTP:                  lifecyclehooks.NewHTTPClient(),
-		nowFn:                     time.Now,
-		postRestoreWaitFn:         waitOrDone,
+		restoreFn:                  executor.Restore,
+		writeControlSentinelFn:     snapshotruntime.WriteControlSentinel,
+		writePodControlSentinelFn:  snapshotruntime.WritePodControlSentinel,
+		readPodControlFileFn:       snapshotruntime.ReadPodControlFile,
+		removePodControlFileFn:     snapshotruntime.RemovePodControlFile,
+		podControlSentinelExistsFn: snapshotruntime.PodControlSentinelExists,
+		sendSignalFn:               snapshotruntime.SendSignalToPID,
+		hostProcPath:               snapshotruntime.HostProcPath,
+		stagingCapacityFn:          snapshotruntime.StagingCapacity,
+		minimumImageSizeFn:         snapshotruntime.MinimumImageSize,
+		reviveGPUProcessesFn:       cuda.ReviveProcessTree,
+		compareFn:                  compat.Compare,
+		hookExec:                   rt,
+		hookHTTP:                   lifecyclehooks.NewHTTPClient(),
+		nowFn:                      time.Now,
+		postRestoreWaitFn:          waitOrDone,
 	}
 	w.requeueCaptureFn = w.captureQueue.AddAfter
 	w.checkpointFn = w.executorCheckpoint
@@ -1165,12 +1165,16 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 	defer recoverPanic(op.log, "restore", func(err error) {
 		retErr = op.failRestore(ctx, err)
 	}, "destination", destination)
+	op.nodeUID = op.nodePodUID(ctx)
 	if recovering {
-		completed, err := op.recoverCompletedRestore(ctx)
+		outcome, err := op.writtenOutcome()
 		if err != nil {
 			return err
 		}
-		if completed {
+		switch outcome {
+		case podcontract.RestoreFailedFile:
+			return errRestoreAlreadyFailed
+		case podcontract.RestoreCompleteFile:
 			return op.recoverPostRestore(ctx)
 		}
 	}
@@ -1231,7 +1235,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 // agent without the record started gets a full config.restore.timeoutSeconds.
 func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 	postCtx := ctx
-	record, found, err := op.readRestoreAttempts(op.nodePodUID(ctx))
+	record, found, err := op.readRestoreAttempts(op.nodeUID)
 	if err != nil {
 		op.log.Error(err, "Ignoring the attempt record; the post-restore action gets a full restore timeout")
 	}
@@ -1253,26 +1257,22 @@ func (op *restoreOperation) recoverPostRestore(ctx context.Context) error {
 	return nil
 }
 
-// recoverCompletedRestore avoids replaying CRIU when the destination-scoped
-// completion sentinel proves the operation already finished.
-func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, error) {
-	condition := findRestoredCondition(op.pod)
-	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != podcontract.RestoreReasonInProgress {
-		return false, nil
+// writtenOutcome returns the sentinel that a restore of the destination
+// already wrote, or "" for none, so that CRIU never runs again after an
+// outcome. It reads the node's path of the volume, which works while the
+// container has no process. restore-failed comes first: a failed
+// post-restore action writes it after restore-complete.
+func (op *restoreOperation) writtenOutcome() (string, error) {
+	for _, name := range []string{podcontract.RestoreFailedFile, podcontract.RestoreCompleteFile} {
+		exists, err := op.controller.podControlSentinelExistsFn(op.nodeUID, op.destination, name)
+		if err != nil {
+			return "", fmt.Errorf("check for %s: %w", name, err)
+		}
+		if exists {
+			return name, nil
+		}
 	}
-
-	hostPID, _, err := op.controller.runtime.ResolveContainer(ctx, op.containerID)
-	if err != nil {
-		return false, fmt.Errorf("resolve restore container before checking completion sentinel: %w", err)
-	}
-	exists, err := op.controller.controlSentinelExistsFn(hostPID, podcontract.RestoreCompleteFile)
-	if err != nil {
-		return false, fmt.Errorf("check restore completion sentinel: %w", err)
-	}
-	if !exists {
-		return false, nil
-	}
-	return true, nil
+	return "", nil
 }
 
 func (w *NodeController) newRestoreOperation(

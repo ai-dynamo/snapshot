@@ -85,11 +85,14 @@ func (op *restoreOperation) writeRestoreAttempts(nodeUID string, record *restore
 // startAttempt picks the restore up from the destination's record and saves
 // the attempt about to start. It returns errRetryScheduled while an in-place
 // retry is not due. The first attempt resolves the retry limit and the
-// deadline; an agent that restarted during an attempt repeats it within the
-// same deadline.
+// deadline.
+//
+// A record with no retry saved holds an attempt that no agent saw finish,
+// since one agent never runs two passes of a Pod at once. The attempt runs
+// again within the same deadline and keeps its number, as an agent restart
+// always repeated it.
 func (op *restoreOperation) startAttempt(ctx context.Context) (*restoreAttempts, error) {
 	now := op.controller.nowFn()
-	op.nodeUID = op.nodePodUID(ctx)
 	record, found, err := op.readRestoreAttempts(op.nodeUID)
 	if err != nil {
 		return nil, err

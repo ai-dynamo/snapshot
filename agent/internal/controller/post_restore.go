@@ -20,10 +20,11 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-// errRestoreInterrupted is a restore whose post-restore action the agent
-// stopped before it finished. The restore stays in progress, so the next
-// agent resumes the action from restore-complete; it is not an outcome.
-var errRestoreInterrupted = errors.New("the agent stopped before the post-restore action finished")
+// errRestoreInterrupted is a restore that the agent stopped before it
+// finished. The restore stays in progress, so the next agent picks it up from
+// the attempt record, or resumes the post-restore action from
+// restore-complete; it is not an outcome.
+var errRestoreInterrupted = errors.New("the agent stopped before the restore finished")
 
 // postRestoreHandler is one kind of lifecycle.postRestore action. The
 // lifecyclehooks package implements it: a file action and an HTTP action. A

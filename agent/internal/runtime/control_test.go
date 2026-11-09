@@ -147,11 +147,12 @@ func TestWriteControlSentinelWithoutControlDir(t *testing.T) {
 	}
 }
 
-func TestControlSentinelExists(t *testing.T) {
-	procRoot, pid, controlDir := fakeContainer(t)
+func TestPodControlSentinelExists(t *testing.T) {
+	podsDir, volume := podsDirWithControlVolume(t)
+	controlDir := filepath.Join(volume, "main")
 	check := func(wantExists, wantErr bool) {
 		t.Helper()
-		exists, err := controlSentinelExists(procRoot, pid, "restore-complete")
+		exists, err := podControlSentinelExists(podsDir, "uid", "main", "restore-complete")
 		if (err != nil) != wantErr {
 			t.Fatalf("err = %v, want error %v", err, wantErr)
 		}
@@ -171,19 +172,30 @@ func TestControlSentinelExists(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	check(false, true) // a directory
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	check(true, false)
+
+	for _, name := range []string{"", "..", "a/b", "../x"} {
+		if _, err := podControlSentinelExists(podsDir, "uid", "main", name); err == nil {
+			t.Errorf("podControlSentinelExists(%q) succeeded, want a refusal", name)
+		}
+	}
 }
 
-func TestControlSentinelExistsWithoutControlDir(t *testing.T) {
-	procRoot, pid, controlDir := fakeContainer(t)
-	if err := os.Remove(controlDir); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controlSentinelExists(procRoot, pid, "restore-complete"); err == nil {
-		t.Fatal("expected an error for a missing control mount")
+func TestPodControlSentinelExistsWithoutVolume(t *testing.T) {
+	exists, err := podControlSentinelExists(t.TempDir(), "uid", "main", "restore-complete")
+	if err != nil || exists {
+		t.Fatalf("podControlSentinelExists() = %v, %v; want no sentinel", exists, err)
 	}
 }
 
