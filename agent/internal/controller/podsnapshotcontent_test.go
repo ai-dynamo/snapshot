@@ -39,21 +39,24 @@ import (
 
 func TestPreflightCuInterpose(t *testing.T) {
 	launched := append(podcontract.CuInterposeLauncherPrefix(), "worker")
+	control := []corev1.VolumeMount{{Name: podcontract.SnapshotControlVolumeName, MountPath: podcontract.SnapshotControlMountPath}}
 	for _, tc := range []struct {
 		name, annotation string
 		command          []string
+		mounts           []corev1.VolumeMount
 		requested        bool
 		wantError        string
 	}{
 		{name: "native", command: []string{"worker"}},
 		{name: "disabled with launcher", annotation: "disabled", command: launched},
 		{name: "launcher without annotation", command: launched},
-		{name: "enabled", annotation: "enabled", command: launched, requested: true},
-		{name: "enabled without launcher", annotation: "enabled", command: []string{"worker"}, wantError: "must start with"},
+		{name: "enabled and self-launched", annotation: "enabled", command: launched, requested: true},
+		{name: "enabled and agent-launched", annotation: "enabled", command: []string{"worker"}, mounts: control, requested: true},
+		{name: "enabled without control mount", annotation: "enabled", command: []string{"worker"}, wantError: "does not mount"},
 		{name: "malformed annotation", annotation: "yes", command: launched, wantError: "expected enabled or disabled"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Command: tc.command}}}}
+			pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Command: tc.command, VolumeMounts: tc.mounts}}}}
 			if tc.annotation != "" {
 				pod.Annotations = map[string]string{podcontract.CuInterposeAnnotation: tc.annotation}
 			}
@@ -68,9 +71,9 @@ func TestPreflightCuInterpose(t *testing.T) {
 	}
 }
 
-// TestReconcileCapture_CuInterposeWithoutLauncherFails proves a misconfigured opt-in
+// TestReconcileCapture_CuInterposeWithoutDeliveryFails proves a misconfigured opt-in
 // fails without waiting for readiness and without touching the source.
-func TestReconcileCapture_CuInterposeWithoutLauncherFails(t *testing.T) {
+func TestReconcileCapture_CuInterposeWithoutDeliveryFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
 	pod.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "enabled"}

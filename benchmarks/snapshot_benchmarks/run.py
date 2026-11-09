@@ -207,9 +207,9 @@ def run_benchmark(
     folder = evidence_dir / run_id
     folder.mkdir(parents=True, exist_ok=False)
     measurement.save(folder / "settings.json", dataclasses.asdict(cfg))
-    agent_image = None
     if mode == "both" or model.tp > 1:
-        agent_image = _validate_snapshot_agent_present(cfg)
+        # The agent on the node delivers the multi-GPU libraries at startup.
+        _validate_snapshot_agent_present(cfg)
 
     source_name = f"bench-source-{run_id}"
 
@@ -254,10 +254,7 @@ def run_benchmark(
             tolerations=tolerations,
         )
         source_manifest = instrument_pod(source_manifest, cfg, engine, model, run_id)
-        for container in source_manifest["spec"].get("initContainers", []):
-            if container["name"] == "snapshot-cuda-install":
-                container["image"] = agent_image
-        app = app_configmap(engine, cfg.workload_namespace, "bench-app-" + run_id)
+        app =app_configmap(engine, cfg.workload_namespace, "bench-app-" + run_id)
         measurement.save(folder / "app.json", app)
         measurement.save(folder / "source-manifest.json", source_manifest)
         # A unique name is create-only: never replace another run's ConfigMap.
@@ -273,12 +270,6 @@ def run_benchmark(
             cfg.workload_namespace, source_name, "Ready", timeout=timeout
         )
         measurement.save(folder / "source-pod.json", source_pod)
-        if model.tp > 1:
-            main = next(
-                c for c in source_pod.spec.containers if c.name == engine.container_name
-            )
-            if not main.command or Path(main.command[0]).name != "cuinterpose-launch":
-                raise ValueError("Multi-GPU source did not use cuinterpose-launch")
         cold_measurement, source_token = measurement.source_measurement(
             cfg, source_pod, folder
         )

@@ -143,10 +143,9 @@ keys in `--engine-args`. For example, add these arguments for vLLM Qwen3-14B:
 --tp 2 --engine-args '{"max_model_len":2048,"gpu_memory_utilization":0.85}'
 ```
 
-Multi-GPU checkpoints use the guide's launcher installer and the agent image from the
-selected node. Dry-run manifests keep the `${SNAPSHOT_AGENT_IMAGE}` placeholder. The
-runner replaces it before it creates a pod. Before the checkpoint, the runner saves the
-admitted command and checks for `cuinterpose-launch`. It also requires per-process
+Multi-GPU checkpoints set the `nvidia.com/snapshot-multi-gpu: enabled`
+annotation, and the Snapshot agent on the selected node starts the workload
+through the multi-GPU launcher. The runner requires per-process
 `gpu/<pid>/manifest.txt` files to confirm use of PageBroker CustomStorage.
 
 Use `--model-label` to select an entry from `models.yaml`, or `sweep` to run

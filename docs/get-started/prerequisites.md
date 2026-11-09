@@ -39,8 +39,16 @@ storage class. See [Other Backends](../operate/configure-storage.md#other-backen
 
 ### Multi-GPU Workloads
 
-Requires the baseline if the workload holds no multicast groups. Otherwise,
-requires CUDA user-mode driver (`libcuda.so`) 615 or newer.
+Requires a container runtime with NRI v0.10 or newer, enabled, on the source
+node: containerd 2.2 or newer. The Snapshot agent uses NRI to start the source
+workload through the multi-GPU launcher. On a node without NRI, or with an older
+runtime, the source container starts without the launcher, and the checkpoint
+fails at the
+[inspecting cuinterpose](../troubleshooting/checkpoints.md#inspecting-cuinterpose)
+step.
+
+Restoring requires the baseline if the workload holds no multicast groups.
+Otherwise, it requires CUDA user-mode driver (`libcuda.so`) 615 or newer.
 
 The 580 user-mode driver cannot restore a process that holds
 [multicast groups](../design/multi-gpu/README.md#multicast-mappings),

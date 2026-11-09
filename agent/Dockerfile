@@ -346,8 +346,9 @@ RUN criu --version
 # launch-job wrapper uses the standalone binary supplied by the workload image.
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
-# The operator copies the launcher into source workloads. It execs the application,
-# so restore needs the libraries and coordinator, but no launcher in the bundle.
+# The NRI plugin copies the launcher and libraries into opted-in source containers.
+# The launcher execs the application, so restore needs the libraries and
+# coordinator, but no launcher in the bundle.
 COPY --from=cuinterpose-payload / /
 COPY --from=cuinterpose-notices /rust-sources/ /legal/cuinterpose/rust/
 COPY cmd/cuinterpose/ /legal/cuinterpose/source/

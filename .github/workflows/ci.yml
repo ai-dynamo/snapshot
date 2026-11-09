@@ -41,16 +41,6 @@ jobs:
         with:
           persist-credentials: false
       - run: make -C agent cuinterpose-test TEST_IMAGE="$SNAPSHOT_CUINTERPOSE_TEST_IMAGE"
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.27.3"
-          cache: true
-          cache-dependency-path: |
-            **/go.sum
-            go.work.sum
-      - name: Check generated installer against the image payload
-        working-directory: operator
-        run: go test ./internal/protocol -run '^TestCuInterposeInstallerImage' -count=1 -v
 
   test:
     runs-on: ubuntu-24.04
